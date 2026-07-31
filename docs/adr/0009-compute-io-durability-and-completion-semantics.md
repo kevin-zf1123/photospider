@@ -8,11 +8,13 @@ commit `f8eba94a53fb5bd41250489df88f5d6480baf853`. Lifecycle finalization is
 recorded separately in Issue/Project history and the corresponding OpenSpec
 lifecycle.
 
-This ADR is a decision and documentation change. It does not add
-`ComputeIoExecutor`, change protocol v2 or the installed ABI, make current
-Graph/cache writers atomic, or turn the current private IPC `OutputStore` into
-a crash-durable store. Issue #88 consumes only the bounded execution boundary;
-later focused changes must implement durable output commit, Graph-document
+Issue #87 accepted this ADR as a decision and documentation change. Issue #88
+now implements only its bounded execution boundary: one source-private
+`ComputeIoExecutor` and one staged HP cache-save vertical. It does not change
+protocol v2 or the installed ABI, make current Graph/cache writers atomic,
+move cache failure behind Run publication, or turn the current private IPC
+`OutputStore` into a crash-durable store. Later focused changes must implement
+post-publication cache outcomes, durable output commit, Graph-document
 transactions, and legacy output-side-effect migration.
 
 ## Context
@@ -48,8 +50,8 @@ but each answers a different question:
   wins.
 
 Calling all of those states “complete” or “saved” would let a worker-pool
-choice accidentally define transaction ownership. Issue #87 therefore has to
-freeze authority and failure ordering before Issue #88 introduces bounded
+choice accidentally define transaction ownership. Issue #87 therefore froze
+authority and failure ordering before Issue #88 introduced bounded
 compute-I/O execution.
 
 This ADR follows:
@@ -280,12 +282,23 @@ durable commit.
 
 ### ComputeIoExecutor owns bounded mechanism, not policy
 
-Issue #88 can add one process-owned `ComputeIoExecutor` for cache read/write,
-asset fetch, and codec subwork. Admission is bounded by both operation count
-and estimated bytes. Each task retains its Run/transaction lifetime token,
-returns a typed result or readiness fence, and cannot mutate Graph state or
-cross a persistence visibility point. CPU-heavy codec work returns to an
-admitted CPU lane instead of hiding unbounded compute on I/O workers.
+Issue #88 adds one process-owned `ComputeIoExecutor` mechanism for bounded
+cache, asset, and codec subwork. Admission atomically covers task count and
+estimated retained bytes before lazy payload construction or side effects.
+Each accepted task retains its Run/transaction lifetime token and returns a
+typed `Succeeded`, `Failed`, or `Cancelled` completion. Cancellation,
+callback failure, late return, and graceful shutdown release that token and
+both accounts exactly once. CPU compute workers cannot synchronously wait on
+the completion.
+
+The first production route is the staged HP cache-save callback. The
+graph-state policy owner chooses eligibility, paths, precision, codecs, and
+the pre-publication ordering, then waits for the typed result; the executor
+does not mutate Graph state or choose a visibility point. The current codec
+API exposes one indivisible I/O-facing call, so this vertical runs that whole
+call on the I/O worker. This is not a general home for CPU-heavy codec work; a
+later split codec contract must return independently admitted CPU phases to
+the CPU execution domain.
 
 Graph-document transactions, daemon sockets/polling, and `OutputStore`
 validation, commit, receipt, retention, and recovery remain with their domain
@@ -329,13 +342,16 @@ than the implementation can prove.
   an explicit output policy instead of an IPC side effect.
 - Graph-document save gains optimistic versioning and a typed durability
   result, but remains independent from compute frequency and runtime state.
-- The existing `io/save` operation, direct cache writers, direct YAML writer,
-  and private IPC store remain current facts and documented migration gaps;
-  accepting this ADR does not silently repair them.
-- Future tests must validate software behavior: bounded admission, failure
-  independence, manifest-last visibility, idempotent ambiguity recovery,
-  cancellation ordering, recovery, durability capability, and stale document
-  versions. Issue-specific scans or orchestration do not enter CTest/CI.
+- The existing `io/save` operation, synchronous cache administration/load,
+  direct YAML writer, and private IPC store remain current facts and
+  documented migration gaps. The staged HP cache-save vertical now uses the
+  bounded executor, but accepting this ADR did not make it atomic or durable.
+- Long-lived tests validate bounded admission, exact cancellation/shutdown
+  settlement, failure preservation, and CPU progress during blocked cache
+  codec work. Later durability work must also validate manifest-last
+  visibility, idempotent ambiguity recovery, recovery, durability capability,
+  and stale document versions. Issue-specific scans or orchestration do not
+  enter CTest/CI.
 
 ## Rejected Alternatives
 

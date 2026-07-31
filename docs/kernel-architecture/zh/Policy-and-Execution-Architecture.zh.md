@@ -292,26 +292,26 @@ manager。失败、被 close 拒绝或 born-stale 的 candidate 绝不调用它�
 
 ## Compute I/O 执行边界
 
-当前产品不存在 `ComputeIoExecutor`。`GraphCacheService` 在 graph-owned cache path 下执行
-cache codec/filesystem work，Graph 文档保存仍是 graph-state operation，daemon 拥有 job
-transport state，其私有 `OutputStore` 拥有受保护的进程级 artifact publication。这些机制都不是
-execution policy route，当前也没有任何组件提供 crash-durable user-output commit。
+`ExecutionService::PoolState` 拥有唯一 source-private `ComputeIoExecutor`，其中有一个独立
+worker。Admission 会在同一 mutex 下、且早于 lazy payload construction、queue publication、
+filesystem mutation 或 codec entry，同时计入 task 数与正数 estimated-retained-byte。每项已接受
+任务保留显式 transaction lifetime token，并返回 typed completion。Success、failure、queued
+cancellation、running late cancellation、construction rollback 与 graceful shutdown 最终都会
+恰好一次释放账本。
 
-[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
-为 Issue #88 接受以下目标边界：
-
-- 唯一 process-owned `ComputeIoExecutor` 可以运行有界 cache、asset 与 codec I/O mechanism
-  work；
-- admission 同时受 operation count 与 estimated retained bytes 限制；
-- CPU-heavy codec phase 会返回既有 CPU execution domain，而不是占用 I/O worker；
-- executor 不拥有 Graph 文档 transaction、daemon job state、`OutputStore` commit policy、
-  用户 path、retry policy 或 durability claim；以及
-- cache persistence 与 durable output commit 发布彼此独立的 typed outcome，且不能改写成功的
-  `ComputeRun`。
+首条生产垂直路径是 staged HP cache save。`GraphCacheService` 仍选择 eligibility、path、
+precision、codec 与错误解释。既有 live lifecycle、supersession 与 revision predicate 通过后，
+graph-state policy 提交 mechanism callback，并在既有 no-throw Graph publication 前等待。
+CPU compute worker 被禁止同步等待该 completion，因此阻塞的 cache codec 不会占用 CPU
+execution domain。由于当前 image-codec API 不可拆分，其整个 I/O-facing call 都在 I/O worker
+上运行；未来拆分后的 API 必须把独立准入的 CPU-heavy phase 送回 CPU executor。
 
 这是机制边界，不是第四种 scheduler 或 persistence authority。它不新增 execution route、
-ready store、Graph owner、policy decision surface 或 device-capacity authority。该目标只是已接受
-架构；下述当前接口与数量保持不变。
+ready store、Graph owner、policy decision surface、Host/device ledger dimension 或 public ABI。
+同步 cache administration/load、Graph 文档 operation、daemon job state 与私有 `OutputStore`
+保持不变。Executor 不拥有用户 path、retry、overwrite、receipt 或 durability policy。当前仍无
+组件提供 crash-durable user-output commit，ADR 0009 中 Run publication 之后的独立 cache
+outcome 仍是未来工作。
 
 ## Host、CLI 与 IPC 接口面
 
@@ -368,6 +368,7 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 - `src/lib/compute/execution_service.hpp` 和 `.cpp`
 - `src/lib/compute/run_lifecycle_registry.hpp` 和 `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` 和 `.cpp`
+- `src/lib/execution/compute_io_executor.*`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device_executor_registry.*`
 - `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
@@ -381,6 +382,7 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/ipc/{codec,client,host,request_router}.cpp`
 - `tests/unit/test_policy_registry.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`

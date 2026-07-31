@@ -104,9 +104,13 @@ publication、file 或 directory synchronization receipt、retry protocol 或 cr
 一次尝试的 observation，不是 durable audit record。
 
 当前 product compute commit policy 会在精确 revision/generation validation 后、no-throw live
-Graph swap 前，执行符合条件的 changed-HP cache write。因此 cache codec、filesystem 或
-allocation failure 可能让该 `ComputeRun` 失败，并保持 live Graph/RT state 不变。这种顺序是
-当前行为，不表示 cache 属于 user-output commit。
+Graph swap 前，执行符合条件的 changed-HP cache write。Live predicate 通过后，它现在会把
+该 staged save mechanism 提交到 process-owned `ComputeIoExecutor`。Admission 会在 lazy
+codec/task payload construction 或 filesystem 副作用之前，同时计入 task 数与 checked
+planned-byte estimate。I/O task 会保留 prepared Graph transaction，graph-state policy owner
+则等待 typed completion 并应用测得的 I/O time。CPU compute worker 不能执行该等待。因此
+rejection、cache codec、filesystem 或 allocation failure 仍可能让该 `ComputeRun` 失败，并保持
+live Graph/RT state 不变。这种顺序是当前行为，不表示 cache 属于 user-output commit。
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 接受不同的目标顺序：cache persistence 在 Run publication 后拥有独立 typed outcome。
 
@@ -207,7 +211,7 @@ RT proxy state 使用 HP-space `region_hp`，但仍只支持 image。Checked ada
 不会进入 RT 或 downsample rectangle boundary。Region value 与 Tensor axis 会计入
 retained-memory accounting。
 
-### 已接受的未来持久化关系（不是当前行为）
+### 当前有界机制与未来持久化关系
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 把未来 persistence 分成 graph document、canonical descriptor envelope、artifact/cache
@@ -224,12 +228,13 @@ RT proxy output 继续保持 transient，当前注入的 artifact/metadata codec
 authority。
 
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
-还会把可丢弃 cache persistence 与 durable user-output commit 分离。其已接受的 Issue #88
-`ComputeIoExecutor` 可以拥有有界 cache、asset 与 codec I/O mechanism work，并同时采用
-operation-count 与 retained-byte admission；CPU-heavy codec phase 会返回既有 CPU domain。它
-绝不拥有 output commit policy、Graph 文档 transaction、daemon state、path、retry 或
-durability。未来 `OutputStore` commit authority 及其 typed receipt 与 cache 和该 executor
-保持分离。
+还会把可丢弃 cache persistence 与 durable user-output commit 分离。Issue #88 现已实现上文
+描述的有界 mechanism 与 staged HP cache-save 垂直路径；同步 cache administration 与 load
+保持不变。当前不可拆分的 image-codec call 整体运行在 I/O worker 上；未来拆分后的 codec
+contract 必须把独立准入的 CPU-heavy phase 送回 CPU domain。Executor 绝不拥有 cache
+eligibility、path、output commit policy、Graph 文档 transaction、daemon state、retry、receipt
+或 durability。未来 Run publication 之后的 cache outcome 与 `OutputStore` commit authority
+继续与该 executor 分离。
 
 ## 实现与验证入口
 
@@ -245,6 +250,7 @@ durability。未来 `OutputStore` commit authority 及其 typed receipt 与 cach
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
+- `src/lib/execution/compute_io_executor.*`
 - `src/lib/graph/graph_model.*`
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/ipc/output_store.*`
@@ -256,6 +262,7 @@ durability。未来 `OutputStore` commit authority 及其 typed receipt 与 cach
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`

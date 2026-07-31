@@ -7,10 +7,12 @@
 Codex review 修复。生命周期收口由 Issue/Project 历史与对应 OpenSpec 生命周期
 分别记录。
 
-本 ADR 是决策与文档变更。它不新增 `ComputeIoExecutor`，不修改协议 v2 或已安装
-ABI，不让当前 Graph/cache writer 变成原子事务，也不把当前私有 IPC
-`OutputStore` 变成 crash-durable store。Issue #88 只消费有界执行边界；后续专项
-变更必须实现 durable 输出提交、Graph 文档事务和旧输出副作用迁移。
+Issue #87 以决策与文档变更的形式接受本 ADR。Issue #88 现在只实现其中的有界
+执行边界：唯一 source-private `ComputeIoExecutor` 与一条 staged HP cache-save
+垂直路径。它不修改协议 v2 或已安装 ABI，不让当前 Graph/cache writer 变成原子
+事务，不把 cache failure 移到 Run publication 之后，也不把当前私有 IPC
+`OutputStore` 变成 crash-durable store。后续专项变更必须实现 Run publication
+之后的 cache outcome、durable 输出提交、Graph 文档事务和旧输出副作用迁移。
 
 ## 背景
 
@@ -36,7 +38,7 @@ PhotoSpider 已经有若干有效的完成与持久化机制，但每个机制�
   在包围它的 Run 提交前可见；若取消或其他终态竞争者随后获胜，也无法回滚。
 
 如果把所有这些状态都称为“完成”或“已保存”，worker pool 的选择就会意外定义
-事务所有权。因此 Issue #87 必须在 Issue #88 引入有界 compute-I/O 执行之前冻结
+事务所有权。因此 Issue #87 在 Issue #88 引入有界 compute-I/O 执行之前冻结了
 权威与失败顺序。
 
 本 ADR 遵循：
@@ -227,11 +229,19 @@ Issue #87 不修改协议 v2。后续版本化协议可以在远端调用方需�
 
 ### ComputeIoExecutor 拥有有界机制，不拥有策略
 
-Issue #88 可以为缓存读写、资源获取和 codec 子工作增加一个进程级
-`ComputeIoExecutor`。准入同时受操作数与估算字节数约束。每个任务保留其
-Run/transaction 生命周期 token，返回类型化结果或 readiness fence，不能改变
-Graph 状态或跨过持久化可见性点。CPU 密集 codec 工作回到已准入 CPU lane，
-而不是把无界 compute 隐藏在 I/O worker 上。
+Issue #88 新增唯一 process-owned `ComputeIoExecutor` mechanism，用于有界 cache、
+asset 与 codec 子工作。准入会在 lazy payload construction 或副作用之前，同时
+原子覆盖 task 数与 estimated retained bytes。每项已接受任务都会保留
+Run/transaction lifetime token，并返回 `Succeeded`、`Failed` 或 `Cancelled`
+typed completion。Cancellation、callback failure、late return 与 graceful shutdown
+都会恰好一次释放该 token 与两项账本。CPU compute worker 不能同步等待 completion。
+
+首条生产路径是 staged HP cache-save callback。Graph-state policy owner 选择
+eligibility、path、precision、codec 与 publication 前的排序，然后等待 typed
+result；executor 不改变 Graph state，也不选择 visibility point。当前 codec API
+只暴露一个不可拆分的 I/O-facing call，因此该垂直路径会在 I/O worker 上运行整个
+调用。这不表示 CPU-heavy codec work 可以普遍归入该 worker；后续拆分后的 codec
+contract 必须把独立准入的 CPU phase 送回 CPU execution domain。
 
 Graph 文档事务、daemon socket/polling 与 `OutputStore` 校验、提交、回执、保留
 和恢复仍属于各自领域 owner。这些 owner 可以提交有界字节传输或 codec 子工作，
@@ -268,11 +278,13 @@ no-follow 方式创建私有同目录 stage，校验文件系统 identity，并�
   不再是 IPC 副作用。
 - Graph 文档保存获得乐观版本控制与类型化 durability 结果，但继续与 compute
   频率和 runtime 状态独立。
-- 现有 `io/save` 操作、直接缓存 writer、直接 YAML writer 和私有 IPC store
-  仍是当前事实与记录在案的迁移缺口；接受本 ADR 不会静默修复它们。
-- 未来测试必须验证软件行为：有界准入、失败独立性、manifest-last 可见性、幂等
-  歧义恢复、取消排序、恢复、durability 能力与过期文档版本。issue 专用 scan
-  或编排不进入 CTest/CI。
+- 现有 `io/save` 操作、同步 cache administration/load、直接 YAML writer 和私有
+  IPC store 仍是当前事实与记录在案的迁移缺口。Staged HP cache-save 垂直路径
+  现已使用有界 executor，但这没有让它变成 atomic 或 durable。
+- 长期测试会验证有界准入、精确 cancellation/shutdown settlement、failure 保留，
+  以及 cache codec 阻塞期间的 CPU progress。后续 durability 工作还必须验证
+  manifest-last visibility、幂等歧义恢复、recovery、durability 能力与过期文档
+  version。Issue 专用 scan 或编排不进入 CTest/CI。
 
 ## 被拒绝的替代方案
 

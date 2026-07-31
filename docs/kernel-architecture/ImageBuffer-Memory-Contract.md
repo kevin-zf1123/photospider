@@ -350,11 +350,13 @@ retention bound rather than byte authority.
 
 V-9 still does not implement quantization, general Map/Import providers,
 provider ABI v3, a public device registry, device queue/in-flight accounting,
-or general named graph Value outputs. Compute-I/O durability and bounded
-cache/codec execution remain Issues #87 and #88; Issue #89 retains the
-multi-channel, FP64, latent, and stride matrix. `ImageBuffer` remains the
-compatibility contract for operation ABI v2, tiled writes, codecs, and Host
-surfaces.
+or general named graph Value outputs. Issue #87's compute-I/O durability
+decision and Issue #88's first bounded cache/codec execution vertical are
+current: the process executor retains transaction lifetime and budgets work,
+but does not change `ImageBuffer` or codec ABI. Post-publication cache outcomes
+and durable output remain future. Issue #89 retains the multi-channel, FP64,
+latent, and stride matrix. `ImageBuffer` remains the compatibility contract
+for operation ABI v2, tiled writes, codecs, and Host surfaces.
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.

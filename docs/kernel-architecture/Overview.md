@@ -689,9 +689,12 @@ Important current behavior:
   future work.
 - [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
   separates current Run, readiness, cache, Graph-document, daemon-delivery,
-  and output-publication observations from the accepted durability target. It
-  assigns future `ComputeIoExecutor` only bounded cache/asset/codec mechanism;
-  current code has no such executor or crash-durable output commit.
+  and output-publication observations from the accepted durability target.
+  Issue #88 now provides the source-private, process-owned, task/estimated-byte
+  bounded `ComputeIoExecutor` and routes staged HP cache save through it before
+  unchanged Graph publication. CPU workers cannot synchronously wait for its
+  completion. Crash-durable output commit and post-publication cache outcomes
+  remain future work.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of
@@ -724,6 +727,7 @@ this current-state document.
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/compute/compute_run.*`
+- `src/lib/execution/compute_io_executor.*`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
@@ -739,6 +743,7 @@ this current-state document.
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_device_residency.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
 - `tests/unit/test_stdlib_image_buffer_processing.cpp`

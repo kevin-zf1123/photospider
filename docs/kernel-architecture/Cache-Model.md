@@ -144,9 +144,16 @@ observations of the latest attempt, not durable audit records.
 
 The current product compute commit policy performs eligible changed-HP cache
 writes after exact revision/generation validation but before the no-throw live
-Graph swap. A cache codec, filesystem, or allocation failure can therefore
-fail that `ComputeRun` and leave live Graph/RT state unchanged. This ordering
-is current behavior, not a statement that cache is part of user-output commit.
+Graph swap. It now submits that staged save mechanism to the process-owned
+`ComputeIoExecutor` after the live predicates succeed. Admission charges both
+task count and a checked planned-byte estimate before lazy codec/task payload
+construction or filesystem side effects. The I/O task retains the prepared
+Graph transaction, while the graph-state policy owner waits for typed
+completion and applies measured I/O time. CPU compute workers cannot perform
+that wait. A rejection, cache codec, filesystem, or allocation failure can
+therefore still fail that `ComputeRun` and leave live Graph/RT state unchanged.
+This ordering is current behavior, not a statement that cache is part of
+user-output commit.
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 accepts a different target ordering in which cache persistence has an
 independent typed outcome after Run publication.
@@ -271,7 +278,7 @@ one exact built-in ImageRect. TensorSlice and Whole do not enter the RT or
 downsample rectangle boundary. Region values and Tensor axes are included in
 retained-memory accounting.
 
-### Accepted future persistence relationship (not current behavior)
+### Current bounded mechanism and future persistence relationship
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 separates future persistence into graph documents, canonical descriptor
@@ -291,13 +298,14 @@ payloads. No future residency replica becomes a second cache authority.
 
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 additionally separates discardable cache persistence from durable user-output
-commit. Its accepted Issue #88 `ComputeIoExecutor` may own bounded cache,
-asset, and codec I/O mechanism work, with both operation-count and
-retained-byte admission; CPU-heavy codec phases return to the existing CPU
-domain. It never owns output commit policy, Graph-document transactions,
-daemon state, paths, retry, or durability. The future `OutputStore` commit
-authority and its typed receipt remain separate from cache and from this
-executor.
+commit. Issue #88 now implements the bounded mechanism and the staged HP
+cache-save vertical described above; synchronous cache administration and load
+remain unchanged. The current indivisible image-codec call runs wholly on the
+I/O worker. A future split codec contract must return independently admitted
+CPU-heavy phases to the CPU domain. The executor never owns cache eligibility,
+paths, output commit policy, Graph-document transactions, daemon state, retry,
+receipts, or durability. The future post-publication cache outcome and
+`OutputStore` commit authority remain separate from this executor.
 
 ## Implementation and Validation Entry Points
 
@@ -313,6 +321,7 @@ executor.
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
+- `src/lib/execution/compute_io_executor.*`
 - `src/lib/graph/graph_model.*`
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/ipc/output_store.*`
@@ -324,6 +333,7 @@ executor.
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`

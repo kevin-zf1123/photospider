@@ -557,8 +557,10 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   persistent/completion 生命周期 lease。其余通用 provider migration 仍是未来工作。
 - [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
   把当前 Run、readiness、cache、Graph 文档、daemon delivery 与 output publication observation
-  同已接受 durability target 分离。它只把有界 cache/asset/codec mechanism 分配给未来
-  `ComputeIoExecutor`；当前代码不存在该 executor 或 crash-durable output commit。
+  同已接受 durability target 分离。Issue #88 现已提供 source-private、process-owned、按
+  task/estimated-byte 有界的 `ComputeIoExecutor`，并在既有 Graph publication 之前让 staged
+  HP cache save 经过该 executor。CPU worker 不能同步等待其 completion。Crash-durable output
+  commit 与 Run publication 之后的 cache outcome 仍是未来工作。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。
@@ -590,6 +592,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/compute/compute_run.*`
+- `src/lib/execution/compute_io_executor.*`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
@@ -605,6 +608,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_device_residency.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
 - `tests/unit/test_stdlib_image_buffer_processing.cpp`

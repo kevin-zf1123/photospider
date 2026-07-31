@@ -859,22 +859,32 @@ scratch reservations, pipeline cache, transfer queues, and completion fences.
 CPU workers do not block waiting for GPU completion. A stale device completion
 releases resources but cannot commit to a newer graph revision.
 
-The accepted target for the compute I/O executor handles bounded cache/asset
-reads and writes and data movement around codecs. It is budgeted by both
-operation count and estimated retained bytes. It does not own daemon framing,
+Current V-11 adds one source-private process `ComputeIoExecutor` with an
+independent worker and atomic task/estimated-retained-byte admission before
+lazy payload construction or side effects. Accepted work retains an explicit
+transaction lifetime token and exposes typed completion with exactly-once
+settlement across failure, cancellation, late return, and shutdown. CPU
+compute workers cannot synchronously wait for it.
+
+The first production vertical runs staged HP cache-save codec/filesystem
+mechanism through this executor while graph-state policy keeps eligibility,
+paths, error interpretation, and the existing pre-publication commit point.
+The current indivisible image-codec call runs wholly on the I/O worker; a
+future split API must return independently admitted CPU-heavy phases to the
+CPU executor. Synchronous cache administration/load, daemon framing,
 Graph-document persistence, `OutputStore` commit policy, user paths, retries,
-or durability claims. CPU-heavy codec work returns to the existing CPU
-executor.
+and durability claims remain with their existing owners.
 
 ### Compute I/O durability and completion target
 
-The current baseline does not have a `ComputeIoExecutor` or a crash-durable
-output store. Current deferred HP cache writes occur before live Graph
-publication and can fail the Run; Graph-document save writes its destination
-directly; daemon job state and acknowledgement are process-local; and the
-private IPC `OutputStore` provides protected, no-replace process-scoped
-delivery with in-memory lease/TTL indexing. The legacy `io/save` callback can
-also expose a file before its enclosing staged Run commits.
+The current baseline has the bounded executor and staged HP cache-save vertical
+described above, but no crash-durable output store. Deferred HP cache writes
+still occur before live Graph publication and can fail the Run; Graph-document
+save writes its destination directly; daemon job state and acknowledgement are
+process-local; and the private IPC `OutputStore` provides protected,
+no-replace process-scoped delivery with in-memory lease/TTL indexing. The
+legacy `io/save` callback can also expose a file before its enclosing staged
+Run commits.
 
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 accepts a target typed partial order:

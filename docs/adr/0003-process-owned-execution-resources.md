@@ -38,6 +38,13 @@ continuations without creating another ready store or capacity authority.
 Issue #86 adds isolated configured non-CPU `DeviceId` memory/scratch accounts,
 native plan/actual reconciliation, and owner-bound persistent/completion
 leases to that sole service ledger.
+Issue #88 adds one source-private `ComputeIoExecutor` to the same process
+service. Its independent worker atomically admits tasks by count and estimated
+retained bytes, retains an explicit transaction lifetime token, returns typed
+completion, settles cancellation and shutdown exactly once, and rejects
+synchronous completion waits from CPU compute workers. The first migrated
+vertical is staged HP cache save: graph-state policy still chooses the cache
+operation and waits before the existing visible publication point.
 Public Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes this ADR only
 as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
@@ -247,11 +254,14 @@ Graph-owned physical executors or create a second execution-resource authority.
 ## Relationship to ADR 0009
 
 [ADR 0009](0009-compute-io-durability-and-completion-semantics.md) fixes the
-boundary for the I/O continuation anticipated by this decision. A future
-process-owned `ComputeIoExecutor` owns bounded cache, asset, and codec
-mechanism, with admission limited by operation count and bytes. It does not own
-Graph-document transactions, daemon transport, cache authority, output commit
-identity, retry/overwrite policy, or durability.
+boundary for the I/O continuation anticipated by this decision. Issue #88 now
+provides the process-owned `ComputeIoExecutor` mechanism, with admission
+limited by task count and estimated retained bytes. Its first production route
+executes the staged HP cache-save codec/filesystem callback while retaining the
+prepared transaction lifetime. It does not own cache eligibility or paths,
+Graph-document transactions, daemon transport, output commit identity,
+retry/overwrite policy, or durability. Synchronous cache administration and
+load remain on their existing owners.
 
 `ComputeRun` success, cache persistence, Graph-document save, daemon result
 availability, and durable output commit remain distinct outcomes. Adding I/O

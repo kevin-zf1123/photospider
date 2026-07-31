@@ -332,10 +332,15 @@ durable user-output commit。旧 `io/save` operation 可以在包围它的 stage
 副作用；这种 callback-owned 行为不是 Run commit protocol。
 
 当前 product transaction 仍会在 no-throw live Graph swap 前执行符合条件的延迟 HP cache write。
-因此 cache codec 或 filesystem failure 可能让当前 Run 失败，且不发布可见 Graph。
+既有 live predicate 通过后，graph-state policy 会把每个 staged cache-save codec/filesystem
+callback 提交给进程级、按 task/estimated-byte 有界的 `ComputeIoExecutor`，以 prepared
+transaction 作为 task lifetime token，并等待 typed completion。该等待绝不发生在
+`ExecutionService` CPU worker 上。因此 cache admission、codec 或 filesystem failure 仍可能让
+当前 Run 失败，且不发布可见 Graph。
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 接受一个目标：把可选 cache persistence 移到独立结果之后，并引入带 receipt 的独立 durable
-output commit。本文当前基线并未实现该目标顺序与 `ComputeIoExecutor`。
+output commit。Executor mechanism 已是当前行为；Run publication 之后的目标顺序与 durable
+output commit 尚未实现。
 
 ## GlobalHighPrecision
 
@@ -522,6 +527,7 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
+- `src/lib/execution/compute_io_executor.*`
 - `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/run_lifecycle_registry.*`
@@ -536,6 +542,7 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_host_adapter.cpp`

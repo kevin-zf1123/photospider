@@ -526,9 +526,12 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 ### 当前 compute-I/O 完成限制
 
 当前 HP product transaction 会在 revision validation 之后、no-throw live Graph swap
-之前执行符合条件的已配置 disk-cache write。因此，cache codec/filesystem failure 当前可能
-把该 Run 解析为 `Failed`，且不发布 live Graph。这是已实现 commit-policy 排序规则，
-不是 disk cache 属于 durable 用户输出的声明。
+之前执行符合条件的已配置 disk-cache write。Graph-state policy 现在会通过 process-owned
+`ComputeIoExecutor` 提交 cache codec/filesystem mechanism；其独立 worker 会按 task 数与
+estimated retained bytes 原子限制容量。Prepared transaction 会一直保留到 typed completion，
+且 CPU compute worker 不能同步等待该 completion。因此 admission 或 cache codec/filesystem
+failure 仍可能把该 Run 解析为 `Failed`，且不发布 live Graph。这是已实现 commit-policy
+排序规则，不是 disk cache 属于 durable 用户输出的声明。
 
 Provider return、pending-Value readiness、Run terminal publication、Host result return、
 daemon job terminal state、result delivery、cache save、Graph 文档保存与用户可见文件
@@ -543,7 +546,9 @@ daemon job terminal state、result delivery、cache save、Graph 文档保存与
 
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 接受一个目标：可选 cache 持久化与 durable output commit 在 Run publication 后拥有独立
-结果。该行为、稳定 output commit receipt 与有界 `ComputeIoExecutor` 都不是当前代码。
+结果。该行为、稳定 output commit receipt 与 durable commit 仍是未来工作。有界 executor
+及其首条 staged HP cache-save 垂直路径已是当前代码；同步 cache administration/load 与上文
+其他 persistence owner 保持不变。
 
 ## 故障与生命周期语义
 
@@ -611,7 +616,7 @@ daemon job terminal state、result delivery、cache save、Graph 文档保存与
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)、
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
-契约。本文是截至 issue #86 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
+契约。本文是截至 issue #88 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
 reserved-start transaction 在封闭私有 route 启动执行前提交资源以及精确 implementation/key gate。
 每次 `GPU_METAL` start 随后都会进入匹配的固定、进程自有 registry executor，并在 provider
@@ -629,7 +634,9 @@ Run-owned commit arbitration 保持不变。`RunLifecycleRegistry` 现在提供�
 candidate/close/shutdown fence、Graph lifetime lease、standalone 与 realtime bundle 安装、精确
 finalization/unregistration 及单调 close generation。`ExecutionLifecycleTelemetry` 提供
 source-private 有界 lifecycle proof；它不是 public Host/CLI/IPC control surface。Public
-cancellation entry point 仍是未来行为。
+cancellation entry point 仍是未来行为。此外，唯一独立 process I/O worker 会按 task 数与
+estimated retained bytes 限制 staged HP cache-save mechanism；graph-state policy 等待其 typed
+completion，CPU worker 则不能等待。
 
 ## 实现与验证入口
 
@@ -648,6 +655,7 @@ cancellation entry point 仍是未来行为。
 - `src/lib/compute/execution_service.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
+- `src/lib/execution/compute_io_executor.*`
 - `src/lib/compute/task_graph_planning.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_submission.*`
@@ -682,6 +690,7 @@ cancellation entry point 仍是未来行为。
 - `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_resource_ledger.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_compute_supersession.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_opencv_operation_concurrency.cpp`

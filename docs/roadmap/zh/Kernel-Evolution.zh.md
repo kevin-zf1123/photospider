@@ -691,18 +691,26 @@ allocator、in-flight limit、memory/scratch reservation、pipeline cache、tran
 fence。CPU worker 不阻塞等待 GPU completion；stale device completion 会释放资源，但不能提交到
 更新的 graph revision。
 
-已接受的 compute I/O executor 目标处理有界 cache/asset read/write 与 codec 周边数据移动，
-同时按 operation 数量和 estimated retained bytes 预算。它不拥有 daemon framing、Graph
-文档 persistence、`OutputStore` commit policy、用户 path、retry 或 durability claim；
-CPU-heavy codec work 返回既有 CPU executor。
+当前 V-11 新增唯一 source-private process `ComputeIoExecutor`，其中有一个独立 worker，并在
+lazy payload construction 或副作用之前，按 task 数与 estimated retained bytes 原子准入。
+已接受 work 会保留显式 transaction lifetime token，并暴露 typed completion；failure、
+cancellation、late return 与 shutdown 都会恰好一次 settlement。CPU compute worker 不能同步
+等待该 executor。
+
+首条生产垂直路径通过该 executor 运行 staged HP cache-save codec/filesystem mechanism，同时
+由 graph-state policy 保留 eligibility、path、错误解释与既有 publication 前 commit point。
+当前不可拆分的 image-codec call 整体运行在 I/O worker 上；未来拆分后的 API 必须把独立准入的
+CPU-heavy phase 送回 CPU executor。同步 cache administration/load、daemon framing、Graph
+文档 persistence、`OutputStore` commit policy、用户 path、retry 与 durability claim 仍由
+既有 owner 负责。
 
 ### Compute I/O 耐久性与完成目标
 
-当前基线不存在 `ComputeIoExecutor` 或 crash-durable output store。当前 deferred HP cache
-write 发生在 live Graph publication 前，并可能使 Run 失败；Graph 文档保存会直接写入
-destination；daemon job state 与 acknowledgement 都是 process-local；私有 IPC `OutputStore`
-使用内存 lease/TTL index，提供受保护、no-replace 的进程级 delivery。旧 `io/save` callback
-也可以在包围它的 staged Run 提交前暴露文件。
+当前基线已有上文所述有界 executor 与 staged HP cache-save 垂直路径，但仍没有 crash-durable
+output store。Deferred HP cache write 仍发生在 live Graph publication 前，并可能使 Run
+失败；Graph 文档保存会直接写入 destination；daemon job state 与 acknowledgement 都是
+process-local；私有 IPC `OutputStore` 使用内存 lease/TTL index，提供受保护、no-replace 的
+进程级 delivery。旧 `io/save` callback 也可以在包围它的 staged Run 提交前暴露文件。
 
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 接受以下 typed partial order 目标：

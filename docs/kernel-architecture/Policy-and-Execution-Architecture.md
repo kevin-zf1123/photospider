@@ -353,31 +353,32 @@ that starts afterward cannot regress the monotonic manager generation.
 
 ## Compute I/O Execution Boundary
 
-There is no `ComputeIoExecutor` in the current product. `GraphCacheService`
-performs cache codec/filesystem work under the graph-owned cache path,
-Graph-document save remains a graph-state operation, the daemon owns job
-transport state, and its private `OutputStore` owns protected process-scoped
-artifact publication. None of these mechanisms is an execution policy route,
-and no current component provides a crash-durable user-output commit.
+`ExecutionService::PoolState` owns one source-private `ComputeIoExecutor` with
+one independent worker. Under one mutex, admission charges both the task count
+and a positive estimated-retained-byte amount before lazy payload construction,
+queue publication, filesystem mutation, or codec entry. Each accepted task
+retains an explicit transaction lifetime token and returns a typed completion.
+Success, failure, queued cancellation, running late cancellation, construction
+rollback, and graceful shutdown converge on exactly-once account release.
 
-[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
-accepts the following target boundary for Issue #88:
-
-- one process-owned `ComputeIoExecutor` may run bounded cache, asset, and codec
-  I/O mechanism work;
-- admission is bounded by both operation count and estimated retained bytes;
-- CPU-heavy codec phases return to the existing CPU execution domain rather
-  than occupying I/O workers;
-- the executor does not own Graph-document transactions, daemon job state,
-  `OutputStore` commit policy, user paths, retry policy, or durability claims;
-  and
-- cache persistence and durable output commit publish independent typed
-  outcomes and cannot rewrite a successful `ComputeRun`.
+The first production vertical is staged HP cache save. `GraphCacheService`
+still chooses eligibility, paths, precision, codecs, and error interpretation.
+After the existing live lifecycle, supersession, and revision predicates,
+graph-state policy submits the mechanism callback and waits for it before the
+existing no-throw Graph publication. CPU compute workers are forbidden from
+synchronously waiting for this completion, so a blocked cache codec does not
+occupy the CPU execution domain. Because the current image-codec API is
+indivisible, its whole I/O-facing call runs on the I/O worker; a future split
+API must return independently admitted CPU-heavy phases to the CPU executor.
 
 This is a mechanism boundary, not a fourth scheduler or a persistence
 authority. It adds no execution route, ready store, Graph owner, policy
-decision surface, or device-capacity authority. The target is accepted
-architecture only; current interfaces and counts below are unchanged.
+decision surface, Host/device ledger dimension, or public ABI. Synchronous
+cache administration/load, Graph-document operations, daemon job state, and
+the private `OutputStore` remain unchanged. The executor owns no user path,
+retry, overwrite, receipt, or durability policy. No current component provides
+a crash-durable user-output commit, and ADR 0009's post-publication independent
+cache outcome remains future work.
 
 ## Host, CLI, and IPC Surfaces
 
@@ -444,6 +445,7 @@ process-isolated plugin supervision belongs to Issue #91.
 - `src/lib/compute/execution_service.hpp` and `.cpp`
 - `src/lib/compute/run_lifecycle_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` and `.cpp`
+- `src/lib/execution/compute_io_executor.*`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device_executor_registry.*`
 - `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
@@ -457,6 +459,7 @@ process-isolated plugin supervision belongs to Issue #91.
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/ipc/{codec,client,host,request_router}.cpp`
 - `tests/unit/test_policy_registry.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`

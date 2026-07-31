@@ -287,10 +287,12 @@ settlement 不释放仍被 owner 持有的 allocation，而 residency entry coun
 bound，不是 byte authority。
 
 V-9 仍不实现 quantization、通用 Map/Import provider、provider ABI v3、public device
-registry、device queue/in-flight accounting 或通用命名 graph Value output。Compute-I/O
-durability 与有界 cache/codec execution 仍归 Issue #87 与 #88；Issue #89 继续负责
-multi-channel、FP64、latent 与 stride matrix。`ImageBuffer` 仍是 operation ABI v2、tiled
-write、codec 与 Host surface 的 compatibility contract。
+registry、device queue/in-flight accounting 或通用命名 graph Value output。Issue #87 的
+compute-I/O durability 决策与 Issue #88 首条有界 cache/codec execution 垂直路径已是当前行为：
+process executor 会保留 transaction lifetime 并预算 work，但不改变 `ImageBuffer` 或 codec
+ABI。Run publication 之后的 cache outcome 与 durable output 仍是未来工作。Issue #89 继续负责
+multi-channel、FP64、latent 与 stride matrix。`ImageBuffer` 仍是 operation ABI v2、tiled write、
+codec 与 Host surface 的 compatibility contract。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。

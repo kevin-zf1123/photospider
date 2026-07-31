@@ -680,10 +680,14 @@ surfaces expose no cancellation entry; IPC jobs continue to report
 
 The current HP product transaction performs eligible configured disk-cache
 writes after revision validation and before the no-throw live Graph swap.
-Consequently, a cache codec/filesystem failure can currently resolve that Run
-as `Failed` with no live Graph publication. This is an implemented
-commit-policy ordering rule, not a claim that disk cache is durable user
-output.
+Graph-state policy now submits the cache codec/filesystem mechanism through
+the process-owned `ComputeIoExecutor`, whose independent worker atomically
+bounds task count and estimated retained bytes. The prepared transaction is
+retained until typed completion, and CPU compute workers cannot synchronously
+wait for that completion. Consequently, admission or cache
+codec/filesystem failure can still resolve that Run as `Failed` with no live
+Graph publication. This is an implemented commit-policy ordering rule, not a
+claim that disk cache is durable user output.
 
 Provider return, pending-Value readiness, Run terminal publication, Host result
 return, daemon job terminal state, result delivery, cache save, Graph-document
@@ -703,7 +707,10 @@ particular:
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 accepts a target in which optional cache persistence and durable output commit
 have independent outcomes after Run publication. That behavior, stable output
-commit receipts, and a bounded `ComputeIoExecutor` are not current code.
+commit receipts, and durable commit remain future work. The bounded executor
+and its first staged HP cache-save vertical are current code; synchronous cache
+administration/load and the other persistence owners listed above are
+unchanged.
 
 ## Failure and Lifetime Semantics
 
@@ -794,7 +801,7 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #86: all HP/RT ready work enters one Host-owned
+is authoritative through issue #88: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
 commits resources plus exact implementation/key gates before a closed private
@@ -820,7 +827,10 @@ Graph lifetime leases, standalone and realtime-bundle installation, exact
 finalization/unregistration, and monotonic close generations.
 `ExecutionLifecycleTelemetry` supplies source-private bounded lifecycle proof;
 it is not a public Host/CLI/IPC control surface. Public cancellation entry
-points remain future behavior.
+points remain future behavior. One independent process I/O worker additionally
+bounds staged HP cache-save mechanism by task count and estimated retained
+bytes; graph-state policy waits for its typed completion, while CPU workers
+cannot.
 
 ## Implementation and Validation Entry Points
 
@@ -839,6 +849,7 @@ points remain future behavior.
 - `src/lib/compute/execution_service.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
+- `src/lib/execution/compute_io_executor.*`
 - `src/lib/compute/task_graph_planning.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_submission.*`
@@ -873,6 +884,7 @@ points remain future behavior.
 - `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_resource_ledger.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_compute_supersession.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_opencv_operation_concurrency.cpp`

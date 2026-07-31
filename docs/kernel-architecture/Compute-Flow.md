@@ -427,13 +427,18 @@ acknowledgement, result delivery, or durable user-output commit. The legacy
 Run commits; that callback-owned behavior is not a Run commit protocol.
 
 The current product transaction still performs eligible deferred HP cache
-writes before the no-throw live Graph swap. A cache codec or filesystem failure
-can therefore fail the current Run with no visible Graph publication.
+writes before the no-throw live Graph swap. After the existing live predicates
+succeed, graph-state policy submits each staged cache-save codec/filesystem
+callback to the process-owned, task/estimated-byte-bounded
+`ComputeIoExecutor`, retains the prepared transaction as the task lifetime
+token, and waits for typed completion. That wait never occurs on an
+`ExecutionService` CPU worker. A cache admission, codec, or filesystem failure
+can therefore still fail the current Run with no visible Graph publication.
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 accepts a target that moves optional cache persistence behind an independent
 outcome and introduces a separate, receipt-bearing durable output commit. The
-target ordering and `ComputeIoExecutor` are not implemented by this document's
-current baseline.
+executor mechanism is current; the target post-publication ordering and
+durable output commit are not.
 
 ## GlobalHighPrecision
 
@@ -664,6 +669,7 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
+- `src/lib/execution/compute_io_executor.*`
 - `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/run_lifecycle_registry.*`
@@ -678,6 +684,7 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_host_adapter.cpp`

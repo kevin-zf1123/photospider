@@ -28,6 +28,11 @@ Issue #85 新增显式且保留 revision 的 CPU/Metal transfer、精确 complet
 进程级 `ResidencyManager` 与 Run-bound pending-Value continuation，且不创建另一套 ready store
 或 capacity authority。Issue #86 在这套唯一的 service ledger 中增加相互隔离的已配置非 CPU
 `DeviceId` memory/scratch 账户、原生 plan/actual 校准，以及绑定到持久 owner/completion 的 lease。
+Issue #88 在同一 process service 中新增唯一 source-private `ComputeIoExecutor`。其独立 worker
+会按 task 数与 estimated retained bytes 原子准入，保留显式 transaction lifetime token，返回
+typed completion，对 cancellation 与 shutdown 执行恰好一次 settlement，并拒绝 CPU compute
+worker 同步等待 completion。首条迁移的垂直路径是 staged HP cache save：graph-state policy
+仍选择 cache operation，并在既有 visible publication point 之前等待。
 Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详细所有权与生命周期契约上
 取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
 
@@ -185,10 +190,12 @@ arbitration、Graph close 与 process shutdown 的权威来源。实现通用 Va
 
 ## 与 ADR 0009 的关系
 
-[ADR 0009](0009-compute-io-durability-and-completion-semantics.zh.md)冻结本决策所预期
-I/O continuation 的边界。未来进程级 `ComputeIoExecutor` 拥有有界 cache、asset 与
-codec 机制，准入同时受操作数与 byte 限制。它不拥有 Graph 文档事务、daemon transport、
-cache authority、output commit identity、重试/覆盖策略或 durability。
+[ADR 0009](0009-compute-io-durability-and-completion-semantics.zh.md) 冻结本决策所预期
+I/O continuation 的边界。Issue #88 现已提供 process-owned `ComputeIoExecutor` mechanism，
+其准入受 task 数与 estimated retained bytes 限制。首条生产路径在保留 prepared transaction
+lifetime 的同时，执行 staged HP cache-save codec/filesystem callback。它不拥有 cache
+eligibility 或 path、Graph 文档事务、daemon transport、output commit identity、重试/覆盖
+策略或 durability。同步 cache administration 与 load 仍由既有 owner 负责。
 
 `ComputeRun` 成功、cache 持久化、Graph 文档保存、daemon 结果可用与 durable 输出
 提交保持为不同结果。增加 I/O worker 不得把进程 execution service 扩展成持久化权威，
