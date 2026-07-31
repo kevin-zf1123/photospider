@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "core/pending_value.hpp"
+#include "core/value_validation.hpp"
 #include "photospider/data/image_view.hpp"
 
 namespace ps {
@@ -415,6 +416,14 @@ std::size_t resolve_coordinate_offset(const StridedLayout& layout,
 }
 
 }  // namespace
+
+/** @copydoc ps::validate_dense_tensor_producer_envelope */
+void validate_dense_tensor_producer_envelope(
+    const DenseTensorDescriptor& descriptor, const StridedLayout& layout,
+    std::size_t storage_size) {
+  validate_producer_envelope(
+      descriptor, layout, dense_tensor_element_bytes(descriptor), storage_size);
+}
 
 /**
  * @brief Private explicit-binding control block retained by BufferHandle
@@ -890,9 +899,8 @@ ValueBuilder::~ValueBuilder() noexcept = default;
 ValueBuilder ValueBuilder::allocate_cpu_dense_tensor(
     DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
     StridedLayout layout, std::size_t storage_size) {
-  const std::size_t element_bytes =
-      validate_descriptor_and_facet(descriptor, image_facet);
-  validate_producer_envelope(descriptor, layout, element_bytes, storage_size);
+  (void)validate_descriptor_and_facet(descriptor, image_facet);
+  validate_dense_tensor_producer_envelope(descriptor, layout, storage_size);
 
   DenseTensorDescriptor isolated_descriptor = descriptor;
   const std::optional<ImageFacet> isolated_image_facet = image_facet;

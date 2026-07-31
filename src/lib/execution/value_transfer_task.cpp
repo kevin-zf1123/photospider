@@ -9,6 +9,8 @@
 #include <string>
 #include <utility>
 
+#include "core/value_validation.hpp"
+
 namespace ps {
 
 /**
@@ -184,6 +186,9 @@ ValueTransferTask ValueTransferTask::prepare_external_transfer(
     throw std::invalid_argument(
         "Host-readable transfer target requires a host pointer.");
   }
+  validate_dense_tensor_producer_envelope(source.dense_tensor_descriptor(),
+                                          source.strided_layout(),
+                                          source.storage_size());
   AccessPlan plan = source.plan_access(target);
   if (plan.kind() != AccessPlanKind::Transfer) {
     throw std::invalid_argument(

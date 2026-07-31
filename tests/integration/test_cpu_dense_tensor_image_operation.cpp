@@ -252,9 +252,11 @@ std::vector<std::size_t> matrix_coordinates(
 /**
  * @brief Builds one positive non-overlapping layout with rank-general gaps.
  *
- * Each outer-axis stride is the complete inner envelope plus a fixed number
- * of element-sized padding bytes. The returned storage size is the exact
- * producer envelope required by `Value::from_cpu_dense_tensor`.
+ * For rank one, the sole stride inserts element-sized padding between adjacent
+ * logical elements. For higher ranks, each outer-axis stride is the complete
+ * inner envelope plus that padding while the innermost axis remains packed.
+ * The returned storage size is the exact producer envelope required by
+ * `Value::from_cpu_dense_tensor`.
  *
  * @param shape Nonempty positive logical extents.
  * @param element_bytes Positive physical bytes per logical element.
@@ -278,10 +280,12 @@ std::pair<StridedLayout, std::size_t> make_positive_matrix_layout(
   std::size_t inner_span = element_bytes;
   for (std::size_t reverse = shape.size(); reverse > 0U; --reverse) {
     const std::size_t axis = reverse - 1U;
+    const bool innermost_axis = axis + 1U == shape.size();
     const std::size_t stride =
-        axis + 1U == shape.size()
-            ? element_bytes
-            : checked_matrix_add(inner_span, padding_bytes);
+        innermost_axis ? (shape.size() == 1U
+                              ? checked_matrix_add(element_bytes, padding_bytes)
+                              : element_bytes)
+                       : checked_matrix_add(inner_span, padding_bytes);
     if (stride >
         static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
       throw std::overflow_error(
@@ -401,6 +405,75 @@ std::vector<std::byte> copy_matrix_storage(const Value& value) {
 }
 
 /**
+ * @brief Verifies one rank-one fixture has real padding and active bytes.
+ *
+ * The oracle derives each active offset directly as `index * stride` instead
+ * of reusing the rank-general coordinate/layout walk used by the fixture
+ * writer. Every byte between adjacent active elements must retain the `0xA5`
+ * sentinel.
+ *
+ * @param value Ready host-visible rank-one FP32 or FP64 Value.
+ * @param seed Integral start used by the fixture's logical-value contract.
+ * @return Nothing; GoogleTest reports stride, envelope, active-byte, or
+ * padding-byte mismatches.
+ * @throws Value access, checked arithmetic, or allocation exceptions.
+ * @note The final active element ends at the exact storage envelope; padding
+ * exists only between adjacent logical elements.
+ */
+void expect_rank_one_padded_storage(const Value& value, double seed) {
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  ASSERT_EQ(descriptor.shape.size(), 1U);
+  const std::size_t extent = descriptor.shape[0];
+  ASSERT_GT(extent, 1U);
+  const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
+  const StridedLayout& layout = value.strided_layout();
+  ASSERT_EQ(layout.byte_strides.size(), 1U);
+  EXPECT_EQ(layout.byte_offset, 0U);
+  ASSERT_GT(layout.byte_strides[0], 0);
+  const std::size_t stride = static_cast<std::size_t>(layout.byte_strides[0]);
+  EXPECT_GT(stride, element_bytes);
+
+  const std::size_t required_span = checked_matrix_add(
+      checked_matrix_multiply(extent - 1U, stride), element_bytes);
+  EXPECT_EQ(value.storage_size(), required_span);
+  EXPECT_EQ(value.storage_binding().byte_size, required_span);
+  EXPECT_GT(required_span, checked_matrix_multiply(extent, element_bytes));
+
+  const std::vector<std::byte> storage = copy_matrix_storage(value);
+  ASSERT_EQ(storage.size(), required_span);
+  std::size_t observed_padding_bytes = 0U;
+  for (std::size_t index = 0U; index < extent; ++index) {
+    const std::size_t offset = checked_matrix_multiply(index, stride);
+    ASSERT_LE(offset, storage.size());
+    ASSERT_LE(element_bytes, storage.size() - offset);
+    const double expected = expected_matrix_element(seed, index);
+    if (descriptor.storage_encoding.bit_width == 32U) {
+      float active = 0.0F;
+      std::memcpy(&active, storage.data() + offset, sizeof(active));
+      EXPECT_EQ(active, static_cast<float>(expected));
+    } else {
+      ASSERT_EQ(descriptor.storage_encoding.bit_width, 64U);
+      double active = 0.0;
+      std::memcpy(&active, storage.data() + offset, sizeof(active));
+      EXPECT_EQ(active, expected);
+    }
+
+    if (index + 1U == extent) {
+      EXPECT_EQ(checked_matrix_add(offset, element_bytes), storage.size());
+      continue;
+    }
+    const std::size_t padding_begin = checked_matrix_add(offset, element_bytes);
+    const std::size_t next_active = checked_matrix_add(offset, stride);
+    ASSERT_LE(next_active, storage.size());
+    for (std::size_t cursor = padding_begin; cursor < next_active; ++cursor) {
+      EXPECT_EQ(storage[cursor], std::byte{0xA5});
+      ++observed_padding_bytes;
+    }
+  }
+  EXPECT_GT(observed_padding_bytes, 0U);
+}
+
+/**
  * @brief Snapshot populated by one admitted generic-Value I/O observation.
  *
  * @throws std::bad_alloc when copied descriptor, layout, or bytes allocate.
@@ -492,6 +565,48 @@ struct FakeMatrixDeviceAllocation final {
   /** @brief Complete fake device-local storage envelope. */
   std::vector<std::byte> bytes;
 };
+
+/**
+ * @brief Proves invalid producer layouts fail before external publication.
+ *
+ * @param source Ready negative- or zero-stride immutable view.
+ * @return Nothing; GoogleTest reports missing rejection, callback execution,
+ * source-fact mutation, or retained external allocation ownership.
+ * @throws Value access or fake-allocation exceptions unchanged.
+ * @note A published device Value would retain the external allocation owner.
+ * Expiration after the test releases its only owner is the observable proof
+ * that preparation created no escaping Pending destination.
+ */
+void expect_external_transfer_preparation_rejected(const Value& source) {
+  const AllocationIdentity source_allocation = source.allocation_identity();
+  const ValueRevisionId source_revision = source.revision_id();
+  const ProducerIdentity source_producer = source.producer_identity();
+  const ReadyFence source_fence = source.ready_fence();
+  auto allocation =
+      std::make_shared<FakeMatrixDeviceAllocation>(source.storage_size());
+  const std::weak_ptr<FakeMatrixDeviceAllocation> weak_allocation = allocation;
+  std::size_t provider_calls = 0U;
+  const AccessTarget target{DeviceId(DeviceBackend::Metal),
+                            MemoryDomain::DeviceLocal, false, true};
+
+  EXPECT_THROW(
+      (void)ValueTransferTask::prepare_external_transfer(
+          source, target, allocation, allocation.get(), nullptr,
+          [&provider_calls](const Value&,
+                            const std::shared_ptr<DeviceTransferCompletion>&) {
+            ++provider_calls;
+          }),
+      std::invalid_argument);
+  EXPECT_EQ(provider_calls, 0U);
+  EXPECT_EQ(source.allocation_identity(), source_allocation);
+  EXPECT_EQ(source.revision_id(), source_revision);
+  EXPECT_EQ(source.producer_identity(), source_producer);
+  EXPECT_EQ(source_fence.poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(source.ready_fence().poll().state(), ReadyFenceState::Ready);
+
+  allocation.reset();
+  EXPECT_TRUE(weak_allocation.expired());
+}
 
 /**
  * @brief Proves explicit CPU/device/I-O boundaries preserve one producer Value.
@@ -2604,6 +2719,10 @@ TEST(CpuDenseTensorImageOperation,
           shape, std::nullopt, bit_width, rank + 2U, 220.0);
       ASSERT_EQ(existing.dense_tensor_descriptor(), expected_descriptor);
       EXPECT_FALSE(existing.image_facet().has_value());
+      if (rank == 1U) {
+        expect_rank_one_padded_storage(existing, 20.0);
+        expect_rank_one_padded_storage(update, 220.0);
+      }
 
       std::vector<RegionInterval> full_axes;
       std::vector<RegionInterval> selected_axes;
@@ -2714,6 +2833,8 @@ TEST(CpuDenseTensorImageOperation,
                std::invalid_argument);
   EXPECT_THROW((void)ValueTransferTask::prepare_cpu_copy(broadcast),
                std::invalid_argument);
+  expect_external_transfer_preparation_rejected(reverse);
+  expect_external_transfer_preparation_rejected(broadcast);
 
   const execution::ComputeIoExecutorSnapshot final_io = io_executor.snapshot();
   EXPECT_EQ(final_io.active_tasks, 0U);

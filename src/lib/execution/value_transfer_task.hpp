@@ -182,13 +182,15 @@ class ValueTransferTask final {
    * @param operation Nonempty provider invoked only after source Ready.
    * @return Move-only task with a distinct revision-preserving destination.
    * @throws std::invalid_argument when source/binding/provider is invalid,
-   * requested host access lacks a host pointer, or access planning does not
-   * select Transfer.
-   * @throws std::out_of_range when source layout escapes destination bytes.
+   * requested host access lacks a host pointer, the source is not a positive
+   * zero-offset exact non-overlapping producer layout, or access planning does
+   * not select Transfer.
    * @throws std::overflow_error for envelope or identity exhaustion.
    * @throws std::bad_alloc when destination/task ownership cannot allocate.
-   * @note The destination envelope equals source.storage_size(). Preparation
-   * performs no payload read and submits no native work.
+   * @note Producer-layout validation completes before retaining `owner`,
+   * minting destination identities, creating a fence, or publishing a Pending
+   * destination. The destination envelope equals source.storage_size().
+   * Preparation performs no payload read and submits no native work.
    */
   static ValueTransferTask prepare_external_transfer(
       Value source, AccessTarget target, std::shared_ptr<void> owner,
