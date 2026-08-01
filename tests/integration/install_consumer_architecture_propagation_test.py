@@ -704,6 +704,64 @@ class CommandRecorder:
         return target_names
 
 
+class DependencyDisabledResidueClassifierTest(unittest.TestCase):
+    """@brief Lock bounded optional deep-codec token classification.
+
+    @throws AssertionError If authoritative OpenEXR/Imf/V-15 spellings become
+      invisible or broad unrelated substrings begin to fail the package gate.
+    @note This is an in-process safety regression for the real installed/link
+      scanner; it launches no configure, compiler, install, or consumer.
+    """
+
+    def test_detects_authoritative_markers_case_insensitively(self) -> None:
+        """@brief Detect package, namespace, mangled, and V-15 mode tokens.
+
+        @return None after every controlled sample yields its expected label.
+        @throws AssertionError If case folding or version suffixes drift.
+        @note Samples are bounded fragments, not copied tool output.
+        """
+
+        samples = (
+            ("/usr/lib/libOpenEXRCore-3_2.dylib", "OpenEXR"),
+            ("Imf_3_2::Header", "Imf"),
+            ("_ZN3Imf6HeaderD1Ev", "Imf"),
+            ("-lIlmThread_3_2", "OpenEXR-transitive-library"),
+            ("deep-scanline", "deep-codec-mode"),
+            ("DEEP_TILED", "deep-codec-mode"),
+            ("multipart", "multipart-codec-mode"),
+            ("mixed shallow/deep", "mixed-part-codec-mode"),
+        )
+        for text, expected in samples:
+            with self.subTest(text=text):
+                self.assertIn(
+                    expected,
+                    dependency_disabled.forbidden_deep_codec_markers(text),
+                )
+
+    def test_avoids_ungrounded_broad_substrings(self) -> None:
+        """@brief Keep unrelated EXR/deep/half and word fragments legal.
+
+        @return None after every non-dependency sample remains unclassified.
+        @throws AssertionError If a future matcher becomes overbroad.
+        @note Qualified ``Imf`` remains forbidden; only unrelated containing
+          words are accepted here.
+        """
+
+        samples = (
+            "exr estimate",
+            "deep graph traversal",
+            "half open interval",
+            "multipartite relation",
+            "openexrenderer",
+            "simple_imf_cache",
+        )
+        for text in samples:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    dependency_disabled.forbidden_deep_codec_markers(text), []
+                )
+
+
 class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
     """@brief Validate dynamic consumer discovery and fail-closed execution.
 
@@ -755,6 +813,7 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "OFF",
                 "CMAKE_DISABLE_FIND_PACKAGE_OpenCV": "ON",
                 "CMAKE_DISABLE_FIND_PACKAGE_yaml-cpp": "ON",
+                "CMAKE_DISABLE_FIND_PACKAGE_OpenEXR": "ON",
             }
         )
         write_cmake_cache(producer, cache)
@@ -778,6 +837,11 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 dependency_disabled,
                 "run_expect_failure",
                 side_effect=recorder.expect_failure,
+            ),
+            mock.patch.object(
+                dependency_disabled,
+                "validate_no_optional_deep_codec_residue",
+                return_value=None,
             ),
             mock.patch("platform.system", return_value="Darwin"),
         ):
@@ -992,10 +1056,10 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 "          Photospider::operation_sdk)\n"
                 "target_link_libraries(installed_c11_data_provider_consumer\n"
                 "  PRIVATE installed_c11_data_provider\n"
-                "          Photospider::operation_runtime)\n"
+                "          Photospider::operation_sdk)\n"
                 "target_link_libraries(installed_cpp17_data_provider_consumer\n"
                 "  PRIVATE installed_cpp17_data_provider\n"
-                "          Photospider::operation_runtime)"
+                "          Photospider::operation_sdk)"
             )
             replacements = (
                 (
@@ -3005,6 +3069,7 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
                     "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "OFF",
                     "CMAKE_DISABLE_FIND_PACKAGE_OpenCV": "ON",
                     "CMAKE_DISABLE_FIND_PACKAGE_yaml-cpp": "ON",
+                    "CMAKE_DISABLE_FIND_PACKAGE_OpenEXR": "ON",
                 }
             )
             write_cmake_cache(producer, cache)
@@ -3037,6 +3102,11 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
                     "run_expect_failure",
                     side_effect=recorder.expect_failure,
                 ),
+                mock.patch.object(
+                    dependency_disabled,
+                    "validate_no_optional_deep_codec_residue",
+                    return_value=None,
+                ),
                 mock.patch(
                     "platform.system", return_value="Darwin"
                 ),
@@ -3046,6 +3116,10 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
             self.assert_propagated(
                 recorder.configure_commands(), expected_count=6
             )
+            for command in recorder.configure_commands():
+                self.assertIn(
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON", command
+                )
 
     def test_ipc_disabled_driver_propagates_to_all_children(self) -> None:
         """@brief Cover optional, required-missing, and embedded consumers.

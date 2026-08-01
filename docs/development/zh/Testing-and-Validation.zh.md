@@ -171,18 +171,25 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 解析既有 backend dependency。
 
 长期 `DependencyDisabledInstallSmoke` 会配置一个 OpenCV 与 YAML capability 均禁用的 clean
-producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
+producer，禁用 OpenCV、yaml-cpp 与 OpenEXR 三个 package discovery，关闭 IPC，只启用
+dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_packed_fp4_dense_tensor` 与
 `test_variable_sample_field_extensions`、`test_value_identity_across_dsos` binary。安装前，
 它会在该真实 disabled producer 中运行全部 48 个 dense-image case、全部 4 个 packed FP4 case、
-全部 7 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
+全部 8 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
 默认值，以及三类无效显式组合的精确诊断。
 Clean install 后，它会拒绝 OpenCV header、target、export reference 与 yaml-cpp link 泄漏；
-optional `operation_opencv` 保持 unavailable，required component 则失败。外部 consumer 会在
-两个 discovery 均禁用时配置，链接并运行 `Photospider::photospider`，分配中立 image，并通过
+optional `operation_opencv` 保持 unavailable，required component 则失败。它还会对全部 installed
+public header、library/archive、package config、CMake export、生成的 consumer link script，以及
+consumer executable 的 dependency/symbol surface 执行大小写不敏感且区分 surface 的可选 provider
+扫描。Mach-O 使用 `otool` 与 `nm`；ELF 使用 `readelf` 与 `nm`。有界 marker 覆盖
+`OpenEXR`、`Imf` namespace/library family 与具名 transitive library，以及为 V-15 保留的
+deep-scanline、deep-tiled、deep-codec、multipart 和 mixed-part 词汇。禁止使用宽泛的 `exr`、
+`deep` 与无限定 `half` 子串扫描，因为它们会制造没有依据的 false positive。外部 consumer 会在
+三个 discovery 均禁用时配置，链接并运行 `Photospider::photospider`，分配中立 image，并通过
 installed package 使用 `ValueBuilder`、write/read lease、runtime identity、ImageView，以及
 public FP4/quantization/Blocked/PackedDenseTensorView contract，
 加载并关闭 empty Host session，并观察显式 YAML operation 返回 `GraphErrc::Io`。CI 只有在校验
@@ -190,9 +197,15 @@ producer cache identity、configuration、完整 capability profile 与已构建
 target 后才可复用该 producer。
 同一个 external project 还会请求 `data_provider_sdk`，验证其 interface 不含 link dependency，
 并根据安装后的 header 分别构建采用精确名称的 C11 与 C++17 v3 definition producer，再将二者
-分别链接进独立的 C++ registry consumer。两个 consumer 都会通过真实
-`DataDefinitionRegistry` 发布两个 typed definition、检查精确 generation，然后卸载。
-任一 producer 都不会引入 source-tree include 或可选 provider dependency。
+分别通过 `Photospider::operation_sdk` 链接进独立的 C++ Host consumer。每个 consumer 都会从
+active snapshot 派生一份 Schema/Facet/Layout 三字段 manifest，发布 compact 与 repacked 两种
+形式的有界三 buffer provider-defined Value，并执行纯 property、DataSpec 与 Region callback。
+它会在 provider 可见和缺席时往返保留未知 descriptor/Layout byte 与完整或 metadata-only artifact
+envelope，绝不为缺失的 ContentDigest 伪造值；同时检查 typed Descriptor、Content 与
+StorageLayout digest，包括与 layout 无关的 content identity。Indexed read 与 provider-owner
+lease 会在 unload 后继续保留精确 generation/module；active resolution 随后报告 MissingProvider，
+retained Value traversal 仍保持有效，最终 owner/provider destroy 先于 module release。
+任一 producer 或 consumer 都不会引入 source-tree include 或可选 provider dependency。
 
 生成的 clean consumer project 会维护一份有序的 CMake executable target list。同一份 list
 负责创建 target、写出 configure-time 精确 target declaration，并通过 `file(GENERATE)` 提供
@@ -997,7 +1010,7 @@ fake-device transfer、精确正式 memory-cache retention，以及在 executor�
 rank/count、zero 或 non-divisible block、nonfinite/nonpositive scale、错误 layout version/
 alignment/overlap/size、quantized Strided publication 与 oversized blocked transfer alias。
 
-`test_variable_sample_field_extensions` 拥有 7 个只使用标准库的 V-14 integration case。
+`test_variable_sample_field_extensions` 拥有 8 个只使用标准库的 V-14 integration case。
 一个合成纯 C definition suite 会发布带版本的 VariableSampleField Schema、Facet 和 Layout record，
 并使用三个 physical buffer。这些用例会验证 typed namespace、candidate conflict 与 malformed
 record rollback；在 revision minting 前拒绝通用 cross-reference 错误；provider semantic rejection；
@@ -1006,6 +1019,32 @@ record rollback；在 revision minting 前拒绝通用 cross-reference 错误；
 physical repacking 与 padding 不改变 content identity；旧 Value/read/owner 跨 replacement 和
 unload 的 lifetime；最终 provider-before-module destroy 顺序；以及 concurrent replacement
 不存在 mixed-generation resolution。
+
+第 8 个 case 是 callback-view 生命周期结构化回归。它通过同一个 Value 进入 validation、property、
+DataSpec、Region 与 content callback，并要求每个 Schema/Layout record、可选 Facet array、buffer
+array、Layout-envelope array、metadata payload 与显式 content pointer 在对应 callback 期间持续
+有效。生产 adapter 把 move-safe owning storage 与借用的 `ps_data_value_view_v3` 分离，只在最终
+callback caller 地址即时 materialize view。Scoped no-elide 运行必须以
+`-fno-elide-constructors` 编译 `photospider_operation_runtime` 本身，而不能只编译 test source，
+随后运行该 case。这是一项手工 compiler-mode 证明，不是新增 CTest entry 或 CI phase-completion
+检查：
+
+```bash
+cmake -S . -B build-v14-no-elide \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DBUILD_TESTING=ON \
+  -DPHOTOSPIDER_BUILD_IPC=OFF \
+  -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
+  -DPHOTOSPIDER_ENABLE_YAML=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON \
+  -DCMAKE_CXX_FLAGS=-fno-elide-constructors
+cmake --build build-v14-no-elide \
+  --target test_variable_sample_field_extensions -j 2
+ctest --test-dir build-v14-no-elide --output-on-failure \
+  -R '^VariableSampleFieldExtensions\.EveryCallbackReceivesOneStableMaterializedValueView$'
+```
 
 Active output byte 必须等于 `255 - input`；input/output row padding 不被当作 image element。
 
@@ -1021,8 +1060,9 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions)\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 48 个
-dense 用例、全部 4 个 packed FP4 用例与 7 个 V-14 extension 用例，再证明 installed consumer；
+`DependencyDisabledInstallSmoke` 会在真实禁用 OpenCV/YAML/OpenEXR discovery 的 product 中构建并
+运行全部 48 个 dense 用例、全部 4 个 packed FP4 用例与 8 个 V-14 extension 用例，再证明
+installed consumer；
 `StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer

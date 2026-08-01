@@ -224,13 +224,14 @@ remain not-found without failing discovery; omitting components or requesting
 `embedded` retains the existing backend dependency resolution.
 
 The durable `DependencyDisabledInstallSmoke` configures a clean producer with
-OpenCV and YAML capabilities disabled, disables both package discoveries,
-turns off IPC, enables only the dependency-neutral test surface, and builds the
+OpenCV and YAML capabilities disabled, disables OpenCV, yaml-cpp, and OpenEXR
+package discovery, turns off IPC, enables only the dependency-neutral test
+surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product,
 `test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`,
 `test_variable_sample_field_extensions`, and `test_value_identity_across_dsos`
 binaries. Before installation it runs all 48 dense-image cases, all four packed
-FP4 cases, all seven provider-defined VariableSampleField cases, and the
+FP4 cases, all eight provider-defined VariableSampleField cases, and the
 dual-DSO identity case in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
@@ -238,8 +239,17 @@ derived provider/plugin/CLI defaults and the precise diagnostics for three
 invalid explicit combinations.
 After a clean install it rejects OpenCV headers, targets, export references,
 and yaml-cpp link leakage; optional `operation_opencv` remains unavailable
-while the required component fails. An external consumer configures with both
-discoveries disabled, links/runs `Photospider::photospider`, allocates a neutral
+while the required component fails. It also performs a case-insensitive,
+surface-aware optional-provider scan over every installed public header,
+library/archive, package config, CMake export, generated consumer link script,
+and consumer executable dependency/symbol surface. Mach-O uses `otool` and
+`nm`; ELF uses `readelf` and `nm`. The bounded markers cover `OpenEXR`, the
+`Imf` namespace/library family and named transitive libraries, plus the
+deep-scanline, deep-tiled, deep-codec, multipart, and mixed-part vocabulary
+reserved for V-15. Broad `exr`, `deep`, and unqualified `half` substring scans
+are forbidden because they create unsupported false positives. An external
+consumer configures with all three package discoveries disabled,
+links/runs `Photospider::photospider`, allocates a neutral
 image, uses `ValueBuilder`, write/read leases, runtime identities, ImageView,
 and the public FP4/quantization/Blocked/PackedDenseTensorView contracts through
 the installed package, loads and closes an empty Host
@@ -249,9 +259,18 @@ capability profile, and already-built dense integration target are validated.
 The same external project requests `data_provider_sdk`, verifies that its
 interface has no link dependency, builds separate exact-name C11 and C++17 v3
 definition producers from the installed header, and links each into a separate
-C++ registry consumer. Both consumers publish two typed definitions through
-the real `DataDefinitionRegistry`, inspect the exact generation, and unload it.
-No source-tree include or optional provider dependency enters either producer.
+C++ Host consumer through `Photospider::operation_sdk`. Each consumer derives a
+three-field Schema/Facet/Layout manifest from the active snapshots, publishes
+bounded three-buffer provider-defined Values in compact and repacked forms,
+and exercises pure property, DataSpec, and Region callbacks. It round-trips
+unknown descriptor/Layout bytes and complete or metadata-only artifact
+envelopes with the provider visible and absent, never invents an absent
+ContentDigest, and checks typed Descriptor, Content, and StorageLayout digests,
+including layout-independent content identity. Indexed read and provider-owner
+leases keep the exact generation/module alive across unload; active resolution
+then reports MissingProvider, retained Value traversal remains valid, and final
+owner/provider destruction precedes module release. No source-tree include or
+optional provider dependency enters either producer or consumer.
 
 The generated clean consumer project maintains one ordered CMake executable
 target list. That same list creates the targets, writes a configure-time exact
@@ -1255,7 +1274,7 @@ zero or non-divisible blocks, nonfinite/nonpositive scales, bad layout version/
 alignment/overlap/size, quantized Strided publication, and oversized blocked
 transfer aliases.
 
-`test_variable_sample_field_extensions` owns seven standard-library-only V-14
+`test_variable_sample_field_extensions` owns eight standard-library-only V-14
 integration cases. A synthetic pure-C definition suite publishes versioned
 VariableSampleField Schema, Facet, and Layout records with three physical
 buffers. The cases verify typed namespaces, candidate conflicts and malformed
@@ -1266,6 +1285,34 @@ cleared; independent exact SHA-256 descriptor/content/layout vectors; content
 identity across physical repacking and padding; old Value/read/owner lifetime
 across replacement and unload; final provider-before-module destroy order; and
 concurrent replacement without mixed-generation resolution.
+
+The eighth case is the structural callback-view lifetime regression. It enters
+validation, property, DataSpec, Region, and content callbacks through one
+Value and requires every Schema/Layout record, optional Facet array, buffer
+array, Layout-envelope array, metadata payload, and explicit content pointer to
+remain valid for its callback. The production adapter keeps move-safe owning
+storage separate from the borrowed `ps_data_value_view_v3` and materializes the
+view only at the final callback caller address. A scoped no-elide run must
+compile `photospider_operation_runtime` itself—not only the test source—with
+`-fno-elide-constructors`, then run that case. This is a manual compiler-mode
+proof, not another CTest entry or CI phase-completion check:
+
+```bash
+cmake -S . -B build-v14-no-elide \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DBUILD_TESTING=ON \
+  -DPHOTOSPIDER_BUILD_IPC=OFF \
+  -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
+  -DPHOTOSPIDER_ENABLE_YAML=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON \
+  -DCMAKE_CXX_FLAGS=-fno-elide-constructors
+cmake --build build-v14-no-elide \
+  --target test_variable_sample_field_extensions -j 2
+ctest --test-dir build-v14-no-elide --output-on-failure \
+  -R '^VariableSampleFieldExtensions\.EveryCallbackReceivesOneStableMaterializedValueView$'
+```
 
 Active output bytes must equal `255 - input`; input and output row padding is
 not treated as image elements.
@@ -1283,7 +1330,8 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `DependencyDisabledInstallSmoke` builds and runs all 48 dense cases plus all
-four packed FP4 and seven V-14 extension cases in an actual OpenCV/YAML-disabled
+four packed FP4 and eight V-14 extension cases in an actual
+OpenCV/YAML/OpenEXR-discovery-disabled
 product before proving the installed consumers.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
 `DependencyDisabledInstallSmoke` also loads two independently linked
