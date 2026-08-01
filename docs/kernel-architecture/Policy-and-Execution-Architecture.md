@@ -373,15 +373,24 @@ API must return independently admitted CPU-heavy phases to the CPU executor.
 
 V-15 adds a second bounded user without changing that mechanism. The
 source-private OpenEXR deep adapter submits one complete indivisible
-single-part deep-scanline read or write as the callback. Admission receives a
-positive retained-byte estimate and occurs before path capture, Value/provider
-generation retention, result-state construction, filesystem effects, or
-OpenEXR entry. Once accepted, the task retains its transaction token, copied
-path, exact provider generation and input Value or decoded-result state through
-the complete codec call. OpenEXR is invoked with `numThreads=0`, so the
-executor's one worker remains the only adapter-created execution lane. Running
-cancellation cannot preempt foreign codec code; it suppresses late result
-publication and still releases task/byte accounts exactly once.
+single-part deep-scanline read or write as the callback. Before
+`ComputeIoExecutor::try_submit`, one shared source-private path check maps an
+empty or embedded-NUL `std::string` to the existing inactive `InvalidRequest`
+fact. It performs no budget charge, lazy construction, path/Value/registry
+capture, hook or worker entry, filesystem access, or OpenEXR call; therefore a
+C-string filename API cannot silently select the NUL prefix. The direct write
+preflight reuses this contract and throws the Host-owned adapter
+`InvalidRequest` category.
+
+For valid paths, executor admission receives a positive retained-byte estimate
+and occurs before path capture, Value/provider generation retention,
+result-state construction, filesystem effects, or OpenEXR entry. Once
+accepted, the task retains its transaction token, copied path, exact provider
+generation and input Value or decoded-result state through the complete codec
+call. OpenEXR is invoked with `numThreads=0`, so the executor's one worker
+remains the only adapter-created execution lane. Running cancellation cannot
+preempt foreign codec code; it suppresses late result publication and still
+releases task/byte accounts exactly once.
 
 After generic Value inspection, the write path crosses a source-private
 continuation barrier before it prepares an OpenEXR Header/frame buffer or

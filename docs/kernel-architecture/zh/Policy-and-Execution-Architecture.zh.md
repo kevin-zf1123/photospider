@@ -308,12 +308,19 @@ execution domain。由于当前 image-codec API 不可拆分，其整个 I/O-fac
 
 V-15 在不改变该 mechanism 的前提下增加第二个有界使用方。Source-private OpenEXR deep
 adapter 会把一次完整且不可拆分的 single-part deep-scanline read 或 write 作为 callback 提交。
-Admission 会接收正数 retained-byte estimate，并先于 path capture、Value/provider generation
-retention、result-state construction、filesystem side effect 或 OpenEXR entry 发生。任务一旦被
-接受，就会在完整 codec call 期间保留 transaction token、复制后的 path、精确 provider
-generation，以及 input Value 或 decoded-result state。调用 OpenEXR 时使用 `numThreads=0`，因此
-executor 的唯一 worker 仍是 adapter 创建的唯一 execution lane。Running cancellation 无法抢占
-foreign codec code；它会抑制延迟 result publication，并仍恰好一次释放 task/byte account。
+在 `ComputeIoExecutor::try_submit` 前，一个共享的 source-private path check 会把 empty 或包含
+embedded NUL 的 `std::string` 映射为既有 inactive `InvalidRequest` fact。它不会计入 budget、
+执行 lazy construction、捕获 path/Value/registry、进入 hook 或 worker、访问 filesystem 或调用
+OpenEXR；因此 C-string filename API 无法静默选择 NUL 前缀。Direct write preflight 会复用这项
+contract，并抛出 Host 自有 adapter `InvalidRequest` 类别。
+
+对于有效 path，executor admission 会接收正数 retained-byte estimate，并先于 path capture、
+Value/provider generation retention、result-state construction、filesystem side effect 或
+OpenEXR entry 发生。任务一旦被接受，就会在完整 codec call 期间保留 transaction token、复制后的
+path、精确 provider generation，以及 input Value 或 decoded-result state。调用 OpenEXR 时使用
+`numThreads=0`，因此 executor 的唯一 worker 仍是 adapter 创建的唯一 execution lane。Running
+cancellation 无法抢占 foreign codec code；它会抑制延迟 result publication，并仍恰好一次释放
+task/byte account。
 
 完成通用 Value 检查后，write path 必须先跨过一个 source-private continuation barrier，才可以
 准备 OpenEXR Header/frame buffer 或打开 output path。该 barrier 会验证两个有符号 window、
