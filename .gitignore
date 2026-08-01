@@ -82,6 +82,7 @@ feedback/
 # Repository-owned plugins
 !plugins/
 !plugins/**/
+!plugins/data/*.cpp
 !plugins/ops/**/*.cpp
 !plugins/ops/**/*.hpp
 !plugins/ops/**/*.mm
