@@ -419,6 +419,14 @@ provider suite 使用单独版本化的 pure-C provider ABI v3。Record 使用 f
 status return 与必须清零的 reserved field。它们不暴露 STL type、exception、RTTI object、
 virtual class、allocator owner、`Value` PImpl、native owner reference 或可变 Host registry。
 
+在已实现的 V-14 definition suite 中，借用 byte view 只用于输入。Diagnostic 与 BYTES-property
+record 携带 scalar length；provider 会在源 storage 仍存活的 callback 执行期间，通过
+callback-local Host output sink 复制完整字段。Sink 在解引用前检查 channel 使用、
+pointer/count framing、重复调用与固定上限；此后复制得到的 byte 独立于 callback、thread 与
+generation lifetime，由 Host 自有。对于规范非空 Exact TensorSlice，Host 还要求 provider 的
+selected-site count 等于每个半开轴长度的 checked `uint64_t` product；overflow 或 mismatch
+都是带类型的无效 provider result。
+
 C++ SDK 在这些 suite 上提供 RAII wrapper，而不改变其 wire layout 或 authority。实现前必须
 冻结并独立复现精确 record layout、limit、calling convention 与 callback inventory。
 
@@ -514,9 +522,10 @@ Issue #78 只修改架构与文档。
 Issue #117 实现 dependency-free 的合成 `VariableSampleField` V-14 切片。其长期测试在不依赖
 OpenEXR 的条件下证明 registration、unknown byte preservation、descriptor 与 Layout
 validation、multi-buffer binding、无 payload authority 的 Region/DataSpec/query behavior、
-独立精确的 canonical digest、generation lease、atomic hot replacement 与 unload。交付的 ABI
-v3 有意只包含 definition suite；本目标中更宽的 access/conversion/inference/execution suite
-仍属于未来 generation 或切片。
+独立精确的 canonical digest、callback-local diagnostic/property copy-out 与 bound、
+rank-general Exact TensorSlice count 校验、generation lease、atomic hot replacement 与 unload。
+交付的 ABI v3 有意只包含 definition suite；本目标中更宽的
+access/conversion/inference/execution suite 仍属于未来 generation 或切片。
 
 另一个独立的可选 OpenEXR 切片跟踪为 V-15，首期只支持 single-part deep-scanline read/write。
 它映射到 `VariableSampleField + ImageFacet + DeepSampleFacet`，并让 OpenEXR type、header、

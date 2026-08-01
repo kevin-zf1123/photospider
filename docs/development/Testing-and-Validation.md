@@ -262,7 +262,10 @@ definition producers from the installed header, and links each into a separate
 C++ Host consumer through `Photospider::operation_sdk`. Each consumer derives a
 three-field Schema/Facet/Layout manifest from the active snapshots, publishes
 bounded three-buffer provider-defined Values in compact and repacked forms,
-and exercises pure property, DataSpec, and Region callbacks. It round-trips
+compiles output-sink/diagnostic/property layout assertions, and exercises pure
+property, DataSpec, and Region callbacks. Each producer emits a nonempty BYTES
+property from callback-local storage so the installed Host proves synchronous
+copy-out rather than delayed pointer access. It round-trips
 unknown descriptor/Layout bytes and complete or metadata-only artifact
 envelopes with the provider visible and absent, never invents an absent
 ContentDigest, and checks typed Descriptor, Content, and StorageLayout digests,
@@ -1274,7 +1277,7 @@ zero or non-divisible blocks, nonfinite/nonpositive scales, bad layout version/
 alignment/overlap/size, quantized Strided publication, and oversized blocked
 transfer aliases.
 
-`test_variable_sample_field_extensions` owns eight standard-library-only V-14
+`test_variable_sample_field_extensions` owns ten standard-library-only V-14
 integration cases. A synthetic pure-C definition suite publishes versioned
 VariableSampleField Schema, Facet, and Layout records with three physical
 buffers. The cases verify typed namespaces, candidate conflicts and malformed
@@ -1284,9 +1287,15 @@ the provider; property/DataSpec/Region callbacks with every payload pointer
 cleared; independent exact SHA-256 descriptor/content/layout vectors; content
 identity across physical repacking and padding; old Value/read/owner lifetime
 across replacement and unload; final provider-before-module destroy order; and
-concurrent replacement without mixed-generation resolution.
+callback-local diagnostic and nonempty property copy-out with an oversized-
+output boundary; checked rank-general Exact TensorSlice site counts, including
+wrong nonzero, wrong zero, and `uint64_t` product overflow; and concurrent
+replacement without mixed-generation resolution. Concurrent readers sample
+callback-local properties from their own output states, and retained old Values
+query the same property after replacement to cover thread/generation lifetime
+boundaries.
 
-The eighth case is the structural callback-view lifetime regression. It enters
+The callback-view case is the structural input-lifetime regression. It enters
 validation, property, DataSpec, Region, and content callbacks through one
 Value and requires every Schema/Layout record, optional Facet array, buffer
 array, Layout-envelope array, metadata payload, and explicit content pointer to
@@ -1330,7 +1339,7 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `DependencyDisabledInstallSmoke` builds and runs all 48 dense cases plus all
-four packed FP4 and eight V-14 extension cases in an actual
+four packed FP4 and ten V-14 extension cases in an actual
 OpenCV/YAML/OpenEXR-discovery-disabled
 product before proving the installed consumers.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.

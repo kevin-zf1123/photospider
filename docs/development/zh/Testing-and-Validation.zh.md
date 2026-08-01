@@ -199,7 +199,10 @@ target 后才可复用该 producer。
 并根据安装后的 header 分别构建采用精确名称的 C11 与 C++17 v3 definition producer，再将二者
 分别通过 `Photospider::operation_sdk` 链接进独立的 C++ Host consumer。每个 consumer 都会从
 active snapshot 派生一份 Schema/Facet/Layout 三字段 manifest，发布 compact 与 repacked 两种
-形式的有界三 buffer provider-defined Value，并执行纯 property、DataSpec 与 Region callback。
+形式的有界三 buffer provider-defined Value，编译 output-sink/diagnostic/property layout
+assertion，并执行纯 property、DataSpec 与 Region callback。每个 producer 都会从
+callback-local storage 发出非空 BYTES property，使 installed Host 证明同步 copy-out，而不是
+延迟 pointer access。
 它会在 provider 可见和缺席时往返保留未知 descriptor/Layout byte 与完整或 metadata-only artifact
 envelope，绝不为缺失的 ContentDigest 伪造值；同时检查 typed Descriptor、Content 与
 StorageLayout digest，包括与 layout 无关的 content identity。Indexed read 与 provider-owner
@@ -1010,17 +1013,21 @@ fake-device transfer、精确正式 memory-cache retention，以及在 executor�
 rank/count、zero 或 non-divisible block、nonfinite/nonpositive scale、错误 layout version/
 alignment/overlap/size、quantized Strided publication 与 oversized blocked transfer alias。
 
-`test_variable_sample_field_extensions` 拥有 8 个只使用标准库的 V-14 integration case。
+`test_variable_sample_field_extensions` 拥有 10 个只使用标准库的 V-14 integration case。
 一个合成纯 C definition suite 会发布带版本的 VariableSampleField Schema、Facet 和 Layout record，
 并使用三个 physical buffer。这些用例会验证 typed namespace、candidate conflict 与 malformed
 record rollback；在 revision minting 前拒绝通用 cross-reference 错误；provider semantic rejection；
 在没有 provider 时保留未知 byte 的 artifact-envelope round-trip；property/DataSpec/Region callback
 中的每个 payload pointer 均被清除；独立且精确的 SHA-256 descriptor/content/layout vector；
 physical repacking 与 padding 不改变 content identity；旧 Value/read/owner 跨 replacement 和
-unload 的 lifetime；最终 provider-before-module destroy 顺序；以及 concurrent replacement
-不存在 mixed-generation resolution。
+unload 的 lifetime；最终 provider-before-module destroy 顺序；callback-local diagnostic 与
+非空 property copy-out、oversized-output boundary；rank-general Exact TensorSlice 的 checked
+site count，包括错误非零 count、错误零 count 与 `uint64_t` product overflow；以及 concurrent
+replacement 不存在 mixed-generation resolution。并发 reader 会从各自 output state 抽样
+callback-local property；保留的旧 Value 则在 replacement 后查询同一 property，以覆盖
+thread/generation lifetime boundary。
 
-第 8 个 case 是 callback-view 生命周期结构化回归。它通过同一个 Value 进入 validation、property、
+Callback-view case 是 input 生命周期结构化回归。它通过同一个 Value 进入 validation、property、
 DataSpec、Region 与 content callback，并要求每个 Schema/Layout record、可选 Facet array、buffer
 array、Layout-envelope array、metadata payload 与显式 content pointer 在对应 callback 期间持续
 有效。生产 adapter 把 move-safe owning storage 与借用的 `ps_data_value_view_v3` 分离，只在最终
@@ -1061,7 +1068,7 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `DependencyDisabledInstallSmoke` 会在真实禁用 OpenCV/YAML/OpenEXR discovery 的 product 中构建并
-运行全部 48 个 dense 用例、全部 4 个 packed FP4 用例与 8 个 V-14 extension 用例，再证明
+运行全部 48 个 dense 用例、全部 4 个 packed FP4 用例与 10 个 V-14 extension 用例，再证明
 installed consumer；
 `StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的

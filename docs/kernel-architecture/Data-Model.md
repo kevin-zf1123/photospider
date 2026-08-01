@@ -488,13 +488,23 @@ validation and canonical-content traversal are the only semantic callbacks
 that receive payload in V-14. Access, mapping, transfer, conversion, inference,
 execution, native-device, and operation ABI v2 authority are absent.
 
+Borrowed ABI byte views are input-only. Each callback receives one Host-owned
+output sink; diagnostic and BYTES-property records declare scalar lengths, and
+providers synchronously copy complete fields while callback-local source
+storage is still alive. Per-invocation Host state enforces exact channel use,
+4 KiB/64 KiB bounds, and sticky failure without sharing storage across threads
+or generations. For Exact nonempty TensorSlice results, the Host independently
+checks that `selected_site_count` equals the checked product of every half-open
+axis length; overflow or mismatch becomes InvalidDescriptor with zero sites.
+
 The bounded V-14 `DataSpec` evaluates Schema identity/version and logical-site
 ranges into Subset, Disjoint, PartialOverlapWithRuntimeGuard, or
 CannotEvaluate. Property and Region calls preserve their typed unavailable or
-uncertain outcomes. Descriptor, storage-layout, and provider-selected logical
-content use separately tagged SHA-256 canonical traversals; physical buffer
-order, offsets, and padding do not enter ContentDigest when the provider emits
-the same logical byte stream. The versioned artifact envelope preserves
+uncertain outcomes, including Empty/Unsupported Region states around exact
+TensorSlice count validation. Descriptor, storage-layout, and provider-selected
+logical content use separately tagged SHA-256 canonical traversals; physical
+buffer order, offsets, and padding do not enter ContentDigest when the provider
+emits the same logical byte stream. The versioned artifact envelope preserves
 Schema/Facet/Layout unknown bytes and all three optional digest identities
 without a provider, but it is not a graph document, manifest/chunk store,
 filesystem codec, or cache-policy integration.

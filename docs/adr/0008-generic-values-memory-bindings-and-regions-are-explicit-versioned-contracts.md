@@ -505,6 +505,16 @@ and zero-required reserved fields. They expose no STL type, exception, RTTI
 object, virtual class, allocator owner, `Value` PImpl, native owner reference,
 or mutable Host registry.
 
+In the implemented V-14 definition suite, borrowed byte views are inputs only.
+Diagnostic and BYTES-property records carry scalar lengths, and the provider
+copies complete fields through a callback-local Host output sink while its
+source storage is alive. The sink checks channel use, pointer/count framing,
+duplicates, and fixed bounds before dereference, then owns the copied bytes
+independently of callback, thread, and generation lifetime. For a canonical
+nonempty Exact TensorSlice, the Host also requires the provider's selected-site
+count to equal the checked `uint64_t` product of every half-open axis length;
+overflow or mismatch is a typed invalid provider result.
+
 The C++ SDK provides RAII wrappers around those suites without changing their
 wire layout or authority. Exact record layout, limits, calling convention, and
 callback inventories must be frozen and independently reproduced before
@@ -620,10 +630,11 @@ Issue #117 implements the dependency-free synthetic `VariableSampleField`
 V-14 slice. Its durable tests prove registration, unknown byte preservation,
 descriptor and Layout validation, multi-buffer binding,
 Region/DataSpec/query behavior without payload authority, independent exact
-canonical digests, generation leases, atomic hot replacement, and unload
-without OpenEXR. The shipped ABI v3 is deliberately the definition suite only;
-the broader access/conversion/inference/execution suites in this target remain
-future generations or slices.
+canonical digests, callback-local diagnostic/property copy-out and bounds,
+rank-general Exact TensorSlice count verification, generation leases, atomic
+hot replacement, and unload without OpenEXR. The shipped ABI v3 is deliberately
+the definition suite only; the broader access/conversion/inference/execution
+suites in this target remain future generations or slices.
 
 A separate optional OpenEXR slice, tracked as V-15, initially supports only
 single-part deep-scanline read/write. It maps to

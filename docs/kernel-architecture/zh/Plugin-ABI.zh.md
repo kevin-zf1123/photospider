@@ -332,7 +332,22 @@ execution、asynchronous completion、native-device 或 operation ABI replacemen
 role 和 allocation identity metadata，但所有 payload pointer 与 payload-available flag 都会被清除。
 只有显式 validation 和 canonical-content traversal 能在保留调用期间访问 payload。
 
-所有记录都使用固定宽度标量、借用且受界限约束的 view、精确 struct size、必须为零的
+每个 callback 还会接收一个 callback-local `ps_data_output_sink_v3`。借用的
+`ps_data_bytes_v3` view 只用于输入：diagnostic 与 BYTES property 携带 scalar
+`message_size` / `bytes_size` 字段，并在 provider 源数据仍存活时，通过 output sink 复制完整
+变长字段。非空 diagnostic 恰好使用一次 diagnostic channel；空 diagnostic 不使用该 channel。
+Available BYTES property 即使为空也恰好使用一次 property channel。Host 会在解引用前检查
+channel permission、pointer/count framing、重复使用、4 KiB diagnostic 上限与 64 KiB property
+上限，同步复制到每次 invocation 私有的 state；即使 provider 忽略 sink error，第一个 failure
+仍具有权威性。因此 callback return、并发调用、generation replacement 与 module retirement
+都不会暴露延迟读取的 provider output pointer。
+
+ABI adapter 的 Region request 仍是 rank-general。Provider 对规范非空 TensorSlice 返回 Exact
+时，Host 会计算全部半开轴长度的 checked `uint64_t` product。Provider 的
+`selected_site_count` 必须精确匹配；product overflow、错误的非零 count，或非空 slice 的零
+count，都会返回 count 为零的 InvalidDescriptor。Empty 与非 Exact outcome 保持既有带类型语义。
+
+所有记录都使用固定宽度标量、借用且受界限约束的输入 view、精确 struct size、必须为零的
 reserved storage，以及平台 C calling convention。支持的 profile 要求 8-bit byte、8-byte
 data/function pointer 和自然 8-byte alignment。头文件冻结以下 v3 布局：
 
@@ -348,6 +363,7 @@ data/function pointer 和自然 8-byte alignment。头文件冻结以下 v3 布�
 | `ps_data_region_request_v3` / `ps_data_region_result_v3` | 72 / 40 | 8 |
 | `ps_data_spec_request_v3` / `ps_data_spec_result_v3` | 64 / 40 | 8 |
 | `ps_data_byte_sink_v3` | 40 | 8 |
+| `ps_data_output_sink_v3` | 40 | 8 |
 | `ps_data_provider_api_v3` | 160 | 8 |
 
 这里没有 tail-extension 规则。Host 会拒绝非预期的 size、offset、kind、enum、bound、
@@ -382,8 +398,9 @@ C++ 声明使用 `extern "C"` 和 `noexcept`。
 直接链接 `Photospider::operation_runtime`，或通过 `Photospider::operation_sdk` 间接链接。
 提供平台解析出的 function pointer 和非空 module lease 是显式的 composition 职责；V-14
 不会安装目录 scanner 或第二个 mutable registry authority。Dependency-disabled install smoke
-会从安装包独立构建并运行采用精确名称的 C11 与 C++17 producer，并通过真实 registry transaction
-分别加载它们。
+会从安装包独立构建并运行采用精确名称的 C11 与 C++17 producer，编译独立的 output
+record/sink layout assertion，从 callback-local storage 发出非空 property，并通过真实 registry
+transaction 分别加载它们。
 
 ## 策略插件 ABI
 

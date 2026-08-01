@@ -449,7 +449,28 @@ identity metadata, but every payload pointer and payload-available flag is
 cleared. Payload is exposed only for explicit validation and canonical-content
 traversal inside a retained call.
 
-All records use fixed-width scalars, borrowed bounded views, exact struct
+Every callback also receives one callback-local `ps_data_output_sink_v3`.
+Borrowed `ps_data_bytes_v3` views are inputs only: diagnostics and BYTES
+properties carry scalar `message_size` / `bytes_size` fields and copy their
+complete variable-size field through the output sink while the provider source
+is alive. A nonempty diagnostic uses the diagnostic channel exactly once; an
+empty diagnostic does not use it. An Available BYTES property uses the property
+channel exactly once even when empty. The Host checks channel permission,
+pointer/count framing, duplicate use, the 4 KiB diagnostic bound, and the
+64 KiB property bound before dereference, synchronously copies into one
+per-invocation state, and treats the first sink failure as authoritative even
+when provider code ignores it. Callback return, concurrent calls, generation
+replacement, and module retirement therefore expose no delayed provider
+output pointer.
+
+The Region request remains rank-general at the ABI adapter. When a provider
+returns Exact for a canonical nonempty TensorSlice, the Host computes the
+checked `uint64_t` product of all half-open axis lengths. The provider's
+`selected_site_count` must match exactly; product overflow, an incorrect
+nonzero count, or zero for a nonempty slice returns InvalidDescriptor with
+zero. Empty and non-Exact outcomes retain their existing typed semantics.
+
+All records use fixed-width scalars, borrowed bounded input views, exact struct
 sizes, zero-required reserved storage, and the platform C calling convention.
 The supported profile requires 8-bit bytes, 8-byte data and function pointers,
 and natural 8-byte alignment. The header freezes these v3 layouts:
@@ -466,6 +487,7 @@ and natural 8-byte alignment. The header freezes these v3 layouts:
 | `ps_data_region_request_v3` / `ps_data_region_result_v3` | 72 / 40 | 8 |
 | `ps_data_spec_request_v3` / `ps_data_spec_result_v3` | 64 / 40 | 8 |
 | `ps_data_byte_sink_v3` | 40 | 8 |
+| `ps_data_output_sink_v3` | 40 | 8 |
 | `ps_data_provider_api_v3` | 160 | 8 |
 
 There is no tail-extension rule. The Host rejects an unexpected size, offset,
@@ -510,8 +532,9 @@ through `Photospider::operation_sdk`. Supplying platform-resolved function
 pointers plus a nonnull module lease is an explicit composition responsibility;
 V-14 installs no directory scanner or second mutable registry authority. The
 dependency-disabled install smoke independently builds and executes exact-name
-C11 and C++17 producers from the installed package and loads each through the
-real registry transaction.
+C11 and C++17 producers from the installed package, compiles independent output
+record/sink layout assertions, emits a nonempty property from callback-local
+storage, and loads each through the real registry transaction.
 
 ## Policy Plugin ABI
 

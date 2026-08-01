@@ -394,12 +394,20 @@ metadata，但所有 payload pointer 都会被清空；V-14 中只有 validation
 traversal 这两个 semantic callback 会收到 payload。Access、mapping、transfer、conversion、
 inference、execution、native-device 与 operation ABI v2 authority 均不存在。
 
+借用的 ABI byte view 只用于输入。每个 callback 都会收到一个 Host 拥有的 output sink；
+diagnostic 与 BYTES-property record 声明 scalar length，provider 会在 callback-local 源 storage
+仍存活时同步复制完整字段。每次 invocation 私有的 Host state 会执行精确 channel 使用规则、
+4 KiB/64 KiB bound 与 sticky failure，thread 或 generation 之间不共享 storage。对于 Exact
+非空 TensorSlice result，Host 会独立检查 `selected_site_count` 是否等于每个半开轴长度的
+checked product；overflow 或 mismatch 会变成 site 为零的 InvalidDescriptor。
+
 有界 V-14 `DataSpec` 把 Schema identity/version 与 logical-site range 求值为 Subset、Disjoint、
 PartialOverlapWithRuntimeGuard 或 CannotEvaluate。Property 与 Region call 保留其 typed
-unavailable 或 uncertain outcome。Descriptor、storage-layout 与 provider-selected logical
-content 分别使用带独立 tag 的 SHA-256 canonical traversal；只要 provider 发出相同 logical
-byte stream，物理 buffer order、offset 与 padding 就不会进入 ContentDigest。版本化 artifact
-envelope 能在没有 provider 时保留 Schema/Facet/Layout unknown byte 与三个可选 digest
+unavailable 或 uncertain outcome，包括 Exact TensorSlice count 校验周围的 Empty/Unsupported
+Region state。Descriptor、storage-layout 与 provider-selected logical content 分别使用带独立
+tag 的 SHA-256 canonical traversal；只要 provider 发出相同 logical byte stream，物理 buffer
+order、offset 与 padding 就不会进入 ContentDigest。版本化 artifact envelope 能在没有
+provider 时保留 Schema/Facet/Layout unknown byte 与三个可选 digest
 identity，但它不是 graph document、manifest/chunk store、filesystem codec 或 cache-policy
 integration。
 
