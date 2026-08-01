@@ -12,10 +12,11 @@
 #include "photospider/memory/buffer_handle.hpp"
 #include "photospider/memory/ready_fence.hpp"
 #include "photospider/memory/strided_layout.hpp"
+#include "photospider/plugin/data_definition_registry.hpp"
 
 /**
  * @file value.hpp
- * @brief Immutable explicit-binding DenseTensor and host-view contracts.
+ * @brief Immutable explicit-binding generic Value and host-view contracts.
  */
 
 namespace ps {
@@ -116,17 +117,34 @@ struct QuantizationSchema {
 };
 
 /**
+ * @brief Identifies the logical representation retained by one Value.
+ *
+ * @throws Nothing for ordinary enum operations.
+ * @note The discriminator separates DenseTensor-only facts from byte-preserved
+ *       provider-defined descriptor semantics without introducing a parallel
+ *       Value authority.
+ */
+enum class ValueRepresentationKind : std::uint32_t {
+  /** @brief Built-in DenseTensor descriptor and image-facet representation. */
+  DenseTensor = 0U,
+  /** @brief Versioned provider-defined Schema and Facet representation. */
+  ProviderDefined = 1U,
+};
+
+/**
  * @brief Identifies the physical layout family retained by one Value.
  *
  * @throws Nothing for ordinary value operations.
- * @note V-13 publishes exactly one Strided or Blocked layout. Provider-defined
- *       layouts remain a later contract.
+ * @note V-14 adds a byte-preserving provider-defined multi-buffer Layout while
+ *       preserving the existing Strided and Blocked DenseTensor meanings.
  */
 enum class StorageLayoutKind : std::uint32_t {
   /** @brief Signed whole-byte stride layout. */
   Strided = 0U,
   /** @brief Versioned bit-addressed block layout. */
   Blocked = 1U,
+  /** @brief Versioned provider-defined multi-buffer Layout envelope. */
+  ProviderDefined = 2U,
 };
 
 /**
@@ -521,17 +539,21 @@ class ValueBuilder final {
 };
 
 /**
- * @brief Immutable owning handle for one validated DenseTensor publication.
+ * @brief Immutable owning handle for one validated generic publication.
  *
- * Value uses a shared immutable PImpl. Copies share one descriptor, layout,
- * facet, BufferHandle, ReadyFence, binding, producer, allocation identity, and
- * Value revision. Host-readable pointers are available only after Ready,
- * explicit access-plan visibility discharge, and a retaining ReadLease.
+ * Value uses one shared immutable PImpl for built-in DenseTensor and
+ * provider-defined representations. DenseTensor copies share one descriptor,
+ * layout, BufferHandle, ReadyFence, binding, producer, allocation identity,
+ * and revision. Provider-defined copies share byte-preserved Schema/Facet/
+ * Layout metadata, one or more BufferHandles, and the exact provider
+ * generation that validated their interpretation.
  *
  * @throws Nothing for default, copy, move, assignment, and destruction.
  * @note V-8 implements explicit CPU/Metal binding and access observations.
  * Native creation and replica publication remain source-private; public
- * payload access never waits, maps, imports, or transfers implicitly.
+ * payload access never waits, maps, imports, converts, or transfers
+ * implicitly. Provider-defined payload access uses an indexed
+ * generation-retaining lease and never exposes a naked BufferHandle.
  */
 class Value final {
  public:
@@ -639,7 +661,38 @@ class Value final {
                                              BufferHandle buffer);
 
   /**
-   * @brief Reports whether this handle owns a published DenseTensor.
+   * @brief Publishes one validated provider-defined multi-buffer Value.
+   *
+   * Validation first checks byte-preserving descriptor framing, buffer count,
+   * every sealed BufferHandle, generic Layout references/ranges, and typed
+   * Schema/Facet/Layout resolution. It then invokes the resolved generation's
+   * provider validation outside the registry lock. Revision and producer
+   * identities are minted only after all validation succeeds.
+   *
+   * @param registry Injected process-owned definition authority used for this
+   *        publication only; the resulting Value retains the resolved
+   *        immutable generation rather than the registry object.
+   * @param descriptor Versioned Schema and ordered Facet bytes to preserve.
+   * @param layout Versioned Layout and checked generic buffer envelopes.
+   * @param buffers One to 32 valid sealed host-readable buffer ranges.
+   * @return Fresh immutable Ready publication retaining every input buffer and
+   *         the exact provider generation that validated it.
+   * @throws ExtensionContractError for malformed descriptor/Layout/bindings,
+   *         missing typed definitions, unavailable payload, provider rejection,
+   *         or malformed callback output.
+   * @throws std::overflow_error when publication identity space is exhausted.
+   * @throws std::bad_alloc when bounded validation or immutable state cannot
+   *         allocate.
+   * @note No BufferHandle, payload pointer, provider callback, or partial Value
+   *       escapes if validation fails.
+   */
+  static Value from_provider_defined(DataDefinitionRegistry& registry,
+                                     DataDescriptorEnvelope descriptor,
+                                     ProviderDefinedLayout layout,
+                                     std::vector<BufferHandle> buffers);
+
+  /**
+   * @brief Reports whether this handle owns a published generic Value.
    *
    * @return True when immutable state is present.
    * @throws Nothing.
@@ -647,10 +700,18 @@ class Value final {
   bool valid() const noexcept;
 
   /**
+   * @brief Identifies the logical representation retained by this Value.
+   * @return DenseTensor or ProviderDefined for a valid publication.
+   * @throws std::logic_error when the handle is invalid.
+   * @note The discriminator grants no provider callback or payload authority.
+   */
+  ValueRepresentationKind representation_kind() const;
+
+  /**
    * @brief Returns the immutable logical DenseTensor descriptor.
    *
    * @return Borrowed descriptor retained by this Value.
-   * @throws std::logic_error when the handle is invalid.
+   * @throws std::logic_error when the handle is invalid or provider-defined.
    * @note The reference remains valid while this Value or one of its copies
    *       retains the shared immutable state.
    */
@@ -660,14 +721,22 @@ class Value final {
    * @brief Returns the optional explicit image-axis mapping.
    *
    * @return Borrowed optional facet retained by this Value.
-   * @throws std::logic_error when the handle is invalid.
+   * @throws std::logic_error when the handle is invalid or provider-defined.
    */
   const std::optional<ImageFacet>& image_facet() const;
 
   /**
+   * @brief Returns the byte-preserved provider-defined logical descriptor.
+   * @return Borrowed immutable Schema and ordered Facet envelope.
+   * @throws std::logic_error when the handle is invalid or DenseTensor.
+   * @note Unknown extension bytes remain exact for the Value lifetime.
+   */
+  const DataDescriptorEnvelope& provider_defined_descriptor() const;
+
+  /**
    * @brief Identifies the one physical layout retained by this Value.
    *
-   * @return Strided or Blocked for a valid publication.
+   * @return Strided, Blocked, or ProviderDefined for a valid publication.
    * @throws std::logic_error when the handle is invalid.
    * @note The result grants no payload, conversion, or device authority.
    */
@@ -677,8 +746,8 @@ class Value final {
    * @brief Returns the immutable physical byte strides.
    *
    * @return Borrowed validated layout retained by this Value.
-   * @throws std::logic_error when the handle is invalid or retains Blocked
-   *         rather than Strided layout.
+   * @throws std::logic_error when the handle is invalid or does not retain a
+   *         Strided DenseTensor layout.
    */
   const StridedLayout& strided_layout() const;
 
@@ -686,18 +755,36 @@ class Value final {
    * @brief Returns the immutable physical Blocked layout.
    *
    * @return Borrowed validated versioned bit-addressed layout.
-   * @throws std::logic_error when the handle is invalid or retains Strided
-   *         rather than Blocked layout.
+   * @throws std::logic_error when the handle is invalid or does not retain a
+   *         Blocked DenseTensor layout.
    * @note The reference remains valid while this Value or a copy retains the
    *       shared immutable state.
    */
   const BlockedLayout& blocked_layout() const;
 
   /**
+   * @brief Returns the byte-preserved provider-defined physical Layout.
+   * @return Borrowed immutable Layout record and buffer envelopes.
+   * @throws std::logic_error when the handle is invalid or DenseTensor.
+   * @note Allocation identities, device handles, and payload bytes are not
+   *       part of this metadata envelope.
+   */
+  const ProviderDefinedLayout& provider_defined_layout() const;
+
+  /**
+   * @brief Returns the number of retained immutable storage ranges.
+   * @return One for a valid DenseTensor or one to 32 for provider-defined.
+   * @throws std::logic_error when the handle is invalid.
+   * @note This is binding cardinality, not Layout envelope cardinality.
+   */
+  std::size_t buffer_count() const;
+
+  /**
    * @brief Returns the exact owned byte-envelope size.
    *
    * @return Number of immutable bytes retained by this Value.
-   * @throws std::logic_error when the handle is invalid.
+   * @throws std::logic_error when the handle is invalid or provider-defined.
+   * @note Provider-defined Values require indexed binding inspection.
    */
   std::size_t storage_size() const;
 
@@ -715,11 +802,21 @@ class Value final {
   /**
    * @brief Returns immutable facts for this Value's current storage binding.
    * @return Allocation, concrete device, memory domain, size, and visibility.
-   * @throws std::logic_error when the handle is invalid.
+   * @throws std::logic_error when the handle is invalid or provider-defined.
    * @note Binding observation grants no pointer, mapping, transfer, cache, or
    *       persistence authority.
    */
   StorageBinding storage_binding() const;
+
+  /**
+   * @brief Returns immutable facts for one indexed storage binding.
+   * @param buffer_index Dense zero-based buffer index.
+   * @return Allocation, device, memory domain, size, and visibility facts.
+   * @throws std::logic_error when the handle is invalid.
+   * @throws std::out_of_range when the index is outside buffer_count().
+   * @note Metadata inspection grants no pointer or provider callback authority.
+   */
+  StorageBinding storage_binding(std::size_t buffer_index) const;
 
   /**
    * @brief Returns the producer or transfer identity of this publication.
@@ -733,7 +830,8 @@ class Value final {
    * @param target Explicit consumer capability.
    * @return Current V-8 Direct, Transfer, or Unsupported plan.
    * @throws std::invalid_argument when the handle is invalid.
-   * @throws std::logic_error for inconsistent retained binding facts.
+   * @throws std::logic_error for provider-defined Values or inconsistent
+   * retained binding facts.
    * @note The operation polls the ReadyFence without waiting, touches no
    * payload, and queues no work.
    */
@@ -743,7 +841,7 @@ class Value final {
    * @brief Returns the immutable checked allocation range after producer Ready.
    *
    * @return Borrowed BufferHandle retained by this Value.
-   * @throws std::logic_error when the handle is invalid.
+   * @throws std::logic_error when the handle is invalid or provider-defined.
    * @throws ReadyFenceAccessError when producer completion is Pending, Failed,
    *         or ProducerCancelled.
    * @note Callers may copy or subrange any binding. Acquiring a ReadLease also
@@ -753,10 +851,77 @@ class Value final {
   const BufferHandle& buffer_handle() const;
 
   /**
+   * @brief Acquires indexed provider-defined payload access and interpretation.
+   * @param buffer_index Dense zero-based provider buffer index.
+   * @return Retaining host-read lease that also owns the exact provider
+   *         generation.
+   * @throws std::logic_error when the Value is invalid or DenseTensor.
+   * @throws std::out_of_range when the index is outside buffer_count().
+   * @throws BufferAccessError when the selected binding is not host-readable.
+   * @note The wrapper deliberately exposes no naked provider BufferHandle.
+   */
+  ProviderReadLease acquire_provider_read(std::size_t buffer_index) const;
+
+  /**
+   * @brief Returns the exact provider generation retained by this Value.
+   * @return Nonzero process-owner generation.
+   * @throws std::logic_error when the handle is invalid or DenseTensor.
+   * @note Hot replacement cannot change this result for existing Value copies.
+   */
+  std::uint64_t provider_generation() const;
+
+  /**
+   * @brief Evaluates one pure metadata-only provider property.
+   * @param query Stable property identity.
+   * @return Host-owned typed query result.
+   * @throws std::logic_error when the handle is invalid or DenseTensor.
+   * @throws std::bad_alloc when bounded callback staging/output cannot
+   *         allocate.
+   * @note Payload addresses are forced null and no implicit work is started.
+   */
+  PropertyQueryResult query_property(PropertyQuery query) const;
+
+  /**
+   * @brief Evaluates one bounded provider DataSpec relation.
+   * @param spec Schema/version/logical-site set predicate.
+   * @return Subset, Disjoint, partial-with-guard, or CannotEvaluate.
+   * @throws std::logic_error when the handle is invalid or DenseTensor.
+   * @throws std::invalid_argument when DataSpec bounds are malformed.
+   * @throws std::bad_alloc when bounded callback staging/output cannot
+   *         allocate.
+   * @note The pure callback receives no payload or conversion authority.
+   */
+  DataSpecResult evaluate_data_spec(const DataSpec& spec) const;
+
+  /**
+   * @brief Evaluates one bounded logical Region through the retained provider.
+   * @param region Canonical Empty, Whole, or provider-supported bounded atom.
+   * @param budget Explicit nonzero atom complexity bound.
+   * @return Host-owned Exact, Unknown, Unsupported, or TooComplex result.
+   * @throws std::logic_error when the handle is invalid or DenseTensor.
+   * @throws std::bad_alloc when bounded callback staging/output cannot
+   *         allocate.
+   * @note The pure callback receives no payload address or scheduling route.
+   */
+  ProviderRegionResult evaluate_region(
+      const RegionSet& region, RegionComplexityBudget budget = {}) const;
+
+  /**
+   * @brief Creates one provider-owned object tied to this exact generation.
+   * @return Copyable owner whose final destroy callback precedes module
+   * release.
+   * @throws std::logic_error when the handle is invalid or DenseTensor.
+   * @throws ExtensionContractError for callback failure or malformed output.
+   * @throws std::bad_alloc when Host owner state cannot allocate.
+   * @note Replacement or unload changes no existing owner lifetime.
+   */
+  ProviderOwner create_provider_owner() const;
+
+  /**
    * @brief Returns this Value's physical allocation identity.
    *
    * @return Nonzero process-local identity shared by allocation aliases.
-   * @throws std::logic_error when the handle is invalid.
+   * @throws std::logic_error when the handle is invalid or provider-defined.
    * @note This identity is neither a Value revision nor a persistent cache key.
    */
   AllocationIdentity allocation_identity() const;
@@ -773,8 +938,8 @@ class Value final {
 
  private:
   /**
-   * @brief Immutable implementation containing descriptor, layout, bytes, and
-   * readiness.
+   * @brief Immutable implementation containing representation, metadata,
+   * storage, provider lifetime, readiness, and publication identities.
    */
   struct Impl;
 
@@ -788,13 +953,13 @@ class Value final {
    */
   explicit Value(std::shared_ptr<const Impl> impl) noexcept;
 
-  /** @brief Shared immutable DenseTensor state, or null for an invalid handle.
-   */
+  /** @brief Shared immutable generic state, or null for an invalid handle. */
   std::shared_ptr<const Impl> impl_;
 
   friend class PendingValuePublisher;
   friend class PendingDeviceValuePublisher;
   friend class ValueBuilder;
+  friend ContentDigestResult compute_content_digest(const Value& value);
 };
 
 /**

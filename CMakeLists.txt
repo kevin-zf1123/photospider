@@ -150,6 +150,7 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     core/inspection_types.hpp
     core/result_types.hpp
     data/image_view.hpp
+    data/extension.hpp
     data/packed_dense_tensor_view.hpp
     data/region.hpp
     data/value.hpp
@@ -163,6 +164,8 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     memory/ready_fence.hpp
     memory/strided_layout.hpp
     plugin/node_view.hpp
+    plugin/data_definition_registry.hpp
+    plugin/data_provider_api.h
     plugin/op_contract.hpp
     plugin/plugin_api.hpp
     policy/policy_plugin_api.h
@@ -179,7 +182,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 26)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 29)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -251,18 +254,22 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/Photospider"
     CACHE STRING "Install directory for Photospider CMake package files")
 
-# Public image-buffer factory, ReadyFence, process-wide Value identity, and
-# shared private device-invocation context implementation.
+# Public image-buffer factory, ReadyFence, process-wide Value identity,
+# provider-defined data contracts, and shared private device-invocation
+# context implementation.
 # Host products and Value-using operation DSOs dynamically depend on this one
 # runtime image so allocation/revision minting cannot restart per DSO. The
-# target deliberately has no OpenCV, yaml-cpp, Threads, graph, registry, or
-# embedded product dependency.
+# target deliberately has no OpenCV, yaml-cpp, graph, policy registry, or
+# embedded product dependency. DataDefinitionRegistry is an injected object;
+# this shared runtime owns its one implementation but creates no singleton.
 add_library(photospider_operation_runtime SHARED
+    src/lib/core/extension.cpp
     src/lib/core/image_buffer.cpp
     src/lib/core/ready_fence.cpp
     src/lib/core/region.cpp
     src/lib/core/value.cpp
     src/lib/core/packed_dense_tensor.cpp
+    src/lib/plugin/data_definition_registry.cpp
     src/lib/execution/device_execution_context.cpp)
 add_library(Photospider::operation_runtime ALIAS
     photospider_operation_runtime)
@@ -291,6 +298,21 @@ target_include_directories(photospider_operation_sdk INTERFACE
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(photospider_operation_sdk INTERFACE
     Photospider::operation_runtime)
+
+# Public data-definition SDK: one dependency-neutral pure-C ABI header. C11
+# and C++17 definition producers receive only the generated/installed include
+# root; registry/runtime authority remains a Host-side concern and therefore
+# does not cross this interface target.
+add_library(photospider_data_provider_sdk INTERFACE)
+add_library(Photospider::data_provider_sdk ALIAS
+    photospider_data_provider_sdk)
+set_target_properties(photospider_data_provider_sdk PROPERTIES
+    EXPORT_NAME data_provider_sdk)
+target_compile_features(photospider_data_provider_sdk INTERFACE
+    c_std_11 cxx_std_17)
+target_include_directories(photospider_data_provider_sdk INTERFACE
+    "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 
 # Public policy SDK: one dependency-neutral pure C ABI header. C11 producers
 # and C++17 producers/consumers receive only the generated/installed include
@@ -1026,6 +1048,7 @@ install(TARGETS photospider
 )
 
 install(TARGETS
+    photospider_data_provider_sdk
     photospider_operation_sdk
     photospider_operation_runtime
     photospider_policy_sdk
@@ -1448,6 +1471,26 @@ if(BUILD_TESTING)
         GTest::gtest
         GTest::gtest_main)
     gtest_discover_tests(test_packed_fp4_dense_tensor
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS value-runtime
+            TIMEOUT 30)
+
+    # Long-lived V-14 dependency-neutral synthetic VariableSampleField proof.
+    add_executable(test_variable_sample_field_extensions
+        tests/integration/test_variable_sample_field_extensions.cpp)
+    set_target_properties(test_variable_sample_field_extensions PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+    target_include_directories(test_variable_sample_field_extensions PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        "${PROJECT_SOURCE_DIR}/tests")
+    target_link_libraries(test_variable_sample_field_extensions PRIVATE
+        Photospider::operation_runtime
+        GTest::gtest
+        GTest::gtest_main)
+    gtest_discover_tests(test_variable_sample_field_extensions
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS value-runtime

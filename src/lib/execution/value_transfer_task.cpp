@@ -149,6 +149,10 @@ ValueTransferTask ValueTransferTask::prepare_cpu_copy(Value source) {
     throw std::invalid_argument(
         "ValueTransferTask requires a valid source Value.");
   }
+  if (source.representation_kind() != ValueRepresentationKind::DenseTensor) {
+    throw std::invalid_argument(
+        "V-14 transfer does not define provider-defined access semantics.");
+  }
   const StorageBinding source_binding = source.storage_binding();
   if (source_binding.device.backend() != DeviceBackend::CPU ||
       !source_binding.host_visible) {
@@ -172,6 +176,9 @@ ValueTransferTask ValueTransferTask::prepare_cpu_copy(Value source) {
         return PendingValuePublisher::allocate_cpu_blocked_dense_tensor(
             source.dense_tensor_descriptor(), source.blocked_layout(),
             source.storage_size(), source.revision_id());
+      case StorageLayoutKind::ProviderDefined:
+        throw std::invalid_argument(
+            "V-14 CPU copy does not support provider-defined Layouts.");
     }
     throw std::logic_error("Value transfer source layout kind is invalid.");
   }();
@@ -187,6 +194,10 @@ ValueTransferTask ValueTransferTask::prepare_external_transfer(
   if (!source.valid()) {
     throw std::invalid_argument(
         "External Value transfer requires a valid source.");
+  }
+  if (source.representation_kind() != ValueRepresentationKind::DenseTensor) {
+    throw std::invalid_argument(
+        "V-14 transfer does not define provider-defined access semantics.");
   }
   if (!operation) {
     throw std::invalid_argument(
@@ -207,6 +218,9 @@ ValueTransferTask ValueTransferTask::prepare_external_transfer(
                                               source.blocked_layout(),
                                               source.storage_size());
       break;
+    case StorageLayoutKind::ProviderDefined:
+      throw std::invalid_argument(
+          "V-14 external transfer does not support provider-defined Layouts.");
   }
   AccessPlan plan = source.plan_access(target);
   if (plan.kind() != AccessPlanKind::Transfer) {
@@ -227,6 +241,10 @@ ValueTransferTask ValueTransferTask::prepare_external_transfer(
             std::move(owner), native_handle, host_pointer,
             source.storage_size(), target.device, target.memory_domain,
             source.revision_id());
+      case StorageLayoutKind::ProviderDefined:
+        throw std::invalid_argument(
+            "V-14 external transfer does not support provider-defined "
+            "Layouts.");
     }
     throw std::logic_error("Value transfer source layout kind is invalid.");
   }();

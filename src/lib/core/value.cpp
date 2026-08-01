@@ -11,6 +11,7 @@
 #include <variant>
 #include <vector>
 
+#include "core/extension_internal.hpp"
 #include "core/pending_value.hpp"
 #include "core/value_validation.hpp"
 #include "photospider/data/image_view.hpp"
@@ -19,7 +20,10 @@ namespace ps {
 namespace {
 
 /** @brief One and only one physical layout retained by a Value publication. */
-using ValueLayout = std::variant<StridedLayout, BlockedLayout>;
+// NOLINTBEGIN(whitespace/indent_namespace)
+using ValueLayout =
+    std::variant<StridedLayout, BlockedLayout, ProviderDefinedLayout>;
+// NOLINTEND
 
 /**
  * @brief Owns process-wide allocation, revision, and producer sequences.
@@ -923,25 +927,39 @@ std::size_t WriteLease::size() const {
 }
 
 /**
- * @brief Immutable implementation for one validated DenseTensor Value.
+ * @brief Immutable implementation for one validated generic Value.
  *
- * @throws std::bad_alloc when copied descriptor/layout storage cannot allocate.
+ * @throws std::bad_alloc when copied descriptor/Layout/buffer storage cannot
+ * allocate.
  * @note Instances are published only through shared_ptr<const Impl>. Ordinary
  * synchronous publication uses an already-Ready fence; source-private pending
  * publication closes ordinary builder authority before the Value escapes.
+ * Provider buffers are destroyed before their retained generation lease.
  */
 struct Value::Impl final {
+  /** @brief Explicit logical representation discriminator. */
+  ValueRepresentationKind representation = ValueRepresentationKind::DenseTensor;
+
   /** @brief Validated concrete logical descriptor. */
   DenseTensorDescriptor descriptor;
 
   /** @brief Optional validated explicit image-axis mapping. */
   std::optional<ImageFacet> image_facet;
 
-  /** @brief Exactly one validated Strided or Blocked physical layout. */
+  /** @brief Optional byte-preserved provider-defined logical descriptor. */
+  std::optional<DataDescriptorEnvelope> provider_descriptor;
+
+  /** @brief Exactly one validated physical Layout. */
   ValueLayout layout;
 
-  /** @brief Immutable checked explicit storage-binding range. */
+  /** @brief DenseTensor-only checked explicit storage-binding range. */
   BufferHandle buffer;
+
+  /** @brief Provider generation declared before buffers so it dies last. */
+  DataDefinitionLease provider_lease;
+
+  /** @brief Provider-defined immutable checked storage-binding ranges. */
+  std::vector<BufferHandle> provider_buffers;
 
   /** @brief Immutable observer of producer completion for this binding. */
   ReadyFence ready_fence;
@@ -973,10 +991,39 @@ struct Value::Impl final {
        std::optional<ImageFacet> image_facet_in, ValueLayout layout_in,
        BufferHandle buffer_in, ReadyFence ready_fence_in,
        ValueRevisionId revision_in, ProducerIdentity producer_in)
-      : descriptor(std::move(descriptor_in)),
+      : representation(ValueRepresentationKind::DenseTensor),
+        descriptor(std::move(descriptor_in)),
         image_facet(std::move(image_facet_in)),
         layout(std::move(layout_in)),
         buffer(std::move(buffer_in)),
+        ready_fence(std::move(ready_fence_in)),
+        revision(revision_in),
+        producer(producer_in) {}
+
+  /**
+   * @brief Stores one completely validated provider-defined publication.
+   *
+   * @param descriptor_in Byte-preserved Schema and ordered Facets.
+   * @param layout_in Byte-preserved Layout and generic buffer envelopes.
+   * @param buffers_in Valid sealed ranges in dense buffer-index order.
+   * @param provider_lease_in Exact generation that validated all semantics.
+   * @param ready_fence_in Already-Ready completion observer.
+   * @param revision_in Fresh nonzero publication revision.
+   * @param producer_in Fresh nonzero publication producer identity.
+   * @throws std::bad_alloc when bounded metadata or buffer vectors cannot move.
+   * @note Inputs are already generically and provider-semantically validated.
+   *       Member order keeps provider code live until every retained buffer is
+   *       destroyed.
+   */
+  Impl(DataDescriptorEnvelope descriptor_in, ProviderDefinedLayout layout_in,
+       std::vector<BufferHandle> buffers_in,
+       DataDefinitionLease provider_lease_in, ReadyFence ready_fence_in,
+       ValueRevisionId revision_in, ProducerIdentity producer_in)
+      : representation(ValueRepresentationKind::ProviderDefined),
+        provider_descriptor(std::move(descriptor_in)),
+        layout(std::move(layout_in)),
+        provider_lease(std::move(provider_lease_in)),
+        provider_buffers(std::move(buffers_in)),
         ready_fence(std::move(ready_fence_in)),
         revision(revision_in),
         producer(producer_in) {}
@@ -1557,15 +1604,69 @@ Value Value::from_cpu_blocked_dense_tensor(DenseTensorDescriptor descriptor,
       ReadyFence::already_ready(), revision, producer));
 }
 
+/** @copydoc Value::from_provider_defined */
+Value Value::from_provider_defined(DataDefinitionRegistry& registry,
+                                   DataDescriptorEnvelope descriptor,
+                                   ProviderDefinedLayout layout,
+                                   std::vector<BufferHandle> buffers) {
+  validate_data_descriptor_envelope(descriptor);
+  std::vector<std::size_t> buffer_sizes;
+  buffer_sizes.reserve(buffers.size());
+  for (const BufferHandle& buffer : buffers) {
+    if (!buffer.valid()) {
+      throw ExtensionContractError(
+          ExtensionErrorCode::InvalidBinding,
+          "Provider-defined Value contains an invalid BufferHandle.");
+    }
+    buffer_sizes.push_back(buffer.size());
+  }
+  validate_provider_defined_layout(layout, buffer_sizes);
+
+  DataDefinitionResolveResult resolved = registry.resolve(descriptor, layout);
+  if (!resolved.ok()) {
+    const ExtensionErrorCode code =
+        resolved.status == DataDefinitionResolveStatus::UnsupportedSchemaVersion
+            ? ExtensionErrorCode::UnsupportedSchemaVersion
+            : ExtensionErrorCode::MissingProvider;
+    throw ExtensionContractError(
+        code, resolved.diagnostic.empty()
+                  ? "No active provider generation owns the complete bundle."
+                  : std::move(resolved.diagnostic));
+  }
+  DataDefinitionLease provider_lease = std::move(resolved.lease);
+  provider_lease.validate(descriptor, layout, buffers);
+
+  const ValueRevisionId revision(
+      process_identity_authority().mint_value_revision());
+  const ProducerIdentity producer(
+      process_identity_authority().mint_producer_identity());
+  return Value(std::make_shared<const Impl>(
+      std::move(descriptor), std::move(layout), std::move(buffers),
+      std::move(provider_lease), ReadyFence::already_ready(), revision,
+      producer));
+}
+
 /** @copydoc Value::valid */
 bool Value::valid() const noexcept {
   return impl_ != nullptr;
+}
+
+/** @copydoc Value::representation_kind */
+ValueRepresentationKind Value::representation_kind() const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no representation kind.");
+  }
+  return impl_->representation;
 }
 
 /** @copydoc Value::dense_tensor_descriptor */
 const DenseTensorDescriptor& Value::dense_tensor_descriptor() const {
   if (!impl_) {
     throw std::logic_error("Invalid Value has no DenseTensor descriptor.");
+  }
+  if (impl_->representation != ValueRepresentationKind::DenseTensor) {
+    throw std::logic_error(
+        "Provider-defined Value has no DenseTensor descriptor.");
   }
   return impl_->descriptor;
 }
@@ -1575,7 +1676,23 @@ const std::optional<ImageFacet>& Value::image_facet() const {
   if (!impl_) {
     throw std::logic_error("Invalid Value has no ImageFacet.");
   }
+  if (impl_->representation != ValueRepresentationKind::DenseTensor) {
+    throw std::logic_error("Provider-defined Value has no ImageFacet.");
+  }
   return impl_->image_facet;
+}
+
+/** @copydoc Value::provider_defined_descriptor */
+const DataDescriptorEnvelope& Value::provider_defined_descriptor() const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no provider-defined descriptor.");
+  }
+  if (impl_->representation != ValueRepresentationKind::ProviderDefined ||
+      !impl_->provider_descriptor.has_value()) {
+    throw std::logic_error(
+        "DenseTensor Value has no provider-defined descriptor.");
+  }
+  return *impl_->provider_descriptor;
 }
 
 /** @copydoc Value::storage_layout_kind */
@@ -1583,9 +1700,13 @@ StorageLayoutKind Value::storage_layout_kind() const {
   if (!impl_) {
     throw std::logic_error("Invalid Value has no storage layout kind.");
   }
-  return std::holds_alternative<StridedLayout>(impl_->layout)
-             ? StorageLayoutKind::Strided
-             : StorageLayoutKind::Blocked;
+  if (std::holds_alternative<StridedLayout>(impl_->layout)) {
+    return StorageLayoutKind::Strided;
+  }
+  if (std::holds_alternative<BlockedLayout>(impl_->layout)) {
+    return StorageLayoutKind::Blocked;
+  }
+  return StorageLayoutKind::ProviderDefined;
 }
 
 /** @copydoc Value::strided_layout */
@@ -1595,7 +1716,7 @@ const StridedLayout& Value::strided_layout() const {
   }
   const auto* layout = std::get_if<StridedLayout>(&impl_->layout);
   if (layout == nullptr) {
-    throw std::logic_error("Blocked Value has no StridedLayout.");
+    throw std::logic_error("Non-Strided Value has no StridedLayout.");
   }
   return *layout;
 }
@@ -1607,15 +1728,41 @@ const BlockedLayout& Value::blocked_layout() const {
   }
   const auto* layout = std::get_if<BlockedLayout>(&impl_->layout);
   if (layout == nullptr) {
-    throw std::logic_error("Strided Value has no BlockedLayout.");
+    throw std::logic_error("Non-Blocked Value has no BlockedLayout.");
   }
   return *layout;
+}
+
+/** @copydoc Value::provider_defined_layout */
+const ProviderDefinedLayout& Value::provider_defined_layout() const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no provider-defined Layout.");
+  }
+  const auto* layout = std::get_if<ProviderDefinedLayout>(&impl_->layout);
+  if (layout == nullptr) {
+    throw std::logic_error("DenseTensor Value has no provider-defined Layout.");
+  }
+  return *layout;
+}
+
+/** @copydoc Value::buffer_count */
+std::size_t Value::buffer_count() const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no buffers.");
+  }
+  return impl_->representation == ValueRepresentationKind::ProviderDefined
+             ? impl_->provider_buffers.size()
+             : 1U;
 }
 
 /** @copydoc Value::storage_size */
 std::size_t Value::storage_size() const {
   if (!impl_) {
     throw std::logic_error("Invalid Value has no storage.");
+  }
+  if (impl_->representation != ValueRepresentationKind::DenseTensor) {
+    throw std::logic_error(
+        "Provider-defined Value requires indexed binding inspection.");
   }
   return impl_->buffer.size();
 }
@@ -1633,7 +1780,29 @@ StorageBinding Value::storage_binding() const {
   if (!impl_) {
     throw std::logic_error("Invalid Value has no storage binding.");
   }
+  if (impl_->representation != ValueRepresentationKind::DenseTensor) {
+    throw std::logic_error(
+        "Provider-defined Value requires indexed binding inspection.");
+  }
   return impl_->buffer.storage_binding();
+}
+
+/** @copydoc Value::storage_binding */
+StorageBinding Value::storage_binding(std::size_t buffer_index) const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no indexed storage binding.");
+  }
+  if (impl_->representation == ValueRepresentationKind::DenseTensor) {
+    if (buffer_index != 0U) {
+      throw std::out_of_range("DenseTensor Value has exactly one buffer.");
+    }
+    return impl_->buffer.storage_binding();
+  }
+  if (buffer_index >= impl_->provider_buffers.size()) {
+    throw std::out_of_range(
+        "Provider-defined buffer index is outside the Value binding set.");
+  }
+  return impl_->provider_buffers[buffer_index].storage_binding();
 }
 
 /** @copydoc Value::producer_identity */
@@ -1654,6 +1823,10 @@ const BufferHandle& Value::buffer_handle() const {
   if (!impl_) {
     throw std::logic_error("Invalid Value has no BufferHandle.");
   }
+  if (impl_->representation != ValueRepresentationKind::DenseTensor) {
+    throw std::logic_error(
+        "Provider-defined Value does not expose a naked BufferHandle.");
+  }
   const ReadyFenceSnapshot snapshot = impl_->ready_fence.poll();
   if (!snapshot.ready()) {
     throw ReadyFenceAccessError(snapshot);
@@ -1661,10 +1834,95 @@ const BufferHandle& Value::buffer_handle() const {
   return impl_->buffer;
 }
 
+/** @copydoc Value::acquire_provider_read */
+ProviderReadLease Value::acquire_provider_read(std::size_t buffer_index) const {
+  if (!impl_ ||
+      impl_->representation != ValueRepresentationKind::ProviderDefined ||
+      !impl_->provider_lease.valid()) {
+    throw std::logic_error(
+        "Provider read access requires a valid provider-defined Value.");
+  }
+  if (buffer_index >= impl_->provider_buffers.size()) {
+    throw std::out_of_range(
+        "Provider-defined buffer index is outside the Value binding set.");
+  }
+  return ProviderReadLease(impl_->provider_buffers[buffer_index].acquire_read(),
+                           impl_->provider_lease);
+}
+
+/** @copydoc Value::provider_generation */
+std::uint64_t Value::provider_generation() const {
+  if (!impl_ ||
+      impl_->representation != ValueRepresentationKind::ProviderDefined ||
+      !impl_->provider_lease.valid()) {
+    throw std::logic_error(
+        "Provider generation requires a valid provider-defined Value.");
+  }
+  return impl_->provider_lease.generation();
+}
+
+/** @copydoc Value::query_property */
+PropertyQueryResult Value::query_property(PropertyQuery query) const {
+  if (!impl_ ||
+      impl_->representation != ValueRepresentationKind::ProviderDefined ||
+      !impl_->provider_descriptor.has_value() ||
+      !impl_->provider_lease.valid()) {
+    throw std::logic_error(
+        "Property query requires a valid provider-defined Value.");
+  }
+  return impl_->provider_lease.query(*impl_->provider_descriptor,
+                                     provider_defined_layout(),
+                                     impl_->provider_buffers, query);
+}
+
+/** @copydoc Value::evaluate_data_spec */
+DataSpecResult Value::evaluate_data_spec(const DataSpec& spec) const {
+  if (!impl_ ||
+      impl_->representation != ValueRepresentationKind::ProviderDefined ||
+      !impl_->provider_descriptor.has_value() ||
+      !impl_->provider_lease.valid()) {
+    throw std::logic_error(
+        "DataSpec evaluation requires a valid provider-defined Value.");
+  }
+  return impl_->provider_lease.evaluate(*impl_->provider_descriptor,
+                                        provider_defined_layout(),
+                                        impl_->provider_buffers, spec);
+}
+
+/** @copydoc Value::evaluate_region */
+ProviderRegionResult Value::evaluate_region(
+    const RegionSet& region, RegionComplexityBudget budget) const {
+  if (!impl_ ||
+      impl_->representation != ValueRepresentationKind::ProviderDefined ||
+      !impl_->provider_descriptor.has_value() ||
+      !impl_->provider_lease.valid()) {
+    throw std::logic_error(
+        "Region evaluation requires a valid provider-defined Value.");
+  }
+  return impl_->provider_lease.evaluate(
+      *impl_->provider_descriptor, provider_defined_layout(),
+      impl_->provider_buffers, region, budget);
+}
+
+/** @copydoc Value::create_provider_owner */
+ProviderOwner Value::create_provider_owner() const {
+  if (!impl_ ||
+      impl_->representation != ValueRepresentationKind::ProviderDefined ||
+      !impl_->provider_lease.valid()) {
+    throw std::logic_error(
+        "Provider owner requires a valid provider-defined Value.");
+  }
+  return impl_->provider_lease.create_owner();
+}
+
 /** @copydoc Value::allocation_identity */
 AllocationIdentity Value::allocation_identity() const {
   if (!impl_) {
     throw std::logic_error("Invalid Value has no allocation identity.");
+  }
+  if (impl_->representation != ValueRepresentationKind::DenseTensor) {
+    throw std::logic_error(
+        "Provider-defined Value has no single allocation identity.");
   }
   return impl_->buffer.allocation_identity();
 }
@@ -1675,6 +1933,55 @@ ValueRevisionId Value::revision_id() const {
     throw std::logic_error("Invalid Value has no revision.");
   }
   return impl_->revision;
+}
+
+/** @copydoc ps::compute_content_digest */
+ContentDigestResult compute_content_digest(const Value& value) {
+  if (!value.impl_ ||
+      value.impl_->representation != ValueRepresentationKind::ProviderDefined ||
+      !value.impl_->provider_descriptor.has_value()) {
+    return {ContentDigestState::InvalidDescriptor, std::nullopt,
+            "ContentDigest requires a valid provider-defined Value."};
+  }
+  if (!value.impl_->provider_lease.valid()) {
+    return {ContentDigestState::MissingProvider, std::nullopt,
+            "ContentDigest requires a retained provider generation."};
+  }
+  try {
+    const DescriptorDigest descriptor =
+        compute_descriptor_digest(*value.impl_->provider_descriptor);
+    const std::vector<std::byte> canonical_content =
+        value.impl_->provider_lease.canonical_content(
+            *value.impl_->provider_descriptor, value.provider_defined_layout(),
+            value.impl_->provider_buffers);
+    return {ContentDigestState::Available,
+            internal::compute_content_digest_from_canonical_bytes(
+                descriptor, canonical_content),
+            {}};
+  } catch (const ExtensionContractError& error) {
+    ContentDigestState state = ContentDigestState::ProviderFailure;
+    switch (error.code()) {
+      case ExtensionErrorCode::MissingProvider:
+        state = ContentDigestState::MissingProvider;
+        break;
+      case ExtensionErrorCode::UnsupportedSchemaVersion:
+        state = ContentDigestState::UnsupportedSchemaVersion;
+        break;
+      case ExtensionErrorCode::PayloadUnavailable:
+        state = ContentDigestState::PayloadUnavailable;
+        break;
+      case ExtensionErrorCode::InvalidEnvelope:
+      case ExtensionErrorCode::InvalidBinding:
+      case ExtensionErrorCode::InvalidSerialization:
+        state = ContentDigestState::InvalidDescriptor;
+        break;
+      case ExtensionErrorCode::ProviderRejected:
+      case ExtensionErrorCode::InvalidProviderOutput:
+        state = ContentDigestState::ProviderFailure;
+        break;
+    }
+    return {state, std::nullopt, error.what()};
+  }
 }
 
 /** @copydoc ps::plan_value_access */
