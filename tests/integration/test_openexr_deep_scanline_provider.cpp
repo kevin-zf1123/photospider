@@ -18,11 +18,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -94,6 +97,10 @@ using ps::openexr_deep::OpenExrDeepErrorCode;
 using ps::openexr_deep::OpenExrDeepImage;
 using ps::openexr_deep::OpenExrDeepIoHooks;
 using ps::openexr_deep::OpenExrDeepReadSubmission;
+using ps::openexr_deep::OpenExrDeepWriteGeometry;
+using ps::openexr_deep::OpenExrDeepWriteOperation;
+using ps::openexr_deep::OpenExrDeepWritePreflight;
+using ps::openexr_deep::run_openexr_deep_write_preflight;
 using ps::openexr_deep::SignedBounds;
 using ps::openexr_deep::submit_openexr_deep_read;
 using ps::openexr_deep::submit_openexr_deep_write;
@@ -498,6 +505,45 @@ std::shared_ptr<const void> make_transaction_token() {
 }
 
 /**
+ * @brief Replaces one exact test file with borrowed binary bytes.
+ * @param path Target file owned by the current temporary directory.
+ * @param bytes Exact bytes to write, including embedded nulls.
+ * @throws std::runtime_error when open or write fails.
+ */
+void write_binary_file(const fs::path& path, std::string_view bytes) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output ||
+      !output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+    throw std::runtime_error("Failed to write OpenEXR preflight test file.");
+  }
+}
+
+/**
+ * @brief Reads one complete test file as exact binary bytes.
+ * @param path Existing file owned by the current temporary directory.
+ * @return Exact file contents, including embedded nulls.
+ * @throws std::runtime_error when open or read fails.
+ * @throws std::bad_alloc when result storage cannot allocate.
+ */
+std::string read_binary_file(const fs::path& path) {
+  std::ifstream input(path, std::ios::binary | std::ios::ate);
+  if (!input) {
+    throw std::runtime_error("Failed to open OpenEXR preflight test file.");
+  }
+  const std::streampos end = input.tellg();
+  if (end < 0) {
+    throw std::runtime_error("Failed to size OpenEXR preflight test file.");
+  }
+  std::string bytes(static_cast<std::size_t>(end), '\0');
+  input.seekg(0);
+  if (!bytes.empty() &&
+      !input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+    throw std::runtime_error("Failed to read OpenEXR preflight test file.");
+  }
+  return bytes;
+}
+
+/**
  * @brief Loads one provider and asserts a successful transaction.
  * @param registry Target registry.
  * @return Native DSO close counter retained by the caller.
@@ -797,6 +843,54 @@ TEST(OpenExrDeepScanlineProvider, AdmissionRejectsBeforePathSideEffects) {
             ComputeIoCompletionStatus::Succeeded);
   EXPECT_TRUE(fs::exists(first));
   executor.shutdown();
+}
+
+/**
+ * @brief Proves unrepresentable write height rejects before output access.
+ * @throws Exceptions from temporary-file I/O or the production preflight seam.
+ * @note The lightweight geometry exceeds INT_MAX scan lines without allocating
+ * per-site counts, offsets, samples, or any multi-gigabyte backing storage.
+ */
+TEST(OpenExrDeepScanlineProvider,
+     WritePreflightRejectsHeightWithoutOutputSideEffects) {
+  TemporaryDirectory temporary;
+  const fs::path existing = temporary.path() / "existing-output.exr";
+  const fs::path missing = temporary.path() / "missing-output.exr";
+  const std::string sentinel(
+      "existing\0output\xff"
+      "bytes",
+      21U);
+  write_binary_file(existing, sentinel);
+
+  OpenExrDeepWritePreflight preflight;
+  preflight.data_window = {
+      0, 0, 1, static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1};
+  preflight.display_window = {0, 0, 1, 1};
+
+  /** @brief Requires typed rejection before a continuation can touch target. */
+  const auto expect_preflight_rejection = [&preflight](const fs::path& target) {
+    bool continuation_called = false;
+    const OpenExrDeepWriteOperation output_operation =
+        [&continuation_called](const OpenExrDeepWriteGeometry&,
+                               const std::string& output_path) {
+          continuation_called = true;
+          write_binary_file(output_path, "unexpected output");
+        };
+    try {
+      run_openexr_deep_write_preflight(preflight, target.string(),
+                                       output_operation);
+      FAIL() << "Unrepresentable OpenEXR write height was accepted";
+    } catch (const OpenExrDeepError& error) {
+      EXPECT_EQ(error.code(), OpenExrDeepErrorCode::UnsupportedFileShape)
+          << error.what();
+    }
+    EXPECT_FALSE(continuation_called);
+  };
+
+  expect_preflight_rejection(existing);
+  EXPECT_EQ(read_binary_file(existing), sentinel);
+  expect_preflight_rejection(missing);
+  EXPECT_FALSE(fs::exists(missing));
 }
 
 /**

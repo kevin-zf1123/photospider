@@ -108,30 +108,6 @@ SignedBounds to_signed_bounds(const Imath::Box2i& window) {
 }
 
 /**
- * @brief Converts signed half-open bounds to an OpenEXR inclusive integer box.
- * @param bounds Valid nonempty half-open bounds.
- * @return Exactly representable OpenEXR box.
- * @throws std::invalid_argument when a limit is outside OpenEXR int range.
- */
-Imath::Box2i to_openexr_box(const SignedBounds& bounds) {
-  (void)checked_site_count(bounds);
-  if (bounds.min_x < std::numeric_limits<int>::min() ||
-      bounds.min_x > std::numeric_limits<int>::max() ||
-      bounds.min_y < std::numeric_limits<int>::min() ||
-      bounds.min_y > std::numeric_limits<int>::max() ||
-      bounds.max_x - 1 < std::numeric_limits<int>::min() ||
-      bounds.max_x - 1 > std::numeric_limits<int>::max() ||
-      bounds.max_y - 1 < std::numeric_limits<int>::min() ||
-      bounds.max_y - 1 > std::numeric_limits<int>::max()) {
-    throw std::invalid_argument(
-        "OpenEXR deep signed bounds exceed the file coordinate range.");
-  }
-  return {
-      {static_cast<int>(bounds.min_x), static_cast<int>(bounds.min_y)},
-      {static_cast<int>(bounds.max_x - 1), static_cast<int>(bounds.max_y - 1)}};
-}
-
-/**
  * @brief Returns the checked width of one valid signed bounds record.
  * @param bounds Valid nonempty bounds.
  * @return Positive width.
@@ -141,6 +117,60 @@ std::uint64_t bounds_width(const SignedBounds& bounds) {
   (void)checked_site_count(bounds);
   return static_cast<std::uint64_t>(bounds.max_x) -
          static_cast<std::uint64_t>(bounds.min_x);
+}
+
+/**
+ * @brief Requires one signed half-open window to map exactly to Box2i.
+ * @param bounds Valid nonempty bounds to check.
+ * @throws std::invalid_argument when an inclusive endpoint is outside int.
+ * @note checked_site_count must validate ordering before this helper runs.
+ */
+void require_openexr_window_representable(const SignedBounds& bounds) {
+  const std::int64_t minimum = std::numeric_limits<int>::min();
+  const std::int64_t maximum = std::numeric_limits<int>::max();
+  const std::int64_t inclusive_max_x = bounds.max_x - 1;
+  const std::int64_t inclusive_max_y = bounds.max_y - 1;
+  if (bounds.min_x < minimum || bounds.min_x > maximum ||
+      bounds.min_y < minimum || bounds.min_y > maximum ||
+      inclusive_max_x < minimum || inclusive_max_x > maximum ||
+      inclusive_max_y < minimum || inclusive_max_y > maximum) {
+    throw std::invalid_argument(
+        "OpenEXR deep signed bounds exceed the file coordinate range.");
+  }
+}
+
+/**
+ * @brief Validates and converts the complete write-side file geometry.
+ * @param preflight Dependency-neutral signed windows.
+ * @return Geometry safe for Box2i and writePixels(int) construction.
+ * @throws OpenExrDeepError with UnsupportedFileShape for invalid geometry.
+ * @throws std::bad_alloc when owned diagnostic storage cannot allocate.
+ */
+OpenExrDeepWriteGeometry make_checked_write_geometry(
+    const OpenExrDeepWritePreflight& preflight) {
+  try {
+    (void)checked_site_count(preflight.data_window);
+    (void)checked_site_count(preflight.display_window);
+    require_openexr_window_representable(preflight.data_window);
+    require_openexr_window_representable(preflight.display_window);
+    const std::uint64_t height =
+        static_cast<std::uint64_t>(preflight.data_window.max_y) -
+        static_cast<std::uint64_t>(preflight.data_window.min_y);
+    if (height > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+      throw OpenExrDeepError(OpenExrDeepErrorCode::UnsupportedFileShape,
+                             "OpenEXR deep scan-line count exceeds int range.");
+    }
+    return {preflight.data_window, preflight.display_window,
+            bounds_width(preflight.data_window), static_cast<int>(height)};
+  } catch (const OpenExrDeepError&) {
+    throw;
+  } catch (const std::invalid_argument& error) {
+    throw OpenExrDeepError(OpenExrDeepErrorCode::UnsupportedFileShape,
+                           error.what());
+  } catch (const std::overflow_error& error) {
+    throw OpenExrDeepError(OpenExrDeepErrorCode::UnsupportedFileShape,
+                           error.what());
+  }
 }
 
 /**
@@ -659,53 +689,60 @@ Value read_file(DataDefinitionRegistry& registry, const std::string& path,
 void write_file(const Value& value, const std::string& path,
                 const OpenExrDeepIoHooks& hooks) {
   try {
-    if (hooks.before_codec) {
-      hooks.before_codec();
-    }
     OpenExrDeepImage image = inspect_openexr_deep_value(value);
     const DeepMetadata metadata = metadata_from_image(image);
-    const Imath::Box2i data_window = to_openexr_box(image.data_window);
-    const Imath::Box2i display_window = to_openexr_box(image.display_window);
-    const std::uint64_t width = bounds_width(image.data_window);
+    run_openexr_deep_write_preflight(
+        {image.data_window, image.display_window}, path,
+        [&image, &metadata, &hooks](const OpenExrDeepWriteGeometry& geometry,
+                                    const std::string& output_path) {
+          const Imath::Box2i data_window{
+              {static_cast<int>(geometry.data_window.min_x),
+               static_cast<int>(geometry.data_window.min_y)},
+              {static_cast<int>(geometry.data_window.max_x - 1),
+               static_cast<int>(geometry.data_window.max_y - 1)}};
+          const Imath::Box2i display_window{
+              {static_cast<int>(geometry.display_window.min_x),
+               static_cast<int>(geometry.display_window.min_y)},
+              {static_cast<int>(geometry.display_window.max_x - 1),
+               static_cast<int>(geometry.display_window.max_y - 1)}};
+          Imf::Header header(display_window, data_window, 1.0F,
+                             Imath::V2f(0, 0), 1.0F, Imf::INCREASING_Y,
+                             Imf::ZIPS_COMPRESSION);
+          header.setType(Imf::DEEPSCANLINE);
+          for (const ChannelMapping& channel : metadata.channels) {
+            header.channels().insert(channel.diagnostic_name,
+                                     Imf::Channel(Imf::FLOAT, 1, 1));
+          }
+          header.insert(kMappingAttributeName,
+                        Imf::StringAttribute(
+                            encode_mapping_attribute(metadata.channels)));
 
-    Imf::Header header(display_window, data_window, 1.0F, Imath::V2f(0, 0),
-                       1.0F, Imf::INCREASING_Y, Imf::ZIPS_COMPRESSION);
-    header.setType(Imf::DEEPSCANLINE);
-    for (const ChannelMapping& channel : metadata.channels) {
-      header.channels().insert(channel.diagnostic_name,
-                               Imf::Channel(Imf::FLOAT, 1, 1));
-    }
-    header.insert(
-        kMappingAttributeName,
-        Imf::StringAttribute(encode_mapping_attribute(metadata.channels)));
-
-    std::vector<std::uint64_t> offsets(image.sample_counts.size() + 1U, 0U);
-    for (std::size_t site = 0U; site < image.sample_counts.size(); ++site) {
-      offsets[site + 1U] =
-          checked_add(offsets[site], image.sample_counts[site]);
-    }
-    std::vector<float> empty_sentinels(metadata.channels.size(), 0.0F);
-    std::vector<std::vector<float*>> pointers =
-        make_sample_pointers(offsets, &image.channel_samples, &empty_sentinels);
-    Imf::DeepFrameBuffer frame_buffer;
-    frame_buffer.insertSampleCountSlice(
-        make_count_slice(&image.sample_counts, data_window, width));
-    for (std::size_t channel = 0U; channel < metadata.channels.size();
-         ++channel) {
-      frame_buffer.insert(
-          metadata.channels[channel].diagnostic_name,
-          make_deep_slice(&pointers[channel], data_window, width));
-    }
-    Imf::DeepScanLineOutputFile output(path.c_str(), header, 0);
-    output.setFrameBuffer(frame_buffer);
-    const std::uint64_t height =
-        static_cast<std::uint64_t>(image.data_window.max_y) -
-        static_cast<std::uint64_t>(image.data_window.min_y);
-    if (height > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-      throw OpenExrDeepError(OpenExrDeepErrorCode::UnsupportedFileShape,
-                             "OpenEXR deep scan-line count exceeds int range.");
-    }
-    output.writePixels(static_cast<int>(height));
+          std::vector<std::uint64_t> offsets(image.sample_counts.size() + 1U,
+                                             0U);
+          for (std::size_t site = 0U; site < image.sample_counts.size();
+               ++site) {
+            offsets[site + 1U] =
+                checked_add(offsets[site], image.sample_counts[site]);
+          }
+          std::vector<float> empty_sentinels(metadata.channels.size(), 0.0F);
+          std::vector<std::vector<float*>> pointers = make_sample_pointers(
+              offsets, &image.channel_samples, &empty_sentinels);
+          Imf::DeepFrameBuffer frame_buffer;
+          frame_buffer.insertSampleCountSlice(make_count_slice(
+              &image.sample_counts, data_window, geometry.width));
+          for (std::size_t channel = 0U; channel < metadata.channels.size();
+               ++channel) {
+            frame_buffer.insert(metadata.channels[channel].diagnostic_name,
+                                make_deep_slice(&pointers[channel], data_window,
+                                                geometry.width));
+          }
+          if (hooks.before_codec) {
+            hooks.before_codec();
+          }
+          Imf::DeepScanLineOutputFile output(output_path.c_str(), header, 0);
+          output.setFrameBuffer(frame_buffer);
+          output.writePixels(geometry.scan_line_count);
+        });
   } catch (const OpenExrDeepError&) {
     throw;
   } catch (const ExtensionContractError& error) {
@@ -727,6 +764,20 @@ void write_file(const Value& value, const std::string& path,
 }
 
 }  // namespace
+
+/** @copydoc run_openexr_deep_write_preflight */
+void run_openexr_deep_write_preflight(
+    const OpenExrDeepWritePreflight& preflight, const std::string& path,
+    const OpenExrDeepWriteOperation& operation) {
+  if (path.empty() || !operation) {
+    throw OpenExrDeepError(
+        OpenExrDeepErrorCode::InvalidRequest,
+        "OpenEXR deep write preflight requires a path and continuation.");
+  }
+  const OpenExrDeepWriteGeometry geometry =
+      make_checked_write_geometry(preflight);
+  operation(geometry, path);
+}
 
 /** @copydoc make_openexr_deep_value */
 Value make_openexr_deep_value(DataDefinitionRegistry& registry,

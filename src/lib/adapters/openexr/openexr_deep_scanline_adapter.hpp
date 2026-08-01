@@ -105,13 +105,80 @@ struct OpenExrDeepImage final {
  * worker and grant no path, codec, registry, or publication authority.
  */
 struct OpenExrDeepIoHooks final {
-  /** @brief Called immediately before the first OpenEXR file/codec operation.
+  /**
+   * @brief Called immediately before opening the OpenEXR input/output file.
+   * @note Write-side in-memory Header/frame-buffer preparation may already be
+   * complete, but no output path has been opened or mutated.
    */
   std::function<void()> before_codec;
   /** @brief Called after read validation and before result-state publication.
    */
   std::function<void()> before_read_publication;
 };
+
+/**
+ * @brief Dependency-neutral shape input for the write-side output barrier.
+ * @throws Nothing for value operations.
+ * @note The record is source-private and intentionally contains no OpenEXR
+ * type, path, sample storage, or test-only override.
+ */
+struct OpenExrDeepWritePreflight final {
+  /** @brief Signed half-open data window to represent in the output file. */
+  SignedBounds data_window;
+  /** @brief Signed half-open display window to represent in the output file. */
+  SignedBounds display_window;
+};
+
+/**
+ * @brief Checked write geometry released only after shape preflight succeeds.
+ * @throws Nothing for value operations.
+ * @note Both windows are guaranteed to convert exactly to OpenEXR inclusive
+ * integer boxes, and scan_line_count is guaranteed to fit OpenEXR's int API.
+ */
+struct OpenExrDeepWriteGeometry final {
+  /** @brief Validated signed half-open data window. */
+  SignedBounds data_window;
+  /** @brief Validated signed half-open display window. */
+  SignedBounds display_window;
+  /** @brief Positive checked row width used by frame-buffer strides. */
+  std::uint64_t width = 0U;
+  /** @brief Positive data-window height representable by writePixels(int). */
+  int scan_line_count = 0;
+};
+
+/**
+ * @brief Continuation allowed to prepare and open one output after preflight.
+ * @param geometry Fully checked file geometry.
+ * @param path Nonempty output path still owned by the write transaction.
+ * @throws Any Host/OpenEXR/allocation failure raised by output preparation.
+ * @note Production supplies the complete Header/frame-buffer/open/write body;
+ * tests may supply a side-effect witness without bypassing production order.
+ */
+using OpenExrDeepWriteOperation = std::function<void(
+    const OpenExrDeepWriteGeometry& geometry, const std::string& path)>;
+
+/**
+ * @brief Runs the mandatory write-shape preflight before output continuation.
+ *
+ * The function first validates both signed windows, exact OpenEXR coordinate
+ * representation, logical-site arithmetic, row width, and the int scan-line
+ * count. Only after every check succeeds does it invoke @p operation, which is
+ * the sole owner of Header/frame-buffer preparation and output-file opening.
+ *
+ * @param preflight Dependency-neutral signed-window input.
+ * @param path Nonempty selected output path, not accessed by this function.
+ * @param operation Nonempty continuation invoked only after successful checks.
+ * @throws OpenExrDeepError with InvalidRequest for an empty path/continuation.
+ * @throws OpenExrDeepError with UnsupportedFileShape for malformed,
+ * overflowing, or unrepresentable windows and scan-line count.
+ * @throws std::bad_alloc when owned diagnostic or continuation state allocates.
+ * @throws Any exception raised by @p operation after successful preflight.
+ * @note This source-private production barrier performs no filesystem or
+ * OpenEXR operation before validation succeeds.
+ */
+void run_openexr_deep_write_preflight(
+    const OpenExrDeepWritePreflight& preflight, const std::string& path,
+    const OpenExrDeepWriteOperation& operation);
 
 /** @brief Opaque shared state for one admitted read result. */
 struct OpenExrDeepReadState;
