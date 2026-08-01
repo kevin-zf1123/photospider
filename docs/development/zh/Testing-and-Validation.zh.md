@@ -210,6 +210,27 @@ lease 会在 unload 后继续保留精确 generation/module；active resolution 
 retained Value traversal 仍保持有效，最终 owner/provider destroy 先于 module release。
 任一 producer 或 consumer 都不会引入 source-tree include 或可选 provider dependency。
 
+`OpenExrDeepProviderOptionOffSmoke` 负责更窄的 V-15 option 边界。它会在禁用 OpenCV、
+yaml-cpp、OpenEXR discovery、graph CLI、IPC 与仓库 operation provider 的同时，用
+`BUILD_TESTING=ON` 配置一个全新的 provider-OFF producer。Configure 会结合展开后的顶层 CMake
+trace 与最终 cache，要求实际执行的 OpenEXR package lookup 和 discovery key 都为零。Driver
+先完成 producer 的完整 build，再构建精确的 `test_variable_sample_field_extensions` target，随后
+运行非空的 `^VariableSampleFieldExtensions\.` CTest selection，并排除 `build-smoke` 作为显式
+递归保护。当前 selection 包含全部 13 个 V-14 case。
+
+安装后，该 smoke 会盘点中立 public header、package Config/Targets 文件、build-tree native
+product 与 installed native product。它依次采用 producer 传入的 `CMAKE_NM`、child toolchain 的
+`CMAKE_NM` 或经过验证的平台 fallback；缺少 symbol inspector 时会 fail closed。Defined 与
+undefined symbol surface 分别检查。Dynamic dependency 在 Darwin 使用 `otool`，在 ELF 使用
+`readelf`，在 Windows 使用 `dumpbin /dependents` 或 `objdump -p`；Windows 不得以空 dependency
+surface 通过。随后，一个中立 installed-package consumer 会执行真实的 verbose compile 与
+executable link；在 executable 运行前，smoke 会扫描其 verbose output、
+`compile_commands.json`、link script、response file、求值后的 imported-target property、native
+symbol 与 dependency。Default 和 optional-component probe 必须继续可用；required absent
+component 必须先以 Photospider 自有诊断失败，不得发现 OpenEXR。
+`OpenExrDeepProviderInstallConsumerSmoke` 是启用态 companion：它安装显式 component，加载真实
+module，解析两个 v3 export，校验 API table，调用 provider destruction，然后卸载 module。
+
 生成的 clean consumer project 会维护一份有序的 CMake executable target list。同一份 list
 负责创建 target、写出 configure-time 精确 target declaration，并通过 `file(GENERATE)` 提供
 configuration-specific 的三字段
@@ -258,6 +279,8 @@ regression 留在完整 CTest 分片。
 `DependencyDisabledInstallSmoke`、
 `ImageArtifactCodecDependencyDisabledBuild`、
 `IpcDisabledInstallSmoke`、
+`OpenExrDeepProviderInstallConsumerSmoke`、
+`OpenExrDeepProviderOptionOffSmoke`、
 `OpenCvOperationProviderDisabledBuild`、
 `PhotospiderdInstallLayoutSmoke`、
 `PublicHeaderSelfContainment` 和
@@ -293,7 +316,7 @@ tree，并要求三个
 `StaticProductConsumerSmoke` 只在 IPC enabled 时必须精确注册一次，在 IPC disabled 时必须缺席。
 每个预期 entry 还必须保持 enabled、带正确 label，并以精确的 `python -B` driver path 开头。被
 注释或处于 inactive CMake 分支中的源码不会生成 CTest entry，因此无法通过这项生成后 inventory
-检查。该查询不会执行任何真实 smoke，也不会改变现有七项 build-smoke 分类。
+检查。该查询不会执行任何真实 smoke，也不会改变现有九项 build-smoke 分类。
 
 CTest 会保留每个带标签测试的注册，供本机直接运行。CI 的 `full-ctest` 分片会排除该精确标签；
 配置规划只会把 `ctest --show-only=json-v1` 解析为允许空集合的预检，因为默认

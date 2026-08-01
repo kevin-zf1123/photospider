@@ -315,6 +315,12 @@ generation，以及 input Value 或 decoded-result state。调用 OpenEXR 时使
 executor 的唯一 worker 仍是 adapter 创建的唯一 execution lane。Running cancellation 无法抢占
 foreign codec code；它会抑制延迟 result publication，并仍恰好一次释放 task/byte account。
 
+完成通用 Value 检查后，write path 必须先跨过一个 source-private continuation barrier，才可以
+准备 OpenEXR Header/frame buffer 或打开 output path。该 barrier 会验证两个有符号 window、
+logical-site 与 row-width 算术、inclusive `Box2i` 坐标的精确可表示性，以及 `writePixels` 消费的
+`int` scan-line count。只有完整 preflight 放行的 continuation 才能准备或打开 output。因此，
+类型化 shape rejection 会逐字节保留既有 destination，也不会创建原本缺失的 destination。
+
 这是机制边界，不是第四种 scheduler 或 persistence authority。它不新增 execution route、
 ready store、Graph owner、policy decision surface、Host/device ledger dimension 或 public ABI。
 同步 cache administration/load、Graph 文档 operation、daemon job state 与私有 `OutputStore`

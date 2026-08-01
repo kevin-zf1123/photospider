@@ -383,6 +383,15 @@ executor's one worker remains the only adapter-created execution lane. Running
 cancellation cannot preempt foreign codec code; it suppresses late result
 publication and still releases task/byte accounts exactly once.
 
+After generic Value inspection, the write path crosses a source-private
+continuation barrier before it prepares an OpenEXR Header/frame buffer or
+opens the output path. The barrier validates both signed windows, logical-site
+and row-width arithmetic, exact inclusive `Box2i` coordinate representation,
+and the `int` scan-line count consumed by `writePixels`. Only the continuation
+released by that complete preflight may prepare or open the output. A typed
+shape rejection therefore preserves an existing destination byte-for-byte and
+does not create a missing destination.
+
 This is a mechanism boundary, not a fourth scheduler or a persistence
 authority. It adds no execution route, ready store, Graph owner, policy
 decision surface, Host/device ledger dimension, or public ABI. Synchronous

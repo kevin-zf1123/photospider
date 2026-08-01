@@ -275,6 +275,35 @@ then reports MissingProvider, retained Value traversal remains valid, and final
 owner/provider destruction precedes module release. No source-tree include or
 optional provider dependency enters either producer or consumer.
 
+`OpenExrDeepProviderOptionOffSmoke` owns the narrower V-15 option boundary. It
+configures a fresh provider-OFF producer with `BUILD_TESTING=ON` while OpenCV,
+yaml-cpp, OpenEXR discovery, graph CLI, IPC, and repository operation providers
+are disabled. The configure uses an expanded top-level CMake trace plus the
+completed cache to require zero executed OpenEXR package lookups and zero
+discovery keys. The driver performs the complete producer build, then builds
+the exact `test_variable_sample_field_extensions` target and runs a nonempty
+`^VariableSampleFieldExtensions\.` CTest selection with `build-smoke` excluded
+as an explicit recursion guard. The current selection contains all thirteen
+V-14 cases.
+
+After installation, that smoke inventories the neutral public header, package
+Config/Targets files, build-tree native products, and installed native
+products. It uses the producer's supplied `CMAKE_NM`, the child toolchain's
+`CMAKE_NM`, or a validated platform fallback; absence of a symbol inspector
+fails closed. Defined and undefined symbol surfaces are inspected separately.
+Dynamic dependencies use `otool` on Darwin, `readelf` on ELF, and
+`dumpbin /dependents` or `objdump -p` on Windows; Windows cannot pass through an
+empty dependency surface. A neutral installed-package consumer then performs a
+real verbose compile and executable link. Its verbose output,
+`compile_commands.json`, link scripts, response files, evaluated imported-
+target properties, native symbols, and dependencies are scanned before the
+executable runs. The default and optional-component probes must remain usable,
+while a required absent component must fail with the Photospider-owned
+diagnostic before OpenEXR discovery. `OpenExrDeepProviderInstallConsumerSmoke`
+is the enabled companion: it installs the explicit component, loads the actual
+module, resolves both v3 exports, validates the API table, invokes provider
+destruction, and unloads the module.
+
 The generated clean consumer project maintains one ordered CMake executable
 target list. That same list creates the targets, writes a configure-time exact
 target declaration, and supplies a configuration-specific three-field
@@ -338,6 +367,8 @@ The maintained labelled inventory is
 `DependencyDisabledInstallSmoke`,
 `ImageArtifactCodecDependencyDisabledBuild`,
 `IpcDisabledInstallSmoke`,
+`OpenExrDeepProviderInstallConsumerSmoke`,
+`OpenExrDeepProviderOptionOffSmoke`,
 `OpenCvOperationProviderDisabledBuild`,
 `PhotospiderdInstallLayoutSmoke`,
 `PublicHeaderSelfContainment`, and
@@ -382,7 +413,7 @@ IPC is enabled and absent otherwise, then requires every expected entry to
 remain enabled and labelled and to start with the exact `python -B` driver
 path. Commented or inactive CMake source cannot satisfy this
 generated-inventory check because it produces no CTest entry. The inventory
-query executes none of the real smokes and does not change the seven-test
+query executes none of the real smokes and does not change the nine-test
 build-smoke classification.
 
 CTest keeps every labelled test registered for direct local use. CI's
