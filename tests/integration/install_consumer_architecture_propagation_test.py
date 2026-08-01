@@ -401,6 +401,7 @@ def write_consumer_target_inventory_fixture(
     declared_targets: tuple[str, ...],
     *,
     mapped_targets: tuple[str, ...] | None = None,
+    configured_filename_by_target: dict[str, str] | None = None,
     target_file_payload: str | None = None,
 ) -> dict[str, pathlib.Path]:
     """@brief Create one CMake-shaped consumer target inventory fixture.
@@ -410,6 +411,9 @@ def write_consumer_target_inventory_fixture(
     @param declared_targets Ordered target sequence written by CMake configure.
     @param mapped_targets Optional ordered target-file sequence; omitted values
       use ``declared_targets`` exactly.
+    @param configured_filename_by_target Optional CMake-authoritative target
+      filenames keyed by mapped target. Omitted entries use the extensionless
+      target spelling without consulting the Python host family.
     @param target_file_payload Optional complete TSV override used by malformed
       fail-closed cases after executable files are synthesized.
     @return Target names mapped to canonical executable fixture paths.
@@ -440,10 +444,13 @@ def write_consumer_target_inventory_fixture(
     effective_mapped_targets = (
         declared_targets if mapped_targets is None else mapped_targets
     )
+    effective_configured_filenames = dict(
+        configured_filename_by_target or {}
+    )
     executable_by_target: dict[str, pathlib.Path] = {}
     for target_name in effective_mapped_targets:
-        executable_name = (
-            f"{target_name}.exe" if os.name == "nt" else target_name
+        executable_name = effective_configured_filenames.get(
+            target_name, target_name
         )
         executable = (build / executable_name).resolve()
         executable.write_text("synthetic consumer executable\n", encoding="utf-8")
@@ -454,7 +461,9 @@ def write_consumer_target_inventory_fixture(
             dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
             + "\n"
             + "".join(
-                f"{target}\t{executable_by_target[target]}\n"
+                f"{target}\t"
+                f"{effective_configured_filenames.get(target, target)}\t"
+                f"{executable_by_target[target]}\n"
                 for target in effective_mapped_targets
             )
         )
@@ -676,9 +685,10 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
     @throws AssertionError If valid 1/N inventories drift, malformed or unsafe
       data is accepted, or driver command ordering changes.
     @note Driver cases reuse a synthetic validated producer and replace process
-      execution with ``CommandRecorder``. One compiler-free configure probes
-      the actual generated CMake target validator; no compiler, installed
-      product, or generated consumer executable is launched.
+      execution with ``CommandRecorder``. Compiler-free configures probe the
+      actual generated CMake target validator and target filename/path writer;
+      no compiler, installed product, or generated consumer executable is
+      launched.
     """
 
     #: @brief CMake launcher used only by the generated-writer rejection case.
@@ -870,6 +880,108 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                         list(inventory_directory.glob("*.tsv")), []
                     )
 
+    def test_generated_writer_emits_cmake_filename_and_path_fields(
+        self,
+    ) -> None:
+        """@brief Round-trip both target-file expressions through CMake.
+
+        @return None after the production serialization loop emits target,
+          ``$<TARGET_FILE_NAME>``, and ``$<TARGET_FILE>`` as three exact TSV
+          fields for a POSIX-Python ``.exe`` imported target fixture.
+        @throws OSError If fixture files cannot be written or CMake cannot
+          start.
+        @throws subprocess.CalledProcessError If CMake rejects the valid
+          compiler-free generated project.
+        @throws AssertionError If the writer omits, reorders, or changes either
+          configuration-specific target-file expression.
+        @note The fixture replaces only target construction and package lookup
+          with an imported executable. The production target list, validation,
+          declaration, and manifest serialization remain unchanged.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-writer-fields-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            source = sandbox / "source"
+            build = sandbox / "build"
+            dependency_disabled.write_consumer(source)
+            cmake_lists = source / "CMakeLists.txt"
+            cmake_text = cmake_lists.read_text(encoding="utf-8")
+            target_variable = (
+                "${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}"
+            )
+            target_creation = (
+                "  add_executable(\n"
+                f'    "{target_variable}"\n'
+                f'    "{target_variable}.cpp")\n'
+                "  target_link_libraries(\n"
+                f'    "{target_variable}"\n'
+                "    PRIVATE Photospider::photospider)"
+            )
+            imported_target_creation = (
+                "  add_executable(\n"
+                f'    "{target_variable}" IMPORTED)\n'
+                "  set_target_properties(\n"
+                f'    "{target_variable}" PROPERTIES\n'
+                "    IMPORTED_LOCATION\n"
+                f'      "${{CMAKE_BINARY_DIR}}/{target_variable}.exe")'
+            )
+            replacements = (
+                (
+                    "project(dependency_disabled_consumer LANGUAGES CXX)",
+                    "project(dependency_disabled_consumer NONE)",
+                ),
+                (
+                    "find_package(Photospider CONFIG REQUIRED "
+                    "COMPONENTS embedded)",
+                    "# Package lookup omitted by compiler-free writer fixture.",
+                ),
+                (target_creation, imported_target_creation),
+            )
+            for original, replacement in replacements:
+                self.assertIn(original, cmake_text)
+                cmake_text = cmake_text.replace(original, replacement, 1)
+            write_exact_text(cmake_lists, cmake_text)
+
+            subprocess.run(
+                [
+                    self.cmake_executable,
+                    "-S",
+                    str(source),
+                    "-B",
+                    str(build),
+                    "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            target_file_manifest = (
+                dependency_disabled.consumer_target_file_manifest_path(
+                    build, "RelWithDebInfo"
+                )
+            )
+            records = dependency_disabled.read_strict_manifest_lines(
+                target_file_manifest,
+                expected_header=(
+                    dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                ),
+                allow_tab=True,
+                description="compiler-free target-file inventory fixture",
+            )
+            self.assertEqual(len(records), 1)
+            target_name, configured_filename, configured_path = (
+                records[0].split("\t")
+            )
+            self.assertEqual(target_name, "dependency_disabled_consumer")
+            self.assertEqual(
+                configured_filename, "dependency_disabled_consumer.exe"
+            )
+            self.assertEqual(
+                pathlib.Path(configured_path).name, configured_filename
+            )
+
     def test_rejects_reserved_dot_names_in_both_manifests(self) -> None:
         """@brief Reject ``.`` and ``..`` in each independent target field.
 
@@ -933,6 +1045,7 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                                 dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
                                 + "\n"
                                 + f"{reserved_target}\t"
+                                + f"{target_name}\t"
                                 + f"{executable_by_target[target_name]}\n"
                             )
                             expected_diagnostic = "target-file inventory"
@@ -944,63 +1057,147 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                                 build, "RelWithDebInfo"
                             )
 
-    def test_native_executable_basename_uses_host_family(self) -> None:
-        """@brief Lock exact POSIX and Windows target-file basename spelling.
+    def test_accepts_cmake_authoritative_native_filename_spellings(
+        self,
+    ) -> None:
+        """@brief Accept native target filenames without Python host guessing.
 
-        @return None after POSIX yields the extensionless target and Windows
-          yields exactly the target plus ``.exe``.
-        @throws AssertionError If the platform-specific helper accepts a shared
-          two-spelling policy or returns another suffix.
-        @note ``os.name`` is replaced only while calling the pure string helper;
+        @return None after Linux/macOS extensionless names, Windows ``.exe``,
+          and Cygwin/MSYS2 POSIX-Python ``.exe`` names all satisfy the same
+          target-bound contract.
+        @throws AssertionError If filename validation consults ``os.name`` or
+          rejects one of CMake's two uncustomized native spellings.
+        @note ``os.name`` is varied only around the pure filename validator;
           no platform-specific ``Path`` object is constructed under the mock.
         """
 
-        with mock.patch.object(dependency_disabled.os, "name", "posix"):
-            self.assertEqual(
-                dependency_disabled.native_consumer_executable_basename(
-                    "consumer_safe"
-                ),
-                "consumer_safe",
-            )
-        with mock.patch.object(dependency_disabled.os, "name", "nt"):
-            self.assertEqual(
-                dependency_disabled.native_consumer_executable_basename(
-                    "consumer_safe"
-                ),
-                "consumer_safe.exe",
-            )
+        target_name = "consumer_safe"
+        profiles = (
+            ("linux", "posix", target_name),
+            ("macos", "posix", target_name),
+            ("windows", "nt", f"{target_name}.exe"),
+            ("cygwin", "posix", f"{target_name}.exe"),
+            ("msys2", "posix", f"{target_name}.exe"),
+        )
+        for profile, python_os_name, configured_filename in profiles:
+            with self.subTest(profile=profile):
+                with mock.patch.object(
+                    dependency_disabled.os, "name", python_os_name
+                ):
+                    self.assertTrue(
+                        dependency_disabled.is_canonical_consumer_target_filename(
+                            target_name, configured_filename
+                        )
+                    )
 
-    def test_rejects_non_native_executable_basename(self) -> None:
-        """@brief Reject a foreign-platform basename for an otherwise safe file.
+    def test_reader_accepts_cmake_declared_exe_without_host_guessing(
+        self,
+    ) -> None:
+        """@brief Accept CMake's ``.exe`` without host suffix inference.
 
-        @return None after POSIX rejects ``target.exe`` or Windows rejects the
-          extensionless ``target`` spelling before returning an executable.
-        @throws OSError If the synthetic executable or manifest cannot be
+        @return None after the complete reader accepts an executable whose
+          CMake-declared filename and path basename both end in ``.exe``.
+        @throws OSError If synthetic manifests or executable files cannot be
           written.
-        @throws AssertionError If the reader accepts both platform spellings.
-        @note The path remains absolute, canonical, in-root, regular, and
-          executable so basename policy is the sole failing invariant.
+        @throws AssertionError If reader behavior still derives suffix policy
+          from the Python host family.
+        @note On Windows this is the native target spelling. On Linux/macOS it
+          deterministically simulates the POSIX-Python/CMake-target split used
+          by Cygwin and MSYS2.
         """
 
         with tempfile.TemporaryDirectory(
-            prefix="photospider-consumer-target-nonnative-basename-"
+            prefix="photospider-consumer-target-posix-cmake-exe-"
         ) as temporary:
             build = pathlib.Path(temporary).resolve() / "build"
             target_name = "consumer_safe"
-            write_consumer_target_inventory_fixture(
+            configured_filename = f"{target_name}.exe"
+            executable_by_target = write_consumer_target_inventory_fixture(
                 build,
                 "RelWithDebInfo",
                 (target_name,),
+                configured_filename_by_target={
+                    target_name: configured_filename
+                },
             )
-            non_native_name = (
-                target_name if os.name == "nt" else f"{target_name}.exe"
+            self.assertIn(dependency_disabled.os.name, {"nt", "posix"})
+            self.assertEqual(
+                dependency_disabled.configured_consumer_target_files(
+                    build, "RelWithDebInfo"
+                ),
+                [(target_name, executable_by_target[target_name])],
             )
-            non_native_executable = build / non_native_name
-            non_native_executable.write_text(
-                "synthetic non-native consumer executable\n",
-                encoding="utf-8",
+
+    def test_rejects_foreign_tampered_and_drifted_filenames(self) -> None:
+        """@brief Reject unbound, unsafe, or path-drifted filename fields.
+
+        @return None after separators, reserved names, a typed sentinel,
+          foreign target/suffix spellings, and filename/path basename drift
+          all fail before returning an executable.
+        @throws OSError If synthetic manifests or executable files cannot be
+          written.
+        @throws AssertionError If the new filename field can select an
+          arbitrary build-local executable or disagree with its path.
+        @note Every referenced path remains canonical, build-local, regular,
+          and executable so configured-filename validation is the sole policy
+          under test.
+        """
+
+        invalid_filenames = {
+            "posix-separator": "nested/consumer_safe",
+            "windows-separator": "nested\\consumer_safe",
+            "dot": ".",
+            "dotdot": "..",
+            "sentinel": "consumer_safe_NOT_BUILT",
+            "foreign-target": "consumer_foreign",
+            "foreign-suffix": "consumer_safe.bin",
+        }
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-tampered-filename-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            target_name = "consumer_safe"
+            for case_name, configured_filename in invalid_filenames.items():
+                with self.subTest(case=case_name):
+                    build = sandbox / case_name
+                    executable_by_target = (
+                        write_consumer_target_inventory_fixture(
+                            build,
+                            "RelWithDebInfo",
+                            (target_name,),
+                        )
+                    )
+                    manifest = (
+                        dependency_disabled.consumer_target_file_manifest_path(
+                            build, "RelWithDebInfo"
+                        )
+                    )
+                    write_exact_text(
+                        manifest,
+                        (
+                            dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                            + "\n"
+                            + f"{target_name}\t{configured_filename}\t"
+                            + f"{executable_by_target[target_name]}\n"
+                        ),
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError, "target-file inventory"
+                    ):
+                        dependency_disabled.configured_consumer_target_files(
+                            build, "RelWithDebInfo"
+                        )
+
+            build = sandbox / "path-name-drift"
+            cmake_filename = f"{target_name}.exe"
+            executable_by_target = write_consumer_target_inventory_fixture(
+                build,
+                "RelWithDebInfo",
+                (target_name,),
+                configured_filename_by_target={
+                    target_name: cmake_filename
+                },
             )
-            non_native_executable.chmod(0o755)
             manifest = dependency_disabled.consumer_target_file_manifest_path(
                 build, "RelWithDebInfo"
             )
@@ -1009,10 +1206,45 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 (
                     dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
                     + "\n"
-                    + f"{target_name}\t{non_native_executable}\n"
+                    + f"{target_name}\t{target_name}\t"
+                    + f"{executable_by_target[target_name]}\n"
                 ),
             )
             with self.assertRaisesRegex(RuntimeError, "does not match target"):
+                dependency_disabled.configured_consumer_target_files(
+                    build, "RelWithDebInfo"
+                )
+
+    def test_rejects_duplicate_configured_filename(self) -> None:
+        """@brief Reject two target identities mapped to one filename.
+
+        @return None after individually target-bound spellings collide and the
+          reader rejects the duplicate before returning an executable.
+        @throws OSError If synthetic manifests or executable files cannot be
+          written.
+        @throws AssertionError If filename identity can collapse across two
+          unique declared targets.
+        @note ``consumer_a.exe`` is legal both as the Windows filename of
+          ``consumer_a`` and the extensionless filename of target
+          ``consumer_a.exe``; their collision must nevertheless fail closed.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-duplicate-filename-"
+        ) as temporary:
+            build = pathlib.Path(temporary).resolve() / "build"
+            targets = ("consumer_a", "consumer_a.exe")
+            write_consumer_target_inventory_fixture(
+                build,
+                "RelWithDebInfo",
+                targets,
+                configured_filename_by_target={
+                    target: "consumer_a.exe" for target in targets
+                },
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, "duplicate configured executable filename"
+            ):
                 dependency_disabled.configured_consumer_target_files(
                     build, "RelWithDebInfo"
                 )
@@ -1059,7 +1291,8 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
 
         @return None after missing/invalid headers, blank/comments, field-count
           drift, empty fields, invalid target names, missing final LF, invalid
-          UTF-8, NUL, every remaining C0 control, and DEL all fail.
+          UTF-8, and every C0 control plus DEL in both target and configured
+          filename fields all fail.
         @throws OSError If malformed manifest bytes cannot be written.
         @throws AssertionError If any malformed payload is accepted.
         @note LF and TAB injection cases use structurally malformed records;
@@ -1079,6 +1312,9 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
             )
             executable = executable_by_target[target_name]
             header = dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+            valid_record = (
+                f"{target_name}\t{target_name}\t{executable}\n"
+            )
             manifest = dependency_disabled.consumer_target_file_manifest_path(
                 build, "RelWithDebInfo"
             )
@@ -1086,37 +1322,58 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 "empty": "",
                 "header-only": f"{header}\n",
                 "wrong-header": (
-                    f"# targets\n{target_name}\t{executable}\n"
+                    f"# targets\n{valid_record}"
                 ),
                 "repeated-header": (
-                    f"{header}\n{header}\n"
-                    f"{target_name}\t{executable}\n"
+                    f"{header}\n{header}\n{valid_record}"
                 ),
                 "comment": (
-                    f"{header}\n# later comment\n"
-                    f"{target_name}\t{executable}\n"
+                    f"{header}\n# later comment\n{valid_record}"
                 ),
-                "blank": (
-                    f"{header}\n\n{target_name}\t{executable}\n"
-                ),
+                "blank": f"{header}\n\n{valid_record}",
                 "one-field": f"{header}\n{target_name}\n",
-                "three-fields": (
-                    f"{header}\n{target_name}\t{executable}\textra\n"
+                "two-fields": (
+                    f"{header}\n{target_name}\t{target_name}\n"
                 ),
-                "empty-target": f"{header}\n\t{executable}\n",
-                "empty-path": f"{header}\n{target_name}\t\n",
-                "alias-target": f"{header}\nconsumer::alias\t{executable}\n",
+                "four-fields": (
+                    f"{header}\n{target_name}\t{target_name}\t"
+                    f"{executable}\textra\n"
+                ),
+                "empty-target": (
+                    f"{header}\n\t{target_name}\t{executable}\n"
+                ),
+                "empty-filename": (
+                    f"{header}\n{target_name}\t\t{executable}\n"
+                ),
+                "empty-path": (
+                    f"{header}\n{target_name}\t{target_name}\t\n"
+                ),
+                "alias-target": (
+                    f"{header}\nconsumer::alias\t{target_name}\t"
+                    f"{executable}\n"
+                ),
                 "sentinel-target": (
-                    f"{header}\n{target_name}_NOT_BUILT\t{executable}\n"
+                    f"{header}\n{target_name}_NOT_BUILT\t{target_name}\t"
+                    f"{executable}\n"
                 ),
                 "missing-final-lf": (
-                    f"{header}\n{target_name}\t{executable}"
+                    f"{header}\n{target_name}\t{target_name}\t{executable}"
                 ),
             }
             malformed_payloads.update(
                 {
-                    f"control-{control_code}": (
+                    f"target-control-{control_code}": (
                         f"{header}\nconsumer"
+                        f"{chr(control_code)}injected\t{target_name}\t"
+                        f"{executable}\n"
+                    )
+                    for control_code in (*range(32), 127)
+                }
+            )
+            malformed_payloads.update(
+                {
+                    f"filename-control-{control_code}": (
+                        f"{header}\n{target_name}\tconsumer"
                         f"{chr(control_code)}injected\t{executable}\n"
                     )
                     for control_code in (*range(32), 127)
@@ -1231,7 +1488,8 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                         (
                             dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
                             + "\n"
-                            + f"{target_name}\t{rejected_path}\n"
+                            + f"{target_name}\t{target_name}\t"
+                            + f"{rejected_path}\n"
                         ),
                     )
                     with self.assertRaisesRegex(
@@ -1331,7 +1589,7 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                         malformed_payload = (
                             dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
                             + "\n"
-                            + f"{target_name}\t../outside\n"
+                            + f"{target_name}\t{target_name}\t../outside\n"
                         )
                         recorder = CommandRecorder(
                             {consumer_build: (target_name,)},
