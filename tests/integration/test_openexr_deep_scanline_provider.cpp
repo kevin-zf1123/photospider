@@ -544,6 +544,23 @@ std::string read_binary_file(const fs::path& path) {
 }
 
 /**
+ * @brief Builds one invalid path whose C-string prefix names a real target.
+ * @param prefix Filesystem path exposed before the embedded NUL.
+ * @param suffix Diagnostic path bytes retained after the embedded NUL.
+ * @return Exact `std::string` containing both path fragments and one NUL.
+ * @throws std::bad_alloc when path or result storage cannot allocate.
+ * @note The result must be rejected before any API can interpret only
+ * `prefix`; `suffix` is never a filesystem authority.
+ */
+std::string make_embedded_nul_path(const fs::path& prefix,
+                                   const fs::path& suffix) {
+  std::string path = prefix.string();
+  path.push_back('\0');
+  path.append(suffix.string());
+  return path;
+}
+
+/**
  * @brief Loads one provider and asserts a successful transaction.
  * @param registry Target registry.
  * @return Native DSO close counter retained by the caller.
@@ -842,6 +859,145 @@ TEST(OpenExrDeepScanlineProvider, AdmissionRejectsBeforePathSideEffects) {
   EXPECT_EQ(accepted.completion().wait().status(),
             ComputeIoCompletionStatus::Succeeded);
   EXPECT_TRUE(fs::exists(first));
+  executor.shutdown();
+}
+
+/**
+ * @brief Proves read admission rejects embedded NUL without decoding its valid
+ * C-string prefix.
+ * @throws Exceptions from provider loading, fixture I/O, or bounded I/O.
+ * @note The prefix is decoded successfully first, so inactive InvalidRequest
+ * proves the malformed submission did not silently read that same file.
+ */
+TEST(OpenExrDeepScanlineProvider,
+     ReadAdmissionRejectsEmbeddedNulBeforePrefixFileAccess) {
+  TemporaryDirectory temporary;
+  auto registry = std::make_shared<DataDefinitionRegistry>();
+  (void)load_initial_provider(*registry);
+  const fs::path prefix = temporary.path() / "read-prefix.exr";
+  const fs::path unexpected = temporary.path() / "read-unexpected.exr";
+  write_zero_sample_file(prefix);
+  ComputeIoExecutor executor({2U, 1024U * 1024U});
+
+  const auto baseline = submit_openexr_deep_read(
+      executor, registry, prefix.string(), 1024U, make_transaction_token());
+  ASSERT_TRUE(baseline.io_submission().accepted());
+  (void)baseline.wait();
+
+  std::atomic<std::uint64_t> codec_entries{0U};
+  OpenExrDeepIoHooks hooks;
+  hooks.before_codec = [&codec_entries]() {
+    codec_entries.fetch_add(1U, std::memory_order_relaxed);
+  };
+  const std::string invalid_path = make_embedded_nul_path(prefix, unexpected);
+  ASSERT_NE(invalid_path.find('\0'), std::string::npos);
+  const OpenExrDeepReadSubmission empty_path = submit_openexr_deep_read(
+      executor, registry, "", 1024U, make_transaction_token(), hooks);
+  const OpenExrDeepReadSubmission rejected = submit_openexr_deep_read(
+      executor, registry, invalid_path, 1024U, make_transaction_token(), hooks);
+
+  EXPECT_EQ(empty_path.io_submission().admission_status(),
+            ComputeIoAdmissionStatus::InvalidRequest);
+  EXPECT_FALSE(empty_path.io_submission().completion().active());
+  EXPECT_EQ(rejected.io_submission().admission_status(),
+            ComputeIoAdmissionStatus::InvalidRequest);
+  EXPECT_FALSE(rejected.io_submission().completion().active());
+  EXPECT_THROW((void)rejected.wait(), std::logic_error);
+  EXPECT_EQ(codec_entries.load(std::memory_order_relaxed), 0U);
+  const auto snapshot = executor.snapshot();
+  EXPECT_EQ(snapshot.active_tasks, 0U);
+  EXPECT_EQ(snapshot.active_planned_bytes, 0U);
+  EXPECT_EQ(snapshot.constructing_tasks, 0U);
+  EXPECT_EQ(snapshot.queued_tasks, 0U);
+  EXPECT_EQ(snapshot.running_tasks, 0U);
+  EXPECT_TRUE(fs::exists(prefix));
+  EXPECT_FALSE(fs::exists(unexpected));
+  executor.shutdown();
+}
+
+/**
+ * @brief Proves write admission and direct preflight reject embedded NUL before
+ * any prefix-path mutation or creation.
+ * @throws Exceptions from provider loading, fixture I/O, or bounded I/O.
+ * @note Both an existing byte sentinel and an absent prefix are checked; the
+ * shared direct-preflight contract must also throw Host-owned InvalidRequest.
+ */
+TEST(OpenExrDeepScanlineProvider,
+     WriteAdmissionRejectsEmbeddedNulWithoutPrefixSideEffects) {
+  TemporaryDirectory temporary;
+  auto registry = std::make_shared<DataDefinitionRegistry>();
+  (void)load_initial_provider(*registry);
+  const OpenExrDeepImage image = make_image();
+  const Value value = make_openexr_deep_value(*registry, image);
+  const fs::path existing_prefix = temporary.path() / "write-existing.exr";
+  const fs::path missing_prefix = temporary.path() / "write-missing.exr";
+  const fs::path unexpected = temporary.path() / "write-unexpected.exr";
+  const std::string sentinel(
+      "embedded\0nul\xff"
+      "prefix",
+      19U);
+  write_binary_file(existing_prefix, sentinel);
+  ComputeIoExecutor executor({2U, 1024U * 1024U});
+  std::atomic<std::uint64_t> codec_entries{0U};
+  OpenExrDeepIoHooks hooks;
+  hooks.before_codec = [&codec_entries]() {
+    codec_entries.fetch_add(1U, std::memory_order_relaxed);
+  };
+  const auto empty_path = submit_openexr_deep_write(
+      executor, value, "", 1024U, make_transaction_token(), hooks);
+  EXPECT_EQ(empty_path.admission_status(),
+            ComputeIoAdmissionStatus::InvalidRequest);
+  EXPECT_FALSE(empty_path.completion().active());
+
+  /**
+   * @brief Requires typed inactive rejection for one malformed prefix path.
+   * @param prefix Existing or absent C-string prefix to protect.
+   * @throws Exceptions from path construction or submission construction.
+   * @note Rejection must not invoke the shared codec hook.
+   */
+  const auto expect_submission_rejection = [&executor, &value, &unexpected,
+                                            &hooks](const fs::path& prefix) {
+    const std::string invalid_path = make_embedded_nul_path(prefix, unexpected);
+    const auto rejected = submit_openexr_deep_write(
+        executor, value, invalid_path, 1024U, make_transaction_token(), hooks);
+    EXPECT_EQ(rejected.admission_status(),
+              ComputeIoAdmissionStatus::InvalidRequest);
+    EXPECT_FALSE(rejected.completion().active());
+  };
+
+  expect_submission_rejection(existing_prefix);
+  EXPECT_EQ(read_binary_file(existing_prefix), sentinel);
+  expect_submission_rejection(missing_prefix);
+  EXPECT_FALSE(fs::exists(missing_prefix));
+  EXPECT_FALSE(fs::exists(unexpected));
+  EXPECT_EQ(codec_entries.load(std::memory_order_relaxed), 0U);
+  const auto snapshot = executor.snapshot();
+  EXPECT_EQ(snapshot.active_tasks, 0U);
+  EXPECT_EQ(snapshot.active_planned_bytes, 0U);
+  EXPECT_EQ(snapshot.constructing_tasks, 0U);
+  EXPECT_EQ(snapshot.queued_tasks, 0U);
+  EXPECT_EQ(snapshot.running_tasks, 0U);
+
+  const std::string invalid_preflight_path =
+      make_embedded_nul_path(existing_prefix, unexpected);
+  bool continuation_called = false;
+  const OpenExrDeepWriteOperation output_operation =
+      [&continuation_called](const OpenExrDeepWriteGeometry&,
+                             const std::string&) {
+        continuation_called = true;
+      };
+  try {
+    run_openexr_deep_write_preflight({image.data_window, image.display_window},
+                                     invalid_preflight_path, output_operation);
+    FAIL() << "Embedded-NUL OpenEXR write preflight path was accepted";
+  } catch (const OpenExrDeepError& error) {
+    EXPECT_EQ(error.code(), OpenExrDeepErrorCode::InvalidRequest)
+        << error.what();
+  }
+  EXPECT_FALSE(continuation_called);
+  EXPECT_EQ(read_binary_file(existing_prefix), sentinel);
+  EXPECT_FALSE(fs::exists(missing_prefix));
+  EXPECT_FALSE(fs::exists(unexpected));
   executor.shutdown();
 }
 

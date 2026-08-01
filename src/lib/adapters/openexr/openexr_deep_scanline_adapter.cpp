@@ -50,6 +50,19 @@ struct OpenExrDeepReadState final {
 namespace {
 
 /**
+ * @brief Reports whether one path can cross OpenEXR C-string filename APIs.
+ * @param path Caller-owned path argument.
+ * @return True exactly when the path is nonempty and contains no embedded NUL.
+ * @throws Nothing.
+ * @note Read/write submission admission and direct write preflight share this
+ * validation before path capture, executor work, filesystem access, or codec
+ * entry.
+ */
+bool is_openexr_path_argument_valid(const std::string& path) noexcept {
+  return !path.empty() && path.find('\0') == std::string::npos;
+}
+
+/**
  * @brief Adds two uint64 values with overflow rejection.
  * @param left First value.
  * @param right Second value.
@@ -567,10 +580,12 @@ std::vector<std::vector<float*>> make_sample_pointers(
 /**
  * @brief Decodes one already-classified single-part deep-scanline file.
  * @param registry Injected data-definition authority.
- * @param path Nonempty input path.
+ * @param path Nonempty, embedded-NUL-free input path validated at submission.
  * @param hooks Optional deterministic I/O-worker hooks.
  * @return Validated provider-defined Value.
  * @throws OpenExrDeepError with only Host-owned types.
+ * @note The submission boundary rejects malformed paths before this worker
+ * helper can invoke hooks, access the filesystem, or enter OpenEXR.
  */
 Value read_file(DataDefinitionRegistry& registry, const std::string& path,
                 const OpenExrDeepIoHooks& hooks) {
@@ -682,9 +697,12 @@ Value read_file(DataDefinitionRegistry& registry, const std::string& path,
 /**
  * @brief Encodes one validated generic deep Value to a new OpenEXR file.
  * @param value Exact provider-defined deep Value.
- * @param path Nonempty selected output path.
+ * @param path Nonempty, embedded-NUL-free output path validated at submission.
  * @param hooks Optional deterministic I/O-worker hooks.
  * @throws OpenExrDeepError with only Host-owned types.
+ * @note The submission boundary rejects malformed paths before this worker
+ * helper can inspect the Value, invoke hooks, or enter OpenEXR; the production
+ * preflight revalidates the same path contract before output preparation.
  */
 void write_file(const Value& value, const std::string& path,
                 const OpenExrDeepIoHooks& hooks) {
@@ -769,10 +787,11 @@ void write_file(const Value& value, const std::string& path,
 void run_openexr_deep_write_preflight(
     const OpenExrDeepWritePreflight& preflight, const std::string& path,
     const OpenExrDeepWriteOperation& operation) {
-  if (path.empty() || !operation) {
+  if (!is_openexr_path_argument_valid(path) || !operation) {
     throw OpenExrDeepError(
         OpenExrDeepErrorCode::InvalidRequest,
-        "OpenEXR deep write preflight requires a path and continuation.");
+        "OpenEXR deep write preflight requires a nonempty, embedded-NUL-free "
+        "path and a continuation.");
   }
   const OpenExrDeepWriteGeometry geometry =
       make_checked_write_geometry(preflight);
@@ -921,7 +940,7 @@ OpenExrDeepReadSubmission submit_openexr_deep_read(
     std::uint64_t planned_bytes,
     const std::shared_ptr<const void>& transaction_lifetime,
     const OpenExrDeepIoHooks& hooks) {
-  if (registry == nullptr || path.empty()) {
+  if (registry == nullptr || !is_openexr_path_argument_valid(path)) {
     return {};
   }
   std::shared_ptr<OpenExrDeepReadState> state;
@@ -954,7 +973,7 @@ execution::ComputeIoSubmission submit_openexr_deep_write(
     const std::string& path, std::uint64_t planned_bytes,
     const std::shared_ptr<const void>& transaction_lifetime,
     const OpenExrDeepIoHooks& hooks) {
-  if (!value.valid() || path.empty()) {
+  if (!value.valid() || !is_openexr_path_argument_valid(path)) {
     return {};
   }
   const auto factory = [&value, &path,

@@ -25,7 +25,9 @@ namespace ps::openexr_deep {
  * @throws Nothing for enum operations.
  */
 enum class OpenExrDeepErrorCode {
-  /** @brief Caller path, registry, Value, token, or byte plan is invalid. */
+  /** @brief Caller path, registry, Value, token, or byte plan is invalid.
+   * @note Paths are invalid when empty or when they contain embedded NUL.
+   */
   InvalidRequest,
   /** @brief File is shallow, tiled, multipart, mixed, or otherwise out of
      scope. */
@@ -108,7 +110,8 @@ struct OpenExrDeepIoHooks final {
   /**
    * @brief Called immediately before opening the OpenEXR input/output file.
    * @note Write-side in-memory Header/frame-buffer preparation may already be
-   * complete, but no output path has been opened or mutated.
+   * complete, but no output path has been opened or mutated. Invalid path
+   * arguments are rejected at submission and never invoke this hook.
    */
   std::function<void()> before_codec;
   /** @brief Called after read validation and before result-state publication.
@@ -149,7 +152,8 @@ struct OpenExrDeepWriteGeometry final {
 /**
  * @brief Continuation allowed to prepare and open one output after preflight.
  * @param geometry Fully checked file geometry.
- * @param path Nonempty output path still owned by the write transaction.
+ * @param path Nonempty, embedded-NUL-free output path still owned by the write
+ * transaction.
  * @throws Any Host/OpenEXR/allocation failure raised by output preparation.
  * @note Production supplies the complete Header/frame-buffer/open/write body;
  * tests may supply a side-effect witness without bypassing production order.
@@ -166,15 +170,18 @@ using OpenExrDeepWriteOperation = std::function<void(
  * the sole owner of Header/frame-buffer preparation and output-file opening.
  *
  * @param preflight Dependency-neutral signed-window input.
- * @param path Nonempty selected output path, not accessed by this function.
+ * @param path Nonempty, embedded-NUL-free selected output path, not accessed by
+ * this function.
  * @param operation Nonempty continuation invoked only after successful checks.
- * @throws OpenExrDeepError with InvalidRequest for an empty path/continuation.
+ * @throws OpenExrDeepError with InvalidRequest for an empty path, a path
+ * containing embedded NUL, or an empty continuation.
  * @throws OpenExrDeepError with UnsupportedFileShape for malformed,
  * overflowing, or unrepresentable windows and scan-line count.
  * @throws std::bad_alloc when owned diagnostic or continuation state allocates.
  * @throws Any exception raised by @p operation after successful preflight.
- * @note This source-private production barrier performs no filesystem or
- * OpenEXR operation before validation succeeds.
+ * @note This source-private production barrier shares the submission path
+ * contract and performs no filesystem or OpenEXR operation before path and
+ * geometry validation succeed.
  */
 void run_openexr_deep_write_preflight(
     const OpenExrDeepWritePreflight& preflight, const std::string& path,
@@ -262,16 +269,19 @@ OpenExrDeepImage inspect_openexr_deep_value(const Value& value);
  * @brief Submits one whole single-part deep-scanline read transaction.
  * @param executor Existing bounded process compute-I/O executor.
  * @param registry Non-null injected data-definition authority retained by work.
- * @param path Nonempty input path copied only after successful admission.
+ * @param path Nonempty, embedded-NUL-free input path copied only after
+ * successful executor admission.
  * @param planned_bytes Positive caller estimate charged for task lifetime.
  * @param transaction_lifetime Non-null Run/transaction owner.
  * @param hooks Optional source-private deterministic test coordination.
- * @return Typed executor submission plus decoded-result handle when accepted.
+ * @return Typed executor submission plus decoded-result handle when accepted;
+ * invalid registry/path input returns an InvalidRequest inactive sentinel.
  * @throws std::bad_alloc or std::system_error from admitted payload/queue
  * construction.
  * @throws std::invalid_argument when an admitted task payload is malformed.
- * @note Rejection invokes no lazy factory, captures no path/registry payload,
- * and performs no file access.
+ * @note Path validation precedes executor admission. Rejection invokes no lazy
+ * factory, captures no path/registry payload, consumes no executor budget, and
+ * performs no hook, worker, filesystem, or codec operation.
  */
 OpenExrDeepReadSubmission submit_openexr_deep_read(
     execution::ComputeIoExecutor& executor,
@@ -284,16 +294,20 @@ OpenExrDeepReadSubmission submit_openexr_deep_read(
  * @brief Submits one whole single-part deep-scanline write transaction.
  * @param executor Existing bounded process compute-I/O executor.
  * @param value Immutable provider-defined deep Value retained by accepted work.
- * @param path Nonempty output path copied only after successful admission.
+ * @param path Nonempty, embedded-NUL-free output path copied only after
+ * successful executor admission.
  * @param planned_bytes Positive caller estimate charged for task lifetime.
  * @param transaction_lifetime Non-null Run/transaction owner.
  * @param hooks Optional source-private deterministic test coordination.
- * @return Existing typed executor submission/completion fact.
+ * @return Existing typed executor submission/completion fact; invalid
+ * Value/path input returns an InvalidRequest inactive sentinel.
  * @throws std::bad_alloc or std::system_error from admitted payload/queue
  * construction.
  * @throws std::invalid_argument when an admitted task payload is malformed.
- * @note Path/overwrite/commit policy remains with the caller; the adapter opens
- * the selected path only after callback entry.
+ * @note Path validation precedes executor admission and any payload capture,
+ * budget charge, queue/worker use, hook, filesystem, or codec side effect.
+ * Overwrite/commit policy remains with the caller; the adapter opens the
+ * selected path only after callback entry and production preflight.
  */
 execution::ComputeIoSubmission submit_openexr_deep_write(
     execution::ComputeIoExecutor& executor, const Value& value,
