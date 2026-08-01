@@ -201,6 +201,23 @@ loads and closes an empty Host session, and observes `GraphErrc::Io` from an
 explicit YAML operation. CI may reuse a producer only after its cache identity,
 configuration, and complete capability profile are validated.
 
+The generated clean consumer project maintains one ordered CMake executable
+target list. That same list creates the targets, writes a configure-time exact
+target declaration, and supplies a configuration-specific two-field
+`target<TAB>$<TARGET_FILE:target>` manifest through `file(GENERATE)`. The current
+profile declares only `dependency_disabled_consumer`; adding another maintained
+consumer extends that CMake list and its source without adding a Python target
+name or discovery branch. The reader requires both manifests to be nonempty,
+unique, and identical in sequence. It rejects malformed fields, blank/comment
+records, invalid UTF-8, non-structural ASCII C0 controls or DEL, noncanonical
+target names, and missing, unexpected, duplicated, or reordered targets.
+Every resolved executable must use canonical native spelling, stay at the
+consumer build root or its selected configuration directory, match the target
+basename, avoid symlinks, and be an executable regular file. Collection, set,
+and path validation completes for the whole inventory before any consumer
+starts; valid consumers then run in declaration order and a runtime failure
+prevents later consumers from starting.
+
 When the selected CMake generator exposes multiple configurations, the smoke
 uses that same generator for producer and consumer, checks each
 `CMAKE_GENERATOR` and `CMAKE_CONFIGURATION_TYPES` cache value, and resolves the
@@ -244,8 +261,14 @@ compile target, or generated executable.
 shard: it runs the three install-consumer drivers' real command-construction
 paths against disposable producer cache fixtures while replacing subprocess
 execution, so it verifies cache-to-child-argv propagation without launching a
-product configure, build, or install. A separate `cmake -P` fixture calls the
-production public-header writer directly and performs no project configure.
+product configure, build, or install. Its data-driven command recorder also
+creates arbitrary 0/1/N dependency-disabled target declarations, target-file
+manifests, and fake executables. In-process cases require ordered execution and
+pre-runtime failure for empty, duplicate, missing/unexpected, malformed,
+control-bearing, unsafe, noncanonical, unexpected-layout, unbuilt, non-file, or
+non-executable inventory records; build and consumer failures lock fail-fast
+ordering. A separate `cmake -P` fixture calls the production public-header
+writer directly and performs no project configure.
 The same process injects executable lookup, validation, and captured-command
 callbacks into the static-product driver's production archive-symbol helpers.
 It locks Darwin xcrun-first fallback, non-Darwin independence, all-candidate

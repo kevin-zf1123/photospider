@@ -149,6 +149,19 @@ yaml-cpp link 泄漏；optional `operation_opencv` 保持 unavailable，required
 operation 返回 `GraphErrc::Io`。CI 只有在校验 producer cache identity、configuration 与完整
 capability profile 后才可复用该 producer。
 
+生成的 clean consumer project 会维护一份有序的 CMake executable target list。同一份 list
+负责创建 target、写出 configure-time 精确 target declaration，并通过 `file(GENERATE)` 提供
+configuration-specific 的双字段
+`target<TAB>$<TARGET_FILE:target>` manifest。当前 profile 只声明
+`dependency_disabled_consumer`；新增另一个长期 consumer 时，只需扩展该 CMake list 与对应源码，
+无需在 Python 中增加 target name 或 discovery branch。Reader 要求两份 manifest 都非空、唯一且
+顺序完全相同，并拒绝字段 malformed、blank/comment record、无效 UTF-8、非结构性的 ASCII C0
+control 或 DEL、非 canonical target name，以及缺失、意外、重复或乱序的 target。每个解析出的
+executable 都必须使用 canonical native 拼写、位于 consumer build root 或所选 configuration
+目录、basename 与 target 匹配、不是 symlink，并且是可执行 regular file。整份 inventory 的
+collection、set 与 path 校验会在任何 consumer 启动前全部完成；有效 consumer 随后按声明顺序
+运行，某个 consumer 运行失败时，后续 consumer 不会启动。
+
 当所选 CMake generator 提供多个 configuration 时，smoke 会为 producer 与 consumer 使用同一个
 generator，检查两侧的 `CMAKE_GENERATOR` 和 `CMAKE_CONFIGURATION_TYPES` cache 值，并从
 configuration-specific `$<TARGET_FILE:...>` manifest 解析 consumer 可执行文件。
@@ -182,8 +195,13 @@ manifest generator，但不会启动 compiler、product build、CTest、install�
 executable。
 `InstallConsumerArchitecturePropagationSafety` 同样留在主分片：它使用可丢弃的 producer cache
 fixture 执行三个 install-consumer driver 的真实命令构造路径，同时替换 subprocess 执行，因此能
-在不启动 product configure、build 或 install 的情况下验证 cache 到 child argv 的传播。另一项
-`cmake -P` fixture 会直接调用 production public-header writer，并且不会执行 project configure。
+在不启动 product configure、build 或 install 的情况下验证 cache 到 child argv 的传播。其
+data-driven command recorder 还会创建任意 0/1/N dependency-disabled target declaration、
+target-file manifest 与 fake executable。进程内 case 要求按序执行，并要求 empty、duplicate、
+missing/unexpected、malformed、含 control、unsafe、noncanonical、unexpected-layout、unbuilt、
+non-file 或 non-executable inventory record 在 runtime 前失败；build 与 consumer failure 还会锁定
+fail-fast 顺序。另一项 `cmake -P` fixture 会直接调用 production public-header writer，并且不会
+执行 project configure。
 同一进程还会向 static-product driver 的 production archive-symbol helper 注入 executable lookup、
 validation 与 captured-command callback；它会在不改变进程 PATH、也不取代真实 installed archive
 scan 的前提下，锁定 Darwin xcrun-first fallback、非 Darwin 独立性、全部 candidate failure 与
