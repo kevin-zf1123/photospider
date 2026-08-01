@@ -29,6 +29,9 @@ option(PHOTOSPIDER_ENABLE_OPENCV
     "Enable OpenCV-backed image processing, codecs, and public adapters" ON)
 option(PHOTOSPIDER_ENABLE_YAML
     "Enable YAML graph-document and cache-metadata persistence" ON)
+option(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER
+    "Build the optional single-part deep-scanline OpenEXR provider"
+    OFF)
 set(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER_DEFAULT
     ${PHOTOSPIDER_ENABLE_OPENCV})
 option(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER
@@ -339,6 +342,13 @@ endif()
 if(PHOTOSPIDER_ENABLE_YAML)
     find_package(yaml-cpp REQUIRED)
 endif()
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    find_package(OpenEXR 3 CONFIG REQUIRED)
+    if(NOT TARGET OpenEXR::OpenEXR)
+        message(FATAL_ERROR
+            "OpenEXR did not provide the required OpenEXR::OpenEXR target")
+    endif()
+endif()
 find_package(CURL) 
 find_package(OpenSSL)
 if(PHOTOSPIDER_BUILD_IPC OR BUILD_TESTING)
@@ -395,6 +405,41 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
         Photospider::operation_sdk
         Photospider::operation_runtime
         ${PHOTOSPIDER_OPENCV_CORE_TARGET})
+endif()
+
+# Optional V-15 definition provider and source-private Host codec adapter.
+# Neither target participates in the dependency-neutral product, operation
+# runtime, or provider SDK. The DSO publishes only the frozen v3 candidate
+# entry points; the adapter is a private C++ seam used by Host composition and
+# long-lived product tests.
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    add_library(photospider_openexr_deep_provider MODULE
+        plugins/data/openexr_deep_scanline_provider.cpp)
+    add_library(Photospider::openexr_deep_provider ALIAS
+        photospider_openexr_deep_provider)
+    set_target_properties(photospider_openexr_deep_provider PROPERTIES
+        EXPORT_NAME openexr_deep_provider
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+        LIBRARY_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}/data")
+    target_compile_features(photospider_openexr_deep_provider PRIVATE
+        cxx_std_17)
+    target_compile_definitions(photospider_openexr_deep_provider PRIVATE
+        PS_DATA_PROVIDER_BUILD)
+    target_include_directories(photospider_openexr_deep_provider PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+    target_link_libraries(photospider_openexr_deep_provider PRIVATE
+        Photospider::data_provider_sdk
+        OpenEXR::OpenEXR)
+
+    add_library(photospider_openexr_deep_adapter STATIC
+        src/lib/adapters/openexr/openexr_deep_scanline_adapter.cpp)
+    target_compile_features(photospider_openexr_deep_adapter PUBLIC cxx_std_17)
+    target_include_directories(photospider_openexr_deep_adapter PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+    target_link_libraries(photospider_openexr_deep_adapter PRIVATE
+        Photospider::operation_runtime
+        OpenEXR::OpenEXR)
 endif()
 
 # --- FTXUI (Frontend UI Lib) ---
@@ -1069,6 +1114,14 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     )
 endif()
 
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    install(TARGETS photospider_openexr_deep_provider
+        EXPORT PhotospiderOpenEXRTargets
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/photospider/providers
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+endif()
+
 if(PHOTOSPIDER_BUILD_IPC)
     install(TARGETS photospider_ipc_client
         EXPORT PhotospiderTargets
@@ -1103,10 +1156,38 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     )
 endif()
 
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    install(EXPORT PhotospiderOpenEXRTargets
+        NAMESPACE Photospider::
+        DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
+    )
+endif()
+
 install(EXPORT PhotospiderEmbeddedTargets
     NAMESPACE Photospider::
     DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
 )
+
+# Keep the disabled installation free of an inert optional-package lookup.
+# The enabled package substitutes this complete block; the disabled package
+# receives an empty string while still reporting the absent lowercase
+# component through the ordinary component loop.
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    set(PHOTOSPIDER_OPENEXR_COMPONENT_DISCOVERY [=[
+if(_Photospider_need_openexr)
+  if(Photospider_FIND_REQUIRED_openexr_deep_provider)
+    find_dependency(OpenEXR 3 CONFIG)
+  else()
+    find_package(OpenEXR 3 QUIET CONFIG)
+    if(NOT TARGET OpenEXR::OpenEXR)
+      set(Photospider_openexr_deep_provider_FOUND FALSE)
+    endif()
+  endif()
+endif()
+]=])
+else()
+    set(PHOTOSPIDER_OPENEXR_COMPONENT_DISCOVERY "")
+endif()
 
 configure_package_config_file(
     "${PROJECT_SOURCE_DIR}/cmake/PhotospiderConfig.cmake.in"
@@ -1496,6 +1577,35 @@ if(BUILD_TESTING)
             LABELS value-runtime
             TIMEOUT 30)
 
+    if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+        add_executable(test_openexr_deep_scanline_provider
+            tests/integration/test_openexr_deep_scanline_provider.cpp)
+        set_target_properties(test_openexr_deep_scanline_provider PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_definitions(test_openexr_deep_scanline_provider PRIVATE
+            "PS_OPENEXR_DEEP_PROVIDER_PATH=\"$<TARGET_FILE:photospider_openexr_deep_provider>\"")
+        target_include_directories(test_openexr_deep_scanline_provider PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests")
+        target_link_libraries(test_openexr_deep_scanline_provider PRIVATE
+            photospider_openexr_deep_adapter
+            photospider_execution_internal
+            Photospider::operation_runtime
+            OpenEXR::OpenEXR
+            GTest::gtest
+            GTest::gtest_main
+            ${CMAKE_DL_LIBS})
+        add_dependencies(test_openexr_deep_scanline_provider
+            photospider_openexr_deep_provider)
+        gtest_discover_tests(test_openexr_deep_scanline_provider
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS openexr-provider
+                TIMEOUT 60)
+    endif()
+
     add_executable(test_value_identity_across_dsos
         tests/integration/test_value_identity_dso.cpp)
     set_target_properties(test_value_identity_across_dsos PROPERTIES
@@ -1531,6 +1641,44 @@ if(BUILD_TESTING)
         LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
         RUN_SERIAL TRUE
         TIMEOUT 900)
+
+    # Keep optional-component build smokes in the complete inventory. Focused
+    # nested configurations intentionally expose their pre-existing bounded
+    # inventories and are validated independently by the parent smoke.
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+        add_test(NAME OpenExrDeepProviderOptionOffSmoke
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/openexr_deep_provider_option_off_smoke.py"
+                --repo "${PROJECT_SOURCE_DIR}"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/openexr_deep_provider_option_off_smoke"
+                --producer-build "${CMAKE_BINARY_DIR}"
+                --cmake-executable "${CMAKE_COMMAND}"
+                --config $<CONFIG>
+                --mode off)
+        set_tests_properties(OpenExrDeepProviderOptionOffSmoke PROPERTIES
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
+
+        if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+            add_test(NAME OpenExrDeepProviderInstallConsumerSmoke
+                COMMAND ${Python3_EXECUTABLE} -B
+                    "${PROJECT_SOURCE_DIR}/tests/integration/openexr_deep_provider_option_off_smoke.py"
+                    --repo "${PROJECT_SOURCE_DIR}"
+                    --work
+                        "${CMAKE_BINARY_DIR}/tests/openexr_deep_provider_install_consumer_smoke"
+                    --producer-build "${CMAKE_BINARY_DIR}"
+                    --cmake-executable "${CMAKE_COMMAND}"
+                    --config $<CONFIG>
+                    --mode enabled)
+            set_tests_properties(OpenExrDeepProviderInstallConsumerSmoke
+                PROPERTIES
+                    LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+                    RUN_SERIAL TRUE
+                    TIMEOUT 900)
+        endif()
+    endif()
 endif()
 
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
@@ -2366,6 +2514,7 @@ message(STATUS "-----------------------------------------------------------")
 message(STATUS "Build Configuration Summary:")
 message(STATUS "  Product Lib (Static): libphotospider (Embedded frontend)")
 message(STATUS "  OpenCV Capability : ${PHOTOSPIDER_ENABLE_OPENCV}")
+message(STATUS "  OpenEXR Deep      : ${PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER}")
 message(STATUS "  YAML Capability   : ${PHOTOSPIDER_ENABLE_YAML}")
 message(STATUS "  Graph CLI         : ${PHOTOSPIDER_BUILD_GRAPH_CLI}")
 message(STATUS "  OpenCV Op Plugins : ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS}")
