@@ -306,6 +306,15 @@ CPU compute worker 被禁止同步等待该 completion，因此阻塞的 cache c
 execution domain。由于当前 image-codec API 不可拆分，其整个 I/O-facing call 都在 I/O worker
 上运行；未来拆分后的 API 必须把独立准入的 CPU-heavy phase 送回 CPU executor。
 
+V-15 在不改变该 mechanism 的前提下增加第二个有界使用方。Source-private OpenEXR deep
+adapter 会把一次完整且不可拆分的 single-part deep-scanline read 或 write 作为 callback 提交。
+Admission 会接收正数 retained-byte estimate，并先于 path capture、Value/provider generation
+retention、result-state construction、filesystem side effect 或 OpenEXR entry 发生。任务一旦被
+接受，就会在完整 codec call 期间保留 transaction token、复制后的 path、精确 provider
+generation，以及 input Value 或 decoded-result state。调用 OpenEXR 时使用 `numThreads=0`，因此
+executor 的唯一 worker 仍是 adapter 创建的唯一 execution lane。Running cancellation 无法抢占
+foreign codec code；它会抑制延迟 result publication，并仍恰好一次释放 task/byte account。
+
 这是机制边界，不是第四种 scheduler 或 persistence authority。它不新增 execution route、
 ready store、Graph owner、policy decision surface、Host/device ledger dimension 或 public ABI。
 同步 cache administration/load、Graph 文档 operation、daemon job state 与私有 `OutputStore`
@@ -369,6 +378,7 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 - `src/lib/compute/run_lifecycle_registry.hpp` 和 `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` 和 `.cpp`
 - `src/lib/execution/compute_io_executor.*`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device_executor_registry.*`
 - `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
@@ -383,6 +393,7 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 - `src/lib/ipc/{codec,client,host,request_router}.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_compute_io_executor.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`

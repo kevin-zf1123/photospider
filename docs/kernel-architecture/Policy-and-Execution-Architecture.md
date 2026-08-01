@@ -371,6 +371,18 @@ occupy the CPU execution domain. Because the current image-codec API is
 indivisible, its whole I/O-facing call runs on the I/O worker; a future split
 API must return independently admitted CPU-heavy phases to the CPU executor.
 
+V-15 adds a second bounded user without changing that mechanism. The
+source-private OpenEXR deep adapter submits one complete indivisible
+single-part deep-scanline read or write as the callback. Admission receives a
+positive retained-byte estimate and occurs before path capture, Value/provider
+generation retention, result-state construction, filesystem effects, or
+OpenEXR entry. Once accepted, the task retains its transaction token, copied
+path, exact provider generation and input Value or decoded-result state through
+the complete codec call. OpenEXR is invoked with `numThreads=0`, so the
+executor's one worker remains the only adapter-created execution lane. Running
+cancellation cannot preempt foreign codec code; it suppresses late result
+publication and still releases task/byte accounts exactly once.
+
 This is a mechanism boundary, not a fourth scheduler or a persistence
 authority. It adds no execution route, ready store, Graph owner, policy
 decision surface, Host/device ledger dimension, or public ABI. Synchronous
@@ -446,6 +458,7 @@ process-isolated plugin supervision belongs to Issue #91.
 - `src/lib/compute/run_lifecycle_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` and `.cpp`
 - `src/lib/execution/compute_io_executor.*`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device_executor_registry.*`
 - `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
@@ -460,6 +473,7 @@ process-isolated plugin supervision belongs to Issue #91.
 - `src/lib/ipc/{codec,client,host,request_router}.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_compute_io_executor.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`

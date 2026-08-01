@@ -642,7 +642,10 @@ byte-preserving Schema/Facet/Layout envelopes, checked multi-buffer bindings,
 one injected typed registry, pure-C definition-suite ABI v3, pure
 property/DataSpec/Region evaluation, canonical descriptor/content/layout
 digests, artifact-envelope round-trip, and generation-safe replacement/unload.
-Their exact
+V-15 now binds that unchanged generic model to an optional repository OpenEXR
+single-part deep-scanline provider/codec, with explicit channel identities,
+typed shape/error rejection, bounded compute-I/O execution, generation-safe
+lifetime, and a dependency-clean default-OFF package profile. Their exact
 behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
@@ -652,7 +655,7 @@ ownership in
 [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md)
 and [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md). The
 complete model below is the accepted target; only the explicit V-2 through
-V-14 subset called out here is a current runtime fact.
+V-15 subset called out here is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 is authoritative for the complete target contract. Its central separation is:
@@ -687,7 +690,7 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2 through V-14 subset is deliberately narrower:
+The implemented V-2 through V-15 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, 8/16/32/64-bit native
@@ -831,15 +834,30 @@ Schema/Facet/Layout bytes and digest metadata without a provider. It is not a
 graph document, filesystem codec, cache manifest/chunk store, or durable output
 authority.
 
-V-14 still has no public device registry, device queue/in-flight dimensions,
+V-15 implements the first concrete optional `VariableSampleField` +
+`ImageFacet` + `DeepSampleFacet` codec. Its v3 provider publishes four fixed
+definitions and uses explicit versioned mapping metadata; diagnostic channel
+names never imply roles. A canonical provider-defined Value contains row-major
+counts, checked prefix offsets, and one identity-ordered FP32 stream per
+unit-sampled channel. Reusing V-14's nonempty semantic-buffer invariant bounds
+an all-zero image to count/offset storage only; channel mappings remain in
+versioned metadata without a sentinel payload or zero-length envelope.
+The source-private adapter reads and writes complete single-part deep-scanline
+files, materializes through the injected registry, retains exact generation
+and Value/read leases, and translates every foreign failure to Host-owned
+errors. Each indivisible codec call runs as one positively budgeted
+`ComputeIoExecutor` task with OpenEXR internal threads disabled.
+
+V-15 still has no public device registry, device queue/in-flight dimensions,
 additional packed encodings or quantization formulae, unaligned requantizing
 slices, access/conversion/inference/execution provider suites, generic graph or
-cache Value persistence, manifests/chunks, OpenEXR, or general named graph
-Value outputs. Its native executor, transfer submission, mutable
-producer, completion admission, and residency owner remain source-private.
+cache Value persistence, manifests/chunks, deep-tiled/multipart/mixed-part
+OpenEXR, or general named graph Value outputs. Its native executor, transfer
+submission, mutable producer, completion admission, and residency owner remain
+source-private.
 ImageBuffer remains the
-compatibility representation for operation ABI v2, tiled writes, codecs, and
-Host surfaces.
+compatibility representation for operation ABI v2, tiled writes, existing
+image codecs, and Host surfaces; V-15 does not adapt its deep Value through it.
 
 `ElementSemantics`, `StorageEncoding`, and `QuantizationSchema` are independent.
 Describable, executable, and convertible support are also independent, and
@@ -848,7 +866,7 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-For the current V-14 subset, `BufferHandle` is a checked immutable byte range.
+For the current V-15 subset, `BufferHandle` is a checked immutable byte range.
 Consumer reads and ordinary builder writes require leases; sealed Values never
 issue `WriteLease`, and consumer writes are always rejected. A source-private
 producer may complete one sealed pending CPU or native payload through its
@@ -926,12 +944,14 @@ replacement, leases, and unload directly. Its ABI v3 is the definition suite
 only and does not pre-implement access, conversion, inference, execution, or
 codec authority.
 
-V-15 is a separate later optional OpenEXR provider/codec issue/change. Its first
+V-15 is the current separate optional OpenEXR provider/codec slice. Its first
 format is single-part deep-scanline read/write, following the core and V-14
 proof rather than replacing it. Deep tiled, multipart, and mixed shallow/deep
-parts remain later work. Disabling the option must remove OpenEXR headers,
-links, types, symbols, package requirements, and transitive dependencies from
-the kernel, public ABI, and dependency-disabled product.
+parts remain later work. The build option defaults OFF; that profile removes
+OpenEXR headers, links, types, symbols, package discovery, target exports, and
+transitive dependencies from the kernel, public ABI, and dependency-disabled
+product. Explicit component consumption is the only installed package path
+that discovers OpenEXR and imports the provider MODULE.
 
 ## Heterogeneous Executors
 

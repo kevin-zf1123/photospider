@@ -412,6 +412,14 @@ C++ 声明使用 `extern "C"` 和 `noexcept`。
 record/sink layout assertion，从 callback-local storage 发出非空 property，并通过真实 registry
 transaction 分别加载它们。
 
+V-15 新增一个必须单独请求的 installed component：`openexr_deep_provider`。当
+`PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON` 时，请求该 component 会导入
+`Photospider::openexr_deep_provider`，随后发现 `OpenEXR::OpenEXR`；只请求 neutral
+component 时，两件事都不会发生。使用默认 OFF build 时，optional request 会报告该 component
+不可用，required request 则会在 OpenEXR discovery 前，以 Photospider 自有 component diagnostic
+失败。Installed target 只有 provider MODULE；其 source-private C++ codec adapter 既不安装也不
+export，而 provider 仍只暴露冻结的两个 v3 C entry point。
+
 ## 策略插件 ABI
 
 策略插件恰好导出由自包含 C11/C++17 头文件声明的两个函数：
@@ -557,7 +565,7 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 | 数据定义 provider v3 | 冻结 64 位 profile 下、大小精确的纯 C definition-suite 记录 | 只执行 Schema/Facet/Layout 校验和受界限约束的语义观察 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
 
-### 已实现的 V-2 至 V-14 SDK 与 definition-provider 子集
+### 已实现的 V-2 至 V-15 SDK 与 definition-provider 子集
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受分别版本化的纯 C provider suite，用于 Schema、Facet、Layout、access、conversion、
@@ -604,6 +612,15 @@ property/DataSpec/Region outcome、带 tag 的 canonical digest、artifact-envel
 继续存活。这个切片既不安装平台 DSO scanner，也不让 provider-defined Value 进入 graph compute、
 operation ABI v2、cache policy 或 codec。
 
+V-15 提供同一套未扩展 definition suite 的一个仓库自有实现。该 module 精确发布四项
+definition：`VariableSampleField` Schema、`ImageFacet`、`DeepSampleFacet` 与 deep
+multi-buffer Layout，并通过既有 callback 校验其版本化 payload 与完整 Value envelope。其显式
+implementation-version byte 只用于诊断；永久 provider/definition identity 与 structural version
+决定 interpretation。该 module 不 export codec entry point，也不拥有 registry、path policy、
+executor、cache 或 commit policy。Source-private adapter 会执行 OpenEXR read/write，并在保留
+module lease 时调用普通 registry/Value API。因此 OpenEXR 是一项可选 codec/provider 实现，
+而不是新的 v3 权限或第四条 ABI 边界。
+
 这些切片都不会把 Value、BufferHandle、lease、Region、ReadyFence、device/access record 或
 PImpl 放进 v2 callback record。V-14 在不改变另外两个边界的前提下向表中加入第三个边界。
 在每个仓库自有 operation 与 installed consumer 完成 migration 前，
@@ -644,6 +661,9 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - Definition provider 填写大小精确的记录，保留全部必须为零的 reserved 字段，
   让 callback metadata 存活到最终 generation destroy，并且绝不保留借用的 per-call view。
   C++ registry consumer 链接 `Photospider::operation_runtime`；这不意味着安装了 provider scanner。
+- 仓库自有 OpenEXR provider 只能通过单独请求的 `openexr_deep_provider` component 使用。它
+  export 相同两个 v3 symbol，绝不把 OpenEXR type 放入 public record，并且在默认 OFF 安装中
+  完全不存在，包括 dependency discovery 与 target export。
 - 策略插件包含 `photospider/policy/policy_plugin_api.h`、请求
   `policy_sdk` component，并链接 `Photospider::policy_sdk`。
 - 策略插件导出精确的两个 v1 符号、填写大小精确的记录、保持每个 Host 初始化
@@ -678,9 +698,13 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
+- `plugins/data/openexr_deep_scanline_provider.cpp`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/policy/policy_registry.*`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_variable_sample_field_extensions.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
+- `tests/integration/openexr_deep_provider_option_off_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/test_plugin_manager.cpp`
 - `tests/unit/test_op_registry_m31.cpp`

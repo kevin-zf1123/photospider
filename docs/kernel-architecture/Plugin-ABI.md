@@ -549,6 +549,17 @@ C11 and C++17 producers from the installed package, compiles independent output
 record/sink layout assertions, emits a nonempty property from callback-local
 storage, and loads each through the real registry transaction.
 
+V-15 adds one separately requested installed component,
+`openexr_deep_provider`. When
+`PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON`, requesting that component imports
+`Photospider::openexr_deep_provider` and then discovers `OpenEXR::OpenEXR`;
+requesting only neutral components does neither. With the default-OFF build,
+an optional request reports the component unavailable and a required request
+fails with a Photospider-owned component diagnostic before OpenEXR discovery.
+The installed target is the provider MODULE only. Its source-private C++ codec
+adapter is neither installed nor exported, and the provider still exposes
+only the two frozen v3 C entry points.
+
 ## Policy Plugin ABI
 
 A policy plugin exports exactly two functions declared by the self-contained
@@ -723,7 +734,7 @@ compatibility and authority profiles:
 | Data-definition provider v3 | Exact-size pure C definition-suite records under a frozen 64-bit profile | Schema/Facet/Layout validation and bounded semantic observation only |
 | Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
 
-### Implemented V-2 through V-14 SDK and definition-provider subset
+### Implemented V-2 through V-15 SDK and definition-provider subset
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts separately versioned pure-C provider suites for Schema, Facet, Layout,
@@ -782,6 +793,19 @@ Values, reads, callbacks, and owners survive atomic replacement and unload.
 This slice neither installs a platform DSO scanner nor enters provider-defined
 Values into graph compute, operation ABI v2, cache policy, or codecs.
 
+V-15 supplies one repository-owned implementation of the same unexpanded
+definition suite. The module publishes exactly four definitions—the
+`VariableSampleField` Schema, `ImageFacet`, `DeepSampleFacet`, and deep
+multi-buffer Layout—and validates their versioned payloads and complete Value
+envelopes through the existing callbacks. Its explicit implementation-version
+bytes are diagnostic; permanent provider/definition identities and structural
+version govern interpretation. The module exports no codec entry point and
+owns no registry, path policy, executor, cache, or commit policy. A
+source-private adapter performs OpenEXR read/write and calls the ordinary
+registry/Value APIs while the module lease is retained. Thus OpenEXR is one
+optional codec/provider implementation, not new v3 authority or a fourth ABI
+boundary.
+
 None of these slices places Value, BufferHandle, leases, Region, ReadyFence,
 device/access records, or a PImpl in a v2 callback record. V-14 adds the third
 boundary in the table without changing the other two. Operation ABI v2 remains the current
@@ -835,6 +859,10 @@ record the follow-up direction.
   reserved field, retain callback metadata until final generation destroy, and
   never retain borrowed per-call views. C++ registry consumers link
   `Photospider::operation_runtime`; no installed provider scanner is implied.
+- The repository OpenEXR provider is available only through the separately
+  requested `openexr_deep_provider` component. It exports the same two v3
+  symbols, never puts OpenEXR types in public records, and is absent—including
+  dependency discovery and target exports—from default-OFF installations.
 - Policy plugins include
   `photospider/policy/policy_plugin_api.h`, request the `policy_sdk`
   component, and link `Photospider::policy_sdk`.
@@ -871,6 +899,8 @@ record the follow-up direction.
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
+- `plugins/data/openexr_deep_scanline_provider.cpp`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/policy/policy_registry.*`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_plugin_manager.cpp`
@@ -882,6 +912,8 @@ record the follow-up direction.
 - `tests/fixtures/value_identity_dso.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
 - `tests/integration/test_variable_sample_field_extensions.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
+- `tests/integration/openexr_deep_provider_option_off_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

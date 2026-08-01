@@ -246,6 +246,14 @@ RT proxy output 继续保持 transient，当前注入的 artifact/metadata codec
 直到后续切片迁移 cache manifest 与 payload。未来 residency replica 也不会成为第二个 cache
 authority。
 
+V-15 不会改变这套 cache format 或 authority。其可选 OpenEXR deep adapter 可以在 caller 选择的
+path 读取或写入一个 provider-defined Value，但两项操作都不是 graph-cache load/save、
+manifest/chunk transaction 或正式 HP publication。Descriptor、storage-layout 与 provider
+选择的 ContentDigest 继续作为通用 semantic identity；adapter 不会把它们提升为 cache key、
+path、receipt 或 durability evidence。Provider replacement 与 read lease 只保护 interpretation
+lifetime。Eligibility、overwrite/commit policy，以及后续任何 cache 或 output outcome，均由 caller
+而不是 provider 或 `ComputeIoExecutor` 拥有。
+
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 还会把可丢弃 cache persistence 与 durable user-output commit 分离。Issue #88 现已实现上文
 描述的有界 mechanism 与 staged HP cache-save 垂直路径；同步 cache administration 与 load
@@ -272,6 +280,8 @@ eligibility、path、output commit policy、Graph 文档 transaction、daemon st
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/compute_io_executor.*`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `src/lib/graph/graph_model.*`
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/ipc/output_store.*`

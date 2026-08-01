@@ -285,7 +285,7 @@ side effect can precede Run commit and has no OutputStore transaction. These
 current limits and the separate target output authority are fixed by
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md).
 
-### Implemented V-3/V-4/V-6/V-8/V-9/V-12/V-13/V-14 relationship and remaining target
+### Implemented V-3/V-4/V-6/V-8/V-9/V-12/V-13/V-14/V-15 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete replacement:
@@ -413,18 +413,42 @@ when the provider emits the same logical stream. Artifact-envelope
 serialization preserves metadata and unknown extension bytes, but creates no
 filesystem, cache, or `ImageBuffer` persistence path.
 
-V-14 still does not implement other quantization formulae or packed formats,
+Issue #118 / V-15 keeps that memory contract and `ImageBuffer` unchanged while
+binding one optional OpenEXR codec to it. The concrete deep Layout has a
+row-major `uint32` count for every logical pixel, a `uint64` prefix-offset
+array of site-count plus one whose first entry is zero and whose final entry is
+the declared deep-sample count, and, when samples exist, one tightly packed
+FP32 sample buffer per explicit channel identity. Every offset is monotonic
+and in range; every channel buffer has exactly the shared declared sample
+count. Signed data and
+display windows remain descriptor facts and do not become negative storage
+offsets. File-channel sampling must be one-by-one, and channel names are
+diagnostic only. The unchanged V-14 nonempty-envelope invariant makes a
+zero shared sample total use two physical buffers only: counts and offsets.
+Channel identities and roles remain in descriptor/Layout metadata, while no
+sentinel payload, zero-length envelope, or fake sample identity is published.
+
+Codec staging occurs only inside one admitted source-private adapter call. It
+uses indexed `ProviderReadLease` values while translating generic buffers,
+does not publish OpenEXR pointers or exception types, and constructs the
+decoded result through the active registry before returning it. The provider
+generation, Value, transaction token, and path copy are retained through the
+complete I/O task; none becomes a public memory binding or a second ownership
+authority.
+
+V-15 still does not implement other quantization formulae or packed formats,
 unaligned requantizing slices, general Map/Import providers, the remaining
 provider ABI suites, a public device registry, device queue/in-flight
-accounting, generic graph/cache Value persistence, or general named graph Value
-outputs. Issue #87's compute-I/O durability
+accounting, generic graph/cache Value persistence, deep-tiled or multipart
+OpenEXR, or general named graph Value outputs. Issue #87's compute-I/O durability
 decision and Issue #88's first bounded cache/codec execution vertical remain
 current: the process executor retains transaction lifetime and budgets work,
 but does not change `ImageBuffer` or codec ABI. The V-12 I/O observation proves
 generic Value retention by an admitted task, not a lossless artifact format.
 Post-publication cache outcomes and durable output remain future.
 `ImageBuffer` remains the compatibility contract for operation ABI v2, tiled
-writes, codecs, and Host surfaces.
+writes, existing image codecs, and Host surfaces; the V-15 adapter does not
+route its provider-defined Value through that compatibility representation.
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.
@@ -461,6 +485,9 @@ operation ABI.
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
+- `src/lib/adapters/openexr/openexr_deep_contract.hpp`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
+- `plugins/data/openexr_deep_scanline_provider.cpp`
 - `src/lib/execution/metal_device_executor.*`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
@@ -478,3 +505,4 @@ operation ABI.
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/integration/test_variable_sample_field_extensions.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`

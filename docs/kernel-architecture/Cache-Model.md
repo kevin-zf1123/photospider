@@ -320,6 +320,16 @@ remains transient, and the current injected artifact/metadata codecs remain
 the implementation boundary until later slices migrate cache manifests and
 payloads. No future residency replica becomes a second cache authority.
 
+V-15 does not change this cache format or authority. Its optional OpenEXR deep
+adapter can read or write one provider-defined Value at a caller-selected path,
+but neither operation is a graph-cache load/save, manifest/chunk transaction,
+or formal HP publication. Descriptor, storage-layout, and provider-selected
+ContentDigest remain generic semantic identities; the adapter does not promote
+them to cache keys, paths, receipts, or durability evidence. Provider
+replacement and read leases protect interpretation lifetime only. The caller,
+not the provider or `ComputeIoExecutor`, owns eligibility, overwrite/commit
+policy, and any later cache or output outcome.
+
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 additionally separates discardable cache persistence from durable user-output
 commit. Issue #88 now implements the bounded mechanism and the staged HP
@@ -348,6 +358,8 @@ receipts, or durability. The future post-publication cache outcome and
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/compute_io_executor.*`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `src/lib/graph/graph_model.*`
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/ipc/output_store.*`

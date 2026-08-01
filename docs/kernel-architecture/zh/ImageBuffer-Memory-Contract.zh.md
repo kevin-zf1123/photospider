@@ -232,7 +232,7 @@ delivery state，不是 crash-durable output receipt。
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 固定。
 
-### 已实现的 V-3/V-4/V-6/V-8/V-9/V-12/V-13/V-14 关系与剩余目标
+### 已实现的 V-3/V-4/V-6/V-8/V-9/V-12/V-13/V-14/V-15 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受以下完整替换：
@@ -334,15 +334,34 @@ canonical ContentDigest 会排除 physical buffer order、padding 与 offset。A
 serialization 会保留 metadata 和未知 extension byte，但不会创建 filesystem、cache 或
 `ImageBuffer` persistence path。
 
-V-14 仍不实现其他 quantization formula 或 packed format、未对齐 requantizing slice、通用
+Issue #118 / V-15 保持这份 memory contract 与 `ImageBuffer` 不变，同时把一个可选 OpenEXR
+codec 绑定到该 contract。具体 deep Layout 会为每个逻辑 pixel 保存一个 row-major `uint32`
+count、一个长度为 site-count 加一的 `uint64` prefix-offset array（首项为零，末项为 declared
+deep-sample count），并在 sample 存在时为每个显式 channel identity 提供一条 tightly packed
+FP32 sample buffer。
+每个 offset 都必须单调且在范围内；每个 channel buffer 都必须恰好包含相同的 shared declared
+sample count。有符号 data/display window 继续作为 descriptor 事实，不会变成负 storage offset。
+文件 channel sampling 必须为 one-by-one，channel 名只用于诊断。依据未改变的 V-14
+nonempty-envelope 不变量，shared sample total 为零时只使用 count 与 offset 两个 physical buffer；
+channel identity 与 role 仍保留在 descriptor/Layout metadata 中，且不会发布 sentinel payload、
+零长度 envelope 或虚假 sample identity。
+
+Codec staging 只发生在一项已准入的 source-private adapter call 内。它在转换通用 buffer 时使用
+indexed `ProviderReadLease`，不会发布 OpenEXR pointer 或 exception type，并会先通过 active
+registry 构造解码后的 result 再返回。Provider generation、Value、transaction token 与 path copy
+会保留到完整 I/O task 结束；它们都不会成为 public memory binding 或第二套 ownership authority。
+
+V-15 仍不实现其他 quantization formula 或 packed format、未对齐 requantizing slice、通用
 Map/Import provider、剩余 provider ABI suite、public device registry、device queue/in-flight
-accounting、通用 graph/cache Value persistence 或通用命名 graph Value output。Issue #87 的
+accounting、通用 graph/cache Value persistence、deep-tiled 或 multipart OpenEXR，或通用命名
+graph Value output。Issue #87 的
 compute-I/O durability 决策与 Issue #88 首条有界 cache/codec execution 垂直路径继续是当前
 行为：process executor 会保留 transaction lifetime 并预算 work，但不改变 `ImageBuffer` 或
 codec ABI。V-12 I/O observation 证明已准入 task 对通用 Value 的 retention，而不是 lossless
 artifact format。Run publication 之后的 cache outcome 与 durable output 仍是未来工作。
-`ImageBuffer` 仍是 operation ABI v2、tiled write、codec 与 Host surface 的 compatibility
-contract。
+`ImageBuffer` 仍是 operation ABI v2、tiled write、现有 image codec 与 Host surface 的
+compatibility contract；V-15 adapter 不会让其 provider-defined Value 经过这套 compatibility
+representation。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。
@@ -377,6 +396,9 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
+- `src/lib/adapters/openexr/openexr_deep_contract.hpp`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
+- `plugins/data/openexr_deep_scanline_provider.cpp`
 - `src/lib/execution/metal_device_executor.*`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
@@ -394,3 +416,4 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/integration/test_variable_sample_field_extensions.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`

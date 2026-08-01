@@ -510,14 +510,17 @@ memory-cache retention 与 fail-closed image disk persistence。V-14 现在会�
 dependency-neutral provider-defined Value 垂直路径，包含保留 byte 的 Schema/Facet/Layout
 envelope、checked multi-buffer binding、一个注入式 typed registry、纯 C definition-suite ABI v3、
 纯 property/DataSpec/Region evaluation、canonical descriptor/content/layout digest、
-artifact-envelope round-trip，以及 generation-safe replacement/unload。精确行为记录在
+artifact-envelope round-trip，以及 generation-safe replacement/unload。V-15 现在会把这套未改变的
+通用模型绑定到一个可选的仓库自有 OpenEXR single-part deep-scanline provider/codec，并提供显式
+channel identity、typed shape/error rejection、有界 compute-I/O execution、generation-safe lifetime，
+以及依赖干净的默认 OFF package profile。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
 [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)；execution ownership 记录在
 [策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)与
 [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2 至 V-14 子集是当前 runtime 事实。
+只有这里明确指出的 V-2 至 V-15 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -548,7 +551,7 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2 至 V-14 子集刻意保持更窄的范围：
+已实现的 V-2 至 V-15 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
   或 floating element semantics、8/16/32/64-bit native scalar storage 或显式 four-bit FP4
@@ -661,19 +664,31 @@ buffer view。Versioned artifact-envelope encoding 可以在没有 provider 时�
 Schema/Facet/Layout byte 与 digest metadata。它不是 graph document、filesystem codec、cache
 manifest/chunk store 或 durable output authority。
 
-V-14 仍不含 public device registry、device queue/in-flight dimension、更多 packed encoding
+V-15 实现首个具体可选 `VariableSampleField + ImageFacet + DeepSampleFacet` codec。其 v3
+provider 会发布四项固定 definition，并使用显式版本化 mapping metadata；诊断用途的 channel
+名绝不隐含 role。Canonical provider-defined Value 包含 row-major count、经过检查的 prefix
+offset，以及每个 unit-sampled channel 各自一条按 identity 排序的 FP32 stream。由于复用 V-14
+的 nonempty semantic-buffer 不变量，全零 image 只保留 count/offset storage；channel mapping 仍
+保存在版本化 metadata 中，不引入 sentinel payload 或零长度 envelope。Source-private
+adapter 会读取与写入完整 single-part deep-scanline 文件，通过注入的 registry 物化结果，保留
+精确 generation 与 Value/read lease，并把所有 foreign failure 转换为 Host 自有 error。每项不可
+拆分的 codec call 都作为一项正数预算的 `ComputeIoExecutor` task 运行，同时关闭 OpenEXR 内部
+thread。
+
+V-15 仍不含 public device registry、device queue/in-flight dimension、更多 packed encoding
 或 quantization formula、未对齐 requantizing slice、access/conversion/inference/execution provider
-suite、通用 graph/cache Value persistence、manifest/chunk、OpenEXR 或通用 named graph Value output。Native
+suite、通用 graph/cache Value persistence、manifest/chunk、deep-tiled/multipart/mixed-part OpenEXR，
+或通用 named graph Value output。Native
 executor、transfer submission、mutable producer、completion admission 与 residency owner
-仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、codec 与 Host surface
-的 compatibility representation。
+仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、现有 image codec 与 Host
+surface 的 compatibility representation；V-15 不会让其 deep Value 经过这套表示。
 
 `ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
 executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意
 channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
 而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
 
-对于当前 V-14 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
+对于当前 V-15 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
 builder write 需要 lease；已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。
 Source-private producer 可以通过其不可复制的 capability，在预先验证的
 binding/Layout/handle envelope 内完成一个 sealed pending CPU 或 native payload。该 capability 的退役
@@ -740,11 +755,12 @@ multi-buffer Layout 与 binding、不具备 payload 权限的 Region/DataSpec/qu
 canonical digest、generation replacement、lease 与 unload。它的 ABI v3 仅是 definition suite，
 不会提前实现 access、conversion、inference、execution 或 codec 权限。
 
-V-15 是单独的后续可选 OpenEXR provider/codec issue/change。首个 format 是 single-part
+V-15 是当前单独的可选 OpenEXR provider/codec 切片。首个 format 是 single-part
 deep-scanline read/write；它跟随 core 与 V-14 proof，而不是替代 V-14。Deep tiled、multipart
-与混合 shallow/deep part 仍是后续工作。关闭 option 时，kernel、public ABI 与
-dependency-disabled product 中不得出现 OpenEXR header、link、type、symbol、package
-requirement 或 transitive dependency。
+与混合 shallow/deep part 仍是后续工作。Build option 默认为 OFF；该 profile 会从 kernel、
+public ABI 与 dependency-disabled product 中移除 OpenEXR header、link、type、symbol、package
+discovery、target export 与 transitive dependency。只有显式 component consumption 这条 installed
+package 路径会发现 OpenEXR 并导入 provider MODULE。
 
 ## 异构 Executor
 

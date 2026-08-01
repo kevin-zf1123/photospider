@@ -252,7 +252,7 @@ daemon result availability 与受保护 artifact publication 是不同的当前�
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)；
 它们不是新增的当前字段。
 
-### 已实现的 V-3 ownership 至 V-14 extension surface
+### 已实现的 V-3 ownership 至 V-15 extension surface
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受完整的通用 Value 替换。V-2 引入了有界 CPU DenseTensor 子集；V-3 现已接通其
@@ -416,12 +416,34 @@ byte 增量送入 SHA-256。两次 invocation 使用独立的 callback-local dia
 三个可选 digest identity，但它不是 graph document、manifest/chunk store、filesystem codec 或
 cache-policy integration。
 
+V-15 为这套未改变的 v3 definition suite 提供首个可选具体 generation。仓库自有 OpenEXR
+provider 会发布一个 `VariableSampleField` Schema、`ImageFacet`、`DeepSampleFacet` 与一个
+multi-buffer Layout。其版本化 descriptor payload 会保留有符号半开 data/display window，以及
+从诊断用途的文件 channel 名到永久 channel identity、semantic-role identity 与 Layout buffer
+role 的显式 mapping；名称不携带任何推断出的语义。其 canonical Value 保存一个 little-endian
+`uint32` sample-count buffer、一个经过检查的 little-endian `uint64` prefix-offset buffer，以及
+每个 unit-sampled channel 各自一条按 identity 排序的 FP32 sample stream。所有 stream 都必须
+与同一个 declared sample count 一致。由于未改变的 V-14 binding contract 要求每个已发布
+semantic buffer envelope 都具有非零长度，全零 deep image 会在 descriptor/Layout payload 中
+保留 channel mapping，但省略零长度 channel envelope 与 BufferHandle；其非空 count/offset buffer
+仍构成完整 canonical content traversal。
+
+Source-private OpenEXR adapter 通过注入的 `DataDefinitionRegistry` 与
+`Value::from_provider_defined` 解码；因此它会复用 V-14 的 cross-reference validation、
+generation retention、indexed read lease、Region/DataSpec/property 与三类通用 digest。编码会
+检查该通用 Value，而不会定义第二套 deep-image object model。首个 format 严格限于完整的
+single-part deep scanline；deep-tiled、multipart、shallow 或 mixed-part 文件、缺失或畸形的
+显式 mapping、非 FP32 channel 与非 unit sampling 都会以 Host 自有 typed error 失败。
+
 更多 packed encoding 或 quantization formula、需要 requantize 的未对齐 slice、通用
 Map/Import provider、其余 provider ABI suite、通用 graph/cache persistence 与通用命名
 immutable Value output 仍属于后续 no-shim slice。V-14 不新增 public resource declaration、
-通用 heap suballocation、device-queue budget、manifest/chunk、OpenEXR，或 provider-defined
-Value 的 graph/compute execution path。`ParameterMap` 仍用于 configuration 与当前命名
-scalar-result storage。
+通用 heap suballocation、device-queue budget 或 manifest/chunk。V-15 不新增 deep-tiled 或
+multipart 支持、provider-defined Value 的 graph/compute execution path、通用 graph/cache
+persistence 或 public OpenEXR type。`PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER` 默认为 OFF；
+在该 profile 下，OpenEXR header、link、symbol、package lookup 与 transitive dependency 均不会
+进入 dependency-neutral product。`ParameterMap` 仍用于 configuration 与当前命名 scalar-result
+storage。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
 mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的
@@ -472,6 +494,9 @@ dependency 工作由
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
+- `src/lib/adapters/openexr/openexr_deep_contract.hpp`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
+- `plugins/data/openexr_deep_scanline_provider.cpp`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`
@@ -485,5 +510,7 @@ dependency 工作由
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/integration/test_variable_sample_field_extensions.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
+- `tests/integration/openexr_deep_provider_option_off_smoke.py`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_value_identity_dso.cpp`

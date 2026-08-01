@@ -309,7 +309,7 @@ completion taxonomy are recorded in
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md);
 they are not additional current fields.
 
-### Implemented V-3 ownership through V-14 extension surfaces
+### Implemented V-3 ownership through V-15 extension surfaces
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete generic-value replacement. V-2 introduced the bounded CPU
@@ -517,12 +517,42 @@ Schema/Facet/Layout unknown bytes and all three optional digest identities
 without a provider, but it is not a graph document, manifest/chunk store,
 filesystem codec, or cache-policy integration.
 
+V-15 supplies the first optional concrete generation for that unchanged v3
+definition suite. The repository OpenEXR provider publishes one
+`VariableSampleField` Schema, `ImageFacet`, `DeepSampleFacet`, and one
+multi-buffer Layout. Its versioned descriptor payload preserves signed
+half-open data/display windows and an explicit mapping from diagnostic file
+channel names to permanent channel identities, semantic-role identities, and
+Layout buffer roles. Names carry no inferred semantics. Its canonical Value
+stores one little-endian `uint32` sample-count buffer, one checked
+little-endian `uint64` prefix-offset buffer, and one identity-ordered FP32
+sample stream per unit-sampled channel. Every stream agrees on the same
+declared sample count. Because the unchanged V-14 binding contract requires
+every published semantic buffer envelope to have nonzero length, an all-zero
+deep image retains its channel mapping in descriptor/Layout payloads but omits
+the zero-length channel envelopes and BufferHandles. Its nonempty count and
+offset buffers remain the complete canonical content traversal.
+
+The source-private OpenEXR adapter decodes through an injected
+`DataDefinitionRegistry` and `Value::from_provider_defined`; it therefore
+reuses V-14 cross-reference validation, generation retention, indexed read
+leases, Region/DataSpec/properties, and all three generic digests. Encoding
+inspects that generic Value rather than defining a second deep-image object
+model. The first format is strictly complete single-part deep scanline;
+deep-tiled, multipart, shallow or mixed-part files, absent/malformed explicit
+mapping, non-FP32 channels, and non-unit sampling fail with Host-owned typed
+errors.
+
 Additional packed encodings or quantization formulae, unaligned requantizing
 slices, general Map/Import providers, the remaining provider ABI suites,
 generic graph/cache persistence, and general named immutable Value outputs
 remain later no-shim slices. V-14 does not add public resource declarations,
-general heap suballocation, device-queue budgets, manifests/chunks, OpenEXR,
-or a graph/compute execution path for provider-defined Values.
+general heap suballocation, device-queue budgets, or manifests/chunks. V-15
+does not add deep-tiled or multipart support, a graph/compute execution path
+for provider-defined Values, generic graph/cache persistence, or public
+OpenEXR types. `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER` defaults OFF; in that
+profile no OpenEXR header, link, symbol, package lookup, or transitive
+dependency enters the dependency-neutral product.
 `ParameterMap` remains configuration and current named scalar-result storage.
 
 Keeping graph identity and topology in one model makes traversal, compute,
@@ -575,6 +605,9 @@ neither document changes the current fields described above.
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
+- `src/lib/adapters/openexr/openexr_deep_contract.hpp`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
+- `plugins/data/openexr_deep_scanline_provider.cpp`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`
@@ -588,5 +621,7 @@ neither document changes the current fields described above.
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/integration/test_variable_sample_field_extensions.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
+- `tests/integration/openexr_deep_provider_option_off_smoke.py`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
