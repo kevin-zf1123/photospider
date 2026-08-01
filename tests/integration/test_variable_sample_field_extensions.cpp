@@ -20,6 +20,10 @@
 namespace ps {
 namespace {
 
+static_assert(noexcept(std::declval<ps_data_copy_output_fn_v3>()(
+                  nullptr, PS_DATA_OUTPUT_DIAGNOSTIC_MESSAGE_V3, nullptr, 0U)),
+              "v3 Host output copy must fence all exceptions");
+
 /** @brief Stable synthetic provider replacement identity. */
 constexpr ExtensionIdentity kProviderIdentity{
     0x1170000000000001ULL,
@@ -56,6 +60,14 @@ constexpr ExtensionIdentity kGenerationProperty{
 constexpr ExtensionIdentity kEmptyBytesProperty{
     0x1170000000000034ULL,
     0x0000000000000034ULL};  // NOLINT(whitespace/indent_namespace)
+/** @brief Available property emitted from callback-local byte storage. */
+constexpr ExtensionIdentity kCallbackLocalBytesProperty{
+    0x1170000000000035ULL,
+    0x0000000000000035ULL};  // NOLINT(whitespace/indent_namespace)
+/** @brief Malicious property whose declared output exceeds the Host bound. */
+constexpr ExtensionIdentity kOversizedBytesProperty{
+    0x1170000000000036ULL,
+    0x0000000000000036ULL};  // NOLINT(whitespace/indent_namespace)
 /** @brief Synthetic rank-one logical-site Region domain. */
 constexpr ExtensionIdentity kLogicalSiteDomain{
     0x1170000000000040ULL,
@@ -154,8 +166,12 @@ struct SyntheticProviderState final {
   /** @brief Whether owner-create returns OK with malformed diagnostic framing.
    */
   bool malformed_owner_diagnostic = false;
+  /** @brief Whether validation emits a callback-local failure diagnostic. */
+  bool callback_local_validation_diagnostic = false;
   /** @brief Whether an unsupported Region carries a forbidden site count. */
   bool contradictory_region_output = false;
+  /** @brief Optional malicious/rank-general exact TensorSlice site count. */
+  std::optional<std::uint64_t> tensor_slice_site_count_override;
   /** @brief Stable implementation-version bytes. */
   std::string implementation_version = "synthetic-variable-sample-field-v1";
   /** @brief Stable diagnostic definition names. */
@@ -247,37 +263,47 @@ ps_data_bytes_v3 borrowed_bytes(const std::string& value) noexcept {
 }
 
 /**
- * @brief Publishes one literal provider diagnostic without allocation.
+ * @brief Copies one literal diagnostic into Host-owned callback output.
  * @param diagnostic Host-owned output record, possibly null.
+ * @param output Host-owned synchronous callback output sink.
  * @param code Provider-specific nonzero code.
  * @param message Static NUL-terminated diagnostic literal.
- * @throws Nothing.
+ * @return Stable output-copy status.
+ * @throws Nothing across the pure-C ABI.
  */
-void set_diagnostic(ps_data_diagnostic_v3* diagnostic, std::uint32_t code,
-                    const char* message) noexcept {
-  if (diagnostic == nullptr || message == nullptr) {
-    return;
+ps_data_status_v3 set_diagnostic(ps_data_diagnostic_v3* diagnostic,
+                                 const ps_data_output_sink_v3* output,
+                                 std::uint32_t code,
+                                 const char* message) noexcept {
+  if (diagnostic == nullptr || output == nullptr || output->copy == nullptr ||
+      message == nullptr) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
   }
   std::size_t size = 0U;
   while (message[size] != '\0') {
     ++size;
   }
   diagnostic->code = code;
-  diagnostic->message = {reinterpret_cast<const std::uint8_t*>(message),
-                         static_cast<std::uint64_t>(size)};
+  diagnostic->message_size = static_cast<std::uint64_t>(size);
+  return output->copy(output->context, PS_DATA_OUTPUT_DIAGNOSTIC_MESSAGE_V3,
+                      reinterpret_cast<const std::uint8_t*>(message), size);
 }
 
 /**
  * @brief Returns one callback failure with an owned-by-provider literal.
  * @param diagnostic Host output record.
+ * @param output Host-owned synchronous callback output sink.
  * @param message Static failure text.
- * @return `PS_DATA_STATUS_INVALID_ARGUMENT_V3`.
+ * @return Invalid-argument after successful copy, otherwise sink failure.
  * @throws Nothing.
  */
 ps_data_status_v3 invalid_callback(ps_data_diagnostic_v3* diagnostic,
+                                   const ps_data_output_sink_v3* output,
                                    const char* message) noexcept {
-  set_diagnostic(diagnostic, 1U, message);
-  return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  const ps_data_status_v3 status =
+      set_diagnostic(diagnostic, output, 1U, message);
+  return status == PS_DATA_STATUS_OK_V3 ? PS_DATA_STATUS_INVALID_ARGUMENT_V3
+                                        : status;
 }
 
 /**
@@ -489,15 +515,19 @@ ps_data_status_v3 validate_semantics(const ps_data_value_view_v3* value,
  * @param provider_context Non-null SyntheticProviderState.
  * @param value Host-validated payload-enabled view.
  * @param diagnostic Host-owned diagnostic output.
+ * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable validation status.
  * @throws Nothing across the pure-C ABI.
  */
 ps_data_status_v3 PS_DATA_CALL
 synthetic_validate(void* provider_context, const ps_data_value_view_v3* value,
-                   ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+                   ps_data_diagnostic_v3* diagnostic,
+                   const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
   auto* state = static_cast<SyntheticProviderState*>(provider_context);
-  if (state == nullptr || !state->counters) {
-    return invalid_callback(diagnostic, "Synthetic provider context missing.");
+  if (state == nullptr || !state->counters || output == nullptr ||
+      output->copy == nullptr) {
+    return invalid_callback(diagnostic, output,
+                            "Synthetic provider context missing.");
   }
   state->counters->validate_calls.fetch_add(1U, std::memory_order_relaxed);
   DescriptorFacts facts;
@@ -508,8 +538,23 @@ synthetic_validate(void* provider_context, const ps_data_value_view_v3* value,
       validate_semantics(value, &facts, &counts, &offsets, &samples);
   if (status != PS_DATA_STATUS_OK_V3) {
     return invalid_callback(
-        diagnostic,
+        diagnostic, output,
         "Synthetic counts, offsets, and sample records are inconsistent.");
+  }
+  if (state->callback_local_validation_diagnostic) {
+    std::array<std::uint8_t, 34U> message{
+        'c', 'a', 'l', 'l', 'b', 'a', 'c', 'k', '-', 'l', 'o', 'c',
+        'a', 'l', ' ', 'v', 'a', 'l', 'i', 'd', 'a', 't', 'i', 'o',
+        'n', ' ', 'f', 'a', 'i', 'l', 'u', 'r', 'e', '.'};
+    diagnostic->code = 117U;
+    diagnostic->message_size = message.size();
+    const ps_data_status_v3 copy_status =
+        output->copy(output->context, PS_DATA_OUTPUT_DIAGNOSTIC_MESSAGE_V3,
+                     message.data(), message.size());
+    message.fill(static_cast<std::uint8_t>('x'));
+    return copy_status == PS_DATA_STATUS_OK_V3
+               ? PS_DATA_STATUS_INVALID_ARGUMENT_V3
+               : copy_status;
   }
   return PS_DATA_STATUS_OK_V3;
 }
@@ -1152,6 +1197,97 @@ TEST(VariableSampleFieldExtensions,
 }
 
 TEST(VariableSampleFieldExtensions,
+     CallbackLocalOutputsAreSynchronouslyCopiedAndBounded) {
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(37U);
+  SyntheticProviderState* const provider_state = fixture.state;
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+  ASSERT_TRUE(load_candidate(registry, std::move(fixture)).ok());
+  SyntheticStorage storage = make_storage();
+
+  provider_state->callback_local_validation_diagnostic = true;
+  try {
+    (void)Value::from_provider_defined(registry, make_descriptor(),
+                                       storage.layout, storage.buffers);
+    FAIL() << "callback-local validation failure unexpectedly published";
+  } catch (const ExtensionContractError& error) {
+    EXPECT_EQ(error.code(), ExtensionErrorCode::ProviderRejected);
+    EXPECT_STREQ(error.what(), "callback-local validation failure.");
+  }
+  provider_state->callback_local_validation_diagnostic = false;
+
+  Value value = Value::from_provider_defined(registry, make_descriptor(),
+                                             storage.layout, storage.buffers);
+  const PropertyQueryResult callback_local =
+      value.query_property({kCallbackLocalBytesProperty});
+  EXPECT_EQ(callback_local.state, PropertyQueryState::Available);
+  const std::vector<std::byte> expected{std::byte{0x11}, std::byte{0x22},
+                                        std::byte{0x33}, std::byte{0x44},
+                                        std::byte{0x55}};
+  EXPECT_EQ(callback_local.bytes_value, expected);
+
+  const PropertyQueryResult oversized =
+      value.query_property({kOversizedBytesProperty});
+  EXPECT_EQ(oversized.state, PropertyQueryState::InvalidDescriptor);
+  EXPECT_TRUE(oversized.bytes_value.empty());
+  EXPECT_NE(oversized.diagnostic.find("malformed callback output"),
+            std::string::npos);
+  EXPECT_EQ(counters->validate_calls.load(), 2U);
+  EXPECT_EQ(counters->query_calls.load(), 2U);
+}
+
+TEST(VariableSampleFieldExtensions,
+     ExactTensorSliceRequiresCheckedRankGeneralSiteCount) {
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(39U);
+  SyntheticProviderState* const provider_state = fixture.state;
+  ASSERT_TRUE(load_candidate(registry, std::move(fixture)).ok());
+  SyntheticStorage storage = make_storage();
+  Value value = Value::from_provider_defined(registry, make_descriptor(),
+                                             storage.layout, storage.buffers);
+  const RegionSet multidimensional = RegionSet::from_tensor_slice(
+      TensorSlice{{kLogicalSiteDomain.high, kLogicalSiteDomain.low},
+                  {{1U, 3U}, {4U, 7U}}});
+
+  provider_state->tensor_slice_site_count_override = 6U;
+  const ProviderRegionResult correct = value.evaluate_region(multidimensional);
+  EXPECT_EQ(correct.state, ProviderRegionState::Exact);
+  EXPECT_EQ(correct.region, multidimensional);
+  EXPECT_EQ(correct.selected_logical_sites, 6U);
+
+  provider_state->tensor_slice_site_count_override = 5U;
+  const ProviderRegionResult wrong_nonzero =
+      value.evaluate_region(multidimensional);
+  EXPECT_EQ(wrong_nonzero.state, ProviderRegionState::InvalidDescriptor);
+  EXPECT_EQ(wrong_nonzero.selected_logical_sites, 0U);
+  EXPECT_NE(wrong_nonzero.diagnostic.find("incorrect TensorSlice site count"),
+            std::string::npos);
+
+  provider_state->tensor_slice_site_count_override = 0U;
+  const ProviderRegionResult wrong_zero =
+      value.evaluate_region(multidimensional);
+  EXPECT_EQ(wrong_zero.state, ProviderRegionState::InvalidDescriptor);
+  EXPECT_EQ(wrong_zero.selected_logical_sites, 0U);
+
+  const RegionSet overflowing = RegionSet::from_tensor_slice(
+      TensorSlice{{kLogicalSiteDomain.high, kLogicalSiteDomain.low},
+                  {{0U, std::uint64_t{1U} << 63U}, {0U, 3U}}});
+  const ProviderRegionResult overflow = value.evaluate_region(overflowing);
+  EXPECT_EQ(overflow.state, ProviderRegionState::InvalidDescriptor);
+  EXPECT_EQ(overflow.selected_logical_sites, 0U);
+  EXPECT_NE(overflow.diagnostic.find("overflows uint64_t"), std::string::npos);
+
+  provider_state->tensor_slice_site_count_override.reset();
+  const ProviderRegionResult empty = value.evaluate_region(RegionSet::empty());
+  EXPECT_EQ(empty.state, ProviderRegionState::Exact);
+  EXPECT_EQ(empty.selected_logical_sites, 0U);
+  const ProviderRegionResult unsupported =
+      value.evaluate_region(make_site_region(0U, 1U, {0x999U, 0x111U}));
+  EXPECT_EQ(unsupported.state, ProviderRegionState::Unsupported);
+  EXPECT_EQ(unsupported.selected_logical_sites, 0U);
+}
+
+TEST(VariableSampleFieldExtensions,
      CanonicalContentIgnoresPhysicalOrderOffsetsAndPadding) {
   DataDefinitionRegistry registry;
   SyntheticCandidate fixture = make_candidate(41U);
@@ -1247,6 +1383,15 @@ TEST(VariableSampleFieldExtensions,
             51U);
   EXPECT_EQ(new_value->query_property({kGenerationProperty}).unsigned_value,
             52U);
+  const std::vector<std::byte> callback_local_bytes{
+      std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44},
+      std::byte{0x55}};
+  EXPECT_EQ(
+      old_value->query_property({kCallbackLocalBytesProperty}).bytes_value,
+      callback_local_bytes);
+  EXPECT_EQ(
+      new_value->query_property({kCallbackLocalBytesProperty}).bytes_value,
+      callback_local_bytes);
   EXPECT_EQ(first_counters->provider_destroys.load(), 0U);
 
   old_value.reset();
@@ -1280,7 +1425,8 @@ TEST(VariableSampleFieldExtensions,
       load_candidate(registry, std::move(first));
   ASSERT_TRUE(first_load.ok());
   const DataDescriptorEnvelope descriptor = make_descriptor();
-  const ProviderDefinedLayout layout = make_storage().layout;
+  const SyntheticStorage storage = make_storage();
+  const ProviderDefinedLayout& layout = storage.layout;
 
   constexpr std::size_t kThreadCount = 4U;
   constexpr std::size_t kLookupCount = 5000U;
@@ -1305,6 +1451,17 @@ TEST(VariableSampleFieldExtensions,
         if (!resolved.ok()) {
           invalid_observations.fetch_add(1U, std::memory_order_relaxed);
           continue;
+        }
+        if (lookup % 128U == 0U) {
+          const PropertyQueryResult property =
+              resolved.lease.query(descriptor, layout, storage.buffers,
+                                   {kCallbackLocalBytesProperty});
+          if (property.state != PropertyQueryState::Available ||
+              property.bytes_value.size() != 5U ||
+              property.bytes_value[0U] != std::byte{0x11} ||
+              property.bytes_value[4U] != std::byte{0x55}) {
+            invalid_observations.fetch_add(1U, std::memory_order_relaxed);
+          }
         }
         if (resolved.lease.generation() == first_load.generation) {
           old_observations.fetch_add(1U, std::memory_order_relaxed);
@@ -1359,17 +1516,21 @@ namespace {
  * @param query Stable property request.
  * @param result Host-owned exact-size result record.
  * @param diagnostic Host-owned diagnostic output.
+ * @param output Host-owned synchronous diagnostic/property output sink.
  * @return Stable callback status.
  * @throws Nothing across the pure-C ABI.
  */
 ps_data_status_v3 PS_DATA_CALL synthetic_query(
     void* provider_context, const ps_data_value_view_v3* value,
     const ps_data_property_query_v3* query, ps_data_property_result_v3* result,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
   auto* state = static_cast<SyntheticProviderState*>(provider_context);
   if (state == nullptr || !state->counters || query == nullptr ||
-      result == nullptr || !pure_view(state, value)) {
-    return invalid_callback(diagnostic, "Synthetic pure query is malformed.");
+      result == nullptr || output == nullptr || output->copy == nullptr ||
+      !pure_view(state, value)) {
+    return invalid_callback(diagnostic, output,
+                            "Synthetic pure query is malformed.");
   }
   state->counters->query_calls.fetch_add(1U, std::memory_order_relaxed);
   DescriptorFacts facts;
@@ -1394,7 +1555,27 @@ ps_data_status_v3 PS_DATA_CALL synthetic_query(
   } else if (identity_equals(query->property, kEmptyBytesProperty)) {
     result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
     result->value_kind = PS_DATA_PROPERTY_VALUE_BYTES_V3;
-    result->bytes_value = {nullptr, 0U};
+    result->bytes_size = 0U;
+    return output->copy(output->context, PS_DATA_OUTPUT_PROPERTY_BYTES_V3,
+                        nullptr, 0U);
+  } else if (identity_equals(query->property, kCallbackLocalBytesProperty)) {
+    result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
+    result->value_kind = PS_DATA_PROPERTY_VALUE_BYTES_V3;
+    std::array<std::uint8_t, 5U> bytes{0x11U, 0x22U, 0x33U, 0x44U, 0x55U};
+    result->bytes_size = bytes.size();
+    const ps_data_status_v3 status =
+        output->copy(output->context, PS_DATA_OUTPUT_PROPERTY_BYTES_V3,
+                     bytes.data(), bytes.size());
+    bytes.fill(0xeeU);
+    return status;
+  } else if (identity_equals(query->property, kOversizedBytesProperty)) {
+    result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
+    result->value_kind = PS_DATA_PROPERTY_VALUE_BYTES_V3;
+    std::uint8_t byte = 0x5aU;
+    result->bytes_size = 64U * 1024U + 1U;
+    (void)output->copy(output->context, PS_DATA_OUTPUT_PROPERTY_BYTES_V3, &byte,
+                       result->bytes_size);
+    return PS_DATA_STATUS_OK_V3;
   } else {
     result->state = PS_DATA_PROPERTY_NOT_APPLICABLE_V3;
     result->value_kind = PS_DATA_PROPERTY_VALUE_NONE_V3;
@@ -1409,22 +1590,26 @@ ps_data_status_v3 PS_DATA_CALL synthetic_query(
  * @param request Host-normalized Region request.
  * @param result Host-owned exact-size result record.
  * @param diagnostic Host-owned diagnostic output.
+ * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable callback status.
  * @throws Nothing across the pure-C ABI.
  */
 ps_data_status_v3 PS_DATA_CALL synthetic_evaluate_region(
     void* provider_context, const ps_data_value_view_v3* value,
     const ps_data_region_request_v3* request, ps_data_region_result_v3* result,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
   auto* state = static_cast<SyntheticProviderState*>(provider_context);
   if (state == nullptr || !state->counters || request == nullptr ||
-      result == nullptr || !pure_view(state, value)) {
-    return invalid_callback(diagnostic, "Synthetic Region request malformed.");
+      result == nullptr || output == nullptr || output->copy == nullptr ||
+      !pure_view(state, value)) {
+    return invalid_callback(diagnostic, output,
+                            "Synthetic Region request malformed.");
   }
   state->counters->region_calls.fetch_add(1U, std::memory_order_relaxed);
   DescriptorFacts facts;
   if (!parse_descriptor(value, &facts)) {
-    return invalid_callback(diagnostic,
+    return invalid_callback(diagnostic, output,
                             "Synthetic descriptor cannot evaluate Region.");
   }
   if (request->complexity_budget == 0U) {
@@ -1441,6 +1626,14 @@ ps_data_status_v3 PS_DATA_CALL synthetic_evaluate_region(
       result->selected_site_count = facts.logical_sites;
       return PS_DATA_STATUS_OK_V3;
     case PS_DATA_REGION_TENSOR_SLICE_V3:
+      if (state->tensor_slice_site_count_override.has_value() &&
+          identity_equals(request->domain, kLogicalSiteDomain) &&
+          request->rank != 0U && request->begin != nullptr &&
+          request->end != nullptr) {
+        result->state = PS_DATA_REGION_EXACT_V3;
+        result->selected_site_count = *state->tensor_slice_site_count_override;
+        return PS_DATA_STATUS_OK_V3;
+      }
       if (!identity_equals(request->domain, kLogicalSiteDomain) ||
           request->rank != 1U || request->begin == nullptr ||
           request->end == nullptr) {
@@ -1462,7 +1655,8 @@ ps_data_status_v3 PS_DATA_CALL synthetic_evaluate_region(
       result->state = PS_DATA_REGION_UNSUPPORTED_STATE_V3;
       return PS_DATA_STATUS_OK_V3;
     default:
-      return invalid_callback(diagnostic, "Synthetic Region kind is unknown.");
+      return invalid_callback(diagnostic, output,
+                              "Synthetic Region kind is unknown.");
   }
 }
 
@@ -1473,6 +1667,7 @@ ps_data_status_v3 PS_DATA_CALL synthetic_evaluate_region(
  * @param request Bounded Schema/version/site predicate.
  * @param result Host-owned exact-size relation output.
  * @param diagnostic Host-owned diagnostic output.
+ * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable callback status.
  * @throws Nothing across the pure-C ABI.
  * @note A broader range containing the concrete site count deliberately
@@ -1481,11 +1676,13 @@ ps_data_status_v3 PS_DATA_CALL synthetic_evaluate_region(
 ps_data_status_v3 PS_DATA_CALL synthetic_evaluate_spec(
     void* provider_context, const ps_data_value_view_v3* value,
     const ps_data_spec_request_v3* request, ps_data_spec_result_v3* result,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
   auto* state = static_cast<SyntheticProviderState*>(provider_context);
   if (state == nullptr || !state->counters || request == nullptr ||
-      result == nullptr || !pure_view(state, value)) {
-    return invalid_callback(diagnostic,
+      result == nullptr || output == nullptr || output->copy == nullptr ||
+      !pure_view(state, value)) {
+    return invalid_callback(diagnostic, output,
                             "Synthetic DataSpec request malformed.");
   }
   state->counters->spec_calls.fetch_add(1U, std::memory_order_relaxed);
@@ -1537,17 +1734,19 @@ void write_u32_be(std::uint32_t value, std::uint8_t* bytes) noexcept {
  * @param value Payload-enabled Host view.
  * @param sink Host-owned canonical byte sink.
  * @param diagnostic Host-owned diagnostic output.
+ * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable callback or sink status.
  * @throws Nothing across the pure-C ABI.
  */
 ps_data_status_v3 PS_DATA_CALL synthetic_visit_content(
     void* provider_context, const ps_data_value_view_v3* value,
-    const ps_data_byte_sink_v3* sink,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+    const ps_data_byte_sink_v3* sink, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
   auto* state = static_cast<SyntheticProviderState*>(provider_context);
   if (state == nullptr || !state->counters || sink == nullptr ||
-      sink->append == nullptr) {
-    return invalid_callback(diagnostic, "Synthetic content sink is malformed.");
+      sink->append == nullptr || output == nullptr || output->copy == nullptr) {
+    return invalid_callback(diagnostic, output,
+                            "Synthetic content sink is malformed.");
   }
   state->counters->content_calls.fetch_add(1U, std::memory_order_relaxed);
   DescriptorFacts facts;
@@ -1556,7 +1755,7 @@ ps_data_status_v3 PS_DATA_CALL synthetic_visit_content(
   RoleBytes samples;
   if (validate_semantics(value, &facts, &counts, &offsets, &samples) !=
       PS_DATA_STATUS_OK_V3) {
-    return invalid_callback(diagnostic,
+    return invalid_callback(diagnostic, output,
                             "Synthetic content cannot be traversed.");
   }
   ps_data_status_v3 status = sink->append(sink->context, nullptr, 0U);
@@ -1591,15 +1790,18 @@ ps_data_status_v3 PS_DATA_CALL synthetic_visit_content(
  * @param provider_context Non-null SyntheticProviderState.
  * @param owner Non-null Host output for one opaque token.
  * @param diagnostic Host-owned diagnostic output.
+ * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable status.
  * @throws Nothing across the pure-C ABI.
  */
-ps_data_status_v3 PS_DATA_CALL
-synthetic_create_owner(void* provider_context, void** owner,
-                       ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+ps_data_status_v3 PS_DATA_CALL synthetic_create_owner(
+    void* provider_context, void** owner, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
   auto* state = static_cast<SyntheticProviderState*>(provider_context);
-  if (state == nullptr || !state->counters || owner == nullptr) {
-    return invalid_callback(diagnostic, "Synthetic owner output is malformed.");
+  if (state == nullptr || !state->counters || owner == nullptr ||
+      output == nullptr || output->copy == nullptr) {
+    return invalid_callback(diagnostic, output,
+                            "Synthetic owner output is malformed.");
   }
   auto* token = new (std::nothrow) std::uint64_t{state->generation_tag};
   if (token == nullptr) {
@@ -1618,15 +1820,17 @@ synthetic_create_owner(void* provider_context, void** owner,
  * @param provider_context Non-null SyntheticProviderState.
  * @param owner Non-null token created by synthetic_create_owner.
  * @param diagnostic Host-owned diagnostic output.
+ * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable status.
  * @throws Nothing across the pure-C ABI.
  */
-ps_data_status_v3 PS_DATA_CALL
-synthetic_destroy_owner(void* provider_context, void* owner,
-                        ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+ps_data_status_v3 PS_DATA_CALL synthetic_destroy_owner(
+    void* provider_context, void* owner, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
   auto* state = static_cast<SyntheticProviderState*>(provider_context);
-  if (state == nullptr || !state->counters || owner == nullptr) {
-    return invalid_callback(diagnostic,
+  if (state == nullptr || !state->counters || owner == nullptr ||
+      output == nullptr || output->copy == nullptr) {
+    return invalid_callback(diagnostic, output,
                             "Synthetic owner destroy input is malformed.");
   }
   delete static_cast<std::uint64_t*>(owner);
@@ -1638,15 +1842,17 @@ synthetic_destroy_owner(void* provider_context, void* owner,
  * @brief Performs final generation destruction while its module remains live.
  * @param provider_context Non-null SyntheticProviderState.
  * @param diagnostic Host-owned diagnostic output.
+ * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable status.
  * @throws Nothing across the pure-C ABI.
  */
-ps_data_status_v3 PS_DATA_CALL
-synthetic_destroy_provider(void* provider_context,
-                           ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+ps_data_status_v3 PS_DATA_CALL synthetic_destroy_provider(
+    void* provider_context, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
   auto* state = static_cast<SyntheticProviderState*>(provider_context);
-  if (state == nullptr || !state->counters) {
-    return invalid_callback(diagnostic,
+  if (state == nullptr || !state->counters || output == nullptr ||
+      output->copy == nullptr) {
+    return invalid_callback(diagnostic, output,
                             "Synthetic provider destroy context missing.");
   }
   state->counters->provider_destroys.fetch_add(1U, std::memory_order_relaxed);

@@ -30,6 +30,44 @@ constexpr std::size_t kMaximumCanonicalContentBytes = 64U * 1024U * 1024U;
 thread_local bool provider_callback_active = false;
 
 /**
+ * @brief Host-owned variable-size outputs for one provider callback.
+ *
+ * The pure-C output function copies complete diagnostic/property fields into
+ * this state before returning to provider code. Scalar result records are
+ * validated only after the provider callback returns, but no provider pointer
+ * survives that return boundary.
+ *
+ * @throws Nothing during default construction and destruction.
+ * @note One instance belongs to exactly one callback invocation and therefore
+ *       needs no shared synchronization even when one generation is called
+ *       concurrently from multiple Host threads.
+ */
+struct CallbackOutputState final {
+  /** @brief Whether this callback permits the property-bytes channel. */
+  bool property_enabled = false;
+  /** @brief Whether the diagnostic channel was invoked once. */
+  bool diagnostic_written = false;
+  /** @brief Whether the property-bytes channel was invoked once. */
+  bool property_written = false;
+  /** @brief Host-owned diagnostic bytes copied during the callback. */
+  std::vector<std::byte> diagnostic;
+  /** @brief Host-owned property bytes copied during a pure query callback. */
+  std::vector<std::byte> property;
+  /** @brief First copy-out failure, preserved even if provider returns OK. */
+  ps_data_status_v3 failure = PS_DATA_STATUS_OK_V3;
+};
+
+/**
+ * @brief Builds one exact callback-local Host output sink.
+ * @param state Non-null Host state that outlives the provider callback.
+ * @param property_enabled Whether the property-bytes channel is permitted.
+ * @return Fixed output table borrowing `state`.
+ * @throws Nothing.
+ */
+ps_data_output_sink_v3 make_callback_output_sink(
+    CallbackOutputState* state, bool property_enabled = false) noexcept;
+
+/**
  * @brief Marks a provider callback entered without holding registry state.
  *
  * @throws std::logic_error when the same thread recursively enters a provider
@@ -98,9 +136,12 @@ class CandidateGenerationCleanup final {
     }
     ps_data_diagnostic_v3 diagnostic{};
     diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+    CallbackOutputState output_state;
+    const ps_data_output_sink_v3 output =
+        make_callback_output_sink(&output_state);
     try {
       ProviderCallbackGuard guard;
-      (void)api_.destroy_provider(api_.provider_context, &diagnostic);
+      (void)api_.destroy_provider(api_.provider_context, &diagnostic, &output);
     } catch (...) {
       // Candidate cleanup cannot expose foreign unwinding or mask allocation.
     }
@@ -307,21 +348,130 @@ bool valid_definition_name(ps_data_bytes_v3 bytes) noexcept {
 }
 
 /**
- * @brief Copies one bounded provider diagnostic while its lease is live.
- * @param diagnostic Callback output record.
- * @return Host-owned message, or an empty string for canonical empty output.
- * @throws ExtensionContractError for malformed record framing.
- * @throws std::bad_alloc when output storage cannot allocate.
+ * @brief Records one stable first failure in callback output state.
+ * @param state Non-null Host callback-output state.
+ * @param failure Non-OK stable status to preserve.
+ * @return The state's first failure after the update.
+ * @throws Nothing.
  */
-std::string copy_diagnostic(const ps_data_diagnostic_v3& diagnostic) {
-  if (diagnostic.struct_size != PS_DATA_DIAGNOSTIC_V3_SIZE ||
+ps_data_status_v3 record_output_failure(CallbackOutputState* state,
+                                        ps_data_status_v3 failure) noexcept {
+  if (state != nullptr && state->failure == PS_DATA_STATUS_OK_V3) {
+    state->failure = failure;
+  }
+  return state == nullptr ? failure : state->failure;
+}
+
+/**
+ * @brief Synchronously copies one complete callback output field.
+ * @param context Non-null `CallbackOutputState` owned by the current call.
+ * @param kind Requested diagnostic or property-bytes channel.
+ * @param data Provider bytes valid for this function call only.
+ * @param size Exact complete field size.
+ * @return Stable copy status; non-OK remains sticky for the callback.
+ * @throws Nothing; allocation and all other exceptions are translated.
+ * @note Bounds and pointer/count framing are checked before any provider byte
+ *       is dereferenced. Duplicate and disallowed channel writes are invalid.
+ */
+ps_data_status_v3 PS_DATA_CALL copy_callback_output(
+    void* context, ps_data_output_kind_v3 kind, const std::uint8_t* data,
+    std::uint64_t size) PS_DATA_NOEXCEPT {
+  auto* state = static_cast<CallbackOutputState*>(context);
+  if (state == nullptr) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  if (state->failure != PS_DATA_STATUS_OK_V3) {
+    return state->failure;
+  }
+  bool* written = nullptr;
+  std::vector<std::byte>* destination = nullptr;
+  std::size_t maximum = 0U;
+  switch (kind) {
+    case PS_DATA_OUTPUT_DIAGNOSTIC_MESSAGE_V3:
+      written = &state->diagnostic_written;
+      destination = &state->diagnostic;
+      maximum = kMaximumProviderDiagnosticBytes;
+      break;
+    case PS_DATA_OUTPUT_PROPERTY_BYTES_V3:
+      if (!state->property_enabled) {
+        return record_output_failure(state, PS_DATA_STATUS_INVALID_ARGUMENT_V3);
+      }
+      written = &state->property_written;
+      destination = &state->property;
+      maximum = kMaximumPropertyResultBytes;
+      break;
+    default:
+      return record_output_failure(state, PS_DATA_STATUS_INVALID_ARGUMENT_V3);
+  }
+  if (*written || size > maximum || (size != 0U && data == nullptr) ||
+      size > std::numeric_limits<std::size_t>::max()) {
+    return record_output_failure(
+        state, size > maximum ? PS_DATA_STATUS_TOO_COMPLEX_V3
+                              : PS_DATA_STATUS_INVALID_ARGUMENT_V3);
+  }
+  *written = true;
+  if (size == 0U) {
+    return PS_DATA_STATUS_OK_V3;
+  }
+  try {
+    const auto* first = reinterpret_cast<const std::byte*>(data);
+    destination->assign(first, first + static_cast<std::size_t>(size));
+  } catch (const std::bad_alloc&) {
+    return record_output_failure(state, PS_DATA_STATUS_OUT_OF_MEMORY_V3);
+  } catch (...) {
+    return record_output_failure(state, PS_DATA_STATUS_INTERNAL_ERROR_V3);
+  }
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Builds one exact callback-local Host output sink.
+ * @param state Non-null Host state that outlives the provider callback.
+ * @param property_enabled Whether the property-bytes channel is permitted.
+ * @return Fixed output table borrowing `state`.
+ * @throws Nothing.
+ */
+ps_data_output_sink_v3 make_callback_output_sink(
+    CallbackOutputState* state, bool property_enabled) noexcept {
+  state->property_enabled = property_enabled;
+  ps_data_output_sink_v3 sink{};
+  sink.struct_size = PS_DATA_OUTPUT_SINK_V3_SIZE;
+  sink.context = state;
+  sink.copy = &copy_callback_output;
+  return sink;
+}
+
+/**
+ * @brief Validates diagnostic scalar framing against synchronously copied data.
+ * @param diagnostic Callback output scalar record.
+ * @param output Host-owned callback output state.
+ * @return Host-owned message, or an empty string for canonical empty output.
+ * @throws ExtensionContractError for malformed framing or copy-out failure.
+ * @throws std::bad_alloc when synchronous Host output allocation failed or
+ *         returned string storage cannot allocate.
+ * @note This function reads no provider-owned pointer after callback return.
+ */
+std::string copy_diagnostic(const ps_data_diagnostic_v3& diagnostic,
+                            const CallbackOutputState& output) {
+  if (output.failure == PS_DATA_STATUS_OUT_OF_MEMORY_V3) {
+    throw std::bad_alloc{};
+  }
+  const bool message_expected = diagnostic.message_size != 0U;
+  if (output.failure != PS_DATA_STATUS_OK_V3 ||
+      diagnostic.struct_size != PS_DATA_DIAGNOSTIC_V3_SIZE ||
       diagnostic.reserved0 != 0U || !reserved_zero(diagnostic.reserved) ||
-      !valid_bytes(diagnostic.message, kMaximumProviderDiagnosticBytes)) {
+      diagnostic.message_size > kMaximumProviderDiagnosticBytes ||
+      message_expected != output.diagnostic_written ||
+      diagnostic.message_size != output.diagnostic.size()) {
     throw ExtensionContractError(
         ExtensionErrorCode::InvalidProviderOutput,
-        "Data provider returned a malformed diagnostic record.");
+        "Data provider returned malformed callback output.");
   }
-  return copy_bytes_as_string(diagnostic.message);
+  if (output.diagnostic.empty()) {
+    return {};
+  }
+  return std::string(reinterpret_cast<const char*>(output.diagnostic.data()),
+                     output.diagnostic.size());
 }
 
 /**
@@ -686,9 +836,12 @@ struct DataDefinitionLease::Impl final {
     }
     ps_data_diagnostic_v3 diagnostic{};
     diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+    CallbackOutputState output_state;
+    const ps_data_output_sink_v3 output =
+        make_callback_output_sink(&output_state);
     try {
       ProviderCallbackGuard guard;
-      (void)api.destroy_provider(api.provider_context, &diagnostic);
+      (void)api.destroy_provider(api.provider_context, &diagnostic, &output);
     } catch (...) {
       // A final in-process ABI violation cannot escape a shared_ptr destructor.
     }
@@ -720,9 +873,12 @@ struct ProviderOwner::Impl final {
     }
     ps_data_diagnostic_v3 diagnostic{};
     diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+    CallbackOutputState output_state;
+    const ps_data_output_sink_v3 output =
+        make_callback_output_sink(&output_state);
     try {
       ProviderCallbackGuard guard;
-      (void)destroy(provider_context, owner, &diagnostic);
+      (void)destroy(provider_context, owner, &diagnostic, &output);
     } catch (...) {
       // Destruction remains exact-once even for a violating provider.
     }
@@ -882,11 +1038,14 @@ void DataDefinitionLease::validate(
   const ps_data_value_view_v3 view = materialize_value_view(prepared);
   ps_data_diagnostic_v3 diagnostic{};
   diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+  CallbackOutputState output_state;
+  const ps_data_output_sink_v3 output =
+      make_callback_output_sink(&output_state);
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
-    status =
-        impl_->api.validate(impl_->api.provider_context, &view, &diagnostic);
+    status = impl_->api.validate(impl_->api.provider_context, &view,
+                                 &diagnostic, &output);
   } catch (const std::bad_alloc&) {
     throw ExtensionContractError(
         ExtensionErrorCode::ProviderRejected,
@@ -896,7 +1055,7 @@ void DataDefinitionLease::validate(
         ExtensionErrorCode::ProviderRejected,
         "Data provider validation threw across the pure-C ABI.");
   }
-  std::string message = copy_diagnostic(diagnostic);
+  std::string message = copy_diagnostic(diagnostic, output_state);
   if (status != PS_DATA_STATUS_OK_V3) {
     throw ExtensionContractError(
         ExtensionErrorCode::ProviderRejected,
@@ -927,11 +1086,14 @@ PropertyQueryResult DataDefinitionLease::query(
   output.struct_size = PS_DATA_PROPERTY_RESULT_V3_SIZE;
   ps_data_diagnostic_v3 diagnostic{};
   diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+  CallbackOutputState output_state;
+  const ps_data_output_sink_v3 output_sink =
+      make_callback_output_sink(&output_state, true);
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
     status = impl_->api.query(impl_->api.provider_context, &view, &query,
-                              &output, &diagnostic);
+                              &output, &diagnostic, &output_sink);
   } catch (...) {
     return {PropertyQueryState::InvalidDescriptor,
             std::nullopt,
@@ -940,7 +1102,7 @@ PropertyQueryResult DataDefinitionLease::query(
   }
   std::string message;
   try {
-    message = copy_diagnostic(diagnostic);
+    message = copy_diagnostic(diagnostic, output_state);
   } catch (const ExtensionContractError& error) {
     return {PropertyQueryState::InvalidDescriptor,
             std::nullopt,
@@ -968,8 +1130,8 @@ PropertyQueryResult DataDefinitionLease::query(
   result.diagnostic = std::move(message);
   if (state != PropertyQueryState::Available) {
     if (output.value_kind != PS_DATA_PROPERTY_VALUE_NONE_V3 ||
-        output.uint64_value != 0U || output.bytes_value.data != nullptr ||
-        output.bytes_value.size != 0U) {
+        output.uint64_value != 0U || output.bytes_size != 0U ||
+        output_state.property_written) {
       result.state = PropertyQueryState::InvalidDescriptor;
       result.diagnostic =
           "Unavailable property result carried a forbidden value.";
@@ -977,20 +1139,16 @@ PropertyQueryResult DataDefinitionLease::query(
     return result;
   }
   if (output.value_kind == PS_DATA_PROPERTY_VALUE_UINT64_V3 &&
-      output.bytes_value.data == nullptr && output.bytes_value.size == 0U) {
+      output.bytes_size == 0U && !output_state.property_written) {
     result.unsigned_value = output.uint64_value;
     return result;
   }
   if (output.value_kind == PS_DATA_PROPERTY_VALUE_BYTES_V3 &&
       output.uint64_value == 0U &&
-      valid_bytes(output.bytes_value, kMaximumPropertyResultBytes)) {
-    if (output.bytes_value.size == 0U) {
-      return result;
-    }
-    const auto* first =
-        reinterpret_cast<const std::byte*>(output.bytes_value.data);
-    result.bytes_value.assign(
-        first, first + static_cast<std::size_t>(output.bytes_value.size));
+      output.bytes_size <= kMaximumPropertyResultBytes &&
+      output_state.property_written &&
+      output.bytes_size == output_state.property.size()) {
+    result.bytes_value = std::move(output_state.property);
     return result;
   }
   result.state = PropertyQueryState::InvalidDescriptor;
@@ -1023,18 +1181,22 @@ DataSpecResult DataDefinitionLease::evaluate(
   output.struct_size = PS_DATA_SPEC_RESULT_V3_SIZE;
   ps_data_diagnostic_v3 diagnostic{};
   diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+  CallbackOutputState output_state;
+  const ps_data_output_sink_v3 output_sink =
+      make_callback_output_sink(&output_state);
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
-    status = impl_->api.evaluate_spec(impl_->api.provider_context, &view,
-                                      &request, &output, &diagnostic);
+    status =
+        impl_->api.evaluate_spec(impl_->api.provider_context, &view, &request,
+                                 &output, &diagnostic, &output_sink);
   } catch (...) {
     return {DataSpecRelation::CannotEvaluate, false,
             "Data provider DataSpec callback threw across the pure-C ABI."};
   }
   std::string message;
   try {
-    message = copy_diagnostic(diagnostic);
+    message = copy_diagnostic(diagnostic, output_state);
   } catch (const ExtensionContractError& error) {
     return {DataSpecRelation::CannotEvaluate, false, error.what()};
   }
@@ -1102,18 +1264,22 @@ ProviderRegionResult DataDefinitionLease::evaluate(
   output.struct_size = PS_DATA_REGION_RESULT_V3_SIZE;
   ps_data_diagnostic_v3 diagnostic{};
   diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+  CallbackOutputState output_state;
+  const ps_data_output_sink_v3 output_sink =
+      make_callback_output_sink(&output_state);
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
-    status = impl_->api.evaluate_region(impl_->api.provider_context, &view,
-                                        &request, &output, &diagnostic);
+    status =
+        impl_->api.evaluate_region(impl_->api.provider_context, &view, &request,
+                                   &output, &diagnostic, &output_sink);
   } catch (...) {
     return {ProviderRegionState::InvalidDescriptor, std::nullopt, 0U,
             "Data provider Region callback threw across the pure-C ABI."};
   }
   std::string message;
   try {
-    message = copy_diagnostic(diagnostic);
+    message = copy_diagnostic(diagnostic, output_state);
   } catch (const ExtensionContractError& error) {
     return {ProviderRegionState::InvalidDescriptor, std::nullopt, 0U,
             error.what()};
@@ -1134,6 +1300,31 @@ ProviderRegionResult DataDefinitionLease::evaluate(
        output.selected_site_count != 0U)) {
     return {ProviderRegionState::InvalidDescriptor, std::nullopt, 0U,
             "Data provider returned contradictory Region output."};
+  }
+  if (output.state == PS_DATA_REGION_EXACT_V3 &&
+      request.kind == PS_DATA_REGION_TENSOR_SLICE_V3) {
+    if (begins.empty() || begins.size() != ends.size()) {
+      return {ProviderRegionState::InvalidDescriptor, std::nullopt, 0U,
+              "Host produced a noncanonical TensorSlice request."};
+    }
+    std::uint64_t expected_site_count = 1U;
+    for (std::size_t index = 0U; index < begins.size(); ++index) {
+      if (ends[index] <= begins[index]) {
+        return {ProviderRegionState::InvalidDescriptor, std::nullopt, 0U,
+                "Host produced a noncanonical TensorSlice request."};
+      }
+      const std::uint64_t axis_length = ends[index] - begins[index];
+      if (expected_site_count >
+          std::numeric_limits<std::uint64_t>::max() / axis_length) {
+        return {ProviderRegionState::InvalidDescriptor, std::nullopt, 0U,
+                "Exact TensorSlice logical-site count overflows uint64_t."};
+      }
+      expected_site_count *= axis_length;
+    }
+    if (output.selected_site_count != expected_site_count) {
+      return {ProviderRegionState::InvalidDescriptor, std::nullopt, 0U,
+              "Data provider returned an incorrect TensorSlice site count."};
+    }
   }
   switch (output.state) {
     case PS_DATA_REGION_EXACT_V3:
@@ -1170,17 +1361,20 @@ std::vector<std::byte> DataDefinitionLease::canonical_content(
   sink.append = &append_content_bytes;
   ps_data_diagnostic_v3 diagnostic{};
   diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+  CallbackOutputState output_state;
+  const ps_data_output_sink_v3 output =
+      make_callback_output_sink(&output_state);
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
     status = impl_->api.visit_content(impl_->api.provider_context, &view, &sink,
-                                      &diagnostic);
+                                      &diagnostic, &output);
   } catch (...) {
     throw ExtensionContractError(
         ExtensionErrorCode::ProviderRejected,
         "Data provider content visitor threw across the pure-C ABI.");
   }
-  std::string message = copy_diagnostic(diagnostic);
+  std::string message = copy_diagnostic(diagnostic, output_state);
   if (status != PS_DATA_STATUS_OK_V3 ||
       sink_state.failure != PS_DATA_STATUS_OK_V3) {
     throw ExtensionContractError(
@@ -1200,18 +1394,21 @@ ProviderOwner DataDefinitionLease::create_owner() const {
   void* owner = nullptr;
   ps_data_diagnostic_v3 diagnostic{};
   diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+  CallbackOutputState output_state;
+  const ps_data_output_sink_v3 output =
+      make_callback_output_sink(&output_state);
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
     status = impl_->api.create_owner(impl_->api.provider_context, &owner,
-                                     &diagnostic);
+                                     &diagnostic, &output);
   } catch (...) {
     throw ExtensionContractError(
         ExtensionErrorCode::ProviderRejected,
         "Data provider owner-create threw across the pure-C ABI.");
   }
   try {
-    std::string message = copy_diagnostic(diagnostic);
+    std::string message = copy_diagnostic(diagnostic, output_state);
     if (status != PS_DATA_STATUS_OK_V3 || owner == nullptr) {
       throw ExtensionContractError(
           ExtensionErrorCode::ProviderRejected,
@@ -1230,10 +1427,13 @@ ProviderOwner DataDefinitionLease::create_owner() const {
     if (status == PS_DATA_STATUS_OK_V3 && owner != nullptr) {
       ps_data_diagnostic_v3 cleanup{};
       cleanup.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+      CallbackOutputState cleanup_output_state;
+      const ps_data_output_sink_v3 cleanup_output =
+          make_callback_output_sink(&cleanup_output_state);
       try {
         ProviderCallbackGuard guard;
         (void)impl_->api.destroy_owner(impl_->api.provider_context, owner,
-                                       &cleanup);
+                                       &cleanup, &cleanup_output);
       } catch (...) {
         // Preserve the original Host validation/allocation exception.
       }

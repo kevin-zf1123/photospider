@@ -269,7 +269,8 @@ class DataDefinitionLease final {
    * provider rejection, malformed output, or callback exception.
    * @throws std::bad_alloc when Host-owned staging cannot allocate.
    * @note Payload is exposed only for this explicit validation call and no
-   * registry lock is held.
+   * registry lock is held. Variable-size diagnostics are synchronously copied
+   * through callback-local Host storage before provider code returns.
    */
   void validate(const DataDescriptorEnvelope& descriptor,
                 const ProviderDefinedLayout& layout,
@@ -287,7 +288,8 @@ class DataDefinitionLease final {
    * @throws std::bad_alloc when bounded staging/output cannot allocate.
    * @note The callback receives no payload, map, transfer, conversion, I/O,
    * device, or executor authority. Malformed callback output becomes an
-   * InvalidDescriptor result with Host-owned diagnostic text.
+   * InvalidDescriptor result with Host-owned diagnostic text. Diagnostic and
+   * BYTES-property fields are copied synchronously during callback execution.
    */
   PropertyQueryResult query(const DataDescriptorEnvelope& descriptor,
                             const ProviderDefinedLayout& layout,
@@ -306,7 +308,8 @@ class DataDefinitionLease final {
    * missing bundle key.
    * @throws std::bad_alloc when bounded staging/output cannot allocate.
    * @note Malformed callback output becomes CannotEvaluate rather than
-   *       exposing a provider diagnostic or exception identity.
+   *       exposing a provider diagnostic or exception identity. Diagnostic
+   *       bytes are copied into callback-local Host storage before return.
    */
   DataSpecResult evaluate(const DataDescriptorEnvelope& descriptor,
                           const ProviderDefinedLayout& layout,
@@ -325,7 +328,9 @@ class DataDefinitionLease final {
    * missing bundle key.
    * @throws std::bad_alloc when bounded staging/output cannot allocate.
    * @note Malformed callback output becomes InvalidDescriptor and never
-   *       fabricates an Exact selection.
+   *       fabricates an Exact selection. For every canonical nonempty Exact
+   *       TensorSlice, the provider count must equal the checked product of all
+   *       half-open axis lengths; overflow is InvalidDescriptor.
    */
   ProviderRegionResult evaluate(const DataDescriptorEnvelope& descriptor,
                                 const ProviderDefinedLayout& layout,
@@ -342,7 +347,8 @@ class DataDefinitionLease final {
    * @throws ExtensionContractError for payload/provider/callback failure.
    * @throws std::bad_alloc when bounded output cannot allocate.
    * @note The provider controls logical traversal but never owns the final
-   * digest state. Physical padding must not be emitted.
+   * digest state. Physical padding must not be emitted. Diagnostic bytes are
+   * synchronously copied through separate callback-local Host storage.
    */
   std::vector<std::byte> canonical_content(
       const DataDescriptorEnvelope& descriptor,
@@ -356,7 +362,8 @@ class DataDefinitionLease final {
    * @throws std::bad_alloc when Host owner state cannot allocate.
    * @note The provider destroy-owner callback runs once after the last copy.
    *       A successfully created owner is also destroyed if Host diagnostic
-   *       validation or owner-state allocation subsequently fails.
+   *       validation or owner-state allocation subsequently fails. Diagnostic
+   *       bytes never outlive the synchronous Host output-copy call.
    */
   ProviderOwner create_owner() const;
 

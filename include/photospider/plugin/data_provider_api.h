@@ -56,6 +56,7 @@ extern "C" {
 #define PS_DATA_SPEC_REQUEST_V3_SIZE 64U
 #define PS_DATA_SPEC_RESULT_V3_SIZE 40U
 #define PS_DATA_BYTE_SINK_V3_SIZE 40U
+#define PS_DATA_OUTPUT_SINK_V3_SIZE 40U
 #define PS_DATA_PROVIDER_API_V3_SIZE 160U
 
 /** @brief Stable provider callback status scalar. */
@@ -114,8 +115,15 @@ typedef uint32_t ps_data_property_value_kind_v3;
 #define PS_DATA_PROPERTY_VALUE_NONE_V3 0U
 /** @brief Result carries one unsigned 64-bit scalar. */
 #define PS_DATA_PROPERTY_VALUE_UINT64_V3 1U
-/** @brief Result carries one bounded borrowed byte sequence. */
+/** @brief Result carries one bounded byte sequence through the output sink. */
 #define PS_DATA_PROPERTY_VALUE_BYTES_V3 2U
+
+/** @brief Stable callback-output channel scalar. */
+typedef uint32_t ps_data_output_kind_v3;
+/** @brief Callback diagnostic UTF-8 message channel. */
+#define PS_DATA_OUTPUT_DIAGNOSTIC_MESSAGE_V3 1U
+/** @brief Pure-query byte-property value channel. */
+#define PS_DATA_OUTPUT_PROPERTY_BYTES_V3 2U
 
 /** @brief Stable Region request-kind scalar. */
 typedef uint32_t ps_data_region_kind_v3;
@@ -163,8 +171,10 @@ typedef struct ps_data_identity_v3 {
 } ps_data_identity_v3;
 
 /**
- * @brief Borrowed bounded byte view valid for one containing call.
- * @note `data` may be null only when `size` is zero.
+ * @brief Borrowed bounded byte view whose lifetime is set by its input record.
+ * @note `data` may be null only when `size` is zero. Callback result records
+ *       never use this type; variable-size callback output must be copied
+ *       synchronously through `ps_data_output_sink_v3`.
  */
 typedef struct ps_data_bytes_v3 {
   /** @brief Borrowed first byte, or null for an empty view. */
@@ -281,8 +291,12 @@ typedef struct ps_data_value_view_v3 {
 } ps_data_value_view_v3;
 
 /**
- * @brief Borrowed bounded provider diagnostic copied before callback return.
- * @note Diagnostic code zero and empty bytes are canonical success output.
+ * @brief Fixed provider diagnostic metadata for one callback.
+ * @note A nonzero `message_size` requires exactly one matching diagnostic
+ *       output-sink call during the callback. Zero requires no diagnostic
+ *       output call. The Host validates the scalar record after return but
+ *       owns all message bytes before the provider's call frame expires.
+ * @throws Nothing for ordinary aggregate operations.
  */
 typedef struct ps_data_diagnostic_v3 {
   /** @brief Must equal `PS_DATA_DIAGNOSTIC_V3_SIZE`. */
@@ -291,10 +305,10 @@ typedef struct ps_data_diagnostic_v3 {
   uint32_t code;
   /** @brief Must be zero for v3. */
   uint32_t reserved0;
-  /** @brief Borrowed diagnostic UTF-8 bytes. */
-  ps_data_bytes_v3 message;
+  /** @brief Exact UTF-8 byte count copied through the diagnostic channel. */
+  uint64_t message_size;
   /** @brief Must be all zero for v3. */
-  uint64_t reserved[2];
+  uint64_t reserved[3];
 } ps_data_diagnostic_v3;
 
 /** @brief Fixed metadata-only property request. */
@@ -307,7 +321,13 @@ typedef struct ps_data_property_query_v3 {
   uint64_t reserved[2];
 } ps_data_property_query_v3;
 
-/** @brief Fixed bounded property outcome. */
+/**
+ * @brief Fixed bounded property outcome with scalar-only variable-size framing.
+ * @throws Nothing for ordinary aggregate operations.
+ * @note An Available BYTES result requires exactly one property output-sink
+ *       call, including when `bytes_size` is zero. All other result kinds and
+ *       states forbid that output channel and require `bytes_size` to be zero.
+ */
 typedef struct ps_data_property_result_v3 {
   /** @brief Must equal `PS_DATA_PROPERTY_RESULT_V3_SIZE`. */
   uint64_t struct_size;
@@ -317,10 +337,10 @@ typedef struct ps_data_property_result_v3 {
   ps_data_property_value_kind_v3 value_kind;
   /** @brief Scalar result when value kind is UINT64, otherwise zero. */
   uint64_t uint64_value;
-  /** @brief Borrowed bounded byte result when value kind is BYTES. */
-  ps_data_bytes_v3 bytes_value;
+  /** @brief Exact byte count copied through the property-bytes channel. */
+  uint64_t bytes_size;
   /** @brief Must be all zero for v3. */
-  uint64_t reserved[2];
+  uint64_t reserved[3];
 } ps_data_property_result_v3;
 
 /**
@@ -413,41 +433,159 @@ typedef struct ps_data_byte_sink_v3 {
   uint64_t reserved[2];
 } ps_data_byte_sink_v3;
 
-/** @brief Validates complete descriptor, Layout, and buffer semantics. */
+/**
+ * @brief Copies one complete variable-size callback output into Host storage.
+ * @param context Host-owned output state valid for the callback.
+ * @param kind One `PS_DATA_OUTPUT_*_V3` channel.
+ * @param data Provider bytes valid only for this copy call; null only when
+ *        `size` is zero.
+ * @param size Exact complete field size, never a streaming segment.
+ * @return Stable status. A non-OK result invalidates the callback output even
+ *         when the provider ignores it or later returns OK.
+ * @throws Nothing; the Host translates allocation and internal exceptions.
+ * @note Each permitted channel is exact-once according to its scalar result
+ *       record. The function synchronously copies before it returns and never
+ *       retains `data`.
+ */
+typedef ps_data_status_v3(PS_DATA_CALL* ps_data_copy_output_fn_v3)(
+    void* context, ps_data_output_kind_v3 kind, const uint8_t* data,
+    uint64_t size) PS_DATA_NOEXCEPT;
+
+/**
+ * @brief Host-owned synchronous copy-out table borrowed for one callback.
+ * @throws Nothing for ordinary aggregate operations.
+ * @note Providers must not retain this table, its context, or its copy
+ *       function beyond the containing callback.
+ */
+typedef struct ps_data_output_sink_v3 {
+  /** @brief Must equal `PS_DATA_OUTPUT_SINK_V3_SIZE`. */
+  uint64_t struct_size;
+  /** @brief Opaque Host state passed to `copy`. */
+  void* context;
+  /** @brief Non-null Host synchronous copy function. */
+  ps_data_copy_output_fn_v3 copy;
+  /** @brief Must be all zero for v3. */
+  uint64_t reserved[2];
+} ps_data_output_sink_v3;
+
+/**
+ * @brief Validates complete descriptor, Layout, and buffer semantics.
+ * @param provider_context Provider-owned context retained by the generation.
+ * @param value Borrowed payload-enabled Value view valid for this call.
+ * @param diagnostic Host-owned fixed diagnostic metadata output.
+ * @param output Host-owned synchronous variable-size output sink.
+ * @return Stable callback status.
+ * @throws Nothing across the pure-C ABI.
+ * @note Variable-size diagnostic output uses `output` during this call.
+ */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_validate_fn_v3)(
     void* provider_context, const ps_data_value_view_v3* value,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT;
-/** @brief Evaluates one pure metadata-only property query. */
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT;
+/**
+ * @brief Evaluates one pure metadata-only property query.
+ * @param provider_context Provider-owned context retained by the generation.
+ * @param value Borrowed metadata-only Value view valid for this call.
+ * @param query Borrowed fixed property request.
+ * @param result Host-owned fixed property result output.
+ * @param diagnostic Host-owned fixed diagnostic metadata output.
+ * @param output Host-owned synchronous diagnostic/property output sink.
+ * @return Stable callback status.
+ * @throws Nothing across the pure-C ABI.
+ * @note Diagnostic and BYTES-property output uses `output` during this call.
+ */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_query_fn_v3)(
     void* provider_context, const ps_data_value_view_v3* value,
     const ps_data_property_query_v3* query, ps_data_property_result_v3* result,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT;
-/** @brief Evaluates one pure metadata-only bounded Region request. */
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT;
+/**
+ * @brief Evaluates one pure metadata-only bounded Region request.
+ * @param provider_context Provider-owned context retained by the generation.
+ * @param value Borrowed metadata-only Value view valid for this call.
+ * @param request Borrowed bounded Region request.
+ * @param result Host-owned fixed Region result output.
+ * @param diagnostic Host-owned fixed diagnostic metadata output.
+ * @param output Host-owned synchronous diagnostic output sink.
+ * @return Stable callback status.
+ * @throws Nothing across the pure-C ABI.
+ * @note Variable-size diagnostic output uses `output` during this call.
+ */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_evaluate_region_fn_v3)(
     void* provider_context, const ps_data_value_view_v3* value,
     const ps_data_region_request_v3* request, ps_data_region_result_v3* result,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT;
-/** @brief Evaluates one pure metadata-only DataSpec set relation. */
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT;
+/**
+ * @brief Evaluates one pure metadata-only DataSpec set relation.
+ * @param provider_context Provider-owned context retained by the generation.
+ * @param value Borrowed metadata-only Value view valid for this call.
+ * @param request Borrowed bounded DataSpec request.
+ * @param result Host-owned fixed DataSpec result output.
+ * @param diagnostic Host-owned fixed diagnostic metadata output.
+ * @param output Host-owned synchronous diagnostic output sink.
+ * @return Stable callback status.
+ * @throws Nothing across the pure-C ABI.
+ * @note Variable-size diagnostic output uses `output` during this call.
+ */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_evaluate_spec_fn_v3)(
     void* provider_context, const ps_data_value_view_v3* value,
     const ps_data_spec_request_v3* request, ps_data_spec_result_v3* result,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT;
-/** @brief Visits logical content in provider-defined canonical order. */
+    ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT;
+/**
+ * @brief Visits logical content in provider-defined canonical order.
+ * @param provider_context Provider-owned context retained by the generation.
+ * @param value Borrowed payload-enabled Value view valid for this call.
+ * @param sink Host-owned streaming canonical-content sink.
+ * @param diagnostic Host-owned fixed diagnostic metadata output.
+ * @param output Host-owned synchronous diagnostic output sink.
+ * @return Stable callback or content-sink status.
+ * @throws Nothing across the pure-C ABI.
+ * @note Content streams through `sink`; diagnostics copy through `output`.
+ */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_visit_content_fn_v3)(
     void* provider_context, const ps_data_value_view_v3* value,
-    const ps_data_byte_sink_v3* sink,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT;
-/** @brief Creates one optional provider-owned opaque lifetime object. */
+    const ps_data_byte_sink_v3* sink, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT;
+/**
+ * @brief Creates one optional provider-owned opaque lifetime object.
+ * @param provider_context Provider-owned context retained by the generation.
+ * @param owner Host-owned output for one nonnull provider token.
+ * @param diagnostic Host-owned fixed diagnostic metadata output.
+ * @param output Host-owned synchronous diagnostic output sink.
+ * @return Stable callback status.
+ * @throws Nothing across the pure-C ABI.
+ * @note Variable-size diagnostic output uses `output` during this call.
+ */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_create_owner_fn_v3)(
-    void* provider_context, void** owner,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT;
-/** @brief Destroys one successfully created opaque owner exactly once. */
+    void* provider_context, void** owner, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT;
+/**
+ * @brief Destroys one successfully created opaque owner exactly once.
+ * @param provider_context Provider-owned context retained by the generation.
+ * @param owner Nonnull token returned by the matching create callback.
+ * @param diagnostic Host-owned fixed diagnostic metadata output.
+ * @param output Host-owned synchronous diagnostic output sink.
+ * @return Stable callback status.
+ * @throws Nothing across the pure-C ABI.
+ * @note Variable-size diagnostic output uses `output` during this call.
+ */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_destroy_owner_fn_v3)(
-    void* provider_context, void* owner,
-    ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT;
-/** @brief Performs one final generation destroy before module release. */
+    void* provider_context, void* owner, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT;
+/**
+ * @brief Performs one final generation destroy before module release.
+ * @param provider_context Provider-owned context retained by the generation.
+ * @param diagnostic Host-owned fixed diagnostic metadata output.
+ * @param output Host-owned synchronous diagnostic output sink.
+ * @return Stable callback status.
+ * @throws Nothing across the pure-C ABI.
+ * @note Variable-size diagnostic output uses `output` during this call.
+ */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_destroy_provider_fn_v3)(
-    void* provider_context, ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT;
+    void* provider_context, ps_data_diagnostic_v3* diagnostic,
+    const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT;
 
 /**
  * @brief Complete immutable v3 definition-suite callback table.
@@ -543,6 +681,8 @@ ps_data_provider_get_api_v3(ps_data_provider_api_v3* api) PS_DATA_NOEXCEPT;
 PS_DATA_STATIC_ASSERT(sizeof(void*) == 8U, "v3 requires 8-byte pointers");
 PS_DATA_STATIC_ASSERT(sizeof(ps_data_append_bytes_fn_v3) == 8U,
                       "v3 requires 8-byte function pointers");
+PS_DATA_STATIC_ASSERT(sizeof(ps_data_copy_output_fn_v3) == 8U,
+                      "v3 requires 8-byte output function pointers");
 #define PS_DATA_ASSERT_LAYOUT(type, size_value)                       \
   PS_DATA_STATIC_ASSERT(sizeof(type) == (size_value), #type " size"); \
   PS_DATA_STATIC_ASSERT(PS_DATA_ALIGNOF(type) == 8U, #type " alignment")
@@ -565,6 +705,7 @@ PS_DATA_ASSERT_LAYOUT(ps_data_region_result_v3, PS_DATA_REGION_RESULT_V3_SIZE);
 PS_DATA_ASSERT_LAYOUT(ps_data_spec_request_v3, PS_DATA_SPEC_REQUEST_V3_SIZE);
 PS_DATA_ASSERT_LAYOUT(ps_data_spec_result_v3, PS_DATA_SPEC_RESULT_V3_SIZE);
 PS_DATA_ASSERT_LAYOUT(ps_data_byte_sink_v3, PS_DATA_BYTE_SINK_V3_SIZE);
+PS_DATA_ASSERT_LAYOUT(ps_data_output_sink_v3, PS_DATA_OUTPUT_SINK_V3_SIZE);
 PS_DATA_ASSERT_LAYOUT(ps_data_provider_api_v3, PS_DATA_PROVIDER_API_V3_SIZE);
 
 PS_DATA_STATIC_ASSERT(offsetof(ps_data_definition_v3, identity) == 16U,
@@ -577,6 +718,12 @@ PS_DATA_STATIC_ASSERT(offsetof(ps_data_buffer_view_v3, data) == 8U,
                       "buffer data offset");
 PS_DATA_STATIC_ASSERT(offsetof(ps_data_value_view_v3, envelopes) == 56U,
                       "value envelopes offset");
+PS_DATA_STATIC_ASSERT(offsetof(ps_data_diagnostic_v3, message_size) == 16U,
+                      "diagnostic message-size offset");
+PS_DATA_STATIC_ASSERT(offsetof(ps_data_property_result_v3, bytes_size) == 24U,
+                      "property bytes-size offset");
+PS_DATA_STATIC_ASSERT(offsetof(ps_data_output_sink_v3, copy) == 16U,
+                      "output copy offset");
 PS_DATA_STATIC_ASSERT(offsetof(ps_data_provider_api_v3, definitions) == 48U,
                       "provider definitions offset");
 PS_DATA_STATIC_ASSERT(offsetof(ps_data_provider_api_v3, validate) == 64U,
