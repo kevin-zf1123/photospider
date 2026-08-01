@@ -226,11 +226,12 @@ remain not-found without failing discovery; omitting components or requesting
 The durable `DependencyDisabledInstallSmoke` configures a clean producer with
 OpenCV and YAML capabilities disabled, disables both package discoveries,
 turns off IPC, enables only the dependency-neutral test surface, and builds the
-real `photospider_kernel` aggregate, `photospider` product, and
-`test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`, and
-`test_value_identity_across_dsos` binaries. Before installation it runs all
-48 dense-image cases, all four packed FP4 cases, and the dual-DSO identity case
-in that actual disabled producer, including the
+real `photospider_kernel` aggregate, `photospider` product,
+`test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`,
+`test_variable_sample_field_extensions`, and `test_value_identity_across_dsos`
+binaries. Before installation it runs all 48 dense-image cases, all four packed
+FP4 cases, all seven provider-defined VariableSampleField cases, and the
+dual-DSO identity case in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
 derived provider/plugin/CLI defaults and the precise diagnostics for three
@@ -245,16 +246,24 @@ the installed package, loads and closes an empty Host
 session, and observes `GraphErrc::Io` from an explicit YAML operation. CI may
 reuse a producer only after its cache identity, configuration, complete
 capability profile, and already-built dense integration target are validated.
+The same external project requests `data_provider_sdk`, verifies that its
+interface has no link dependency, builds separate exact-name C11 and C++17 v3
+definition producers from the installed header, and links each into a separate
+C++ registry consumer. Both consumers publish two typed definitions through
+the real `DataDefinitionRegistry`, inspect the exact generation, and unload it.
+No source-tree include or optional provider dependency enters either producer.
 
 The generated clean consumer project maintains one ordered CMake executable
 target list. That same list creates the targets, writes a configure-time exact
 target declaration, and supplies a configuration-specific three-field
 `target<TAB>$<TARGET_FILE_NAME:target><TAB>$<TARGET_FILE:target>` manifest
-through `file(GENERATE)`. The current profile declares only
-`dependency_disabled_consumer`; adding another maintained consumer extends that
-CMake list and its source without adding a Python target name or discovery
-branch. CMake 3.16's target generator expressions are the native spelling
-authority because they describe the selected generator, target platform, and
+through `file(GENERATE)`. The current profile declares
+`dependency_disabled_consumer`, `installed_c11_data_provider_consumer`, and
+`installed_cpp17_data_provider_consumer`; adding another maintained consumer
+extends that CMake list and its paired source list without adding a Python
+target name or discovery branch. CMake 3.16's target generator expressions are
+the native spelling authority because they describe the selected generator,
+target platform, and
 configuration. Python's `os.name` and `sys.platform` describe the interpreter
 host instead, so they must not infer the executable suffix. In particular, a
 POSIX Python running under Cygwin or MSYS2 may legitimately receive a CMake
@@ -1167,7 +1176,7 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
-## CPU DenseTensor, Packed FP4, Region, ReadyFence, and Transfer Validation
+## CPU DenseTensor, Packed FP4, Provider Extensions, Region, ReadyFence, and Transfer Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
 binary for the implemented V-2 through V-12 boundary. Its 48 durable cases
@@ -1246,6 +1255,18 @@ zero or non-divisible blocks, nonfinite/nonpositive scales, bad layout version/
 alignment/overlap/size, quantized Strided publication, and oversized blocked
 transfer aliases.
 
+`test_variable_sample_field_extensions` owns seven standard-library-only V-14
+integration cases. A synthetic pure-C definition suite publishes versioned
+VariableSampleField Schema, Facet, and Layout records with three physical
+buffers. The cases verify typed namespaces, candidate conflicts and malformed
+record rollback; generic cross-reference rejection before revision minting;
+provider semantic rejection; unknown-byte artifact-envelope round-trip without
+the provider; property/DataSpec/Region callbacks with every payload pointer
+cleared; independent exact SHA-256 descriptor/content/layout vectors; content
+identity across physical repacking and padding; old Value/read/owner lifetime
+across replacement and unload; final provider-before-module destroy order; and
+concurrent replacement without mixed-generation resolution.
+
 Active output bytes must equal `255 - input`; input and output row padding is
 not treated as image elements.
 
@@ -1255,14 +1276,15 @@ Run the focused validation with:
 cmake --build build --target test_region_contracts \
   test_cpu_dense_tensor_image_operation \
   test_packed_fp4_dense_tensor \
+  test_variable_sample_field_extensions \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor)\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions)\.'
 ```
 
 `DependencyDisabledInstallSmoke` builds and runs all 48 dense cases plus all
-four packed FP4 cases in an actual OpenCV/YAML-disabled product before proving
-the installed consumer.
+four packed FP4 and seven V-14 extension cases in an actual OpenCV/YAML-disabled
+product before proving the installed consumers.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
 `DependencyDisabledInstallSmoke` also loads two independently linked
 Value-using DSOs and proves that they mint from one shared runtime authority.

@@ -285,7 +285,7 @@ side effect can precede Run commit and has no OutputStore transaction. These
 current limits and the separate target output authority are fixed by
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md).
 
-### Implemented V-3/V-4/V-6/V-8/V-9/V-12/V-13 relationship and remaining target
+### Implemented V-3/V-4/V-6/V-8/V-9/V-12/V-13/V-14 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete replacement:
@@ -391,10 +391,33 @@ compatibility boundary: a packed, quantized, or latent formal Value fails with
 or codec calls. No widening, metadata-only fallback, or generic durable format
 occurs.
 
-V-13 still does not implement other quantization formulae or packed formats,
-unaligned requantizing slices, general Map/Import providers, provider ABI v3, a
-public device registry, device queue/in-flight accounting, generic Value
-persistence, or general named graph Value outputs. Issue #87's compute-I/O durability
+Issue #117 / V-14 also leaves `ImageBuffer` unchanged. It adds a separate
+provider-defined `Value` representation whose `ProviderDefinedLayout` names
+one or more checked `BufferHandle` ranges through bounded buffer envelopes.
+Generic Host validation proves every index, nonzero role, offset, length, and
+checked end before invoking the matching exact-generation provider. A
+provider-defined Value exposes only indexed `ProviderReadLease`; each read
+retains both the selected allocation and the provider generation. DenseTensor
+byte/view/layout accessors and existing transfer tasks reject this
+representation instead of adapting it through `ImageBuffer` or assuming one
+buffer.
+
+The V-14 pure-C definition suite receives payload only for explicit semantic
+validation and canonical logical-content traversal. Property, DataSpec, and
+Region evaluation sees buffer sizes and identities with null payload pointers,
+and has no mapping, transfer, conversion, device, or executor authority. Atomic
+provider replacement and unload remove new interpretation visibility while old
+Values, reads, and provider owners retain the retiring generation and module.
+Canonical ContentDigest excludes physical buffer order, padding, and offsets
+when the provider emits the same logical stream. Artifact-envelope
+serialization preserves metadata and unknown extension bytes, but creates no
+filesystem, cache, or `ImageBuffer` persistence path.
+
+V-14 still does not implement other quantization formulae or packed formats,
+unaligned requantizing slices, general Map/Import providers, the remaining
+provider ABI suites, a public device registry, device queue/in-flight
+accounting, generic graph/cache Value persistence, or general named graph Value
+outputs. Issue #87's compute-I/O durability
 decision and Issue #88's first bounded cache/codec execution vertical remain
 current: the process executor retains transaction lifetime and budgets work,
 but does not change `ImageBuffer` or codec ABI. The V-12 I/O observation proves
@@ -420,19 +443,24 @@ operation ABI.
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/data/value.hpp`
+- `include/photospider/data/extension.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/packed_dense_tensor_view.hpp`
 - `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/plugin/data_definition_registry.hpp`
+- `include/photospider/plugin/data_provider_api.h`
 - `src/lib/core/image_buffer.cpp`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
+- `src/lib/plugin/data_definition_registry.cpp`
 - `src/lib/execution/metal_device_executor.*`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
@@ -449,3 +477,4 @@ operation ABI.
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
+- `tests/integration/test_variable_sample_field_extensions.cpp`

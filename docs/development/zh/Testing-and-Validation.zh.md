@@ -174,8 +174,9 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_packed_fp4_dense_tensor` 与
-`test_value_identity_across_dsos` binary。安装前，它会在该真实 disabled producer 中运行全部
-48 个 dense-image case、全部 4 个 packed FP4 case 与一个双 DSO identity case，包括
+`test_variable_sample_field_extensions`、`test_value_identity_across_dsos` binary。安装前，
+它会在该真实 disabled producer 中运行全部 48 个 dense-image case、全部 4 个 packed FP4 case、
+全部 7 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
 默认值，以及三类无效显式组合的精确诊断。
@@ -187,13 +188,19 @@ public FP4/quantization/Blocked/PackedDenseTensorView contract，
 加载并关闭 empty Host session，并观察显式 YAML operation 返回 `GraphErrc::Io`。CI 只有在校验
 producer cache identity、configuration、完整 capability profile 与已构建 dense integration
 target 后才可复用该 producer。
+同一个 external project 还会请求 `data_provider_sdk`，验证其 interface 不含 link dependency，
+并根据安装后的 header 分别构建采用精确名称的 C11 与 C++17 v3 definition producer，再将二者
+分别链接进独立的 C++ registry consumer。两个 consumer 都会通过真实
+`DataDefinitionRegistry` 发布两个 typed definition、检查精确 generation，然后卸载。
+任一 producer 都不会引入 source-tree include 或可选 provider dependency。
 
 生成的 clean consumer project 会维护一份有序的 CMake executable target list。同一份 list
 负责创建 target、写出 configure-time 精确 target declaration，并通过 `file(GENERATE)` 提供
 configuration-specific 的三字段
 `target<TAB>$<TARGET_FILE_NAME:target><TAB>$<TARGET_FILE:target>` manifest。当前 profile
-只声明 `dependency_disabled_consumer`；新增另一个长期 consumer 时，只需扩展该 CMake list 与
-对应源码，无需在 Python 中增加 target name 或 discovery branch。CMake 3.16 的 target generator
+声明 `dependency_disabled_consumer`、`installed_c11_data_provider_consumer` 与
+`installed_cpp17_data_provider_consumer`；新增另一个长期 consumer 时，只需扩展该 CMake list 与
+配对源码列表，无需在 Python 中增加 target name 或 discovery branch。CMake 3.16 的 target generator
 expression 是 native 拼写的权威来源，因为它描述所选 generator、target platform 与
 configuration；Python 的 `os.name` 与 `sys.platform` 描述的是 interpreter host，不能据此推断
 executable suffix。尤其是，在 Cygwin 或 MSYS2 下运行的 POSIX Python 完全可能合法收到以
@@ -924,7 +931,7 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
-## CPU DenseTensor、Packed FP4、Region、ReadyFence 与 Transfer 验证
+## CPU DenseTensor、Packed FP4、Provider Extension、Region、ReadyFence 与 Transfer 验证
 
 `test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-12 边界的 provider-independent
 integration binary。它的 48 个长期用例验证：
@@ -990,6 +997,16 @@ fake-device transfer、精确正式 memory-cache retention，以及在 executor�
 rank/count、zero 或 non-divisible block、nonfinite/nonpositive scale、错误 layout version/
 alignment/overlap/size、quantized Strided publication 与 oversized blocked transfer alias。
 
+`test_variable_sample_field_extensions` 拥有 7 个只使用标准库的 V-14 integration case。
+一个合成纯 C definition suite 会发布带版本的 VariableSampleField Schema、Facet 和 Layout record，
+并使用三个 physical buffer。这些用例会验证 typed namespace、candidate conflict 与 malformed
+record rollback；在 revision minting 前拒绝通用 cross-reference 错误；provider semantic rejection；
+在没有 provider 时保留未知 byte 的 artifact-envelope round-trip；property/DataSpec/Region callback
+中的每个 payload pointer 均被清除；独立且精确的 SHA-256 descriptor/content/layout vector；
+physical repacking 与 padding 不改变 content identity；旧 Value/read/owner 跨 replacement 和
+unload 的 lifetime；最终 provider-before-module destroy 顺序；以及 concurrent replacement
+不存在 mixed-generation resolution。
+
 Active output byte 必须等于 `255 - input`；input/output row padding 不被当作 image element。
 
 聚焦验证命令为：
@@ -998,13 +1015,14 @@ Active output byte 必须等于 `255 - input`；input/output row padding 不被�
 cmake --build build --target test_region_contracts \
   test_cpu_dense_tensor_image_operation \
   test_packed_fp4_dense_tensor \
+  test_variable_sample_field_extensions \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor)\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions)\.'
 ```
 
 `DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 48 个
-dense 用例与全部 4 个 packed FP4 用例，再证明 installed consumer；
+dense 用例、全部 4 个 packed FP4 用例与 7 个 V-14 extension 用例，再证明 installed consumer；
 `StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer

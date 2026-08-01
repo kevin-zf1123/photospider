@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-12
+已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-14
 切片：CPU DenseTensor/ImageView Value、checked BufferHandle ownership 与 runtime identity，
 以及由 dirty planning、validity 和 core dense operation 使用的 public Region MVP；V-5
 operation-metadata routing 与有界 V-6 ReadyFence、pending CPU Value 和显式 fake-device
@@ -25,10 +25,18 @@ rank-five FP32/FP64 latent Value、正向 padding、有界 signed/zero-stride �
 Region merge、显式 CPU/external-device transfer 与 compute-I/O retention。该矩阵验证现有
 契约；它不扩大内置 operation、真实 Metal provider 或 image-codec capability surface。
 
-Issue #78 批准了本契约。Issue #79 至 #89 交付了有界的 V-2 至 V-12 实现与决策切片；
-Issue #90 仍是独立的实现切片。合成的
-`VariableSampleField` 证明与可选 OpenEXR Deep provider 仍是彼此独立的后续 change；
-本决策不实现二者。
+V-13 新增一条版本化 Blocked FP4 E2M1/量化 DenseTensor 纵向路径，覆盖 checked packed
+access、block-aligned TensorSlice copy、保持 representation 的 transfer、memory-cache retention
+以及 fail-closed image-disk-cache 行为。V-14 新增一条 dependency-neutral 的
+provider-defined `Value` 纵向路径：保留字节的 Schema/Facet/Layout envelope、多个 checked
+buffer、一个注入的 `DataDefinitionRegistry`、精确的纯 C definition-suite ABI v3、纯
+property/DataSpec/Region 求值、canonical descriptor/content/layout SHA-256 identity、artifact
+envelope round-trip，以及保留 generation 的 replacement/unload。它有意不加入 access、
+conversion、inference、execution、codec、OpenEXR 或 operation ABI v2 replacement suite。
+
+Issue #78 批准了本契约。Issue #79 至 #90 交付了有界的 V-2 至 V-13 实现与决策切片。
+Issue #117 实现独立的合成 `VariableSampleField` V-14 证明，不依赖可选 codec。Issue #118
+仍是独立的 V-15 可选 OpenEXR Deep provider/codec 切片；V-14 不声称具备该依赖或格式行为。
 
 ## 背景
 
@@ -414,9 +422,10 @@ virtual class、allocator owner、`Value` PImpl、native owner reference 或可�
 C++ SDK 在这些 suite 上提供 RAII wrapper，而不改变其 wire layout 或 authority。实现前必须
 冻结并独立复现精确 record layout、limit、calling convention 与 callback inventory。
 
-注入的进程执行域拥有彼此独立的 Schema、Facet、Layout 与 provider registry。它们不是 global
-或 function-static singleton。对于一个精确 identity 与 structural version，最多有一个 active
-definition provider；多个 execution kernel 可以在不同 capability 上支持同一个逻辑 definition。
+注入的进程组合拥有一个 `DataDefinitionRegistry`，其内部包含彼此独立的 Schema、Facet、
+Layout 类型表以及一个 provider-generation 表。它不是 global 或 function-static singleton。
+对于一个精确的类型化 identity 与 structural version，最多有一个 active definition provider；
+多个 execution kernel 可以在不同 capability 上支持同一个逻辑 definition。
 
 已发布 definition 与 kernel binding 是不可变 generation owner。Caller 在 validation、query、
 inference、access planning、invocation、result conversion 与 provider-created owner lifetime
@@ -502,10 +511,12 @@ Issue #78 只修改架构与文档。
 首条实现链仍是 Issue #79 至 #90。每个 Issue 都是可独立测试的纵向切片，并且必须消费本契约，
 不能静默缩窄契约。
 
-后续依赖中立的合成 `VariableSampleField` 切片跟踪为 V-14。它必须在不依赖 OpenEXR 的条件下
-证明 registration、unknown byte preservation、descriptor 与 Layout validation、multi-buffer
-binding、Region/DataSpec/query behavior、canonical digest、generation lease、hot replacement
-与 unload。
+Issue #117 实现 dependency-free 的合成 `VariableSampleField` V-14 切片。其长期测试在不依赖
+OpenEXR 的条件下证明 registration、unknown byte preservation、descriptor 与 Layout
+validation、multi-buffer binding、无 payload authority 的 Region/DataSpec/query behavior、
+独立精确的 canonical digest、generation lease、atomic hot replacement 与 unload。交付的 ABI
+v3 有意只包含 definition suite；本目标中更宽的 access/conversion/inference/execution suite
+仍属于未来 generation 或切片。
 
 另一个独立的可选 OpenEXR 切片跟踪为 V-15，首期只支持 single-part deep-scanline read/write。
 它映射到 `VariableSampleField + ImageFacet + DeepSampleFacet`，并让 OpenEXR type、header、

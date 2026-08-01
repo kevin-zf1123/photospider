@@ -637,6 +637,11 @@ and bounded compute-I/O retention. V-13 now installs one packed FP4 E2M1,
 block-scale quantized DenseTensor vertical with version-1 Blocked addressing,
 checked packed access, block-aligned TensorSlice copy, representation-preserving
 transfer, exact memory-cache retention, and fail-closed image disk persistence.
+V-14 now installs a dependency-neutral provider-defined Value vertical with
+byte-preserving Schema/Facet/Layout envelopes, checked multi-buffer bindings,
+one injected typed registry, pure-C definition-suite ABI v3, pure
+property/DataSpec/Region evaluation, canonical descriptor/content/layout
+digests, artifact-envelope round-trip, and generation-safe replacement/unload.
 Their exact
 behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
@@ -647,7 +652,7 @@ ownership in
 [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md)
 and [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md). The
 complete model below is the accepted target; only the explicit V-2 through
-V-13 subset called out here is a current runtime fact.
+V-14 subset called out here is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 is authoritative for the complete target contract. Its central separation is:
@@ -682,7 +687,7 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2 through V-13 subset is deliberately narrower:
+The implemented V-2 through V-14 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, 8/16/32/64-bit native
@@ -701,7 +706,7 @@ The implemented V-2 through V-13 subset is deliberately narrower:
   while the lease is live, and publishes a fresh process-local
   `ValueRevisionId`;
 - final copyable `Value` shares immutable descriptor/layout/handle state;
-  Values over sealed handles retain exactly one tagged Strided or Blocked
+  DenseTensor Values over sealed handles retain exactly one tagged Strided or Blocked
   layout; Strided aliases may use a bounded byte offset and positive, zero, or
   negative signed strides, while V-13 Blocked aliases use checked bit offsets
   and block bit strides;
@@ -769,6 +774,23 @@ The implemented V-2 through V-13 subset is deliberately narrower:
   TensorSlice through checked strides; TensorSlice is HP-only monolithic work,
   and same-key plugin replacement cannot inherit that source-private contract.
 
+V-14 adds a second explicit `ProviderDefined` representation. Its
+`DataDescriptorEnvelope` owns one Schema and bounded ordered Facets; its
+`ProviderDefinedLayout` owns one Layout definition plus checked buffer-role
+envelopes; and its Value retains multiple sealed host-readable `BufferHandle`s
+plus one immutable provider generation. DenseTensor-only accessors and current
+transfer paths reject this representation. Indexed `ProviderReadLease` retains
+both the selected buffer and interpretation generation.
+
+One injected `DataDefinitionRegistry` owns a single generation source,
+provider table, and strict typed Schema/Facet/Layout maps under one publication
+lock. It stages and validates complete candidate bundles, publishes new or
+replacement generations atomically, rejects cross-provider typed-key
+conflicts without partial visibility, and invokes no provider callback while
+locked. Unload denies new lookup while old Values, reads, callbacks, and opaque
+owners retain the retiring generation through final provider destroy and
+module release.
+
 V-12 adds verification rather than a new representation or provider ABI. Its
 dependency-neutral matrix proves active logical FP32/FP64 image elements for
 1/3/4/8/16 channels through padded Values and the CPU ImageBuffer bridge;
@@ -800,10 +822,19 @@ logical revision, and Pending-to-Ready facts in a distinct binding. Formal
 memory cache retains the exact Value/Region facts; image disk persistence fails
 closed without inventing widened image bytes or a generic artifact format.
 
-V-13 still has no DataSpec, public device registry, device queue/in-flight
-dimensions, additional packed encodings or quantization formulae, unaligned
-requantizing slices, provider ABI v3, generic Value persistence, canonical
-descriptor/content/layout digests, manifests/chunks, or general named graph
+V-14 implements one bounded concrete `DataSpec`, typed pure property and Region
+outcomes, the exact-size C11/C++17 v3 definition-suite ABI, and tagged SHA-256
+Descriptor/Content/StorageLayout digests. Pure callbacks receive no payload;
+validation and canonical-content traversal receive only retained checked
+buffer views. Versioned artifact-envelope encoding preserves unknown
+Schema/Facet/Layout bytes and digest metadata without a provider. It is not a
+graph document, filesystem codec, cache manifest/chunk store, or durable output
+authority.
+
+V-14 still has no public device registry, device queue/in-flight dimensions,
+additional packed encodings or quantization formulae, unaligned requantizing
+slices, access/conversion/inference/execution provider suites, generic graph or
+cache Value persistence, manifests/chunks, OpenEXR, or general named graph
 Value outputs. Its native executor, transfer submission, mutable
 producer, completion admission, and residency owner remain source-private.
 ImageBuffer remains the
@@ -817,7 +848,7 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-For the current V-13 subset, `BufferHandle` is a checked immutable byte range.
+For the current V-14 subset, `BufferHandle` is a checked immutable byte range.
 Consumer reads and ordinary builder writes require leases; sealed Values never
 issue `WriteLease`, and consumer writes are always rejected. A source-private
 producer may complete one sealed pending CPU or native payload through its
@@ -835,8 +866,9 @@ plan kinds remain typed outcomes rather than hidden work.
 The implemented `RegionSet` is bounded DNF over explicit logical domain keys.
 The MVP supports Whole, Empty, ImageRect, TensorSlice, and one nonempty clause.
 Region algebra returns Exact, labelled ConservativeSuperset, Unknown,
-Unsupported, or TooComplex rather than silently widening. `DataSpec` describes
-descriptor sets and uses subset, disjointness, conditional runtime guards, or
+Unsupported, or TooComplex rather than silently widening. The V-14 provider
+subset of `DataSpec` constrains Schema identity/version and logical-site bounds
+and returns subset, disjointness, a conditional runtime guard, or
 `CannotEvaluate`; it never authorizes implicit conversion or device access.
 
 Runtime revision, descriptor/content/Layout digests, and artifact identity are
@@ -882,12 +914,17 @@ Project fields remain the status authority.
 | [#88 / V-11](https://github.com/kevin-zf1123/photospider/issues/88) | Route bounded cache/asset/codec I/O mechanism through `ComputeIoExecutor` without moving commit policy | #87, #70 |
 | [#89 / V-12](https://github.com/kevin-zf1123/photospider/issues/89) | Verify the multi-channel, FP64, latent, and stride matrix | #81, #85 |
 | [#90 / V-13](https://github.com/kevin-zf1123/photospider/issues/90) | Run one packed FP4/quantized DenseTensor slice | #89 |
+| [#117 / V-14](https://github.com/kevin-zf1123/photospider/issues/117) | Prove dependency-free VariableSampleField definitions, multi-buffer Values, pure queries/digests, and generation replacement/unload | #90 |
+| [#118 / V-15](https://github.com/kevin-zf1123/photospider/issues/118) | Add the first optional OpenEXR deep-scanline provider/codec without leaking the dependency | #117 |
 
-V-14 is a separate later dependency-free synthetic
-`VariableSampleField` issue/change. “Dependency-free” means the proof does not
-use OpenEXR or another optional codec; it must exercise registration, unknown
-byte preservation, multi-buffer Layout and binding, Region/DataSpec/query,
-canonical digest, generation replacement, lease, and unload behavior directly.
+V-14 is the current separate dependency-free synthetic
+`VariableSampleField` slice. “Dependency-free” means the proof uses neither
+OpenEXR nor another optional codec. It exercises registration, unknown-byte
+preservation, multi-buffer Layout and binding, Region/DataSpec/query without
+payload authority, independent exact canonical digests, generation
+replacement, leases, and unload directly. Its ABI v3 is the definition suite
+only and does not pre-implement access, conversion, inference, execution, or
+codec authority.
 
 V-15 is a separate later optional OpenEXR provider/codec issue/change. Its first
 format is single-part deep-scanline read/write, following the core and V-14

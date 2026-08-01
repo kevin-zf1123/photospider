@@ -42,8 +42,9 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | `photospider_compute_internal` | 仅用于构建的 compute、dirty-region、runtime、interaction、event、固定 worker service、reserved-start 与私有 route 实现；它单向依赖 policy 和 execution internal。 |
 | `photospider_host_internal` | 仅用于构建的 Kernel/Interaction facade 与 embedded Host composition root。它根据 producer capability 选择真实 YAML persistence adapter 或显式 unavailable adapter。 |
 | `photospider_kernel` | 可构建的聚合 target，编译实际选中的 core、graph、operation-plugin、policy、execution、compute、Host 以及可选 provider/adapter 模块；它不是安装 artifact，也不是占位 library。 |
-| `photospider_operation_runtime` | 可安装的 public image-buffer factory、explicit-binding DenseTensor Value/ImageView 子集、Region algebra 与 ReadyFence 共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Threads、graph、registry、native-device SDK 或 embedded product。 |
+| `photospider_operation_runtime` | 可安装的 public image-buffer factory、DenseTensor 与 provider-defined Value contract、Region algebra、ReadyFence、canonical extension metadata/digest 及注入式 data-definition registry 共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Graph、policy registry、native-device SDK 或 embedded product。 |
 | `photospider_operation_sdk` | operation v2 与 dependency-neutral data/memory header 的可安装 interface target；传递链接 `operation_runtime`。 |
+| `photospider_data_provider_sdk` | 只携带自包含纯 C data-definition provider ABI v3 头文件与 C11/C++17 requirement 的可安装、dependency-neutral interface target。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter，只使用 OpenCV `core` component；仅在 `PHOTOSPIDER_ENABLE_OPENCV=ON` 时存在。 |
 | `photospider_policy_sdk` | 携带自包含纯 C policy ABI header 与 C11/C++17 requirement 的可安装、无依赖 interface target。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`，由已启用的 CLI 和 embedded Host 前端链接。它导出 `Photospider::photospider`，在 OpenCV 与 YAML 均禁用时仍可构建；operation plugin 通过 `ps::plugin::OperationPluginRegistrar` 和 `register_photospider_ops_v2` 注册，而不是为了 registry 状态链接该产品。 |
@@ -73,7 +74,7 @@ plugin 位于 `plugins/{ops,policies}`；维护中的测试翻译单元归类到
 
 Package 边界：
 
-- `cmake --install` 会安装静态 `photospider`、operation-runtime、operation/policy interface
+- `cmake --install` 会安装静态 `photospider`、operation-runtime、operation/data-provider/policy interface
   SDK、`include/photospider/**` 下已启用的 public-header inventory，以及基础
   `PhotospiderTargets.cmake`、`PhotospiderEmbeddedTargets.cmake` 和
   `PhotospiderConfig.cmake`。OpenCV 启用时还会安装 operation-OpenCV 归档、header 与
@@ -106,9 +107,13 @@ Package 边界：
   `photospider/memory/ready_fence.hpp` surface 与实现只使用 C++ 标准库；source-private pending
   producer 与 transfer task 不会安装。该 runtime 不依赖 ELF/Mach-O symbol interposition，也不
   新增 package component。
-- Package component 包括 `embedded`、`ipc_client`、`operation_sdk`、`operation_runtime`、
-  `operation_opencv` 与 `policy_sdk`。省略 component 时保留 embedded 默认行为。
-  `policy_sdk`、`operation_sdk` 和 `operation_runtime` 不发现外部 package；
+- `Photospider::data_provider_sdk` 是没有 link interface 的纯 interface producer target。
+  C11 与 C++17 provider 只获得安装后的 include root；Host-side registry/Value consumer
+  单独链接 `operation_runtime`。
+- Package component 包括 `embedded`、`ipc_client`、`data_provider_sdk`、`operation_sdk`、
+  `operation_runtime`、`operation_opencv` 与 `policy_sdk`。省略 component 时保留 embedded
+  默认行为。`data_provider_sdk`、`policy_sdk`、`operation_sdk` 和 `operation_runtime`
+  不发现外部 package；
   `operation_opencv` 只发现 OpenCV `core`；`ipc_client` 只解析 Threads。如果 optional
   `operation_opencv` discovery 找不到 OpenCV `core`，package 仍保持 found，
   `Photospider_operation_opencv_FOUND` 为 false，不导入其 target，而所请求的无依赖 target 仍然
@@ -134,7 +139,7 @@ Package 边界：
 - `apps/graph_cli/include/graph_cli/**` 下的 CLI header 是 private build input，不会安装；public
   install inventory 仍严格限定为 `include/photospider/**`。
 - Source-tree extension header 不属于 public inventory，也不提供 forwarding header。Operation
-  契约只位于 `include/photospider/plugin`，policy 契约只位于 `include/photospider/policy`，共享 device
+  与 data-definition 契约只位于 `include/photospider/plugin`，policy 契约只位于 `include/photospider/policy`，共享 device
   label 位于 `include/photospider/core/device.hpp`，完整可变/private declaration 则归属相应
   `src/lib` 目录。
 
@@ -255,6 +260,7 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 | `GraphCacheService` | 内存/磁盘缓存操作和缓存同步；磁盘 image 与中立 metadata 经过必需的注入 codec contract。 |
 | `GraphInspectService` | 基于图拓扑构建结构化缓存/空间元数据 inspect 和 dependency-tree snapshot。 |
 | `GraphEventService` | 线程安全、固定容量的每节点 compute-event ring，提供带 sequence 的破坏性 batch 与饱和 drop accounting。 |
+| `DataDefinitionRegistry` | 显式注入的 Schema/Facet/Layout provider 权威，拥有一个原子 publication domain 和保留 generation 的 lease；runtime 提供其实现，但不提供 global instance 或平台 scanner。 |
 | `PluginManager` | 唯一的进程寿命 operation plugin owner；串行化 load/seed/unload/inspection 并拥有 source/restoration/handle 状态。Load 会注册并记录动态插件，seed 会初始化或对齐 built-in，只有显式全局 unload 才会移除动态插件。 |
 | `OpRegistry` | 进程级 operation implementation registry，返回一致的 callback copy snapshot，包括 HP/RT、tiled/monolithic、设备元数据和 ROI propagator。 |
 
@@ -468,6 +474,14 @@ accepted current-generation callback 会按 coordinator-to-manager 顺序推进�
 texture-to-buffer readback。Operation ABI v2 与 Host surface 仍使用 ImageBuffer compatibility
 value；V-8 不增加 public native-device context 或新 ABI slot。
 
+V-14 在不改变 `ImageBuffer` 的前提下新增 provider-defined multi-buffer `Value` contract。
+一个注入式 `DataDefinitionRegistry` 会把完整 typed Schema/Facet/Layout bundle 解析为不可变
+generation。通用 bounds check 先于 provider validation 和 revision minting；带 index 的 read 会
+保留选中的 `BufferHandle` 及该 generation。纯 property、DataSpec 与 Region callback 能看到
+metadata，但看不到 payload。系统安装 canonical descriptor/content/layout SHA-256 identity 与
+保留 byte 的 artifact envelope，但不会增加 provider-defined graph operation、cache policy、codec、
+OpenEXR path、operation ABI v2 slot 或 Host command。
+
 ### 脏区传播
 
 ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 propagator、`GraphModel`
@@ -550,11 +564,14 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   fence、精确 settlement 与 source-private telemetry 已是当前行为。Public cancellation control
   仍是未来行为。
 - [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
-  定义版本化 data、binding 与 Region 方向。其中 issue #79 至 #86 已是当前行为：V-8 提供显式
+  定义版本化 data、binding 与 Region 方向。其中 issue #79 至 #90 和 #117 已是当前行为。V-8 提供显式
   CPU/Metal transfer、保留 revision 的 replica、进程级 residency、精确 stale-completion
   rejection 与 pending-Value continuation，且不改变 operation ABI v2。V-9 在唯一的 service
   `ResourceLedger` 内新增原子 per-device memory/scratch plan、native actual-byte 校准，以及
-  persistent/completion 生命周期 lease。其余通用 provider migration 仍是未来工作。
+  persistent/completion 生命周期 lease。V-13 新增一条 packed FP4/quantized 垂直路径。V-14
+  新增纯 C definition-suite ABI、注入式 typed registry、provider-defined multi-buffer Value、
+  pure query、canonical digest 以及 generation-safe replacement/unload。其余 provider suite、
+  graph migration 与可选 OpenEXR V-15 仍是未来工作。
 - [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
   把当前 Run、readiness、cache、Graph 文档、daemon delivery 与 output publication observation
   同已接受 durability target 分离。Issue #88 现已提供 source-private、process-owned、按
@@ -570,10 +587,13 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `CMakeLists.txt`
 - `include/photospider/host/host.hpp`
 - `include/photospider/data/value.hpp`
+- `include/photospider/data/extension.hpp`
 - `include/photospider/core/device.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/strided_layout.hpp`
+- `include/photospider/plugin/data_definition_registry.hpp`
+- `include/photospider/plugin/data_provider_api.h`
 - `src/lib/graph/graph_document_reader.hpp`
 - `src/lib/graph/graph_document_writer.hpp`
 - `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
@@ -582,6 +602,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `src/lib/core/cache_metadata_codec.hpp`
 - `src/lib/core/image_buffer_processing.*`
 - `src/lib/core/value.cpp`
+- `src/lib/core/extension.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
@@ -596,6 +617,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/plugin/data_definition_registry.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_injection.cpp`
@@ -607,6 +629,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
+- `tests/integration/test_variable_sample_field_extensions.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_device_residency.cpp`

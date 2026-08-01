@@ -232,7 +232,7 @@ delivery state，不是 crash-durable output receipt。
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 固定。
 
-### 已实现的 V-3/V-4/V-6/V-8/V-9/V-12/V-13 关系与剩余目标
+### 已实现的 V-3/V-4/V-6/V-8/V-9/V-12/V-13/V-14 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受以下完整替换：
@@ -317,9 +317,26 @@ compatibility boundary：packed、quantized 或 latent 正式 Value 会在 execu
 filesystem mutation 或 codec call 前以 `GraphError{InvalidParameter}` 失败；不会发生 widening、
 metadata-only fallback 或通用 durable format 写入。
 
-V-13 仍不实现其他 quantization formula 或 packed format、未对齐 requantizing slice、通用
-Map/Import provider、provider ABI v3、public device registry、device queue/in-flight
-accounting、通用 Value persistence 或通用命名 graph Value output。Issue #87 的
+Issue #117 / V-14 同样保持 `ImageBuffer` 不变。它新增独立的 provider-defined `Value`
+表示，其中 `ProviderDefinedLayout` 通过受界限约束的 buffer envelope 命名一个或多个经过检查的
+`BufferHandle` range。通用 Host validation 会在调用匹配的精确 generation provider 前，证明每个
+index、非零 role、offset、length 和 checked end。Provider-defined Value 只暴露带 index 的
+`ProviderReadLease`；每次 read 都同时保留选中的 allocation 和 provider generation。
+DenseTensor byte/view/layout accessor 与现有 transfer task 会拒绝这种表示，而不会通过
+`ImageBuffer` 适配它或假定只有一个 buffer。
+
+V-14 纯 C definition suite 只会为显式 semantic validation 与 canonical logical-content
+traversal 接收 payload。Property、DataSpec 和 Region evaluation 只能看到 buffer size 和 identity，
+payload pointer 均为空，并且没有 mapping、transfer、conversion、device 或 executor 权限。
+原子 provider replacement 与 unload 会移除新的 interpretation visibility，而旧 Value、read 和
+provider owner 会保留正在退役的 generation 与 module。当 provider 发出相同 logical stream 时，
+canonical ContentDigest 会排除 physical buffer order、padding 与 offset。Artifact-envelope
+serialization 会保留 metadata 和未知 extension byte，但不会创建 filesystem、cache 或
+`ImageBuffer` persistence path。
+
+V-14 仍不实现其他 quantization formula 或 packed format、未对齐 requantizing slice、通用
+Map/Import provider、剩余 provider ABI suite、public device registry、device queue/in-flight
+accounting、通用 graph/cache Value persistence 或通用命名 graph Value output。Issue #87 的
 compute-I/O durability 决策与 Issue #88 首条有界 cache/codec execution 垂直路径继续是当前
 行为：process executor 会保留 transaction lifetime 并预算 work，但不改变 `ImageBuffer` 或
 codec ABI。V-12 I/O observation 证明已准入 task 对通用 Value 的 retention，而不是 lossless
@@ -342,19 +359,24 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/data/value.hpp`
+- `include/photospider/data/extension.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/packed_dense_tensor_view.hpp`
 - `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/plugin/data_definition_registry.hpp`
+- `include/photospider/plugin/data_provider_api.h`
 - `src/lib/core/image_buffer.cpp`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
+- `src/lib/plugin/data_definition_registry.cpp`
 - `src/lib/execution/metal_device_executor.*`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
@@ -371,3 +393,4 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
+- `tests/integration/test_variable_sample_field_extensions.cpp`

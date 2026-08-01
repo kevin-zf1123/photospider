@@ -252,7 +252,7 @@ daemon result availability 与受保护 artifact publication 是不同的当前�
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)；
 它们不是新增的当前字段。
 
-### 已实现的 V-3 ownership 至 V-13 packed data surface
+### 已实现的 V-3 ownership 至 V-14 extension surface
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受完整的通用 Value 替换。V-2 引入了有界 CPU DenseTensor 子集；V-3 现已接通其
@@ -368,11 +368,47 @@ readiness transition 与逻辑 revision。正式 HP memory cache copy 会保留�
 mutation 或 codec invocation 前，以 `GraphError{InvalidParameter}` 拒绝 packed、quantized 或
 latent 正式 Value；这不代表存在通用 artifact format 或持久 digest。
 
-`DataSpec`、更多 packed encoding 或 quantization formula、需要 requantize 的未对齐 slice、
-通用 Map/Import provider、provider ABI v3、通用 Value persistence 与通用命名 immutable Value
-output 仍属于后续 no-shim slice。V-13 不新增 public resource declaration、通用 heap
-suballocation、device-queue budget、canonical descriptor/content/layout digest、manifest 或
-chunk。`ParameterMap` 仍用于 configuration 与当前命名 scalar-result storage。
+V-14 在 DenseTensor 旁新增显式 `ProviderDefined` representation。
+`DataDescriptorEnvelope` 保留精确一个版本化 Schema record 与有界、有序 Facet record；
+`ProviderDefinedLayout` 保留一个版本化 Layout record，以及 checked
+`{buffer_index, logical_role, offset, length}` envelope。每个 extension record 都拥有自己的
+unknown payload byte。Provider-defined `Value` 保留多个 sealed、host-readable
+`BufferHandle`、一个不可变的精确 provider generation，以及一个新的进程内 revision。通用
+cross-reference 与 checked-end validation 会先于 provider validation 和 publication identity
+minting。DenseTensor-only accessor 会拒绝该 representation；indexed `ProviderReadLease` 会同时
+保留所选 buffer 与 interpretation generation。
+
+`DataDefinitionRegistry` 是一个注入式、非 singleton authority；它在一个 publication lock 下
+拥有一个 generation source、一个 provider table，以及彼此分离的 typed Schema、Facet 和
+Layout map。Candidate load 会在一次 atomic publication 前 stage 并验证完整 exact-size v3
+definition bundle；typed-key conflict 或 malformed record 会保留所有可见旧状态。Replacement
+发布新的完整 generation。Unload 只移除新 lookup visibility：旧 Value、read、callback 与
+provider-created owner 会继续保留 retiring generation，直到 final provider destruction，之后
+才释放 candidate module lease。持有 registry lock 时不会运行 callback。
+
+本切片实现的 v3 provider ABI 只包含 dependency-neutral definition suite。其 self-contained
+C11/C++17 header 冻结精确 record size、offset、alignment、calling convention、status、两个
+exported handshake，以及 mandatory validation、纯 property、纯 Region、纯 DataSpec、
+canonical-content、owner 和 destroy callback。纯 callback 收到 descriptor/Layout/buffer
+metadata，但所有 payload pointer 都会被清空；V-14 中只有 validation 与 canonical-content
+traversal 这两个 semantic callback 会收到 payload。Access、mapping、transfer、conversion、
+inference、execution、native-device 与 operation ABI v2 authority 均不存在。
+
+有界 V-14 `DataSpec` 把 Schema identity/version 与 logical-site range 求值为 Subset、Disjoint、
+PartialOverlapWithRuntimeGuard 或 CannotEvaluate。Property 与 Region call 保留其 typed
+unavailable 或 uncertain outcome。Descriptor、storage-layout 与 provider-selected logical
+content 分别使用带独立 tag 的 SHA-256 canonical traversal；只要 provider 发出相同 logical
+byte stream，物理 buffer order、offset 与 padding 就不会进入 ContentDigest。版本化 artifact
+envelope 能在没有 provider 时保留 Schema/Facet/Layout unknown byte 与三个可选 digest
+identity，但它不是 graph document、manifest/chunk store、filesystem codec 或 cache-policy
+integration。
+
+更多 packed encoding 或 quantization formula、需要 requantize 的未对齐 slice、通用
+Map/Import provider、其余 provider ABI suite、通用 graph/cache persistence 与通用命名
+immutable Value output 仍属于后续 no-shim slice。V-14 不新增 public resource declaration、
+通用 heap suballocation、device-queue budget、manifest/chunk、OpenEXR，或 provider-defined
+Value 的 graph/compute execution path。`ParameterMap` 仍用于 configuration 与当前命名
+scalar-result storage。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
 mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的
@@ -385,6 +421,7 @@ dependency 工作由
 ## 实现与验证入口
 
 - `include/photospider/data/value.hpp`
+- `include/photospider/data/extension.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/packed_dense_tensor_view.hpp`
 - `include/photospider/data/region.hpp`
@@ -394,6 +431,8 @@ dependency 工作由
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
+- `include/photospider/plugin/data_definition_registry.hpp`
+- `include/photospider/plugin/data_provider_api.h`
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
 - `src/lib/graph/graph_definition.hpp`
@@ -408,6 +447,7 @@ dependency 工作由
 - `src/lib/ipc/output_store.*`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
@@ -418,6 +458,7 @@ dependency 工作由
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
+- `src/lib/plugin/data_definition_registry.cpp`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`
@@ -430,5 +471,6 @@ dependency 工作由
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
+- `tests/integration/test_variable_sample_field_extensions.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_value_identity_dso.cpp`

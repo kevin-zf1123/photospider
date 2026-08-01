@@ -178,6 +178,9 @@ Extension DSOs use separate installed components:
 find_package(Photospider CONFIG REQUIRED COMPONENTS operation_sdk)
 target_link_libraries(my_operation PRIVATE Photospider::operation_sdk)
 
+find_package(Photospider CONFIG REQUIRED COMPONENTS data_provider_sdk)
+target_link_libraries(my_data_provider PRIVATE Photospider::data_provider_sdk)
+
 find_package(Photospider CONFIG REQUIRED COMPONENTS policy_sdk)
 target_link_libraries(my_policy PRIVATE Photospider::policy_sdk)
 ```
@@ -185,7 +188,16 @@ target_link_libraries(my_policy PRIVATE Photospider::policy_sdk)
 `operation_sdk` contains the v2 `ps::plugin` contracts and transitively links
 the no-external-dependency `operation_runtime` image factories. An adapter user
 requests `operation_opencv`, which discovers only OpenCV `core`; algorithm-
-specific modules remain the plugin's responsibility. `policy_sdk` is a
+specific modules remain the plugin's responsibility. `data_provider_sdk` is a
+dependency-neutral C11/C++17 header-only contract for immutable
+Schema/Facet/Layout definition bundles. Providers export
+`ps_data_provider_get_abi_version` and `ps_data_provider_get_api_v3`; the v3
+suite covers validation, pure property/DataSpec/Region observation, canonical
+content traversal, and generation lifetime only. It grants no access,
+conversion, execution, device, Graph, or registry-mutation authority and links
+no runtime or optional package. Host-side C++ users of
+`DataDefinitionRegistry` link `Photospider::operation_runtime` separately.
+`policy_sdk` is a
 dependency-neutral C11/C++17 header-only contract. Policy DSOs export
 `ps_policy_plugin_get_abi_version` and `ps_policy_plugin_get_api_v1`; callbacks
 receive only bounded immutable ranking snapshots and return one candidate id or

@@ -131,6 +131,7 @@ only the dependencies recorded as enabled by the producer.
 | Embedded backend | `embedded` | `Photospider::photospider` |
 | Typed local IPC | `ipc_client` | `Photospider::photospider_ipc_client` |
 | Operation plugin | `operation_sdk` | `Photospider::operation_sdk` |
+| Data-definition provider | `data_provider_sdk` | `Photospider::data_provider_sdk` |
 | OpenCV operation adapter | `operation_opencv` | `Photospider::operation_opencv` |
 | Policy plugin | `policy_sdk` | `Photospider::policy_sdk` |
 
@@ -141,7 +142,7 @@ find_package(Photospider CONFIG REQUIRED COMPONENTS embedded)
 target_link_libraries(app PRIVATE Photospider::photospider)
 ```
 
-Operation and policy extension authors should use only their narrow SDK
+Operation, data-definition, and policy extension authors should use only their narrow SDK
 component. The [plugin ABI guide](docs/kernel-architecture/Plugin-ABI.md)
 defines the public contracts and required entry points.
 

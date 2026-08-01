@@ -309,7 +309,7 @@ completion taxonomy are recorded in
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md);
 they are not additional current fields.
 
-### Implemented V-3 ownership through V-13 packed data surfaces
+### Implemented V-3 ownership through V-14 extension surfaces
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete generic-value replacement. V-2 introduced the bounded CPU
@@ -454,12 +454,57 @@ disk cache instead rejects packed, quantized, or latent formal Values with
 mutation, or codec invocation; no generic artifact format or persistent digest
 is implied.
 
-`DataSpec`, additional packed encodings or quantization formulae, unaligned
-requantizing slices, general Map/Import providers, provider ABI v3, generic
-Value persistence, and general named immutable Value outputs remain later
-no-shim slices. V-13 does not add public resource declarations, general heap
-suballocation, device-queue budgets, canonical descriptor/content/layout
-digests, manifests, or chunks.
+V-14 adds one explicit `ProviderDefined` representation beside DenseTensor.
+`DataDescriptorEnvelope` retains exactly one versioned Schema record plus
+bounded ordered Facet records; `ProviderDefinedLayout` retains one versioned
+Layout record plus checked `{buffer_index, logical_role, offset, length}`
+envelopes. Every extension record owns its unknown payload bytes. A
+provider-defined `Value` retains multiple sealed host-readable
+`BufferHandle`s, an immutable exact provider generation, and one fresh
+process-local revision. Generic cross-reference and checked-end validation
+run before provider validation and before publication identities are minted.
+DenseTensor-only accessors reject this representation; indexed
+`ProviderReadLease` keeps both the selected buffer and interpretation
+generation live.
+
+`DataDefinitionRegistry` is one injected, non-singleton authority with one
+generation source, one provider table, and separate typed Schema, Facet, and
+Layout maps under one publication lock. Candidate loading stages and validates
+the complete exact-size v3 definition bundle before one atomic publication;
+typed-key conflicts or malformed records preserve all visible prior state.
+Replacement publishes a fresh complete generation. Unload removes only new
+lookup visibility: old Values, reads, callbacks, and provider-created owners
+retain the retiring generation until final provider destruction, after which
+the candidate module lease releases. No callback runs while the registry lock
+is held.
+
+The v3 provider ABI implemented by this slice is the dependency-neutral
+definition suite only. Its self-contained C11/C++17 header freezes exact record
+sizes, offsets, alignment, calling convention, statuses, two exported
+handshakes, and mandatory validation, pure property, pure Region, pure
+DataSpec, canonical-content, owner, and destroy callbacks. Pure callbacks
+receive descriptor/Layout/buffer metadata with every payload pointer cleared;
+validation and canonical-content traversal are the only semantic callbacks
+that receive payload in V-14. Access, mapping, transfer, conversion, inference,
+execution, native-device, and operation ABI v2 authority are absent.
+
+The bounded V-14 `DataSpec` evaluates Schema identity/version and logical-site
+ranges into Subset, Disjoint, PartialOverlapWithRuntimeGuard, or
+CannotEvaluate. Property and Region calls preserve their typed unavailable or
+uncertain outcomes. Descriptor, storage-layout, and provider-selected logical
+content use separately tagged SHA-256 canonical traversals; physical buffer
+order, offsets, and padding do not enter ContentDigest when the provider emits
+the same logical byte stream. The versioned artifact envelope preserves
+Schema/Facet/Layout unknown bytes and all three optional digest identities
+without a provider, but it is not a graph document, manifest/chunk store,
+filesystem codec, or cache-policy integration.
+
+Additional packed encodings or quantization formulae, unaligned requantizing
+slices, general Map/Import providers, the remaining provider ABI suites,
+generic graph/cache persistence, and general named immutable Value outputs
+remain later no-shim slices. V-14 does not add public resource declarations,
+general heap suballocation, device-queue budgets, manifests/chunks, OpenEXR,
+or a graph/compute execution path for provider-defined Values.
 `ParameterMap` remains configuration and current named scalar-result storage.
 
 Keeping graph identity and topology in one model makes traversal, compute,
@@ -474,6 +519,7 @@ neither document changes the current fields described above.
 ## Implementation and Validation Entry Points
 
 - `include/photospider/data/value.hpp`
+- `include/photospider/data/extension.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/packed_dense_tensor_view.hpp`
 - `include/photospider/data/region.hpp`
@@ -483,6 +529,8 @@ neither document changes the current fields described above.
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
+- `include/photospider/plugin/data_definition_registry.hpp`
+- `include/photospider/plugin/data_provider_api.h`
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
 - `src/lib/graph/graph_definition.hpp`
@@ -497,6 +545,7 @@ neither document changes the current fields described above.
 - `src/lib/ipc/output_store.*`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
@@ -507,6 +556,7 @@ neither document changes the current fields described above.
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
+- `src/lib/plugin/data_definition_registry.cpp`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`
@@ -519,5 +569,6 @@ neither document changes the current fields described above.
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
+- `tests/integration/test_variable_sample_field_extensions.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_value_identity_dso.cpp`

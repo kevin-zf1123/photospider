@@ -3,7 +3,7 @@
 ## Status
 
 Accepted as the target contract for Project 4 generic data and heterogeneous
-execution. The source tree now implements bounded V-2 through V-12 slices:
+execution. The source tree now implements bounded V-2 through V-14 slices:
 CPU DenseTensor/ImageView values, checked BufferHandle ownership and runtime
 identity, and the public Region MVP used by dirty planning, validity, and the
 core dense operation; V-5 operation-metadata routing and the bounded V-6
@@ -33,11 +33,22 @@ transfer, and compute-I/O retention. The matrix verifies existing contracts;
 it does not widen the built-in operation, real Metal provider, or image-codec
 capability surface.
 
-Issue #78 ratified this contract. Issues #79 through #89 delivered the bounded
-V-2 through V-12 implementation and decision slices; Issue #90 remains a
-separate implementation slice. A synthetic
-`VariableSampleField` proof and an optional OpenEXR Deep provider remain
-separate later changes; neither is implemented by this decision.
+V-13 adds one versioned Blocked FP4 E2M1/quantized DenseTensor vertical with
+checked packed access, block-aligned TensorSlice copy, representation-
+preserving transfer, memory-cache retention, and fail-closed image-disk-cache
+behavior. V-14 adds a dependency-neutral provider-defined `Value` vertical:
+byte-preserving Schema/Facet/Layout envelopes, multiple checked buffers, one
+injected `DataDefinitionRegistry`, the exact pure-C definition-suite ABI v3,
+pure property/DataSpec/Region evaluation, canonical descriptor/content/layout
+SHA-256 identities, artifact-envelope round-trip, and generation-retaining
+replacement/unload. It intentionally adds no access, conversion, inference,
+execution, codec, OpenEXR, or operation-ABI-v2 replacement suite.
+
+Issue #78 ratified this contract. Issues #79 through #90 delivered the bounded
+V-2 through V-13 implementation and decision slices. Issue #117 implements the
+separate synthetic `VariableSampleField` V-14 proof without an optional codec.
+Issue #118 remains the separate V-15 optional OpenEXR Deep provider/codec
+slice; V-14 does not claim that dependency or format behavior.
 
 ## Context
 
@@ -499,11 +510,12 @@ wire layout or authority. Exact record layout, limits, calling convention, and
 callback inventories must be frozen and independently reproduced before
 implementation.
 
-The injected process execution domain owns separate Schema, Facet, Layout, and
-provider registries. They are not global or function-static singletons. For one
-exact identity and structural version, at most one definition provider is
-active; multiple execution kernels may support that logical definition on
-different capabilities.
+The injected process composition owns one `DataDefinitionRegistry` with
+separate typed Schema, Facet, and Layout tables plus one provider-generation
+table. It is not a global or function-static singleton. For one exact typed
+identity and structural version, at most one definition provider is active;
+multiple execution kernels may support that logical definition on different
+capabilities.
 
 Published definitions and kernel bindings are immutable generation owners.
 Callers retain generation leases through validation, query, inference, access
@@ -604,11 +616,14 @@ The first implementation chain remains issues #79 through #90. Each issue is a
 separately testable vertical slice and must consume this contract without
 silently narrowing it.
 
-A later dependency-free synthetic `VariableSampleField` slice, tracked as
-V-14, must prove registration, unknown byte preservation, descriptor and
-Layout validation, multi-buffer binding, Region/DataSpec/query behavior,
-canonical digests, generation leases, hot replacement, and unload without
-OpenEXR.
+Issue #117 implements the dependency-free synthetic `VariableSampleField`
+V-14 slice. Its durable tests prove registration, unknown byte preservation,
+descriptor and Layout validation, multi-buffer binding,
+Region/DataSpec/query behavior without payload authority, independent exact
+canonical digests, generation leases, atomic hot replacement, and unload
+without OpenEXR. The shipped ABI v3 is deliberately the definition suite only;
+the broader access/conversion/inference/execution suites in this target remain
+future generations or slices.
 
 A separate optional OpenEXR slice, tracked as V-15, initially supports only
 single-part deep-scanline read/write. It maps to

@@ -38,8 +38,9 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_execution_internal` | 仅用于构建的私有物理执行资源与 accounting primitive。 | `ResourceLedger`、固定 `DeviceExecutorRegistry` 和平台 executor factory 在这里编译；每个 composition-root `ExecutionService` 拥有唯一 Host 与逐设备权威 ledger 及 registry。 |
 | `photospider_compute_internal` | 仅用于构建的 compute、request-owned HP/RT `ComputeRun`、policy-aware ready store、reserved-start transaction、私有 route execution、runtime 与 dirty-region helper。 | Run 与物理 route mechanism 保持私有。 |
 | `photospider_host_internal` | 仅用于构建的 embedded Host adapter 与 Kernel facade closure。 | 不导出，也不会向 consumer 暴露私有 execution owner。 |
-| `photospider_operation_runtime` | 可安装的 shared image-buffer/immutable Value 与 Region 实现。 | 持有唯一的进程级 allocation/revision minting authority 与 dependency-neutral Region algebra；没有外部 package，也不反向链接 operation SDK。 |
+| `photospider_operation_runtime` | 可安装的 shared image-buffer、DenseTensor/provider-defined Value、Region、extension-digest 与 data-definition registry 实现。 | 持有唯一的进程级 allocation/revision minting authority 以及 dependency-neutral registry/Region 逻辑；没有外部 package，也不反向链接 operation SDK。 |
 | `photospider_operation_sdk` | 可安装的 operation v2 interface SDK。 | 传递链接 `operation_runtime`，是普通插件唯一所需 link target。 |
+| `photospider_data_provider_sdk` | 可安装、dependency-neutral 的纯 C data-definition ABI v3 SDK。 | 只携带一个兼容 C11/C++17 的 header，不带 runtime、registry、loader 或可选依赖。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter。 | 只发现并链接 OpenCV `core`。 |
 | `photospider_policy_sdk` | 可安装、dependency-neutral 的纯 C policy ABI v1 SDK。 | 只携带一个兼容 C11/C++17 的 header，不带 execution/runtime dependency。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 已符合目标静态产品和 public Host 形态，同时把按角色归属的后端源码折叠进单一归档。 |
@@ -173,6 +174,7 @@ include/photospider/host/
 
 include/photospider/data/
   value.hpp
+  extension.hpp
   image_view.hpp
   region.hpp
 
@@ -181,6 +183,8 @@ include/photospider/memory/
   strided_layout.hpp
 
 include/photospider/plugin/
+  data_definition_registry.hpp
+  data_provider_api.h
   plugin_api.hpp
   op_contract.hpp
   node_view.hpp
@@ -292,8 +296,9 @@ implementation owner 都不会成为 public Host 或 IPC type。
 | `photospider_policy_internal` | Static | 否 | 纯 C policy registry/loader、built-in、binding、context、fault 与 DSO lease。 |
 | `photospider_execution_internal` | Static | 否 | 私有 `DeviceExecutorRegistry`、平台 executor factory、物理 execution accounting 与 `ResourceLedger` 实现。 |
 | `photospider_host_internal` | Static | 否 | Embedded Host adapter 与 Kernel facade closure。 |
-| `photospider_operation_runtime` | Shared | 是 | Public image-buffer/immutable Value 与 Region 实现及唯一进程级 allocation/revision minting authority；同时包含 dependency-neutral Region algebra，无外部 package dependency，也无 SDK 反向链接。 |
+| `photospider_operation_runtime` | Shared | 是 | Public image-buffer、DenseTensor/provider-defined Value、Region、canonical extension metadata 与注入式 data-definition registry 实现及唯一进程级 allocation/revision minting authority；无外部 package dependency，也无 SDK 反向链接。 |
 | `photospider_operation_sdk` | Interface | 是 | Operation v2 header，并传递链接 `operation_runtime`。 |
+| `photospider_data_provider_sdk` | Interface | 是 | 一个 dependency-neutral 的纯 C ABI v3 header，携带 C11/C++17 usage requirement 且没有 link interface。 |
 | `photospider_operation_opencv` | Static | 是 | 只使用 OpenCV `core` 的 opt-in public adapter。 |
 | `photospider_policy_sdk` | Interface | 是 | 一个 dependency-neutral 的纯 C ABI v1 header，携带 C11/C++17 usage requirement。 |
 | `photospider` / `libphotospider` | Static | 是 | 面向进程内前端的公共静态库。 |
@@ -317,6 +322,7 @@ graph TD
     policy["photospider_policy_internal"] --> libphotospider
     execution["photospider_execution_internal"] --> libphotospider
     operation_sdk["Photospider::operation_sdk"] --> operation_runtime["Photospider::operation_runtime"]
+    data_provider_sdk["Photospider::data_provider_sdk"] --> data_providers["data-definition providers"]
     operation_opencv["Photospider::operation_opencv"] --> operation_sdk
     policy_sdk["Photospider::policy_sdk"] --> policy_plugins["policy plugins"]
     operation_sdk --> operation_plugins["operation plugins"]
@@ -354,9 +360,9 @@ CMake 规则：
   `PhotospiderConfig.cmake` 会寻找这些依赖，因而外部嵌入式 consumer
   可以链接导出的 target，但 public Host/core 头不要求 OpenCV 或 `yaml-cpp` 类型。
   `${CMAKE_DL_LIBS}` 只在 CMake 判断目标平台需要时加入 dynamic-loader 库。
-- Package component 为 `embedded`、`ipc_client`、`operation_sdk`、`operation_runtime`、
+- Package component 为 `embedded`、`ipc_client`、`data_provider_sdk`、`operation_sdk`、`operation_runtime`、
   `operation_opencv` 与 `policy_sdk`。省略 component 时使用 `embedded`，并保留上述 dependency
-  行为。`policy_sdk`、`operation_sdk` 和 `operation_runtime` 不解析外部 package；
+  行为。`data_provider_sdk`、`policy_sdk`、`operation_sdk` 和 `operation_runtime` 不解析外部 package；
   `operation_opencv` 只解析 OpenCV `core`；显式 required `ipc_client` component 只解析 Threads；optional
   `embedded` 的 backend dependency 不可用时，该 component 会成为 not-found，但不会使 required
   IPC component 无效。Unknown required component 会失败；IPC-disabled install 中的 required
@@ -386,6 +392,10 @@ CMake 规则：
   callback 构成 C11 纯 C ABI；policy code 不接收 worker grant、executor、Run、Graph、allocator 或
   completion route。已删除的 scheduler SDK 没有 adapter、alias、forwarding header 或 compatibility
   registration。
+  Data-definition provider 只链接 `Photospider::data_provider_sdk`，精确导出
+  `ps_data_provider_get_abi_version` 与 `ps_data_provider_get_api_v3`，并发布不可变
+  Schema/Facet/Layout bundle。C++ registry consumer 链接 `operation_runtime`；这不意味着安装了
+  provider scanner、mutable registry callback 或可选 codec dependency。
 
 ## 目标进程执行组合边界
 
@@ -708,6 +718,11 @@ scratch 字节。权威的无环依赖表位于
    - 长期 integration coverage 还会通过仓库内 embedded Host、真实 `photospiderd` IPC 进程与真实
      `graph_cli` 进程分别运行一条 external operation、external policy 与 compute 链路。
      Operation 产生的 ROI 与复制的 policy binding/generation 会证明实际调用与配置，而不只是发现。
+9. **已实现 V-14 data-definition 边界：** Issue #117 新增自包含纯 C definition-suite ABI v3、
+   已安装 `data_provider_sdk`、保留 byte 的公共 extension/registry contract 与 runtime 实现，
+   但不增加第二个 product 或 loader。Dependency-disabled install smoke 会从已安装 SDK 构建采用
+   精确名称的 C11 与 C++17 provider，通过真实 registry 分别加载它们，并运行 dependency-neutral
+   VariableSampleField contract matrix。OpenEXR 与其他可选 provider dependency 继续保持缺失。
 
 ## 验证期望
 
@@ -734,6 +749,11 @@ scratch 字节。权威的无环依赖表位于
   stdout/stderr 供 CTest 捕获，并且只在 build tree 下使用正常的临时 install/consumer 工作目录。
   它不生成 expected/actual/compare/summary 报告，也不得依赖 Git identity、patch hash、replay、
   provenance 或迁移完成度。
+- 将 dependency-disabled install smoke 保持为已安装 data-definition SDK 门禁。其 clean、
+  OpenCV/YAML-disabled producer 会运行 V-14 synthetic multi-buffer/registry/digest/lifetime matrix；
+  其外部 project 会只针对 `Photospider::data_provider_sdk` 分别构建并执行采用精确名称的 C11 与
+  C++17 provider producer，再通过 `Photospider::operation_runtime` 完成 Host-side registration。
+  现有带 label 的 smoke 已拥有这条长期边界，因此不需要修改 CI test name。
 - 将 `PublicHeaderSelfContainment` 作为长期编译边界检查保留在 CTest 中。它为每个可安装 public
   header 生成一个 translation unit；所有非 OpenCV 头只通过 public include root 以 C++17 编译。
   Opt-in OpenCV adapter 在独立 object target 中仅使用 `Photospider::operation_opencv`；任一依赖隔离

@@ -506,14 +506,18 @@ image、rank-one 至 rank-five FP32/FP64 latent Value、padded 与 signed/zero s
 Region merge、显式 CPU/external-device transfer 和有界 compute-I/O retention。V-13 现在会
 安装一条 packed FP4 E2M1、block-scale quantized DenseTensor 垂直路径，包含 version-1 Blocked
 addressing、checked packed access、block-aligned TensorSlice copy、保留表示的 transfer、精确
-memory-cache retention 与 fail-closed image disk persistence。精确行为记录在
+memory-cache retention 与 fail-closed image disk persistence。V-14 现在会安装一条
+dependency-neutral provider-defined Value 垂直路径，包含保留 byte 的 Schema/Facet/Layout
+envelope、checked multi-buffer binding、一个注入式 typed registry、纯 C definition-suite ABI v3、
+纯 property/DataSpec/Region evaluation、canonical descriptor/content/layout digest、
+artifact-envelope round-trip，以及 generation-safe replacement/unload。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
 [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)；execution ownership 记录在
 [策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)与
 [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2 至 V-13 子集是当前 runtime 事实。
+只有这里明确指出的 V-2 至 V-14 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -544,7 +548,7 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2 至 V-13 子集刻意保持更窄的范围：
+已实现的 V-2 至 V-14 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
   或 floating element semantics、8/16/32/64-bit native scalar storage 或显式 four-bit FP4
@@ -558,8 +562,8 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 - move-only `ValueBuilder` 控制唯一 move-only `WriteLease`，要求 byte offset 为零的 positive
   exact-envelope Strided producer，或 version-1、nibble-aligned、exact-envelope、non-overlapping
   Blocked producer，在 lease 存活时拒绝 seal，并发布全新 process-local `ValueRevisionId`；
-- final、copyable `Value` 共享 immutable descriptor/layout/handle state；通过 sealed handle
-  构造的 Value 只保留一个带 tag 的 Strided 或 Blocked layout；Strided alias 可以使用受界限
+- final、copyable `Value` 共享 immutable descriptor/layout/handle state；DenseTensor Value
+  通过 sealed handle 构造，并且只保留一个带 tag 的 Strided 或 Blocked layout；Strided alias 可以使用受界限
   约束的 byte offset 与正、零或负 signed stride，V-13 Blocked alias 则使用 checked bit offset
   与 block bit stride；
 - retaining checked `DenseTensorView`/`ImageView` 持有 `ReadLease` 并暴露只读 whole-byte
@@ -612,6 +616,20 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   TensorSlice；TensorSlice 是 HP-only monolithic work，same-key plugin replacement 无法继承该
   source-private contract。
 
+V-14 新增第二种显式 `ProviderDefined` representation。它的 `DataDescriptorEnvelope` 拥有一个
+Schema 和一组受界限约束且有序的 Facet；它的 `ProviderDefinedLayout` 拥有一个 Layout definition
+以及经过检查的 buffer-role envelope；它的 Value 保留多个已 seal、host-readable 的
+`BufferHandle` 以及一个不可变 provider generation。DenseTensor-only accessor 与当前 transfer
+path 会拒绝这种表示。带 index 的 `ProviderReadLease` 会同时保留选中的 buffer 与 interpretation
+generation。
+
+一个注入式 `DataDefinitionRegistry` 在同一个 publication lock 下拥有单一 generation source、
+provider table，以及严格 typed 的 Schema/Facet/Layout map。它会暂存并校验完整 candidate bundle，
+原子发布新 generation 或 replacement generation，拒绝跨 provider typed-key conflict 且不产生
+局部可见性，并且不在持锁时调用 provider callback。Unload 会拒绝新 lookup；旧 Value、read、
+callback 与 opaque owner 则保留正在退役的 generation，直到最终 provider destroy 与 module
+release。
+
 V-12 增加的是验证，而不是新的 representation 或 provider ABI。它的 dependency-neutral
 矩阵会证明：1/3/4/8/16 通道 active logical FP32/FP64 image element 穿过 padded Value 与 CPU
 ImageBuffer bridge；rank-one 至 rank-five FP32/FP64 latent Value 穿过完整 rank TensorSlice；
@@ -636,9 +654,16 @@ binding 中保留 descriptor、quantization、layout、byte envelope（包括 un
 revision 与 Pending-to-Ready fact。正式 memory cache 会保留精确 Value/Region fact；image disk
 persistence 则 fail-closed，不会伪造 widened image byte 或通用 artifact format。
 
-V-13 仍不含 DataSpec、public device registry、device queue/in-flight dimension、更多 packed
-encoding 或 quantization formula、未对齐 requantizing slice、provider ABI v3、通用 Value
-persistence、canonical descriptor/content/layout digest、manifest/chunk 或通用 named graph Value output。Native
+V-14 实现一个受界限约束的具体 `DataSpec`、typed pure property/Region outcome、大小精确的
+C11/C++17 v3 definition-suite ABI，以及带 tag 的 SHA-256 Descriptor/Content/StorageLayout digest。
+纯 callback 不接收 payload；validation 与 canonical-content traversal 只接收保留且经过检查的
+buffer view。Versioned artifact-envelope encoding 可以在没有 provider 时保留未知
+Schema/Facet/Layout byte 与 digest metadata。它不是 graph document、filesystem codec、cache
+manifest/chunk store 或 durable output authority。
+
+V-14 仍不含 public device registry、device queue/in-flight dimension、更多 packed encoding
+或 quantization formula、未对齐 requantizing slice、access/conversion/inference/execution provider
+suite、通用 graph/cache Value persistence、manifest/chunk、OpenEXR 或通用 named graph Value output。Native
 executor、transfer submission、mutable producer、completion admission 与 residency owner
 仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、codec 与 Host surface
 的 compatibility representation。
@@ -648,7 +673,7 @@ executable 与 convertible 支持也彼此独立，而且 conversion 始终显�
 channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
 而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
 
-对于当前 V-13 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
+对于当前 V-14 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
 builder write 需要 lease；已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。
 Source-private producer 可以通过其不可复制的 capability，在预先验证的
 binding/Layout/handle envelope 内完成一个 sealed pending CPU 或 native payload。该 capability 的退役
@@ -662,8 +687,9 @@ outcome，而不是隐藏工作。
 
 已实现的 `RegionSet` 是基于显式逻辑 domain key 的有界析取范式。MVP 支持 Whole、Empty、
 ImageRect、TensorSlice 与一个 nonempty clause。Region algebra 返回 Exact、带标签的
-ConservativeSuperset、Unknown、Unsupported 或 TooComplex，而不是静默放大。
-`DataSpec` 描述 descriptor set，并使用 subset、disjointness、conditional runtime guard 或
+ConservativeSuperset、Unknown、Unsupported 或 TooComplex，而不是静默放大。V-14 provider
+子集中的 `DataSpec` 约束 Schema identity/version 与 logical-site bound，并使用 subset、
+disjointness、conditional runtime guard 或
 `CannotEvaluate`；它绝不授权隐式 conversion 或 device access。
 
 Runtime revision、descriptor/content/Layout digest 与 artifact identity 是不同 identity。
@@ -705,11 +731,14 @@ forwarding header、dual loader 或 v2-to-v3 shim。Policy ABI v1 保持独立�
 | [#88 / V-11](https://github.com/kevin-zf1123/photospider/issues/88) | 让有界 cache/asset/codec I/O mechanism 经过 `ComputeIoExecutor`，但不迁移 commit policy | #87、#70 |
 | [#89 / V-12](https://github.com/kevin-zf1123/photospider/issues/89) | 验证 multi-channel、FP64、latent 与 stride matrix | #81、#85 |
 | [#90 / V-13](https://github.com/kevin-zf1123/photospider/issues/90) | 跑通一个 packed FP4/quantized DenseTensor slice | #89 |
+| [#117 / V-14](https://github.com/kevin-zf1123/photospider/issues/117) | 证明 dependency-free VariableSampleField definition、multi-buffer Value、pure query/digest 及 generation replacement/unload | #90 |
+| [#118 / V-15](https://github.com/kevin-zf1123/photospider/issues/118) | 增加首个可选 OpenEXR deep-scanline provider/codec，且不泄漏依赖 | #117 |
 
-V-14 是单独的后续依赖中立合成 `VariableSampleField` issue/change。“依赖中立”表示该证明不使用
-OpenEXR 或其他可选 codec；它必须直接验证 registration、unknown byte preservation、
-multi-buffer Layout 与 binding、Region/DataSpec/query、canonical digest、generation
-replacement、lease 与 unload 行为。
+V-14 是当前单独的依赖中立合成 `VariableSampleField` 切片。“依赖中立”表示该证明既不使用
+OpenEXR，也不使用其他可选 codec。它会直接验证 registration、unknown byte preservation、
+multi-buffer Layout 与 binding、不具备 payload 权限的 Region/DataSpec/query、独立且精确的
+canonical digest、generation replacement、lease 与 unload。它的 ABI v3 仅是 definition suite，
+不会提前实现 access、conversion、inference、execution 或 codec 权限。
 
 V-15 是单独的后续可选 OpenEXR provider/codec issue/change。首个 format 是 single-part
 deep-scanline read/write；它跟随 core 与 V-14 proof，而不是替代 V-14。Deep tiled、multipart
