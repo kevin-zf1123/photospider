@@ -970,8 +970,32 @@ def write_data_provider_producers(source: Path) -> None:
 
             static const ps_data_identity_v3 kLogicalSitesProperty = {
                 0x1170000000000030ULL, 0x1170000000000030ULL};
+            static const ps_data_identity_v3 kCallbackLocalBytesProperty = {
+                0x1170000000000035ULL, 0x1170000000000035ULL};
             static const ps_data_identity_v3 kLogicalSiteDomain = {
                 0x1170000000000040ULL, 0x1170000000000040ULL};
+
+            _Static_assert(sizeof(ps_data_output_sink_v3) ==
+                               PS_DATA_OUTPUT_SINK_V3_SIZE,
+                           "installed C11 output sink size");
+            _Static_assert(sizeof(ps_data_diagnostic_v3) ==
+                               PS_DATA_DIAGNOSTIC_V3_SIZE,
+                           "installed C11 diagnostic size");
+            _Static_assert(sizeof(ps_data_property_result_v3) ==
+                               PS_DATA_PROPERTY_RESULT_V3_SIZE,
+                           "installed C11 property size");
+            _Static_assert(offsetof(ps_data_diagnostic_v3, message_size) == 16U,
+                           "installed C11 diagnostic layout");
+            _Static_assert(offsetof(ps_data_property_result_v3, bytes_size) ==
+                               24U,
+                           "installed C11 property layout");
+            _Static_assert(offsetof(ps_data_output_sink_v3, copy) == 16U,
+                           "installed C11 output sink layout");
+            _Static_assert(offsetof(ps_data_provider_api_v3, validate) == 64U,
+                           "installed C11 API validate offset");
+            _Static_assert(
+                offsetof(ps_data_provider_api_v3, destroy_provider) == 120U,
+                "installed C11 API destroy offset");
 
             static const ps_data_definition_v3 kDefinitions[] = {
                 {PS_DATA_DEFINITION_V3_SIZE,
@@ -1138,14 +1162,17 @@ def write_data_provider_producers(source: Path) -> None:
              * @param context Expected provider context.
              * @param value Borrowed payload-enabled callback Value view.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK only for the exact installed fixture.
              * @throws Nothing across the pure-C ABI.
              */
             static ps_data_status_v3 PS_DATA_CALL validate_value(
                 void* context, const ps_data_value_view_v3* value,
-                ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
               clear_diagnostic(diagnostic);
-              return context == &kProviderContext && valid_fixture_view(value)
+              return context == &kProviderContext && output != NULL &&
+                             output->copy != NULL && valid_fixture_view(value)
                          ? PS_DATA_STATUS_OK_V3
                          : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
             }
@@ -1157,6 +1184,7 @@ def write_data_provider_producers(source: Path) -> None:
              * @param query Borrowed property request.
              * @param result Non-null Host-owned property result.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK with Available logical-site count or Unknown otherwise.
              * @throws Nothing across the pure-C ABI.
              */
@@ -1164,10 +1192,12 @@ def write_data_provider_producers(source: Path) -> None:
                 void* context, const ps_data_value_view_v3* value,
                 const ps_data_property_query_v3* query,
                 ps_data_property_result_v3* result,
-                ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
               clear_diagnostic(diagnostic);
               if (context != &kProviderContext || query == NULL ||
-                  result == NULL || !pure_value_view(value)) {
+                  result == NULL || output == NULL || output->copy == NULL ||
+                  !pure_value_view(value)) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               memset(result, 0, sizeof(*result));
@@ -1176,6 +1206,18 @@ def write_data_provider_producers(source: Path) -> None:
                 result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
                 result->value_kind = PS_DATA_PROPERTY_VALUE_UINT64_V3;
                 result->uint64_value = 3U;
+              } else if (identity_equals(query->property,
+                                         kCallbackLocalBytesProperty)) {
+                uint8_t bytes[4] = {0x11U, 0x22U, 0x33U, 0x44U};
+                ps_data_status_v3 status;
+                result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
+                result->value_kind = PS_DATA_PROPERTY_VALUE_BYTES_V3;
+                result->bytes_size = sizeof(bytes);
+                status = output->copy(
+                    output->context, PS_DATA_OUTPUT_PROPERTY_BYTES_V3, bytes,
+                    sizeof(bytes));
+                memset(bytes, 0xee, sizeof(bytes));
+                return status;
               } else {
                 result->state = PS_DATA_PROPERTY_UNKNOWN_V3;
                 result->value_kind = PS_DATA_PROPERTY_VALUE_NONE_V3;
@@ -1190,6 +1232,7 @@ def write_data_provider_producers(source: Path) -> None:
              * @param request Borrowed Region request.
              * @param result Non-null Host-owned Region result.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK with Exact or Unsupported canonical state.
              * @throws Nothing across the pure-C ABI.
              */
@@ -1197,10 +1240,12 @@ def write_data_provider_producers(source: Path) -> None:
                 void* context, const ps_data_value_view_v3* value,
                 const ps_data_region_request_v3* request,
                 ps_data_region_result_v3* result,
-                ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
               clear_diagnostic(diagnostic);
               if (context != &kProviderContext || request == NULL ||
-                  result == NULL || !pure_value_view(value)) {
+                  result == NULL || output == NULL || output->copy == NULL ||
+                  !pure_value_view(value)) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               memset(result, 0, sizeof(*result));
@@ -1231,6 +1276,7 @@ def write_data_provider_producers(source: Path) -> None:
              * @param request Borrowed DataSpec request.
              * @param result Non-null Host-owned DataSpec result.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK with Subset or Disjoint canonical relation.
              * @throws Nothing across the pure-C ABI.
              */
@@ -1238,10 +1284,12 @@ def write_data_provider_producers(source: Path) -> None:
                 void* context, const ps_data_value_view_v3* value,
                 const ps_data_spec_request_v3* request,
                 ps_data_spec_result_v3* result,
-                ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
               clear_diagnostic(diagnostic);
               if (context != &kProviderContext || request == NULL ||
-                  result == NULL || !pure_value_view(value)) {
+                  result == NULL || output == NULL || output->copy == NULL ||
+                  !pure_value_view(value)) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               memset(result, 0, sizeof(*result));
@@ -1264,17 +1312,20 @@ def write_data_provider_producers(source: Path) -> None:
              * @param value Borrowed payload-enabled callback Value view.
              * @param sink Non-null Host byte sink.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return Sink status after the exact logical sample range is sent.
              * @throws Nothing across the pure-C ABI.
              */
             static ps_data_status_v3 PS_DATA_CALL visit_content(
                 void* context, const ps_data_value_view_v3* value,
                 const ps_data_byte_sink_v3* sink,
-                ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
               installed_role_bytes samples;
               clear_diagnostic(diagnostic);
               if (context != &kProviderContext || sink == NULL ||
-                  sink->append == NULL || !valid_fixture_view(value) ||
+                  sink->append == NULL || output == NULL ||
+                  output->copy == NULL || !valid_fixture_view(value) ||
                   !find_role(value, 3U, 1, &samples)) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
@@ -1286,15 +1337,18 @@ def write_data_provider_producers(source: Path) -> None:
              * @param context Expected provider context.
              * @param owner Non-null Host-owned token output.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK only when the provider context can be borrowed.
              * @throws Nothing across the pure-C ABI.
              * @note The fixture token aliases context and owns no allocation.
              */
             static ps_data_status_v3 PS_DATA_CALL create_owner(
                 void* context, void** owner,
-                ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
               clear_diagnostic(diagnostic);
-              if (context == NULL || owner == NULL) {
+              if (context == NULL || owner == NULL || output == NULL ||
+                  output->copy == NULL) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               *owner = context;
@@ -1306,14 +1360,17 @@ def write_data_provider_producers(source: Path) -> None:
              * @param context Expected provider context.
              * @param owner Token returned by create_owner.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK only for the exact borrowed token.
              * @throws Nothing across the pure-C ABI.
              */
             static ps_data_status_v3 PS_DATA_CALL destroy_owner(
                 void* context, void* owner,
-                ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
               clear_diagnostic(diagnostic);
-              if (context == NULL || owner != context) {
+              if (context == NULL || owner != context || output == NULL ||
+                  output->copy == NULL) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               ++kOwnerDestroyCount;
@@ -1324,14 +1381,16 @@ def write_data_provider_producers(source: Path) -> None:
              * @brief Finish one immutable fixture generation.
              * @param context Expected provider context.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK only for the live fixture context.
              * @throws Nothing across the pure-C ABI.
              */
             static ps_data_status_v3 PS_DATA_CALL destroy_provider(
                 void* context,
-                ps_data_diagnostic_v3* diagnostic) PS_DATA_NOEXCEPT {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
               clear_diagnostic(diagnostic);
-              if (context == NULL) {
+              if (context == NULL || output == NULL || output->copy == NULL) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               ++kProviderDestroyCount;
@@ -1427,8 +1486,24 @@ def write_data_provider_producers(source: Path) -> None:
 
             constexpr ps_data_identity_v3 kLogicalSitesProperty{
                 0x1170000000000030ULL, 0x1170000000000030ULL};
+            constexpr ps_data_identity_v3 kCallbackLocalBytesProperty{
+                0x1170000000000035ULL, 0x1170000000000035ULL};
             constexpr ps_data_identity_v3 kLogicalSiteDomain{
                 0x1170000000000040ULL, 0x1170000000000040ULL};
+
+            static_assert(sizeof(ps_data_output_sink_v3) ==
+                          PS_DATA_OUTPUT_SINK_V3_SIZE);
+            static_assert(sizeof(ps_data_diagnostic_v3) ==
+                          PS_DATA_DIAGNOSTIC_V3_SIZE);
+            static_assert(sizeof(ps_data_property_result_v3) ==
+                          PS_DATA_PROPERTY_RESULT_V3_SIZE);
+            static_assert(offsetof(ps_data_diagnostic_v3, message_size) == 16U);
+            static_assert(offsetof(ps_data_property_result_v3, bytes_size) ==
+                          24U);
+            static_assert(offsetof(ps_data_output_sink_v3, copy) == 16U);
+            static_assert(offsetof(ps_data_provider_api_v3, validate) == 64U);
+            static_assert(offsetof(ps_data_provider_api_v3, destroy_provider) ==
+                          120U);
 
             constexpr ps_data_definition_v3 kDefinitions[] = {
                 {PS_DATA_DEFINITION_V3_SIZE,
@@ -1598,14 +1673,17 @@ def write_data_provider_producers(source: Path) -> None:
              * @param context Expected provider context.
              * @param value Borrowed payload-enabled callback Value view.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK only for the exact installed fixture.
              * @throws Nothing across the pure-C ABI.
              */
             ps_data_status_v3 PS_DATA_CALL validate_value(
                 void* context, const ps_data_value_view_v3* value,
-                ps_data_diagnostic_v3* diagnostic) noexcept {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
               clear_diagnostic(diagnostic);
-              return context == &kProviderContext && valid_fixture_view(value)
+              return context == &kProviderContext && output != nullptr &&
+                             output->copy != nullptr && valid_fixture_view(value)
                          ? PS_DATA_STATUS_OK_V3
                          : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
             }
@@ -1617,6 +1695,7 @@ def write_data_provider_producers(source: Path) -> None:
              * @param query Borrowed property request.
              * @param result Non-null Host-owned property result.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK with Available logical-site count or Unknown otherwise.
              * @throws Nothing across the pure-C ABI.
              */
@@ -1624,10 +1703,12 @@ def write_data_provider_producers(source: Path) -> None:
                 void* context, const ps_data_value_view_v3* value,
                 const ps_data_property_query_v3* query,
                 ps_data_property_result_v3* result,
-                ps_data_diagnostic_v3* diagnostic) noexcept {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
               clear_diagnostic(diagnostic);
               if (context != &kProviderContext || query == nullptr ||
-                  result == nullptr || !pure_value_view(value)) {
+                  result == nullptr || output == nullptr ||
+                  output->copy == nullptr || !pure_value_view(value)) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               std::memset(result, 0, sizeof(*result));
@@ -1636,6 +1717,17 @@ def write_data_provider_producers(source: Path) -> None:
                 result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
                 result->value_kind = PS_DATA_PROPERTY_VALUE_UINT64_V3;
                 result->uint64_value = 3U;
+              } else if (identity_equals(query->property,
+                                         kCallbackLocalBytesProperty)) {
+                std::uint8_t bytes[4U]{0x11U, 0x22U, 0x33U, 0x44U};
+                result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
+                result->value_kind = PS_DATA_PROPERTY_VALUE_BYTES_V3;
+                result->bytes_size = sizeof(bytes);
+                const ps_data_status_v3 status = output->copy(
+                    output->context, PS_DATA_OUTPUT_PROPERTY_BYTES_V3, bytes,
+                    sizeof(bytes));
+                std::memset(bytes, 0xee, sizeof(bytes));
+                return status;
               } else {
                 result->state = PS_DATA_PROPERTY_UNKNOWN_V3;
                 result->value_kind = PS_DATA_PROPERTY_VALUE_NONE_V3;
@@ -1650,6 +1742,7 @@ def write_data_provider_producers(source: Path) -> None:
              * @param request Borrowed Region request.
              * @param result Non-null Host-owned Region result.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK with Exact or Unsupported canonical state.
              * @throws Nothing across the pure-C ABI.
              */
@@ -1657,10 +1750,12 @@ def write_data_provider_producers(source: Path) -> None:
                 void* context, const ps_data_value_view_v3* value,
                 const ps_data_region_request_v3* request,
                 ps_data_region_result_v3* result,
-                ps_data_diagnostic_v3* diagnostic) noexcept {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
               clear_diagnostic(diagnostic);
               if (context != &kProviderContext || request == nullptr ||
-                  result == nullptr || !pure_value_view(value)) {
+                  result == nullptr || output == nullptr ||
+                  output->copy == nullptr || !pure_value_view(value)) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               std::memset(result, 0, sizeof(*result));
@@ -1691,6 +1786,7 @@ def write_data_provider_producers(source: Path) -> None:
              * @param request Borrowed DataSpec request.
              * @param result Non-null Host-owned DataSpec result.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK with Subset or Disjoint canonical relation.
              * @throws Nothing across the pure-C ABI.
              */
@@ -1698,10 +1794,12 @@ def write_data_provider_producers(source: Path) -> None:
                 void* context, const ps_data_value_view_v3* value,
                 const ps_data_spec_request_v3* request,
                 ps_data_spec_result_v3* result,
-                ps_data_diagnostic_v3* diagnostic) noexcept {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
               clear_diagnostic(diagnostic);
               if (context != &kProviderContext || request == nullptr ||
-                  result == nullptr || !pure_value_view(value)) {
+                  result == nullptr || output == nullptr ||
+                  output->copy == nullptr || !pure_value_view(value)) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               std::memset(result, 0, sizeof(*result));
@@ -1724,17 +1822,20 @@ def write_data_provider_producers(source: Path) -> None:
              * @param value Borrowed payload-enabled callback Value view.
              * @param sink Non-null Host byte sink.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return Sink status after the exact logical sample range is sent.
              * @throws Nothing across the pure-C ABI.
              */
             ps_data_status_v3 PS_DATA_CALL visit_content(
                 void* context, const ps_data_value_view_v3* value,
                 const ps_data_byte_sink_v3* sink,
-                ps_data_diagnostic_v3* diagnostic) noexcept {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
               InstalledRoleBytes samples;
               clear_diagnostic(diagnostic);
               if (context != &kProviderContext || sink == nullptr ||
-                  sink->append == nullptr || !valid_fixture_view(value) ||
+                  sink->append == nullptr || output == nullptr ||
+                  output->copy == nullptr || !valid_fixture_view(value) ||
                   !find_role(value, 3U, true, &samples)) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
@@ -1746,15 +1847,18 @@ def write_data_provider_producers(source: Path) -> None:
              * @param context Expected provider context.
              * @param owner Non-null Host-owned token output.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK only when the provider context can be borrowed.
              * @throws Nothing across the pure-C ABI.
              * @note The fixture token aliases context and owns no allocation.
              */
             ps_data_status_v3 PS_DATA_CALL create_owner(
                 void* context, void** owner,
-                ps_data_diagnostic_v3* diagnostic) noexcept {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
               clear_diagnostic(diagnostic);
-              if (context == nullptr || owner == nullptr) {
+              if (context == nullptr || owner == nullptr || output == nullptr ||
+                  output->copy == nullptr) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               *owner = context;
@@ -1766,14 +1870,17 @@ def write_data_provider_producers(source: Path) -> None:
              * @param context Expected provider context.
              * @param owner Token returned by create_owner.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK only for the exact borrowed token.
              * @throws Nothing across the pure-C ABI.
              */
             ps_data_status_v3 PS_DATA_CALL destroy_owner(
                 void* context, void* owner,
-                ps_data_diagnostic_v3* diagnostic) noexcept {
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
               clear_diagnostic(diagnostic);
-              if (context == nullptr || owner != context) {
+              if (context == nullptr || owner != context || output == nullptr ||
+                  output->copy == nullptr) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               ++kOwnerDestroyCount;
@@ -1784,13 +1891,16 @@ def write_data_provider_producers(source: Path) -> None:
              * @brief Finish one immutable fixture generation.
              * @param context Expected provider context.
              * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
              * @return OK only for the live fixture context.
              * @throws Nothing across the pure-C ABI.
              */
             ps_data_status_v3 PS_DATA_CALL destroy_provider(
-                void* context, ps_data_diagnostic_v3* diagnostic) noexcept {
+                void* context, ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
               clear_diagnostic(diagnostic);
-              if (context == nullptr) {
+              if (context == nullptr || output == nullptr ||
+                  output->copy == nullptr) {
                 return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
               }
               ++kProviderDestroyCount;
@@ -1891,6 +2001,9 @@ def write_data_provider_producers(source: Path) -> None:
             /** @brief Pure logical-site-count property shared by both fixtures. */
             constexpr ps::ExtensionIdentity kLogicalSitesProperty{
                 0x1170000000000030ULL, 0x1170000000000030ULL};
+            /** @brief Callback-local bytes property shared by both fixtures. */
+            constexpr ps::ExtensionIdentity kCallbackLocalBytesProperty{
+                0x1170000000000035ULL, 0x1170000000000035ULL};
             /** @brief Rank-one logical-site Region domain. */
             constexpr ps::ExtensionIdentity kLogicalSiteDomain{
                 0x1170000000000040ULL, 0x1170000000000040ULL};
@@ -1900,6 +2013,20 @@ def write_data_provider_producers(source: Path) -> None:
             constexpr std::uint32_t kOffsetsRole = 2U;
             /** @brief Installed sample-record-buffer logical role. */
             constexpr std::uint32_t kSamplesRole = 3U;
+
+            static_assert(sizeof(ps_data_output_sink_v3) ==
+                          PS_DATA_OUTPUT_SINK_V3_SIZE);
+            static_assert(sizeof(ps_data_diagnostic_v3) ==
+                          PS_DATA_DIAGNOSTIC_V3_SIZE);
+            static_assert(sizeof(ps_data_property_result_v3) ==
+                          PS_DATA_PROPERTY_RESULT_V3_SIZE);
+            static_assert(offsetof(ps_data_diagnostic_v3, message_size) == 16U);
+            static_assert(offsetof(ps_data_property_result_v3, bytes_size) ==
+                          24U);
+            static_assert(offsetof(ps_data_output_sink_v3, copy) == 16U);
+            static_assert(offsetof(ps_data_provider_api_v3, validate) == 64U);
+            static_assert(offsetof(ps_data_provider_api_v3, destroy_provider) ==
+                          120U);
 
             /**
              * @brief Observe owner destruction from the linked fixture provider.
@@ -2114,6 +2241,10 @@ def write_data_provider_producers(source: Path) -> None:
             int main() {
               static_assert(noexcept(ps_data_provider_get_abi_version()));
               static_assert(noexcept(ps_data_provider_get_api_v3(nullptr)));
+              static_assert(noexcept(
+                  std::declval<ps_data_copy_output_fn_v3>()(
+                      nullptr, PS_DATA_OUTPUT_DIAGNOSTIC_MESSAGE_V3, nullptr,
+                      0U)));
 
               ps::DataDefinitionRegistry registry;
               std::weak_ptr<int> module_observer;
@@ -2168,6 +2299,18 @@ def write_data_provider_producers(source: Path) -> None:
                 if (property.state != ps::PropertyQueryState::Available ||
                     property.unsigned_value != 3U) {
                   return 23;
+                }
+                const ps::PropertyQueryResult callback_local =
+                    compact_value.query_property(
+                        {kCallbackLocalBytesProperty});
+                const std::vector<std::byte> expected_callback_local{
+                    std::byte{0x11}, std::byte{0x22}, std::byte{0x33},
+                    std::byte{0x44}};
+                if (callback_local.state !=
+                        ps::PropertyQueryState::Available ||
+                    callback_local.unsigned_value.has_value() ||
+                    callback_local.bytes_value != expected_callback_local) {
+                  return 36;
                 }
                 const ps::DataSpecResult spec =
                     compact_value.evaluate_data_spec(
