@@ -36,9 +36,45 @@ CONSUMER_TARGET_FILE_MANIFEST_PREFIX = "consumer_target_files-"
 CONSUMER_TARGET_FILE_MANIFEST_HEADER = (
     "# target\tconfigured executable"
 )
-#: @brief Canonical local executable-target spelling shared with CMake.
-#: @note Imported/alias syntax and ``_NOT_BUILT`` sentinel names are excluded.
+#: @brief Lexical local executable-target spelling shared with CMake.
+#: @note Semantic validation separately excludes ``.``, ``..``, imported/alias
+#:   syntax, and typed ``_NOT_BUILT`` sentinel names.
 CONSUMER_TARGET_NAME_PATTERN = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+def is_canonical_consumer_target_name(target_name: str) -> bool:
+    """@brief Validate one local executable target name for both manifests.
+
+    @param target_name Exact declaration or target-file manifest field.
+    @return True only for a lexical local target name that is neither a
+      reserved dot spelling nor a typed ``_NOT_BUILT`` sentinel.
+    @throws None Validation is deterministic and performs no I/O.
+    @note The generated CMake writer applies the equivalent conditions before
+      target creation or manifest serialization, keeping both boundaries in
+      one fail-closed contract.
+    """
+
+    return (
+        target_name not in {".", ".."}
+        and CONSUMER_TARGET_NAME_PATTERN.fullmatch(target_name) is not None
+        and not target_name.endswith("_NOT_BUILT")
+    )
+
+
+def native_consumer_executable_basename(target_name: str) -> str:
+    """@brief Derive the sole native executable basename for one target.
+
+    @param target_name Canonical local target name already validated by the
+      caller.
+    @return ``target_name.exe`` on native Windows Python, otherwise the exact
+      extensionless ``target_name`` spelling.
+    @throws None The result is derived only from ``os.name`` and the input.
+    @note Accepting exactly one host-native spelling prevents a POSIX manifest
+      from substituting a foreign ``.exe`` path, or Windows from substituting
+      an extensionless path, for CMake's ``$<TARGET_FILE:...>`` result.
+    """
+
+    return f"{target_name}.exe" if os.name == "nt" else target_name
 
 
 def run(command: list[str], cwd: Path) -> None:
@@ -206,10 +242,9 @@ def configured_consumer_target_files(
     configuration-specific ``$<TARGET_FILE:...>`` TSV independently. It then
     requires the same nonempty unique target sequence before validating every
     executable path. Paths must use canonical native spelling, resolve without
-    a symlink inside the current consumer build, name their target (plus the
-    native ``.exe`` suffix when present), and identify an executable regular
-    file. Only after the complete inventory passes does the function return any
-    runnable path.
+    a symlink inside the current consumer build, use the target's sole native
+    executable basename, and identify an executable regular file. Only after
+    the complete inventory passes does the function return any runnable path.
 
     @param build Configured and built disposable consumer build directory.
     @param configuration Exact configuration selected by the consumer build.
@@ -240,10 +275,7 @@ def configured_consumer_target_files(
     declared_targets: list[str] = []
     declared_target_set: set[str] = set()
     for line_number, target_name in enumerate(declaration_lines, start=2):
-        if (
-            CONSUMER_TARGET_NAME_PATTERN.fullmatch(target_name) is None
-            or target_name.endswith("_NOT_BUILT")
-        ):
+        if not is_canonical_consumer_target_name(target_name):
             raise RuntimeError(
                 "dependency-disabled consumer target declaration contains "
                 f"an invalid target at line {line_number}"
@@ -280,8 +312,7 @@ def configured_consumer_target_files(
             )
         target_name, executable_text = fields
         if (
-            CONSUMER_TARGET_NAME_PATTERN.fullmatch(target_name) is None
-            or target_name.endswith("_NOT_BUILT")
+            not is_canonical_consumer_target_name(target_name)
             or not executable_text
         ):
             raise RuntimeError(
@@ -368,10 +399,10 @@ def configured_consumer_target_files(
                 "dependency-disabled consumer target-file inventory escapes "
                 f"the consumer build for target {target_name!r}"
             ) from error
-        if resolved_executable.name not in {
-            target_name,
-            f"{target_name}.exe",
-        }:
+        expected_executable_name = native_consumer_executable_basename(
+            target_name
+        )
+        if resolved_executable.name != expected_executable_name:
             raise RuntimeError(
                 "dependency-disabled consumer target-file inventory path does "
                 f"not match target {target_name!r}"
@@ -555,10 +586,12 @@ def write_consumer(source: Path) -> None:
     @param source Source directory created for the consumer.
     @return None.
     @throws OSError If source files cannot be written.
-    @note One CMake target list owns executable creation, declaration order,
-      and the configuration-specific ``$<TARGET_FILE:...>`` manifest. The
-      current executable verifies neutral allocation, empty-session lifecycle,
-      and explicit persistence failure without parser or image-library APIs.
+    @note One CMake target list owns validated executable creation, declaration
+      order, and the configuration-specific ``$<TARGET_FILE:...>`` manifest.
+      Reserved dot spellings and typed ``_NOT_BUILT`` sentinels fail before
+      target creation or serialization. The current executable verifies neutral
+      allocation, empty-session lifecycle, and explicit persistence failure
+      without parser or image-library APIs.
     """
 
     source.mkdir(parents=True)
@@ -589,6 +622,10 @@ def write_consumer(source: Path) -> None:
                 "  if(NOT",
                 "      PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
                 '      MATCHES "^[A-Za-z0-9_.+-]+$" OR',
+                "     PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
+                '      STREQUAL "." OR',
+                "     PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
+                '      STREQUAL ".." OR',
                 "     PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
                 '      MATCHES "_NOT_BUILT$")',
                 '    message(FATAL_ERROR "Invalid consumer target name")',
