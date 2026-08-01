@@ -254,6 +254,8 @@ typedef struct ps_data_buffer_envelope_v3 {
 /**
  * @brief Borrowed complete provider-defined Value metadata for one callback.
  * @note Every pointer/count pair is validated by the Host before entry.
+ *       The Host materializes this view only after its owning storage reaches
+ *       a stable address; every pointer expires when that callback returns.
  */
 typedef struct ps_data_value_view_v3 {
   /** @brief Must equal `PS_DATA_VALUE_VIEW_V3_SIZE`. */

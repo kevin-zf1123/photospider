@@ -359,12 +359,15 @@ ps_data_extension_v3 to_c_extension(const ExtensionRecord& record) noexcept {
 }
 
 /**
- * @brief Callback-ready storage owning every borrowed C view and ReadLease.
+ * @brief Move-safe owning storage for one later callback Value view.
  *
- * @note Member vectors are completely populated before pointers in `view` are
- * assigned, so callback-visible storage never moves during entry.
+ * @throws std::bad_alloc when vector storage cannot allocate.
+ * @note This type deliberately stores no pointer to one of its own members.
+ *       It may therefore move while being returned from preparation without
+ *       invalidating a previously materialized C view. The caller materializes
+ *       that non-owning view only after this storage reaches its final address.
  */
-struct PreparedValueView final {
+struct PreparedValueStorage final {
   /** @brief Borrowed Schema record converted to C framing. */
   ps_data_extension_v3 schema{};
   /** @brief Borrowed Facet records converted to C framing. */
@@ -377,25 +380,25 @@ struct PreparedValueView final {
   std::vector<ps_data_buffer_envelope_v3> envelopes;
   /** @brief Retaining leases only for payload-enabled callbacks. */
   std::vector<ReadLease> reads;
-  /** @brief Complete fixed callback view borrowing preceding members. */
-  ps_data_value_view_v3 view{};
 };
 
 /**
- * @brief Builds one complete callback view after generic validation.
+ * @brief Builds move-safe owning callback storage after generic validation.
  * @param descriptor Valid Schema and Facets.
  * @param layout Valid provider-defined Layout.
  * @param handles Valid sealed BufferHandle ranges.
  * @param expose_payload Whether to acquire host reads and expose pointers.
- * @return Fully owned callback staging whose internal pointers are stable.
+ * @return Fully owned storage containing no self-referential C view pointers.
  * @throws ExtensionContractError for envelope or payload-access failure.
  * @throws std::bad_alloc when bounded staging cannot allocate.
- * @note Pure calls pass false and therefore expose null payload pointers.
+ * @note Pure calls pass false and therefore prepare null payload pointers.
+ *       Named-return movement is safe because only vectors, records, and
+ *       retaining leases move; callback pointers do not yet exist.
  */
-PreparedValueView prepare_value_view(const DataDescriptorEnvelope& descriptor,
-                                     const ProviderDefinedLayout& layout,
-                                     const std::vector<BufferHandle>& handles,
-                                     bool expose_payload) {
+PreparedValueStorage prepare_value_storage(
+    const DataDescriptorEnvelope& descriptor,
+    const ProviderDefinedLayout& layout,
+    const std::vector<BufferHandle>& handles, bool expose_payload) {
   validate_data_descriptor_envelope(descriptor);
   std::vector<std::size_t> sizes;
   sizes.reserve(handles.size());
@@ -409,7 +412,7 @@ PreparedValueView prepare_value_view(const DataDescriptorEnvelope& descriptor,
   }
   validate_provider_defined_layout(layout, sizes);
 
-  PreparedValueView prepared;
+  PreparedValueStorage prepared;
   prepared.schema = to_c_extension(descriptor.schema);
   prepared.facets.reserve(descriptor.facets.size());
   for (const ExtensionRecord& facet : descriptor.facets) {
@@ -458,17 +461,35 @@ PreparedValueView prepare_value_view(const DataDescriptorEnvelope& descriptor,
     envelope.length = source.length;
     prepared.envelopes.push_back(envelope);
   }
-  prepared.view.struct_size = PS_DATA_VALUE_VIEW_V3_SIZE;
-  prepared.view.schema = &prepared.schema;
-  prepared.view.facets =
-      prepared.facets.empty() ? nullptr : prepared.facets.data();
-  prepared.view.facet_count = prepared.facets.size();
-  prepared.view.layout = &prepared.layout;
-  prepared.view.buffers = prepared.buffers.data();
-  prepared.view.buffer_count = prepared.buffers.size();
-  prepared.view.envelopes = prepared.envelopes.data();
-  prepared.view.envelope_count = prepared.envelopes.size();
   return prepared;
+}
+
+/**
+ * @brief Materializes one fixed C view at the final owning-storage address.
+ * @param storage Fully populated owning storage that will not move again until
+ *        the callback returns.
+ * @return Non-owning fixed record borrowing only `storage` members and their
+ *         externally retained extension payloads.
+ * @throws Nothing.
+ * @note The returned record must remain in the callback caller's scope and may
+ *       be used only while `storage` remains at the same address. Empty arrays
+ *       are represented as null plus zero; validated buffer and envelope
+ *       arrays are nonempty, while Facets may canonically be empty.
+ */
+ps_data_value_view_v3 materialize_value_view(
+    const PreparedValueStorage& storage) noexcept {
+  ps_data_value_view_v3 view{};
+  view.struct_size = PS_DATA_VALUE_VIEW_V3_SIZE;
+  view.schema = &storage.schema;
+  view.facets = storage.facets.empty() ? nullptr : storage.facets.data();
+  view.facet_count = storage.facets.size();
+  view.layout = &storage.layout;
+  view.buffers = storage.buffers.empty() ? nullptr : storage.buffers.data();
+  view.buffer_count = storage.buffers.size();
+  view.envelopes =
+      storage.envelopes.empty() ? nullptr : storage.envelopes.data();
+  view.envelope_count = storage.envelopes.size();
+  return view;
 }
 
 /**
@@ -856,15 +877,16 @@ void DataDefinitionLease::validate(
     const ProviderDefinedLayout& layout,
     const std::vector<BufferHandle>& buffers) const {
   require_complete_bundle(*this, descriptor, layout);
-  PreparedValueView prepared =
-      prepare_value_view(descriptor, layout, buffers, true);
+  PreparedValueStorage prepared =
+      prepare_value_storage(descriptor, layout, buffers, true);
+  const ps_data_value_view_v3 view = materialize_value_view(prepared);
   ps_data_diagnostic_v3 diagnostic{};
   diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
-    status = impl_->api.validate(impl_->api.provider_context, &prepared.view,
-                                 &diagnostic);
+    status =
+        impl_->api.validate(impl_->api.provider_context, &view, &diagnostic);
   } catch (const std::bad_alloc&) {
     throw ExtensionContractError(
         ExtensionErrorCode::ProviderRejected,
@@ -895,8 +917,9 @@ PropertyQueryResult DataDefinitionLease::query(
             {},
             "Property identity must be nonzero."};
   }
-  PreparedValueView prepared =
-      prepare_value_view(descriptor, layout, buffers, false);
+  PreparedValueStorage prepared =
+      prepare_value_storage(descriptor, layout, buffers, false);
+  const ps_data_value_view_v3 view = materialize_value_view(prepared);
   ps_data_property_query_v3 query{};
   query.struct_size = PS_DATA_PROPERTY_QUERY_V3_SIZE;
   query.property = to_c_identity(query_value.property);
@@ -907,8 +930,8 @@ PropertyQueryResult DataDefinitionLease::query(
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
-    status = impl_->api.query(impl_->api.provider_context, &prepared.view,
-                              &query, &output, &diagnostic);
+    status = impl_->api.query(impl_->api.provider_context, &view, &query,
+                              &output, &diagnostic);
   } catch (...) {
     return {PropertyQueryState::InvalidDescriptor,
             std::nullopt,
@@ -986,8 +1009,9 @@ DataSpecResult DataDefinitionLease::evaluate(
       spec.maximum_logical_sites < spec.minimum_logical_sites) {
     throw std::invalid_argument("DataSpec bounds are not canonical.");
   }
-  PreparedValueView prepared =
-      prepare_value_view(descriptor, layout, buffers, false);
+  PreparedValueStorage prepared =
+      prepare_value_storage(descriptor, layout, buffers, false);
+  const ps_data_value_view_v3 view = materialize_value_view(prepared);
   ps_data_spec_request_v3 request{};
   request.struct_size = PS_DATA_SPEC_REQUEST_V3_SIZE;
   request.schema_identity = to_c_identity(spec.schema_identity);
@@ -1002,9 +1026,8 @@ DataSpecResult DataDefinitionLease::evaluate(
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
-    status =
-        impl_->api.evaluate_spec(impl_->api.provider_context, &prepared.view,
-                                 &request, &output, &diagnostic);
+    status = impl_->api.evaluate_spec(impl_->api.provider_context, &view,
+                                      &request, &output, &diagnostic);
   } catch (...) {
     return {DataSpecRelation::CannotEvaluate, false,
             "Data provider DataSpec callback threw across the pure-C ABI."};
@@ -1043,8 +1066,9 @@ ProviderRegionResult DataDefinitionLease::evaluate(
     return {ProviderRegionState::TooComplex, std::nullopt, 0U,
             "Region complexity budget must be nonzero."};
   }
-  PreparedValueView prepared =
-      prepare_value_view(descriptor, layout, buffers, false);
+  PreparedValueStorage prepared =
+      prepare_value_storage(descriptor, layout, buffers, false);
+  const ps_data_value_view_v3 view = materialize_value_view(prepared);
   ps_data_region_request_v3 request{};
   request.struct_size = PS_DATA_REGION_REQUEST_V3_SIZE;
   request.complexity_budget = budget.maximum_atoms;
@@ -1081,9 +1105,8 @@ ProviderRegionResult DataDefinitionLease::evaluate(
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
-    status =
-        impl_->api.evaluate_region(impl_->api.provider_context, &prepared.view,
-                                   &request, &output, &diagnostic);
+    status = impl_->api.evaluate_region(impl_->api.provider_context, &view,
+                                        &request, &output, &diagnostic);
   } catch (...) {
     return {ProviderRegionState::InvalidDescriptor, std::nullopt, 0U,
             "Data provider Region callback threw across the pure-C ABI."};
@@ -1137,8 +1160,9 @@ std::vector<std::byte> DataDefinitionLease::canonical_content(
     const ProviderDefinedLayout& layout,
     const std::vector<BufferHandle>& buffers) const {
   require_complete_bundle(*this, descriptor, layout);
-  PreparedValueView prepared =
-      prepare_value_view(descriptor, layout, buffers, true);
+  PreparedValueStorage prepared =
+      prepare_value_storage(descriptor, layout, buffers, true);
+  const ps_data_value_view_v3 view = materialize_value_view(prepared);
   ContentSinkState sink_state;
   ps_data_byte_sink_v3 sink{};
   sink.struct_size = PS_DATA_BYTE_SINK_V3_SIZE;
@@ -1149,8 +1173,8 @@ std::vector<std::byte> DataDefinitionLease::canonical_content(
   ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
   try {
     ProviderCallbackGuard guard;
-    status = impl_->api.visit_content(impl_->api.provider_context,
-                                      &prepared.view, &sink, &diagnostic);
+    status = impl_->api.visit_content(impl_->api.provider_context, &view, &sink,
+                                      &diagnostic);
   } catch (...) {
     throw ExtensionContractError(
         ExtensionErrorCode::ProviderRejected,

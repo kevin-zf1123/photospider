@@ -218,7 +218,10 @@ class ProviderReadLease final {
  *
  * @throws Nothing for default/copy/move/assignment/destruction.
  * @note Every callback copies this lease and executes outside the registry
- * lock. An invalid lease contains no provider or callback authority.
+ * lock. Each callback call first prepares move-safe owning storage, then
+ * materializes its borrowed pure-C Value view at the final local address for
+ * callback duration only. An invalid lease contains no provider or callback
+ * authority.
  */
 class DataDefinitionLease final {
  public:

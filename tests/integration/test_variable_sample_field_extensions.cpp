@@ -980,6 +980,37 @@ TEST(VariableSampleFieldExtensions,
 }
 
 TEST(VariableSampleFieldExtensions,
+     EveryCallbackReceivesOneStableMaterializedValueView) {
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(17U);
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+  ASSERT_TRUE(load_candidate(registry, std::move(fixture)).ok());
+
+  SyntheticStorage storage = make_storage();
+  Value value = Value::from_provider_defined(registry, make_descriptor(),
+                                             storage.layout, storage.buffers);
+  EXPECT_EQ(counters->validate_calls.load(), 1U);
+
+  const PropertyQueryResult property =
+      value.query_property({kLogicalSiteCountProperty});
+  EXPECT_EQ(property.state, PropertyQueryState::Available);
+  const DataSpecResult spec =
+      value.evaluate_data_spec({kSchemaAndLayoutIdentity, 1U, 1U, 3U, 3U});
+  EXPECT_EQ(spec.relation, DataSpecRelation::Subset);
+  const ProviderRegionResult region =
+      value.evaluate_region(make_site_region(0U, 3U));
+  EXPECT_EQ(region.state, ProviderRegionState::Exact);
+  const ContentDigestResult content = compute_content_digest(value);
+  EXPECT_EQ(content.state, ContentDigestState::Available) << content.diagnostic;
+
+  EXPECT_EQ(counters->query_calls.load(), 1U);
+  EXPECT_EQ(counters->spec_calls.load(), 1U);
+  EXPECT_EQ(counters->region_calls.load(), 1U);
+  EXPECT_EQ(counters->content_calls.load(), 1U);
+  EXPECT_EQ(counters->pure_payload_violations.load(), 0U);
+}
+
+TEST(VariableSampleFieldExtensions,
      UnknownBytesRoundTripWithoutProviderAndKeepMetadataDigests) {
   DataDefinitionRegistry registry;
   SyntheticCandidate fixture = make_candidate(21U);
