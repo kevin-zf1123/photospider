@@ -32,9 +32,11 @@ CONSUMER_TARGET_DECLARATION_HEADER = "# target"
 #:   reader; CMake uses the matching ``$<CONFIG>`` expression when generating.
 CONSUMER_TARGET_FILE_MANIFEST_PREFIX = "consumer_target_files-"
 #: @brief Exact first record required by the target-file TSV manifest.
-#: @note No comment, blank, or repeated-header record is legal after this line.
+#: @note Each later record binds one target to CMake's configured target
+#:   filename and full target path. No comment, blank, or repeated-header
+#:   record is legal after this line.
 CONSUMER_TARGET_FILE_MANIFEST_HEADER = (
-    "# target\tconfigured executable"
+    "# target\tconfigured executable filename\tconfigured executable"
 )
 #: @brief Lexical local executable-target spelling shared with CMake.
 #: @note Semantic validation separately excludes ``.``, ``..``, imported/alias
@@ -61,20 +63,34 @@ def is_canonical_consumer_target_name(target_name: str) -> bool:
     )
 
 
-def native_consumer_executable_basename(target_name: str) -> str:
-    """@brief Derive the sole native executable basename for one target.
+def is_canonical_consumer_target_filename(
+    target_name: str, executable_name: str
+) -> bool:
+    """@brief Validate CMake's configured filename for one local target.
 
-    @param target_name Canonical local target name already validated by the
-      caller.
-    @return ``target_name.exe`` on native Windows Python, otherwise the exact
-      extensionless ``target_name`` spelling.
-    @throws None The result is derived only from ``os.name`` and the input.
-    @note Accepting exactly one host-native spelling prevents a POSIX manifest
-      from substituting a foreign ``.exe`` path, or Windows from substituting
-      an extensionless path, for CMake's ``$<TARGET_FILE:...>`` result.
+    @param target_name Exact canonical target identity from both manifests.
+    @param executable_name Configuration-specific ``$<TARGET_FILE_NAME>``
+      field emitted by the generated CMake project.
+    @return True only for the extensionless target spelling or that exact
+      spelling plus the native Windows/Cygwin/MSYS2 ``.exe`` suffix.
+    @throws None Validation is deterministic and performs no host-platform
+      classification or I/O.
+    @note The generated consumer does not customize ``OUTPUT_NAME``, prefix,
+      suffix, or configuration postfix. CMake, rather than Python's
+      ``os.name`` or ``sys.platform``, therefore chooses which of the two
+      target-bound native spellings is authoritative. Requiring that closed
+      relationship prevents a forged filename field from selecting an
+      arbitrary build-local executable.
     """
 
-    return f"{target_name}.exe" if os.name == "nt" else target_name
+    return (
+        is_canonical_consumer_target_name(target_name)
+        and executable_name not in {"", ".", ".."}
+        and not contains_forbidden_ascii_control(executable_name)
+        and PurePosixPath(executable_name).name == executable_name
+        and PureWindowsPath(executable_name).name == executable_name
+        and executable_name in {target_name, f"{target_name}.exe"}
+    )
 
 
 def run(command: list[str], cwd: Path) -> None:
@@ -239,12 +255,14 @@ def configured_consumer_target_files(
     """@brief Validate and resolve every declared consumer executable.
 
     The reader first parses the configure-time target declaration and the
-    configuration-specific ``$<TARGET_FILE:...>`` TSV independently. It then
-    requires the same nonempty unique target sequence before validating every
-    executable path. Paths must use canonical native spelling, resolve without
-    a symlink inside the current consumer build, use the target's sole native
-    executable basename, and identify an executable regular file. Only after
-    the complete inventory passes does the function return any runnable path.
+    configuration-specific ``$<TARGET_FILE_NAME:...>`` plus
+    ``$<TARGET_FILE:...>`` TSV independently. It then requires the same
+    nonempty unique target sequence before validating every executable name
+    and path. Configured names must remain target-bound native spellings;
+    paths must use canonical native spelling, resolve without a symlink inside
+    the current consumer build, match the configured name exactly, and
+    identify an executable regular file. Only after the complete inventory
+    passes does the function return any runnable path.
 
     @param build Configured and built disposable consumer build directory.
     @param configuration Exact configuration selected by the consumer build.
@@ -301,18 +319,22 @@ def configured_consumer_target_files(
         allow_tab=True,
         description="dependency-disabled consumer target-file inventory",
     )
-    serialized_records: list[tuple[str, str]] = []
+    serialized_records: list[tuple[str, str, str]] = []
     serialized_target_set: set[str] = set()
+    serialized_filename_set: set[str] = set()
     for line_number, line in enumerate(target_file_lines, start=2):
         fields = line.split("\t")
-        if len(fields) != 2:
+        if len(fields) != 3:
             raise RuntimeError(
                 "dependency-disabled consumer target-file inventory contains "
                 f"a malformed entry at line {line_number}"
             )
-        target_name, executable_text = fields
+        target_name, executable_name, executable_text = fields
         if (
             not is_canonical_consumer_target_name(target_name)
+            or not is_canonical_consumer_target_filename(
+                target_name, executable_name
+            )
             or not executable_text
         ):
             raise RuntimeError(
@@ -324,14 +346,24 @@ def configured_consumer_target_files(
                 "dependency-disabled consumer target-file inventory contains "
                 f"a duplicate target: {target_name!r}"
             )
+        if executable_name in serialized_filename_set:
+            raise RuntimeError(
+                "dependency-disabled consumer target-file inventory contains "
+                "a duplicate configured executable filename"
+            )
         serialized_target_set.add(target_name)
-        serialized_records.append((target_name, executable_text))
+        serialized_filename_set.add(executable_name)
+        serialized_records.append(
+            (target_name, executable_name, executable_text)
+        )
     if not serialized_records:
         raise RuntimeError(
             "dependency-disabled consumer target-file inventory is empty"
         )
 
-    serialized_targets = [target for target, _path in serialized_records]
+    serialized_targets = [
+        target for target, _filename, _path in serialized_records
+    ]
     missing_targets = [
         target
         for target in declared_targets
@@ -353,7 +385,7 @@ def configured_consumer_target_files(
 
     resolved_records: list[tuple[str, Path]] = []
     resolved_path_set: set[Path] = set()
-    for target_name, executable_text in serialized_records:
+    for target_name, executable_name, executable_text in serialized_records:
         executable = Path(executable_text)
         if not executable.is_absolute():
             raise RuntimeError(
@@ -399,15 +431,11 @@ def configured_consumer_target_files(
                 "dependency-disabled consumer target-file inventory escapes "
                 f"the consumer build for target {target_name!r}"
             ) from error
-        expected_executable_name = native_consumer_executable_basename(
-            target_name
-        )
-        if resolved_executable.name != expected_executable_name:
+        if resolved_executable.name != executable_name:
             raise RuntimeError(
                 "dependency-disabled consumer target-file inventory path does "
                 f"not match target {target_name!r}"
             )
-        executable_name = resolved_executable.name
         if build_relative_executable not in {
             Path(executable_name),
             Path(configuration) / executable_name,
@@ -587,11 +615,12 @@ def write_consumer(source: Path) -> None:
     @return None.
     @throws OSError If source files cannot be written.
     @note One CMake target list owns validated executable creation, declaration
-      order, and the configuration-specific ``$<TARGET_FILE:...>`` manifest.
-      Reserved dot spellings and typed ``_NOT_BUILT`` sentinels fail before
-      target creation or serialization. The current executable verifies neutral
-      allocation, empty-session lifecycle, and explicit persistence failure
-      without parser or image-library APIs.
+      order, and the configuration-specific ``$<TARGET_FILE_NAME:...>`` plus
+      ``$<TARGET_FILE:...>`` manifest. Reserved dot spellings and typed
+      ``_NOT_BUILT`` sentinels fail before target creation or serialization.
+      The current executable verifies neutral allocation, empty-session
+      lifecycle, and explicit persistence failure without parser or
+      image-library APIs.
     """
 
     source.mkdir(parents=True)
@@ -615,7 +644,10 @@ def write_consumer(source: Path) -> None:
                 "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_DECLARATION",
                 '  "# target\\n")',
                 "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET_FILES",
-                '  "# target\\tconfigured executable\\n")',
+                (
+                    '  "# target\\tconfigured executable filename\\t'
+                    'configured executable\\n")'
+                ),
                 "foreach(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
                 "    IN LISTS",
                 "      PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGETS)",
@@ -654,6 +686,10 @@ def write_consumer(source: Path) -> None:
                 "  string(APPEND",
                 "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET_FILES",
                 "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}\\t\"",
+                (
+                    "    \"$<TARGET_FILE_NAME:${PHOTOSPIDER_DEPENDENCY_"
+                    "DISABLED_CONSUMER_TARGET}>\\t\""
+                ),
                 (
                     "    \"$<TARGET_FILE:${PHOTOSPIDER_DEPENDENCY_DISABLED_"
                     "CONSUMER_TARGET}>\\n\")"
