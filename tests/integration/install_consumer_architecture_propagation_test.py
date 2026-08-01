@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -394,25 +395,122 @@ def base_producer_cache(
     }
 
 
-class CommandRecorder:
-    """@brief Record driver commands and synthesize consumer executables.
+def write_consumer_target_inventory_fixture(
+    build: pathlib.Path,
+    configuration: str,
+    declared_targets: tuple[str, ...],
+    *,
+    mapped_targets: tuple[str, ...] | None = None,
+    configured_filename_by_target: dict[str, str] | None = None,
+    target_file_payload: str | None = None,
+) -> dict[str, pathlib.Path]:
+    """@brief Create one CMake-shaped consumer target inventory fixture.
 
-    @throws OSError If a requested synthetic executable cannot be created.
+    @param build Disposable synthetic consumer build directory to create.
+    @param configuration Exact configuration serialized into the TSV basename.
+    @param declared_targets Ordered target sequence written by CMake configure.
+    @param mapped_targets Optional ordered target-file sequence; omitted values
+      use ``declared_targets`` exactly.
+    @param configured_filename_by_target Optional CMake-authoritative target
+      filenames keyed by mapped target. Omitted entries use the extensionless
+      target spelling without consulting the Python host family.
+    @param target_file_payload Optional complete TSV override used by malformed
+      fail-closed cases after executable files are synthesized.
+    @return Target names mapped to canonical executable fixture paths.
+    @throws OSError If a directory, executable, or manifest cannot be written.
+    @throws RuntimeError If production rejects the configuration while deriving
+      the target-file manifest path.
+    @note Executables are ordinary test-owned files with owner execute
+      permission. No compiler or child process runs, and arbitrary future
+      canonical target names require no helper change.
+    """
+
+    build = build.resolve()
+    inventory_directory = (
+        build / dependency_disabled.CONSUMER_INVENTORY_RELATIVE_DIRECTORY
+    )
+    inventory_directory.mkdir(parents=True, exist_ok=True)
+    declaration_text = (
+        dependency_disabled.CONSUMER_TARGET_DECLARATION_HEADER
+        + "\n"
+        + "".join(f"{target}\n" for target in declared_targets)
+    )
+    write_exact_text(
+        inventory_directory
+        / dependency_disabled.CONSUMER_TARGET_DECLARATION_MANIFEST_NAME,
+        declaration_text,
+    )
+
+    effective_mapped_targets = (
+        declared_targets if mapped_targets is None else mapped_targets
+    )
+    effective_configured_filenames = dict(
+        configured_filename_by_target or {}
+    )
+    executable_by_target: dict[str, pathlib.Path] = {}
+    for target_name in effective_mapped_targets:
+        executable_name = effective_configured_filenames.get(
+            target_name, target_name
+        )
+        executable = (build / executable_name).resolve()
+        executable.write_text("synthetic consumer executable\n", encoding="utf-8")
+        executable.chmod(0o755)
+        executable_by_target[target_name] = executable
+    if target_file_payload is None:
+        target_file_payload = (
+            dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+            + "\n"
+            + "".join(
+                f"{target}\t"
+                f"{effective_configured_filenames.get(target, target)}\t"
+                f"{executable_by_target[target]}\n"
+                for target in effective_mapped_targets
+            )
+        )
+    write_exact_text(
+        dependency_disabled.consumer_target_file_manifest_path(
+            build, configuration
+        ),
+        target_file_payload,
+    )
+    return executable_by_target
+
+
+class CommandRecorder:
+    """@brief Record driver commands and synthesize consumer inventories.
+
+    @throws OSError If a requested executable or manifest cannot be created.
+    @throws subprocess.CalledProcessError If a configured synthetic build or
+      consumer target is selected as the deterministic failure point.
     @note The callable never starts a process. Configure argv still comes from
       each production driver's real ``main`` control flow.
     """
 
     def __init__(
-        self, executable_by_build: dict[pathlib.Path, str]
+        self,
+        consumer_targets_by_build: dict[
+            pathlib.Path, tuple[str, ...]
+        ],
+        *,
+        failing_builds: set[pathlib.Path] | None = None,
+        failing_consumer_targets: set[str] | None = None,
+        target_file_payload_by_build: dict[pathlib.Path, str] | None = None,
     ) -> None:
         """@brief Initialize one command recorder.
 
-        @param executable_by_build Consumer build directories mapped to the
-          executable basename their driver later discovers.
+        @param consumer_targets_by_build Consumer build directories mapped to
+          arbitrary ordered canonical target sequences.
+        @param failing_builds Build directories whose ``cmake --build`` command
+          raises before creating any executable or manifest.
+        @param failing_consumer_targets Target names whose synthetic execution
+          raises after the attempted command is recorded.
+        @param target_file_payload_by_build Optional complete malformed TSV
+          payloads written instead of generated valid target-file inventories.
         @return None.
         @throws None Initialization only copies the caller-owned mapping.
         @note Paths are resolved before storage so driver path spelling cannot
-          affect the synthetic build lookup.
+          affect build lookup. Failure and payload maps are detached for one
+          test-local lifetime.
         """
 
         #: @brief Successful command argv snapshots owned by this recorder.
@@ -421,17 +519,44 @@ class CommandRecorder:
         self.commands: list[list[str]] = []
         #: @brief Expected-failure argv snapshots owned by this recorder.
         #: @note Detached lists live for one test-local recorder lifetime and
-        #:   are merged with successful snapshots only by
-        #:   ``configure_commands``.
+        #:   remain available for direct assertions; ``command_events`` owns
+        #:   cross-callback ordering.
         self.expected_failure_commands: list[list[str]] = []
-        #: @brief Private resolved build-to-executable fixture map.
-        #: @note The recorder owns this detached mapping for its lifetime;
-        #:   ``run`` only reads it when synthesizing disposable executable
-        #:   files.
-        self._executable_by_build = {
-            path.resolve(): name
-            for path, name in executable_by_build.items()
+        #: @brief Complete successful/expected-failure event order.
+        #: @note Both callbacks append detached argv at their production call
+        #:   position so ordering assertions do not regroup command classes.
+        self.command_events: list[list[str]] = []
+        #: @brief Consumer execution attempts in exact driver order.
+        #: @note A configured failure remains recorded while later consumers
+        #:   stay absent, making fail-fast behavior directly observable.
+        self.consumer_commands: list[list[str]] = []
+        #: @brief Private resolved build-to-target-sequence fixture map.
+        #: @note The recorder owns immutable tuples for its test-local lifetime.
+        self._consumer_targets_by_build = {
+            path.resolve(): tuple(targets)
+            for path, targets in consumer_targets_by_build.items()
         }
+        #: @brief Private build failures selected before artifact synthesis.
+        #: @note Membership is immutable after detached construction.
+        self._failing_builds = {
+            path.resolve() for path in (failing_builds or set())
+        }
+        #: @brief Private target failures selected at execution time.
+        #: @note Names are compared only after a path matches a created fixture.
+        self._failing_consumer_targets = set(
+            failing_consumer_targets or set()
+        )
+        #: @brief Private build-specific target-file payload overrides.
+        #: @note Values are written only after their synthetic build succeeds.
+        self._target_file_payload_by_build = {
+            path.resolve(): payload
+            for path, payload in (
+                target_file_payload_by_build or {}
+            ).items()
+        }
+        #: @brief Created executable paths bound back to canonical target names.
+        #: @note Entries appear only after a successful synthetic build.
+        self._target_by_executable: dict[pathlib.Path, str] = {}
 
     def run(self, command: list[str], cwd: pathlib.Path) -> int:
         """@brief Record one successful driver command.
@@ -439,18 +564,21 @@ class CommandRecorder:
         @param command Executable and argv produced by the smoke driver.
         @param cwd Working directory selected by the smoke driver.
         @return Zero, matching a successful required subprocess.
-        @throws OSError If a synthetic cache or consumer executable cannot be
+        @throws OSError If a synthetic cache, executable, or manifest cannot be
           written.
+        @throws subprocess.CalledProcessError If this build or consumer target
+          is a configured deterministic failure point.
         @note ``cwd`` is intentionally not inspected. A consumer configure
           creates a cache-shaped record of its source, build, and ``-D``
           arguments so post-configure validators observe the same boundary as
-          a real CMake call. A consumer build command creates only the empty
-          file that the driver subsequently discovers; no command is executed.
+          a real CMake call. A mapped consumer build creates every ordered fake
+          executable plus both CMake-owned manifests; no command is executed.
         """
 
         del cwd
         recorded = list(command)
         self.commands.append(recorded)
+        self.command_events.append(recorded)
         if (
             len(recorded) >= 4
             and recorded[1] == "-S"
@@ -477,10 +605,42 @@ class CommandRecorder:
                 write_cmake_cache(build, cache_values)
         if len(recorded) >= 3 and recorded[1] == "--build":
             build = pathlib.Path(recorded[2]).resolve()
-            executable_name = self._executable_by_build.get(build)
-            if executable_name:
-                build.mkdir(parents=True, exist_ok=True)
-                (build / executable_name).write_text("", encoding="utf-8")
+            targets = self._consumer_targets_by_build.get(build)
+            if build in self._failing_builds:
+                raise subprocess.CalledProcessError(1, recorded)
+            if targets is not None:
+                if "--config" not in recorded:
+                    raise AssertionError(
+                        f"consumer build omitted --config: {recorded!r}"
+                    )
+                configuration_index = recorded.index("--config") + 1
+                if configuration_index >= len(recorded):
+                    raise AssertionError(
+                        f"consumer build has no configuration: {recorded!r}"
+                    )
+                executable_by_target = (
+                    write_consumer_target_inventory_fixture(
+                        build,
+                        recorded[configuration_index],
+                        targets,
+                        target_file_payload=(
+                            self._target_file_payload_by_build.get(build)
+                        ),
+                    )
+                )
+                self._target_by_executable.update(
+                    {
+                        executable.resolve(): target
+                        for target, executable in executable_by_target.items()
+                    }
+                )
+        if recorded:
+            executable = pathlib.Path(recorded[0]).resolve()
+            target_name = self._target_by_executable.get(executable)
+            if target_name is not None:
+                self.consumer_commands.append(recorded)
+                if target_name in self._failing_consumer_targets:
+                    raise subprocess.CalledProcessError(1, recorded)
         return 0
 
     def expect_failure(
@@ -502,7 +662,9 @@ class CommandRecorder:
         """
 
         del cwd, expected_diagnostic
-        self.expected_failure_commands.append(list(command))
+        recorded = list(command)
+        self.expected_failure_commands.append(recorded)
+        self.command_events.append(recorded)
 
     def configure_commands(self) -> list[list[str]]:
         """@brief Return every recorded child CMake configure argv.
@@ -511,16 +673,969 @@ class CommandRecorder:
           after the executable is ``-S``.
         @throws None The returned lists are detached copies.
         @note Producer configure is absent because tests reuse a validated
-          synthetic producer cache.
+          synthetic producer cache. Events retain their original interleaving.
         """
 
         return [
             list(command)
-            for command in (
-                self.commands + self.expected_failure_commands
-            )
+            for command in self.command_events
             if len(command) >= 2 and command[1] == "-S"
         ]
+
+    def consumer_target_names(self) -> list[str]:
+        """@brief Return attempted consumer targets in execution order.
+
+        @return Detached canonical target names for every consumer command.
+        @throws AssertionError If a recorded consumer path lost its fixture
+          binding, which indicates a recorder implementation defect.
+        @note A failing target is included because production attempted it;
+          later targets remain absent under fail-fast execution.
+        """
+
+        target_names: list[str] = []
+        for command in self.consumer_commands:
+            executable = pathlib.Path(command[0]).resolve()
+            target_name = self._target_by_executable.get(executable)
+            if target_name is None:
+                raise AssertionError(
+                    f"consumer command has no target binding: {command!r}"
+                )
+            target_names.append(target_name)
+        return target_names
+
+
+class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
+    """@brief Validate dynamic consumer discovery and fail-closed execution.
+
+    @throws OSError If disposable producer, executable, manifest, or CMake
+      writer fixtures cannot be created or inspected.
+    @throws AssertionError If valid 1/N inventories drift, malformed or unsafe
+      data is accepted, or driver command ordering changes.
+    @note Driver cases reuse a synthetic validated producer and replace process
+      execution with ``CommandRecorder``. Compiler-free configures probe the
+      actual generated CMake target validator and target filename/path writer;
+      no compiler, installed product, or generated consumer executable is
+      launched.
+    """
+
+    #: @brief CMake launcher used only by the generated-writer rejection case.
+    #: @note CTest supplies CMAKE_COMMAND; direct unittest execution uses PATH.
+    cmake_executable: str = "cmake"
+
+    def run_dependency_driver(
+        self,
+        sandbox: pathlib.Path,
+        recorder: CommandRecorder,
+    ) -> int:
+        """@brief Run the production driver against one synthetic producer.
+
+        @param sandbox Resolved disposable root containing repo/producer/work.
+        @param recorder Data-driven command and consumer-inventory replacement.
+        @return Production ``main`` result when every mocked command succeeds.
+        @throws OSError If fixture creation or production file I/O fails.
+        @throws RuntimeError If producer or consumer inventory validation fails.
+        @throws subprocess.CalledProcessError If the recorder injects a build or
+          consumer execution failure.
+        @note Darwin is selected so the same invocation also retains the six
+          child-configure architecture propagation boundary.
+        """
+
+        repo = sandbox / "repo"
+        producer = sandbox / "producer"
+        work = sandbox / "work"
+        repo.mkdir()
+        cache = base_producer_cache(repo, producer)
+        cache.update(
+            {
+                "BUILD_TESTING": "ON",
+                "PHOTOSPIDER_ENABLE_OPENCV": "OFF",
+                "PHOTOSPIDER_ENABLE_YAML": "OFF",
+                "PHOTOSPIDER_BUILD_GRAPH_CLI": "OFF",
+                "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "OFF",
+                "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "OFF",
+                "CMAKE_DISABLE_FIND_PACKAGE_OpenCV": "ON",
+                "CMAKE_DISABLE_FIND_PACKAGE_yaml-cpp": "ON",
+            }
+        )
+        write_cmake_cache(producer, cache)
+        argv = [
+            "dependency_disabled_install_smoke.py",
+            "--repo",
+            str(repo),
+            "--work",
+            str(work),
+            "--producer-build",
+            str(producer),
+            "--config",
+            "RelWithDebInfo",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                dependency_disabled, "run", side_effect=recorder.run
+            ),
+            mock.patch.object(
+                dependency_disabled,
+                "run_expect_failure",
+                side_effect=recorder.expect_failure,
+            ),
+            mock.patch("platform.system", return_value="Darwin"),
+        ):
+            return dependency_disabled.main()
+
+    def test_accepts_one_and_many_targets_in_declaration_order(self) -> None:
+        """@brief Accept data-driven 1/N target-file inventories.
+
+        @return None after one target and an unsorted three-target sequence
+          round-trip exactly in their CMake declaration order.
+        @throws OSError If fixture files cannot be created or inspected.
+        @throws AssertionError If parsing changes, sorts, drops, or invents a
+          target.
+        @note Arbitrary neutral target names prove no future Issue-specific
+          consumer name is embedded in the Python discovery algorithm.
+        """
+
+        profiles = (
+            ("one", ("consumer_only",)),
+            (
+                "many",
+                ("consumer_zeta", "consumer_alpha", "consumer_middle"),
+            ),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-inventory-valid-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            for profile, targets in profiles:
+                with self.subTest(profile=profile):
+                    build = sandbox / f"{profile} build"
+                    expected_paths = write_consumer_target_inventory_fixture(
+                        build,
+                        "RelWithDebInfo",
+                        targets,
+                    )
+                    self.assertEqual(
+                        dependency_disabled.configured_consumer_target_files(
+                            build, "RelWithDebInfo"
+                        ),
+                        [
+                            (target, expected_paths[target])
+                            for target in targets
+                        ],
+                    )
+
+    def test_generated_writer_rejects_reserved_dot_target_names(self) -> None:
+        """@brief Reject dot spellings at the actual generated CMake boundary.
+
+        @return None after ``.`` and ``..`` each fail with the writer's typed
+          diagnostic before a declaration or target-file manifest exists.
+        @throws OSError If fixture files cannot be written or CMake cannot
+          start.
+        @throws AssertionError If generated project structure drifts, either
+          name reaches serialization, or the explicit diagnostic is absent.
+        @note The fixture replaces package discovery with an imported interface
+          target and selects ``project(... NONE)``. The target-list validator
+          and serialization code remain the exact production writer output.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-writer-reserved-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            inventory_relative_directory = (
+                dependency_disabled.CONSUMER_INVENTORY_RELATIVE_DIRECTORY
+            )
+            declaration_manifest_name = (
+                dependency_disabled.CONSUMER_TARGET_DECLARATION_MANIFEST_NAME
+            )
+            for case_name, reserved_target in (("dot", "."), ("dotdot", "..")):
+                with self.subTest(case=case_name):
+                    source = sandbox / f"source-{case_name}"
+                    build = sandbox / f"build-{case_name}"
+                    dependency_disabled.write_consumer(source)
+                    cmake_lists = source / "CMakeLists.txt"
+                    cmake_text = cmake_lists.read_text(encoding="utf-8")
+                    replacements = (
+                        (
+                            "project(dependency_disabled_consumer LANGUAGES CXX)",
+                            "project(dependency_disabled_consumer NONE)",
+                        ),
+                        (
+                            "find_package(Photospider CONFIG REQUIRED\n"
+                            "  COMPONENTS embedded operation_sdk)",
+                            "add_library(Photospider::photospider "
+                            "INTERFACE IMPORTED)",
+                        ),
+                        (
+                            "  dependency_disabled_consumer)\n",
+                            f"  {reserved_target})\n",
+                        ),
+                    )
+                    for original, replacement in replacements:
+                        self.assertIn(original, cmake_text)
+                        cmake_text = cmake_text.replace(
+                            original, replacement, 1
+                        )
+                    write_exact_text(cmake_lists, cmake_text)
+
+                    result = subprocess.run(
+                        [
+                            self.cmake_executable,
+                            "-S",
+                            str(source),
+                            "-B",
+                            str(build),
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        "Invalid consumer target name",
+                        result.stdout + result.stderr,
+                    )
+                    inventory_directory = (
+                        build / inventory_relative_directory
+                    )
+                    self.assertFalse(
+                        (
+                            inventory_directory
+                            / declaration_manifest_name
+                        ).exists()
+                    )
+                    self.assertEqual(
+                        list(inventory_directory.glob("*.tsv")), []
+                    )
+
+    def test_generated_writer_emits_cmake_filename_and_path_fields(
+        self,
+    ) -> None:
+        """@brief Round-trip both target-file expressions through CMake.
+
+        @return None after the production serialization loop emits target,
+          ``$<TARGET_FILE_NAME>``, and ``$<TARGET_FILE>`` as three exact TSV
+          fields for a POSIX-Python ``.exe`` imported target fixture.
+        @throws OSError If fixture files cannot be written or CMake cannot
+          start.
+        @throws subprocess.CalledProcessError If CMake rejects the valid
+          compiler-free generated project.
+        @throws AssertionError If the writer omits, reorders, or changes either
+          configuration-specific target-file expression.
+        @note The fixture replaces only target construction and package lookup
+          with an imported executable. The production target list, validation,
+          declaration, and manifest serialization remain unchanged.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-writer-fields-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            source = sandbox / "source"
+            build = sandbox / "build"
+            dependency_disabled.write_consumer(source)
+            cmake_lists = source / "CMakeLists.txt"
+            cmake_text = cmake_lists.read_text(encoding="utf-8")
+            target_variable = (
+                "${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}"
+            )
+            target_creation = (
+                "  add_executable(\n"
+                f'    "{target_variable}"\n'
+                f'    "{target_variable}.cpp")\n'
+                "  target_link_libraries(\n"
+                f'    "{target_variable}"\n'
+                "    PRIVATE Photospider::photospider\n"
+                "            Photospider::operation_sdk)"
+            )
+            imported_target_creation = (
+                "  add_executable(\n"
+                f'    "{target_variable}" IMPORTED)\n'
+                "  set_target_properties(\n"
+                f'    "{target_variable}" PROPERTIES\n'
+                "    IMPORTED_LOCATION\n"
+                f'      "${{CMAKE_BINARY_DIR}}/{target_variable}.exe")'
+            )
+            replacements = (
+                (
+                    "project(dependency_disabled_consumer LANGUAGES CXX)",
+                    "project(dependency_disabled_consumer NONE)",
+                ),
+                (
+                    "find_package(Photospider CONFIG REQUIRED\n"
+                    "  COMPONENTS embedded operation_sdk)",
+                    "# Package lookup omitted by compiler-free writer fixture.",
+                ),
+                (target_creation, imported_target_creation),
+            )
+            for original, replacement in replacements:
+                self.assertIn(original, cmake_text)
+                cmake_text = cmake_text.replace(original, replacement, 1)
+            write_exact_text(cmake_lists, cmake_text)
+
+            subprocess.run(
+                [
+                    self.cmake_executable,
+                    "-S",
+                    str(source),
+                    "-B",
+                    str(build),
+                    "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            target_file_manifest = (
+                dependency_disabled.consumer_target_file_manifest_path(
+                    build, "RelWithDebInfo"
+                )
+            )
+            records = dependency_disabled.read_strict_manifest_lines(
+                target_file_manifest,
+                expected_header=(
+                    dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                ),
+                allow_tab=True,
+                description="compiler-free target-file inventory fixture",
+            )
+            self.assertEqual(len(records), 1)
+            target_name, configured_filename, configured_path = (
+                records[0].split("\t")
+            )
+            self.assertEqual(target_name, "dependency_disabled_consumer")
+            self.assertEqual(
+                configured_filename, "dependency_disabled_consumer.exe"
+            )
+            self.assertEqual(
+                pathlib.Path(configured_path).name, configured_filename
+            )
+
+    def test_rejects_reserved_dot_names_in_both_manifests(self) -> None:
+        """@brief Reject ``.`` and ``..`` in each independent target field.
+
+        @return None after both reserved spellings fail once in the declaration
+          manifest and once in the target-file manifest.
+        @throws OSError If synthetic manifests or executables cannot be written.
+        @throws AssertionError If either reader reaches cross-manifest set
+          comparison instead of rejecting its own invalid target field.
+        @note Each case keeps the other manifest valid, proving both readers
+          enforce the same canonical target-name contract independently.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-reserved-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            target_name = "consumer_safe"
+            inventory_relative_directory = (
+                dependency_disabled.CONSUMER_INVENTORY_RELATIVE_DIRECTORY
+            )
+            declaration_manifest_name = (
+                dependency_disabled.CONSUMER_TARGET_DECLARATION_MANIFEST_NAME
+            )
+            target_file_manifest_path = (
+                dependency_disabled.consumer_target_file_manifest_path
+            )
+            for manifest_kind in ("declaration", "target-file"):
+                for case_name, reserved_target in (
+                    ("dot", "."),
+                    ("dotdot", ".."),
+                ):
+                    with self.subTest(
+                        manifest=manifest_kind, case=case_name
+                    ):
+                        build = sandbox / f"{manifest_kind}-{case_name}"
+                        executable_by_target = (
+                            write_consumer_target_inventory_fixture(
+                                build,
+                                "RelWithDebInfo",
+                                (target_name,),
+                            )
+                        )
+                        if manifest_kind == "declaration":
+                            manifest = (
+                                build
+                                / inventory_relative_directory
+                                / declaration_manifest_name
+                            )
+                            payload = (
+                                dependency_disabled.CONSUMER_TARGET_DECLARATION_HEADER
+                                + "\n"
+                                + reserved_target
+                                + "\n"
+                            )
+                            expected_diagnostic = "target declaration"
+                        else:
+                            manifest = target_file_manifest_path(
+                                build, "RelWithDebInfo"
+                            )
+                            payload = (
+                                dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                                + "\n"
+                                + f"{reserved_target}\t"
+                                + f"{target_name}\t"
+                                + f"{executable_by_target[target_name]}\n"
+                            )
+                            expected_diagnostic = "target-file inventory"
+                        write_exact_text(manifest, payload)
+                        with self.assertRaisesRegex(
+                            RuntimeError, expected_diagnostic
+                        ):
+                            dependency_disabled.configured_consumer_target_files(
+                                build, "RelWithDebInfo"
+                            )
+
+    def test_accepts_cmake_authoritative_native_filename_spellings(
+        self,
+    ) -> None:
+        """@brief Accept native target filenames without Python host guessing.
+
+        @return None after Linux/macOS extensionless names, Windows ``.exe``,
+          and Cygwin/MSYS2 POSIX-Python ``.exe`` names all satisfy the same
+          target-bound contract.
+        @throws AssertionError If filename validation consults ``os.name`` or
+          rejects one of CMake's two uncustomized native spellings.
+        @note ``os.name`` is varied only around the pure filename validator;
+          no platform-specific ``Path`` object is constructed under the mock.
+        """
+
+        target_name = "consumer_safe"
+        profiles = (
+            ("linux", "posix", target_name),
+            ("macos", "posix", target_name),
+            ("windows", "nt", f"{target_name}.exe"),
+            ("cygwin", "posix", f"{target_name}.exe"),
+            ("msys2", "posix", f"{target_name}.exe"),
+        )
+        for profile, python_os_name, configured_filename in profiles:
+            with self.subTest(profile=profile):
+                with mock.patch.object(
+                    dependency_disabled.os, "name", python_os_name
+                ):
+                    self.assertTrue(
+                        dependency_disabled.is_canonical_consumer_target_filename(
+                            target_name, configured_filename
+                        )
+                    )
+
+    def test_reader_accepts_cmake_declared_exe_without_host_guessing(
+        self,
+    ) -> None:
+        """@brief Accept CMake's ``.exe`` without host suffix inference.
+
+        @return None after the complete reader accepts an executable whose
+          CMake-declared filename and path basename both end in ``.exe``.
+        @throws OSError If synthetic manifests or executable files cannot be
+          written.
+        @throws AssertionError If reader behavior still derives suffix policy
+          from the Python host family.
+        @note On Windows this is the native target spelling. On Linux/macOS it
+          deterministically simulates the POSIX-Python/CMake-target split used
+          by Cygwin and MSYS2.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-posix-cmake-exe-"
+        ) as temporary:
+            build = pathlib.Path(temporary).resolve() / "build"
+            target_name = "consumer_safe"
+            configured_filename = f"{target_name}.exe"
+            executable_by_target = write_consumer_target_inventory_fixture(
+                build,
+                "RelWithDebInfo",
+                (target_name,),
+                configured_filename_by_target={
+                    target_name: configured_filename
+                },
+            )
+            self.assertIn(dependency_disabled.os.name, {"nt", "posix"})
+            self.assertEqual(
+                dependency_disabled.configured_consumer_target_files(
+                    build, "RelWithDebInfo"
+                ),
+                [(target_name, executable_by_target[target_name])],
+            )
+
+    def test_rejects_foreign_tampered_and_drifted_filenames(self) -> None:
+        """@brief Reject unbound, unsafe, or path-drifted filename fields.
+
+        @return None after separators, reserved names, a typed sentinel,
+          foreign target/suffix spellings, and filename/path basename drift
+          all fail before returning an executable.
+        @throws OSError If synthetic manifests or executable files cannot be
+          written.
+        @throws AssertionError If the new filename field can select an
+          arbitrary build-local executable or disagree with its path.
+        @note Every referenced path remains canonical, build-local, regular,
+          and executable so configured-filename validation is the sole policy
+          under test.
+        """
+
+        invalid_filenames = {
+            "posix-separator": "nested/consumer_safe",
+            "windows-separator": "nested\\consumer_safe",
+            "dot": ".",
+            "dotdot": "..",
+            "sentinel": "consumer_safe_NOT_BUILT",
+            "foreign-target": "consumer_foreign",
+            "foreign-suffix": "consumer_safe.bin",
+        }
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-tampered-filename-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            target_name = "consumer_safe"
+            for case_name, configured_filename in invalid_filenames.items():
+                with self.subTest(case=case_name):
+                    build = sandbox / case_name
+                    executable_by_target = (
+                        write_consumer_target_inventory_fixture(
+                            build,
+                            "RelWithDebInfo",
+                            (target_name,),
+                        )
+                    )
+                    manifest = (
+                        dependency_disabled.consumer_target_file_manifest_path(
+                            build, "RelWithDebInfo"
+                        )
+                    )
+                    write_exact_text(
+                        manifest,
+                        (
+                            dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                            + "\n"
+                            + f"{target_name}\t{configured_filename}\t"
+                            + f"{executable_by_target[target_name]}\n"
+                        ),
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError, "target-file inventory"
+                    ):
+                        dependency_disabled.configured_consumer_target_files(
+                            build, "RelWithDebInfo"
+                        )
+
+            build = sandbox / "path-name-drift"
+            cmake_filename = f"{target_name}.exe"
+            executable_by_target = write_consumer_target_inventory_fixture(
+                build,
+                "RelWithDebInfo",
+                (target_name,),
+                configured_filename_by_target={
+                    target_name: cmake_filename
+                },
+            )
+            manifest = dependency_disabled.consumer_target_file_manifest_path(
+                build, "RelWithDebInfo"
+            )
+            write_exact_text(
+                manifest,
+                (
+                    dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                    + "\n"
+                    + f"{target_name}\t{target_name}\t"
+                    + f"{executable_by_target[target_name]}\n"
+                ),
+            )
+            with self.assertRaisesRegex(RuntimeError, "does not match target"):
+                dependency_disabled.configured_consumer_target_files(
+                    build, "RelWithDebInfo"
+                )
+
+    def test_rejects_duplicate_configured_filename(self) -> None:
+        """@brief Reject two target identities mapped to one filename.
+
+        @return None after individually target-bound spellings collide and the
+          reader rejects the duplicate before returning an executable.
+        @throws OSError If synthetic manifests or executable files cannot be
+          written.
+        @throws AssertionError If filename identity can collapse across two
+          unique declared targets.
+        @note ``consumer_a.exe`` is legal both as the Windows filename of
+          ``consumer_a`` and the extensionless filename of target
+          ``consumer_a.exe``; their collision must nevertheless fail closed.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-duplicate-filename-"
+        ) as temporary:
+            build = pathlib.Path(temporary).resolve() / "build"
+            targets = ("consumer_a", "consumer_a.exe")
+            write_consumer_target_inventory_fixture(
+                build,
+                "RelWithDebInfo",
+                targets,
+                configured_filename_by_target={
+                    target: "consumer_a.exe" for target in targets
+                },
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, "duplicate configured executable filename"
+            ):
+                dependency_disabled.configured_consumer_target_files(
+                    build, "RelWithDebInfo"
+                )
+
+    def test_rejects_zero_duplicate_and_drifted_target_sets(self) -> None:
+        """@brief Reject 0, duplicates, missing/unexpected, and order drift.
+
+        @return None after every invalid declaration/mapping relationship raises
+          before returning an executable.
+        @throws OSError If synthetic manifests cannot be written.
+        @throws AssertionError If any invalid relationship is accepted.
+        @note The target declaration and target-file TSV are independently
+          serialized from one conceptual CMake target list for these fixtures.
+        """
+
+        cases = (
+            ("zero", (), ()),
+            ("duplicate-declaration", ("consumer_a", "consumer_a"), ("consumer_a",)),
+            ("duplicate-mapping", ("consumer_a",), ("consumer_a", "consumer_a")),
+            ("missing", ("consumer_a", "consumer_b"), ("consumer_a",)),
+            ("unexpected", ("consumer_a",), ("consumer_a", "consumer_b")),
+            ("order", ("consumer_a", "consumer_b"), ("consumer_b", "consumer_a")),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-inventory-set-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            for case_name, declared_targets, mapped_targets in cases:
+                with self.subTest(case=case_name):
+                    build = sandbox / case_name
+                    write_consumer_target_inventory_fixture(
+                        build,
+                        "RelWithDebInfo",
+                        declared_targets,
+                        mapped_targets=mapped_targets,
+                    )
+                    with self.assertRaisesRegex(RuntimeError, "consumer target"):
+                        dependency_disabled.configured_consumer_target_files(
+                            build, "RelWithDebInfo"
+                        )
+
+    def test_rejects_malformed_and_control_bearing_manifests(self) -> None:
+        """@brief Reject strict-format, UTF-8, and ASCII-control violations.
+
+        @return None after missing/invalid headers, blank/comments, field-count
+          drift, empty fields, invalid target names, missing final LF, invalid
+          UTF-8, and every C0 control plus DEL in both target and configured
+          filename fields all fail.
+        @throws OSError If malformed manifest bytes cannot be written.
+        @throws AssertionError If any malformed payload is accepted.
+        @note LF and TAB injection cases use structurally malformed records;
+          every other control is rejected directly by the byte boundary.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-inventory-malformed-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            target_name = "consumer_safe"
+            build = sandbox / "build"
+            executable_by_target = write_consumer_target_inventory_fixture(
+                build,
+                "RelWithDebInfo",
+                (target_name,),
+            )
+            executable = executable_by_target[target_name]
+            header = dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+            valid_record = (
+                f"{target_name}\t{target_name}\t{executable}\n"
+            )
+            manifest = dependency_disabled.consumer_target_file_manifest_path(
+                build, "RelWithDebInfo"
+            )
+            malformed_payloads = {
+                "empty": "",
+                "header-only": f"{header}\n",
+                "wrong-header": (
+                    f"# targets\n{valid_record}"
+                ),
+                "repeated-header": (
+                    f"{header}\n{header}\n{valid_record}"
+                ),
+                "comment": (
+                    f"{header}\n# later comment\n{valid_record}"
+                ),
+                "blank": f"{header}\n\n{valid_record}",
+                "one-field": f"{header}\n{target_name}\n",
+                "two-fields": (
+                    f"{header}\n{target_name}\t{target_name}\n"
+                ),
+                "four-fields": (
+                    f"{header}\n{target_name}\t{target_name}\t"
+                    f"{executable}\textra\n"
+                ),
+                "empty-target": (
+                    f"{header}\n\t{target_name}\t{executable}\n"
+                ),
+                "empty-filename": (
+                    f"{header}\n{target_name}\t\t{executable}\n"
+                ),
+                "empty-path": (
+                    f"{header}\n{target_name}\t{target_name}\t\n"
+                ),
+                "alias-target": (
+                    f"{header}\nconsumer::alias\t{target_name}\t"
+                    f"{executable}\n"
+                ),
+                "sentinel-target": (
+                    f"{header}\n{target_name}_NOT_BUILT\t{target_name}\t"
+                    f"{executable}\n"
+                ),
+                "missing-final-lf": (
+                    f"{header}\n{target_name}\t{target_name}\t{executable}"
+                ),
+            }
+            malformed_payloads.update(
+                {
+                    f"target-control-{control_code}": (
+                        f"{header}\nconsumer"
+                        f"{chr(control_code)}injected\t{target_name}\t"
+                        f"{executable}\n"
+                    )
+                    for control_code in (*range(32), 127)
+                }
+            )
+            malformed_payloads.update(
+                {
+                    f"filename-control-{control_code}": (
+                        f"{header}\n{target_name}\tconsumer"
+                        f"{chr(control_code)}injected\t{executable}\n"
+                    )
+                    for control_code in (*range(32), 127)
+                }
+            )
+            for case_name, payload in malformed_payloads.items():
+                with self.subTest(case=case_name):
+                    write_exact_text(manifest, payload)
+                    with self.assertRaisesRegex(
+                        RuntimeError, "target-file inventory"
+                    ):
+                        dependency_disabled.configured_consumer_target_files(
+                            build, "RelWithDebInfo"
+                        )
+
+            manifest.write_bytes(b"\xff")
+            with self.assertRaisesRegex(RuntimeError, "valid UTF-8"):
+                dependency_disabled.configured_consumer_target_files(
+                    build, "RelWithDebInfo"
+                )
+            manifest.unlink()
+            with self.assertRaisesRegex(RuntimeError, "missing"):
+                dependency_disabled.configured_consumer_target_files(
+                    build, "RelWithDebInfo"
+                )
+
+    def test_rejects_unsafe_noncanonical_and_unbuilt_paths(self) -> None:
+        """@brief Reject every path that is not the exact built target output.
+
+        @return None after relative, parent/redundant, outside-root, wrong-name,
+          unexpected-subdirectory, missing, directory, symlink, and
+          non-executable records all fail.
+        @throws OSError If path fixtures cannot be created or linked.
+        @throws AssertionError If any unsafe/non-file path is accepted.
+        @note Each case uses a fresh build root so filesystem state cannot make
+          a later counterexample accidentally valid.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-inventory-path-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            target_name = "consumer_safe"
+            for case_name in (
+                "relative",
+                "parent",
+                "redundant",
+                "outside",
+                "wrong-name",
+                "unexpected-subdirectory",
+                "unbuilt",
+                "directory",
+                "symlink",
+                "non-executable",
+            ):
+                with self.subTest(case=case_name):
+                    build = sandbox / f"build-{case_name}"
+                    executable_by_target = (
+                        write_consumer_target_inventory_fixture(
+                            build,
+                            "RelWithDebInfo",
+                            (target_name,),
+                        )
+                    )
+                    valid_executable = executable_by_target[target_name]
+                    if case_name == "relative":
+                        rejected_path = pathlib.Path(target_name)
+                    elif case_name == "parent":
+                        (build / "nested").mkdir()
+                        rejected_path = (
+                            build / "nested" / ".." / target_name
+                        )
+                    elif case_name == "redundant":
+                        rejected_path = f"{build}//{target_name}"
+                    elif case_name == "outside":
+                        rejected_path = sandbox / "outside" / target_name
+                        rejected_path.parent.mkdir(exist_ok=True)
+                        rejected_path.write_text("outside\n", encoding="utf-8")
+                        rejected_path.chmod(0o755)
+                    elif case_name == "wrong-name":
+                        rejected_path = build / "different_executable"
+                        rejected_path.write_text("wrong\n", encoding="utf-8")
+                        rejected_path.chmod(0o755)
+                    elif case_name == "unexpected-subdirectory":
+                        rejected_path = build / "CMakeFiles" / target_name
+                        rejected_path.parent.mkdir()
+                        rejected_path.write_text("internal\n", encoding="utf-8")
+                        rejected_path.chmod(0o755)
+                    elif case_name == "unbuilt":
+                        rejected_path = build / "RelWithDebInfo" / target_name
+                    elif case_name == "directory":
+                        rejected_path = build / "RelWithDebInfo" / target_name
+                        rejected_path.mkdir(parents=True)
+                    elif case_name == "symlink":
+                        rejected_path = build / "RelWithDebInfo" / target_name
+                        rejected_path.parent.mkdir()
+                        rejected_path.symlink_to(valid_executable)
+                    else:
+                        rejected_path = build / "RelWithDebInfo" / target_name
+                        rejected_path.parent.mkdir()
+                        rejected_path.write_text(
+                            "not executable\n", encoding="utf-8"
+                        )
+                        rejected_path.chmod(0o644)
+                    manifest = (
+                        dependency_disabled.consumer_target_file_manifest_path(
+                            build, "RelWithDebInfo"
+                        )
+                    )
+                    write_exact_text(
+                        manifest,
+                        (
+                            dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                            + "\n"
+                            + f"{target_name}\t{target_name}\t"
+                            + f"{rejected_path}\n"
+                        ),
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError, "target-file inventory"
+                    ):
+                        dependency_disabled.configured_consumer_target_files(
+                            build, "RelWithDebInfo"
+                        )
+
+    def test_driver_runs_all_targets_in_order_and_fails_fast(self) -> None:
+        """@brief Prove full driver 1/N ordering and consumer failure cutoff.
+
+        @return None after one and three valid consumers run in declared order,
+          while a failure at the second consumer prevents the third attempt.
+        @throws OSError If synthetic producer or inventory fixtures fail.
+        @throws AssertionError If execution order or fail-fast behavior differs.
+        @note All six child configure commands continue to carry the exact
+          unsplit Darwin architecture argument in every successful profile.
+        """
+
+        profiles = (
+            ("one", ("consumer_only",)),
+            (
+                "many",
+                ("consumer_first", "consumer_second", "consumer_third"),
+            ),
+        )
+        for profile, targets in profiles:
+            with self.subTest(profile=profile):
+                with tempfile.TemporaryDirectory(
+                    prefix=f"photospider-consumer-driver-{profile}-"
+                ) as temporary:
+                    sandbox = pathlib.Path(temporary).resolve()
+                    work = sandbox / "work"
+                    recorder = CommandRecorder(
+                        {work / "consumer-build": targets}
+                    )
+                    self.assertEqual(
+                        self.run_dependency_driver(sandbox, recorder), 0
+                    )
+                    self.assertEqual(
+                        recorder.consumer_target_names(), list(targets)
+                    )
+                    self.assertEqual(
+                        len(recorder.configure_commands()), 6
+                    )
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-driver-fail-fast-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            work = sandbox / "work"
+            targets = (
+                "consumer_first",
+                "consumer_second",
+                "consumer_third",
+            )
+            recorder = CommandRecorder(
+                {work / "consumer-build": targets},
+                failing_consumer_targets={"consumer_second"},
+            )
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.run_dependency_driver(sandbox, recorder)
+            self.assertEqual(
+                recorder.consumer_target_names(),
+                ["consumer_first", "consumer_second"],
+            )
+
+    def test_driver_starts_no_consumer_after_inventory_or_build_failure(
+        self,
+    ) -> None:
+        """@brief Require collection/path/build failures before child runtime.
+
+        @return None after zero-target, malformed-path, and failed-build cases
+          each raise with no consumer command recorded.
+        @throws OSError If synthetic producer or manifest fixtures fail.
+        @throws AssertionError If a failure reaches any consumer execution.
+        @note Build failure occurs before artifacts exist; the other cases occur
+          only after build, proving complete inventory prevalidation precedes
+          the first runnable child.
+        """
+
+        cases = ("zero", "malformed-path", "build-failure")
+        for case_name in cases:
+            with self.subTest(case=case_name):
+                with tempfile.TemporaryDirectory(
+                    prefix=f"photospider-consumer-driver-{case_name}-"
+                ) as temporary:
+                    sandbox = pathlib.Path(temporary).resolve()
+                    work = sandbox / "work"
+                    consumer_build = work / "consumer-build"
+                    if case_name == "zero":
+                        recorder = CommandRecorder({consumer_build: ()})
+                        expected_error: type[Exception] = RuntimeError
+                    elif case_name == "malformed-path":
+                        target_name = "consumer_safe"
+                        malformed_payload = (
+                            dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                            + "\n"
+                            + f"{target_name}\t{target_name}\t../outside\n"
+                        )
+                        recorder = CommandRecorder(
+                            {consumer_build: (target_name,)},
+                            target_file_payload_by_build={
+                                consumer_build: malformed_payload
+                            },
+                        )
+                        expected_error = RuntimeError
+                    else:
+                        recorder = CommandRecorder(
+                            {consumer_build: ("consumer_safe",)},
+                            failing_builds={consumer_build},
+                        )
+                        expected_error = subprocess.CalledProcessError
+                    with self.assertRaises(expected_error):
+                        self.run_dependency_driver(sandbox, recorder)
+                    self.assertEqual(recorder.consumer_commands, [])
 
 
 class SymbolToolHarness:
@@ -1846,7 +2961,7 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
             recorder = CommandRecorder(
                 {
                     work / "consumer-build": (
-                        "dependency_disabled_consumer"
+                        "dependency_disabled_consumer",
                     )
                 }
             )
@@ -1906,7 +3021,9 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
             )
             recorder = CommandRecorder(
                 {
-                    work / "consumer-build": "ipc_disabled_consumer",
+                    work / "consumer-build": (
+                        "ipc_disabled_consumer",
+                    ),
                 }
             )
             argv = [
@@ -2034,6 +3151,9 @@ if __name__ == "__main__":
         parse_live_inventory_arguments(sys.argv)
     )
     ConfiguredPublicHeaderInventoryTest.cmake_executable = (
+        live_options.cmake_executable
+    )
+    DependencyDisabledConsumerTargetInventoryTest.cmake_executable = (
         live_options.cmake_executable
     )
     InstallConsumerCTestRegistrationTest.live_build_dir = (

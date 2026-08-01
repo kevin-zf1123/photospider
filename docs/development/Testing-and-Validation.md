@@ -246,11 +246,44 @@ session, and observes `GraphErrc::Io` from an explicit YAML operation. CI may
 reuse a producer only after its cache identity, configuration, complete
 capability profile, and already-built dense integration target are validated.
 
+The generated clean consumer project maintains one ordered CMake executable
+target list. That same list creates the targets, writes a configure-time exact
+target declaration, and supplies a configuration-specific three-field
+`target<TAB>$<TARGET_FILE_NAME:target><TAB>$<TARGET_FILE:target>` manifest
+through `file(GENERATE)`. The current profile declares only
+`dependency_disabled_consumer`; adding another maintained consumer extends that
+CMake list and its source without adding a Python target name or discovery
+branch. CMake 3.16's target generator expressions are the native spelling
+authority because they describe the selected generator, target platform, and
+configuration. Python's `os.name` and `sys.platform` describe the interpreter
+host instead, so they must not infer the executable suffix. In particular, a
+POSIX Python running under Cygwin or MSYS2 may legitimately receive a CMake
+target filename ending in `.exe`.
+
+The reader requires both manifests to be nonempty, unique, and identical in
+target sequence. It rejects malformed field counts, empty fields,
+blank/comment records, invalid UTF-8, non-structural ASCII C0 controls or DEL,
+noncanonical target names, and missing, unexpected, duplicated, or reordered
+targets. A configured filename must contain no POSIX or Windows separator, may
+not be `.` or `..`, must be unique, and must equal either the exact target name
+or that name plus `.exe`. Those are the only native spellings available because
+the generated consumer does not customize `OUTPUT_NAME`, prefix, suffix, or a
+configuration postfix. This target-to-filename binding prevents a forged new
+field from selecting an arbitrary build-local executable. The full target path
+must use canonical native spelling, remain unique, stay at the consumer build
+root or its selected configuration directory, have a basename exactly equal to
+the CMake-declared filename, avoid symlinks, and identify an executable regular
+file. Both manifests are accepted only as products of this invocation's
+disposable configure/generate step, and the reader nevertheless completes all
+record, identity, set, filename, and path validation before any consumer
+starts. Valid consumers then run in declaration order, and a runtime failure
+prevents later consumers from starting.
+
 When the selected CMake generator exposes multiple configurations, the smoke
 uses that same generator for producer and consumer, checks each
 `CMAKE_GENERATOR` and `CMAKE_CONFIGURATION_TYPES` cache value, and resolves the
-consumer executable from the configuration-specific `$<TARGET_FILE:...>`
-manifest.
+consumer executable from the configuration-specific `$<TARGET_FILE_NAME:...>`
+and `$<TARGET_FILE:...>` manifest fields.
 
 Migration residue, phase completion, stale-term, and source-layout checks are
 temporary development checks. They must not be registered with CTest or CI.
@@ -290,8 +323,20 @@ compile target, or generated executable.
 shard: it runs the three install-consumer drivers' real command-construction
 paths against disposable producer cache fixtures while replacing subprocess
 execution, so it verifies cache-to-child-argv propagation without launching a
-product configure, build, or install. A separate `cmake -P` fixture calls the
-production public-header writer directly and performs no project configure.
+product configure, build, or install. Its data-driven command recorder also
+creates arbitrary 0/1/N dependency-disabled target declarations, target-file
+manifests, CMake-authoritative target filenames, and fake executables.
+In-process cases cover Linux/macOS extensionless names, Windows `.exe`, and
+POSIX-Python Cygwin/MSYS2 `.exe` spelling. They require ordered execution and
+pre-runtime failure for empty, duplicate, missing/unexpected, malformed,
+control-bearing, separator-bearing, reserved, foreign,
+filename/path-drifted, unsafe, noncanonical, unexpected-layout, unbuilt,
+non-file, or non-executable inventory records; build and consumer failures lock
+fail-fast ordering. A compiler-free `project(... NONE)` fixture exercises the
+generated target validator and both target filename/path expressions. A
+separate `cmake -P` fixture calls the production public-header writer directly;
+neither fixture starts a compiler, product build, install, or generated
+executable.
 The same process injects executable lookup, validation, and captured-command
 callbacks into the static-product driver's production archive-symbol helpers.
 It locks Darwin xcrun-first fallback, non-Darwin independence, all-candidate
