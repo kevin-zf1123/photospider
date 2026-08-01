@@ -44,9 +44,10 @@ void validate_dense_tensor_producer_envelope(
  * Validation requires a valid FP4 E2M1 descriptor with independent block-scale
  * quantization, no image facet, layout version 1, matching rank/block shape,
  * nibble-aligned positive bit strides and offset, an exact byte envelope, and
- * a checked non-overlap proof for complete physical block bit ranges. It
- * performs no allocation, identity minting, fence creation, payload access, or
- * owner retention.
+ * a checked non-overlap proof for complete physical block bit ranges. It may
+ * allocate rank-bounded temporary validation state, but neither allocates nor
+ * publishes target storage or a Value, mints identities, creates fences,
+ * accesses payloads, or retains owners.
  *
  * @param descriptor Candidate packed logical descriptor.
  * @param layout Candidate physical Blocked layout.
@@ -60,6 +61,8 @@ void validate_dense_tensor_producer_envelope(
  * @note This is the shared authority for blocked builders and explicit
  * transfer preparation. The V-13 exact producer envelope may have a nonzero
  * nibble offset because leading unused bits are part of its byte allocation.
+ * Calls are independent and may run concurrently while their inputs remain
+ * immutable; no input reference is retained beyond the call.
  */
 void validate_dense_tensor_producer_envelope(
     const DenseTensorDescriptor& descriptor, const BlockedLayout& layout,
