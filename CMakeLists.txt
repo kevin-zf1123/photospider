@@ -1654,6 +1654,8 @@ if(BUILD_TESTING)
                     "${CMAKE_BINARY_DIR}/tests/openexr_deep_provider_option_off_smoke"
                 --producer-build "${CMAKE_BINARY_DIR}"
                 --cmake-executable "${CMAKE_COMMAND}"
+                --ctest-executable "${CMAKE_CTEST_COMMAND}"
+                --symbol-tool "${CMAKE_NM}"
                 --config $<CONFIG>
                 --mode off)
         set_tests_properties(OpenExrDeepProviderOptionOffSmoke PROPERTIES
