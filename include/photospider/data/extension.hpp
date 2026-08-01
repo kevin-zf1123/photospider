@@ -584,9 +584,13 @@ StorageLayoutDigest compute_storage_layout_digest(
  * @brief Computes canonical logical content through the Value generation.
  * @param value Valid provider-defined Value.
  * @return Typed availability and optional ContentDigest.
- * @throws std::bad_alloc when bounded Host-owned staging cannot allocate.
+ * @throws std::bad_alloc when bounded metadata or fixed digest state cannot
+ * allocate.
  * @note The operation is explicit and may read Ready host-visible payload;
- * property, Region, and DataSpec query paths never call it implicitly.
+ * property, Region, and DataSpec query paths never call it implicitly. The
+ * Host measures then incrementally hashes the deterministic provider stream
+ * without retaining payload-proportional storage or imposing a cumulative
+ * 64 MiB logical-content limit.
  */
 ContentDigestResult compute_content_digest(const Value& value);
 

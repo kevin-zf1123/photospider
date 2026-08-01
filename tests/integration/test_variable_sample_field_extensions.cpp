@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -81,6 +82,10 @@ constexpr std::uint32_t kOffsetsRole = 2U;
 constexpr std::uint32_t kSamplesRole = 3U;
 /** @brief Fixed synthetic sample-record width. */
 constexpr std::uint32_t kSampleRecordBytes = 2U;
+/** @brief Schema payload marker enabling deterministic repeated content. */
+constexpr std::uint8_t kRepeatedContentMarker = 0x53U;
+/** @brief Largest callback-local repeated-content segment. */
+constexpr std::size_t kMaximumRepeatedContentChunkBytes = 64U * 1024U;
 
 /**
  * @brief Converts a C++ identity into the frozen pure-C record.
@@ -172,6 +177,17 @@ struct SyntheticProviderState final {
   bool contradictory_region_output = false;
   /** @brief Optional malicious/rank-general exact TensorSlice site count. */
   std::optional<std::uint64_t> tensor_slice_site_count_override;
+  /** @brief Provider-selected repeated-content segment size for digest tests.
+   */
+  std::atomic<std::uint64_t> repeated_content_chunk_bytes{
+      kMaximumRepeatedContentChunkBytes};
+  /** @brief Whether content emits null plus nonzero and ignores sink failure.
+   */
+  bool malformed_content_segment = false;
+  /** @brief Whether content overflows the Host checked measurement counter. */
+  bool overflowing_content_count = false;
+  /** @brief Whether the hashing pass emits fewer bytes than measurement. */
+  bool short_content_hash_traversal = false;
   /** @brief Stable implementation-version bytes. */
   std::string implementation_version = "synthetic-variable-sample-field-v1";
   /** @brief Stable diagnostic definition names. */
@@ -353,6 +369,10 @@ struct DescriptorFacts final {
   std::uint64_t declared_samples = 0U;
   /** @brief Exact sample-record byte width from the Facet. */
   std::uint32_t record_bytes = 0U;
+  /** @brief Optional deterministic repeated logical-content byte count. */
+  std::uint64_t repeated_content_bytes = 0U;
+  /** @brief Repeated byte value when stress-content mode is enabled. */
+  std::uint8_t repeated_content_value = 0U;
 };
 
 /**
@@ -386,6 +406,12 @@ bool parse_descriptor(const ps_data_value_view_v3* value,
   facts->logical_sites = read_u64_le(value->schema->payload.data);
   facts->declared_samples = read_u64_le(value->schema->payload.data + 8U);
   facts->record_bytes = read_u32_le(value->facets[0].payload.data);
+  if (value->schema->payload.size >= 26U &&
+      value->schema->payload.data[16U] == kRepeatedContentMarker) {
+    facts->repeated_content_bytes =
+        read_u64_le(value->schema->payload.data + 17U);
+    facts->repeated_content_value = value->schema->payload.data[25U];
+  }
   return facts->logical_sites != 0U &&
          facts->record_bytes == kSampleRecordBytes;
 }
@@ -649,18 +675,30 @@ void append_u64_le(std::vector<std::byte>* output, std::uint64_t value) {
  * @param include_unknown_trailing_bytes Whether to append versioned bytes the
  * Host does not interpret.
  * @param schema_version Exact structural version to select.
+ * @param repeated_content_bytes Optional provider-recognized logical stream
+ * byte count used without a payload-proportional fixture allocation.
+ * @param repeated_content_value Exact repeated logical byte value.
  * @return Schema plus one sample-record Facet.
  * @throws std::bad_alloc when payload storage cannot allocate.
  */
 DataDescriptorEnvelope make_descriptor(
     bool include_unknown_trailing_bytes = true,
-    std::uint32_t schema_version = 1U) {
+    std::uint32_t schema_version = 1U,
+    std::optional<std::uint64_t> repeated_content_bytes = std::nullopt,
+    std::uint8_t repeated_content_value = 0U) {
   DataDescriptorEnvelope descriptor;
   descriptor.schema.kind = ExtensionDefinitionKind::Schema;
   descriptor.schema.identity = kSchemaAndLayoutIdentity;
   descriptor.schema.structural_version = schema_version;
   append_u64_le(&descriptor.schema.payload, 3U);
   append_u64_le(&descriptor.schema.payload, 3U);
+  if (repeated_content_bytes.has_value()) {
+    descriptor.schema.payload.push_back(
+        static_cast<std::byte>(kRepeatedContentMarker));
+    append_u64_le(&descriptor.schema.payload, *repeated_content_bytes);
+    descriptor.schema.payload.push_back(
+        static_cast<std::byte>(repeated_content_value));
+  }
   if (include_unknown_trailing_bytes) {
     descriptor.schema.payload.push_back(std::byte{0xde});
     descriptor.schema.payload.push_back(std::byte{0xad});
@@ -1051,7 +1089,7 @@ TEST(VariableSampleFieldExtensions,
   EXPECT_EQ(counters->query_calls.load(), 1U);
   EXPECT_EQ(counters->spec_calls.load(), 1U);
   EXPECT_EQ(counters->region_calls.load(), 1U);
-  EXPECT_EQ(counters->content_calls.load(), 1U);
+  EXPECT_EQ(counters->content_calls.load(), 2U);
   EXPECT_EQ(counters->pure_payload_violations.load(), 0U);
 }
 
@@ -1320,7 +1358,7 @@ TEST(VariableSampleFieldExtensions,
   ASSERT_TRUE(repacked_content.digest.has_value());
   EXPECT_EQ(compact_content.digest, repacked_content.digest);
   EXPECT_FALSE(compact_layout_digest == repacked_layout_digest);
-  EXPECT_EQ(counters->content_calls.load(), 2U);
+  EXPECT_EQ(counters->content_calls.load(), 4U);
 
   // Independently generated with Python hashlib/struct from the frozen stream
   // specification rather than by reusing any production traversal helper.
@@ -1339,6 +1377,118 @@ TEST(VariableSampleFieldExtensions,
   expect_digest_bytes(descriptor_digest, expected_descriptor);
   expect_digest_bytes(compact_layout_digest, expected_layout);
   expect_digest_bytes(*compact_content.digest, expected_content);
+}
+
+TEST(VariableSampleFieldExtensions,
+     CanonicalContentStreamsPastFormer64MiBCeiling) {
+  constexpr std::uint64_t kLogicalContentBytes = 64U * 1024U * 1024U + 257U;
+  constexpr std::uint8_t kLogicalContentValue = 0xa5U;
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(43U);
+  SyntheticProviderState* const provider_state = fixture.state;
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+  ASSERT_TRUE(load_candidate(registry, std::move(fixture)).ok());
+  provider_state->repeated_content_chunk_bytes.store(
+      kMaximumRepeatedContentChunkBytes, std::memory_order_relaxed);
+
+  SyntheticStorage storage = make_storage();
+  const DataDescriptorEnvelope descriptor =
+      make_descriptor(false, 1U, kLogicalContentBytes, kLogicalContentValue);
+  Value value = Value::from_provider_defined(registry, descriptor,
+                                             storage.layout, storage.buffers);
+  const ContentDigestResult content = compute_content_digest(value);
+  ASSERT_EQ(content.state, ContentDigestState::Available) << content.diagnostic;
+  ASSERT_TRUE(content.digest.has_value());
+
+  // Independently generated with Python hashlib/struct from the frozen TLV
+  // stream and 67,109,121 repeated logical bytes.
+  const std::array<std::uint8_t, kCanonicalDigestBytes> expected_content{
+      0x94, 0x6e, 0x34, 0x4b, 0xdc, 0x0f, 0x36, 0x1d, 0xb7, 0xe9, 0xdc,
+      0xdf, 0xc2, 0x99, 0x2c, 0x17, 0x6d, 0xb4, 0xde, 0xec, 0x05, 0xf4,
+      0xcd, 0xfa, 0x0d, 0x7e, 0xa1, 0xc3, 0x6a, 0xcc, 0xa8, 0x91};
+  expect_digest_bytes(*content.digest, expected_content);
+  EXPECT_EQ(counters->content_calls.load(), 2U);
+}
+
+TEST(VariableSampleFieldExtensions,
+     CanonicalContentDigestIgnoresProviderChunkBoundaries) {
+  constexpr std::uint64_t kLogicalContentBytes = 256U * 1024U + 13U;
+  constexpr std::uint8_t kLogicalContentValue = 0x3cU;
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(44U);
+  SyntheticProviderState* const provider_state = fixture.state;
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+  ASSERT_TRUE(load_candidate(registry, std::move(fixture)).ok());
+
+  SyntheticStorage storage = make_storage();
+  Value value = Value::from_provider_defined(
+      registry,
+      make_descriptor(false, 1U, kLogicalContentBytes, kLogicalContentValue),
+      storage.layout, storage.buffers);
+  provider_state->repeated_content_chunk_bytes.store(7U,
+                                                     std::memory_order_relaxed);
+  const ContentDigestResult seven_byte_chunks = compute_content_digest(value);
+  provider_state->repeated_content_chunk_bytes.store(4093U,
+                                                     std::memory_order_relaxed);
+  const ContentDigestResult prime_sized_chunks = compute_content_digest(value);
+  ASSERT_EQ(seven_byte_chunks.state, ContentDigestState::Available)
+      << seven_byte_chunks.diagnostic;
+  ASSERT_EQ(prime_sized_chunks.state, ContentDigestState::Available)
+      << prime_sized_chunks.diagnostic;
+  ASSERT_TRUE(seven_byte_chunks.digest.has_value());
+  ASSERT_TRUE(prime_sized_chunks.digest.has_value());
+  EXPECT_EQ(seven_byte_chunks.digest, prime_sized_chunks.digest);
+
+  // Independently generated from the same frozen stream without production
+  // traversal helpers; provider append boundaries are deliberately absent.
+  const std::array<std::uint8_t, kCanonicalDigestBytes> expected_content{
+      0x19, 0xee, 0x89, 0xc4, 0xab, 0x76, 0x5f, 0x54, 0xae, 0x12, 0x52,
+      0xe9, 0x33, 0x27, 0xbe, 0x36, 0xb2, 0x7f, 0x09, 0xa6, 0xe1, 0x79,
+      0x0a, 0xa3, 0x4e, 0x3d, 0x2a, 0xe1, 0xd2, 0x62, 0x39, 0x86};
+  expect_digest_bytes(*seven_byte_chunks.digest, expected_content);
+  EXPECT_EQ(counters->content_calls.load(), 4U);
+}
+
+TEST(VariableSampleFieldExtensions,
+     ContentSinkFailuresAndCountDriftAreRejectedWithRecovery) {
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(45U);
+  SyntheticProviderState* const provider_state = fixture.state;
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+  ASSERT_TRUE(load_candidate(registry, std::move(fixture)).ok());
+  SyntheticStorage storage = make_storage();
+  Value value = Value::from_provider_defined(registry, make_descriptor(),
+                                             storage.layout, storage.buffers);
+
+  provider_state->malformed_content_segment = true;
+  const ContentDigestResult malformed = compute_content_digest(value);
+  EXPECT_EQ(malformed.state, ContentDigestState::ProviderFailure);
+  EXPECT_FALSE(malformed.digest.has_value());
+  EXPECT_NE(malformed.diagnostic.find("measurement failed"), std::string::npos);
+  EXPECT_EQ(counters->content_calls.load(), 1U);
+
+  provider_state->malformed_content_segment = false;
+  provider_state->overflowing_content_count = true;
+  const ContentDigestResult overflowing = compute_content_digest(value);
+  EXPECT_EQ(overflowing.state, ContentDigestState::ProviderFailure);
+  EXPECT_FALSE(overflowing.digest.has_value());
+  EXPECT_NE(overflowing.diagnostic.find("measurement failed"),
+            std::string::npos);
+  EXPECT_EQ(counters->content_calls.load(), 2U);
+
+  provider_state->overflowing_content_count = false;
+  provider_state->short_content_hash_traversal = true;
+  const ContentDigestResult count_drift = compute_content_digest(value);
+  EXPECT_EQ(count_drift.state, ContentDigestState::ProviderFailure);
+  EXPECT_FALSE(count_drift.digest.has_value());
+  EXPECT_NE(count_drift.diagnostic.find("length changed"), std::string::npos);
+  EXPECT_EQ(counters->content_calls.load(), 4U);
+
+  provider_state->short_content_hash_traversal = false;
+  const ContentDigestResult recovered = compute_content_digest(value);
+  EXPECT_EQ(recovered.state, ContentDigestState::Available)
+      << recovered.diagnostic;
+  EXPECT_EQ(counters->content_calls.load(), 6U);
 }
 
 TEST(VariableSampleFieldExtensions,
@@ -1729,6 +1879,40 @@ void write_u32_be(std::uint32_t value, std::uint8_t* bytes) noexcept {
 }
 
 /**
+ * @brief Streams provider-recognized repeated logical bytes in bounded chunks.
+ * @param state Non-null provider state selecting one legal segment size.
+ * @param facts Parsed descriptor facts including total bytes and fill value.
+ * @param sink Host-owned synchronous canonical-content sink.
+ * @return Stable sink or invalid-argument status.
+ * @throws Nothing across the pure-C ABI.
+ * @note The callback-local array is fixed at 64 KiB; total logical content is
+ * generated incrementally and never materialized as a fixture or file.
+ */
+ps_data_status_v3 emit_repeated_content(
+    const SyntheticProviderState& state, const DescriptorFacts& facts,
+    const ps_data_byte_sink_v3& sink) noexcept {
+  const std::uint64_t chunk_size =
+      state.repeated_content_chunk_bytes.load(std::memory_order_relaxed);
+  if (facts.repeated_content_bytes == 0U || chunk_size == 0U ||
+      chunk_size > kMaximumRepeatedContentChunkBytes) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  std::array<std::uint8_t, kMaximumRepeatedContentChunkBytes> chunk{};
+  chunk.fill(facts.repeated_content_value);
+  std::uint64_t remaining = facts.repeated_content_bytes;
+  while (remaining != 0U) {
+    const std::uint64_t count = std::min(remaining, chunk_size);
+    const ps_data_status_v3 status =
+        sink.append(sink.context, chunk.data(), count);
+    if (status != PS_DATA_STATUS_OK_V3) {
+      return status;
+    }
+    remaining -= count;
+  }
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
  * @brief Emits logical samples in stable site/sample/record order.
  * @param provider_context Non-null SyntheticProviderState.
  * @param value Payload-enabled Host view.
@@ -1737,6 +1921,10 @@ void write_u32_be(std::uint32_t value, std::uint8_t* bytes) noexcept {
  * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable callback or sink status.
  * @throws Nothing across the pure-C ABI.
+ * @note Normal mode emits count/record bytes; stress mode emits a descriptor-
+ * selected repeated sequence through a fixed callback-local chunk. Repeated
+ * Host traversals are deterministic, while the provider-selected chunk size
+ * may change without changing logical identity.
  */
 ps_data_status_v3 PS_DATA_CALL synthetic_visit_content(
     void* provider_context, const ps_data_value_view_v3* value,
@@ -1748,7 +1936,8 @@ ps_data_status_v3 PS_DATA_CALL synthetic_visit_content(
     return invalid_callback(diagnostic, output,
                             "Synthetic content sink is malformed.");
   }
-  state->counters->content_calls.fetch_add(1U, std::memory_order_relaxed);
+  const std::uint64_t content_invocation =
+      state->counters->content_calls.fetch_add(1U, std::memory_order_relaxed);
   DescriptorFacts facts;
   RoleBytes counts;
   RoleBytes offsets;
@@ -1758,9 +1947,29 @@ ps_data_status_v3 PS_DATA_CALL synthetic_visit_content(
     return invalid_callback(diagnostic, output,
                             "Synthetic content cannot be traversed.");
   }
+  if (state->malformed_content_segment) {
+    (void)sink->append(sink->context, nullptr, 1U);
+    const std::uint8_t valid_byte = 0x7fU;
+    (void)sink->append(sink->context, &valid_byte, 1U);
+    return PS_DATA_STATUS_OK_V3;
+  }
+  if (state->overflowing_content_count) {
+    const std::uint8_t invalid_extent = 0x7eU;
+    (void)sink->append(sink->context, &invalid_extent,
+                       std::numeric_limits<std::uint64_t>::max());
+    (void)sink->append(sink->context, &invalid_extent, 1U);
+    (void)sink->append(sink->context, nullptr, 0U);
+    return PS_DATA_STATUS_OK_V3;
+  }
   ps_data_status_v3 status = sink->append(sink->context, nullptr, 0U);
   if (status != PS_DATA_STATUS_OK_V3) {
     return status;
+  }
+  if (state->short_content_hash_traversal && content_invocation % 2U == 1U) {
+    return PS_DATA_STATUS_OK_V3;
+  }
+  if (facts.repeated_content_bytes != 0U) {
+    return emit_repeated_content(*state, facts, *sink);
   }
   for (std::uint64_t site = 0U; site < facts.logical_sites; ++site) {
     const std::uint32_t count =

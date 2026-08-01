@@ -464,6 +464,13 @@ ResourceLedger、ready store 与 policy authority 保持不变。
 每个 digest 都携带 algorithm tag。`ContentDigest` 可以是 `Deferred`。它排除 device identity、
 allocation identity、fence、padding、physical stride 与 replica state。Schema provider 定义
 canonical traversal，使等价逻辑 value 在允许的不同物理 Layout 上得到相同 hash。
+由于冻结的 content field 会在 payload 前存储 byte length，Host 会先用 checked `uint64_t`
+累计计量一遍确定性 provider traversal，写入规范 field header，再在同一个不可变 Value view
+与 payload lease 下重复调用同一 active generation，把 byte 增量送入 SHA-256。每遍 traversal
+使用独立的 callback-local diagnostic state。Provider 必须重现相同的逻辑 byte sequence；
+callback chunk 边界不影响 identity。Host 会拒绝畸形 pointer/count 对、计量 overflow、sticky
+sink failure 以及 measured/hashed count 漂移。它不拥有 payload-proportional staging，也不施加
+任意的 64 MiB content 上限；stream 总量只受冻结的 SHA-256 length framing 限制。
 
 Persistence 分成四层：
 
@@ -524,7 +531,9 @@ OpenEXR 的条件下证明 registration、unknown byte preservation、descriptor
 validation、multi-buffer binding、无 payload authority 的 Region/DataSpec/query behavior、
 独立精确的 canonical digest、callback-local diagnostic/property copy-out 与 bound、
 rank-general Exact TensorSlice count 校验、generation lease、atomic hot replacement 与 unload。
-交付的 ABI v3 有意只包含 definition suite；本目标中更宽的
+Content-digest 覆盖包括超过原 64 MiB 上限的生成式 stream 及其独立精确 SHA-256 vector、采用
+不同 callback chunk 边界的等价 stream，以及 sticky malformed/overflowing sink failure，同时
+保持既有冻结 golden identity。交付的 ABI v3 有意只包含 definition suite；本目标中更宽的
 access/conversion/inference/execution suite 仍属于未来 generation 或切片。
 
 另一个独立的可选 OpenEXR 切片跟踪为 V-15，首期只支持 single-part deep-scanline read/write。

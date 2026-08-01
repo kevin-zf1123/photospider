@@ -416,7 +416,9 @@ typedef struct ps_data_spec_result_v3 {
  * @param data Borrowed bytes; may be null only when size is zero.
  * @param size Exact byte count.
  * @return Stable status; non-OK aborts traversal.
- * @note The provider never owns or finalizes the Host digest state.
+ * @note The Host consumes the segment synchronously before return and never
+ * retains `data`. Segment boundaries carry no canonical meaning. The provider
+ * never owns or finalizes the Host digest state.
  */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_append_bytes_fn_v3)(
     void* context, const uint8_t* data, uint64_t size) PS_DATA_NOEXCEPT;
@@ -543,6 +545,10 @@ typedef ps_data_status_v3(PS_DATA_CALL* ps_data_evaluate_spec_fn_v3)(
  * @return Stable callback or content-sink status.
  * @throws Nothing across the pure-C ABI.
  * @note Content streams through `sink`; diagnostics copy through `output`.
+ * The Host may invoke this callback more than once for one immutable Value so
+ * it can measure a length-framed stream before incrementally hashing it.
+ * Every invocation must emit the same complete logical byte sequence, though
+ * it may use different segment boundaries. Providers retain neither sink.
  */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_visit_content_fn_v3)(
     void* provider_context, const ps_data_value_view_v3* value,

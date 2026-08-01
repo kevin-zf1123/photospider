@@ -339,21 +339,32 @@ class DataDefinitionLease final {
                                 RegionComplexityBudget budget = {}) const;
 
   /**
-   * @brief Visits complete logical content in provider canonical order.
+   * @brief Computes canonical logical identity through streaming traversal.
+   *
+   * The Host prepares one payload-enabled immutable Value view, measures the
+   * complete logical byte count through a first synchronous provider
+   * traversal, writes that count into the frozen ContentDigest field header,
+   * and incrementally hashes a second traversal. Both calls retain this exact
+   * generation and the same payload read leases.
+   *
    * @param descriptor Valid provider-defined logical descriptor.
    * @param layout Valid provider-defined Layout metadata.
    * @param buffers Ready host-readable storage ranges.
-   * @return Concatenated provider-emitted logical bytes.
-   * @throws ExtensionContractError for payload/provider/callback failure.
-   * @throws std::bad_alloc when bounded output cannot allocate.
-   * @note The provider controls logical traversal but never owns the final
-   * digest state. Physical padding must not be emitted. Diagnostic bytes are
-   * synchronously copied through separate callback-local Host storage.
+   * @return Typed SHA-256 canonical-v1 logical ContentDigest.
+   * @throws ExtensionContractError for payload/provider/callback failure,
+   * nondeterministic byte count, or SHA-256 length-framing overflow.
+   * @throws std::bad_alloc when bounded metadata or fixed digest state cannot
+   * allocate.
+   * @note Provider bytes are consumed synchronously during each sink call and
+   * never retained. The provider must emit the same complete byte sequence on
+   * repeated traversal; chunk boundaries carry no identity. There is no
+   * payload-proportional staging or cumulative 64 MiB content ceiling.
+   * Physical padding must not be emitted. Diagnostic channels remain
+   * callback-local and exact-once for each traversal.
    */
-  std::vector<std::byte> canonical_content(
-      const DataDescriptorEnvelope& descriptor,
-      const ProviderDefinedLayout& layout,
-      const std::vector<BufferHandle>& buffers) const;
+  ContentDigest content_digest(const DataDescriptorEnvelope& descriptor,
+                               const ProviderDefinedLayout& layout,
+                               const std::vector<BufferHandle>& buffers) const;
 
   /**
    * @brief Creates one opaque provider owner retaining this generation.

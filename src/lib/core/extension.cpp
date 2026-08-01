@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -635,7 +636,27 @@ ExtensionRecord decode_extension_record(ByteReader& reader,
 }
 
 /**
- * @brief Writes one canonical TLV field into a SHA state.
+ * @brief Writes one canonical TLV field tag and declared payload length.
+ * @param hash Mutable Host-owned SHA state.
+ * @param tag Exact one-byte field tag.
+ * @param payload_size Exact field payload length.
+ * @throws ExtensionContractError if SHA length framing overflows.
+ * @note The caller must append exactly `payload_size` bytes afterward.
+ */
+void hash_field_header(Sha256& hash, std::uint8_t tag,
+                       std::uint64_t payload_size) {
+  const std::byte tag_byte = static_cast<std::byte>(tag);
+  hash.update(&tag_byte, 1U);
+  std::array<std::byte, 8U> length{};
+  for (std::size_t index = 0U; index < length.size(); ++index) {
+    length[index] =
+        static_cast<std::byte>((payload_size >> ((7U - index) * 8U)) & 0xffU);
+  }
+  hash.update(length.data(), length.size());
+}
+
+/**
+ * @brief Writes one complete canonical TLV field into a SHA state.
  * @param hash Mutable Host-owned SHA state.
  * @param tag Exact one-byte field tag.
  * @param payload Exact field payload.
@@ -643,15 +664,7 @@ ExtensionRecord decode_extension_record(ByteReader& reader,
  */
 void hash_field(Sha256& hash, std::uint8_t tag,
                 const std::vector<std::byte>& payload) {
-  const std::byte tag_byte = static_cast<std::byte>(tag);
-  hash.update(&tag_byte, 1U);
-  std::array<std::byte, 8U> length{};
-  const std::uint64_t payload_size = static_cast<std::uint64_t>(payload.size());
-  for (std::size_t index = 0U; index < length.size(); ++index) {
-    length[index] =
-        static_cast<std::byte>((payload_size >> ((7U - index) * 8U)) & 0xffU);
-  }
-  hash.update(length.data(), length.size());
+  hash_field_header(hash, tag, static_cast<std::uint64_t>(payload.size()));
   hash.update(payload.data(), payload.size());
 }
 
@@ -859,23 +872,87 @@ StorageLayoutDigest compute_storage_layout_digest(
 
 namespace internal {
 
-/** @copydoc compute_content_digest_from_canonical_bytes */
-ContentDigest compute_content_digest_from_canonical_bytes(
-    const DescriptorDigest& descriptor,
-    const std::vector<std::byte>& canonical_content) {
+/**
+ * @brief Fixed SHA state for one incrementally written ContentDigest.
+ * @throws Nothing for ordinary member destruction.
+ */
+struct CanonicalContentDigestWriter::Impl final {
+  /** @brief Host-owned incremental canonical SHA-256 state. */
+  Sha256 hash;
+  /** @brief Exact logical content length measured before hashing. */
+  std::uint64_t expected_bytes = 0U;
+  /** @brief Logical content bytes synchronously incorporated so far. */
+  std::uint64_t appended_bytes = 0U;
+  /** @brief Whether the digest has already been finalized. */
+  bool finished = false;
+};
+
+/** @copydoc CanonicalContentDigestWriter::CanonicalContentDigestWriter */
+CanonicalContentDigestWriter::CanonicalContentDigestWriter(
+    const DescriptorDigest& descriptor, std::uint64_t canonical_content_size)
+    : impl_(std::make_unique<Impl>()) {
   if (descriptor.algorithm != CanonicalDigestAlgorithm::Sha256CanonicalV1) {
     fail(ExtensionErrorCode::InvalidEnvelope,
          "Content identity requires SHA-256 canonical descriptor input.");
   }
-  Sha256 hash;
-  begin_canonical_hash(hash, kContentDomain);
+
+  constexpr std::uint64_t kMaximumSha256InputBytes =
+      std::numeric_limits<std::uint64_t>::max() / 8U;
+  constexpr std::uint64_t kContentFramingBytes =
+      kCanonicalPrefix.size() + 1U + 1U + 8U + 4U + kCanonicalDigestBytes + 1U +
+      8U;
+  if (canonical_content_size >
+      kMaximumSha256InputBytes - kContentFramingBytes) {
+    fail(ExtensionErrorCode::ProviderRejected,
+         "Provider canonical content exceeds SHA-256 length framing.");
+  }
+
+  begin_canonical_hash(impl_->hash, kContentDomain);
   ByteWriter descriptor_field(kMaximumExtensionMetadataBytes);
   descriptor_field.append_u32(static_cast<std::uint32_t>(descriptor.algorithm));
   descriptor_field.append(descriptor.bytes);
-  hash_field(hash, 1U, descriptor_field.bytes());
-  hash_field(hash, 2U, canonical_content);
+  hash_field(impl_->hash, 1U, descriptor_field.bytes());
+  hash_field_header(impl_->hash, 2U, canonical_content_size);
+  impl_->expected_bytes = canonical_content_size;
+}
+
+/** @copydoc CanonicalContentDigestWriter::~CanonicalContentDigestWriter */
+CanonicalContentDigestWriter::~CanonicalContentDigestWriter() noexcept =
+    default;
+
+/** @copydoc CanonicalContentDigestWriter::append */
+void CanonicalContentDigestWriter::append(const std::byte* data,
+                                          std::size_t size) {
+  if (!impl_ || impl_->finished) {
+    fail(ExtensionErrorCode::ProviderRejected,
+         "Canonical content digest state is unavailable or finalized.");
+  }
+  if (size != 0U && data == nullptr) {
+    fail(ExtensionErrorCode::ProviderRejected,
+         "Provider emitted a null nonempty canonical-content segment.");
+  }
+  const std::uint64_t count = static_cast<std::uint64_t>(size);
+  if (count > impl_->expected_bytes - impl_->appended_bytes) {
+    fail(ExtensionErrorCode::ProviderRejected,
+         "Provider emitted more canonical content than measured.");
+  }
+  impl_->hash.update(data, size);
+  impl_->appended_bytes += count;
+}
+
+/** @copydoc CanonicalContentDigestWriter::finish */
+ContentDigest CanonicalContentDigestWriter::finish() {
+  if (!impl_ || impl_->finished) {
+    fail(ExtensionErrorCode::ProviderRejected,
+         "Canonical content digest finalization was repeated.");
+  }
+  if (impl_->appended_bytes != impl_->expected_bytes) {
+    fail(ExtensionErrorCode::ProviderRejected,
+         "Provider canonical-content length changed between traversals.");
+  }
   ContentDigest digest;
-  digest.bytes = hash.finish();
+  digest.bytes = impl_->hash.finish();
+  impl_->finished = true;
   return digest;
 }
 

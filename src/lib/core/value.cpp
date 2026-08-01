@@ -11,7 +11,6 @@
 #include <variant>
 #include <vector>
 
-#include "core/extension_internal.hpp"
 #include "core/pending_value.hpp"
 #include "core/value_validation.hpp"
 #include "photospider/data/image_view.hpp"
@@ -1948,15 +1947,10 @@ ContentDigestResult compute_content_digest(const Value& value) {
             "ContentDigest requires a retained provider generation."};
   }
   try {
-    const DescriptorDigest descriptor =
-        compute_descriptor_digest(*value.impl_->provider_descriptor);
-    const std::vector<std::byte> canonical_content =
-        value.impl_->provider_lease.canonical_content(
-            *value.impl_->provider_descriptor, value.provider_defined_layout(),
-            value.impl_->provider_buffers);
     return {ContentDigestState::Available,
-            internal::compute_content_digest_from_canonical_bytes(
-                descriptor, canonical_content),
+            value.impl_->provider_lease.content_digest(
+                *value.impl_->provider_descriptor,
+                value.provider_defined_layout(), value.impl_->provider_buffers),
             {}};
   } catch (const ExtensionContractError& error) {
     ContentDigestState state = ContentDigestState::ProviderFailure;

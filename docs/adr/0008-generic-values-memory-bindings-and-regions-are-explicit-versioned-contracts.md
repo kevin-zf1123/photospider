@@ -561,6 +561,17 @@ Each digest carries an algorithm tag. `ContentDigest` may be `Deferred`. It
 excludes device identity, allocation identity, fences, padding, physical
 stride, and replica state. Schema providers define canonical traversal so
 equivalent logical values hash equally across permitted physical layouts.
+Because the frozen content field stores its byte length before its payload,
+the Host measures one deterministic provider traversal with checked
+`uint64_t` accumulation, writes the canonical field header, and repeats the
+same active generation under the same immutable Value view and payload leases
+to feed SHA-256 incrementally. Each traversal has independent callback-local
+diagnostic state. Providers must reproduce the same logical byte sequence;
+callback chunk boundaries do not affect identity. The Host rejects malformed
+pointer/count pairs, measurement overflow, sticky sink failure, and measured/
+hashed count drift. It owns no payload-proportional staging and applies no
+arbitrary 64 MiB content ceiling; only the frozen SHA-256 length framing limits
+the stream.
 
 Persistence has four layers:
 
@@ -632,9 +643,13 @@ descriptor and Layout validation, multi-buffer binding,
 Region/DataSpec/query behavior without payload authority, independent exact
 canonical digests, callback-local diagnostic/property copy-out and bounds,
 rank-general Exact TensorSlice count verification, generation leases, atomic
-hot replacement, and unload without OpenEXR. The shipped ABI v3 is deliberately
-the definition suite only; the broader access/conversion/inference/execution
-suites in this target remain future generations or slices.
+hot replacement, and unload without OpenEXR. Content-digest coverage includes
+a generated stream beyond the former 64 MiB ceiling with an independent exact
+SHA-256 vector, equivalent streams with different callback chunk boundaries,
+and sticky malformed/overflowing sink failures while preserving the existing
+frozen golden identity. The shipped ABI v3 is deliberately the definition
+suite only; the broader access/conversion/inference/execution suites in this
+target remain future generations or slices.
 
 A separate optional OpenEXR slice, tracked as V-15, initially supports only
 single-part deep-scanline read/write. It maps to

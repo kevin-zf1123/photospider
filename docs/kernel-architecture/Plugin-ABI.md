@@ -463,6 +463,19 @@ when provider code ignores it. Callback return, concurrent calls, generation
 replacement, and module retirement therefore expose no delayed provider
 output pointer.
 
+The `ps_data_byte_sink_v3` used by `visit_content` is a separate synchronous
+streaming channel, not one of those bounded diagnostic/property fields. The
+Host may invoke the callback more than once for one digest: it first measures
+with checked `uint64_t` accumulation, writes the frozen canonical field length,
+then repeats the same active generation under the same immutable Value view and
+payload read leases while hashing each segment directly. Each invocation owns
+independent diagnostic and sticky-failure state. The provider must reproduce
+the same logical byte sequence, although append-call boundaries may differ.
+Null/nonzero pointer-count pairs, measurement overflow, ignored sink failure,
+and measured/hash count drift are rejected. The cumulative stream is neither
+materialized nor subject to the 4 KiB/64 KiB output bounds or an arbitrary
+64 MiB content ceiling; only frozen SHA-256 length framing limits it.
+
 The Region request remains rank-general at the ABI adapter. When a provider
 returns Exact for a canonical nonempty TensorSlice, the Host computes the
 checked `uint64_t` product of all half-open axis lengths. The provider's

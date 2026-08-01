@@ -342,6 +342,16 @@ channel permission、pointer/count framing、重复使用、4 KiB diagnostic 上
 仍具有权威性。因此 callback return、并发调用、generation replacement 与 module retirement
 都不会暴露延迟读取的 provider output pointer。
 
+`visit_content` 使用的 `ps_data_byte_sink_v3` 是独立的同步 streaming channel，而不是上述
+受限的 diagnostic/property field。Host 可以为一个 digest 多次调用 callback：它先用 checked
+`uint64_t` 累计计量，写入冻结的 canonical field length，再在同一个不可变 Value view 与
+payload read lease 下重复调用同一 active generation，同时直接 hash 每个 segment。每次
+invocation 拥有独立的 diagnostic 与 sticky-failure state。Provider 必须重现相同逻辑 byte
+sequence，但 append-call 边界可以不同。Host 会拒绝 null/nonzero pointer-count 对、计量
+overflow、被忽略的 sink failure 与 measured/hash count 漂移。累计 stream 不会被物化，也不受
+4 KiB/64 KiB output bound 或任意 64 MiB content 上限约束；它只受冻结的 SHA-256 length
+framing 限制。
+
 ABI adapter 的 Region request 仍是 rank-general。Provider 对规范非空 TensorSlice 返回 Exact
 时，Host 会计算全部半开轴长度的 checked `uint64_t` product。Provider 的
 `selected_site_count` 必须精确匹配；product overflow、错误的非零 count，或非空 slice 的零

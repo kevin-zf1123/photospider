@@ -504,7 +504,15 @@ uncertain outcomes, including Empty/Unsupported Region states around exact
 TensorSlice count validation. Descriptor, storage-layout, and provider-selected
 logical content use separately tagged SHA-256 canonical traversals; physical
 buffer order, offsets, and padding do not enter ContentDigest when the provider
-emits the same logical byte stream. The versioned artifact envelope preserves
+emits the same logical byte stream. To preserve the frozen length-prefixed
+field without staging that stream, the Host first performs a checked
+`uint64_t` measurement traversal, then repeats the same active generation
+under the same immutable Value view and payload read leases while feeding
+SHA-256 incrementally. The two invocations use independent callback-local
+diagnostic state. Chunk boundaries are irrelevant; malformed pointer/count
+pairs, overflow, sticky sink failures, and measured/hash count drift are typed
+provider failures. There is no payload-proportional staging or arbitrary
+64 MiB content ceiling. The versioned artifact envelope preserves
 Schema/Facet/Layout unknown bytes and all three optional digest identities
 without a provider, but it is not a graph document, manifest/chunk store,
 filesystem codec, or cache-policy integration.

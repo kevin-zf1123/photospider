@@ -231,7 +231,7 @@ real `photospider_kernel` aggregate, `photospider` product,
 `test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`,
 `test_variable_sample_field_extensions`, and `test_value_identity_across_dsos`
 binaries. Before installation it runs all 48 dense-image cases, all four packed
-FP4 cases, all eight provider-defined VariableSampleField cases, and the
+FP4 cases, all thirteen provider-defined VariableSampleField cases, and the
 dual-DSO identity case in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
@@ -1277,7 +1277,7 @@ zero or non-divisible blocks, nonfinite/nonpositive scales, bad layout version/
 alignment/overlap/size, quantized Strided publication, and oversized blocked
 transfer aliases.
 
-`test_variable_sample_field_extensions` owns ten standard-library-only V-14
+`test_variable_sample_field_extensions` owns thirteen standard-library-only V-14
 integration cases. A synthetic pure-C definition suite publishes versioned
 VariableSampleField Schema, Facet, and Layout records with three physical
 buffers. The cases verify typed namespaces, candidate conflicts and malformed
@@ -1285,8 +1285,13 @@ record rollback; generic cross-reference rejection before revision minting;
 provider semantic rejection; unknown-byte artifact-envelope round-trip without
 the provider; property/DataSpec/Region callbacks with every payload pointer
 cleared; independent exact SHA-256 descriptor/content/layout vectors; content
-identity across physical repacking and padding; old Value/read/owner lifetime
-across replacement and unload; final provider-before-module destroy order; and
+identity across physical repacking and padding; incremental ContentDigest for
+a fixed-memory generated stream larger than 64 MiB against an independently
+calculated exact vector; identity across different provider callback chunk
+boundaries; sticky malformed/null and `uint64_t`-overflow sink failures;
+measured/hash count-drift rejection and subsequent recovery; old
+Value/read/owner lifetime across replacement and unload; final
+provider-before-module destroy order;
 callback-local diagnostic and nonempty property copy-out with an oversized-
 output boundary; checked rank-general Exact TensorSlice site counts, including
 wrong nonzero, wrong zero, and `uint64_t` product overflow; and concurrent
@@ -1339,7 +1344,7 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `DependencyDisabledInstallSmoke` builds and runs all 48 dense cases plus all
-four packed FP4 and ten V-14 extension cases in an actual
+four packed FP4 and thirteen V-14 extension cases in an actual
 OpenCV/YAML/OpenEXR-discovery-disabled
 product before proving the installed consumers.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.

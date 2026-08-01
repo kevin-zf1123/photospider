@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/extension_internal.hpp"
+
 namespace ps {
 namespace {
 
@@ -23,8 +25,6 @@ constexpr std::size_t kMaximumImplementationVersionBytes = 4096U;
 constexpr std::size_t kMaximumProviderDiagnosticBytes = 4096U;
 /** @brief Maximum copied pure property byte result. */
 constexpr std::size_t kMaximumPropertyResultBytes = 64U * 1024U;
-/** @brief Bounded V-14 logical-content fixture traversal output. */
-constexpr std::size_t kMaximumCanonicalContentBytes = 64U * 1024U * 1024U;
 
 /** @brief True while one provider callback is entered on this thread. */
 thread_local bool provider_callback_active = false;
@@ -743,52 +743,177 @@ bool map_spec_relation(ps_data_spec_relation_v3 relation,
 }
 
 /**
- * @brief Sink state for one bounded canonical-content callback.
- * @note The callback never throws through the pure-C boundary.
+ * @brief Checked byte counter for one canonical-content measurement pass.
+ * @throws Nothing for ordinary aggregate operations.
+ * @note The state belongs to exactly one synchronous callback invocation.
  */
-struct ContentSinkState final {
-  /** @brief Concatenated provider-emitted logical bytes. */
-  std::vector<std::byte> bytes;
+struct ContentMeasureState final {
+  /** @brief Complete provider-emitted byte count observed so far. */
+  std::uint64_t bytes = 0U;
   /** @brief First sink failure status, or OK. */
   ps_data_status_v3 failure = PS_DATA_STATUS_OK_V3;
 };
 
 /**
- * @brief Appends one canonical-content segment without foreign unwinding.
- * @param context Non-null `ContentSinkState` supplied by the Host.
+ * @brief Borrowed incremental digest state for one hashing traversal.
+ * @throws Nothing for ordinary aggregate operations.
+ * @note The writer and this state outlive exactly one provider callback.
+ */
+struct ContentDigestSinkState final {
+  /** @brief Non-null Host-owned canonical digest writer. */
+  internal::CanonicalContentDigestWriter* writer = nullptr;
+  /** @brief First sink failure status, or OK. */
+  ps_data_status_v3 failure = PS_DATA_STATUS_OK_V3;
+};
+
+/**
+ * @brief Preserves the first failure of one canonical-content sink.
+ * @param failure Non-null sticky status storage.
+ * @param status New non-OK status.
+ * @return The authoritative first failure.
+ * @throws Nothing.
+ */
+ps_data_status_v3 record_content_failure(ps_data_status_v3* failure,
+                                         ps_data_status_v3 status) noexcept {
+  if (*failure == PS_DATA_STATUS_OK_V3) {
+    *failure = status;
+  }
+  return *failure;
+}
+
+/**
+ * @brief Measures one canonical-content segment without retaining its bytes.
+ * @param context Non-null `ContentMeasureState` supplied by the Host.
  * @param data Borrowed bytes, null only when size is zero.
  * @param size Exact byte count.
- * @return Stable sink status.
- * @throws Nothing; all exceptions are caught and translated.
+ * @return Stable sticky sink status.
+ * @throws Nothing across the pure-C ABI.
+ * @note Pointer/count framing and checked uint64 accumulation complete before
+ * return. Provider storage is never retained or dereferenced by this framing
+ * pass; the subsequent hashing pass consumes every byte synchronously.
  */
 ps_data_status_v3 PS_DATA_CALL
-append_content_bytes(void* context, const std::uint8_t* data,
-                     std::uint64_t size) PS_DATA_NOEXCEPT {
-  auto* sink = static_cast<ContentSinkState*>(context);
-  if (sink == nullptr || (size != 0U && data == nullptr) ||
-      size > std::numeric_limits<std::size_t>::max()) {
+measure_content_bytes(void* context, const std::uint8_t* data,
+                      std::uint64_t size) PS_DATA_NOEXCEPT {
+  auto* sink = static_cast<ContentMeasureState*>(context);
+  if (sink == nullptr) {
     return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
   }
   if (sink->failure != PS_DATA_STATUS_OK_V3) {
     return sink->failure;
   }
-  const std::size_t count = static_cast<std::size_t>(size);
-  if (count > kMaximumCanonicalContentBytes - sink->bytes.size()) {
-    sink->failure = PS_DATA_STATUS_TOO_COMPLEX_V3;
+  if ((size != 0U && data == nullptr) ||
+      size > std::numeric_limits<std::uint64_t>::max() - sink->bytes) {
+    return record_content_failure(&sink->failure,
+                                  PS_DATA_STATUS_INVALID_ARGUMENT_V3);
+  }
+  sink->bytes += size;
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Incrementally hashes one canonical-content segment without staging.
+ * @param context Non-null `ContentDigestSinkState` supplied by the Host.
+ * @param data Borrowed bytes, null only when size is zero.
+ * @param size Exact byte count.
+ * @return Stable sticky sink status.
+ * @throws Nothing; all C++ failures are caught and translated.
+ * @note Valid bytes are incorporated into Host SHA state before return and
+ * never retained. Segment boundaries do not enter canonical identity.
+ */
+ps_data_status_v3 PS_DATA_CALL
+hash_content_bytes(void* context, const std::uint8_t* data,
+                   std::uint64_t size) PS_DATA_NOEXCEPT {
+  auto* sink = static_cast<ContentDigestSinkState*>(context);
+  if (sink == nullptr) {
+    return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+  }
+  if (sink->failure != PS_DATA_STATUS_OK_V3) {
     return sink->failure;
   }
-  if (count == 0U) {
-    return sink->failure;
+  if (sink->writer == nullptr || (size != 0U && data == nullptr) ||
+      size > std::numeric_limits<std::size_t>::max()) {
+    return record_content_failure(&sink->failure,
+                                  PS_DATA_STATUS_INVALID_ARGUMENT_V3);
   }
   try {
-    const auto* first = reinterpret_cast<const std::byte*>(data);
-    sink->bytes.insert(sink->bytes.end(), first, first + count);
+    sink->writer->append(reinterpret_cast<const std::byte*>(data),
+                         static_cast<std::size_t>(size));
   } catch (const std::bad_alloc&) {
-    sink->failure = PS_DATA_STATUS_OUT_OF_MEMORY_V3;
+    return record_content_failure(&sink->failure,
+                                  PS_DATA_STATUS_OUT_OF_MEMORY_V3);
+  } catch (const ExtensionContractError&) {
+    return record_content_failure(&sink->failure,
+                                  PS_DATA_STATUS_INVALID_ARGUMENT_V3);
   } catch (...) {
-    sink->failure = PS_DATA_STATUS_INTERNAL_ERROR_V3;
+    return record_content_failure(&sink->failure,
+                                  PS_DATA_STATUS_INTERNAL_ERROR_V3);
   }
-  return sink->failure;
+  return PS_DATA_STATUS_OK_V3;
+}
+
+/**
+ * @brief Host-owned result of one complete content callback invocation.
+ * @throws std::bad_alloc when copied diagnostic storage cannot allocate.
+ */
+struct ContentTraversalOutcome final {
+  /** @brief Provider callback status after the synchronous traversal. */
+  ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
+  /** @brief Host-owned validated provider diagnostic. */
+  std::string diagnostic;
+};
+
+/**
+ * @brief Invokes one content traversal behind generation and exception fences.
+ * @param api Immutable callback table retained by the caller's generation.
+ * @param view Stable payload-enabled C Value view.
+ * @param sink Host-owned measurement or digest sink for this invocation.
+ * @return Provider status plus synchronously copied diagnostic.
+ * @throws ExtensionContractError when foreign unwinding or diagnostic output
+ * is malformed.
+ * @throws std::bad_alloc when Host diagnostic storage cannot allocate.
+ * @note No registry lock is held. Each invocation owns an independent output
+ * state, so diagnostic exact-once and sticky-failure rules cannot mix across
+ * measurement, hashing, threads, or generations.
+ */
+ContentTraversalOutcome invoke_content_traversal(
+    const ps_data_provider_api_v3& api, const ps_data_value_view_v3& view,
+    const ps_data_byte_sink_v3& sink) {
+  ps_data_diagnostic_v3 diagnostic{};
+  diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+  CallbackOutputState output_state;
+  const ps_data_output_sink_v3 output =
+      make_callback_output_sink(&output_state);
+  ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
+  try {
+    ProviderCallbackGuard guard;
+    status = api.visit_content(api.provider_context, &view, &sink, &diagnostic,
+                               &output);
+  } catch (...) {
+    throw ExtensionContractError(
+        ExtensionErrorCode::ProviderRejected,
+        "Data provider content visitor threw across the pure-C ABI.");
+  }
+  return {status, copy_diagnostic(diagnostic, output_state)};
+}
+
+/**
+ * @brief Requires both provider and Host content sink success.
+ * @param outcome Complete callback result with Host-owned diagnostic.
+ * @param sink_failure Sticky Host sink status.
+ * @param fallback Stable diagnostic used when the provider supplied none.
+ * @throws ExtensionContractError when either status is non-OK.
+ * @throws std::bad_alloc when fallback text cannot allocate.
+ */
+void require_content_traversal_success(ContentTraversalOutcome outcome,
+                                       ps_data_status_v3 sink_failure,
+                                       const char* fallback) {
+  if (outcome.status != PS_DATA_STATUS_OK_V3 ||
+      sink_failure != PS_DATA_STATUS_OK_V3) {
+    throw ExtensionContractError(
+        ExtensionErrorCode::ProviderRejected,
+        with_fallback(std::move(outcome.diagnostic), fallback));
+  }
 }
 
 }  // namespace
@@ -1345,8 +1470,8 @@ ProviderRegionResult DataDefinitionLease::evaluate(
   }
 }
 
-/** @copydoc DataDefinitionLease::canonical_content */
-std::vector<std::byte> DataDefinitionLease::canonical_content(
+/** @copydoc DataDefinitionLease::content_digest */
+ContentDigest DataDefinitionLease::content_digest(
     const DataDescriptorEnvelope& descriptor,
     const ProviderDefinedLayout& layout,
     const std::vector<BufferHandle>& buffers) const {
@@ -1354,35 +1479,34 @@ std::vector<std::byte> DataDefinitionLease::canonical_content(
   PreparedValueStorage prepared =
       prepare_value_storage(descriptor, layout, buffers, true);
   const ps_data_value_view_v3 view = materialize_value_view(prepared);
-  ContentSinkState sink_state;
-  ps_data_byte_sink_v3 sink{};
-  sink.struct_size = PS_DATA_BYTE_SINK_V3_SIZE;
-  sink.context = &sink_state;
-  sink.append = &append_content_bytes;
-  ps_data_diagnostic_v3 diagnostic{};
-  diagnostic.struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
-  CallbackOutputState output_state;
-  const ps_data_output_sink_v3 output =
-      make_callback_output_sink(&output_state);
-  ps_data_status_v3 status = PS_DATA_STATUS_INTERNAL_ERROR_V3;
-  try {
-    ProviderCallbackGuard guard;
-    status = impl_->api.visit_content(impl_->api.provider_context, &view, &sink,
-                                      &diagnostic, &output);
-  } catch (...) {
-    throw ExtensionContractError(
-        ExtensionErrorCode::ProviderRejected,
-        "Data provider content visitor threw across the pure-C ABI.");
-  }
-  std::string message = copy_diagnostic(diagnostic, output_state);
-  if (status != PS_DATA_STATUS_OK_V3 ||
-      sink_state.failure != PS_DATA_STATUS_OK_V3) {
-    throw ExtensionContractError(
-        ExtensionErrorCode::ProviderRejected,
-        with_fallback(std::move(message),
-                      "Data provider canonical-content traversal failed."));
-  }
-  return std::move(sink_state.bytes);
+
+  ContentMeasureState measure_state;
+  ps_data_byte_sink_v3 measure_sink{};
+  measure_sink.struct_size = PS_DATA_BYTE_SINK_V3_SIZE;
+  measure_sink.context = &measure_state;
+  measure_sink.append = &measure_content_bytes;
+  ContentTraversalOutcome measure_outcome =
+      invoke_content_traversal(impl_->api, view, measure_sink);
+  require_content_traversal_success(
+      std::move(measure_outcome), measure_state.failure,
+      "Data provider canonical-content measurement failed.");
+
+  const DescriptorDigest descriptor_digest =
+      ps::compute_descriptor_digest(descriptor);
+  internal::CanonicalContentDigestWriter writer(descriptor_digest,
+                                                measure_state.bytes);
+  ContentDigestSinkState digest_state;
+  digest_state.writer = &writer;
+  ps_data_byte_sink_v3 digest_sink{};
+  digest_sink.struct_size = PS_DATA_BYTE_SINK_V3_SIZE;
+  digest_sink.context = &digest_state;
+  digest_sink.append = &hash_content_bytes;
+  ContentTraversalOutcome digest_outcome =
+      invoke_content_traversal(impl_->api, view, digest_sink);
+  require_content_traversal_success(
+      std::move(digest_outcome), digest_state.failure,
+      "Data provider canonical-content digest traversal failed.");
+  return writer.finish();
 }
 
 /** @copydoc DataDefinitionLease::create_owner */

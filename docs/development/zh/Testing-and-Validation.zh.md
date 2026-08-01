@@ -177,7 +177,7 @@ dependency-neutral test surface，
 `test_cpu_dense_tensor_image_operation`、`test_packed_fp4_dense_tensor` 与
 `test_variable_sample_field_extensions`、`test_value_identity_across_dsos` binary。安装前，
 它会在该真实 disabled producer 中运行全部 48 个 dense-image case、全部 4 个 packed FP4 case、
-全部 8 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
+全部 13 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
 默认值，以及三类无效显式组合的精确诊断。
@@ -1013,14 +1013,17 @@ fake-device transfer、精确正式 memory-cache retention，以及在 executor�
 rank/count、zero 或 non-divisible block、nonfinite/nonpositive scale、错误 layout version/
 alignment/overlap/size、quantized Strided publication 与 oversized blocked transfer alias。
 
-`test_variable_sample_field_extensions` 拥有 10 个只使用标准库的 V-14 integration case。
+`test_variable_sample_field_extensions` 拥有 13 个只使用标准库的 V-14 integration case。
 一个合成纯 C definition suite 会发布带版本的 VariableSampleField Schema、Facet 和 Layout record，
 并使用三个 physical buffer。这些用例会验证 typed namespace、candidate conflict 与 malformed
 record rollback；在 revision minting 前拒绝通用 cross-reference 错误；provider semantic rejection；
 在没有 provider 时保留未知 byte 的 artifact-envelope round-trip；property/DataSpec/Region callback
 中的每个 payload pointer 均被清除；独立且精确的 SHA-256 descriptor/content/layout vector；
-physical repacking 与 padding 不改变 content identity；旧 Value/read/owner 跨 replacement 和
-unload 的 lifetime；最终 provider-before-module destroy 顺序；callback-local diagnostic 与
+physical repacking 与 padding 不改变 content identity；固定内存生成式 stream 超过 64 MiB 时的
+增量 ContentDigest 及其独立计算的精确 vector；不同 provider callback chunk 边界保持相同
+identity；sticky malformed/null 与 `uint64_t` overflow sink failure；measured/hash
+count-drift 拒绝及后续正常计算恢复；旧 Value/read/owner 跨 replacement 和 unload 的
+lifetime；最终 provider-before-module destroy 顺序；callback-local diagnostic 与
 非空 property copy-out、oversized-output boundary；rank-general Exact TensorSlice 的 checked
 site count，包括错误非零 count、错误零 count 与 `uint64_t` product overflow；以及 concurrent
 replacement 不存在 mixed-generation resolution。并发 reader 会从各自 output state 抽样
@@ -1068,7 +1071,7 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `DependencyDisabledInstallSmoke` 会在真实禁用 OpenCV/YAML/OpenEXR discovery 的 product 中构建并
-运行全部 48 个 dense 用例、全部 4 个 packed FP4 用例与 10 个 V-14 extension 用例，再证明
+运行全部 48 个 dense 用例、全部 4 个 packed FP4 用例与 13 个 V-14 extension 用例，再证明
 installed consumer；
 `StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的

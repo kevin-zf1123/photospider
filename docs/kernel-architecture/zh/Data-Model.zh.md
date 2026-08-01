@@ -406,10 +406,15 @@ PartialOverlapWithRuntimeGuard 或 CannotEvaluate。Property 与 Region call 保
 unavailable 或 uncertain outcome，包括 Exact TensorSlice count 校验周围的 Empty/Unsupported
 Region state。Descriptor、storage-layout 与 provider-selected logical content 分别使用带独立
 tag 的 SHA-256 canonical traversal；只要 provider 发出相同 logical byte stream，物理 buffer
-order、offset 与 padding 就不会进入 ContentDigest。版本化 artifact envelope 能在没有
-provider 时保留 Schema/Facet/Layout unknown byte 与三个可选 digest
-identity，但它不是 graph document、manifest/chunk store、filesystem codec 或 cache-policy
-integration。
+order、offset 与 padding 就不会进入 ContentDigest。为了在不 staging 该 stream 的情况下保留
+冻结的 length-prefixed field，Host 会先进行一次 checked `uint64_t` measurement traversal，
+再在同一个不可变 Value view 与 payload read lease 下重复调用同一 active generation，同时把
+byte 增量送入 SHA-256。两次 invocation 使用独立的 callback-local diagnostic state。Chunk
+边界不影响结果；畸形 pointer/count 对、overflow、sticky sink failure 与 measured/hash count
+漂移均成为带类型 provider failure。不存在 payload-proportional staging 或任意 64 MiB content
+上限。版本化 artifact envelope 能在没有 provider 时保留 Schema/Facet/Layout unknown byte 与
+三个可选 digest identity，但它不是 graph document、manifest/chunk store、filesystem codec 或
+cache-policy integration。
 
 更多 packed encoding 或 quantization formula、需要 requantize 的未对齐 slice、通用
 Map/Import provider、其余 provider ABI suite、通用 graph/cache persistence 与通用命名
