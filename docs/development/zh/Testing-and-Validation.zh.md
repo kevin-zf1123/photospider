@@ -151,20 +151,32 @@ capability profile 后才可复用该 producer。
 
 生成的 clean consumer project 会维护一份有序的 CMake executable target list。同一份 list
 负责创建 target、写出 configure-time 精确 target declaration，并通过 `file(GENERATE)` 提供
-configuration-specific 的双字段
-`target<TAB>$<TARGET_FILE:target>` manifest。当前 profile 只声明
-`dependency_disabled_consumer`；新增另一个长期 consumer 时，只需扩展该 CMake list 与对应源码，
-无需在 Python 中增加 target name 或 discovery branch。Reader 要求两份 manifest 都非空、唯一且
-顺序完全相同，并拒绝字段 malformed、blank/comment record、无效 UTF-8、非结构性的 ASCII C0
-control 或 DEL、非 canonical target name，以及缺失、意外、重复或乱序的 target。每个解析出的
-executable 都必须使用 canonical native 拼写、位于 consumer build root 或所选 configuration
-目录、basename 与 target 匹配、不是 symlink，并且是可执行 regular file。整份 inventory 的
-collection、set 与 path 校验会在任何 consumer 启动前全部完成；有效 consumer 随后按声明顺序
-运行，某个 consumer 运行失败时，后续 consumer 不会启动。
+configuration-specific 的三字段
+`target<TAB>$<TARGET_FILE_NAME:target><TAB>$<TARGET_FILE:target>` manifest。当前 profile
+只声明 `dependency_disabled_consumer`；新增另一个长期 consumer 时，只需扩展该 CMake list 与
+对应源码，无需在 Python 中增加 target name 或 discovery branch。CMake 3.16 的 target generator
+expression 是 native 拼写的权威来源，因为它描述所选 generator、target platform 与
+configuration；Python 的 `os.name` 与 `sys.platform` 描述的是 interpreter host，不能据此推断
+executable suffix。尤其是，在 Cygwin 或 MSYS2 下运行的 POSIX Python 完全可能合法收到以
+`.exe` 结尾的 CMake target filename。
+
+Reader 要求两份 manifest 都非空、唯一，并且 target 顺序完全相同。它会拒绝字段数量 malformed、
+empty field、blank/comment record、无效 UTF-8、非结构性的 ASCII C0 control 或 DEL、非 canonical
+target name，以及缺失、意外、重复或乱序的 target。Configured filename 不得包含 POSIX 或
+Windows separator，不得为 `.` 或 `..`，必须唯一，并且只能精确等于 target name 或该名称加
+`.exe`。这是全部可用的 native 拼写，因为生成的 consumer 不会定制 `OUTPUT_NAME`、prefix、
+suffix 或 configuration postfix。这项 target-to-filename 绑定会阻止伪造的新字段选择任意
+build-local executable。完整 target path 必须使用 canonical native 拼写、保持唯一、位于
+consumer build root 或所选 configuration 目录，其 basename 与 CMake 声明的 filename 精确相等，
+同时不得是 symlink，且必须指向可执行 regular file。两份 manifest 只有作为本次调用的可丢弃
+configure/generate step 的产物才会被接受；即便如此，reader 仍会在任何 consumer 启动前完成
+全部 record、identity、set、filename 与 path 校验。有效 consumer 随后按声明顺序运行；某个
+consumer 运行失败时，后续 consumer 不会启动。
 
 当所选 CMake generator 提供多个 configuration 时，smoke 会为 producer 与 consumer 使用同一个
 generator，检查两侧的 `CMAKE_GENERATOR` 和 `CMAKE_CONFIGURATION_TYPES` cache 值，并从
-configuration-specific `$<TARGET_FILE:...>` manifest 解析 consumer 可执行文件。
+configuration-specific manifest 的 `$<TARGET_FILE_NAME:...>` 与 `$<TARGET_FILE:...>` 字段
+解析 consumer 可执行文件。
 
 迁移 residue、phase 完成度、陈旧术语与源码布局检查是临时开发检查，不得注册到 CTest 或 CI。
 Issue 专属 replay、provenance、helper 和 output artifact 既不得进入 primary repository，也不得
@@ -197,11 +209,15 @@ executable。
 fixture 执行三个 install-consumer driver 的真实命令构造路径，同时替换 subprocess 执行，因此能
 在不启动 product configure、build 或 install 的情况下验证 cache 到 child argv 的传播。其
 data-driven command recorder 还会创建任意 0/1/N dependency-disabled target declaration、
-target-file manifest 与 fake executable。进程内 case 要求按序执行，并要求 empty、duplicate、
-missing/unexpected、malformed、含 control、unsafe、noncanonical、unexpected-layout、unbuilt、
-non-file 或 non-executable inventory record 在 runtime 前失败；build 与 consumer failure 还会锁定
-fail-fast 顺序。另一项 `cmake -P` fixture 会直接调用 production public-header writer，并且不会
-执行 project configure。
+target-file manifest、由 CMake 提供权威值的 target filename 与 fake executable。进程内 case
+覆盖 Linux/macOS 的无后缀名称、Windows `.exe`，以及 POSIX Python 下 Cygwin/MSYS2 的 `.exe`
+拼写。它们要求按序执行，并要求 empty、duplicate、missing/unexpected、malformed、含 control、
+含 separator、reserved、foreign、filename/path drift、unsafe、noncanonical、unexpected-layout、
+unbuilt、non-file 或 non-executable inventory record 在 runtime 前失败；build 与 consumer
+failure 还会锁定 fail-fast 顺序。一项 compiler-free `project(... NONE)` fixture 会执行生成的
+target validator 与两种 target filename/path expression；另一项 `cmake -P` fixture 会直接调用
+production public-header writer。两者都不会启动 compiler、product build、install 或生成的
+executable。
 同一进程还会向 static-product driver 的 production archive-symbol helper 注入 executable lookup、
 validation 与 captured-command callback；它会在不改变进程 PATH、也不取代真实 installed archive
 scan 的前提下，锁定 Darwin xcrun-first fallback、非 Darwin 独立性、全部 candidate failure 与
