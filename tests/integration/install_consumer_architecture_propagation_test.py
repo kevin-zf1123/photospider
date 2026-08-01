@@ -833,9 +833,9 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
           start.
         @throws AssertionError If generated project structure drifts, either
           name reaches serialization, or the explicit diagnostic is absent.
-        @note The fixture replaces package discovery with an imported interface
-          target and selects ``project(... NONE)``. The target-list validator
-          and serialization code remain the exact production writer output.
+        @note The fixture replaces package discovery with imported interface
+          targets and selects ``project(... NONE)``. The target/source-list
+          validator and serialization code remain the production writer output.
         """
 
         with tempfile.TemporaryDirectory(
@@ -857,18 +857,26 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                     cmake_text = cmake_lists.read_text(encoding="utf-8")
                     replacements = (
                         (
-                            "project(dependency_disabled_consumer LANGUAGES CXX)",
+                            "project(dependency_disabled_consumer "
+                            "LANGUAGES C CXX)",
                             "project(dependency_disabled_consumer NONE)",
                         ),
                         (
                             "find_package(Photospider CONFIG REQUIRED\n"
-                            "  COMPONENTS embedded operation_sdk)",
+                            "  COMPONENTS embedded operation_sdk "
+                            "data_provider_sdk)",
                             "add_library(Photospider::photospider "
+                            "INTERFACE IMPORTED)\n"
+                            "add_library(Photospider::operation_sdk "
+                            "INTERFACE IMPORTED)\n"
+                            "add_library(Photospider::data_provider_sdk "
+                            "INTERFACE IMPORTED)\n"
+                            "add_library(Photospider::operation_runtime "
                             "INTERFACE IMPORTED)",
                         ),
                         (
-                            "  dependency_disabled_consumer)\n",
-                            f"  {reserved_target})\n",
+                            "  dependency_disabled_consumer\n",
+                            f"  {reserved_target}\n",
                         ),
                     )
                     for original, replacement in replacements:
@@ -913,18 +921,19 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
     ) -> None:
         """@brief Round-trip both target-file expressions through CMake.
 
-        @return None after the production serialization loop emits target,
+        @return None after the production serialization loop emits each target,
           ``$<TARGET_FILE_NAME>``, and ``$<TARGET_FILE>`` as three exact TSV
-          fields for a POSIX-Python ``.exe`` imported target fixture.
+          fields for POSIX-Python ``.exe`` imported target fixtures.
         @throws OSError If fixture files cannot be written or CMake cannot
           start.
         @throws subprocess.CalledProcessError If CMake rejects the valid
           compiler-free generated project.
         @throws AssertionError If the writer omits, reorders, or changes either
           configuration-specific target-file expression.
-        @note The fixture replaces only target construction and package lookup
-          with an imported executable. The production target list, validation,
-          declaration, and manifest serialization remain unchanged.
+        @note The fixture replaces provider setup, target construction, and
+          target-specific links with imported executables. The ordered
+          target/source lists, validation, declaration, and manifest writer
+          remain unchanged.
         """
 
         with tempfile.TemporaryDirectory(
@@ -939,14 +948,13 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
             target_variable = (
                 "${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}"
             )
+            source_variable = (
+                "${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE}"
+            )
             target_creation = (
                 "  add_executable(\n"
                 f'    "{target_variable}"\n'
-                f'    "{target_variable}.cpp")\n'
-                "  target_link_libraries(\n"
-                f'    "{target_variable}"\n'
-                "    PRIVATE Photospider::photospider\n"
-                "            Photospider::operation_sdk)"
+                f'    "{source_variable}")'
             )
             imported_target_creation = (
                 "  add_executable(\n"
@@ -956,17 +964,53 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 "    IMPORTED_LOCATION\n"
                 f'      "${{CMAKE_BINARY_DIR}}/{target_variable}.exe")'
             )
+            provider_setup = (
+                "find_package(Photospider CONFIG REQUIRED\n"
+                "  COMPONENTS embedded operation_sdk data_provider_sdk)\n"
+                "get_target_property(_data_provider_links\n"
+                "  Photospider::data_provider_sdk INTERFACE_LINK_LIBRARIES)\n"
+                "if(_data_provider_links)\n"
+                "  message(FATAL_ERROR \"data_provider_sdk leaked a link "
+                "dependency\")\n"
+                "endif()\n"
+                "add_library(installed_c11_data_provider STATIC\n"
+                "  data_provider_c11.c)\n"
+                "set_target_properties(installed_c11_data_provider PROPERTIES\n"
+                "  C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)\n"
+                "target_link_libraries(installed_c11_data_provider\n"
+                "  PRIVATE Photospider::data_provider_sdk)\n"
+                "add_library(installed_cpp17_data_provider STATIC\n"
+                "  data_provider_cpp17.cpp)\n"
+                "set_target_properties(installed_cpp17_data_provider PROPERTIES\n"
+                "  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)\n"
+                "target_link_libraries(installed_cpp17_data_provider\n"
+                "  PRIVATE Photospider::data_provider_sdk)"
+            )
+            target_specific_links = (
+                "target_link_libraries(dependency_disabled_consumer\n"
+                "  PRIVATE Photospider::photospider\n"
+                "          Photospider::operation_sdk)\n"
+                "target_link_libraries(installed_c11_data_provider_consumer\n"
+                "  PRIVATE installed_c11_data_provider\n"
+                "          Photospider::operation_runtime)\n"
+                "target_link_libraries(installed_cpp17_data_provider_consumer\n"
+                "  PRIVATE installed_cpp17_data_provider\n"
+                "          Photospider::operation_runtime)"
+            )
             replacements = (
                 (
-                    "project(dependency_disabled_consumer LANGUAGES CXX)",
+                    "project(dependency_disabled_consumer LANGUAGES C CXX)",
                     "project(dependency_disabled_consumer NONE)",
                 ),
                 (
-                    "find_package(Photospider CONFIG REQUIRED\n"
-                    "  COMPONENTS embedded operation_sdk)",
-                    "# Package lookup omitted by compiler-free writer fixture.",
+                    provider_setup,
+                    "# Provider setup omitted by compiler-free writer fixture.",
                 ),
                 (target_creation, imported_target_creation),
+                (
+                    target_specific_links,
+                    "# Target links omitted by compiler-free writer fixture.",
+                ),
             )
             for original, replacement in replacements:
                 self.assertIn(original, cmake_text)
@@ -999,17 +1043,23 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 allow_tab=True,
                 description="compiler-free target-file inventory fixture",
             )
-            self.assertEqual(len(records), 1)
-            target_name, configured_filename, configured_path = (
-                records[0].split("\t")
+            expected_targets = (
+                "dependency_disabled_consumer",
+                "installed_c11_data_provider_consumer",
+                "installed_cpp17_data_provider_consumer",
             )
-            self.assertEqual(target_name, "dependency_disabled_consumer")
-            self.assertEqual(
-                configured_filename, "dependency_disabled_consumer.exe"
-            )
-            self.assertEqual(
-                pathlib.Path(configured_path).name, configured_filename
-            )
+            self.assertEqual(len(records), len(expected_targets))
+            for record, expected_target in zip(records, expected_targets):
+                target_name, configured_filename, configured_path = (
+                    record.split("\t")
+                )
+                self.assertEqual(target_name, expected_target)
+                self.assertEqual(
+                    configured_filename, f"{expected_target}.exe"
+                )
+                self.assertEqual(
+                    pathlib.Path(configured_path).name, configured_filename
+                )
 
     def test_rejects_reserved_dot_names_in_both_manifests(self) -> None:
         """@brief Reject ``.`` and ``..`` in each independent target field.

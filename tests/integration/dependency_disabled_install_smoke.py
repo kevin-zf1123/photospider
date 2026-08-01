@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from textwrap import dedent
 
 from cmake_build_smoke_support import (
     producer_osx_architecture_arguments,
@@ -684,20 +685,448 @@ def write_component_probe(source: Path, *, required: bool) -> None:
     (source / "CMakeLists.txt").write_text("\n".join(body), encoding="utf-8")
 
 
+def write_data_provider_producers(source: Path) -> None:
+    """@brief Write independent C11/C++17 pure-C ABI producer fixtures.
+
+    @param source Existing installed-consumer source directory.
+    @return None.
+    @throws OSError If source files cannot be written.
+    @note Each producer defines the exact exported v3 handshake names and is
+      linked into a separate process so duplicate symbols never coexist.
+    """
+
+    (source / "data_provider_c11.c").write_text(
+        dedent(
+            r"""
+            #include <stdint.h>
+            #include <string.h>
+
+            #define PS_DATA_PROVIDER_BUILD
+            #include <photospider/plugin/data_provider_api.h>
+
+            static const uint8_t kSchemaName[] = "installed_c11_schema";
+            static const uint8_t kLayoutName[] = "installed_c11_layout";
+            static const uint8_t kImplementationVersion[] = "c11-1";
+            static int kProviderContext = 11;
+
+            static const ps_data_definition_v3 kDefinitions[] = {
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_SCHEMA_V3,
+                 1U,
+                 {0x1170000000000001ULL, 0x1170000000000011ULL},
+                 {kSchemaName, sizeof(kSchemaName) - 1U},
+                 {0U, 0U}},
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_LAYOUT_V3,
+                 1U,
+                 {0x1170000000000002ULL, 0x1170000000000012ULL},
+                 {kLayoutName, sizeof(kLayoutName) - 1U},
+                 {0U, 0U}},
+            };
+
+            /** Clear one optional callback diagnostic to canonical success. */
+            static void clear_diagnostic(ps_data_diagnostic_v3* diagnostic) {
+              if (diagnostic != NULL) {
+                memset(diagnostic, 0, sizeof(*diagnostic));
+                diagnostic->struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+              }
+            }
+
+            /** Accept one non-null, Host-framed value. */
+            static ps_data_status_v3 PS_DATA_CALL validate_value(
+                void* context, const ps_data_value_view_v3* value,
+                ps_data_diagnostic_v3* diagnostic) {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              return value != NULL ? PS_DATA_STATUS_OK_V3
+                                   : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            /** Return a canonical metadata-only Unknown property result. */
+            static ps_data_status_v3 PS_DATA_CALL query_value(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_property_query_v3* query,
+                ps_data_property_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic) {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              if (value == NULL || query == NULL || result == NULL) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_PROPERTY_RESULT_V3_SIZE;
+              result->state = PS_DATA_PROPERTY_UNKNOWN_V3;
+              result->value_kind = PS_DATA_PROPERTY_VALUE_NONE_V3;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /** Return a canonical bounded Unknown Region result. */
+            static ps_data_status_v3 PS_DATA_CALL evaluate_region(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_region_request_v3* request,
+                ps_data_region_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic) {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              if (value == NULL || request == NULL || result == NULL) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_REGION_RESULT_V3_SIZE;
+              result->state = PS_DATA_REGION_UNKNOWN_V3;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /** Return a canonical cannot-evaluate DataSpec relation. */
+            static ps_data_status_v3 PS_DATA_CALL evaluate_spec(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_spec_request_v3* request,
+                ps_data_spec_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic) {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              if (value == NULL || request == NULL || result == NULL) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_SPEC_RESULT_V3_SIZE;
+              result->relation = PS_DATA_SPEC_CANNOT_EVALUATE_V3;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /** Visit the fixture's canonical empty logical byte stream. */
+            static ps_data_status_v3 PS_DATA_CALL visit_content(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_byte_sink_v3* sink,
+                ps_data_diagnostic_v3* diagnostic) {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              return value != NULL && sink != NULL
+                         ? PS_DATA_STATUS_OK_V3
+                         : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            /** Create one borrowed fixture owner token. */
+            static ps_data_status_v3 PS_DATA_CALL create_owner(
+                void* context, void** owner,
+                ps_data_diagnostic_v3* diagnostic) {
+              clear_diagnostic(diagnostic);
+              if (context == NULL || owner == NULL) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              *owner = context;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /** Validate and release the borrowed fixture owner token. */
+            static ps_data_status_v3 PS_DATA_CALL destroy_owner(
+                void* context, void* owner,
+                ps_data_diagnostic_v3* diagnostic) {
+              clear_diagnostic(diagnostic);
+              return context != NULL && owner == context
+                         ? PS_DATA_STATUS_OK_V3
+                         : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            /** Finish one immutable fixture generation. */
+            static ps_data_status_v3 PS_DATA_CALL destroy_provider(
+                void* context, ps_data_diagnostic_v3* diagnostic) {
+              clear_diagnostic(diagnostic);
+              return context != NULL ? PS_DATA_STATUS_OK_V3
+                                     : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            uint32_t PS_DATA_CALL ps_data_provider_get_abi_version(void) {
+              return PS_DATA_PROVIDER_ABI_VERSION;
+            }
+
+            ps_data_status_v3 PS_DATA_CALL ps_data_provider_get_api_v3(
+                ps_data_provider_api_v3* api) {
+              if (api == NULL ||
+                  api->struct_size != PS_DATA_PROVIDER_API_V3_SIZE) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              memset(api, 0, sizeof(*api));
+              api->struct_size = PS_DATA_PROVIDER_API_V3_SIZE;
+              api->abi_version = PS_DATA_PROVIDER_ABI_VERSION;
+              api->definition_count =
+                  (uint32_t)(sizeof(kDefinitions) / sizeof(kDefinitions[0]));
+              api->provider_identity.high = 0x11700000000000C1ULL;
+              api->provider_identity.low = 0x11700000000001C1ULL;
+              api->implementation_version.data = kImplementationVersion;
+              api->implementation_version.size =
+                  sizeof(kImplementationVersion) - 1U;
+              api->definitions = kDefinitions;
+              api->provider_context = &kProviderContext;
+              api->validate = validate_value;
+              api->query = query_value;
+              api->evaluate_region = evaluate_region;
+              api->evaluate_spec = evaluate_spec;
+              api->visit_content = visit_content;
+              api->create_owner = create_owner;
+              api->destroy_owner = destroy_owner;
+              api->destroy_provider = destroy_provider;
+              return PS_DATA_STATUS_OK_V3;
+            }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    (source / "data_provider_cpp17.cpp").write_text(
+        dedent(
+            r"""
+            #include <cstdint>
+            #include <cstring>
+
+            #define PS_DATA_PROVIDER_BUILD
+            #include <photospider/plugin/data_provider_api.h>
+
+            namespace {
+
+            constexpr std::uint8_t kSchemaName[] = "installed_cpp17_schema";
+            constexpr std::uint8_t kLayoutName[] = "installed_cpp17_layout";
+            constexpr std::uint8_t kImplementationVersion[] = "cpp17-1";
+            int kProviderContext = 17;
+
+            constexpr ps_data_definition_v3 kDefinitions[] = {
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_SCHEMA_V3,
+                 1U,
+                 {0x1170000000000003ULL, 0x1170000000000013ULL},
+                 {kSchemaName, sizeof(kSchemaName) - 1U},
+                 {0U, 0U}},
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_LAYOUT_V3,
+                 1U,
+                 {0x1170000000000004ULL, 0x1170000000000014ULL},
+                 {kLayoutName, sizeof(kLayoutName) - 1U},
+                 {0U, 0U}},
+            };
+
+            /** Clear one optional callback diagnostic to canonical success. */
+            void clear_diagnostic(ps_data_diagnostic_v3* diagnostic) noexcept {
+              if (diagnostic != nullptr) {
+                std::memset(diagnostic, 0, sizeof(*diagnostic));
+                diagnostic->struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+              }
+            }
+
+            /** Accept one non-null, Host-framed value. */
+            ps_data_status_v3 PS_DATA_CALL validate_value(
+                void* context, const ps_data_value_view_v3* value,
+                ps_data_diagnostic_v3* diagnostic) noexcept {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              return value != nullptr ? PS_DATA_STATUS_OK_V3
+                                      : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            /** Return a canonical metadata-only Unknown property result. */
+            ps_data_status_v3 PS_DATA_CALL query_value(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_property_query_v3* query,
+                ps_data_property_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic) noexcept {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              if (value == nullptr || query == nullptr || result == nullptr) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              std::memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_PROPERTY_RESULT_V3_SIZE;
+              result->state = PS_DATA_PROPERTY_UNKNOWN_V3;
+              result->value_kind = PS_DATA_PROPERTY_VALUE_NONE_V3;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /** Return a canonical bounded Unknown Region result. */
+            ps_data_status_v3 PS_DATA_CALL evaluate_region(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_region_request_v3* request,
+                ps_data_region_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic) noexcept {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              if (value == nullptr || request == nullptr || result == nullptr) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              std::memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_REGION_RESULT_V3_SIZE;
+              result->state = PS_DATA_REGION_UNKNOWN_V3;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /** Return a canonical cannot-evaluate DataSpec relation. */
+            ps_data_status_v3 PS_DATA_CALL evaluate_spec(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_spec_request_v3* request,
+                ps_data_spec_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic) noexcept {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              if (value == nullptr || request == nullptr || result == nullptr) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              std::memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_SPEC_RESULT_V3_SIZE;
+              result->relation = PS_DATA_SPEC_CANNOT_EVALUATE_V3;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /** Visit the fixture's canonical empty logical byte stream. */
+            ps_data_status_v3 PS_DATA_CALL visit_content(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_byte_sink_v3* sink,
+                ps_data_diagnostic_v3* diagnostic) noexcept {
+              (void)context;
+              clear_diagnostic(diagnostic);
+              return value != nullptr && sink != nullptr
+                         ? PS_DATA_STATUS_OK_V3
+                         : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            /** Create one borrowed fixture owner token. */
+            ps_data_status_v3 PS_DATA_CALL create_owner(
+                void* context, void** owner,
+                ps_data_diagnostic_v3* diagnostic) noexcept {
+              clear_diagnostic(diagnostic);
+              if (context == nullptr || owner == nullptr) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              *owner = context;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /** Validate and release the borrowed fixture owner token. */
+            ps_data_status_v3 PS_DATA_CALL destroy_owner(
+                void* context, void* owner,
+                ps_data_diagnostic_v3* diagnostic) noexcept {
+              clear_diagnostic(diagnostic);
+              return context != nullptr && owner == context
+                         ? PS_DATA_STATUS_OK_V3
+                         : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            /** Finish one immutable fixture generation. */
+            ps_data_status_v3 PS_DATA_CALL destroy_provider(
+                void* context, ps_data_diagnostic_v3* diagnostic) noexcept {
+              clear_diagnostic(diagnostic);
+              return context != nullptr ? PS_DATA_STATUS_OK_V3
+                                        : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            }  // namespace
+
+            extern "C" PS_DATA_PROVIDER_EXPORT std::uint32_t PS_DATA_CALL
+            ps_data_provider_get_abi_version(void) noexcept {
+              return PS_DATA_PROVIDER_ABI_VERSION;
+            }
+
+            extern "C" PS_DATA_PROVIDER_EXPORT ps_data_status_v3 PS_DATA_CALL
+            ps_data_provider_get_api_v3(ps_data_provider_api_v3* api) noexcept {
+              if (api == nullptr ||
+                  api->struct_size != PS_DATA_PROVIDER_API_V3_SIZE) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              std::memset(api, 0, sizeof(*api));
+              api->struct_size = PS_DATA_PROVIDER_API_V3_SIZE;
+              api->abi_version = PS_DATA_PROVIDER_ABI_VERSION;
+              api->definition_count = static_cast<std::uint32_t>(
+                  sizeof(kDefinitions) / sizeof(kDefinitions[0]));
+              api->provider_identity.high = 0x11700000000000C2ULL;
+              api->provider_identity.low = 0x11700000000001C2ULL;
+              api->implementation_version.data = kImplementationVersion;
+              api->implementation_version.size =
+                  sizeof(kImplementationVersion) - 1U;
+              api->definitions = kDefinitions;
+              api->provider_context = &kProviderContext;
+              api->validate = validate_value;
+              api->query = query_value;
+              api->evaluate_region = evaluate_region;
+              api->evaluate_spec = evaluate_spec;
+              api->visit_content = visit_content;
+              api->create_owner = create_owner;
+              api->destroy_owner = destroy_owner;
+              api->destroy_provider = destroy_provider;
+              return PS_DATA_STATUS_OK_V3;
+            }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    (source / "data_provider_consumer.cpp").write_text(
+        dedent(
+            r"""
+            #include <memory>
+            #include <utility>
+            #include <vector>
+
+            #include <photospider/plugin/data_definition_registry.hpp>
+            #include <photospider/plugin/data_provider_api.h>
+
+            /**
+             * @brief Loads one independently compiled exact-name ABI producer.
+             * @return Zero only when publication, inspection, and unload work.
+             * @throws Nothing; uncaught smoke failures terminate the process.
+             */
+            int main() {
+              static_assert(noexcept(ps_data_provider_get_abi_version()));
+              static_assert(noexcept(ps_data_provider_get_api_v3(nullptr)));
+
+              ps::DataDefinitionRegistry registry;
+              ps::DataProviderCandidate candidate;
+              candidate.get_abi_version = ps_data_provider_get_abi_version;
+              candidate.get_api = ps_data_provider_get_api_v3;
+              candidate.module_lease = std::make_shared<int>(117);
+              const ps::DataProviderLoadResult loaded =
+                  registry.load(std::move(candidate));
+              if (!loaded.ok() ||
+                  loaded.status != ps::DataProviderLoadStatus::Loaded ||
+                  loaded.generation == 0U || registry.provider_count() != 1U) {
+                return 20;
+              }
+
+              const std::vector<ps::DataDefinitionSnapshot> definitions =
+                  registry.definitions();
+              if (definitions.size() != 2U ||
+                  definitions[0].kind !=
+                      ps::ExtensionDefinitionKind::Schema ||
+                  definitions[1].kind !=
+                      ps::ExtensionDefinitionKind::Layout ||
+                  definitions[0].provider_generation != loaded.generation ||
+                  definitions[1].provider_generation != loaded.generation) {
+                return 21;
+              }
+              if (!registry.unload(loaded.provider_identity) ||
+                  registry.provider_count() != 0U ||
+                  !registry.definitions().empty()) {
+                return 22;
+              }
+              return 0;
+            }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+
 def write_consumer(source: Path) -> None:
-    """@brief Write the installed Host consumer and its CMake project.
+    """@brief Write the installed Host and ABI consumers' CMake project.
 
     @param source Source directory created for the consumer.
     @return None.
     @throws OSError If source files cannot be written.
     @note One CMake target list owns validated executable creation, declaration
-      order, and the configuration-specific ``$<TARGET_FILE_NAME:...>`` plus
-      ``$<TARGET_FILE:...>`` manifest. Reserved dot spellings and typed
-      ``_NOT_BUILT`` sentinels fail before target creation or serialization.
-      The current executable verifies neutral allocation, installed V-6
-      readiness, the extended operation metadata layout, empty-session
-      lifecycle, packed V-13 Value access, and explicit persistence failure
-      without parser or image-library APIs.
+      order, its paired source set, and the configuration-specific
+      ``$<TARGET_FILE_NAME:...>`` plus ``$<TARGET_FILE:...>`` manifest.
+      Reserved dot spellings and typed ``_NOT_BUILT`` sentinels fail before
+      target creation or serialization. The Host executable verifies neutral
+      allocation, installed V-6 readiness, operation metadata, empty-session
+      lifecycle, packed V-13 access, and persistence failure. Two additional
+      executables independently load C11 and C++17 exact-name data-definition
+      producers, while the clean producer runs the complete V-14 matrix.
     """
 
     source.mkdir(parents=True)
@@ -705,17 +1134,49 @@ def write_consumer(source: Path) -> None:
         "\n".join(
             [
                 "cmake_minimum_required(VERSION 3.16)",
-                "project(dependency_disabled_consumer LANGUAGES CXX)",
+                "project(dependency_disabled_consumer LANGUAGES C CXX)",
                 "find_package(Photospider CONFIG REQUIRED",
-                "  COMPONENTS embedded operation_sdk)",
+                "  COMPONENTS embedded operation_sdk data_provider_sdk)",
+                "get_target_property(_data_provider_links",
+                "  Photospider::data_provider_sdk INTERFACE_LINK_LIBRARIES)",
+                "if(_data_provider_links)",
+                '  message(FATAL_ERROR "data_provider_sdk leaked a link dependency")',
+                "endif()",
+                "add_library(installed_c11_data_provider STATIC",
+                "  data_provider_c11.c)",
+                "set_target_properties(installed_c11_data_provider PROPERTIES",
+                "  C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)",
+                "target_link_libraries(installed_c11_data_provider",
+                "  PRIVATE Photospider::data_provider_sdk)",
+                "add_library(installed_cpp17_data_provider STATIC",
+                "  data_provider_cpp17.cpp)",
+                "set_target_properties(installed_cpp17_data_provider PROPERTIES",
+                "  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)",
+                "target_link_libraries(installed_cpp17_data_provider",
+                "  PRIVATE Photospider::data_provider_sdk)",
                 "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGETS",
-                "  dependency_disabled_consumer)",
+                "  dependency_disabled_consumer",
+                "  installed_c11_data_provider_consumer",
+                "  installed_cpp17_data_provider_consumer)",
+                "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCES",
+                "  dependency_disabled_consumer.cpp",
+                "  data_provider_consumer.cpp",
+                "  data_provider_consumer.cpp)",
                 "list(LENGTH",
                 "  PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGETS",
                 "  PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET_COUNT)",
+                "list(LENGTH",
+                "  PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCES",
+                "  PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE_COUNT)",
                 "if(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET_COUNT",
                 "    EQUAL 0)",
                 '  message(FATAL_ERROR "Consumer target list is empty")',
+                "endif()",
+                "if(NOT",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE_COUNT",
+                "    EQUAL",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET_COUNT)",
+                '  message(FATAL_ERROR "Consumer target/source count differs")',
                 "endif()",
                 "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SEEN_TARGETS",
                 "  \"\")",
@@ -726,9 +1187,24 @@ def write_consumer(source: Path) -> None:
                     '  "# target\\tconfigured executable filename\\t'
                     'configured executable\\n")'
                 ),
-                "foreach(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
-                "    IN LISTS",
-                "      PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGETS)",
+                "math(EXPR PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_LAST_INDEX",
+                (
+                    '  "${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_'
+                    'TARGET_COUNT} - 1")'
+                ),
+                "foreach(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_INDEX RANGE",
+                (
+                    "    0 ${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_"
+                    "LAST_INDEX})"
+                ),
+                "  list(GET",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGETS",
+                "    ${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_INDEX}",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET)",
+                "  list(GET",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCES",
+                "    ${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_INDEX}",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE)",
                 "  if(NOT",
                 "      PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
                 '      MATCHES "^[A-Za-z0-9_.+-]+$" OR',
@@ -739,6 +1215,11 @@ def write_consumer(source: Path) -> None:
                 "     PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
                 '      MATCHES "_NOT_BUILT$")',
                 '    message(FATAL_ERROR "Invalid consumer target name")',
+                "  endif()",
+                "  if(NOT",
+                "      PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE",
+                '      MATCHES "^[A-Za-z0-9_.+-]+$")',
+                '    message(FATAL_ERROR "Invalid consumer source name")',
                 "  endif()",
                 "  list(FIND",
                 "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SEEN_TARGETS",
@@ -754,11 +1235,7 @@ def write_consumer(source: Path) -> None:
                 "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}\")",
                 "  add_executable(",
                 "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}\"",
-                "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}.cpp\")",
-                "  target_link_libraries(",
-                "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}\"",
-                "    PRIVATE Photospider::photospider",
-                "            Photospider::operation_sdk)",
+                "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE}\")",
                 "  string(APPEND",
                 "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_DECLARATION",
                 "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}\\n\")",
@@ -774,6 +1251,15 @@ def write_consumer(source: Path) -> None:
                     "CONSUMER_TARGET}>\\n\")"
                 ),
                 "endforeach()",
+                "target_link_libraries(dependency_disabled_consumer",
+                "  PRIVATE Photospider::photospider",
+                "          Photospider::operation_sdk)",
+                "target_link_libraries(installed_c11_data_provider_consumer",
+                "  PRIVATE installed_c11_data_provider",
+                "          Photospider::operation_runtime)",
+                "target_link_libraries(installed_cpp17_data_provider_consumer",
+                "  PRIVATE installed_cpp17_data_provider",
+                "          Photospider::operation_runtime)",
                 "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_INVENTORY_DIR",
                 "  \"${CMAKE_BINARY_DIR}/generated/ci_inventory\")",
                 "file(MAKE_DIRECTORY",
@@ -796,6 +1282,7 @@ def write_consumer(source: Path) -> None:
         ),
         encoding="utf-8",
     )
+    write_data_provider_producers(source)
     (source / "dependency_disabled_consumer.cpp").write_text(
         "\n".join(
             [
@@ -1042,6 +1529,7 @@ def main() -> int:
                     "photospider",
                     "test_cpu_dense_tensor_image_operation",
                     "test_packed_fp4_dense_tensor",
+                    "test_variable_sample_field_extensions",
                     "test_value_identity_across_dsos",
                     "--config",
                     args.config,
@@ -1057,11 +1545,15 @@ def main() -> int:
         packed_test_executable = configured_test_executable(
             build, args.config, "test_packed_fp4_dense_tensor"
         )
+        extension_test_executable = configured_test_executable(
+            build, args.config, "test_variable_sample_field_extensions"
+        )
         identity_test_executable = configured_test_executable(
             build, args.config, "test_value_identity_across_dsos"
         )
         run([str(dense_test_executable)], repo)
         run([str(packed_test_executable)], repo)
+        run([str(extension_test_executable)], repo)
         run([str(identity_test_executable)], repo)
 
         child_architecture_arguments = (
