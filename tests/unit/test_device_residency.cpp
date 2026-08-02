@@ -460,7 +460,8 @@ TEST(DeviceResidency,
  * @throws Fake publication, identity, and synchronized manager exceptions.
  * @note A producer from another pending source cannot be completed as part of
  * the admitted transfer. The rightful source/destination pair remains able to
- * publish exactly once afterward.
+ * publish exactly once afterward, and residency then exposes the exact Ready,
+ * host-readable destination binding.
  */
 TEST(DeviceResidency, MismatchedPendingSourceCapabilityCannotPublishReplica) {
   ResidencyManager manager;
@@ -490,10 +491,19 @@ TEST(DeviceResidency, MismatchedPendingSourceCapabilityCannotPublishReplica) {
                 identity, admitted.source.value, admitted.destination.value,
                 &admitted.source.producer, admitted.destination.producer),
             ResidencyCompletionDisposition::Published);
-  EXPECT_TRUE(manager
-                  .find(admitted.destination.value.revision_id(),
-                        DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned)
-                  .has_value());
+  const std::optional<Value> resident =
+      manager.find(admitted.destination.value.revision_id(),
+                   DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned);
+  ASSERT_TRUE(resident.has_value());
+  EXPECT_EQ(resident->revision_id(), admitted.destination.value.revision_id());
+  EXPECT_EQ(resident->producer_identity(),
+            admitted.destination.value.producer_identity());
+  EXPECT_EQ(resident->allocation_identity(),
+            admitted.destination.value.allocation_identity());
+  EXPECT_EQ(resident->storage_binding(),
+            admitted.destination.value.storage_binding());
+  const ReadLease read = resident->buffer_handle().acquire_read();
+  EXPECT_EQ(read.size(), admitted.destination.value.storage_size());
 }
 
 /**

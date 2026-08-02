@@ -281,8 +281,13 @@ class PendingDeviceValueProducer final {
    *       not revision, producer, allocation, or other scalar identities. The
    *       owning physical task must externally serialize this move-only
    *       producer, as required for every producer operation.
+   * @note The source-private inline definition avoids adding a callable symbol
+   *       to the installed operation-runtime dynamic library.
    */
-  bool matches_pending_fence(const ReadyFence& fence) const noexcept;
+  inline bool matches_pending_fence(const ReadyFence& fence) const noexcept {
+    return completer_.state_ != nullptr && fence.state_ != nullptr &&
+           completer_.state_ == fence.state_;
+  }
 
   /**
    * @brief Publishes Ready after caller-side producer/visibility retirement.

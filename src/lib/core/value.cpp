@@ -1429,13 +1429,6 @@ bool PendingDeviceValueProducer::valid() const noexcept {
   return completer_.valid();
 }
 
-/** @copydoc PendingDeviceValueProducer::matches_pending_fence */
-bool PendingDeviceValueProducer::matches_pending_fence(
-    const ReadyFence& fence) const noexcept {
-  return completer_.state_ != nullptr && fence.state_ != nullptr &&
-         completer_.state_ == fence.state_;
-}
-
 /** @copydoc PendingDeviceValueProducer::complete_ready */
 bool PendingDeviceValueProducer::complete_ready() noexcept {
   return completer_.complete_ready();
