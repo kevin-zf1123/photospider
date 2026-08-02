@@ -176,12 +176,15 @@ class DownsampleExecutor {
   /**
    * @brief Updates RT ROI/version metadata after a successful image refresh.
    *
-   * @param proxy_state Proxy node state whose RT metadata is updated.
-   * @param roi_hp HP-space ROI represented by the RT proxy update.
-   * @param hp_size HP output extent used to clamp merged ROI state.
+   * @param proxy_state Proxy node state whose Region metadata is updated.
+   * @param roi_hp Checked HP-space image ROI represented by the RT update.
+   * @param hp_size Retained current-boundary extent parameter; the planner has
+   *        already clipped roi_hp to this extent.
    * @param hp_version HP version copied into RT metadata.
-   * @throws Nothing directly.
-   * @note RT ROI remains stored in HP coordinates for inspection consistency.
+   * @throws std::bad_alloc when Region construction or algebra allocates.
+   * @note Exact representable validity is merged. A non-representable union
+   *       keeps only the fresh update as a safe under-approximation and never
+   *       authorizes a bounding superset.
    */
   void commit_rt_metadata(RealtimeProxyGraph::NodeState& proxy_state,
                           const PixelRect& roi_hp, const PixelSize& hp_size,

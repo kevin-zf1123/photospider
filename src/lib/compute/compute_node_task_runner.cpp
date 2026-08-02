@@ -12,6 +12,7 @@
 #include <variant>
 #include <vector>
 
+#include "compute/compute_cache_policy.hpp"
 #include "compute/compute_metrics_recorder.hpp"
 #include "compute/compute_run.hpp"
 #include "compute/node_executor.hpp"
@@ -282,6 +283,7 @@ bool NodeTaskRunner::allow_disk_cache() const {
   return !disable_disk_cache_ && !force_recache_;
 }
 
+/** @copydoc NodeTaskRunner::upstream_output */
 const NodeOutput* NodeTaskRunner::upstream_output(int up_id) const {
   if (up_id < 0) {
     return nullptr;
@@ -297,30 +299,30 @@ const NodeOutput* NodeTaskRunner::upstream_output(int up_id) const {
       return &*temp_results_[up_idx];
     }
   }
-  if (upstream->cached_output_high_precision.has_value()) {
-    return &*upstream->cached_output_high_precision;
-  }
-  return nullptr;
+  return ComputeCachePolicy::reusable_output(*upstream);
 }
 
-bool NodeTaskRunner::has_memory_or_temp_output(const Node& node,
-                                               int node_idx) const {
-  return node.cached_output_high_precision.has_value() ||
-         temp_results_[node_idx].has_value();
+/** @copydoc NodeTaskRunner::has_reusable_memory_or_temp_output */
+bool NodeTaskRunner::has_reusable_memory_or_temp_output(const Node& node,
+                                                        int node_idx) const {
+  return temp_results_[node_idx].has_value() ||
+         ComputeCachePolicy::has_reusable_output(node);
 }
 
+/** @copydoc NodeTaskRunner::compute_node */
 void NodeTaskRunner::compute_node(int node_idx, int node_id) {
   const Node& target_node = graph_.node(node_id);
   std::atomic_thread_fence(std::memory_order_acquire);
 
-  if (!has_memory_or_temp_output(target_node, node_idx)) {
+  if (!has_reusable_memory_or_temp_output(target_node, node_idx)) {
     try_load_disk_cache(target_node, node_idx);
   }
-  if (!has_memory_or_temp_output(target_node, node_idx)) {
+  if (!has_reusable_memory_or_temp_output(target_node, node_idx)) {
     compute_uncached_node(target_node, node_idx);
   }
 }
 
+/** @copydoc NodeTaskRunner::compute_tile_task */
 void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   auto idx_it = id_to_idx_.find(task.node_id);
   if (idx_it == id_to_idx_.end()) {
@@ -330,7 +332,7 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   }
   const int node_idx = idx_it->second;
   const Node& target_node = graph_.node(task.node_id);
-  if (!force_recache_ && target_node.cached_output_high_precision) {
+  if (!force_recache_ && ComputeCachePolicy::has_reusable_output(target_node)) {
     node_precomputed_[node_idx].store(true, std::memory_order_release);
     return;
   }
@@ -339,7 +341,7 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   }
 
   const auto& op_opt = resolved_ops_[node_idx];
-  if (!op_opt.has_value() || !std::holds_alternative<TileOpFunc>(*op_opt)) {
+  if (!op_opt.has_value() || !op_opt->is_tiled()) {
     throw GraphError(
         GraphErrc::NoOperation,
         "No tiled op for " + target_node.type + ":" + target_node.subtype);
@@ -371,8 +373,8 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
 
   BenchmarkEvent current_event = start_event(target_node);
   NodeExecutor::execute_tiled_into(graph_, node_for_exec,
-                                   std::get<TileOpFunc>(*op_opt), inputs_ready,
-                                   *output_buffer, tiled_config);
+                                   std::get<TileOpFunc>(op_opt->func),
+                                   inputs_ready, *output_buffer, tiled_config);
   finalize_tiled_node_if_complete(node_idx, target_node, inputs_ready,
                                   current_event);
 }
@@ -520,19 +522,17 @@ std::vector<const NodeOutput*> NodeTaskRunner::resolve_image_inputs(
 
 /** @copydoc NodeTaskRunner::tiled_config_for */
 TiledExecutionConfig NodeTaskRunner::tiled_config_for(
-    const Node& target_node, const OpRegistry::OpVariant& op) const {
+    const Node& target_node, const OpImplementation& implementation) const {
   TiledExecutionConfig tiled_config;
-  if (!std::holds_alternative<TileOpFunc>(op)) {
+  if (!implementation.is_tiled()) {
     return tiled_config;
   }
-  if (auto metadata = OpRegistry::instance().get_metadata(
-          target_node.type, target_node.subtype)) {
-    tiled_config.metadata = *metadata;
-    if (metadata->tile_preference == TileSizePreference::MICRO) {
-      tiled_config.tile_size = 16;
-    } else if (metadata->tile_preference == TileSizePreference::MACRO) {
-      tiled_config.tile_size = 256;
-    }
+  tiled_config.metadata = implementation.metadata;
+  if (implementation.metadata.tile_preference == TileSizePreference::MICRO) {
+    tiled_config.tile_size = 16;
+  } else if (implementation.metadata.tile_preference ==
+             TileSizePreference::MACRO) {
+    tiled_config.tile_size = 256;
   }
   tiled_config.on_tile = [this, node_id = target_node.id](const PixelRect&) {
     observe_runner_cancellation(run_lease_);
@@ -566,7 +566,7 @@ void NodeTaskRunner::compute_uncached_node(const Node& target_node,
   Node node_for_exec = target_node;
   node_for_exec.runtime_parameters = runtime_params;
   TiledExecutionConfig tiled_config = tiled_config_for(target_node, *op_opt);
-  NodeOutput result = NodeExecutor::execute(graph_, node_for_exec, *op_opt,
+  NodeOutput result = NodeExecutor::execute(graph_, node_for_exec, op_opt->func,
                                             inputs_ready, tiled_config);
 
   const double execution_ms =

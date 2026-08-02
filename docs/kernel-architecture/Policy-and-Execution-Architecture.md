@@ -24,11 +24,13 @@ Host. It owns:
 - the bounded ready store and its complete ready-byte charges;
 - one Interactive and one Throughput policy binding;
 - process fairness and three-to-one class arbitration state;
-- the fixed CPU worker pool, one service-owned Metal worker lane, and private
-  `serial_debug` and `gpu_pipeline` routes;
+- the fixed CPU worker pool, one service-owned Metal worker lane, a fixed
+  `DeviceExecutorRegistry`, and private `serial_debug` and `gpu_pipeline`
+  routes;
 - Host-authored candidate, Graph, Run, entry-version, enqueue, snapshot, and
   selection identities;
-- ready-to-execution resource exchange and in-flight callback ownership.
+- ready-to-execution resource exchange, exact implementation/exclusive-key
+  gates, and in-flight callback ownership.
 
 `GraphRuntime` stores only copied HP and RT route ids with nonzero generations.
 It owns Graph state, compute/event/trace observation, and request serialization,
@@ -168,11 +170,15 @@ affected Run as `GraphErrc::ComputeError`.
 
 A returned candidate id is not execution authority. The Host keeps a private
 `SelectionPin` containing the original entry identity/version and rechecks
-current state under the documented lock order. `StartTransaction` stages the
-CPU, retained-memory, and scratch grants with no-throw RAII.
+current state under the documented lock order. Before irreversible
+ready/fairness mutation, `StartTransaction` stages the CPU, retained-memory,
+and scratch child grant plus any first-use implementation/key gate rows.
+Fallible gate allocation precedes active-counter mutation, and no-throw RAII
+releases the staged grant on every rejection.
 
-The final commit is allocation-free and non-throwing. It atomically:
+The remaining commit is allocation-free and non-throwing. It atomically:
 
+- acquires the exact implementation count and nonempty exclusive key;
 - removes the exact ready entry;
 - exchanges its ready grant for execution grants;
 - advances class, Graph, and Run service accounting;
@@ -181,8 +187,10 @@ The final commit is allocation-free and non-throwing. It atomically:
 
 No executor callback begins before that commit. Every rejection or exception
 before commit preserves ready/fairness/burst/in-flight state and releases staged
-grants exactly once. Completion, cancellation, supersession, dependency release,
-and Run settlement also release their grants exactly once.
+grants and gate rows exactly once. Completion, cancellation, supersession,
+dependency release, and Run settlement also release their owned state exactly
+once. A started callback retains its operation gate until provider exit or
+callback skip, even if cancellation or failure purges its queued siblings.
 
 Temporary execution-grant exhaustion after revalidation is not a plugin fault
 or obsolete-decision retry. The ready store marks the exact candidate/version
@@ -196,6 +204,29 @@ replacement, and shutdown. Spurious wakes do not retry; a 50 ms low-frequency
 fallback covers an otherwise unobservable external child-grant release, after
 which cycle marks are cleared and current Host state is revalidated.
 
+An implementation cap or occupied exclusive key removes that candidate from
+the startable frontier without exposing operation metadata to policy plugins.
+Worker retirement advances the same notification epoch when it releases the
+gate. Direct sequential callers wait cancellation-aware without holding a
+resource reservation, then acquire the same gate and one CPU/byte/scratch root
+only around provider entry.
+
+Every Host-owned retained operation or constraint key is charged by the actual
+copied `std::string::capacity()` plus its null terminator. Full-plan admission
+preallocates one independently owned, already charged constraint record per
+logical task, including every tile, and moves each record exactly once into
+that task's unique `ReadyTaskSubmission`. Dirty admission does the same for
+each active task. Both freeze the complete shared estimate before moving any
+record. Connected-preflight callable/submission copies and the direct lease are
+charged independently. The operation gate stores only a borrowed
+`string_view` erased before the stable owner retires. Queued work borrows its
+`QueueEntry`-owned submission; direct acquisition copies the caller constraints
+into its lease state before querying the gate, and its wait predicate, start,
+and finish all borrow that state-owned copy. The caller input therefore need
+not outlive the returned lease. This neither duplicates nor undercounts string
+ownership. Checked terminator overflow and a one-byte-short retained limit fail
+before provider entry without gate or ledger residue.
+
 ## Private Execution Routes
 
 The route vocabulary is closed:
@@ -204,7 +235,7 @@ The route vocabulary is closed:
 | --- | --- |
 | `cpu` | Host-lifetime fixed CPU worker pool with reusable multi-entry execution; exposes CPU only |
 | `serial_debug` | CPU worker zero with one callback in flight; exposes CPU only |
-| `gpu_pipeline` | the same fixed CPU pool for CPU fallback plus one service-owned Metal lane; exposes Metal then CPU when the Host reports Metal, otherwise CPU only |
+| `gpu_pipeline` | the same fixed CPU pool for CPU fallback plus one service-owned Metal lane; exposes Metal then CPU when the fixed registry owns a Metal executor, otherwise CPU only |
 
 `heterogeneous` is not an alias. Execution routes are not plugins and cannot be
 scanned or loaded.
@@ -219,24 +250,192 @@ ownerless binding, serializes against active same-session requests, and
 publishes a new nonzero generation. A same-name replacement also advances the
 generation. Failure preserves the old route.
 
-Operation selection freezes both the implementation callable and its `Device`
-before Run admission. Full HP, dirty HP/RT, and connected-parameter preflight
-all consume the same route-aware inventory. Connected-preflight preparation
-also freezes each callable/DSO lease and complete service root without entering
-provider code; only an installed Run may perform reserved start and invoke the
-provider, after which output-dependent dirty planning remains Run-owned. Every
-ready submission carries the frozen device, and `ExecutionService` rejects a
-device outside the configured route/Host inventory before publishing the Run.
-CPU submissions enter the
-fixed CPU pool; Metal submissions enter the single GPU lane. Both lanes share
+Operation selection freezes one coherent callback, metadata, `Device`, and
+nonzero implementation revision before Run admission. Planning retains only
+the callback-free identity/metadata/shape, and submission must re-resolve the
+same identity before it may retain the callable/DSO lease. Full HP, dirty HP/RT,
+and connected-parameter preflight all consume the same canonical route-aware
+inventory; full-task cache identity includes that inventory and the registry
+generation. Region propagation and dirty TensorSlice eligibility use that same
+request inventory and the matching HP/RT intent to select the actual
+revisioned `OpImplementation` before testing source-private core identity. They
+do not use a scalar-only lookup or filter away a selected same-key device
+candidate. HP TensorSlice planning immediately converts every accepted
+executable target/upstream selection into a callback-free operation key plus
+the complete identity/device/shape/metadata route, then releases the temporary
+callable/DSO lease. Dirty preparation compares those frozen routes with the
+active task-population routes before ROI mutation, task materialization,
+callable resolution, or admission; an empty active view returns before frozen
+context comparison, while any remaining active route or context mismatch is
+`NoOperation`. Final callable re-resolution remains mandatory.
+Connected-preflight preparation also freezes
+each callable/DSO lease and complete service root without entering provider
+code; only an installed Run may perform reserved start and invoke the provider,
+after which output-dependent dirty planning remains Run-owned. Every ready
+submission carries the frozen device, and `ExecutionService` rejects a device
+outside the configured route/registry inventory before publishing the Run.
+CPU submissions enter the fixed CPU pool; Metal submissions enter the single
+GPU lane and then the matching registry executor. Both lanes share
 the common ready store, policy decision, reserved-start transaction, Host
-ledger, Run maximum-parallelism grant, cancellation, completion, exception,
-reuse, shutdown, and drainage rules; no second device-capacity authority or
-per-Graph executor is created.
+ledger, Run maximum-parallelism grant, operation implementation/key gates,
+cancellation, completion, exception, reuse, shutdown, and drainage rules; no
+second device-capacity authority or per-Graph executor is created.
 
 Full HP, dirty HP/RT, connected preflight, initial ready work, and
 dependency-released work all enter the common ready-store, policy,
 reserved-start, private-route, and Run-lease completion path.
+
+V-6 adds no configured execution route and no second ready store.
+`ReadyFence::async_wait` accepts a shared injected executor that must enqueue
+rather than invoke inline. Its preconstructed continuation retains the executor
+while pending or queued, then transfers that owner to callback-local retention
+on entry. This keeps temporary executor ownership alive through callback
+completion or exception unwinding while releasing an executor-owned queue
+self-reference. Fence state and the source-private `ValueTransferTask` own no
+worker or queue. The repository fake executor is a deterministic, thread-safe
+test mechanism only; C++17 mutex/condition-variable rendezvous exercises real
+registration/publication, cancellation/callback-entry, and
+transfer-destruction/callback-entry races without sleeps.
+
+V-7 adds a source-private, fixed `DeviceExecutorRegistry` to the same
+`ExecutionService` domain. When the repository Metal plugin is enabled, the
+Apple entry owns one device and command queue, supplies an invocation-scoped
+texture/buffer allocator, and keeps a validated process-lifetime pipeline
+cache. Reserved-start workers enter that
+executor synchronously and invoke the already selected operation through the
+same Run completion/exception path. The Metal Perlin provider now borrows those
+resources and keeps no static native state; `GraphRuntime`, `Kernel`, operation
+metadata, and policy state expose no native handle or capability hook.
+
+V-8 adds source-private, explicit CPU/Metal access and residency to that same
+execution domain. `AccessPlan` selects exactly one of direct, map, import,
+transfer, or unsupported without performing hidden work. A transfer preserves
+the logical `ValueRevisionId` while publishing a distinct checked
+`StorageBinding`; CPU-to-Metal upload and Metal-to-CPU readback are explicit
+asynchronous tasks. The Metal Perlin provider publishes a pending native Value
+and encodes texture-to-shared-buffer readback without waiting on a command
+buffer or calling synchronous `getBytes`.
+
+`ExecutionService` owns the one process `ResidencyManager` and routes pending
+Value continuations through its existing ready store. Exact completion
+identity includes Graph/revision/target/intent/generation, Run/task, source and
+destination revision, producer, and binding facts. Freshness admission,
+source/destination terminal publication, and resident insertion form one
+manager-locked transaction. Each source or destination producer supplied for
+that publication must also retain the exact same non-null private `ReadyFence`
+control state as its corresponding pending Value; matching revision, producer,
+allocation, binding, or other scalar facts cannot substitute for this terminal
+authority. A capability mismatch is rejected without consuming the rightful
+admission, settling either fence, inserting residency, or releasing the
+retained resource owner, so the exact admitted producer pair can retry. A late,
+duplicate, or mismatched completion
+cannot publish Ready, release dependent work, enter residency, or restore an
+older commit right; it settles the affected destination with a typed failure
+when it still owns that producer. Run settlement retains the executor and
+continuation until every pending fence callback has retired. V-8 adds no
+second ready store, Graph authority, persistence path, or device-memory
+capacity authority. Settled replicas may remain reusable after Run release,
+but the manager's 64-entry default bounds strong native/provider retention by
+releasing the lowest-revision entry under publication pressure; generation
+advance alone does not bulk-clear them. This entry count neither measures nor
+admits bytes.
+
+V-9 places authoritative device-memory and scratch admission in the existing
+service `ResourceLedger`, not in policy or residency. Each configured
+non-CPU `DeviceId` has isolated limits. Metal atomically reserves native
+size/alignment plans before allocation, audits `allocatedSize`, and commits
+actual bytes before command submission. Persistent memory follows the native
+Value owner through residency; scratch follows exact command completion.
+Policy sees no native handle or token, does not rank byte owners, and gains no
+second waiting/fairness queue.
+
+Freshness publication uses two phases. Kernel first asks `ExecutionService` to
+pretrack the lineage without changing its current generation; this fallible
+allocation completes before coordinator submission. When the candidate is
+accepted as current, the coordinator invokes a no-throw, no-allocation service
+callback while holding its mutex and before publishing its own current row.
+That callback advances the manager under the manager mutex. Failed,
+close-rejected, and born-stale candidates never invoke it, and an older Run
+that starts afterward cannot regress the monotonic manager generation.
+
+## Compute I/O Execution Boundary
+
+`ExecutionService::PoolState` owns one source-private `ComputeIoExecutor` with
+one independent worker. Under one mutex, admission charges both the task count
+and a positive estimated-retained-byte amount before lazy payload construction,
+queue publication, filesystem mutation, or codec entry. Each accepted task
+retains an explicit transaction lifetime token and returns a typed completion.
+Success, failure, queued cancellation, running late cancellation, construction
+rollback, and graceful shutdown converge on exactly-once account release.
+
+The worker and completion boundaries prevent identity-specific self-blocking.
+While admission remains open, the owning I/O worker's nested submission returns
+inactive `InvalidRequest` before either budget or the lazy factory changes; a
+concurrent admission stop retains `ShuttingDown` priority. The owning worker may
+copy an already terminal completion, but a nonterminal completion wait fails
+before condition-variable blocking. A completion keeps only a weak executor
+identity for that comparison. Submitting to and waiting for another independent
+executor remains legal.
+
+Lazy factory invocation uses an allocation-free, exception-safe thread-local
+scope stack. `shutdown()` rejects a target found anywhere in that stack before
+changing `accepting`/`stopping`, acquiring join authority, or waiting for the
+worker. This covers direct factory re-entry and indirect
+`A factory -> B factory -> A shutdown` without rejecting an unrelated executor.
+An external shutdown still stops admission and waits for every already charged
+factory. A factory that returns after the stop produces the existing
+Accepted/Cancelled submission and exact settlement; a factory that throws
+performs exact rollback. Worker join completes only after construction
+settlement and FIFO drain.
+
+The first production vertical is staged HP cache save. `GraphCacheService`
+still chooses eligibility, paths, precision, codecs, and error interpretation.
+After the existing live lifecycle, supersession, and revision predicates,
+graph-state policy submits the mechanism callback and waits for it before the
+existing no-throw Graph publication. CPU compute workers are forbidden from
+synchronously waiting for this completion, so a blocked cache codec does not
+occupy the CPU execution domain. Because the current image-codec API is
+indivisible, its whole I/O-facing call runs on the I/O worker; a future split
+API must return independently admitted CPU-heavy phases to the CPU executor.
+
+V-15 adds a second bounded user without changing that mechanism. The
+source-private OpenEXR deep adapter submits one complete indivisible
+single-part deep-scanline read or write as the callback. Before
+`ComputeIoExecutor::try_submit`, one shared source-private path check maps an
+empty or embedded-NUL `std::string` to the existing inactive `InvalidRequest`
+fact. It performs no budget charge, lazy construction, path/Value/registry
+capture, hook or worker entry, filesystem access, or OpenEXR call; therefore a
+C-string filename API cannot silently select the NUL prefix. The direct write
+preflight reuses this contract and throws the Host-owned adapter
+`InvalidRequest` category.
+
+For valid paths, executor admission receives a positive retained-byte estimate
+and occurs before path capture, Value/provider generation retention,
+result-state construction, filesystem effects, or OpenEXR entry. Once
+accepted, the task retains its transaction token, copied path, exact provider
+generation and input Value or decoded-result state through the complete codec
+call. OpenEXR is invoked with `numThreads=0`, so the executor's one worker
+remains the only adapter-created execution lane. Running cancellation cannot
+preempt foreign codec code; it suppresses late result publication and still
+releases task/byte accounts exactly once.
+
+After generic Value inspection, the write path crosses a source-private
+continuation barrier before it prepares an OpenEXR Header/frame buffer or
+opens the output path. The barrier validates both signed windows, logical-site
+and row-width arithmetic, exact inclusive `Box2i` coordinate representation,
+and the `int` scan-line count consumed by `writePixels`. Only the continuation
+released by that complete preflight may prepare or open the output. A typed
+shape rejection therefore preserves an existing destination byte-for-byte and
+does not create a missing destination.
+
+This is a mechanism boundary, not a fourth scheduler or a persistence
+authority. It adds no execution route, ready store, Graph owner, policy
+decision surface, Host/device ledger dimension, or public ABI. Synchronous
+cache administration/load, Graph-document operations, daemon job state, and
+the private `OutputStore` remain unchanged. The executor owns no user path,
+retry, overwrite, receipt, or durability policy. No current component provides
+a crash-durable user-output commit, and ADR 0009's post-publication independent
+cache outcome remains future work.
 
 ## Host, CLI, and IPC Surfaces
 
@@ -294,21 +493,37 @@ process-isolated plugin supervision belongs to Issue #91.
 
 ## Implementation and Validation Entry Points
 
+- `include/photospider/plugin/op_contract.hpp`
+- `src/lib/core/ps_types.hpp` and `.cpp`
+- `src/lib/compute/task_graph_planning.hpp` and `.cpp`
+- `src/lib/compute/compute_task_submission.hpp` and `.cpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/policy/policy_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_service.hpp` and `.cpp`
 - `src/lib/compute/run_lifecycle_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` and `.cpp`
+- `src/lib/execution/compute_io_executor.*`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/execution/execution_task_runtime.hpp`
-- `src/lib/runtime/graph_runtime.hpp` and `.mm`
+- `src/lib/execution/device_executor_registry.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `include/photospider/memory/ready_fence.hpp`
+- `src/lib/execution/value_transfer_task.*`
+- `src/lib/runtime/graph_runtime.hpp` and `.cpp`
 - `src/lib/runtime/kernel_execution_facade.cpp`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
 - `include/photospider/host/host.hpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/ipc/{codec,client,host,request_router}.cpp`
 - `tests/unit/test_policy_registry.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
+- `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
 
 See also [Compute Flow](Compute-Flow.md),

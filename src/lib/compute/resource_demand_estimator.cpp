@@ -8,9 +8,14 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include "compute/dirty_region_planner.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+#include "compute/execution_service_test_probe.hpp"
+#endif
+#include "photospider/data/region.hpp"
 #include "photospider/plugin/node_view.hpp"
 
 namespace ps::compute {
@@ -42,21 +47,6 @@ void add_bool_vector_capacity(const std::vector<bool>& values,
   const std::uint64_t bit_capacity =
       static_cast<std::uint64_t>(values.capacity());
   estimate->add_bytes(bit_capacity / 8U + (bit_capacity % 8U == 0U ? 0U : 1U));
-}
-
-/**
- * @brief Adds an owned string payload conservatively.
- * @param value String whose reported capacity is charged with its terminator.
- * @param estimate Checked destination estimator.
- * @return Nothing.
- * @throws GraphError when capacity plus terminator overflows.
- * @note Small-string payloads may be inline; charging them again is a
- * deliberate conservative bound, not a claim about library SSO layout.
- */
-void add_string_payload(const std::string& value,
-                        RetainedMemoryEstimator* estimate) {
-  estimate->add_bytes(static_cast<std::uint64_t>(value.capacity()));
-  estimate->add_bytes(1U);
 }
 
 /**
@@ -118,6 +108,23 @@ void add_parameter_value_dynamic(const plugin::ParameterValue& value,
                                  RetainedMemoryEstimator* estimate);
 
 /**
+ * @brief Adds atom and TensorSlice-axis allocations nested in one Region.
+ * @param region Canonical Region whose dynamic storage is charged.
+ * @param estimate Checked destination estimator.
+ * @return Nothing.
+ * @throws GraphError when checked structural arithmetic overflows.
+ */
+void add_region_dynamic(const RegionSet& region,
+                        RetainedMemoryEstimator* estimate) {
+  add_vector_capacity(region.atoms(), estimate);
+  for (const RegionAtom& atom : region.atoms()) {
+    if (const auto* tensor = std::get_if<TensorSlice>(&atom)) {
+      add_vector_capacity(tensor->axes, estimate);
+    }
+  }
+}
+
+/**
  * @brief Adds node, key, and value storage for one parameter object.
  * @param object Ordered string-keyed parameter object.
  * @param estimate Checked destination estimator.
@@ -128,7 +135,7 @@ void add_parameter_object_dynamic(const plugin::ParameterValue::Object& object,
                                   RetainedMemoryEstimator* estimate) {
   add_map_nodes(object, estimate);
   for (const auto& [key, value] : object) {
-    add_string_payload(key, estimate);
+    estimate->add_string_payload(key);
     add_parameter_value_dynamic(value, estimate);
   }
 }
@@ -137,7 +144,7 @@ void add_parameter_object_dynamic(const plugin::ParameterValue::Object& object,
 void add_parameter_value_dynamic(const plugin::ParameterValue& value,
                                  RetainedMemoryEstimator* estimate) {
   if (value.is_string()) {
-    add_string_payload(value.as_string(), estimate);
+    estimate->add_string_payload(value.as_string());
     return;
   }
   if (value.is_array()) {
@@ -154,8 +161,8 @@ void add_parameter_value_dynamic(const plugin::ParameterValue& value,
 }
 
 /**
- * @brief Adds dynamic vectors nested in one planned node summary.
- * @param work Planned node work whose vector capacities are charged.
+ * @brief Adds dynamic vectors and route metadata in one planned node summary.
+ * @param work Planned node work whose vectors and route key are charged.
  * @param estimate Checked destination estimator.
  * @return Nothing.
  * @throws GraphError when checked arithmetic overflows.
@@ -166,6 +173,18 @@ void add_planned_work_dynamic(const PlannedNodeWork& work,
   add_vector_capacity(work.dependency_node_ids, estimate);
   add_vector_capacity(work.dependent_node_ids, estimate);
   add_vector_capacity(work.task_ids, estimate);
+  if (work.operation_route.has_value()) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_operation_route = estimate->bytes();
+#endif
+    estimate->add_string_payload(work.operation_route->metadata.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::ComputePlanOperationRoute,
+        work.operation_route->metadata.exclusive_key, before_operation_route,
+        estimate->bytes());
+#endif
+  }
 }
 
 /**
@@ -202,14 +221,79 @@ void add_dirty_snapshot_dynamic(const DirtyRegionSnapshot& snapshot,
   for (const auto& [node_id, state] : snapshot.dirty_source_state) {
     (void)node_id;
     add_vector_capacity(state.source_rois, estimate);
+    add_vector_capacity(state.source_regions, estimate);
+    for (const RegionSet& region : state.source_regions) {
+      add_region_dynamic(region, estimate);
+    }
   }
 
   add_unordered_vector_map(snapshot.source_roi_records, estimate);
+  add_unordered_vector_map(snapshot.source_region_records, estimate);
+  for (const auto& [node_id, records] : snapshot.source_region_records) {
+    (void)node_id;
+    for (const DirtySourceRegionRecord& record : records) {
+      add_region_dynamic(record.source_region, estimate);
+    }
+  }
   add_vector_capacity(snapshot.dirty_tiles, estimate);
+  for (const DirtyTileKey& tile : snapshot.dirty_tiles) {
+    add_region_dynamic(tile.region, estimate);
+  }
   add_vector_capacity(snapshot.dirty_monolithic_nodes, estimate);
+  for (const DirtyMonolithicRegion& monolithic :
+       snapshot.dirty_monolithic_nodes) {
+    add_region_dynamic(monolithic.region, estimate);
+  }
   add_unordered_vector_map(snapshot.per_node_dirty_rois, estimate);
+  add_unordered_vector_map(snapshot.per_node_dirty_regions, estimate);
+  for (const auto& [node_id, regions] : snapshot.per_node_dirty_regions) {
+    (void)node_id;
+    for (const RegionSet& region : regions) {
+      add_region_dynamic(region, estimate);
+    }
+  }
   add_unordered_vector_map(snapshot.actual_dirty_rois, estimate);
+  add_unordered_vector_map(snapshot.actual_dirty_regions, estimate);
+  for (const auto& [node_id, regions] : snapshot.actual_dirty_regions) {
+    (void)node_id;
+    for (const RegionSet& region : regions) {
+      add_region_dynamic(region, estimate);
+    }
+  }
   add_vector_capacity(snapshot.edge_mappings, estimate);
+  for (const DirtyEdgeMapping& mapping : snapshot.edge_mappings) {
+    add_region_dynamic(mapping.from_region, estimate);
+    add_region_dynamic(mapping.to_region, estimate);
+  }
+}
+
+/**
+ * @brief Adds dynamic storage owned by one dirty Region route snapshot.
+ *
+ * @param snapshot Callback-free route authority to inspect.
+ * @param estimate Checked destination estimator.
+ * @return Nothing.
+ * @throws GraphError when checked structural arithmetic overflows.
+ * @note Route objects are already part of unordered-map value storage; only
+ * bucket/linkage storage and nested string payloads are added here.
+ */
+void add_dirty_operation_route_snapshot_dynamic(
+    const DirtyRegionOperationRouteSnapshot& snapshot,
+    RetainedMemoryEstimator* estimate) {
+  add_vector_capacity(snapshot.available_devices, estimate);
+  estimate->add_objects<void*>(
+      static_cast<std::uint64_t>(snapshot.node_routes.bucket_count()));
+  estimate->add_objects<decltype(snapshot.node_routes)::value_type>(
+      static_cast<std::uint64_t>(snapshot.node_routes.size()));
+  const std::uint64_t route_count =
+      static_cast<std::uint64_t>(snapshot.node_routes.size());
+  estimate->add_objects<void*>(route_count);
+  estimate->add_objects<void*>(route_count);
+  for (const auto& [node_id, planned_route] : snapshot.node_routes) {
+    (void)node_id;
+    estimate->add_string_payload(planned_route.operation_key);
+    estimate->add_string_payload(planned_route.route.metadata.exclusive_key);
+  }
 }
 
 }  // namespace
@@ -230,9 +314,10 @@ std::uint64_t compute_plan_dynamic_retained_memory_bytes(
   }
   add_vector_capacity(plan.task_graph.dependencies, &estimate);
   for (const PlannedDependency& dependency : plan.task_graph.dependencies) {
-    add_string_payload(dependency.input_kind, &estimate);
+    estimate.add_string_payload(dependency.input_kind);
   }
   add_vector_capacity(plan.task_graph.initial_task_ids, &estimate);
+  add_vector_capacity(plan.available_devices, &estimate);
   return estimate.bytes();
 }
 
@@ -267,8 +352,15 @@ std::uint64_t dirty_selection_dynamic_retained_memory_bytes(
 
   add_vector_capacity(selection.dependencies, &estimate);
   for (const PlannedDependency& dependency : selection.dependencies) {
-    add_string_payload(dependency.input_kind, &estimate);
+    estimate.add_string_payload(dependency.input_kind);
   }
+  return estimate.bytes();
+}
+
+/** @copydoc region_dynamic_retained_memory_bytes */
+std::uint64_t region_dynamic_retained_memory_bytes(const RegionSet& region) {
+  RetainedMemoryEstimator estimate("RegionSet");
+  add_region_dynamic(region, &estimate);
   return estimate.bytes();
 }
 
@@ -284,7 +376,12 @@ std::uint64_t high_precision_dirty_plan_retained_memory_bytes(
       static_cast<std::uint64_t>(plan.entries.size()));
   estimate.add_objects<void*>(static_cast<std::uint64_t>(plan.entries.size()));
   estimate.add_objects<void*>(static_cast<std::uint64_t>(plan.entries.size()));
+  for (const auto& [node_id, entry] : plan.entries) {
+    (void)node_id;
+    add_region_dynamic(entry.region_hp, &estimate);
+  }
   add_dirty_snapshot_dynamic(plan.snapshot, &estimate);
+  add_dirty_operation_route_snapshot_dynamic(plan.operation_routes, &estimate);
   return estimate.bytes();
 }
 
@@ -300,7 +397,12 @@ std::uint64_t real_time_dirty_plan_retained_memory_bytes(
       static_cast<std::uint64_t>(plan.entries.size()));
   estimate.add_objects<void*>(static_cast<std::uint64_t>(plan.entries.size()));
   estimate.add_objects<void*>(static_cast<std::uint64_t>(plan.entries.size()));
+  for (const auto& [node_id, entry] : plan.entries) {
+    (void)node_id;
+    add_region_dynamic(entry.region_hp, &estimate);
+  }
   add_dirty_snapshot_dynamic(plan.snapshot, &estimate);
+  add_dirty_operation_route_snapshot_dynamic(plan.operation_routes, &estimate);
   return estimate.bytes();
 }
 
@@ -309,7 +411,7 @@ std::uint64_t node_output_dynamic_retained_memory_bytes(
     const NodeOutput& output) {
   RetainedMemoryEstimator estimate("NodeOutput");
   add_parameter_object_dynamic(output.data, &estimate);
-  add_string_payload(output.debug.compute_device, &estimate);
+  estimate.add_string_payload(output.debug.compute_device);
   return estimate.bytes();
 }
 

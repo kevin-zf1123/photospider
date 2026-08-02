@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the installed OpenCV/YAML-disabled Host product."""
+"""Exercise the optional-provider-disabled runtime and installed V-14 Host."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from textwrap import dedent
 
 from cmake_build_smoke_support import (
     producer_osx_architecture_arguments,
@@ -42,6 +43,261 @@ CONSUMER_TARGET_FILE_MANIFEST_HEADER = (
 #: @note Semantic validation separately excludes ``.``, ``..``, imported/alias
 #:   syntax, and typed ``_NOT_BUILT`` sentinel names.
 CONSUMER_TARGET_NAME_PATTERN = re.compile(r"[A-Za-z0-9_.+-]+")
+
+#: @brief Case-insensitive optional deep-codec dependency markers.
+#: @note Patterns name only approved package/library namespaces and the V-15
+#:   deep-scanline/tiled/multipart/mixed-part vocabulary. A broad ``exr``,
+#:   ``deep``, ``half``, or arbitrary three-letter substring is intentionally
+#:   absent so unrelated product text and binary symbols do not false-positive.
+FORBIDDEN_DEEP_CODEC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "OpenEXR",
+        re.compile(
+            r"(?:^|[^a-z0-9_]|-l)(?:lib)?openexr(?:core|util)?"
+            r"(?:[-_][0-9]+)*(?![a-z0-9_])",
+            re.I,
+        ),
+    ),
+    (
+        "Imf",
+        re.compile(
+            r"(?:^|[^a-z0-9_]|-l)(?:lib)?imf(?:[-_][0-9]+)*"
+            r"(?![a-z0-9_])|(?:^|[^a-z0-9_])imf(?:[-_][0-9]+)*::"
+            r"|_zn\d+imf",
+            re.I,
+        ),
+    ),
+    (
+        "OpenEXR-transitive-library",
+        re.compile(
+            r"(?:^|[^a-z0-9_]|-l)(?:lib(?:ilmbase|ilmthread|iex|half)"
+            r"(?:[-_][0-9]+)*|(?:ilmbase|ilmthread|iex)"
+            r"(?:[-_][0-9]+)*|(?:ilmbase|ilmthread|iex|half)"
+            r"(?:[-_][0-9]+)*::)(?![a-z0-9_])",
+            re.I,
+        ),
+    ),
+    (
+        "deep-codec-mode",
+        re.compile(
+            r"(?<![a-z0-9_])deep(?:[-_ ]?)(?:scanline|tiled|codec)"
+            r"(?![a-z0-9_])",
+            re.I,
+        ),
+    ),
+    (
+        "multipart-codec-mode",
+        re.compile(r"(?<![a-z0-9_])multipart(?![a-z0-9_])", re.I),
+    ),
+    (
+        "mixed-part-codec-mode",
+        re.compile(
+            r"(?<![a-z0-9_])mixed(?:[-_ ]?)(?:part|shallow(?:/deep)?)"
+            r"(?![a-z0-9_])",
+            re.I,
+        ),
+    ),
+)
+
+
+def forbidden_deep_codec_markers(text: str) -> list[str]:
+    """@brief Classify optional OpenEXR/deep-codec residue in one surface.
+
+    @param text Decoded installed header/export/linker inspection text.
+    @return Stable unique marker labels in declaration order.
+    @throws None Matching is deterministic, bounded by the caller's input, and
+      case-insensitive.
+    @note The classifier uses package/library namespace boundaries and exact
+      V-15 mode vocabulary. It deliberately does not match broad ``exr``,
+      ``deep``, or unqualified ``half`` substrings.
+    """
+
+    return [
+        label
+        for label, pattern in FORBIDDEN_DEEP_CODEC_PATTERNS
+        if pattern.search(text) is not None
+    ]
+
+
+def binary_link_surface(path: Path) -> str:
+    """@brief Inspect one installed or consumer library/executable surface.
+
+    @param path Existing regular binary or archive selected by the caller.
+    @return Combined dependency and externally visible symbol text from the
+      native object-format tools.
+    @throws OSError If an inspector process cannot start.
+    @throws RuntimeError If no supported inspector is installed or every
+      applicable inspector rejects the selected binary.
+    @note Darwin uses ``otool -L`` plus ``nm -g`` for Mach-O images/archives;
+      Linux uses ``readelf -d`` plus ``nm -g`` for ELF images/archives. Other
+      hosts use ``nm -g`` when available, while generated link scripts remain
+      an independent cross-platform surface. Failed optional probes are kept
+      out of diagnostics; at least one native probe must succeed fail-closed.
+    """
+
+    if sys.platform == "darwin":
+        candidates = (("otool", "-L"), ("nm", "-g"))
+    elif sys.platform.startswith("linux"):
+        candidates = (("readelf", "-d"), ("nm", "-g"))
+    else:
+        candidates = (("nm", "-g"),)
+    outputs: list[str] = []
+    attempted = False
+    for executable_name, option in candidates:
+        executable = shutil.which(executable_name)
+        if executable is None:
+            continue
+        attempted = True
+        completed = subprocess.run(
+            [executable, option, str(path)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if completed.returncode == 0:
+            outputs.append(completed.stdout)
+    if not attempted:
+        raise RuntimeError(
+            "no native object inspector is available for the dependency scan"
+        )
+    if not outputs:
+        raise RuntimeError(
+            "native object inspectors could not read installed/consumer binary"
+        )
+    return "\n".join(outputs)
+
+
+def validate_no_optional_deep_codec_residue(
+    prefix: Path,
+    consumer_build: Path,
+    consumer_executables: list[Path],
+) -> None:
+    """@brief Reject OpenEXR/Imf/deep-codec residue from installed V-14.
+
+    The scan validates a concrete installed prefix and the freshly configured
+    external consumer. It reads every installed public header, package config,
+    CMake export, and pkg-config file as strict UTF-8; inspects every installed
+    library/archive plus each declared consumer executable through native
+    Mach-O/ELF symbol/dependency tools; and reads generated ``link.txt`` and
+    Ninja link surfaces. Every decoded surface is matched case-insensitively
+    against bounded OpenEXR, Imf, related library-namespace, deep-scanline,
+    deep-tiled, deep-codec, multipart, and mixed-part markers.
+
+    @param prefix Fresh dependency-disabled installation root.
+    @param consumer_build Fresh independent consumer build root.
+    @param consumer_executables Exact validated CMake target files that will
+      run after the scan.
+    @return None after every required surface exists and contains no marker.
+    @throws OSError If required files, directories, or object inspectors cannot
+      be read or started.
+    @throws RuntimeError If the install/package/link surface is missing,
+      symlink-unsafe, non-UTF-8, uninspectable, escapes its owned root, or
+      contains a forbidden marker. Findings report controlled marker labels
+      and relative surface paths, never raw binary or linker output.
+    @note Reader-facing documentation is not installed or scanned. The token
+      set intentionally avoids broad ``exr``, ``deep``, and arbitrary short
+      substrings, so an absence statement or unrelated symbol cannot become an
+      ungrounded false positive. No provider discovery or optional package is
+      invoked by this inspection.
+    """
+
+    prefix_root = prefix.resolve(strict=True)
+    consumer_root = consumer_build.resolve(strict=True)
+    include_root = prefix_root / "include" / "photospider"
+    package_configs = sorted(prefix_root.rglob("PhotospiderConfig*.cmake"))
+    target_exports = sorted(prefix_root.rglob("Photospider*Targets*.cmake"))
+    if not include_root.is_dir() or not package_configs or not target_exports:
+        raise RuntimeError(
+            "dependency-disabled install lacks required headers/package exports"
+        )
+
+    text_surfaces = sorted(
+        path
+        for path in include_root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+    text_surfaces.extend(package_configs)
+    text_surfaces.extend(target_exports)
+    text_surfaces.extend(sorted(prefix_root.rglob("*.pc")))
+
+    link_surfaces = sorted(consumer_root.rglob("link.txt"))
+    link_surfaces.extend(sorted(consumer_root.rglob("*.ninja")))
+    text_surfaces.extend(link_surfaces)
+
+    findings: list[tuple[str, str]] = []
+    seen_text: set[Path] = set()
+    for surface in text_surfaces:
+        if surface in seen_text:
+            continue
+        seen_text.add(surface)
+        if surface.is_symlink() or not surface.is_file():
+            raise RuntimeError(
+                "dependency residue text surface is not a regular file"
+            )
+        try:
+            text = surface.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RuntimeError(
+                "dependency residue text surface is not valid UTF-8"
+            ) from error
+        for marker in forbidden_deep_codec_markers(text):
+            owner = consumer_root if surface.is_relative_to(consumer_root) else prefix_root
+            findings.append((marker, surface.relative_to(owner).as_posix()))
+
+    installed_libraries: list[Path] = []
+    for candidate in prefix_root.rglob("*"):
+        name = candidate.name.lower()
+        if not (
+            candidate.is_file()
+            and (
+                name.endswith((".a", ".dylib", ".so", ".dll", ".lib"))
+                or ".so." in name
+            )
+        ):
+            continue
+        resolved = candidate.resolve(strict=True)
+        try:
+            resolved.relative_to(prefix_root)
+        except ValueError as error:
+            raise RuntimeError(
+                "installed library symlink escapes the package prefix"
+            ) from error
+        if resolved not in installed_libraries:
+            installed_libraries.append(resolved)
+    if not installed_libraries or not consumer_executables:
+        raise RuntimeError(
+            "dependency residue scan lacks installed libraries or consumers"
+        )
+
+    binary_surfaces = [*installed_libraries, *consumer_executables]
+    for surface in binary_surfaces:
+        resolved = surface.resolve(strict=True)
+        if not resolved.is_file():
+            raise RuntimeError(
+                "dependency residue binary surface is not a regular file"
+            )
+        owner = (
+            consumer_root
+            if resolved.is_relative_to(consumer_root)
+            else prefix_root
+        )
+        try:
+            relative = resolved.relative_to(owner).as_posix()
+        except ValueError as error:
+            raise RuntimeError(
+                "dependency residue binary surface escapes owned roots"
+            ) from error
+        for marker in forbidden_deep_codec_markers(
+            binary_link_surface(resolved)
+        ):
+            findings.append((marker, relative))
+
+    if findings:
+        raise RuntimeError(
+            "dependency-disabled V-14 leaked optional deep-codec residue: "
+            f"{sorted(set(findings))}"
+        )
 
 
 def is_canonical_consumer_target_name(target_name: str) -> bool:
@@ -505,6 +761,39 @@ def cmake_cache_values(build: Path) -> dict[str, str]:
     return values
 
 
+def validate_dependency_disabled_native_toolchain(build: Path) -> None:
+    """@brief Prove the Darwin-neutral profile did not activate Metal tooling.
+
+    @param build Configured dependency-disabled producer or consumer directory.
+    @return None after the cache and generated toolchain remain Metal-neutral.
+    @throws OSError If cache or generated toolchain paths cannot be inspected.
+    @throws RuntimeError If Objective-C++ or Metal/Foundation discovery leaked.
+    @note Non-Darwin hosts return immediately because the leak is Apple-specific.
+    """
+
+    if sys.platform != "darwin":
+        return
+    cache = cmake_cache_values(build)
+    forbidden_cache_keys = (
+        "CMAKE_OBJCXX_COMPILER",
+        "METAL_FRAMEWORK",
+        "FOUNDATION_FRAMEWORK",
+        "PHOTOSPIDER_METAL_FRAMEWORK",
+        "PHOTOSPIDER_FOUNDATION_FRAMEWORK",
+    )
+    leaked_cache_keys = [
+        key for key in forbidden_cache_keys if key in cache
+    ]
+    compiler_records = list(
+        build.rglob("CMakeOBJCXXCompiler.cmake")
+    )
+    if leaked_cache_keys or compiler_records:
+        raise RuntimeError(
+            "dependency-disabled Darwin profile activated native Metal tooling: "
+            f"cache={leaked_cache_keys}, compiler_records={compiler_records}"
+        )
+
+
 def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
     """@brief Validate an external dependency-disabled producer.
 
@@ -518,6 +807,7 @@ def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
     """
 
     cache = cmake_cache_values(build)
+    validate_dependency_disabled_native_toolchain(build)
 
     def require(key: str) -> str:
         """@brief Return one required serialized cache value.
@@ -540,7 +830,7 @@ def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
             f"source={cached_source}, build={cached_build}"
         )
     expected_values = {
-        "BUILD_TESTING": "OFF",
+        "BUILD_TESTING": "ON",
         "PHOTOSPIDER_BUILD_IPC": "OFF",
         "PHOTOSPIDER_ENABLE_OPENCV": "OFF",
         "PHOTOSPIDER_ENABLE_YAML": "OFF",
@@ -549,6 +839,7 @@ def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
         "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "OFF",
         "CMAKE_DISABLE_FIND_PACKAGE_OpenCV": "ON",
         "CMAKE_DISABLE_FIND_PACKAGE_yaml-cpp": "ON",
+        "CMAKE_DISABLE_FIND_PACKAGE_OpenEXR": "ON",
     }
     for key, expected in expected_values.items():
         actual = require(key)
@@ -568,6 +859,48 @@ def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
         raise RuntimeError(
             f"reusable producer build type is not requested {config}"
         )
+
+
+def configured_test_executable(
+    build: Path, config: str, target_name: str
+) -> Path:
+    """@brief Resolve one built dependency-neutral integration binary.
+
+    @param build Configured dependency-disabled producer build directory.
+    @param config Requested single- or multi-config build configuration.
+    @param target_name Exact executable target basename without platform suffix.
+    @return Expected executable path for the cached generator mode.
+    @throws OSError If the producer cache cannot be read.
+    @throws RuntimeError If configuration metadata is missing or contradicts
+      the requested configuration.
+    @note The caller executes the returned path directly, so a missing or
+      non-runnable target fails through the ordinary process-start boundary.
+    """
+
+    cache = cmake_cache_values(build)
+    configuration_types = cache.get("CMAKE_CONFIGURATION_TYPES", "")
+    if configuration_types:
+        available = [
+            candidate.strip()
+            for candidate in configuration_types.split(";")
+            if candidate.strip()
+        ]
+        if config not in available:
+            raise RuntimeError(
+                "dependency-disabled test configuration mismatch: "
+                f"requested {config}, available {available}"
+            )
+        output_directory = build / "tests" / config
+    else:
+        build_type = cache.get("CMAKE_BUILD_TYPE")
+        if build_type != config:
+            raise RuntimeError(
+                "dependency-disabled test build type mismatch: "
+                f"requested {config}, got {build_type}"
+            )
+        output_directory = build / "tests"
+    executable_suffix = ".exe" if sys.platform == "win32" else ""
+    return output_directory / (target_name + executable_suffix)
 
 
 def write_component_probe(source: Path, *, required: bool) -> None:
@@ -608,19 +941,1537 @@ def write_component_probe(source: Path, *, required: bool) -> None:
     (source / "CMakeLists.txt").write_text("\n".join(body), encoding="utf-8")
 
 
+def write_data_provider_producers(source: Path) -> None:
+    """@brief Write independent C11/C++17 pure-C ABI producer fixtures.
+
+    @param source Existing installed-consumer source directory.
+    @return None.
+    @throws OSError If source files cannot be written.
+    @note Each producer defines the exact exported v3 handshake names and is
+      linked into a separate process so duplicate symbols never coexist.
+    """
+
+    (source / "data_provider_c11.c").write_text(
+        dedent(
+            r"""
+            #include <stdint.h>
+            #include <string.h>
+
+            #define PS_DATA_PROVIDER_BUILD
+            #include <photospider/plugin/data_provider_api.h>
+
+            static const uint8_t kSchemaName[] = "installed_c11_schema";
+            static const uint8_t kFacetName[] = "installed_c11_facet";
+            static const uint8_t kLayoutName[] = "installed_c11_layout";
+            static const uint8_t kImplementationVersion[] = "c11-1";
+            static int kProviderContext = 11;
+            static uint32_t kOwnerDestroyCount = 0U;
+            static uint32_t kProviderDestroyCount = 0U;
+
+            static const ps_data_identity_v3 kLogicalSitesProperty = {
+                0x1170000000000030ULL, 0x1170000000000030ULL};
+            static const ps_data_identity_v3 kCallbackLocalBytesProperty = {
+                0x1170000000000035ULL, 0x1170000000000035ULL};
+            static const ps_data_identity_v3 kLogicalSiteDomain = {
+                0x1170000000000040ULL, 0x1170000000000040ULL};
+
+            _Static_assert(sizeof(ps_data_output_sink_v3) ==
+                               PS_DATA_OUTPUT_SINK_V3_SIZE,
+                           "installed C11 output sink size");
+            _Static_assert(sizeof(ps_data_diagnostic_v3) ==
+                               PS_DATA_DIAGNOSTIC_V3_SIZE,
+                           "installed C11 diagnostic size");
+            _Static_assert(sizeof(ps_data_property_result_v3) ==
+                               PS_DATA_PROPERTY_RESULT_V3_SIZE,
+                           "installed C11 property size");
+            _Static_assert(offsetof(ps_data_diagnostic_v3, message_size) == 16U,
+                           "installed C11 diagnostic layout");
+            _Static_assert(offsetof(ps_data_property_result_v3, bytes_size) ==
+                               24U,
+                           "installed C11 property layout");
+            _Static_assert(offsetof(ps_data_output_sink_v3, copy) == 16U,
+                           "installed C11 output sink layout");
+            _Static_assert(offsetof(ps_data_provider_api_v3, validate) == 64U,
+                           "installed C11 API validate offset");
+            _Static_assert(
+                offsetof(ps_data_provider_api_v3, destroy_provider) == 120U,
+                "installed C11 API destroy offset");
+
+            static const ps_data_definition_v3 kDefinitions[] = {
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_SCHEMA_V3,
+                 1U,
+                 {0x1170000000000001ULL, 0x1170000000000011ULL},
+                 {kSchemaName, sizeof(kSchemaName) - 1U},
+                 {0U, 0U}},
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_FACET_V3,
+                 1U,
+                 {0x1170000000000005ULL, 0x1170000000000015ULL},
+                 {kFacetName, sizeof(kFacetName) - 1U},
+                 {0U, 0U}},
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_LAYOUT_V3,
+                 1U,
+                 {0x1170000000000002ULL, 0x1170000000000012ULL},
+                 {kLayoutName, sizeof(kLayoutName) - 1U},
+                 {0U, 0U}},
+            };
+
+            /**
+             * @brief Clear one optional callback diagnostic to canonical success.
+             * @param diagnostic Optional Host-owned output record.
+             * @return Nothing.
+             * @throws Nothing.
+             * @note A null diagnostic is accepted by every fixture callback.
+             */
+            static void clear_diagnostic(ps_data_diagnostic_v3* diagnostic) {
+              if (diagnostic != NULL) {
+                memset(diagnostic, 0, sizeof(*diagnostic));
+                diagnostic->struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+              }
+            }
+
+            /**
+             * @brief Compare two fixed extension identities.
+             * @param left First identity.
+             * @param right Second identity.
+             * @return Nonzero only when both words match.
+             * @throws Nothing.
+             */
+            static int identity_equals(ps_data_identity_v3 left,
+                                       ps_data_identity_v3 right) {
+              return left.high == right.high && left.low == right.low;
+            }
+
+            /**
+             * @brief Report whether one metadata callback received no payload.
+             * @param value Borrowed callback Value view.
+             * @return Nonzero only for the exact three-buffer pure view.
+             * @throws Nothing.
+             * @note Buffer metadata remains visible while payload authority must
+             *       be absent from every buffer.
+             */
+            static int pure_value_view(const ps_data_value_view_v3* value) {
+              uint64_t index = 0U;
+              if (value == NULL || value->buffers == NULL ||
+                  value->buffer_count != 3U) {
+                return 0;
+              }
+              for (index = 0U; index < value->buffer_count; ++index) {
+                if (value->buffers[index].data != NULL ||
+                    (value->buffers[index].flags &
+                     PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) != 0U) {
+                  return 0;
+                }
+              }
+              return 1;
+            }
+
+            /**
+             * @brief Borrow one checked logical-role payload from a Value view.
+             * @throws Nothing for ordinary aggregate operations.
+             * @note The pointer never outlives the current provider callback.
+             */
+            typedef struct installed_role_bytes {
+              /** @brief Optional first byte of the selected logical range. */
+              const uint8_t* data;
+              /** @brief Exact logical-range byte count. */
+              uint64_t size;
+            } installed_role_bytes;
+
+            /**
+             * @brief Find one unique role with or without payload authority.
+             * @param value Borrowed callback Value view.
+             * @param role Exact provider-defined logical role.
+             * @param require_payload Whether a readable payload is mandatory.
+             * @param output Non-null selected range output.
+             * @return Nonzero only for one bounded unique role.
+             * @throws Nothing.
+             * @note The returned pointer is null for pure metadata callbacks.
+             */
+            static int find_role(const ps_data_value_view_v3* value,
+                                 uint32_t role, int require_payload,
+                                 installed_role_bytes* output) {
+              uint64_t index = 0U;
+              int found = 0;
+              if (value == NULL || output == NULL || value->buffers == NULL ||
+                  value->envelopes == NULL) {
+                return 0;
+              }
+              output->data = NULL;
+              output->size = 0U;
+              for (index = 0U; index < value->envelope_count; ++index) {
+                const ps_data_buffer_envelope_v3* envelope =
+                    &value->envelopes[index];
+                const ps_data_buffer_view_v3* buffer = NULL;
+                if (envelope->logical_role != role) {
+                  continue;
+                }
+                if (found || envelope->buffer_index >= value->buffer_count) {
+                  return 0;
+                }
+                buffer = &value->buffers[envelope->buffer_index];
+                if (envelope->offset > buffer->byte_size ||
+                    envelope->length > buffer->byte_size - envelope->offset) {
+                  return 0;
+                }
+                if (require_payload &&
+                    (buffer->data == NULL ||
+                     (buffer->flags & PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) ==
+                         0U)) {
+                  return 0;
+                }
+                output->data = require_payload
+                                   ? buffer->data + envelope->offset
+                                   : NULL;
+                output->size = envelope->length;
+                found = 1;
+              }
+              return found;
+            }
+
+            /**
+             * @brief Validate the installed three-buffer fixture view.
+             * @param value Borrowed payload-enabled callback Value view.
+             * @return Nonzero only for the exact Schema/Facet/Layout fixture.
+             * @throws Nothing.
+             */
+            static int valid_fixture_view(const ps_data_value_view_v3* value) {
+              installed_role_bytes counts;
+              installed_role_bytes offsets;
+              installed_role_bytes samples;
+              return value != NULL && value->schema != NULL &&
+                     value->layout != NULL && value->facets != NULL &&
+                     value->facet_count == 1U && value->buffer_count == 3U &&
+                     value->envelope_count == 3U &&
+                     value->schema->payload.data != NULL &&
+                     value->schema->payload.size >= 18U &&
+                     value->facets[0].payload.data != NULL &&
+                     value->facets[0].payload.size >= 6U &&
+                     value->layout->payload.data != NULL &&
+                     value->layout->payload.size >= 3U &&
+                     find_role(value, 1U, 1, &counts) && counts.size == 12U &&
+                     find_role(value, 2U, 1, &offsets) &&
+                     offsets.size == 32U &&
+                     find_role(value, 3U, 1, &samples) && samples.size == 6U;
+            }
+
+            /**
+             * @brief Accept one exact bounded three-buffer fixture value.
+             * @param context Expected provider context.
+             * @param value Borrowed payload-enabled callback Value view.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK only for the exact installed fixture.
+             * @throws Nothing across the pure-C ABI.
+             */
+            static ps_data_status_v3 PS_DATA_CALL validate_value(
+                void* context, const ps_data_value_view_v3* value,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+              clear_diagnostic(diagnostic);
+              return context == &kProviderContext && output != NULL &&
+                             output->copy != NULL && valid_fixture_view(value)
+                         ? PS_DATA_STATUS_OK_V3
+                         : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            /**
+             * @brief Evaluate one metadata-only property query.
+             * @param context Expected provider context.
+             * @param value Borrowed pure callback Value view.
+             * @param query Borrowed property request.
+             * @param result Non-null Host-owned property result.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK with Available logical-site count or Unknown otherwise.
+             * @throws Nothing across the pure-C ABI.
+             */
+            static ps_data_status_v3 PS_DATA_CALL query_value(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_property_query_v3* query,
+                ps_data_property_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+              clear_diagnostic(diagnostic);
+              if (context != &kProviderContext || query == NULL ||
+                  result == NULL || output == NULL || output->copy == NULL ||
+                  !pure_value_view(value)) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_PROPERTY_RESULT_V3_SIZE;
+              if (identity_equals(query->property, kLogicalSitesProperty)) {
+                result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
+                result->value_kind = PS_DATA_PROPERTY_VALUE_UINT64_V3;
+                result->uint64_value = 3U;
+              } else if (identity_equals(query->property,
+                                         kCallbackLocalBytesProperty)) {
+                uint8_t bytes[4] = {0x11U, 0x22U, 0x33U, 0x44U};
+                ps_data_status_v3 status;
+                result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
+                result->value_kind = PS_DATA_PROPERTY_VALUE_BYTES_V3;
+                result->bytes_size = sizeof(bytes);
+                status = output->copy(
+                    output->context, PS_DATA_OUTPUT_PROPERTY_BYTES_V3, bytes,
+                    sizeof(bytes));
+                memset(bytes, 0xee, sizeof(bytes));
+                return status;
+              } else {
+                result->state = PS_DATA_PROPERTY_UNKNOWN_V3;
+                result->value_kind = PS_DATA_PROPERTY_VALUE_NONE_V3;
+              }
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Evaluate one bounded metadata-only Region request.
+             * @param context Expected provider context.
+             * @param value Borrowed pure callback Value view.
+             * @param request Borrowed Region request.
+             * @param result Non-null Host-owned Region result.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK with Exact or Unsupported canonical state.
+             * @throws Nothing across the pure-C ABI.
+             */
+            static ps_data_status_v3 PS_DATA_CALL evaluate_region(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_region_request_v3* request,
+                ps_data_region_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+              clear_diagnostic(diagnostic);
+              if (context != &kProviderContext || request == NULL ||
+                  result == NULL || output == NULL || output->copy == NULL ||
+                  !pure_value_view(value)) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_REGION_RESULT_V3_SIZE;
+              if (request->kind == PS_DATA_REGION_WHOLE_V3) {
+                result->state = PS_DATA_REGION_EXACT_V3;
+                result->selected_site_count = 3U;
+              } else if (request->kind == PS_DATA_REGION_TENSOR_SLICE_V3 &&
+                         identity_equals(request->domain,
+                                         kLogicalSiteDomain) &&
+                         request->rank == 1U && request->begin != NULL &&
+                         request->end != NULL &&
+                         request->begin[0] <= request->end[0] &&
+                         request->end[0] <= 3U) {
+                result->state = PS_DATA_REGION_EXACT_V3;
+                result->selected_site_count =
+                    request->end[0] - request->begin[0];
+              } else {
+                result->state = PS_DATA_REGION_UNSUPPORTED_STATE_V3;
+              }
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Evaluate one bounded metadata-only DataSpec request.
+             * @param context Expected provider context.
+             * @param value Borrowed pure callback Value view.
+             * @param request Borrowed DataSpec request.
+             * @param result Non-null Host-owned DataSpec result.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK with Subset or Disjoint canonical relation.
+             * @throws Nothing across the pure-C ABI.
+             */
+            static ps_data_status_v3 PS_DATA_CALL evaluate_spec(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_spec_request_v3* request,
+                ps_data_spec_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+              clear_diagnostic(diagnostic);
+              if (context != &kProviderContext || request == NULL ||
+                  result == NULL || output == NULL || output->copy == NULL ||
+                  !pure_value_view(value)) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_SPEC_RESULT_V3_SIZE;
+              result->relation =
+                  identity_equals(request->schema_identity,
+                                  kDefinitions[0].identity) &&
+                          request->minimum_version <= 1U &&
+                          request->maximum_version >= 1U &&
+                          request->minimum_logical_sites <= 3U &&
+                          request->maximum_logical_sites >= 3U
+                      ? PS_DATA_SPEC_SUBSET_V3
+                      : PS_DATA_SPEC_DISJOINT_V3;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Visit the fixture's canonical logical sample-record bytes.
+             * @param context Expected provider context.
+             * @param value Borrowed payload-enabled callback Value view.
+             * @param sink Non-null Host byte sink.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return Sink status after the exact logical sample range is sent.
+             * @throws Nothing across the pure-C ABI.
+             */
+            static ps_data_status_v3 PS_DATA_CALL visit_content(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_byte_sink_v3* sink,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+              installed_role_bytes samples;
+              clear_diagnostic(diagnostic);
+              if (context != &kProviderContext || sink == NULL ||
+                  sink->append == NULL || output == NULL ||
+                  output->copy == NULL || !valid_fixture_view(value) ||
+                  !find_role(value, 3U, 1, &samples)) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              return sink->append(sink->context, samples.data, samples.size);
+            }
+
+            /**
+             * @brief Create one borrowed fixture owner token.
+             * @param context Expected provider context.
+             * @param owner Non-null Host-owned token output.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK only when the provider context can be borrowed.
+             * @throws Nothing across the pure-C ABI.
+             * @note The fixture token aliases context and owns no allocation.
+             */
+            static ps_data_status_v3 PS_DATA_CALL create_owner(
+                void* context, void** owner,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+              clear_diagnostic(diagnostic);
+              if (context == NULL || owner == NULL || output == NULL ||
+                  output->copy == NULL) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              *owner = context;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Validate and release the borrowed fixture owner token.
+             * @param context Expected provider context.
+             * @param owner Token returned by create_owner.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK only for the exact borrowed token.
+             * @throws Nothing across the pure-C ABI.
+             */
+            static ps_data_status_v3 PS_DATA_CALL destroy_owner(
+                void* context, void* owner,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+              clear_diagnostic(diagnostic);
+              if (context == NULL || owner != context || output == NULL ||
+                  output->copy == NULL) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              ++kOwnerDestroyCount;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Finish one immutable fixture generation.
+             * @param context Expected provider context.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK only for the live fixture context.
+             * @throws Nothing across the pure-C ABI.
+             */
+            static ps_data_status_v3 PS_DATA_CALL destroy_provider(
+                void* context,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) PS_DATA_NOEXCEPT {
+              clear_diagnostic(diagnostic);
+              if (context == NULL || output == NULL || output->copy == NULL) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              ++kProviderDestroyCount;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Return the exact owner-destroy observation for this process.
+             * @return Number of successfully destroyed owner tokens.
+             * @throws Nothing.
+             */
+            uint32_t installed_provider_owner_destroy_count(void) {
+              return kOwnerDestroyCount;
+            }
+
+            /**
+             * @brief Return the exact final provider-destroy observation.
+             * @return Number of successfully destroyed provider generations.
+             * @throws Nothing.
+             */
+            uint32_t installed_provider_destroy_count(void) {
+              return kProviderDestroyCount;
+            }
+
+            /**
+             * @brief Report the exact installed provider ABI version.
+             * @return PS_DATA_PROVIDER_ABI_VERSION.
+             * @throws Nothing across the pure-C ABI.
+             */
+            uint32_t PS_DATA_CALL ps_data_provider_get_abi_version(void)
+                PS_DATA_NOEXCEPT {
+              return PS_DATA_PROVIDER_ABI_VERSION;
+            }
+
+            /**
+             * @brief Populate the complete immutable installed provider API.
+             * @param api Non-null caller record with exact struct size.
+             * @return OK on success or InvalidArgument for bad framing.
+             * @throws Nothing across the pure-C ABI.
+             * @note Every returned pointer remains process-static.
+             */
+            ps_data_status_v3 PS_DATA_CALL ps_data_provider_get_api_v3(
+                ps_data_provider_api_v3* api) PS_DATA_NOEXCEPT {
+              if (api == NULL ||
+                  api->struct_size != PS_DATA_PROVIDER_API_V3_SIZE) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              memset(api, 0, sizeof(*api));
+              api->struct_size = PS_DATA_PROVIDER_API_V3_SIZE;
+              api->abi_version = PS_DATA_PROVIDER_ABI_VERSION;
+              api->definition_count =
+                  (uint32_t)(sizeof(kDefinitions) / sizeof(kDefinitions[0]));
+              api->provider_identity.high = 0x11700000000000C1ULL;
+              api->provider_identity.low = 0x11700000000001C1ULL;
+              api->implementation_version.data = kImplementationVersion;
+              api->implementation_version.size =
+                  sizeof(kImplementationVersion) - 1U;
+              api->definitions = kDefinitions;
+              api->provider_context = &kProviderContext;
+              api->validate = validate_value;
+              api->query = query_value;
+              api->evaluate_region = evaluate_region;
+              api->evaluate_spec = evaluate_spec;
+              api->visit_content = visit_content;
+              api->create_owner = create_owner;
+              api->destroy_owner = destroy_owner;
+              api->destroy_provider = destroy_provider;
+              return PS_DATA_STATUS_OK_V3;
+            }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    (source / "data_provider_cpp17.cpp").write_text(
+        dedent(
+            r"""
+            #include <cstdint>
+            #include <cstring>
+
+            #define PS_DATA_PROVIDER_BUILD
+            #include <photospider/plugin/data_provider_api.h>
+
+            namespace {
+
+            constexpr std::uint8_t kSchemaName[] = "installed_cpp17_schema";
+            constexpr std::uint8_t kFacetName[] = "installed_cpp17_facet";
+            constexpr std::uint8_t kLayoutName[] = "installed_cpp17_layout";
+            constexpr std::uint8_t kImplementationVersion[] = "cpp17-1";
+            int kProviderContext = 17;
+            std::uint32_t kOwnerDestroyCount = 0U;
+            std::uint32_t kProviderDestroyCount = 0U;
+
+            constexpr ps_data_identity_v3 kLogicalSitesProperty{
+                0x1170000000000030ULL, 0x1170000000000030ULL};
+            constexpr ps_data_identity_v3 kCallbackLocalBytesProperty{
+                0x1170000000000035ULL, 0x1170000000000035ULL};
+            constexpr ps_data_identity_v3 kLogicalSiteDomain{
+                0x1170000000000040ULL, 0x1170000000000040ULL};
+
+            static_assert(sizeof(ps_data_output_sink_v3) ==
+                          PS_DATA_OUTPUT_SINK_V3_SIZE);
+            static_assert(sizeof(ps_data_diagnostic_v3) ==
+                          PS_DATA_DIAGNOSTIC_V3_SIZE);
+            static_assert(sizeof(ps_data_property_result_v3) ==
+                          PS_DATA_PROPERTY_RESULT_V3_SIZE);
+            static_assert(offsetof(ps_data_diagnostic_v3, message_size) == 16U);
+            static_assert(offsetof(ps_data_property_result_v3, bytes_size) ==
+                          24U);
+            static_assert(offsetof(ps_data_output_sink_v3, copy) == 16U);
+            static_assert(offsetof(ps_data_provider_api_v3, validate) == 64U);
+            static_assert(offsetof(ps_data_provider_api_v3, destroy_provider) ==
+                          120U);
+
+            constexpr ps_data_definition_v3 kDefinitions[] = {
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_SCHEMA_V3,
+                 1U,
+                 {0x1170000000000003ULL, 0x1170000000000013ULL},
+                 {kSchemaName, sizeof(kSchemaName) - 1U},
+                 {0U, 0U}},
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_FACET_V3,
+                 1U,
+                 {0x1170000000000006ULL, 0x1170000000000016ULL},
+                 {kFacetName, sizeof(kFacetName) - 1U},
+                 {0U, 0U}},
+                {PS_DATA_DEFINITION_V3_SIZE,
+                 PS_DATA_DEFINITION_LAYOUT_V3,
+                 1U,
+                 {0x1170000000000004ULL, 0x1170000000000014ULL},
+                 {kLayoutName, sizeof(kLayoutName) - 1U},
+                 {0U, 0U}},
+            };
+
+            /**
+             * @brief Clear one optional callback diagnostic to canonical success.
+             * @param diagnostic Optional Host-owned output record.
+             * @return Nothing.
+             * @throws Nothing.
+             * @note A null diagnostic is accepted by every fixture callback.
+             */
+            void clear_diagnostic(ps_data_diagnostic_v3* diagnostic) noexcept {
+              if (diagnostic != nullptr) {
+                std::memset(diagnostic, 0, sizeof(*diagnostic));
+                diagnostic->struct_size = PS_DATA_DIAGNOSTIC_V3_SIZE;
+              }
+            }
+
+            /**
+             * @brief Compare two fixed extension identities.
+             * @param left First identity.
+             * @param right Second identity.
+             * @return True only when both words match.
+             * @throws Nothing.
+             */
+            constexpr bool identity_equals(ps_data_identity_v3 left,
+                                           ps_data_identity_v3 right) noexcept {
+              return left.high == right.high && left.low == right.low;
+            }
+
+            /**
+             * @brief Report whether one metadata callback received no payload.
+             * @param value Borrowed callback Value view.
+             * @return True only for the exact three-buffer pure view.
+             * @throws Nothing.
+             * @note Buffer metadata remains visible while payload authority must
+             *       be absent from every buffer.
+             */
+            bool pure_value_view(
+                const ps_data_value_view_v3* value) noexcept {
+              if (value == nullptr || value->buffers == nullptr ||
+                  value->buffer_count != 3U) {
+                return false;
+              }
+              for (std::uint64_t index = 0U; index < value->buffer_count;
+                   ++index) {
+                if (value->buffers[index].data != nullptr ||
+                    (value->buffers[index].flags &
+                     PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) != 0U) {
+                  return false;
+                }
+              }
+              return true;
+            }
+
+            /**
+             * @brief Borrow one checked logical-role payload from a Value view.
+             * @throws Nothing for ordinary aggregate operations.
+             * @note The pointer never outlives the current provider callback.
+             */
+            struct InstalledRoleBytes final {
+              /** @brief Optional first byte of the selected logical range. */
+              const std::uint8_t* data = nullptr;
+              /** @brief Exact logical-range byte count. */
+              std::uint64_t size = 0U;
+            };
+
+            /**
+             * @brief Find one unique role with or without payload authority.
+             * @param value Borrowed callback Value view.
+             * @param role Exact provider-defined logical role.
+             * @param require_payload Whether a readable payload is mandatory.
+             * @param output Non-null selected range output.
+             * @return True only for one bounded unique role.
+             * @throws Nothing.
+             * @note The returned pointer is null for pure metadata callbacks.
+             */
+            bool find_role(const ps_data_value_view_v3* value,
+                           std::uint32_t role, bool require_payload,
+                           InstalledRoleBytes* output) noexcept {
+              if (value == nullptr || output == nullptr ||
+                  value->buffers == nullptr || value->envelopes == nullptr) {
+                return false;
+              }
+              *output = {};
+              bool found = false;
+              for (std::uint64_t index = 0U; index < value->envelope_count;
+                   ++index) {
+                const ps_data_buffer_envelope_v3& envelope =
+                    value->envelopes[index];
+                if (envelope.logical_role != role) {
+                  continue;
+                }
+                if (found || envelope.buffer_index >= value->buffer_count) {
+                  return false;
+                }
+                const ps_data_buffer_view_v3& buffer =
+                    value->buffers[envelope.buffer_index];
+                if (envelope.offset > buffer.byte_size ||
+                    envelope.length > buffer.byte_size - envelope.offset) {
+                  return false;
+                }
+                if (require_payload &&
+                    (buffer.data == nullptr ||
+                     (buffer.flags & PS_DATA_BUFFER_PAYLOAD_AVAILABLE_V3) ==
+                         0U)) {
+                  return false;
+                }
+                output->data = require_payload
+                                   ? buffer.data + envelope.offset
+                                   : nullptr;
+                output->size = envelope.length;
+                found = true;
+              }
+              return found;
+            }
+
+            /**
+             * @brief Validate the installed three-buffer fixture view.
+             * @param value Borrowed payload-enabled callback Value view.
+             * @return True only for the exact Schema/Facet/Layout fixture.
+             * @throws Nothing.
+             */
+            bool valid_fixture_view(
+                const ps_data_value_view_v3* value) noexcept {
+              InstalledRoleBytes counts;
+              InstalledRoleBytes offsets;
+              InstalledRoleBytes samples;
+              return value != nullptr && value->schema != nullptr &&
+                     value->layout != nullptr && value->facets != nullptr &&
+                     value->facet_count == 1U && value->buffer_count == 3U &&
+                     value->envelope_count == 3U &&
+                     value->schema->payload.data != nullptr &&
+                     value->schema->payload.size >= 18U &&
+                     value->facets[0].payload.data != nullptr &&
+                     value->facets[0].payload.size >= 6U &&
+                     value->layout->payload.data != nullptr &&
+                     value->layout->payload.size >= 3U &&
+                     find_role(value, 1U, true, &counts) &&
+                     counts.size == 12U &&
+                     find_role(value, 2U, true, &offsets) &&
+                     offsets.size == 32U &&
+                     find_role(value, 3U, true, &samples) &&
+                     samples.size == 6U;
+            }
+
+            /**
+             * @brief Accept one exact bounded three-buffer fixture value.
+             * @param context Expected provider context.
+             * @param value Borrowed payload-enabled callback Value view.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK only for the exact installed fixture.
+             * @throws Nothing across the pure-C ABI.
+             */
+            ps_data_status_v3 PS_DATA_CALL validate_value(
+                void* context, const ps_data_value_view_v3* value,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
+              clear_diagnostic(diagnostic);
+              return context == &kProviderContext && output != nullptr &&
+                             output->copy != nullptr && valid_fixture_view(value)
+                         ? PS_DATA_STATUS_OK_V3
+                         : PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+            }
+
+            /**
+             * @brief Evaluate one metadata-only property query.
+             * @param context Expected provider context.
+             * @param value Borrowed pure callback Value view.
+             * @param query Borrowed property request.
+             * @param result Non-null Host-owned property result.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK with Available logical-site count or Unknown otherwise.
+             * @throws Nothing across the pure-C ABI.
+             */
+            ps_data_status_v3 PS_DATA_CALL query_value(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_property_query_v3* query,
+                ps_data_property_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
+              clear_diagnostic(diagnostic);
+              if (context != &kProviderContext || query == nullptr ||
+                  result == nullptr || output == nullptr ||
+                  output->copy == nullptr || !pure_value_view(value)) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              std::memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_PROPERTY_RESULT_V3_SIZE;
+              if (identity_equals(query->property, kLogicalSitesProperty)) {
+                result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
+                result->value_kind = PS_DATA_PROPERTY_VALUE_UINT64_V3;
+                result->uint64_value = 3U;
+              } else if (identity_equals(query->property,
+                                         kCallbackLocalBytesProperty)) {
+                std::uint8_t bytes[4U]{0x11U, 0x22U, 0x33U, 0x44U};
+                result->state = PS_DATA_PROPERTY_AVAILABLE_V3;
+                result->value_kind = PS_DATA_PROPERTY_VALUE_BYTES_V3;
+                result->bytes_size = sizeof(bytes);
+                const ps_data_status_v3 status = output->copy(
+                    output->context, PS_DATA_OUTPUT_PROPERTY_BYTES_V3, bytes,
+                    sizeof(bytes));
+                std::memset(bytes, 0xee, sizeof(bytes));
+                return status;
+              } else {
+                result->state = PS_DATA_PROPERTY_UNKNOWN_V3;
+                result->value_kind = PS_DATA_PROPERTY_VALUE_NONE_V3;
+              }
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Evaluate one bounded metadata-only Region request.
+             * @param context Expected provider context.
+             * @param value Borrowed pure callback Value view.
+             * @param request Borrowed Region request.
+             * @param result Non-null Host-owned Region result.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK with Exact or Unsupported canonical state.
+             * @throws Nothing across the pure-C ABI.
+             */
+            ps_data_status_v3 PS_DATA_CALL evaluate_region(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_region_request_v3* request,
+                ps_data_region_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
+              clear_diagnostic(diagnostic);
+              if (context != &kProviderContext || request == nullptr ||
+                  result == nullptr || output == nullptr ||
+                  output->copy == nullptr || !pure_value_view(value)) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              std::memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_REGION_RESULT_V3_SIZE;
+              if (request->kind == PS_DATA_REGION_WHOLE_V3) {
+                result->state = PS_DATA_REGION_EXACT_V3;
+                result->selected_site_count = 3U;
+              } else if (request->kind == PS_DATA_REGION_TENSOR_SLICE_V3 &&
+                         identity_equals(request->domain,
+                                         kLogicalSiteDomain) &&
+                         request->rank == 1U && request->begin != nullptr &&
+                         request->end != nullptr &&
+                         request->begin[0] <= request->end[0] &&
+                         request->end[0] <= 3U) {
+                result->state = PS_DATA_REGION_EXACT_V3;
+                result->selected_site_count =
+                    request->end[0] - request->begin[0];
+              } else {
+                result->state = PS_DATA_REGION_UNSUPPORTED_STATE_V3;
+              }
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Evaluate one bounded metadata-only DataSpec request.
+             * @param context Expected provider context.
+             * @param value Borrowed pure callback Value view.
+             * @param request Borrowed DataSpec request.
+             * @param result Non-null Host-owned DataSpec result.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK with Subset or Disjoint canonical relation.
+             * @throws Nothing across the pure-C ABI.
+             */
+            ps_data_status_v3 PS_DATA_CALL evaluate_spec(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_spec_request_v3* request,
+                ps_data_spec_result_v3* result,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
+              clear_diagnostic(diagnostic);
+              if (context != &kProviderContext || request == nullptr ||
+                  result == nullptr || output == nullptr ||
+                  output->copy == nullptr || !pure_value_view(value)) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              std::memset(result, 0, sizeof(*result));
+              result->struct_size = PS_DATA_SPEC_RESULT_V3_SIZE;
+              result->relation =
+                  identity_equals(request->schema_identity,
+                                  kDefinitions[0].identity) &&
+                          request->minimum_version <= 1U &&
+                          request->maximum_version >= 1U &&
+                          request->minimum_logical_sites <= 3U &&
+                          request->maximum_logical_sites >= 3U
+                      ? PS_DATA_SPEC_SUBSET_V3
+                      : PS_DATA_SPEC_DISJOINT_V3;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Visit the fixture's canonical logical sample-record bytes.
+             * @param context Expected provider context.
+             * @param value Borrowed payload-enabled callback Value view.
+             * @param sink Non-null Host byte sink.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return Sink status after the exact logical sample range is sent.
+             * @throws Nothing across the pure-C ABI.
+             */
+            ps_data_status_v3 PS_DATA_CALL visit_content(
+                void* context, const ps_data_value_view_v3* value,
+                const ps_data_byte_sink_v3* sink,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
+              InstalledRoleBytes samples;
+              clear_diagnostic(diagnostic);
+              if (context != &kProviderContext || sink == nullptr ||
+                  sink->append == nullptr || output == nullptr ||
+                  output->copy == nullptr || !valid_fixture_view(value) ||
+                  !find_role(value, 3U, true, &samples)) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              return sink->append(sink->context, samples.data, samples.size);
+            }
+
+            /**
+             * @brief Create one borrowed fixture owner token.
+             * @param context Expected provider context.
+             * @param owner Non-null Host-owned token output.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK only when the provider context can be borrowed.
+             * @throws Nothing across the pure-C ABI.
+             * @note The fixture token aliases context and owns no allocation.
+             */
+            ps_data_status_v3 PS_DATA_CALL create_owner(
+                void* context, void** owner,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
+              clear_diagnostic(diagnostic);
+              if (context == nullptr || owner == nullptr || output == nullptr ||
+                  output->copy == nullptr) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              *owner = context;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Validate and release the borrowed fixture owner token.
+             * @param context Expected provider context.
+             * @param owner Token returned by create_owner.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK only for the exact borrowed token.
+             * @throws Nothing across the pure-C ABI.
+             */
+            ps_data_status_v3 PS_DATA_CALL destroy_owner(
+                void* context, void* owner,
+                ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
+              clear_diagnostic(diagnostic);
+              if (context == nullptr || owner != context || output == nullptr ||
+                  output->copy == nullptr) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              ++kOwnerDestroyCount;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            /**
+             * @brief Finish one immutable fixture generation.
+             * @param context Expected provider context.
+             * @param diagnostic Optional Host-owned diagnostic output.
+             * @param output Host-owned synchronous callback output sink.
+             * @return OK only for the live fixture context.
+             * @throws Nothing across the pure-C ABI.
+             */
+            ps_data_status_v3 PS_DATA_CALL destroy_provider(
+                void* context, ps_data_diagnostic_v3* diagnostic,
+                const ps_data_output_sink_v3* output) noexcept {
+              clear_diagnostic(diagnostic);
+              if (context == nullptr || output == nullptr ||
+                  output->copy == nullptr) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              ++kProviderDestroyCount;
+              return PS_DATA_STATUS_OK_V3;
+            }
+
+            }  // namespace
+
+            /**
+             * @brief Return the exact owner-destroy observation for this process.
+             * @return Number of successfully destroyed owner tokens.
+             * @throws Nothing.
+             */
+            extern "C" PS_DATA_PROVIDER_EXPORT std::uint32_t
+            installed_provider_owner_destroy_count(void) noexcept {
+              return kOwnerDestroyCount;
+            }
+
+            /**
+             * @brief Return the exact final provider-destroy observation.
+             * @return Number of successfully destroyed provider generations.
+             * @throws Nothing.
+             */
+            extern "C" PS_DATA_PROVIDER_EXPORT std::uint32_t
+            installed_provider_destroy_count(void) noexcept {
+              return kProviderDestroyCount;
+            }
+
+            /**
+             * @brief Report the exact installed provider ABI version.
+             * @return PS_DATA_PROVIDER_ABI_VERSION.
+             * @throws Nothing across the pure-C ABI.
+             */
+            extern "C" PS_DATA_PROVIDER_EXPORT std::uint32_t PS_DATA_CALL
+            ps_data_provider_get_abi_version(void) noexcept {
+              return PS_DATA_PROVIDER_ABI_VERSION;
+            }
+
+            /**
+             * @brief Populate the complete immutable installed provider API.
+             * @param api Non-null caller record with exact struct size.
+             * @return OK on success or InvalidArgument for bad framing.
+             * @throws Nothing across the pure-C ABI.
+             * @note Every returned pointer remains process-static.
+             */
+            extern "C" PS_DATA_PROVIDER_EXPORT ps_data_status_v3 PS_DATA_CALL
+            ps_data_provider_get_api_v3(ps_data_provider_api_v3* api) noexcept {
+              if (api == nullptr ||
+                  api->struct_size != PS_DATA_PROVIDER_API_V3_SIZE) {
+                return PS_DATA_STATUS_INVALID_ARGUMENT_V3;
+              }
+              std::memset(api, 0, sizeof(*api));
+              api->struct_size = PS_DATA_PROVIDER_API_V3_SIZE;
+              api->abi_version = PS_DATA_PROVIDER_ABI_VERSION;
+              api->definition_count = static_cast<std::uint32_t>(
+                  sizeof(kDefinitions) / sizeof(kDefinitions[0]));
+              api->provider_identity.high = 0x11700000000000C2ULL;
+              api->provider_identity.low = 0x11700000000001C2ULL;
+              api->implementation_version.data = kImplementationVersion;
+              api->implementation_version.size =
+                  sizeof(kImplementationVersion) - 1U;
+              api->definitions = kDefinitions;
+              api->provider_context = &kProviderContext;
+              api->validate = validate_value;
+              api->query = query_value;
+              api->evaluate_region = evaluate_region;
+              api->evaluate_spec = evaluate_spec;
+              api->visit_content = visit_content;
+              api->create_owner = create_owner;
+              api->destroy_owner = destroy_owner;
+              api->destroy_provider = destroy_provider;
+              return PS_DATA_STATUS_OK_V3;
+            }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    (source / "data_provider_consumer.cpp").write_text(
+        dedent(
+            r"""
+            #include <algorithm>
+            #include <array>
+            #include <cstddef>
+            #include <cstdint>
+            #include <memory>
+            #include <optional>
+            #include <utility>
+            #include <vector>
+
+            #include <photospider/data/extension.hpp>
+            #include <photospider/data/value.hpp>
+            #include <photospider/plugin/data_definition_registry.hpp>
+            #include <photospider/plugin/data_provider_api.h>
+
+            namespace {
+
+            /** @brief Pure logical-site-count property shared by both fixtures. */
+            constexpr ps::ExtensionIdentity kLogicalSitesProperty{
+                0x1170000000000030ULL, 0x1170000000000030ULL};
+            /** @brief Callback-local bytes property shared by both fixtures. */
+            constexpr ps::ExtensionIdentity kCallbackLocalBytesProperty{
+                0x1170000000000035ULL, 0x1170000000000035ULL};
+            /** @brief Rank-one logical-site Region domain. */
+            constexpr ps::ExtensionIdentity kLogicalSiteDomain{
+                0x1170000000000040ULL, 0x1170000000000040ULL};
+            /** @brief Installed counts-buffer logical role. */
+            constexpr std::uint32_t kCountsRole = 1U;
+            /** @brief Installed offsets-buffer logical role. */
+            constexpr std::uint32_t kOffsetsRole = 2U;
+            /** @brief Installed sample-record-buffer logical role. */
+            constexpr std::uint32_t kSamplesRole = 3U;
+
+            static_assert(sizeof(ps_data_output_sink_v3) ==
+                          PS_DATA_OUTPUT_SINK_V3_SIZE);
+            static_assert(sizeof(ps_data_diagnostic_v3) ==
+                          PS_DATA_DIAGNOSTIC_V3_SIZE);
+            static_assert(sizeof(ps_data_property_result_v3) ==
+                          PS_DATA_PROPERTY_RESULT_V3_SIZE);
+            static_assert(offsetof(ps_data_diagnostic_v3, message_size) == 16U);
+            static_assert(offsetof(ps_data_property_result_v3, bytes_size) ==
+                          24U);
+            static_assert(offsetof(ps_data_output_sink_v3, copy) == 16U);
+            static_assert(offsetof(ps_data_provider_api_v3, validate) == 64U);
+            static_assert(offsetof(ps_data_provider_api_v3, destroy_provider) ==
+                          120U);
+
+            /**
+             * @brief Observe owner destruction from the linked fixture provider.
+             * @return Exact successful owner-destroy callback count.
+             * @throws Nothing across the linked pure-C boundary.
+             */
+            extern "C" std::uint32_t
+            installed_provider_owner_destroy_count(void);
+            /**
+             * @brief Observe generation destruction from the linked provider.
+             * @return Exact successful provider-destroy callback count.
+             * @throws Nothing across the linked pure-C boundary.
+             */
+            extern "C" std::uint32_t installed_provider_destroy_count(void);
+
+            /**
+             * @brief Exact three-definition manifest discovered after load.
+             * @throws Nothing for ordinary aggregate operations.
+             * @note The consumer does not compile provider-specific identities;
+             *       it derives all Schema/Facet/Layout keys from the installed
+             *       producer's active registry snapshots.
+             */
+            struct DefinitionManifest final {
+              /** @brief Active Schema identity. */
+              ps::ExtensionIdentity schema;
+              /** @brief Active Facet identity. */
+              ps::ExtensionIdentity facet;
+              /** @brief Active Layout identity. */
+              ps::ExtensionIdentity layout;
+            };
+
+            /**
+             * @brief Parses one exact Schema/Facet/Layout snapshot sequence.
+             * @param definitions Deterministically ordered registry snapshots.
+             * @return Dynamic three-field manifest, or no value on drift.
+             * @throws Nothing under fixed aggregate construction.
+             */
+            std::optional<DefinitionManifest> parse_definition_manifest(
+                const std::vector<ps::DataDefinitionSnapshot>& definitions) {
+              if (definitions.size() != 3U ||
+                  definitions[0].kind !=
+                      ps::ExtensionDefinitionKind::Schema ||
+                  definitions[1].kind !=
+                      ps::ExtensionDefinitionKind::Facet ||
+                  definitions[2].kind !=
+                      ps::ExtensionDefinitionKind::Layout ||
+                  definitions[0].provider_generation == 0U ||
+                  definitions[0].provider_generation !=
+                      definitions[1].provider_generation ||
+                  definitions[0].provider_generation !=
+                      definitions[2].provider_generation) {
+                return std::nullopt;
+              }
+              return DefinitionManifest{definitions[0].identity,
+                                        definitions[1].identity,
+                                        definitions[2].identity};
+            }
+
+            /**
+             * @brief Appends one fixture uint32 in little-endian order.
+             * @param output Non-null destination byte vector.
+             * @param value Scalar to encode.
+             * @throws std::bad_alloc when vector growth fails.
+             */
+            void append_u32_le(std::vector<std::byte>* output,
+                               std::uint32_t value) {
+              for (std::size_t index = 0U; index < 4U; ++index) {
+                output->push_back(static_cast<std::byte>(
+                    (value >> (index * 8U)) & 0xffU));
+              }
+            }
+
+            /**
+             * @brief Appends one fixture uint64 in little-endian order.
+             * @param output Non-null destination byte vector.
+             * @param value Scalar to encode.
+             * @throws std::bad_alloc when vector growth fails.
+             */
+            void append_u64_le(std::vector<std::byte>* output,
+                               std::uint64_t value) {
+              for (std::size_t index = 0U; index < 8U; ++index) {
+                output->push_back(static_cast<std::byte>(
+                    (value >> (index * 8U)) & 0xffU));
+              }
+            }
+
+            /**
+             * @brief Builds the byte-preserving installed descriptor fixture.
+             * @param manifest Dynamic identities discovered from the producer.
+             * @return Schema plus one Facet with unknown trailing bytes.
+             * @throws std::bad_alloc when payload storage grows.
+             */
+            ps::DataDescriptorEnvelope make_descriptor(
+                const DefinitionManifest& manifest) {
+              ps::DataDescriptorEnvelope descriptor;
+              descriptor.schema.kind = ps::ExtensionDefinitionKind::Schema;
+              descriptor.schema.identity = manifest.schema;
+              descriptor.schema.structural_version = 1U;
+              append_u64_le(&descriptor.schema.payload, 3U);
+              append_u64_le(&descriptor.schema.payload, 3U);
+              descriptor.schema.payload.push_back(std::byte{0xde});
+              descriptor.schema.payload.push_back(std::byte{0xad});
+              ps::ExtensionRecord facet;
+              facet.kind = ps::ExtensionDefinitionKind::Facet;
+              facet.identity = manifest.facet;
+              facet.structural_version = 1U;
+              append_u32_le(&facet.payload, 2U);
+              facet.payload.push_back(std::byte{0xbe});
+              facet.payload.push_back(std::byte{0xef});
+              descriptor.facets.push_back(std::move(facet));
+              return descriptor;
+            }
+
+            /**
+             * @brief Publishes one immutable byte allocation for a role.
+             * @param bytes Complete nonempty allocation bytes.
+             * @return Sealed public BufferHandle retaining that allocation.
+             * @throws The same exceptions as Value::from_cpu_dense_tensor.
+             */
+            ps::BufferHandle make_buffer(std::vector<std::byte> bytes) {
+              ps::DenseTensorDescriptor descriptor;
+              descriptor.shape = {bytes.size()};
+              descriptor.element_semantics =
+                  ps::ElementSemantics::UnsignedInteger;
+              descriptor.storage_encoding = {
+                  8U, ps::StorageEncodingKind::NativeScalar};
+              ps::Value owner = ps::Value::from_cpu_dense_tensor(
+                  std::move(descriptor), std::nullopt,
+                  ps::StridedLayout{{1}, 0U}, std::move(bytes));
+              return owner.buffer_handle();
+            }
+
+            /**
+             * @brief Complete physical storage for one installed V-14 Value.
+             * @throws std::bad_alloc when owned vectors allocate.
+             */
+            struct InstalledStorage final {
+              /** @brief Dense physical buffer bindings. */
+              std::vector<ps::BufferHandle> buffers;
+              /** @brief Provider Layout plus role envelopes. */
+              ps::ProviderDefinedLayout layout;
+            };
+
+            /**
+             * @brief Creates one logical fixture in an arbitrary packing.
+             * @param manifest Dynamic producer definition identities.
+             * @param roles Physical-index to logical-role permutation.
+             * @param prefixes Ignored prefix bytes per physical allocation.
+             * @return Three-buffer fixture with exact role subranges.
+             * @throws std::bad_alloc when owned storage allocates.
+             * @throws std::logic_error when a role is unsupported.
+             */
+            InstalledStorage make_storage(
+                const DefinitionManifest& manifest,
+                std::array<std::uint32_t, 3U> roles,
+                std::array<std::size_t, 3U> prefixes) {
+              std::vector<std::byte> counts;
+              append_u32_le(&counts, 2U);
+              append_u32_le(&counts, 0U);
+              append_u32_le(&counts, 1U);
+              std::vector<std::byte> offsets;
+              append_u64_le(&offsets, 0U);
+              append_u64_le(&offsets, 2U);
+              append_u64_le(&offsets, 2U);
+              append_u64_le(&offsets, 3U);
+              const std::vector<std::byte> samples{
+                  std::byte{0x0a}, std::byte{0x01}, std::byte{0x14},
+                  std::byte{0x02}, std::byte{0x1e}, std::byte{0x03}};
+
+              InstalledStorage storage;
+              storage.layout.definition.kind =
+                  ps::ExtensionDefinitionKind::Layout;
+              storage.layout.definition.identity = manifest.layout;
+              storage.layout.definition.structural_version = 1U;
+              storage.layout.definition.payload = {
+                  std::byte{0x01}, std::byte{0xfa}, std::byte{0xce}};
+              for (std::size_t index = 0U; index < roles.size(); ++index) {
+                const std::vector<std::byte>* payload = nullptr;
+                switch (roles[index]) {
+                  case kCountsRole:
+                    payload = &counts;
+                    break;
+                  case kOffsetsRole:
+                    payload = &offsets;
+                    break;
+                  case kSamplesRole:
+                    payload = &samples;
+                    break;
+                  default:
+                    throw std::logic_error("unsupported installed role");
+                }
+                std::vector<std::byte> allocation(prefixes[index],
+                                                  std::byte{0x7c});
+                allocation.insert(allocation.end(), payload->begin(),
+                                  payload->end());
+                allocation.push_back(std::byte{0x6d});
+                storage.buffers.push_back(make_buffer(std::move(allocation)));
+                storage.layout.buffers.push_back(
+                    {static_cast<std::uint32_t>(index), roles[index],
+                     prefixes[index], payload->size()});
+              }
+              return storage;
+            }
+
+            }  // namespace
+
+            /**
+             * @brief Loads one independently compiled exact-name ABI producer.
+             * @return Zero only when the complete installed V-14 slice works.
+             * @throws Nothing; uncaught smoke failures terminate the process.
+             */
+            int main() {
+              static_assert(noexcept(ps_data_provider_get_abi_version()));
+              static_assert(noexcept(ps_data_provider_get_api_v3(nullptr)));
+              static_assert(noexcept(
+                  std::declval<ps_data_copy_output_fn_v3>()(
+                      nullptr, PS_DATA_OUTPUT_DIAGNOSTIC_MESSAGE_V3, nullptr,
+                      0U)));
+
+              ps::DataDefinitionRegistry registry;
+              std::weak_ptr<int> module_observer;
+              {
+                ps::DataProviderCandidate candidate;
+                candidate.get_abi_version = ps_data_provider_get_abi_version;
+                candidate.get_api = ps_data_provider_get_api_v3;
+                auto module_lease = std::make_shared<int>(117);
+                module_observer = module_lease;
+                candidate.module_lease = std::move(module_lease);
+                const ps::DataProviderLoadResult loaded =
+                    registry.load(std::move(candidate));
+                if (!loaded.ok() ||
+                    loaded.status != ps::DataProviderLoadStatus::Loaded ||
+                    loaded.generation == 0U ||
+                    registry.provider_count() != 1U) {
+                  return 20;
+                }
+
+                const std::vector<ps::DataDefinitionSnapshot> definitions =
+                    registry.definitions();
+                const std::optional<DefinitionManifest> manifest =
+                    parse_definition_manifest(definitions);
+                if (!manifest.has_value() ||
+                    definitions[0].provider_generation != loaded.generation) {
+                  return 21;
+                }
+
+                const ps::DataDescriptorEnvelope descriptor =
+                    make_descriptor(*manifest);
+                InstalledStorage compact = make_storage(
+                    *manifest, {kCountsRole, kOffsetsRole, kSamplesRole},
+                    {0U, 0U, 0U});
+                InstalledStorage repacked = make_storage(
+                    *manifest, {kSamplesRole, kCountsRole, kOffsetsRole},
+                    {5U, 3U, 7U});
+                const ps::Value compact_value = ps::Value::from_provider_defined(
+                    registry, descriptor, compact.layout, compact.buffers);
+                const ps::Value repacked_value =
+                    ps::Value::from_provider_defined(
+                        registry, descriptor, repacked.layout,
+                        repacked.buffers);
+                if (compact_value.buffer_count() != 3U ||
+                    compact_value.provider_generation() != loaded.generation ||
+                    compact_value.storage_layout_kind() !=
+                        ps::StorageLayoutKind::ProviderDefined) {
+                  return 22;
+                }
+
+                const ps::PropertyQueryResult property =
+                    compact_value.query_property({kLogicalSitesProperty});
+                if (property.state != ps::PropertyQueryState::Available ||
+                    property.unsigned_value != 3U) {
+                  return 23;
+                }
+                const ps::PropertyQueryResult callback_local =
+                    compact_value.query_property(
+                        {kCallbackLocalBytesProperty});
+                const std::vector<std::byte> expected_callback_local{
+                    std::byte{0x11}, std::byte{0x22}, std::byte{0x33},
+                    std::byte{0x44}};
+                if (callback_local.state !=
+                        ps::PropertyQueryState::Available ||
+                    callback_local.unsigned_value.has_value() ||
+                    callback_local.bytes_value != expected_callback_local) {
+                  return 36;
+                }
+                const ps::DataSpecResult spec =
+                    compact_value.evaluate_data_spec(
+                        {manifest->schema, 1U, 1U, 3U, 3U});
+                if (spec.relation != ps::DataSpecRelation::Subset ||
+                    spec.requires_runtime_guard) {
+                  return 24;
+                }
+                const ps::RegionSet requested =
+                    ps::RegionSet::from_tensor_slice(
+                        ps::TensorSlice{{kLogicalSiteDomain.high,
+                                         kLogicalSiteDomain.low},
+                                        {{1U, 3U}}});
+                const ps::ProviderRegionResult region =
+                    compact_value.evaluate_region(requested);
+                if (region.state != ps::ProviderRegionState::Exact ||
+                    !region.region.has_value() ||
+                    !(*region.region == requested) ||
+                    region.selected_logical_sites != 2U) {
+                  return 25;
+                }
+
+                const ps::DescriptorDigest descriptor_digest =
+                    ps::compute_descriptor_digest(descriptor);
+                const ps::StorageLayoutDigest compact_layout_digest =
+                    ps::compute_storage_layout_digest(compact.layout);
+                const ps::StorageLayoutDigest repacked_layout_digest =
+                    ps::compute_storage_layout_digest(repacked.layout);
+                const ps::ContentDigestResult compact_content =
+                    ps::compute_content_digest(compact_value);
+                const ps::ContentDigestResult repacked_content =
+                    ps::compute_content_digest(repacked_value);
+                if (compact_content.state !=
+                        ps::ContentDigestState::Available ||
+                    repacked_content.state !=
+                        ps::ContentDigestState::Available ||
+                    !compact_content.digest.has_value() ||
+                    !(compact_content.digest == repacked_content.digest) ||
+                    compact_layout_digest == repacked_layout_digest) {
+                  return 26;
+                }
+
+                ps::ExtensionArtifactEnvelope complete_artifact;
+                complete_artifact.descriptor = descriptor;
+                complete_artifact.layout = compact.layout;
+                complete_artifact.descriptor_digest = descriptor_digest;
+                complete_artifact.content_digest = compact_content.digest;
+                complete_artifact.storage_layout_digest =
+                    compact_layout_digest;
+                const std::vector<std::byte> complete_bytes =
+                    ps::encode_extension_artifact(complete_artifact);
+                if (!(ps::decode_extension_artifact(complete_bytes) ==
+                      complete_artifact)) {
+                  return 27;
+                }
+                ps::ExtensionArtifactEnvelope metadata_only =
+                    complete_artifact;
+                metadata_only.content_digest.reset();
+                const std::vector<std::byte> metadata_bytes =
+                    ps::encode_extension_artifact(metadata_only);
+                if (!(ps::decode_extension_artifact(metadata_bytes) ==
+                      metadata_only)) {
+                  return 28;
+                }
+
+                const ps::ProviderReadLease read =
+                    compact_value.acquire_provider_read(2U);
+                const ps::ProviderOwner owner =
+                    compact_value.create_provider_owner();
+                if (!read.valid() || !owner.valid() ||
+                    read.provider_generation() != loaded.generation ||
+                    owner.provider_generation() != loaded.generation ||
+                    installed_provider_owner_destroy_count() != 0U ||
+                    installed_provider_destroy_count() != 0U) {
+                  return 29;
+                }
+
+                if (!registry.unload(loaded.provider_identity) ||
+                    registry.provider_count() != 0U ||
+                    !registry.definitions().empty() ||
+                    module_observer.expired() ||
+                    installed_provider_destroy_count() != 0U) {
+                  return 30;
+                }
+                const ps::DataDefinitionResolveResult missing =
+                    registry.resolve(descriptor, compact.layout);
+                if (missing.status !=
+                    ps::DataDefinitionResolveStatus::MissingProvider) {
+                  return 31;
+                }
+                const ps::ContentDigestResult retained_content =
+                    ps::compute_content_digest(compact_value);
+                if (retained_content.state !=
+                        ps::ContentDigestState::Available ||
+                    !(retained_content.digest == compact_content.digest)) {
+                  return 32;
+                }
+
+                const ps::ExtensionArtifactEnvelope absent_complete =
+                    ps::decode_extension_artifact(complete_bytes);
+                const ps::ExtensionArtifactEnvelope absent_metadata =
+                    ps::decode_extension_artifact(metadata_bytes);
+                if (!(absent_complete == complete_artifact) ||
+                    !(absent_metadata == metadata_only) ||
+                    absent_metadata.content_digest.has_value() ||
+                    ps::encode_extension_artifact(absent_metadata) !=
+                        metadata_bytes ||
+                    absent_metadata.descriptor.schema.payload.back() !=
+                        std::byte{0xad} ||
+                    absent_metadata.descriptor.facets[0].payload.back() !=
+                        std::byte{0xef} ||
+                    absent_metadata.layout.definition.payload.back() !=
+                        std::byte{0xce} ||
+                    !(ps::compute_descriptor_digest(
+                          absent_metadata.descriptor) == descriptor_digest) ||
+                    !(ps::compute_storage_layout_digest(
+                          absent_metadata.layout) == compact_layout_digest)) {
+                  return 33;
+                }
+
+                bool rejected_without_provider = false;
+                try {
+                  (void)ps::Value::from_provider_defined(
+                      registry, absent_metadata.descriptor,
+                      absent_metadata.layout, compact.buffers);
+                } catch (const ps::ExtensionContractError& error) {
+                  rejected_without_provider =
+                      error.code() == ps::ExtensionErrorCode::MissingProvider;
+                }
+                if (!rejected_without_provider) {
+                  return 34;
+                }
+              }
+              if (!module_observer.expired() ||
+                  installed_provider_owner_destroy_count() != 1U ||
+                  installed_provider_destroy_count() != 1U) {
+                return 35;
+              }
+              return 0;
+            }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+
 def write_consumer(source: Path) -> None:
-    """@brief Write the installed Host consumer and its CMake project.
+    """@brief Write the installed Host and ABI consumers' CMake project.
 
     @param source Source directory created for the consumer.
     @return None.
     @throws OSError If source files cannot be written.
     @note One CMake target list owns validated executable creation, declaration
-      order, and the configuration-specific ``$<TARGET_FILE_NAME:...>`` plus
-      ``$<TARGET_FILE:...>`` manifest. Reserved dot spellings and typed
-      ``_NOT_BUILT`` sentinels fail before target creation or serialization.
-      The current executable verifies neutral allocation, empty-session
-      lifecycle, and explicit persistence failure without parser or
-      image-library APIs.
+      order, its paired source set, and the configuration-specific
+      ``$<TARGET_FILE_NAME:...>`` plus ``$<TARGET_FILE:...>`` manifest.
+      Reserved dot spellings and typed ``_NOT_BUILT`` sentinels fail before
+      target creation or serialization. The Host executable verifies neutral
+      allocation, installed V-6 readiness, operation metadata, empty-session
+      lifecycle, packed V-13 access, and persistence failure. Two additional
+      executables independently load C11 and C++17 exact-name data-definition
+      producers, while the clean producer runs the complete V-14 matrix.
     """
 
     source.mkdir(parents=True)
@@ -628,16 +2479,49 @@ def write_consumer(source: Path) -> None:
         "\n".join(
             [
                 "cmake_minimum_required(VERSION 3.16)",
-                "project(dependency_disabled_consumer LANGUAGES CXX)",
-                "find_package(Photospider CONFIG REQUIRED COMPONENTS embedded)",
+                "project(dependency_disabled_consumer LANGUAGES C CXX)",
+                "find_package(Photospider CONFIG REQUIRED",
+                "  COMPONENTS embedded operation_sdk data_provider_sdk)",
+                "get_target_property(_data_provider_links",
+                "  Photospider::data_provider_sdk INTERFACE_LINK_LIBRARIES)",
+                "if(_data_provider_links)",
+                '  message(FATAL_ERROR "data_provider_sdk leaked a link dependency")',
+                "endif()",
+                "add_library(installed_c11_data_provider STATIC",
+                "  data_provider_c11.c)",
+                "set_target_properties(installed_c11_data_provider PROPERTIES",
+                "  C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)",
+                "target_link_libraries(installed_c11_data_provider",
+                "  PRIVATE Photospider::data_provider_sdk)",
+                "add_library(installed_cpp17_data_provider STATIC",
+                "  data_provider_cpp17.cpp)",
+                "set_target_properties(installed_cpp17_data_provider PROPERTIES",
+                "  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)",
+                "target_link_libraries(installed_cpp17_data_provider",
+                "  PRIVATE Photospider::data_provider_sdk)",
                 "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGETS",
-                "  dependency_disabled_consumer)",
+                "  dependency_disabled_consumer",
+                "  installed_c11_data_provider_consumer",
+                "  installed_cpp17_data_provider_consumer)",
+                "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCES",
+                "  dependency_disabled_consumer.cpp",
+                "  data_provider_consumer.cpp",
+                "  data_provider_consumer.cpp)",
                 "list(LENGTH",
                 "  PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGETS",
                 "  PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET_COUNT)",
+                "list(LENGTH",
+                "  PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCES",
+                "  PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE_COUNT)",
                 "if(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET_COUNT",
                 "    EQUAL 0)",
                 '  message(FATAL_ERROR "Consumer target list is empty")',
+                "endif()",
+                "if(NOT",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE_COUNT",
+                "    EQUAL",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET_COUNT)",
+                '  message(FATAL_ERROR "Consumer target/source count differs")',
                 "endif()",
                 "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SEEN_TARGETS",
                 "  \"\")",
@@ -648,9 +2532,24 @@ def write_consumer(source: Path) -> None:
                     '  "# target\\tconfigured executable filename\\t'
                     'configured executable\\n")'
                 ),
-                "foreach(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
-                "    IN LISTS",
-                "      PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGETS)",
+                "math(EXPR PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_LAST_INDEX",
+                (
+                    '  "${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_'
+                    'TARGET_COUNT} - 1")'
+                ),
+                "foreach(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_INDEX RANGE",
+                (
+                    "    0 ${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_"
+                    "LAST_INDEX})"
+                ),
+                "  list(GET",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGETS",
+                "    ${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_INDEX}",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET)",
+                "  list(GET",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCES",
+                "    ${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_INDEX}",
+                "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE)",
                 "  if(NOT",
                 "      PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
                 '      MATCHES "^[A-Za-z0-9_.+-]+$" OR',
@@ -661,6 +2560,11 @@ def write_consumer(source: Path) -> None:
                 "     PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET",
                 '      MATCHES "_NOT_BUILT$")',
                 '    message(FATAL_ERROR "Invalid consumer target name")',
+                "  endif()",
+                "  if(NOT",
+                "      PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE",
+                '      MATCHES "^[A-Za-z0-9_.+-]+$")',
+                '    message(FATAL_ERROR "Invalid consumer source name")',
                 "  endif()",
                 "  list(FIND",
                 "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SEEN_TARGETS",
@@ -676,10 +2580,7 @@ def write_consumer(source: Path) -> None:
                 "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}\")",
                 "  add_executable(",
                 "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}\"",
-                "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}.cpp\")",
-                "  target_link_libraries(",
-                "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}\"",
-                "    PRIVATE Photospider::photospider)",
+                "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE}\")",
                 "  string(APPEND",
                 "    PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_DECLARATION",
                 "    \"${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}\\n\")",
@@ -695,6 +2596,15 @@ def write_consumer(source: Path) -> None:
                     "CONSUMER_TARGET}>\\n\")"
                 ),
                 "endforeach()",
+                "target_link_libraries(dependency_disabled_consumer",
+                "  PRIVATE Photospider::photospider",
+                "          Photospider::operation_sdk)",
+                "target_link_libraries(installed_c11_data_provider_consumer",
+                "  PRIVATE installed_c11_data_provider",
+                "          Photospider::operation_sdk)",
+                "target_link_libraries(installed_cpp17_data_provider_consumer",
+                "  PRIVATE installed_cpp17_data_provider",
+                "          Photospider::operation_sdk)",
                 "set(PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_INVENTORY_DIR",
                 "  \"${CMAKE_BINARY_DIR}/generated/ci_inventory\")",
                 "file(MAKE_DIRECTORY",
@@ -717,29 +2627,126 @@ def write_consumer(source: Path) -> None:
         ),
         encoding="utf-8",
     )
+    write_data_provider_producers(source)
     (source / "dependency_disabled_consumer.cpp").write_text(
         "\n".join(
             [
+                "#include <algorithm>",
+                "#include <cstddef>",
+                "#include <cstdint>",
                 "#include <filesystem>",
                 "#include <fstream>",
                 "#include <memory>",
                 "#include <string>",
+                "#include <utility>",
+                "#include <vector>",
                 "",
                 "#include <photospider/core/graph_error.hpp>",
                 "#include <photospider/core/image_buffer.hpp>",
                 "#include <photospider/core/result_types.hpp>",
+                "#include <photospider/data/image_view.hpp>",
+                "#include <photospider/data/packed_dense_tensor_view.hpp>",
+                "#include <photospider/data/region.hpp>",
+                "#include <photospider/data/value.hpp>",
                 "#include <photospider/host/host.hpp>",
+                "#include <photospider/memory/buffer_handle.hpp>",
+                "#include <photospider/memory/ready_fence.hpp>",
+                "#include <photospider/plugin/op_contract.hpp>",
                 "",
+                "/**",
+                " * @brief Exercises the dependency-disabled installed product.",
+                " * @param argc Process argument count.",
+                " * @param argv Process argument vector containing the work root.",
+                " * @return Zero only when every installed contract is coherent.",
+                " * @throws Nothing; uncaught smoke failures terminate the process.",
+                " * @note A sealed synchronous Value must expose a Ready fence.",
+                " */",
                 "int main(int argc, char** argv) {",
                 "  if (argc != 2) return 10;",
                 "  const std::filesystem::path root(argv[1]);",
                 "  std::filesystem::create_directories(root);",
+                "",
+                "  ps::plugin::OperationMetadata metadata;",
+                "  metadata.reentrant = false;",
+                "  metadata.maximum_parallelism = 2U;",
+                "  metadata.retained_memory_bytes = 1024U;",
+                "  metadata.scratch_bytes = 512U;",
+                '  metadata.exclusive_key = "dependency-disabled";',
+                "  if (metadata.reentrant || metadata.maximum_parallelism != 2U ||",
+                "      metadata.retained_memory_bytes != 1024U ||",
+                "      metadata.scratch_bytes != 512U ||",
+                '      metadata.exclusive_key != "dependency-disabled") {',
+                "    return 18;",
+                "  }",
                 "",
                 "  ps::ImageBuffer image = ps::make_aligned_cpu_image_buffer(",
                 "      3, 2, 4, ps::DataType::UINT8);",
                 "  ps::validate_image_buffer(image);",
                 "  if (!image.data || image.width != 3 || image.height != 2) {",
                 "    return 11;",
+                "  }",
+                "",
+                "  const ps::RegionSet region = ps::RegionSet::from_image_rect(",
+                "      {ps::image_region_domain(), 0, 3, 0, 2});",
+                "  const auto overlap = ps::intersect_regions(",
+                "      region, ps::RegionSet::from_image_rect(",
+                "                  {ps::image_region_domain(), 1, 3, 1, 2}));",
+                "  if (overlap.status() != ps::RegionOperationStatus::Exact ||",
+                "      !overlap.region().has_value() ||",
+                "      ps::region_contains(region, *overlap.region()) !=",
+                "          ps::RegionContainmentStatus::Contains) {",
+                "    return 17;",
+                "  }",
+                "",
+                "  ps::DenseTensorDescriptor descriptor{",
+                "      {2U, 3U, 1U}, ps::ElementSemantics::UnsignedInteger,",
+                "      ps::StorageEncoding{8U}};",
+                "  ps::ImageFacet facet;",
+                "  facet.x_axis = 1U;",
+                "  facet.y_axis = 0U;",
+                "  facet.channel_axis = 2U;",
+                "  ps::StridedLayout layout{{3, 1, 1}};",
+                "  std::vector<std::byte> storage{",
+                "      std::byte{1}, std::byte{2}, std::byte{3},",
+                "      std::byte{4}, std::byte{5}, std::byte{6}};",
+                "  auto builder = ps::ValueBuilder::allocate_cpu_dense_tensor(",
+                "      std::move(descriptor), facet, std::move(layout),",
+                "      storage.size());",
+                "  {",
+                "    auto write = builder.acquire_write();",
+                "    std::copy(storage.begin(), storage.end(), write.data());",
+                "  }",
+                "  const ps::Value value = builder.seal();",
+                "  const auto read = value.buffer_handle().acquire_read();",
+                "  const ps::ImageView view(value);",
+                "  if (!read.valid() || read.size() != storage.size() ||",
+                "      read.allocation_identity() !=",
+                "          value.allocation_identity() ||",
+                "      !value.revision_id().valid() ||",
+                "      value.ready_fence().poll().state() !=",
+                "          ps::ReadyFenceState::Ready ||",
+                "      view.width() != 3U ||",
+                "      view.height() != 2U ||",
+                "      std::to_integer<unsigned int>(",
+                "          *view.channel_data(2U, 1U, 0U)) != 6U) {",
+                "    return 16;",
+                "  }",
+                "",
+                "  ps::DenseTensorDescriptor packed_descriptor{",
+                "      {1U, 4U}, ps::ElementSemantics::FloatingPoint,",
+                "      ps::StorageEncoding{4U, ps::StorageEncodingKind::Fp4E2M1},",
+                "      ps::QuantizationSchema{{1U, 4U}, {2.0F}}};",
+                "  ps::BlockedLayout packed_layout{",
+                "      1U, {1U, 4U}, {16U, 16U}, 4U,",
+                "      ps::PackedBitOrder::LeastSignificantFirst};",
+                "  const ps::Value packed = ps::Value::from_cpu_blocked_dense_tensor(",
+                "      std::move(packed_descriptor), std::move(packed_layout),",
+                "      {std::byte{0x10}, std::byte{0x32}, std::byte{0x04}});",
+                "  const ps::PackedDenseTensorView packed_view(packed);",
+                "  if (packed.storage_layout_kind() != ps::StorageLayoutKind::Blocked ||",
+                "      packed_view.encoded_element({0U, 3U}) != 4U ||",
+                "      packed_view.dequantized_element({0U, 3U}) != 4.0F) {",
+                "    return 19;",
                 "  }",
                 "",
                 "  auto host = ps::create_embedded_host();",
@@ -775,24 +2782,28 @@ def write_consumer(source: Path) -> None:
 
 
 def main() -> int:
-    """@brief Build, install, and consume the dependency-disabled profile.
+    """@brief Execute, install, and consume the dependency-disabled profile.
 
     @return Zero only when the kernel aggregate and Host product build without
-      OpenCV/YAML discovery, installation omits their public/export surfaces,
-      optional/required component semantics are correct, and every consumer in
-      the generated exact target inventory runs successfully.
+      OpenCV/YAML/OpenEXR discovery, the core dense operation executes through
+      its production registry/executor chain, installation omits optional
+      public/export/link surfaces, optional/required component semantics are
+      correct, and every consumer in the generated exact target inventory
+      exercises neutral image, Host, and complete installed V-14 behavior.
     @throws OSError For filesystem or process-start failures.
     @throws subprocess.CalledProcessError For required command failures.
     @throws ValueError If transient paths overlap protected paths.
     @throws RuntimeError If any build, export, component, or runtime invariant
       contradicts the dependency-disabled profile.
-    @note A validated ``--producer-build`` may be reused without configuration
-      or compilation. Installation and consumer artifacts always remain under
-      ``work`` and are removed before return. On Darwin, every child configure
-      inherits the selected producer's meaningful
-      ``CMAKE_OSX_ARCHITECTURES`` value as one argv element; other platforms
-      receive no macOS-specific option. Target collection and path validation
-      complete before the first consumer process starts.
+    @note A validated, already-built ``--producer-build`` may be reused without
+      configuration or compilation. Its dependency-neutral dense and
+      cross-DSO identity integration binaries are still executed. Installation
+      and consumer artifacts always remain under ``work`` and are removed
+      before return. On Darwin, every child configure inherits the selected
+      producer's meaningful ``CMAKE_OSX_ARCHITECTURES`` value as one argv
+      element; other platforms receive no macOS-specific option. Target
+      collection and path validation complete before the first consumer
+      process starts.
     """
 
     parser = argparse.ArgumentParser()
@@ -842,16 +2853,18 @@ def main() -> int:
                     str(repo),
                     "-B",
                     str(build),
-                    "-DBUILD_TESTING=OFF",
+                    "-DBUILD_TESTING=ON",
                     "-DPHOTOSPIDER_BUILD_IPC=OFF",
                     "-DPHOTOSPIDER_ENABLE_OPENCV=OFF",
                     "-DPHOTOSPIDER_ENABLE_YAML=OFF",
                     "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
                     "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON",
                     f"-DCMAKE_BUILD_TYPE={args.config}",
                 ],
                 repo,
             )
+            validate_dependency_disabled_native_toolchain(build)
             run(
                 [
                     args.cmake_executable,
@@ -860,6 +2873,10 @@ def main() -> int:
                     "--target",
                     "photospider_kernel",
                     "photospider",
+                    "test_cpu_dense_tensor_image_operation",
+                    "test_packed_fp4_dense_tensor",
+                    "test_variable_sample_field_extensions",
+                    "test_value_identity_across_dsos",
                     "--config",
                     args.config,
                     "--parallel",
@@ -867,6 +2884,23 @@ def main() -> int:
                 ],
                 repo,
             )
+
+        dense_test_executable = configured_test_executable(
+            build, args.config, "test_cpu_dense_tensor_image_operation"
+        )
+        packed_test_executable = configured_test_executable(
+            build, args.config, "test_packed_fp4_dense_tensor"
+        )
+        extension_test_executable = configured_test_executable(
+            build, args.config, "test_variable_sample_field_extensions"
+        )
+        identity_test_executable = configured_test_executable(
+            build, args.config, "test_value_identity_across_dsos"
+        )
+        run([str(dense_test_executable)], repo)
+        run([str(packed_test_executable)], repo)
+        run([str(extension_test_executable)], repo)
+        run([str(identity_test_executable)], repo)
 
         child_architecture_arguments = (
             producer_osx_architecture_arguments(build)
@@ -925,6 +2959,7 @@ def main() -> int:
                 f"-DCMAKE_PREFIX_PATH={prefix}",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",
+                "-DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON",
                 *child_architecture_arguments,
             ],
             repo,
@@ -941,6 +2976,7 @@ def main() -> int:
                 f"-DCMAKE_PREFIX_PATH={prefix}",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",
+                "-DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON",
                 *child_architecture_arguments,
             ],
             repo,
@@ -957,6 +2993,7 @@ def main() -> int:
             "-DPHOTOSPIDER_ENABLE_YAML=OFF",
             "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
             "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",
+            "-DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON",
             *child_architecture_arguments,
         ]
         run_expect_failure(
@@ -1004,11 +3041,13 @@ def main() -> int:
                 f"-DCMAKE_PREFIX_PATH={prefix}",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",
+                "-DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON",
                 f"-DCMAKE_BUILD_TYPE={args.config}",
                 *child_architecture_arguments,
             ],
             repo,
         )
+        validate_dependency_disabled_native_toolchain(consumer_build)
         run(
             [
                 args.cmake_executable,
@@ -1023,6 +3062,11 @@ def main() -> int:
         )
         consumer_target_files = configured_consumer_target_files(
             consumer_build, args.config
+        )
+        validate_no_optional_deep_codec_residue(
+            prefix,
+            consumer_build,
+            [executable for _target_name, executable in consumer_target_files],
         )
         for _target_name, executable in consumer_target_files:
             run([str(executable), str(runtime_root)], work)

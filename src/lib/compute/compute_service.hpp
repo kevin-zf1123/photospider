@@ -331,8 +331,10 @@ class ComputeService {
     /** @brief Planned node order after cache pruning. */
     std::vector<int> execution_order;
 
-    /** @brief Pre-resolved HP operation for every executable planned node. */
-    std::unordered_map<int, OpRegistry::OpVariant> resolved_operations;
+    /**
+     * @brief Coherent HP callback/metadata/identity for each planned node.
+     */
+    std::unordered_map<int, OpImplementation> resolved_operations;
 
     /** @brief Pre-reserved recursion/cycle state reused during execution. */
     std::unordered_map<int, bool> visiting;
@@ -366,7 +368,7 @@ class ComputeService {
     std::vector<BenchmarkEvent>* benchmark_events = nullptr;
 
     /** @brief Off-registry operation lookup keyed by planned node id. */
-    const std::unordered_map<int, OpRegistry::OpVariant>& resolved_operations;
+    const std::unordered_map<int, OpImplementation>& resolved_operations;
 
     /** @brief Retained read-only Run lease observed at recursive boundaries. */
     const compute::ComputeRunLease& run_lease;
@@ -387,12 +389,21 @@ class ComputeService {
    * cancellation translated from the retained Run.
    * @note The context and its references must outlive the recursive call tree.
    * Effective parameters and execution-facing node state remain on a
-   * request-local Node snapshot. The method commits only the resolved
-   * graph-owned input-size hint, HP cache/version, disk-cache effects, and
-   * telemetry on the calling thread. Cooperative observations surround
-   * recursive dependency resolution, disk cache, provider/tile execution,
-   * cache publication, and return; a monolithic provider already entered is
-   * non-preemptible.
+   * request-local Node snapshot. Before HP publication, a nonempty legacy CPU
+   * image result is normalized to a sealed identity-bearing Value. The method
+   * commits only the resolved graph-owned input-size hint, HP cache/version,
+   * disk-cache effects, and telemetry on the calling thread. Cooperative
+   * observations surround recursive dependency resolution, disk cache,
+   * provider/tile execution, cache publication, and return; a monolithic
+   * provider already entered is non-preemptible. Immediately before each
+   * provider entry, the method acquires a direct operation lease for the
+   * planned implementation identity, exclusive key, and declared
+   * retained/scratch bytes; dependency recursion completes before acquisition.
+   * The lease is destroyed immediately after NodeExecutor returns, before
+   * cancellation observation, result normalization, Graph cache publication,
+   * or disk persistence. Provider exceptions release it by RAII during
+   * unwinding, and Host post-processing exceptions therefore occur after
+   * release.
    */
   NodeOutput& compute_internal(GraphModel& graph, int node_id,
                                const RecursiveComputeContext& context);
@@ -432,11 +443,12 @@ class ComputeService {
    * @param request Target, cache, and telemetry controls.
    * @param run_lease Candidate lease used for cancellation observation.
    * @return Complete plan, operations, and reserved recursion state.
-   * @throws GraphError for missing targets, invalid topology/plans, or missing
-   * operations.
+   * @throws GraphError for missing targets, invalid topology/plans, missing
+   * operations, or a registry identity change after planning.
    * @throws std::bad_alloc unchanged from planning and staging.
    * @note The method executes no operation, advances no Run phase, publishes
-   * no result, and requires no lifecycle admission.
+   * no result, and requires no lifecycle admission. It retains callback
+   * snapshots only after matching the callback-free planned identity.
    */
   PreparedSequentialCompute prepare_sequential_compute(
       GraphModel& graph, const Request& request,

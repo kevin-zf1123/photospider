@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "execution/device_execution_context.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
 
@@ -239,6 +240,8 @@ OperationInputStorage make_operation_inputs(
  * @return Complete private output without a library lease.
  * @throws std::invalid_argument for an invalid image descriptor or spatial
  * snapshot.
+ * @throws std::logic_error when one provider returns both a public image and a
+ * source-private pending device Value.
  * @throws std::bad_alloc unchanged from recursive map moves/copies.
  * @note The caller attaches its private DSO lease only after this conversion
  *       succeeds; during conversion the callback wrapper still retains it.
@@ -257,6 +260,19 @@ NodeOutput operation_output_to_private(plugin::OperationOutput output) {
   result.debug.max_val = output.debug.max_value;
   result.debug.has_nan = output.debug.has_nan;
   result.debug.compute_device = std::move(output.debug.compute_device);
+  if (execution::MetalExecutionContext* context =
+          execution::current_metal_execution_context()) {
+    Value published = context->take_published_value();
+    if (published.valid()) {
+      if (result.image_buffer.width != 0 || result.image_buffer.height != 0 ||
+          result.image_buffer.channels != 0 || result.image_buffer.data ||
+          result.image_buffer.context) {
+        throw std::logic_error(
+            "Operation returned both ImageBuffer and pending device Value.");
+      }
+      result.image_value = std::move(published);
+    }
+  }
   return result;
 }
 
@@ -550,6 +566,20 @@ OpMetadata operation_metadata_to_private(
           "Operation metadata has invalid input access pattern");
   }
   result.data_dependent = metadata.data_dependent;
+  result.reentrant = metadata.reentrant;
+  result.maximum_parallelism = metadata.maximum_parallelism;
+  result.retained_memory_bytes = metadata.retained_memory_bytes;
+  result.scratch_bytes = metadata.scratch_bytes;
+  if (metadata.exclusive_key.size() >
+      plugin::OperationMetadata::kExclusiveKeyMaxBytes) {
+    throw std::invalid_argument(
+        "Operation metadata exclusive key exceeds 128 bytes");
+  }
+  if (metadata.exclusive_key.find('\0') != std::string::npos) {
+    throw std::invalid_argument(
+        "Operation metadata exclusive key contains an embedded NUL");
+  }
+  result.exclusive_key = metadata.exclusive_key;
   return result;
 }
 

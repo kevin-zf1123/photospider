@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/cpu_dense_image_operation.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -218,7 +219,55 @@ NodeOutput op_divide(const Node& node,
   return output;
 }
 
+/**
+ * @brief Runs the built-in Value-backed dense unsigned-8 image inversion.
+ *
+ * @param node Immutable operation node.
+ * @param inputs Exactly one current-boundary CPU image input.
+ * @return Validated current-boundary image whose active bytes are inverted.
+ * @throws GraphError for input, inference, execution, or output failures.
+ * @throws std::bad_alloc unchanged for resource exhaustion.
+ * @note The static operation definition is immutable and reentrant; the runner
+ *       performs all current ImageBuffer edge adaptation.
+ */
+NodeOutput op_invert_dense(const Node& node,
+                           const std::vector<const NodeOutput*>& inputs) {
+  static const CpuDenseImageOperation operation = make_dense_invert_operation();
+  return execute_cpu_dense_image_operation(node, inputs, operation);
+}
+
+/**
+ * @brief Executes core dense inversion for one exact logical Region.
+ * @param node Borrowed operation node snapshot.
+ * @param inputs Borrowed destination-indexed inputs.
+ * @param region Exact normalized ImageRect, TensorSlice, Whole, or Empty.
+ * @return Independently owned sealed dense output and ImageBuffer snapshot.
+ * @throws GraphError or std::bad_alloc from the validated dense runner.
+ * @note The static operation definition is immutable and reentrant.
+ */
+NodeOutput op_invert_dense_region(const Node& node,
+                                  const std::vector<const NodeOutput*>& inputs,
+                                  const RegionSet& region) {
+  static const CpuDenseImageOperation operation = make_dense_invert_operation();
+  return execute_cpu_dense_image_operation(node, inputs, operation, region);
+}
+
 }  // namespace
+
+/** @copydoc ps::ops::find_core_region_monolithic_operation */
+std::optional<CoreRegionMonolithicOpFunc> find_core_region_monolithic_operation(
+    const std::string& type, const std::string& subtype,
+    const MonolithicOpFunc& selected_operation) {
+  using MonolithicFunctionPointer =
+      NodeOutput (*)(const Node&, const std::vector<const NodeOutput*>&);
+  const MonolithicFunctionPointer* selected_target =
+      selected_operation.target<MonolithicFunctionPointer>();
+  if (type == "image_process" && subtype == "invert_dense" &&
+      selected_target != nullptr && *selected_target == &op_invert_dense) {
+    return CoreRegionMonolithicOpFunc(op_invert_dense_region);
+  }
+  return std::nullopt;
+}
 
 /** @copydoc ps::ops::builtin_input_halo_radius */
 int builtin_input_halo_radius(const std::string& type,
@@ -251,13 +300,18 @@ void register_core_operations() {
                                      MonolithicOpFunc(op_get_dimensions));
   registry.register_op_hp_monolithic("math", "divide",
                                      MonolithicOpFunc(op_divide));
+  registry.register_op_hp_monolithic("image_process", "invert_dense",
+                                     MonolithicOpFunc(op_invert_dense));
 
   const DirtyRoiPropFunc dirty(identity_dirty_roi);
   const ForwardRoiPropFunc forward(identity_forward_roi);
   registry.register_dirty_propagator("analyzer", "get_dimensions", dirty);
   registry.register_dirty_propagator("math", "divide", dirty);
+  registry.register_dirty_propagator("image_process", "invert_dense", dirty);
   registry.register_forward_propagator("analyzer", "get_dimensions", forward);
   registry.register_forward_propagator("math", "divide", forward);
+  registry.register_forward_propagator("image_process", "invert_dense",
+                                       forward);
 }
 
 }  // namespace ps::ops

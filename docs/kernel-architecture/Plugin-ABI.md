@@ -1,11 +1,14 @@
 # Plugin ABI
 
-Photospider supports operation plugins and policy plugins. Operation plugins
-extend the process-owned `OpRegistry` through a Host-provided registrar and
-remain a provisional C++ ABI. Policy plugins rank immutable Host-admissible
-candidates through a versioned pure C ABI; they own no worker, queue, device,
-resource, Run, or Graph capability. The installable authoring contracts live
-only under `include/photospider/plugin/` and
+Photospider supports operation plugins, data-definition providers, and policy
+plugins. Operation plugins extend the process-owned `OpRegistry` through a
+Host-provided registrar and remain a provisional C++ ABI. Data-definition
+providers publish immutable Schema/Facet/Layout bundles and bounded semantic
+callbacks through pure-C ABI v3; they receive no access, conversion, execution,
+device, registry-mutation, or graph capability. Policy plugins rank immutable
+Host-admissible candidates through pure-C ABI v1; they own no worker, queue,
+device, resource, Run, or Graph capability. The installable authoring contracts
+live only under `include/photospider/plugin/` and
 `include/photospider/policy/policy_plugin_api.h`.
 
 ## Operation Plugin ABI
@@ -49,6 +52,26 @@ Supported operation registrations include:
 | Forward ROI propagator | Downstream ROI projection. |
 | Dependency LUT builder | Data-dependent spatial dependency map. |
 | Device implementation | CPU, Metal, CUDA, or another supported public `Device` capability. |
+
+Every executable registration carries one `OperationMetadata` value. In
+addition to tile, device, cost, and dependency hints, the CPU execution
+contract contains:
+
+| Field | Meaning |
+| --- | --- |
+| `reentrant` | Whether callbacks of the exact implementation may overlap; defaults to `true`. |
+| `maximum_parallelism` | Exact-implementation callback cap; zero means no implementation-specific cap. |
+| `retained_memory_bytes` | Additional Host-retained bytes per in-flight callback; zero is an explicit declaration. |
+| `scratch_bytes` | Additional Host scratch bytes per in-flight callback; zero is an explicit declaration. |
+| `exclusive_key` | Optional execution-domain exclusion key shared across implementations, Runs, and Graphs. |
+
+`reentrant=false` has an effective cap of one regardless of
+`maximum_parallelism`. A nonempty exclusive key is limited to 128 bytes and
+must not contain an embedded NUL. The Host validates the same rules for core
+and plugin registrations before publication. These fields extend the
+provisional C++ v2 metadata layout without changing the registrar symbol or
+callback signatures. Existing v2 DSOs must be rebuilt against the matching
+SDK; no missing-tail, stale-layout, or compatibility interpretation exists.
 
 The canonical registry identity is `type:subtype`. Both segments must be
 non-empty and neither may contain the reserved `:` separator, otherwise two
@@ -101,9 +124,18 @@ Operation plugins do not link the broad static `photospider` product to reach
 registry symbols. An ordinary plugin requests the `operation_sdk` package
 component and links only `Photospider::operation_sdk`. That interface target
 carries the installed headers and transitively links
-`Photospider::operation_runtime`, whose static archive implements public
-image-buffer factories without linking back to the SDK or requiring an
-external package.
+`Photospider::operation_runtime`, whose shared library implements public
+image-buffer factories, explicit-binding DenseTensor Value and checked view
+symbols, dependency-neutral device/access facts, and Region value/algebra,
+without linking back to the SDK or requiring an external package. The static
+Host product and
+independently loaded Value-using
+operation DSOs therefore resolve allocation/revision minting through that one
+runtime image instead of copying counters into each DSO. This is an ordinary
+dynamic dependency, not ELF/Mach-O symbol interposition or a plugin ABI
+callback. Those data/memory headers are available for dependency-neutral
+plugin-internal work, but operation v2 callback records still receive and
+return the current ImageBuffer/OperationOutput values.
 
 OpenCV is an explicit opt-in. A plugin that uses
 `photospider/plugin/opencv_adapter.hpp` additionally requests and links
@@ -129,8 +161,12 @@ This split supports the static-host direction:
   `PluginManager`, shared by every embedded Host.
 - Dynamic operation plugins receive registration callbacks from the host, so
   registry mutation stays in that process-owned instance.
-- `Photospider::operation_runtime` contains value-factory implementation only;
-  it contains no registry, loader, Graph, policy, execution, or compute state.
+- `Photospider::operation_runtime` contains ImageBuffer, immutable DenseTensor
+  and provider-defined Value, Region, and data-definition registry
+  implementation. It contains no operation registry, platform loader, Graph,
+  policy, execution, or compute state and constructs no global definition
+  registry. Its one process-wide identity
+  authority owns separate monotonic allocation and Value-revision sequences.
 - Plugin callback objects and plugin-instantiated return-value internals may
   still point into plugin code, so the process owner and copied value leases
   retain libraries until all such state has been destroyed.
@@ -197,6 +233,15 @@ receives new tokens for its changed slots. Source inspection reports `mixed`
 while direct and plugin-owned slots coexist instead of attributing the complete
 key to the plugin.
 
+Executable scalar slots are atomic schedulable values rather than a callback
+plus one mutable intent-wide metadata record. Monolithic HP, tiled HP, and
+tiled RT each own their exact callback, `OperationMetadata`, and nonzero
+implementation identity in one `OpImplementation`. Registering a sibling shape
+cannot rewrite an existing slot's scheduling declarations or identity.
+Replacement, capture, retirement, and unload exchange the complete slot, so a
+reader can never combine one scalar callback with another registration's
+reentrancy, cap, retained bytes, scratch bytes, or exclusive key.
+
 Live device implementation elements use stable immutable owners rather than
 storing `std::function` targets directly in the growing registry vector. A new
 monolithic or tiled device value, including its plugin lease wrapper, is fully
@@ -214,14 +259,17 @@ registry lock. Failure to construct the new stable value or compatibility
 bridge occurs before key, callback, or ownership publication and leaves the
 registry unchanged.
 
-Stable ownership is not an execution mutex. The first CPU device value and its
-HP compatibility bridge retain the same callback target, and executor or
-reader snapshots may retain that same logical target as well. These paths may
-invoke it concurrently. The callback provider must therefore make the target
-reentrant or synchronize its shared mutable state. The registry serializes only
-ownership mutation, coherent snapshot capture, publication, and unload; it never
-holds its state lock to serialize callback execution. Callers must not infer
-single-threaded execution from a shared operation key, device, or intent.
+Stable ownership is not itself an execution mutex. The registry serializes only
+ownership mutation, coherent snapshot capture, publication, and unload; it
+never holds its state lock during callback execution. Product planning selects
+one coherent callback, metadata, device, and nonzero ownership revision, stores
+only callback-free identity/metadata in the plan, and re-resolves the exact
+identity before admission. Within one injected `ExecutionService`, the Host
+then enforces `reentrant`, `maximum_parallelism`, and `exclusive_key` at
+reserved start across Runs and Graphs. A shared operation key, device, intent,
+or callback owner does not imply serialization unless the selected metadata
+declares it. Providers must still protect shared state reached outside this
+Host boundary or omitted from their declaration.
 
 Repository-owned CPU OpenCV providers implement that contract with immutable
 inputs, callback-local or task-owned `cv::Mat` state, and no process-wide outer
@@ -233,7 +281,11 @@ fresh `std::bad_alloc` and all other `cv::Exception` values to host-owned
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits those slots while the
 registry and public v2 registrar remain usable by another provider.
 Provider-local synchronization is still required for actual shared backend
-state: the Metal Perlin DSO mutex protects only its shared Metal lifecycle.
+state that a provider owns. The Metal Perlin DSO owns neither a native
+lifecycle nor a lifecycle mutex: it borrows the command queue,
+invocation-scoped allocator, and pipeline cache from the current process
+executor, while execution metadata gates provide implementation/key
+serialization.
 [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
 records the decision and its accounting limits.
 
@@ -360,6 +412,171 @@ Built-in callback registration also belongs to the process owner. It runs at
 most once, before process-owner plugin publication; later Host seed calls only
 reconcile source labels and cannot replay built-ins over an active plugin
 replacement.
+
+## Data-Definition Provider ABI v3
+
+A data-definition provider exports exactly the two functions declared by the
+self-contained C11/C++17 header:
+
+```c
+uint32_t ps_data_provider_get_abi_version(void);
+ps_data_status_v3 ps_data_provider_get_api_v3(
+    ps_data_provider_api_v3 *api);
+```
+
+The numeric handshake must return `PS_DATA_PROVIDER_ABI_VERSION`, exactly
+three. The Host calls no other candidate function before equality succeeds.
+It then supplies one pre-zeroed exact-size API table. The provider returns one
+nonzero permanent provider identity, a bounded implementation version, a
+bounded immutable typed definition array, one opaque context, and every
+mandatory callback:
+
+| Callback | V-14 responsibility |
+| --- | --- |
+| `validate` | Validate the complete Schema/Facet/Layout and checked multi-buffer payload. |
+| `query` | Evaluate one pure metadata-only property request. |
+| `evaluate_region` | Evaluate one pure bounded metadata-only Region request. |
+| `evaluate_spec` | Evaluate one pure bounded metadata-only DataSpec relation. |
+| `visit_content` | Append logical content bytes in provider canonical order. |
+| `create_owner` / `destroy_owner` | Own one optional opaque object while its exact generation remains mapped. |
+| `destroy_provider` | Perform final generation retirement before the module lease releases. |
+
+This is the definition suite only. V-14 contains no access/map/import/transfer,
+conversion, inference, execution, asynchronous completion, native-device, or
+operation ABI replacement callback. Pure property, Region, and DataSpec calls
+receive descriptor, Layout, envelope, byte-size, index, role, and allocation-
+identity metadata, but every payload pointer and payload-available flag is
+cleared. Payload is exposed only for explicit validation and canonical-content
+traversal inside a retained call.
+
+Every callback also receives one callback-local `ps_data_output_sink_v3`.
+Borrowed `ps_data_bytes_v3` views are inputs only: diagnostics and BYTES
+properties carry scalar `message_size` / `bytes_size` fields and copy their
+complete variable-size field through the output sink while the provider source
+is alive. A nonempty diagnostic uses the diagnostic channel exactly once; an
+empty diagnostic does not use it. An Available BYTES property uses the property
+channel exactly once even when empty. The Host checks channel permission,
+pointer/count framing, duplicate use, the 4 KiB diagnostic bound, and the
+64 KiB property bound before dereference, synchronously copies into one
+per-invocation state, and treats the first sink failure as authoritative even
+when provider code ignores it. Callback return, concurrent calls, generation
+replacement, and module retirement therefore expose no delayed provider
+output pointer.
+
+The `ps_data_byte_sink_v3` used by `visit_content` is a separate synchronous
+streaming channel, not one of those bounded diagnostic/property fields. The
+Host may invoke the callback more than once for one digest: it first measures
+with checked `uint64_t` accumulation, writes the frozen canonical field length,
+then repeats the same active generation under the same immutable Value view and
+payload read leases while hashing each segment directly. Each invocation owns
+independent diagnostic and sticky-failure state. The provider must reproduce
+the same logical byte sequence, although append-call boundaries may differ.
+Null/nonzero pointer-count pairs, measurement overflow, ignored sink failure,
+and measured/hash count drift are rejected. The cumulative stream is neither
+materialized nor subject to the 4 KiB/64 KiB output bounds or an arbitrary
+64 MiB content ceiling; only frozen SHA-256 length framing limits it.
+
+The Region request remains rank-general at the ABI adapter. When a provider
+returns Exact for a canonical nonempty TensorSlice, the Host computes the
+checked `uint64_t` product of all half-open axis lengths. The provider's
+`selected_site_count` must match exactly; product overflow, an incorrect
+nonzero count, or zero for a nonempty slice returns InvalidDescriptor with
+zero. Empty and non-Exact outcomes retain their existing typed semantics.
+
+All records use fixed-width scalars, borrowed bounded input views, exact struct
+sizes, zero-required reserved storage, and the platform C calling convention.
+The supported profile requires 8-bit bytes, 8-byte data and function pointers,
+and natural 8-byte alignment. The header freezes these v3 layouts:
+
+| Record | Size | Alignment |
+| --- | ---: | ---: |
+| `ps_data_identity_v3` / `ps_data_bytes_v3` | 16 | 8 |
+| `ps_data_definition_v3` / `ps_data_extension_v3` | 64 | 8 |
+| `ps_data_buffer_view_v3` | 56 | 8 |
+| `ps_data_buffer_envelope_v3` | 48 | 8 |
+| `ps_data_value_view_v3` | 88 | 8 |
+| `ps_data_diagnostic_v3` | 48 | 8 |
+| `ps_data_property_query_v3` / `ps_data_property_result_v3` | 40 / 56 | 8 |
+| `ps_data_region_request_v3` / `ps_data_region_result_v3` | 72 / 40 | 8 |
+| `ps_data_spec_request_v3` / `ps_data_spec_result_v3` | 64 / 40 | 8 |
+| `ps_data_byte_sink_v3` | 40 | 8 |
+| `ps_data_output_sink_v3` | 40 | 8 |
+| `ps_data_provider_api_v3` | 160 | 8 |
+
+There is no tail-extension rule. The Host rejects an unexpected size, offset,
+kind, enum, bound, pointer/count pair, required callback, reserved byte, or
+duplicate typed key. Definition names are diagnostic lowercase ASCII
+`[a-z][a-z0-9_.-]*`; permanent 128-bit identities plus nonzero structural
+versions are authoritative. Schema, Facet, and Layout occupy separate typed
+namespaces, so equal numeric identities across different kinds do not collide.
+
+`DataDefinitionRegistry` is an injected C++ authority, not a global or
+function-static singleton. It owns one publication mutex, one generation
+source, one provider map, and three typed definition maps. Candidate loading
+copies and validates the complete bundle, stages all next maps, and publishes
+them together. ABI mismatch, callback failure, malformed metadata, duplicates,
+or a typed key owned by another active provider publishes nothing and preserves
+the previous generation. Provider callbacks never execute while the registry
+mutex is held; same-thread registry mutation from a provider callback is
+rejected.
+
+Replacement is by permanent provider identity and publishes one fresh complete
+generation atomically. Unload removes the active generation from new lookup
+visibility. Existing `DataDefinitionLease`, provider-defined `Value`, indexed
+`ProviderReadLease`, callback staging, and `ProviderOwner` values keep the
+retiring callbacks, context, definitions, and module lease alive. Final owner
+destroy runs once; final provider destroy runs after all generation users and
+before the module lease releases.
+
+If the last `ProviderOwner` or generation reference is released inside any
+provider callback on the same Host thread, the Host does not recursively enter
+the corresponding destroy callback. The owner/generation state embeds its own
+cleanup node, so final shared release appends it to a per-thread FIFO without
+allocating. The outer callback guard clears the active-callback fence and then
+drains that FIFO after provider code returns, for both provider success and
+failure and during normal C++ stack unwinding of the Host invocation. An owner
+or generation released by a destroy callback or by cleanup member destruction
+joins the FIFO tail; one iterative drain preserves existing FIFO order and
+prevents recursive cleanup callback entry. Releases outside provider callbacks
+use the same queue but drain synchronously. Owner state retains its exact
+generation throughout `destroy_owner`, and generation state retains the module
+lease throughout `destroy_provider`, including all callback-tail cascades.
+Normal callback return empties the per-thread queue before normal thread exit;
+a callback that never returns can still retain its generation indefinitely.
+This Host-side lifetime repair changes no v3 record layout, callback signature,
+or provider responsibility. V-14 provides no forced unwind or process
+isolation.
+
+## Data-Definition SDK Target and Linkage
+
+A producer requests the `data_provider_sdk` package component and links
+`Photospider::data_provider_sdk`. This interface-only target carries the
+installed include directory and C11/C++17 compile features. It links no
+operation runtime, static product, OpenCV, yaml-cpp, Threads, registry, loader,
+executor, or device SDK. C11 and C++17 producers export the same two exact C
+names; C++ declarations are `extern "C"` and `noexcept`.
+
+A C++ Host-side consumer that instantiates `DataDefinitionRegistry` or creates
+a provider-defined `Value` links `Photospider::operation_runtime` directly or
+through `Photospider::operation_sdk`. Supplying platform-resolved function
+pointers plus a nonnull module lease is an explicit composition responsibility;
+V-14 installs no directory scanner or second mutable registry authority. The
+dependency-disabled install smoke independently builds and executes exact-name
+C11 and C++17 producers from the installed package, compiles independent output
+record/sink layout assertions, emits a nonempty property from callback-local
+storage, and loads each through the real registry transaction.
+
+V-15 adds one separately requested installed component,
+`openexr_deep_provider`. When
+`PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON`, requesting that component imports
+`Photospider::openexr_deep_provider` and then discovers `OpenEXR::OpenEXR`;
+requesting only neutral components does neither. With the default-OFF build,
+an optional request reports the component unavailable and a required request
+fails with a Photospider-owned component diagnostic before OpenEXR discovery.
+The installed target is the provider MODULE only. Its source-private C++ codec
+adapter is neither installed nor exported, and the provider still exposes
+only the two frozen v3 C entry points.
+
 ## Policy Plugin ABI
 
 A policy plugin exports exactly two functions declared by the self-contained
@@ -525,13 +742,96 @@ supervision is a separate architecture generation.
 
 ## Boundaries and Rationale
 
-The two current plugin boundaries intentionally have different compatibility
-profiles:
+The three current extension boundaries intentionally have different
+compatibility and authority profiles:
 
 | Boundary | Data ABI | Authority |
 | --- | --- | --- |
 | Operation plugin v2 | Provisional C++ registrar and callback values | Operation computation and returned values under Host validation |
+| Data-definition provider v3 | Exact-size pure C definition-suite records under a frozen 64-bit profile | Schema/Facet/Layout validation and bounded semantic observation only |
 | Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
+
+### Implemented V-2 through V-15 SDK and definition-provider subset
+
+[ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+accepts separately versioned pure-C provider suites for Schema, Facet, Layout,
+access, conversion, inference, query, region, digest, and execution. V-14
+implements the exact v3 definition suite described above, together with public
+C++ envelopes, `DataDefinitionRegistry`, generation leases, provider owners,
+and provider-defined `Value` access. It places no STL, exception, RTTI, virtual
+class, allocator ownership, or `Value` PImpl across the C boundary. The access,
+conversion, inference, execution, asynchronous, and native-device suites remain
+future separately bounded work rather than implicit v3 authority.
+
+V-2 implements the dependency-neutral C++ CPU DenseTensor `Value`,
+`StridedLayout`, `DenseTensorView`, and `ImageView` subset in
+`operation_runtime`. V-3 adds installed BufferHandle ranges, read/write leases,
+ValueBuilder sealing, byte offsets, bounded signed immutable views, and
+process-local allocation/revision identity. The runtime is shared so the Host
+and every Value-using DSO call one minting authority; the durable loader
+regression opens two independent DSOs and proves both identity domains remain
+distinct. One built-in operation uses that
+surface behind a private dual-representation bridge: it preserves the sealed
+result Value and derives an ImageBuffer compatibility snapshot.
+
+V-4 adds installed `RegionSet` and bounded algebra to `operation_runtime`.
+Region does not enter a new public v2 slot. A source-private bridge recognizes
+only the exact core dense callback in the actual revisioned implementation
+selected with execution's route-visible device inventory and request intent,
+and invokes its Region-aware implementation. The bridge never performs a
+scalar-only lookup or filters candidates to force core fallback; a same-key
+device or plugin override selected by the route keeps ordinary complete-output
+v2 behavior. Exact ImageRect may adapt current propagation callbacks, while
+TensorSlice never crosses the rectangular v2 contract.
+
+V-6 adds the installed dependency-neutral `ReadyFence` observer and
+synchronous Value readiness to `operation_runtime`. Pending publication
+authority and `ValueTransferTask` remain source-private, so an SDK consumer can
+observe readiness but cannot create a pending producer or transfer task.
+
+V-8 adds installed checked `DeviceBackend`, `DeviceId`, `MemoryDomain`,
+`StorageBinding`, producer identity, and pure `AccessPlan` observation. Native
+allocation construction, native handles, mutable pending-device producers,
+completion admission, `ResidencyManager`, and CPU/Metal transfer submission
+remain source-private. The repository Metal operation receives its borrowed
+device/queue/allocator context only through the source-private invocation
+boundary, publishes a pending native Value internally, and performs explicit
+asynchronous readback. A third-party v2 callback receives no such context and
+cannot infer one from `ImageBuffer::context`.
+
+V-14 adds installed byte-preserving Schema/Facet/Layout envelopes, typed
+property/DataSpec/Region outcomes, tagged canonical digests, artifact-envelope
+serialization, the exact v3 C header, and one injectable C++ registry. The
+runtime proves provider-defined multi-buffer Values with a dependency-neutral
+synthetic `VariableSampleField` generation. Generic Host validation precedes
+the provider callback and identity mint; pure calls expose no payload; content
+traversal controls logical bytes but never owns the Host digest state; and old
+Values, reads, callbacks, and owners survive atomic replacement and unload.
+This slice neither installs a platform DSO scanner nor enters provider-defined
+Values into graph compute, operation ABI v2, cache policy, or codecs.
+
+V-15 supplies one repository-owned implementation of the same unexpanded
+definition suite. The module publishes exactly four definitions—the
+`VariableSampleField` Schema, `ImageFacet`, `DeepSampleFacet`, and deep
+multi-buffer Layout—and validates their versioned payloads and complete Value
+envelopes through the existing callbacks. Its explicit implementation-version
+bytes are diagnostic; permanent provider/definition identities and structural
+version govern interpretation. The module exports no codec entry point and
+owns no registry, path policy, executor, cache, or commit policy. A
+source-private adapter performs OpenEXR read/write and calls the ordinary
+registry/Value APIs while the module lease is retained. Thus OpenEXR is one
+optional codec/provider implementation, not new v3 authority or a fourth ABI
+boundary.
+
+None of these slices places Value, BufferHandle, leases, Region, ReadyFence,
+device/access records, or a PImpl in a v2 callback record. V-14 adds the third
+boundary in the table without changing the other two. Operation ABI v2 remains the current
+operation contract until every
+repository-owned operation and installed consumer has migrated. The completion
+boundary then deletes v2, its entry point, SDK, fixtures, and package surface
+without a permanent dual loader, wrapper, alias, forwarding header, or
+v2-to-v3 shim. Policy ABI v1 remains independently versioned and is not renamed
+to v3.
 
 The operation C-linkage entry name is an identity/generation gate, not a stable
 C data ABI. Binary compatibility still depends on the matching SDK, compiler,
@@ -568,6 +868,18 @@ record the follow-up direction.
 - Operation plugins link `Photospider::operation_sdk`, adding
   `Photospider::operation_opencv` only for the public OpenCV adapter. They do
   not link the broad static product merely to share registry state.
+- Data-definition providers include
+  `photospider/plugin/data_provider_api.h`, request `data_provider_sdk`, link
+  `Photospider::data_provider_sdk`, and export only
+  `ps_data_provider_get_abi_version` plus `ps_data_provider_get_api_v3`.
+- Definition providers fill exact-size records, preserve every zero-required
+  reserved field, retain callback metadata until final generation destroy, and
+  never retain borrowed per-call views. C++ registry consumers link
+  `Photospider::operation_runtime`; no installed provider scanner is implied.
+- The repository OpenEXR provider is available only through the separately
+  requested `openexr_deep_provider` component. It exports the same two v3
+  symbols, never puts OpenEXR types in public records, and is absent—including
+  dependency discovery and target exports—from default-OFF installations.
 - Policy plugins include
   `photospider/policy/policy_plugin_api.h`, request the `policy_sdk`
   component, and link `Photospider::policy_sdk`.
@@ -581,16 +893,44 @@ record the follow-up direction.
 
 ## Implementation and Validation Entry Points
 
+- `include/photospider/data/value.hpp`
+- `include/photospider/data/extension.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/access_plan.hpp`
+- `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/memory/ready_fence.hpp`
+- `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/plugin_api.hpp`
+- `include/photospider/plugin/data_definition_registry.hpp`
+- `include/photospider/plugin/data_provider_api.h`
 - `include/photospider/plugin/op_contract.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
+- `src/lib/core/value.cpp`
+- `src/lib/core/extension.cpp`
+- `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
+- `src/lib/plugin/data_definition_registry.cpp`
+- `plugins/data/openexr_deep_scanline_provider.cpp`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/policy/policy_registry.*`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_plugin_manager.cpp`
 - `tests/unit/test_op_registry_m31.cpp`
 - `tests/unit/test_policy_registry.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
+- `tests/unit/test_device_residency.cpp`
+- `tests/fixtures/value_identity_dso.cpp`
+- `tests/integration/test_value_identity_dso.cpp`
+- `tests/integration/test_variable_sample_field_extensions.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
+- `tests/integration/openexr_deep_provider_option_off_smoke.py`
+- `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

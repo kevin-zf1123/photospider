@@ -30,6 +30,13 @@ enum class KernelCloseTestEvent {
    */
   OwnerReadyToEraseAndPublish,
   /**
+   * @brief Run lifecycle drained before compute-request lane drainage.
+   *
+   * @note A callback may block here to prove prepared candidates remain ahead
+   * of residency-lineage retirement.
+   */
+  LifecycleDrainedBeforeRequestLaneDrain,
+  /**
    * @brief Process publication closed before execution-service transition.
    *
    * @note Throwing from this checkpoint exercises the monotonic shutdown

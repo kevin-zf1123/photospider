@@ -21,6 +21,7 @@ class GraphRuntime;
 namespace ps::compute {
 
 class ComputeRunLease;
+class ExecutionService;
 class StabilizedDirtyParameters;
 
 /**
@@ -41,6 +42,16 @@ struct DirtyResolvedOperation {
 
   /** @brief Device whose private lane must execute the callable. */
   Device device = Device::CPU;
+
+  /** @brief Nonzero registry revision of the exact selected implementation. */
+  std::uint64_t implementation_identity = 0U;
+
+  /**
+   * @brief Metadata frozen coherently with the selected callable and identity.
+   * @note Execution must not query the registry again for tile, resource, or
+   * concurrency behavior.
+   */
+  OpMetadata metadata;
 };
 
 /** @brief Node-id index of immutable dirty operation/device snapshots. */
@@ -96,6 +107,14 @@ struct DirtyNodeExecutionContext {
    * through synchronous task settlement; this context never retains it.
    */
   const ComputeRunLease* run_lease = nullptr;
+
+  /**
+   * @brief Optional process authority for direct provider admission.
+   * @note Physical service workers leave this null because their ready-entry
+   * gate and resource grant already own the same authority. Inline and
+   * task-runtime paths supply it together with run_lease.
+   */
+  ExecutionService* direct_execution_service = nullptr;
 };
 
 /**
@@ -135,8 +154,9 @@ class HighPrecisionDirtyNodeExecutor {
    * @return Nothing.
    * @throws GraphError when dependencies or operators are missing, or when the
    * selected operation fails, including accepted Run cancellation.
-   * @note Empty HP ROIs and stale dirty-source generations are valid no-op
-   * entries after the initial cancellation observation. Tiled providers
+   * @note Empty logical Regions and stale dirty-source generations are valid
+   * no-op entries after the initial cancellation observation. TensorSlice
+   * entries intentionally retain an empty derived roi_hp. Tiled providers
    * observe before every tile; a monolithic provider already entered is
    * non-preemptible. Cancellation observed after provider return suppresses
    * ROI/version/event staging, leaving any partial write-buffer data
@@ -162,7 +182,7 @@ class HighPrecisionDirtyNodeExecutor {
    * @param node Node being computed.
    * @param entry HP ROI and extent metadata.
    * @param image_inputs_ready Resolved HP image inputs.
-   * @param operation Planning-time selected operation snapshot.
+   * @param operation Planning-time selected operation and metadata snapshot.
    * @return Nothing.
    * @throws std::bad_alloc when operation execution or staging exhausts
    * memory.
@@ -172,7 +192,7 @@ class HighPrecisionDirtyNodeExecutor {
   void execute_operation(
       Node& node, const HpPlanEntry& entry,
       const std::vector<const NodeOutput*>& image_inputs_ready,
-      const OpRegistry::OpVariant& operation) const;
+      const DirtyResolvedOperation& operation) const;
 
   /**
    * @brief Ensures the HP cache image buffer can receive tiled dirty output.
@@ -195,6 +215,7 @@ class HighPrecisionDirtyNodeExecutor {
    * @param node Node being computed.
    * @param tile_fn Tiled HP operation implementation.
    * @param entry HP ROI, extent, and halo metadata.
+   * @param metadata Metadata frozen with the selected tiled implementation.
    * @param image_inputs_ready Resolved HP image inputs.
    * @param hp_buffer Request-local destination buffer.
    * @return Nothing.
@@ -204,7 +225,7 @@ class HighPrecisionDirtyNodeExecutor {
    * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
-                     const HpPlanEntry& entry,
+                     const HpPlanEntry& entry, const OpMetadata& metadata,
                      const std::vector<const NodeOutput*>& image_inputs_ready,
                      ImageBuffer& hp_buffer) const;
 
@@ -212,13 +233,19 @@ class HighPrecisionDirtyNodeExecutor {
    * @brief Runs a monolithic HP implementation and stores its output.
    *
    * @param node Node being computed.
+   * @param entry Exact logical Region selected by HP planning.
    * @param mono_fn Monolithic HP operation implementation.
+   * @param operation Exact frozen identity and scheduling metadata.
    * @param image_inputs_ready Resolved HP image inputs.
    * @throws GraphError if the operation produces no output.
-   * @note Monolithic HP fallback preserves the previous dirty update behavior.
+   * @note The exact core Region bridge stages selected bytes through the HP
+   *       write buffer so prior valid coordinates survive a partial result.
+   *       Generic ABI v2 monolithic callbacks preserve complete-output
+   *       replacement behavior.
    */
   void execute_monolithic(
-      Node& node, const MonolithicOpFunc& mono_fn,
+      Node& node, const HpPlanEntry& entry, const MonolithicOpFunc& mono_fn,
+      const DirtyResolvedOperation& operation,
       const std::vector<const NodeOutput*>& image_inputs_ready) const;
 
   /**
@@ -282,6 +309,9 @@ class HighPrecisionDirtyNodeExecutor {
 
   /** @brief Optional borrowed lifecycle lease for cooperative observations. */
   const ComputeRunLease* run_lease_ = nullptr;
+
+  /** @brief Optional process authority for direct provider admission. */
+  ExecutionService* direct_execution_service_ = nullptr;
 };
 
 /**
@@ -367,7 +397,7 @@ class RealTimeDirtyNodeExecutor {
    * @param entry RT dirty ROI and extent metadata.
    * @param image_inputs_ready Resolved RT image inputs.
    * @param rt_buffer Destination RT proxy buffer.
-   * @param op_variant Selected monolithic or tiled operation.
+   * @param operation Selected operation and metadata snapshot.
    * @return Nothing.
    * @throws std::bad_alloc when RT operation execution exhausts memory.
    * @throws GraphError wrapping other OpenCV and standard exceptions with node
@@ -377,7 +407,7 @@ class RealTimeDirtyNodeExecutor {
   void execute_operation(
       Node& node, const RtPlanEntry& entry,
       const std::vector<const NodeOutput*>& image_inputs_ready,
-      ImageBuffer& rt_buffer, const OpRegistry::OpVariant& op_variant) const;
+      ImageBuffer& rt_buffer, const DirtyResolvedOperation& operation) const;
 
   /**
    * @brief Runs a monolithic operation and copies the affected RT ROI.
@@ -417,6 +447,7 @@ class RealTimeDirtyNodeExecutor {
    * @param node Node being computed.
    * @param tile_fn Tiled operation implementation.
    * @param entry RT dirty ROI, extent, and halo metadata.
+   * @param metadata Metadata frozen with the selected tiled implementation.
    * @param image_inputs_ready Resolved RT image inputs.
    * @param rt_buffer Destination RT proxy buffer.
    * @return Nothing.
@@ -426,7 +457,7 @@ class RealTimeDirtyNodeExecutor {
    * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
-                     const RtPlanEntry& entry,
+                     const RtPlanEntry& entry, const OpMetadata& metadata,
                      const std::vector<const NodeOutput*>& image_inputs_ready,
                      ImageBuffer& rt_buffer) const;
 
@@ -497,6 +528,9 @@ class RealTimeDirtyNodeExecutor {
 
   /** @brief Optional borrowed lifecycle lease for cooperative observations. */
   const ComputeRunLease* run_lease_ = nullptr;
+
+  /** @brief Optional process authority for direct provider admission. */
+  ExecutionService* direct_execution_service_ = nullptr;
 };
 
 }  // namespace ps::compute

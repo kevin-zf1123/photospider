@@ -24,10 +24,17 @@
 #include "compute/dirty_sibling_commit_gate.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/downsample_executor.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+#include "compute/execution_service_test_probe.hpp"
+#endif
 #include "compute/node_executor.hpp"
 #include "compute/node_input_resolver.hpp"
 #include "compute/realtime_proxy_graph.hpp"
 #include "compute/resource_demand_estimator.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
+#include "compute/dirty_update_executor_test_access.hpp"
+#endif
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
@@ -35,6 +42,53 @@
 #include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
+
+#if defined(PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
+namespace testing {
+namespace {
+
+/**
+ * @brief Current test thread's borrowed dirty post-plan observer.
+ * @throws Nothing for thread-local initialization and pointer access.
+ * @note The separate internal test product owns this storage; the installable
+ * archive compiles neither the state nor its notification branch.
+ */
+thread_local const DirtyPostPlanTestHook* g_dirty_post_plan_test_hook = nullptr;
+
+}  // namespace
+
+/** @copydoc set_dirty_post_plan_test_hook */
+void set_dirty_post_plan_test_hook(const DirtyPostPlanTestHook* hook) noexcept {
+  g_dirty_post_plan_test_hook = hook;
+}
+
+/** @copydoc notify_dirty_node_cache_plan_test_hook */
+void notify_dirty_node_cache_plan_test_hook(const ComputePlan& node_cache_plan,
+                                            GraphModel& graph) {
+  if (g_dirty_post_plan_test_hook != nullptr &&
+      g_dirty_post_plan_test_hook->notify_node_cache_plan != nullptr) {
+    g_dirty_post_plan_test_hook->notify_node_cache_plan(
+        g_dirty_post_plan_test_hook->context, node_cache_plan, graph);
+  }
+}
+
+/**
+ * @brief Notifies the current test thread after dirty planning completes.
+ * @return Nothing.
+ * @throws Any exception selected by the installed test observer.
+ * @note A null hook or callback is a no-op. The graph planning lock has already
+ * been released, and active-operation revalidation has not started.
+ */
+void notify_dirty_post_plan_test_hook() {
+  if (g_dirty_post_plan_test_hook != nullptr &&
+      g_dirty_post_plan_test_hook->notify != nullptr) {
+    g_dirty_post_plan_test_hook->notify(g_dirty_post_plan_test_hook->context);
+  }
+}
+
+}  // namespace testing
+#endif
+
 namespace {
 
 /**
@@ -114,9 +168,10 @@ void advance_dirty_run_for_execution(ComputeRun* run,
  * @param entry Base HP entry selected by dirty planning.
  * @param task Planned task whose ROI should bound execution.
  * @return Entry copy scoped to the task output ROI.
- * @throws Nothing; HpPlanEntry contains only scalar/POD ROI metadata.
- * @note Tile tasks execute one tile; monolithic/node tasks keep planner ROI.
- * Copying and clipping this value performs no dynamic allocation.
+ * @throws std::bad_alloc when copying Region metadata cannot allocate.
+ * @note Tile tasks execute one derived physical tile. The authoritative Region
+ * remains plan-level because publication occurs only after every selected task
+ * succeeds; monolithic/TensorSlice work keeps the same Region and ROI.
  */
 HpPlanEntry entry_for_task(const HpPlanEntry& entry, const PlannedTask& task) {
   HpPlanEntry clipped = entry;
@@ -134,9 +189,9 @@ HpPlanEntry entry_for_task(const HpPlanEntry& entry, const PlannedTask& task) {
  * @param task Planned task whose domain-local ROI should bound execution.
  * @return Entry copy scoped to the task output ROI.
  * @throws Nothing; RtPlanEntry contains only scalar/POD ROI metadata.
- * @note RT task output_roi is already in RT execution coordinates; HP ROI is
- * kept in the base entry for commit and inspection metadata. Copying and
- * clipping this value performs no dynamic allocation.
+ * @throws std::bad_alloc when copying Region metadata cannot allocate.
+ * @note RT task output_roi is already in RT execution coordinates; HP Region
+ * and ROI stay plan-level for commit after all selected tasks succeed.
  */
 RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
   RtPlanEntry clipped = entry;
@@ -155,94 +210,106 @@ RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
  * @param intent HP or RT registry priority policy.
  * @param require_tiled Whether the materialized task shape requires a tiled
  * callable.
+ * @param planned_route Optional planning-time identity, device, shape, and
+ * complete metadata contract.
  * @return Frozen callable/device pair, or nullopt when no compatible operation
  * exists.
  * @throws std::bad_alloc when registry snapshot storage allocates.
  * @throws Any exception propagated by registry callback copying.
- * @note Device implementations use registry ordering. Legacy CPU callbacks
- * preserve dirty-path HP tiled-first and RT-then-HP fallback behavior.
+ * @note The unified registry selection freezes callable, metadata, identity,
+ * and device under one lock. When planned_route is supplied, any intervening
+ * registry or metadata mutation rejects the operation instead of silently
+ * changing it.
  */
 std::optional<DirtyResolvedOperation> select_dirty_operation(
     const Node& node, const std::vector<Device>& available_devices,
-    ComputeIntent intent, bool require_tiled) {
-  const OpRegistry& registry = OpRegistry::instance();
-  auto selected = registry.select_best_implementation(
+    ComputeIntent intent, bool require_tiled,
+    const PlannedOperationRoute* planned_route = nullptr) {
+  auto selected = OpRegistry::instance().select_implementation(
       node.type, node.subtype, available_devices, intent,
       [require_tiled](const OpImplementation& implementation) {
         return !require_tiled || implementation.is_tiled();
       });
-  if (selected) {
-    return DirtyResolvedOperation{std::move(selected->func),
-                                  selected->metadata.device_preference};
-  }
-
-  const auto implementations =
-      registry.get_implementations(node.type, node.subtype);
-  std::optional<OpRegistry::OpVariant> fallback;
-  if (implementations) {
-    if (intent == ComputeIntent::RealTimeUpdate) {
-      if (implementations->tiled_rt) {
-        fallback.emplace(*implementations->tiled_rt);
-      } else if (implementations->tiled_hp) {
-        fallback.emplace(*implementations->tiled_hp);
-      } else if (!require_tiled && implementations->monolithic_hp) {
-        fallback.emplace(*implementations->monolithic_hp);
-      }
-    } else {
-      if (implementations->tiled_hp) {
-        fallback.emplace(*implementations->tiled_hp);
-      } else if (!require_tiled && implementations->monolithic_hp) {
-        fallback.emplace(*implementations->monolithic_hp);
-      }
-    }
-  }
-  if (!fallback) {
-    fallback = registry.resolve_for_intent(node.type, node.subtype, intent);
-    if (!fallback && intent == ComputeIntent::RealTimeUpdate) {
-      fallback = registry.resolve_for_intent(
-          node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
-    }
-  }
-  if (!fallback ||
-      (require_tiled && !std::holds_alternative<TileOpFunc>(*fallback))) {
+  if (!selected) {
     return std::nullopt;
   }
-  return DirtyResolvedOperation{std::move(*fallback), Device::CPU};
+  if (planned_route != nullptr &&
+      !planned_operation_route_matches(*planned_route, *selected)) {
+    return std::nullopt;
+  }
+  return DirtyResolvedOperation{
+      std::move(selected->func), selected->metadata.device_preference,
+      selected->implementation_identity, std::move(selected->metadata)};
 }
 
 /**
- * @brief Freezes operation/device choices for every node in a dirty plan.
+ * @brief Revalidates and freezes operations for active dirty task nodes.
  *
  * @param graph Graph containing the immutable node descriptions.
  * @param compute_plan Materialized task shape for the dirty domain.
+ * @param selection Generation-local active task overlay.
  * @param available_devices Route-aware device inventory.
  * @param intent Registry ordering policy for the dirty domain.
- * @return Node-id map of compatible selected operations; nodes without an
- * operation are omitted so node execution preserves its established error.
+ * @return Node-id map containing exactly the unique active task nodes.
  * @throws std::bad_alloc when temporary sets, maps, or callback copies
  * allocate.
- * @note A node with any Tile task rejects monolithic candidates. Every task of
- * one node therefore shares one callable revision and private execution lane.
+ * @throws GraphError with `GraphErrc::NoOperation` when any active node lacks
+ * its planning-time route or that route no longer resolves to the exact
+ * callback identity, device, shape, and metadata.
+ * @note Inactive and externally satisfied nodes are deliberately ignored. A
+ * node with any active Tile task rejects monolithic candidates. This complete
+ * active-node validation runs before constraint construction, retained-memory
+ * estimation, source-first preparation, or physical admission.
  */
 DirtyResolvedOperationMap resolve_dirty_operations(
     const GraphModel& graph, const ComputePlan& compute_plan,
+    const DirtyTaskSelectionOverlay& selection,
     const std::vector<Device>& available_devices, ComputeIntent intent) {
+  std::vector<int> active_node_ids;
+  active_node_ids.reserve(selection.active_task_ids.size());
+  std::unordered_set<int> active_nodes;
   std::unordered_set<int> tiled_nodes;
-  for (const PlannedTask& task : compute_plan.task_graph.tasks) {
+  for (int task_id : selection.active_task_ids) {
+    if (task_id < 0 || static_cast<std::size_t>(task_id) >=
+                           compute_plan.task_graph.tasks.size()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Dirty task selection contains an invalid task id.");
+    }
+    const PlannedTask& task =
+        compute_plan.task_graph.tasks.at(static_cast<std::size_t>(task_id));
+    if (active_nodes.insert(task.node_id).second) {
+      active_node_ids.push_back(task.node_id);
+    }
     if (task.kind == PlannedTaskKind::Tile) {
       tiled_nodes.insert(task.node_id);
     }
   }
 
   DirtyResolvedOperationMap resolved;
-  resolved.reserve(compute_plan.execution_order.size());
-  for (int node_id : compute_plan.execution_order) {
-    auto operation =
-        select_dirty_operation(graph.node(node_id), available_devices, intent,
-                               tiled_nodes.count(node_id) != 0U);
-    if (operation) {
-      resolved.emplace(node_id, std::move(*operation));
+  resolved.reserve(active_node_ids.size());
+  for (int node_id : active_node_ids) {
+    const auto planned_work = std::find_if(
+        compute_plan.planned_work.begin(), compute_plan.planned_work.end(),
+        [node_id](const PlannedNodeWork& work) {
+          return work.node_id == node_id;
+        });
+    if (planned_work == compute_plan.planned_work.end() ||
+        !planned_work->operation_route.has_value()) {
+      const Node& node = graph.node(node_id);
+      throw GraphError(GraphErrc::NoOperation,
+                       "Active dirty node has no planned operation route for " +
+                           node.type + ":" + node.subtype);
     }
+    auto operation = select_dirty_operation(
+        graph.node(node_id), available_devices, intent,
+        tiled_nodes.count(node_id) != 0U, &*planned_work->operation_route);
+    if (!operation) {
+      const Node& node = graph.node(node_id);
+      throw GraphError(GraphErrc::NoOperation,
+                       "Active dirty operation changed after planning for " +
+                           node.type + ":" + node.subtype);
+    }
+    resolved.emplace(node_id, std::move(*operation));
   }
   return resolved;
 }
@@ -254,8 +321,8 @@ DirtyResolvedOperationMap resolve_dirty_operations(
  * @param resolved_operations Frozen node operation/device map.
  * @return Device vector aligned with `compute_plan.task_graph.tasks`.
  * @throws std::bad_alloc when vector storage allocates.
- * @note Missing operations remain CPU-tagged; node execution raises the
- * authoritative NoOperation error before any such callback can do work.
+ * @note Inactive tasks retain the CPU default. Every active task has already
+ * passed exact operation revalidation before this helper is called.
  */
 std::vector<Device> dirty_task_devices(
     const ComputePlan& compute_plan,
@@ -273,13 +340,67 @@ std::vector<Device> dirty_task_devices(
 }
 
 /**
+ * @brief Expands frozen dirty operation constraints to dense task ids.
+ *
+ * @param compute_plan Plan whose task ids index the returned vector.
+ * @param resolved_operations Exact node operation snapshots.
+ * @return Constraint vector aligned with `compute_plan.task_graph.tasks`.
+ * @throws std::bad_alloc when vector or exclusive-key copies allocate.
+ * @note Inactive tasks retain the all-default value. Every active task has
+ * already passed exact operation revalidation before this helper is called.
+ */
+std::vector<OperationExecutionConstraints> dirty_task_constraints(
+    const ComputePlan& compute_plan,
+    const DirtyResolvedOperationMap& resolved_operations) {
+  std::vector<OperationExecutionConstraints> constraints(
+      compute_plan.task_graph.tasks.size());
+  for (const PlannedTask& task : compute_plan.task_graph.tasks) {
+    const auto operation_it = resolved_operations.find(task.node_id);
+    if (operation_it == resolved_operations.end()) {
+      continue;
+    }
+    const DirtyResolvedOperation& operation = operation_it->second;
+    constraints.at(static_cast<std::size_t>(task.task_id)) =
+        OperationExecutionConstraints{operation.implementation_identity,
+                                      operation.metadata.reentrant,
+                                      operation.metadata.maximum_parallelism,
+                                      operation.metadata.exclusive_key};
+  }
+  return constraints;
+}
+
+/**
+ * @brief Computes the uniform per-task operation demand for a dirty Run.
+ *
+ * @param operations Exact operation snapshots used by the Run.
+ * @return Component-wise maximum retained/scratch demand and one work unit.
+ * @throws Nothing; only bounded comparisons and value copies are performed.
+ * @note Ready bytes remain adapter-owned and are added by the source-first
+ * context. This maximum matches the service's uniform batch reservation model.
+ */
+ReadyTaskResourceDemand dirty_task_operation_resource_demand(
+    const DirtyResolvedOperationMap& operations) noexcept {
+  ReadyTaskResourceDemand demand =
+      ReadyTaskSubmission::default_resource_demand();
+  for (const auto& [node_id, operation] : operations) {
+    static_cast<void>(node_id);
+    demand.retained_memory_bytes = std::max(
+        demand.retained_memory_bytes, operation.metadata.retained_memory_bytes);
+    demand.scratch_bytes =
+        std::max(demand.scratch_bytes, operation.metadata.scratch_bytes);
+  }
+  return demand;
+}
+
+/**
  * @brief Estimates structural storage retained by dirty operation snapshots.
  *
  * @param operations Immutable node operation/device map.
  * @return Checked visible map bucket, value, and linkage bytes.
  * @throws GraphError when checked retained-memory arithmetic overflows.
- * @note Opaque allocations inside provider callable targets remain excluded,
- * matching full-plan callback accounting.
+ * @note Every retained operation-snapshot key is charged by its actual copied
+ * string capacity plus the null terminator. Opaque allocations inside provider
+ * callable targets remain excluded, matching full-plan callback accounting.
  */
 std::uint64_t dirty_operation_retained_memory_bytes(
     const DirtyResolvedOperationMap& operations) {
@@ -290,6 +411,19 @@ std::uint64_t dirty_operation_retained_memory_bytes(
       static_cast<std::uint64_t>(operations.size()));
   estimate.add_objects<void*>(static_cast<std::uint64_t>(operations.size()) *
                               2U);
+  for (const auto& [node_id, operation] : operations) {
+    static_cast<void>(node_id);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_operation_key = estimate.bytes();
+#endif
+    estimate.add_string_payload(operation.metadata.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::DirtyResolvedOperation,
+        operation.metadata.exclusive_key, before_operation_key,
+        estimate.bytes());
+#endif
+  }
   return estimate.bytes();
 }
 
@@ -602,8 +736,9 @@ plugin::ParameterMap stabilized_runtime_parameters(
  * @return Independent graph used only for extent/task/dirty planning.
  * @throws GraphError or std::bad_alloc from node cloning and graph validation.
  * @note Geometry-affected caches are cleared before stabilized outputs are
- * installed. The shadow has its own FullTaskGraph cache and therefore cannot
- * reuse a stale live-graph task expansion.
+ * installed. Staged legacy CPU images are normalized to sealed Value identity
+ * before becoming shadow HP cache. The shadow has its own FullTaskGraph cache
+ * and therefore cannot reuse a stale live-graph task expansion.
  */
 std::unique_ptr<GraphModel> make_stabilized_planning_graph(
     const GraphModel& graph, const StabilizedDirtyParameters& stabilized,
@@ -614,7 +749,7 @@ std::unique_ptr<GraphModel> make_stabilized_planning_graph(
     Node node = graph.node(node_id);
     if (stabilized.geometry_affected(node_id)) {
       node.cached_output_high_precision.reset();
-      node.hp_roi.reset();
+      node.hp_region.reset();
       node.runtime_parameters =
           stabilized_runtime_parameters(node, graph, stabilized);
     }
@@ -632,9 +767,11 @@ std::unique_ptr<GraphModel> make_stabilized_planning_graph(
                                                 std::to_string(node_id) +
                                                 " is missing.");
     }
-    node_it->second.cached_output_high_precision = staged.output;
+    NodeOutput normalized_output = staged.output;
+    value_image_adapter::normalize_node_output_image_value(&normalized_output);
+    node_it->second.cached_output_high_precision = std::move(normalized_output);
     node_it->second.hp_version = staged.hp_version;
-    node_it->second.hp_roi = staged.hp_roi;
+    node_it->second.hp_region = staged.hp_region;
   }
 
   auto planning_graph = std::make_unique<GraphModel>(graph.cache_root);
@@ -793,6 +930,8 @@ struct PreparedConnectedDirtyParametersState final {
    * @param active_graph Graph read later by installed provider callbacks.
    * @param active_task_runtime Optional task-runtime route.
    * @param active_execution_service Optional process execution service.
+   * @param active_direct_execution_service Optional authority for direct
+   * provider gates and resource admission.
    * @param active_run Optional HP Run.
    * @param lifecycle_lease Optional strong HP lifecycle lease.
    * @throws Nothing except ComputeRunLease copy construction.
@@ -800,10 +939,12 @@ struct PreparedConnectedDirtyParametersState final {
   PreparedConnectedDirtyParametersState(
       GraphModel& active_graph, ExecutionTaskRuntime* active_task_runtime,
       ExecutionService* active_execution_service, ComputeRun* active_run,
-      const ComputeRunLease* lifecycle_lease)
+      const ComputeRunLease* lifecycle_lease,
+      ExecutionService* active_direct_execution_service)
       : graph(&active_graph),
         task_runtime(active_task_runtime),
         execution_service(active_execution_service),
+        direct_execution_service(active_direct_execution_service),
         run(active_run),
         run_lease(lifecycle_lease != nullptr
                       ? std::optional<ComputeRunLease>(*lifecycle_lease)
@@ -815,6 +956,8 @@ struct PreparedConnectedDirtyParametersState final {
   ExecutionTaskRuntime* task_runtime = nullptr;
   /** @brief Optional process service owning pre-reserved roots. */
   ExecutionService* execution_service = nullptr;
+  /** @brief Optional process authority wrapping direct provider callbacks. */
+  ExecutionService* direct_execution_service = nullptr;
   /** @brief Optional request HP Run. */
   ComputeRun* run = nullptr;
   /** @brief Stable lease observed by every provider boundary. */
@@ -867,8 +1010,14 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     ExecutionTaskRuntime* task_runtime, ExecutionService* execution_service,
     ExecutionHostContext* host, ComputeRun* run,
     const ComputeRunLease* run_lease, const std::string& execution_type,
-    const std::vector<Device>* available_devices_override) {
+    const std::vector<Device>* available_devices_override,
+    ExecutionService* direct_execution_service) {
   observe_dirty_run_or_throw(run, run_lease);
+  if (execution_service != nullptr && direct_execution_service != nullptr) {
+    throw std::invalid_argument(
+        "Connected-parameter execution cannot use worker and direct "
+        "operation admission together.");
+  }
   if (execution_service != nullptr &&
       (task_runtime != nullptr || host == nullptr || run == nullptr)) {
     throw std::invalid_argument(
@@ -885,8 +1034,15 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
   std::unordered_set<int> target_cone(execution_order.begin(),
                                       execution_order.end());
   auto state = std::make_unique<PreparedConnectedDirtyParametersState>(
-      graph, task_runtime, execution_service, run, run_lease);
-  if (execution_service != nullptr && !state->run_lease.has_value()) {
+      graph, task_runtime, execution_service, run, run_lease,
+      direct_execution_service);
+  if ((execution_service != nullptr || direct_execution_service != nullptr) &&
+      !state->run_lease.has_value() && run == nullptr) {
+    throw std::invalid_argument(
+        "Connected-parameter operation admission requires a Run lease.");
+  }
+  if ((execution_service != nullptr || direct_execution_service != nullptr) &&
+      !state->run_lease.has_value()) {
     state->run_lease.emplace(run->acquire_lease());
   }
   auto result = std::make_shared<StabilizedDirtyParameters>();
@@ -919,7 +1075,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
       available_devices_override != nullptr
           ? *available_devices_override
           : (execution_service
-                 ? execution_service->available_devices(*host, execution_type)
+                 ? execution_service->available_devices(execution_type)
                  : (task_runtime ? task_runtime->available_devices()
                                  : std::vector<Device>{Device::CPU}));
 
@@ -994,8 +1150,48 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
                            selection_node.type + ":" + selection_node.subtype);
     }
     const Device selected_device = selected_operation->device;
+    OperationExecutionConstraints operation_constraints{
+        selected_operation->implementation_identity,
+        selected_operation->metadata.reentrant,
+        selected_operation->metadata.maximum_parallelism,
+        selected_operation->metadata.exclusive_key};
+    OperationExecutionConstraints submission_constraints(operation_constraints);
+    RetainedMemoryEstimator retained_constraints(
+        "connected-parameter operation constraints");
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_operation_constraint =
+        retained_constraints.bytes();
+#endif
+    retained_constraints.add_string_payload(
+        operation_constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::
+            ConnectedPreflightOperationConstraint,
+        operation_constraints.exclusive_key, before_operation_constraint,
+        retained_constraints.bytes());
+    const std::uint64_t before_submission_constraint =
+        retained_constraints.bytes();
+#endif
+    retained_constraints.add_string_payload(
+        submission_constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::
+            ConnectedPreflightSubmissionConstraint,
+        submission_constraints.exclusive_key, before_submission_constraint,
+        retained_constraints.bytes());
+#endif
+    const std::uint64_t retained_constraint_bytes =
+        retained_constraints.bytes();
+    const ReadyTaskResourceDemand operation_demand{
+        selected_operation->metadata.retained_memory_bytes,
+        selected_operation->metadata.scratch_bytes, 0U, 1U};
     OpRegistry::OpVariant operation = std::move(selected_operation->operation);
-    auto execute_preflight_node = [state_ptr, result, node_id, operation]() {
+    auto execute_preflight_node = [state_ptr, result, node_id, operation,
+                                   operation_constraints =
+                                       std::move(operation_constraints),
+                                   operation_demand]() {
       const ComputeRunLease* active_lease =
           state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;
       observe_dirty_run_or_throw(state_ptr->run, active_lease);
@@ -1021,25 +1217,37 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
             state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;
         observe_dirty_run_or_throw(state_ptr->run, lease);
       };
-      NodeOutput output =
-          NodeExecutor::execute(*state_ptr->graph, node_for_exec, operation,
-                                resolved.image_inputs, tiled_config);
+      NodeOutput output;
+      {
+        OperationExecutionLease operation_lease;
+        if (state_ptr->direct_execution_service != nullptr) {
+          if (active_lease == nullptr) {
+            throw std::logic_error(
+                "Direct connected-parameter execution lost its Run lease.");
+          }
+          operation_lease =
+              state_ptr->direct_execution_service->acquire_operation_execution(
+                  *active_lease, operation_constraints, operation_demand);
+        }
+        output =
+            NodeExecutor::execute(*state_ptr->graph, node_for_exec, operation,
+                                  resolved.image_inputs, tiled_config);
+      }
       observe_dirty_run_or_throw(state_ptr->run, active_lease);
-      if (!has_image_payload(output) && output.data.empty()) {
+      if (!has_image_payload(output) && !output.image_value.valid() &&
+          output.data.empty()) {
         throw GraphError(
             GraphErrc::ComputeError,
             "Connected-parameter preflight produced no output for " +
                 node_for_exec.type + ":" + node_for_exec.subtype);
       }
-      std::optional<PixelRect> hp_roi;
-      if (has_image_payload(output)) {
-        hp_roi = PixelRect{0, 0, output.image_buffer.width,
-                           output.image_buffer.height};
-      }
+      const RegionSet hp_region =
+          value_image_adapter::full_node_output_region(output);
       result->staged_outputs_.emplace(
-          node_id, StabilizedDirtyNodeOutput{
-                       std::move(output),
-                       state_ptr->graph->node(node_id).hp_version + 1, hp_roi});
+          node_id,
+          StabilizedDirtyNodeOutput{
+              std::move(output), state_ptr->graph->node(node_id).hp_version + 1,
+              hp_region});
     };
     PreparedConnectedDirtyNode step;
     step.node_id = node_id;
@@ -1074,20 +1282,26 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
           throw;
         }
       };
-      const ReadyTaskResourceDemand task_demand =
-          owned_callback_resource_demand(
-              static_cast<std::uint64_t>(sizeof(service_callback)));
+      ReadyTaskResourceDemand task_demand = owned_callback_resource_demand(
+          static_cast<std::uint64_t>(sizeof(service_callback)));
+      RetainedMemoryEstimator complete_task_retained(
+          "connected-parameter operation task");
+      complete_task_retained.add_bytes(task_demand.retained_memory_bytes);
+      complete_task_retained.add_bytes(operation_demand.retained_memory_bytes);
+      task_demand.retained_memory_bytes = complete_task_retained.bytes();
+      task_demand.scratch_bytes = operation_demand.scratch_bytes;
       RetainedMemoryEstimator unique_shared_demand(
           "connected-parameter preflight node callback");
       unique_shared_demand.add_objects<std::function<void()>>();
       unique_shared_demand.add_shared_control_block();
       unique_shared_demand.add_bytes(owned_callable_retained_memory_bytes(
           static_cast<std::uint64_t>(sizeof(execute_preflight_node))));
+      unique_shared_demand.add_bytes(retained_constraint_bytes);
       std::vector<ReadyTaskSubmission> submissions;
-      submissions.emplace_back(std::move(lease), identity, node_id, true,
-                               std::move(service_callback),
-                               ExecutionTaskPriority::High, task_demand,
-                               selected_device);
+      submissions.emplace_back(
+          std::move(lease), identity, node_id, true,
+          std::move(service_callback), ExecutionTaskPriority::High, task_demand,
+          selected_device, std::move(submission_constraints));
       step.service_prepared.emplace(execution_service->prepare_run(
           *host, execution_type, std::move(submissions), 1,
           CpuRunResourceDemand{unique_shared_demand.bytes(), task_demand}));
@@ -1266,6 +1480,10 @@ struct PreparedHighPrecisionDirtyRunState final {
   DirtyResolvedOperationMap resolved_operations;
   /** @brief Per-task immutable device choices. */
   std::vector<Device> task_devices;
+  /** @brief Per-task exact-identity concurrency and exclusion constraints. */
+  std::vector<OperationExecutionConstraints> task_constraints;
+  /** @brief Uniform maximum operation retained/scratch demand for this Run. */
+  ReadyTaskResourceDemand task_operation_resource_demand;
   /** @brief Complete request-local node synchronization. */
   std::shared_ptr<DirtyNodeSynchronization> node_synchronization;
   /** @brief Copied private route id. */
@@ -1354,6 +1572,10 @@ struct PreparedRealTimeDirtyRunState final {
   DirtyResolvedOperationMap resolved_operations;
   /** @brief Per-task immutable device choices. */
   std::vector<Device> task_devices;
+  /** @brief Per-task exact-identity concurrency and exclusion constraints. */
+  std::vector<OperationExecutionConstraints> task_constraints;
+  /** @brief Uniform maximum operation retained/scratch demand for this Run. */
+  ReadyTaskResourceDemand task_operation_resource_demand;
   /** @brief Complete request-local node synchronization. */
   std::shared_ptr<DirtyNodeSynchronization> node_synchronization;
   /** @brief Copied private route id. */
@@ -1450,7 +1672,7 @@ void HighPrecisionDirtyExecutor::reset_plan_cache(
     (void)entry;
     Node& node = graph.mutable_node(node_id);
     node.cached_output_high_precision.reset();
-    node.hp_roi.reset();
+    node.hp_region.reset();
     node.hp_version = 0;
   }
 }
@@ -1488,6 +1710,8 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * ready submissions.
  * @param run_lease Optional borrowed lifecycle lease observed across planning,
  * provider, tile, downsample, and commit boundaries.
+ * @param direct_execution_service Optional process authority wrapping direct
+ * provider callbacks; mutually exclusive with execution_service.
  * @return Mutable target HP output owned by graph.
  * @throws std::bad_alloc unchanged when planning, task, cache, staging,
  * telemetry, or output storage exhausts memory.
@@ -1502,25 +1726,52 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * synchronization owner. Concurrent HP/RT siblings therefore reserve the same
  * object conservatively in both Runs so either reservation can settle first
  * without leaving the surviving sibling's retained ownership unaccounted.
- * Cancellation observations bracket planning, node/tile work, sibling gating,
- * write-buffer commit, downsample, and return. A monolithic provider already
- * entered remains non-preemptible, while product publication remains protected
- * by the outer request-owned staging/commit contender.
+ * Exact complete formal HP cache may cut request-local work; force-recache
+ * disables that satisfaction without clearing visible output during fallible
+ * preparation. Cancellation observations bracket planning, node/tile work,
+ * sibling gating, write-buffer commit, downsample, and return. A monolithic
+ * provider already entered remains non-preemptible, while product publication
+ * remains protected by the outer request-owned staging/commit contender.
  */
 NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
     const DirtyUpdateRequest& request, ComputeRun* run,
-    ExecutionService* execution_service, const ComputeRunLease* run_lease) {
+    ExecutionService* execution_service, const ComputeRunLease* run_lease,
+    ExecutionService* direct_execution_service) {
   return execute_prepared(prepare(graph, proxy_graph, runtime, request, run,
-                                  execution_service, run_lease));
+                                  execution_service, run_lease,
+                                  direct_execution_service));
 }
 
 /** @copydoc HighPrecisionDirtyExecutor::prepare */
 PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
     const DirtyUpdateRequest& request, ComputeRun* run,
-    ExecutionService* execution_service, const ComputeRunLease* run_lease) {
+    ExecutionService* execution_service, const ComputeRunLease* run_lease,
+    ExecutionService* direct_execution_service) {
   observe_dirty_run_or_throw(run, run_lease);
+  if (execution_service != nullptr && direct_execution_service != nullptr) {
+    throw std::invalid_argument(
+        "HP dirty execution cannot use worker and direct operation admission "
+        "together.");
+  }
+  if (direct_execution_service != nullptr && run_lease == nullptr) {
+    throw std::invalid_argument(
+        "Direct HP dirty execution requires a Run lease.");
+  }
+  if (execution_service != nullptr && runtime == nullptr) {
+    throw std::invalid_argument(
+        "HP dirty service execution requires a Graph runtime host.");
+  }
+  const std::string execution_type =
+      runtime != nullptr
+          ? runtime->execution_route(ComputeIntent::GlobalHighPrecision)
+                .execution_type
+          : "cpu";
+  const std::vector<Device> available_devices =
+      execution_service != nullptr
+          ? execution_service->available_devices(execution_type)
+          : std::vector<Device>{Device::CPU};
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
   if (request.stabilized_parameters &&
@@ -1550,7 +1801,8 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
         &request.stabilized_parameters->staged_node_ids();
   }
 
-  RoiPropagationService roi_propagation;
+  RoiPropagationService roi_propagation(available_devices,
+                                        ComputeIntent::GlobalHighPrecision);
   DirtyRegionPlanner dirty_planner(
       traversal_, roi_propagation, stabilized_geometry_nodes, nullptr,
       request.stabilized_parameters
@@ -1564,32 +1816,26 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
   auto prepared = prepare_dirty_execution(
       *planning_graph, std::move(dirty_plan),
       ComputeRequest{ComputeIntent::GlobalHighPrecision, request.node_id, false,
-                     planning_roi},
-      externally_satisfied_nodes);
+                     planning_roi, !request.force_recache},
+      available_devices, externally_satisfied_nodes);
   observe_dirty_run_or_throw(run, run_lease);
   planning_graph_owner.reset();
   graph_lock.unlock();
 
+#if defined(PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
+  testing::notify_dirty_post_plan_test_hook();
+#endif
   observe_dirty_run_or_throw(run, run_lease);
 
-  const std::string execution_type =
-      runtime != nullptr
-          ? runtime->execution_route(ComputeIntent::GlobalHighPrecision)
-                .execution_type
-          : "cpu";
-  if (execution_service != nullptr && runtime == nullptr) {
-    throw std::invalid_argument(
-        "HP dirty service execution requires a Graph runtime host.");
-  }
-  const std::vector<Device> available_devices =
-      execution_service != nullptr
-          ? execution_service->available_devices(*runtime, execution_type)
-          : std::vector<Device>{Device::CPU};
-  DirtyResolvedOperationMap resolved_operations =
-      resolve_dirty_operations(graph, prepared.compute_plan, available_devices,
-                               ComputeIntent::GlobalHighPrecision);
+  DirtyResolvedOperationMap resolved_operations = resolve_dirty_operations(
+      graph, prepared.compute_plan, prepared.selection, available_devices,
+      ComputeIntent::GlobalHighPrecision);
   std::vector<Device> task_devices =
       dirty_task_devices(prepared.compute_plan, resolved_operations);
+  std::vector<OperationExecutionConstraints> task_constraints =
+      dirty_task_constraints(prepared.compute_plan, resolved_operations);
+  const ReadyTaskResourceDemand task_operation_resource_demand =
+      dirty_task_operation_resource_demand(resolved_operations);
   std::shared_ptr<DirtyNodeSynchronization> node_synchronization =
       request.node_synchronization;
   if (!node_synchronization) {
@@ -1600,13 +1846,16 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
       graph, proxy_graph, runtime, request, run, run_lease, events_,
       std::move(prepared), std::move(resolved_operations),
       std::move(task_devices), std::move(node_synchronization), execution_type);
+  state->task_constraints = std::move(task_constraints);
+  state->task_operation_resource_demand = task_operation_resource_demand;
   HighPrecisionDirtyPlan& prepared_dirty_plan = state->prepared.dirty_plan;
   HighPrecisionDirtyWriteBuffer& hp_write_buffer = *state->hp_write_buffer;
   if (request.stabilized_parameters) {
     for (const auto& [node_id, staged] :
          request.stabilized_parameters->staged_outputs()) {
       hp_write_buffer.import_precomputed_output(
-          graph.node(node_id), staged.output, staged.hp_version, staged.hp_roi,
+          graph.node(node_id), staged.output, staged.hp_version,
+          staged.hp_region,
           request.stabilized_parameters->is_staged_source(node_id)
               ? std::optional<uint64_t>(
                     request.stabilized_parameters->request_generation())
@@ -1622,7 +1871,8 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
       prepared_dirty_plan.snapshot.graph_generation,
       *state->node_synchronization,
       request.stabilized_parameters.get(),
-      state->run_lease.has_value() ? &*state->run_lease : nullptr};
+      state->run_lease.has_value() ? &*state->run_lease : nullptr,
+      direct_execution_service};
   state->node_executor = std::make_unique<HighPrecisionDirtyNodeExecutor>(
       node_context, hp_write_buffer);
 
@@ -1666,6 +1916,9 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
   source_first_request.compute_plan = &state->prepared.compute_plan;
   source_first_request.selection = &state->prepared.selection;
   source_first_request.task_devices = &state->task_devices;
+  source_first_request.task_constraints = &state->task_constraints;
+  source_first_request.task_operation_resource_demand =
+      state->task_operation_resource_demand;
   RetainedMemoryEstimator hp_shared_demand("HP dirty request");
   hp_shared_demand.add_bytes(
       prepared_dirty_retained_memory_bytes(state->prepared));
@@ -1675,6 +1928,22 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
       dirty_operation_retained_memory_bytes(state->resolved_operations));
   hp_shared_demand.add_objects<Device>(
       static_cast<std::uint64_t>(state->task_devices.capacity()));
+  hp_shared_demand.add_objects<OperationExecutionConstraints>(
+      static_cast<std::uint64_t>(state->task_constraints.capacity()));
+  for (const OperationExecutionConstraints& constraints :
+       state->task_constraints) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_constraint_key = hp_shared_demand.bytes();
+#endif
+    hp_shared_demand.add_string_payload(constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::
+            DirtyHighPrecisionExecutionConstraint,
+        constraints.exclusive_key, before_constraint_key,
+        hp_shared_demand.bytes());
+#endif
+  }
   if (request.stabilized_parameters) {
     hp_shared_demand.add_bytes(
         request.stabilized_parameters->retained_memory_bytes());
@@ -1809,6 +2078,8 @@ NodeOutput& RealTimeDirtyExecutor::require_target_output(
  * ready submissions.
  * @param run_lease Optional borrowed lifecycle lease observed across planning,
  * provider, tile, and proxy-commit boundaries.
+ * @param direct_execution_service Optional process authority wrapping direct
+ * provider callbacks; mutually exclusive with execution_service.
  * @return Mutable target RT output owned by proxy_graph.
  * @throws std::bad_alloc unchanged when planning, task, proxy, staging,
  * telemetry, or output storage exhausts memory.
@@ -1819,26 +2090,51 @@ NodeOutput& RealTimeDirtyExecutor::require_target_output(
  * outside that lock. RT output never becomes formal reusable GraphModel cache.
  * Each process-service phase charges the complete per-node synchronization
  * owner; a shared HP/RT sibling object is therefore conservatively present in
- * both independent Run reservations. Cancellation observations bracket
- * planning, node/tile work, proxy write-buffer commit, and return. A
- * monolithic provider already entered remains non-preemptible, while product
- * publication remains protected by the outer request-owned staging/commit
- * contender.
+ * both independent Run reservations. Formal HP cache never satisfies RT task
+ * demand. Cancellation observations bracket planning, node/tile work, proxy
+ * write-buffer commit, and return. A monolithic provider already entered
+ * remains non-preemptible, while product publication remains protected by the
+ * outer request-owned staging/commit contender.
  */
 NodeOutput& RealTimeDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
     const DirtyUpdateRequest& request, ComputeRun* run,
-    ExecutionService* execution_service, const ComputeRunLease* run_lease) {
+    ExecutionService* execution_service, const ComputeRunLease* run_lease,
+    ExecutionService* direct_execution_service) {
   return execute_prepared(prepare(graph, proxy_graph, runtime, request, run,
-                                  execution_service, run_lease));
+                                  execution_service, run_lease,
+                                  direct_execution_service));
 }
 
 /** @copydoc RealTimeDirtyExecutor::prepare */
 PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
     const DirtyUpdateRequest& request, ComputeRun* run,
-    ExecutionService* execution_service, const ComputeRunLease* run_lease) {
+    ExecutionService* execution_service, const ComputeRunLease* run_lease,
+    ExecutionService* direct_execution_service) {
   observe_dirty_run_or_throw(run, run_lease);
+  if (execution_service != nullptr && direct_execution_service != nullptr) {
+    throw std::invalid_argument(
+        "RT dirty execution cannot use worker and direct operation admission "
+        "together.");
+  }
+  if (direct_execution_service != nullptr && run_lease == nullptr) {
+    throw std::invalid_argument(
+        "Direct RT dirty execution requires a Run lease.");
+  }
+  if (execution_service != nullptr && runtime == nullptr) {
+    throw std::invalid_argument(
+        "RT dirty service execution requires a Graph runtime host.");
+  }
+  const std::string execution_type =
+      runtime != nullptr
+          ? runtime->execution_route(ComputeIntent::RealTimeUpdate)
+                .execution_type
+          : "cpu";
+  const std::vector<Device> available_devices =
+      execution_service != nullptr
+          ? execution_service->available_devices(execution_type)
+          : std::vector<Device>{Device::CPU};
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
   if (request.stabilized_parameters &&
@@ -1871,7 +2167,8 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
         &request.stabilized_parameters->rt_satisfied_parameter_node_ids();
   }
 
-  RoiPropagationService roi_propagation;
+  RoiPropagationService roi_propagation(available_devices,
+                                        ComputeIntent::RealTimeUpdate);
   DirtyRegionPlanner dirty_planner(
       traversal_, roi_propagation, stabilized_geometry_nodes,
       forced_parameter_producers,
@@ -1884,32 +2181,26 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
   auto prepared = prepare_dirty_execution(
       *planning_graph, std::move(dirty_plan),
       ComputeRequest{ComputeIntent::RealTimeUpdate, request.node_id, false,
-                     request.dirty_roi},
-      externally_satisfied_nodes);
+                     request.dirty_roi, false},
+      available_devices, externally_satisfied_nodes);
   observe_dirty_run_or_throw(run, run_lease);
   planning_graph_owner.reset();
   graph_lock.unlock();
 
+#if defined(PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
+  testing::notify_dirty_post_plan_test_hook();
+#endif
   observe_dirty_run_or_throw(run, run_lease);
 
-  const std::string execution_type =
-      runtime != nullptr
-          ? runtime->execution_route(ComputeIntent::RealTimeUpdate)
-                .execution_type
-          : "cpu";
-  if (execution_service != nullptr && runtime == nullptr) {
-    throw std::invalid_argument(
-        "RT dirty service execution requires a Graph runtime host.");
-  }
-  const std::vector<Device> available_devices =
-      execution_service != nullptr
-          ? execution_service->available_devices(*runtime, execution_type)
-          : std::vector<Device>{Device::CPU};
-  DirtyResolvedOperationMap resolved_operations =
-      resolve_dirty_operations(graph, prepared.compute_plan, available_devices,
-                               ComputeIntent::RealTimeUpdate);
+  DirtyResolvedOperationMap resolved_operations = resolve_dirty_operations(
+      graph, prepared.compute_plan, prepared.selection, available_devices,
+      ComputeIntent::RealTimeUpdate);
   std::vector<Device> task_devices =
       dirty_task_devices(prepared.compute_plan, resolved_operations);
+  std::vector<OperationExecutionConstraints> task_constraints =
+      dirty_task_constraints(prepared.compute_plan, resolved_operations);
+  const ReadyTaskResourceDemand task_operation_resource_demand =
+      dirty_task_operation_resource_demand(resolved_operations);
   std::shared_ptr<DirtyNodeSynchronization> node_synchronization =
       request.node_synchronization;
   if (!node_synchronization) {
@@ -1920,6 +2211,8 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
       graph, proxy_graph, runtime, request, run, run_lease, events_,
       std::move(prepared), std::move(resolved_operations),
       std::move(task_devices), std::move(node_synchronization), execution_type);
+  state->task_constraints = std::move(task_constraints);
+  state->task_operation_resource_demand = task_operation_resource_demand;
   RealTimeDirtyPlan& prepared_dirty_plan = state->prepared.dirty_plan;
   DirtyNodeExecutionContext node_context{
       graph,
@@ -1930,7 +2223,8 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
       prepared_dirty_plan.snapshot.graph_generation,
       *state->node_synchronization,
       request.stabilized_parameters.get(),
-      state->run_lease.has_value() ? &*state->run_lease : nullptr};
+      state->run_lease.has_value() ? &*state->run_lease : nullptr,
+      direct_execution_service};
   state->node_executor = std::make_unique<RealTimeDirtyNodeExecutor>(
       node_context, proxy_graph, *state->rt_write_buffer);
   PreparedRealTimeDirtyRunState* state_ptr = state.get();
@@ -1973,6 +2267,9 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
   source_first_request.compute_plan = &state->prepared.compute_plan;
   source_first_request.selection = &state->prepared.selection;
   source_first_request.task_devices = &state->task_devices;
+  source_first_request.task_constraints = &state->task_constraints;
+  source_first_request.task_operation_resource_demand =
+      state->task_operation_resource_demand;
   RetainedMemoryEstimator rt_shared_demand("RT dirty request");
   rt_shared_demand.add_bytes(
       prepared_dirty_retained_memory_bytes(state->prepared));
@@ -1982,6 +2279,21 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
       dirty_operation_retained_memory_bytes(state->resolved_operations));
   rt_shared_demand.add_objects<Device>(
       static_cast<std::uint64_t>(state->task_devices.capacity()));
+  rt_shared_demand.add_objects<OperationExecutionConstraints>(
+      static_cast<std::uint64_t>(state->task_constraints.capacity()));
+  for (const OperationExecutionConstraints& constraints :
+       state->task_constraints) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_constraint_key = rt_shared_demand.bytes();
+#endif
+    rt_shared_demand.add_string_payload(constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::DirtyRealTimeExecutionConstraint,
+        constraints.exclusive_key, before_constraint_key,
+        rt_shared_demand.bytes());
+#endif
+  }
   if (request.stabilized_parameters) {
     rt_shared_demand.add_bytes(
         request.stabilized_parameters->retained_memory_bytes());

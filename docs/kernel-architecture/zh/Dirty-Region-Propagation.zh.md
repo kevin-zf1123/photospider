@@ -2,7 +2,8 @@
 
 本文描述当前内核已经实现的 dirty-region 行为，并区分 graph-scoped dirty facts、request
 planning、task selection、policy/ready-store selection、私有 route execution、output commit，
-以及截至 issue #75 已实现的 cooperative Run-cancellation 与 latest-wins commit observation。
+以及截至 issue #81 已实现的 cooperative Run-cancellation、latest-wins commit observation 与
+统一逻辑 Region 行为。
 拟议的 Macro retile 与自适应
 coarsening 属于内核演进
 路线图，而不是本文的当前行为契约。Dirty geometry
@@ -14,10 +15,11 @@ OpenCV adapter 或标准库实现，因此 compute/runtime 代码不会直接声
 **Dirty source** 是一个 graph node，表示某个 snapshot 中 dirty work 的来源。Lifecycle event 可以
 显式指定它；request planner 也可以把选中 dependency cone 的 upstream root 推导为 dirty source。
 
-**Dirty ROI** 是受影响或被请求的矩形区域。在 Host、graph、propagation、planning、snapshot、
-task/work-set、write-buffer 与 `NodeExecutor` 边界中，内核自有表示为 `PixelRect`，output extent
-使用 `PixelSize`。只有 provider 或算法在真实 matrix 或 algorithm call 处才会局部创建 OpenCV
-rectangle 与 size。
+**Dirty Region** 是由 `RegionSet` 表示的规范化逻辑 affected/demanded work。V-4 的 HP 支持
+精确 ImageRect 与 rank-general TensorSlice；RT 只接受精确 ImageRect。当前 Host/IPC v2
+inspection、operation ABI v2、ImageBuffer processing 与 physical image tile 使用 checked
+derived `PixelRect`/`PixelSize`。只有 provider 或算法在真实 matrix 或 algorithm call 处才会
+局部创建 OpenCV rectangle 与 size。
 
 **Dirty generation** 是存储在 `DirtyRegionSnapshot` 中并复制到 selected task metadata 的值，用于
 标识 dirty inspection 与 source commit state。它不是 graph revision、`ComputeRun` 或 private-route
@@ -33,8 +35,8 @@ record 使用的 RT proxy coordinate）。HP 与 RT 是不同 compute domain；d
 | --- | --- | --- |
 | `DirtyControlLane` | 在串行 graph-state path 上应用显式 begin/update/end source event，并派生 wake/cutoff hint | Compute task、ready-store entry 或 execution route |
 | `DirtyRegionPlanner` | 构造 HP/RT request snapshot，并更新 lifecycle snapshot | Worker execution 或 result commit |
-| `DirtyRegionSnapshotBuilder` | 规范化 source ROI，物化 snapshot-only Micro tile 或 monolithic record | Graph traversal 或 compute request |
-| `RoiPropagationService` | 计算 operation-specific forward inspection 与 backward demand projection | Graph topology ownership |
+| `DirtyRegionSnapshotBuilder` | 规范化 source Region，物化 derived image Micro tile 或 monolithic record | Graph traversal 或 compute request |
+| `RoiPropagationService` | 计算 typed Region forward inspection 与 backward demand projection，并把精确 ImageRect 适配到当前 callback | Graph topology ownership |
 | `DirtySnapshotTaskGraphPruner` | 从现有 request plan 中选择并裁剪 active task | 新 task shape |
 | dirty executor 与 write buffer | 按 source-first 顺序执行，在现有 phase/node/tile/provider 边界观察匹配 Run lease，并暂存 HP/RT output；standalone 非 realtime HP staging 由其 `ComputeRun` 拥有，配对 realtime sibling buffer 仍保持 callback-local | Cancellation authority、Run grouping 或 graph revision policy |
 
@@ -43,13 +45,13 @@ record 使用的 RT proxy coordinate）。HP 与 RT 是不同 compute domain；d
 ```mermaid
 flowchart TD
   EVENT["Host dirty lifecycle call"] --> LANE["DirtyControlLane"]
-  LANE --> FACTS["source membership, lifecycle, ROI records"]
+  LANE --> FACTS["source membership, lifecycle, Region records"]
   FACTS --> SNAPSHOT["DirtyRegionSnapshot"]
 
   REQUEST["HP or RT dirty compute request"] --> PLAN["DirtyRegionPlanner"]
   PLAN --> SNAPSHOT
   SNAPSHOT --> SELECT["DirtySnapshotTaskGraphPruner"]
-  STATIC["node/cache-pruned ComputePlan"] --> SELECT
+  STATIC["保留的 request-cone ComputePlan"] --> SELECT
   SELECT --> SOURCE["source task group"]
   SELECT --> DOWNSTREAM["downstream task group"]
   SOURCE --> VALIDATE["source-boundary validation"]
@@ -59,7 +61,8 @@ flowchart TD
 ```
 
 Dirty lifecycle call 只更新 graph state，不会自动启动 compute request。Parallel execution 始终从
-另行构造的 node/cache-pruned `ComputePlan` 开始。
+另行构造的 request-cone `ComputePlan` 开始；dirty preparation 会保留其 callback-free shape，
+直到 dirty/external-boundary selection。
 
 ## `DirtyRegionSnapshot`
 
@@ -68,11 +71,11 @@ value record，不是 graph 或 task pointer：
 
 - `graph_generation`；
 - `dirty_source_nodes`；
-- 每个 source 的 lifecycle state 与累计 source ROI record；
+- 每个 source 的 lifecycle state、累计 authoritative Region record 与 derived image ROI record；
 - `dirty_updating_count`；
 - `dirty_tiles` 与 `dirty_monolithic_nodes`；
-- `per_node_dirty_rois` 与 `actual_dirty_rois`；
-- edge-level ROI mapping。
+- `per_node_dirty_regions` 与 `actual_dirty_regions`，以及 image ROI projection；
+- edge-level Region mapping，并在精确时附带 image ROI projection。
 
 它有意排除 dependency counter、ready-store entry、policy snapshot/binding、task reference count、
 resource grant、cancellation state 与 commit policy。Snapshot 是 inspection/execution input，不是 undo log
@@ -80,14 +83,14 @@ resource grant、cancellation state 与 commit policy。Snapshot 是 inspection/
 
 ### Lifecycle 产生的 snapshot
 
-`begin_dirty_source()` 与 `update_dirty_source()` 会验证 node 与非空 source ROI，把 node 加入 source
-membership、追加 ROI，并把 source state 设为 `Updating`。`end_dirty_source()` 只把该 source 改为
+`begin_dirty_source()` 与 `update_dirty_source()` 会验证 node 与非空有限 source Region，把 node
+加入 source membership、追加 Region，并把 source state 设为 `Updating`。`end_dirty_source()` 只把该 source 改为
 `Settled`，不会追加 ROI。Source membership 与此前 ROI record 会继续保留；end 后再次 begin 本身
 不会打开新 generation。Graph runtime-state reset 才会清除这些状态。每次 event 后，系统会从全部
 source state 重新计算 `dirty_updating_count`。
 
 Planner 会复制 graph 的 latest snapshot。只有复制出的 snapshot generation 为零时才分配新
-generation，随后根据当前 event 的 domain，从已保存 source record 重建 derived ROI、tile、
+generation，随后根据当前 event 的 domain，从已保存 source record 重建 derived Region、tile、
 monolithic 与 edge container。当前 lifecycle rebuild 是 source-local：它只规范化已记录的 source
 node，不遍历 downstream graph edge。因此，它会清空 edge mapping list，且不会重新生成 mapping。
 
@@ -97,20 +100,51 @@ node，不遍历 downstream graph edge。因此，它会清空 edge mapping list
 
 ### Request planning 产生的 snapshot
 
-`plan_high_precision()` 与 `plan_real_time()` 针对一个 target 和 dirty ROI 构造新的 request
-snapshot。Planner 会验证 target 与 ROI，取得从 target 出发的 topological postorder，解析 HP
+`plan_high_precision()` 与 `plan_real_time()` 针对一个 target 和 dirty Region 构造新的 request
+snapshot。Planner 会验证 target 与 Region，取得从 target 出发的 topological postorder，解析 HP
 authoritative extent，并反向遍历选中 graph 以推导 upstream demand。结果 plan 的 upstream root
 会成为 settled dirty source。
+
+对于 TensorSlice，该遍历只会在 exact validity 能证明 complete coverage 的 upstream
+formal output 处停止。缺失或部分有效的 intermediate exact-core dense node 会在 consumer
+前继续保留在 plan 中，并接收同一 logical demand。uncached leaf source 是分类明确的
+missing dependency。Planner 会记录 direct TensorSlice source Region，而不会从空
+PixelRect compatibility projection 推断 source provenance。
+对于每个 executable target 或 upstream node，通过 exact-core 检查的同一次 route selection
+会立即缩减成 callback-free operation key 与完整 identity/device/shape/metadata record。
+Request plan 只保留这些带 revision 的 record，不保留 callable 或 DSO lease。在
+dirty/external-satisfaction selection 识别 active task node 后，若 active view 为空，dirty
+preparation 会在比较 intent、device inventory、task id 或 node route 前把它视为成功 no-work。
+否则 preparation 会在应用 ROI 或 materialize work 前，把每条 active task-population route 与这些
+record 比较。因此剩余 active work 的 target 或 upstream replacement 会在取得
+provider/gate/grant/reservation/ledger ownership 前以 `NoOperation` 失败；普通 execution
+随后仍会重新解析 callable。
+
+Formal HP cache eligibility 由 production node/cache pruner 记录，而不是由测试自行修改 execution
+order。普通 full HP planning 可以立即消费 `ComputeCachePolicy` 给出的 exact complete 结果。Dirty
+preparation 会保留完整的 callback-free request cone，但 dirty selector 会把每个
+snapshot-selected node 排除在 formal-cache satisfaction 之外。Exact 旧 output 是用来保留未选
+坐标的 staging merge base，不是当前 dirty Region 已经是最新的证据。因此，exact、removed 与
+partial 三种 target-cache 状态都会保留选中的 provider cone。Force-recache 会禁用 cache reuse，
+RT intent 绝不会把 formal HP cache 当成 task satisfaction。
 
 Planner 记录 `BackwardDemand` edge mapping。Forward affected-region projection 是独立的
 `RoiPropagationService` inspection behavior，不是当前 dirty execution plan 的物化遍历方式。
 
-## ROI 传播
+## Region 传播
 
-对于每条 image-input edge，`RoiPropagationService` 会向已注册 operation 请求 upstream
-projection。Static operation formula 覆盖 identity、neighborhood、crop、resize 与其他 geometric
-behavior；data-dependent operation 可以提供经过验证的 dependency LUT。同一 parent 的多个 demand
-会合并成一个 bounding rectangle，并裁剪到 resolved extent；当前表示不会保留 sparse ROI set。
+对于精确内建 ImageRect，`RoiPropagationService` 会经过 checked private adapter 转换，向当前
+选中的 v2 callback 请求 projection，验证返回 rectangle，再把它包装成 Exact Region。Static
+formula 继续覆盖 identity、neighborhood、crop、resize 与其他 image geometry；data-dependent
+operation 可以提供经过验证的 dependency LUT。同一 parent 的 image demand 保留当前有界矩形行为。
+
+TensorSlice 绝不进入 rectangular callback。Request-bound `RoiPropagationService` 会使用与
+execution 相同的规范 route device inventory 和 HP/RT intent 选出实际的 revisioned
+implementation；只有该选中 callback 是精确 source-private core dense identity
+implementation 时才接受 TensorSlice。它不会为了 core identity 过滤 candidate，也不会查询
+scalar-only fallback。因此，route 选中的 same-key device 或 plugin replacement 会返回
+Unsupported，而不会继承自己未声明的 contract。缺失 transform 与不可表示 operation 保持为
+typed Unknown、Unsupported 或 TooComplex，而不是伪造 Region。
 
 Connected parameter producer 可能改变 geometry。若 request 尚未先稳定这些 value，planner 会把
 受影响 consumer、connected parameter producer 与相关 image parent 保守扩展到 full extent。Dirty
@@ -118,7 +152,7 @@ execution 也可以构造 request-local stabilized planning graph，使 extent�
 task-shape decision 观察同一份 parameter snapshot。
 
 如果某 operation 有 monolithic HP callback、但没有 tiled HP callback，它会被视为 monolithic
-boundary。其局部 dirty ROI 会提升为 whole output，并记录为一个 `DirtyMonolithicRegion`。该判断基于
+boundary。其局部 image dirty ROI 会提升为 whole output，并记录为一个 `DirtyMonolithicRegion`。该判断基于
 registry，即使请求 RT domain 也复用同一判断。离开该局部 node 后，传播仍可能得到更窄 ROI。
 
 ## 坐标与网格规则
@@ -132,7 +166,7 @@ registry，即使请求 RT domain 也复用同一判断。离开该局部 node �
 | RT dirty Micro tile | 16 x 16 | RT proxy space |
 | preferred HP Macro task size | 256 x 256 | task-shape planning，不用于 dirty snapshot materialization |
 
-HP request planning 会把 propagated ROI 向 64 对齐并裁剪。RT request planning 保留向 64 对齐的
+对于 ImageRect，HP request planning 会把 propagated ROI 向 64 对齐并裁剪。RT request planning 保留向 64 对齐的
 HP-space propagation ROI，随后用保守 rounding 把 extent 与 work ROI 除以 4，再向 16 对齐并在
 proxy space 中裁剪。
 
@@ -148,12 +182,30 @@ proxy space 中裁剪。
 alignment，且不会再次裁剪生成的 key，因此边界处的 `DirtyTileKey::pixel_roi` 可能延伸到 output
 extent 之外；已经展开的 execution task 则保留其自身裁剪后的边界 shape。
 
+TensorSlice planning 只支持 HP。它把每个 axis 裁剪到具体 sealed DenseTensor shape，在 source、
+node、monolithic 与 edge record 中保留 exact Region，并创建没有 PixelRect 或 tile
+coordinate、按 dependency-first 排列的 monolithic work。complete upstream cache 是 read
+boundary；缺失或 partial intermediate output 会在 downstream execution 前进入 plan 并完成
+staging。
+
 ## Task 选择与执行
 
-Dirty execution 会先取得所请求 domain 的 immutable node/cache-pruned plan。
-`DirtySnapshotTaskGraphPruner::select()` 会把 snapshot 作为 overlay 应用到已经展开的 task，裁剪
-execution ROI、保留 task id、推导 task-level dependency，并分离 source-boundary 与 downstream
-task id。它不会展开 node、创建新 tile shape 或插入 retile task。
+Dirty execution 会先取得所请求 domain 的 immutable retained request-cone plan。
+`DirtySnapshotTaskGraphPruner::select()` 会把 snapshot 作为 overlay 应用到已经展开的 task，让
+dirty candidate 保持 executable、裁剪 image execution ROI、保留 task id、推导 task-level
+dependency，并分离 source-boundary 与 downstream task id。它不会展开 node、创建新 tile shape
+或插入 retile task。Nonempty nonprojectable Region record 会选择既有 non-tile work 并抑制 extent-derived
+rectangle；没有精确 image projection 时，绝不会选择 physical tile。
+
+Current-request external satisfaction 是 demand cut，而不是孤立的 task filter。
+Selection 会在完整保留的 dependency universe（包括 inactive connector 与 satisfied node）中，
+从每个 unsatisfied sink 逆向遍历。它会在 satisfied node 处停止；如果另一个 unsatisfied sink
+仍需要 shared upstream node，该 node 会继续保留；最终只发出 dirty candidate task。Dirty
+candidate 自身绝不会被旧 cache 满足。这样可以避免 inactive satisfied connector 把其 exclusive
+upstream producer 错误变成 sink。若显式 external satisfaction 使结果没有 active task，外层产品
+request 仍会完成 candidate admission、逻辑 Run/RunGroup 安装、successful terminal arbitration、
+quiescence、resource settlement 与 unregistration；它不会创建 ready entry、callback、operation
+gate、policy invocation、physical reservation/grant、provider entry 或 ledger demand。
 
 在选中的 tiled `image_mixing` node 分派其借用的 `InputTile`/`OutputTile` view 之前，
 `NodeExecutor` 会为该次 node invocation 一次性规范化所需 secondary input。Crop/pad 使用
@@ -185,13 +237,23 @@ dirty generation 或 route/runtime epoch 变成 cancellation authority。
 
 ## 暂存与提交
 
-HP dirty task 把 output 暂存到 `HighPrecisionDirtyWriteBuffer`；RT dirty task 暂存到
-`RealtimeProxyWriteBuffer`。成功 request 会通过 intent-specific commit path，把 staged HP state
+HP dirty task 把 output 与 Region validity 暂存到 `HighPrecisionDirtyWriteBuffer`；RT dirty task
+把 image output 与 HP-space ImageRect validity 暂存到 `RealtimeProxyWriteBuffer`。成功 request
+会通过 intent-specific commit path，把 staged HP state
 提交到 `GraphModel`，或把 RT state 提交到 `RealtimeProxyGraph`。Standalone 非 realtime HP
 request 拥有一个 `ComputeRun`。每个 `RealTimeUpdate` 会在 preflight 前创建不同的 HP 与 RT child
 Run，并将它们放入一个 request-owned `RunGroup`；两者捕获相同的强 Graph instance identity、
 authoritative revision 与 request supersession generation，同时保留各自独立的 domain、lease、
 phase、terminal 与 staging state。当前不会创建 mixed-domain Run。
+
+Exact core Region bridge 会返回 complete-shaped dense result，但对于 partial invocation，
+只有 selected coordinate 是 authoritative。`HighPrecisionDirtyWriteBuffer` 会把这些
+coordinate 合并进 existing staged byte，再 seal 为一个 fresh Value；unselected
+coordinate 保持不变。若 prior output 为 complete，即使 full ImageRect proof 与
+TensorSlice update 使用不同 Region domain，其 complete validity 仍保持为 true。fresh
+partial output 只有 partial validity，因此 whole-output dependency resolution 与当前
+regionless disk persistence 会拒绝它，直到 normal Whole commit 将其替换。Generic ABI v2
+monolithic callback 保持 complete-output replacement behavior。
 
 Kernel 的 product commit policy 会先物化 publication copy，随后在 graph-state work item 内检查：
 每个 child Run 已处于 `CommitPending`、拥有精确 staged Graph/proxy，并且仍匹配 live Graph
@@ -216,18 +278,17 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 
 - `ReTileTask` insertion 或 Micro-to-Macro/Macro-to-Micro dirty conversion；
 - Macro dirty-key materialization 或动态 Micro/Macro coarsening；
-- sparse ROI set、dirty-area cap、time-window merge 或 adaptive batching；
+- multiple-clause sparse Region set、dirty-area cap、time-window merge 或 adaptive batching；
 - 自动启动 compute 的 node-to-backend dirty subscription；
 - public 或 lifecycle-driven cancellation，或对已经进入的 provider callback 进行 preemption。
   Dirty work 已使用当前 policy 与 reserved-start admission path。
 
-当前 dirty geometry 在 Host request、graph state、ROI propagation、planning、snapshot、
-task/work-set、write-buffer 与 `NodeExecutor` 边界中都使用内核自有的 `PixelRect` 和
-`PixelSize` value。Checked geometry helper 会先在更宽的整数表示中完成 endpoint arithmetic，
-再窄化结果。只有 provider 或 adapter 实现在真实 matrix 或 algorithm call 处才会创建 OpenCV
-rectangle 与 size。私有 compute helper 使用 `image_processing::*`；标准库 profile 在不发现
-OpenCV 的情况下提供 stride-safe、确定性的 bilinear resize、channel conversion、clone 与 ROI
-copy。
+当前逻辑 dirty authority 在 propagation、planning、source history、per-node state、edge
+mapping、HP validity、staging 与 Region-aware core dense operation 中使用规范化 `RegionSet`。
+Checked derived `PixelRect` 与 `PixelSize` 只保留在 image tile/task、ImageBuffer、Host/IPC v2
+与 operation ABI v2 边缘。Region endpoint 与 tensor-shape arithmetic 都受检查；image adapter
+拒绝 uncertainty、TensorSlice、custom domain、multi-atom clause 与 narrowing overflow。只有
+provider 或 adapter 实现在真实调用处才会创建 OpenCV rectangle 与 size。
 
 把 dirty fact、static task shape、ready dispatch 与 staged commit 保持为不同 value，可以防止 ROI
 update 重写 topology，或把 graph ownership 转交 policy snapshot、ready store 或私有 execution
@@ -236,6 +297,9 @@ route。上述明确限制界定了当前 generation 与 epoch check 能够保�
 ## 实现与验证入口
 
 - `src/lib/compute/compute_geometry.hpp`
+- `include/photospider/data/region.hpp`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/core/image_buffer_processing.*`
 - `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
@@ -258,3 +322,5 @@ route。上述明确限制界定了当前 generation 与 epoch check 能够保�
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
+- `tests/unit/test_region_contracts.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

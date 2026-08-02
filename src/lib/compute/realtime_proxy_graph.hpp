@@ -33,8 +33,8 @@ class RealtimeProxyGraph {
   /**
    * @brief Transient RT state for one graph node id.
    *
-   * @note ROI metadata is stored in HP coordinates so existing dirty-region
-   * inspection and frontend mapping semantics remain consistent.
+   * @note Region metadata is stored in HP logical coordinates. Current
+   * inspection/IPC v2 rectangles are derived edge projections.
    */
   struct NodeState {
     /**
@@ -43,8 +43,12 @@ class RealtimeProxyGraph {
      */
     std::optional<NodeOutput> output;
 
-    /** @brief Most recent or merged HP-space ROI represented by RT output. */
-    std::optional<PixelRect> roi_hp;
+    /**
+     * @brief Normalized HP-space Region represented by the RT proxy output.
+     * @note RT remains image-only in V-4 and rejects TensorSlice before
+     *       publication.
+     */
+    std::optional<RegionSet> region_hp;
 
     /** @brief Version counter advanced on every RT proxy update. */
     int version = 0;

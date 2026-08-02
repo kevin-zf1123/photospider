@@ -26,8 +26,10 @@ client polling 和映射图像生命周期，不拥有 daemon session 或后端�
 **`GraphRuntime`**
 每图资源容器。它拥有一个 `GraphModel`、一个有界 graph-state lane、一条有界私有
 compute-request lane、一个私有 supersession coordinator、复制的 HP/RT execution-route binding、
-event、execution trace、一个稳定 Graph lifetime anchor 与平台运行时资源，但不拥有计算依赖规划、
-policy context 或物理 route worker。
+event、execution trace 与一个稳定 Graph lifetime anchor。它拥有图拓扑和 session 级状态，不拥有
+native platform state。固定 `DeviceExecutorRegistry` 及其 native device、command queue、
+invocation allocator 和 pipeline cache 由进程 `ExecutionService` 拥有。`GraphRuntime` 不拥有
+计算依赖规划、policy context 或物理 route worker。
 
 **`GraphModel`**
 内存中的图状态：节点、拓扑邻接、参数、输出、缓存元数据、计时数据和图级运行时元数据。
@@ -53,6 +55,33 @@ ready dispatch 分离；其 worker 是不计费的基础设施，不是 Run exec
 **图文档（Graph document）**
 用于创建或更新图状态的持久化表示。YAML 是当前具体格式；“图文档”描述其行为，而不会把
 序列化库当作图状态。
+
+**图文档保存完成（Graph-document save completion）**
+当前表示 graph serialization 已打开、写入、flush 并关闭 destination，且没有报告错误的观察。
+它与 `ComputeRun` 分离，当前不承诺 expected-version transaction、atomic replacement、
+directory synchronization 或 crash-durability receipt。
+
+**磁盘缓存制品（Disk-cache artifact）**
+由 graph cache path 拥有、可丢弃的 acceleration state。当前 image payload 与 metadata 会作为
+两个独立文件直接写入，因此各自 save success 既不是 atomic cache-entry commit，也不是 durable
+user output。
+
+**`OutputStore` 发布（`OutputStore` publication）**
+当前 image-daemon 的观察：受保护进程级 artifact 通过 identity check，并在 file
+synchronization 后通过 no-replace rename 发布。其 index 位于内存，retention 基于 lease/TTL；
+不声称支持 directory synchronization 或 crash-recoverable index。
+
+**Daemon 计算作业终态（Daemon compute-job terminal）**
+进程内 job registry 在 queued/running work 失败，或完成 Host compute 以及 image result 的
+`OutputStore` publication 后到达的状态。它不是 durable acknowledgement，并会随进程丢失。
+
+**耐久输出提交（Durable output commit，仅为已接受目标）**
+未来 user-output transaction：由稳定 `OutputCommitId` 标识，只有在完整 payload/metadata
+校验与文件同步、canonical manifest 暂存/校验/文件同步、原子 no-replace manifest-last
+publication，以及请求的从叶目录到 durability root 的目录屏障完成后才完成。它的 typed
+receipt 区分达到 atomic-visible 与 crash-durable，以幂等方式恢复有歧义的 retry，并支持
+at-least-once delivery；不声称 exactly-once delivery。参见
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)。
 
 **每图独占访问（Per-graph exclusive access）**
 当前 visible Graph capture、mutation、commit validation 与 publication 由唯一 graph-state lane
@@ -110,6 +139,24 @@ plan/temporary result 或 dirty HP staging。Run 会 mint 一个私有弱生命�
 commit-contender lifetime。Full、dirty 与 preflight task 会通过 Host-owned `ExecutionService`
 与封闭的私有 route 执行 owned callback，并且只通过匹配的 `(RunId, RunLocalTaskId)` 发布失败。
 
+**Operation 返回（Operation return）**
+表示某个 operation provider callback 已返回的观察。Callback 可以返回 pending `Value`；因此
+operation return 不表示 value readiness、Run terminal state、result availability 或
+persistence。
+
+**Value 就绪（Value ready）**
+表示 `Value` producer 已发布 terminal readiness、dependent execution 可以消费该 value 的观察。
+对 pending producer 而言，它晚于 operation return；若仍需 commit，则早于 Run success。
+
+**Run 终态（Run terminal）**
+由 `ComputeRun` terminal arbiter 发布的 outcome。`Succeeded` 表示已验证 Graph/RT
+publication，或已准入的合法 no-op path；它不包含 cache save、Graph 文档保存、daemon terminal
+state、result delivery 或 durable output commit。
+
+**结果可用（Result available）**
+表示 Host/daemon result 在 public translation 与任何 transport-owned publication 后可以返回或
+获取的观察。它本身不是 durability guarantee。
+
 **`RunGroup`**
 当前用于一对 realtime HP/RT child 的私有 request owner。它捕获一个 realtime supersession
 identity，拥有彼此独立的 HP Full 与 RT Interactive child Run 及其 observation lease，共享
@@ -147,8 +194,9 @@ timer thread 或 wall clock 的情况下协作式使 Run 过期。当前 Kernel 
 execution-visible task 可能执行，它就保持不可变。
 
 **`DirtyRegionSnapshot`**
-记录 dirty source、受影响 region、tile 和 edge mapping 的图级 ROI 与生命周期状态。
-它不是计算任务图、policy snapshot、ready store 或 execution route。
+记录 dirty source、authoritative affected Region、derived image tile、monolithic work 与 edge
+mapping 的图级 Region 与生命周期状态。它不是计算任务图、policy snapshot、ready store 或
+execution route。
 
 **`DirtyUpdateWorkSet`**
 由 dirty snapshot 从既有请求 plan 中选出的活动任务子集。选择可以激活或裁剪已规划任务，
@@ -210,11 +258,13 @@ scratch-byte、ready-entry 与 ready-byte 维度。零表示该维度声明的�
 可以自行虚构未知数量。
 
 **`ResourceLedger`**
-由一个 `ExecutionService` 独占的私有 Host 权威 mint。它原子准入完整 vector，只签发有界 child
-grant，并在 parent 与 child ownership 结束后精确释放容量。私有 release observer 可以在这个精确
-root-release 点更新不具权威的 companion accounting，但不能铸造或扩大容量。默认上限属于 Host
-composition，而不是静态 process singleton。Ledger 不拥有 worker、ready ordering、dependency、
-lifecycle registry、device/I/O/plugin 估算或 fairness authority。
+由一个 `ExecutionService` 独占的私有 Host/device 权威 mint。它原子准入完整 Host vector 与隔离的
+逐 `DeviceId` memory/scratch plan，只签发有界 child grant 或精确 device lease，并在真实 owner
+结束后释放容量。私有 release observer 可以在精确 Host root-release 点更新不具权威的 companion
+accounting，但不能铸造或扩大容量。默认候选 limit 属于 Host composition，而不是静态 process
+singleton；service construction 只为 frozen registry 中匹配的 executor 创建 account，且绝不惰性
+插入。Ledger 不拥有 worker、ready ordering、dependency、lifecycle registry、未注册设备/I/O/plugin
+估算、residency eviction 或 fairness authority。
 
 **`ExecutionLifecycleTelemetry`**
 由一个 `ExecutionService` 拥有的 source-private schema-v1 process lifecycle proof store。它会
@@ -272,15 +322,48 @@ deadline 或 cooperative cancellation token。
 **`RealtimeProxyGraph`**
 runtime-owned 的临时 RT 输出状态。它不是权威 HP cache，也不会作为可复用图缓存持久化。
 
+**`AllocationIdentity`**
+一个 CPU allocation control block 的 opaque process-local identity。即使 range 不同，同一
+allocation 上的 BufferHandle subrange 也具有相同 allocation identity。它不是 Value revision、
+content digest、持久 cache key 或 task identity。`valid()` 只表示 token 非零且已经签发，
+不是 liveness 查询；最后一个 allocation owner 销毁后，复制出的 token 仍保持非零。Shared
+operation runtime 通过 Host 与 Value-using DSO 共用的唯一进程级 authority 铸造这些 token。
+
+**`BufferHandle`**
+同一个 allocation identity 上受检、不可变、非空的 byte range。它不暴露 raw pointer。
+Consumer 通过会保留所有权的 `ReadLease` 访问 byte；construction-time write 由
+`ValueBuilder` 控制。
+
+**`ReadLease` / `WriteLease`**
+`ReadLease` 是可复制且会保留所有权的 immutable byte access capability。`WriteLease` 是
+seal 前用于 mutable byte access 的唯一 move-only、builder-scoped capability。Live write
+lease 会阻止 seal；sealed Value 永不签发该 lease。
+
+**`ValueRevisionId`**
+`ValueBuilder` 每次 seal 新 Value publication 时铸造的 opaque process-local identity。
+普通 Value/cache copy 会保留该 identity；dirty mutation、replacement 与 disk reload 会铸造
+新 identity。它不是 `GraphRevision`、allocation identity、持久 digest/artifact id 或
+task/cache key。
+
 **`ImageBuffer`**
 当前图像 payload 契约：二维 extent、通道数、单一 scalar type、device、row stride、共享数据
-所有权和可选 backend context。它不是通用 Tensor、Deep Image 或 vector-scene 模型。
+所有权和可选 backend context。在带有效 sealed `image_value` 的正式 CPU image cache entry
+中，它是独立 compatibility snapshot，而不是 allocation/revision identity authority。它不是
+通用 Tensor、Deep Image 或 vector-scene 模型。
+
+**`RegionDomainKey` / `RegionSet`**
+`RegionDomainKey` 是永久的 128-bit 逻辑 coordinate-domain identity。`RegionSet` 是 immutable
+normalized 逻辑 work/validity value。V-4 MVP 支持规范 Empty、Whole、一个有界 nonempty
+conjunction、signed half-open ImageRect、rank-general unsigned half-open TensorSlice、显式
+complexity budget、typed algebra outcome 与 containment。它不是 physical tile geometry、
+cache owner、Value revision 或 uncertainty placeholder。
 
 **`PixelRect` / `PixelSize`**
-公共 Host 与 operation 契约以及私有 Graph、ROI propagation、dirty-region、cache identity、
-planning 与 task state 使用的不依赖外部 library 的整数 geometry value。只能在 OpenCV
-adapter 或 provider 实际调用 matrix/library 时局部构造 OpenCV geometry；这些内核契约不会
-存储或传递该类型。
+当前 Host/IPC v2 inspection、operation ABI v2、ImageBuffer processing 与 physical image
+tile/task record 使用的不依赖外部 library 的二维整数 geometry。在需要逻辑 Region authority
+的位置，它只能从一个精确内建 ImageRect 派生。它无法表示 TensorSlice、Whole、custom domain、
+multi-atom clause 或 uncertainty。只能在 OpenCV adapter 或 provider 实际调用 matrix/library
+时局部构造 OpenCV geometry。
 
 **Operation provider**
 operation callback、propagation contract 与 metadata 的实现来源。依赖中立 core operation
@@ -301,7 +384,15 @@ cache、policy 或物理 execution 语义的所有者。
 - `DirtyRegionSnapshot` 不是 `ComputeTaskGraph`。
 - ready task 不是任务图。
 - HP cache 不是 RT proxy state。
+- `AllocationIdentity` 不是 `ValueRevisionId`；二者都不是持久 content/cache identity。
 - `ImageBuffer` 不是[目标通用数据模型](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)。
+- Operation return 不是 `Value` readiness，二者也都不是 Run terminal publication。
+- Run success 不是 cache persistence、Graph 文档保存、durable output commit、daemon terminal
+  state 或 result delivery。
+- 当前 `OutputStore` publication 不是 crash-durable output commit。
+- Daemon job terminal state 或 acknowledgement 不是 durable receipt。
+- `RegionSet` 不是 `PixelRect`；后者是 checked image-edge projection，绝不是 TensorSlice
+  authority。
 - Execution worker request 不是 Run reservation 或 child grant。
 - Policy candidate id 或 decision 不是 execution authority；只有已提交的 reserved-start transaction
   才能进入私有 route。
@@ -317,6 +408,8 @@ cache、policy 或物理 execution 语义的所有者。
 
 ## 实现与验证入口
 
+- `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/data/value.hpp`
 - `include/photospider/host/host.hpp`
 - `include/photospider/core/compute_intent.hpp`
 - `include/photospider/core/image_buffer.hpp`
@@ -324,6 +417,11 @@ cache、policy 或物理 execution 语义的所有者。
 - `src/lib/runtime/graph_runtime.hpp`
 - `src/lib/graph/graph_model.hpp`
 - `src/lib/graph/graph_state_executor.hpp`
+- `src/lib/graph/graph_io_service.*`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
+- `src/lib/ipc/request_router.cpp`
+- `plugins/ops/save_op.cpp`
 - `src/lib/compute/task_graph_planning.hpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
 - `src/lib/compute/execution_service.hpp`

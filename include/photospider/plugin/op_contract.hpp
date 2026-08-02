@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -349,12 +350,23 @@ enum class InputAccessPattern : std::uint32_t {
 };
 
 /**
- * @brief Scheduling and spatial-dependency metadata for one implementation.
- * @throws Nothing for value operations.
- * @note Metadata is copied into host-private registry state during
- * registration.
+ * @brief Scheduling, resource, and spatial metadata for one implementation.
+ *
+ * The Host copies this complete value into the same revisioned registry slot as
+ * the callback. CPU execution uses the concurrency and byte declarations for
+ * process-domain start admission; providers remain responsible for declaring
+ * every additional Host-retained and scratch byte needed while one callback is
+ * in flight.
+ *
+ * @throws std::bad_alloc when copied string storage cannot allocate.
+ * @note This provisional C++ v2 layout requires a plugin built against the
+ * matching SDK and compatible C++17 toolchain. Zero byte fields explicitly
+ * declare no additional metered Host bytes; they are not inferred estimates.
  */
 struct OperationMetadata {
+  /** @brief Maximum accepted UTF-8 byte length of a nonempty exclusive key. */
+  static constexpr std::size_t kExclusiveKeyMaxBytes = 128U;
+
   /** @brief Preferred tile granularity. */
   TileSizePreference tile_preference = TileSizePreference::Undefined;
   /** @brief Preferred execution device. */
@@ -365,6 +377,32 @@ struct OperationMetadata {
   InputAccessPattern access_pattern = InputAccessPattern::SpatialAligned;
   /** @brief Whether propagation depends on upstream content values. */
   bool data_dependent = false;
+  /**
+   * @brief Whether independent callbacks of this implementation may overlap.
+   * @note False imposes an effective process-domain parallelism limit of one.
+   */
+  bool reentrant = true;
+  /**
+   * @brief Process-domain callback cap for the exact implementation identity.
+   * @note Zero means no implementation-specific cap; Run and service limits
+   * still apply.
+   */
+  std::uint32_t maximum_parallelism = 0U;
+  /**
+   * @brief Additional Host-retained bytes required by each in-flight callback.
+   */
+  std::uint64_t retained_memory_bytes = 0U;
+  /**
+   * @brief Additional temporary Host bytes required by each in-flight callback.
+   */
+  std::uint64_t scratch_bytes = 0U;
+  /**
+   * @brief Optional process execution-domain mutual-exclusion key.
+   * @note Equal nonempty keys cannot overlap across implementations, Runs, or
+   * Graphs. Registration rejects embedded NUL and values larger than
+   * kExclusiveKeyMaxBytes.
+   */
+  std::string exclusive_key;
 };
 
 /**

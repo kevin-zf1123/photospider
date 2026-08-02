@@ -12,9 +12,12 @@ adapters are current behavior.
 lifetime roots. Each runtime owns one `GraphModel`, one graph-state executor,
 one private compute-request executor, one latest-wins request coordinator,
 copied HP/RT execution-route bindings, event/execution-trace state, and
-platform runtime resources. Map lookup copies one shared runtime owner inside a
-short critical section; graph-state, compute, IO, inspection, and lane work run
-after releasing the map lock. A concurrent close may therefore remove the name
+one stable Graph lifetime anchor. Native platform device, command-queue,
+allocator, pipeline-cache, and executor resources instead belong to the fixed
+`DeviceExecutorRegistry` in the process `ExecutionService`; they are not Graph
+lifetime resources. Map lookup copies one shared runtime owner inside a short
+critical section; graph-state, compute, IO, inspection, and lane work run after
+releasing the map lock. A concurrent close may therefore remove the name
 without destroying a runtime already retained by an admitted internal call.
 
 ```text
@@ -177,6 +180,19 @@ bytes. Once open succeeds, a write, flush, close, or later resource failure may
 leave a created, truncated, or partially written destination. Destination
 rollback is therefore not part of the graph-owner transaction.
 
+Current save success means only that detached capture, YAML emission, and the
+direct open/write/flush/close sequence returned successfully. The format has no
+document version or expected-version predicate; the call returns no save
+receipt or achieved-durability level, does not call file or directory `fsync`,
+and does not claim atomic replacement or crash durability. Graph-document save
+is independent from `ComputeRun`, disk cache, daemon job state, and protected
+IPC output delivery.
+
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+accepts a future versioned same-directory staging/atomic-replacement contract
+with explicit durability capability. That target does not strengthen the
+current behavior above.
+
 ## Node Replacement and Structural Edits
 
 `Host::set_node_yaml()` admits the session against concurrent close. Required
@@ -257,9 +273,9 @@ them. `Kernel::~Kernel()` explicitly clears the owned runtime map before
 ordinary member teardown reaches cache, traversal, diagnostic, IO, or ROI
 collaborators. Each `GraphRuntime` therefore stops and drains compute-request
 work while graph-state is available, then drains graph-state before releasing
-Graph-local route values and platform state, all while those borrowed Kernel
-services and injected owners remain alive; only later service destruction
-releases them. The owning Host must stop
+Graph-local route values and other session-scoped state, all while those
+borrowed Kernel services and injected owners remain alive; only later service
+destruction releases them. The owning Host must stop
 external Kernel-call admission before Kernel destruction, because the private
 graph map is not a concurrent-destruction API. Codec/document `GraphError`
 values retain their documented categories, and `std::bad_alloc` propagates
@@ -339,13 +355,21 @@ the implementation does not fabricate recovery.
 After the Graph index and candidate count are empty, close performs the exact
 irreversible tail:
 
-1. remove the empty lifecycle-registry row;
+1. remove the empty lifecycle-registry row after every admitted Run and native
+   completion settles;
 2. stop coordinator and compute-request admission, wake capacity-blocked
    producers, retire parked tickets, drain accepted callbacks, and join the
-   request worker while graph-state finalization remains available;
-3. stop, drain, and join the graph-state lane;
-4. mark the runtime retired and release route ownership;
-5. retake the graph-registry mutex, verify that the name still denotes the
+   request worker while graph-state finalization remains available. A
+   `PreparedCandidate` owns one admitted reserved ticket before Kernel
+   pretracks its residency lineage, so this drain also settles callers paused
+   in that interval;
+3. retire every residency generation row for that exact `GraphInstanceId`
+   only after the request worker joins; a surviving pending transfer is
+   fail-stop, while settled Ready replicas remain governed by process-domain
+   capacity;
+4. stop, drain, and join the graph-state lane;
+5. mark the runtime retired and release route ownership;
+6. retake the graph-registry mutex, verify that the name still denotes the
    retained runtime, erase that map entry, and publish close-generation success
    before releasing the mutex. Remaining shared runtime owners may then retire
    without any dangling map-derived pointer.
@@ -463,6 +487,12 @@ YAML-neutral. Issue #63 completes the dependency-disabled product profile:
 empty and in-memory sessions remain available without yaml-cpp discovery,
 while an explicit graph-document or cache-metadata representation operation
 uses an unavailable adapter and returns `GraphErrc::Io`.
+
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+keeps this current direct-writer limitation visible while assigning the target
+Graph-document transaction its own version, atomic publication, and durability
+receipt. Neither the current save nor that target becomes a phase of
+`ComputeRun`.
 
 The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)

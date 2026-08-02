@@ -21,11 +21,12 @@ CLI / TUI
 
 `Kernel` 拥有多图 API。`GraphRuntime` 拥有一个图模型、每图可见状态
 `GraphStateExecutor`、独立的有界串行 compute-request lane、每个 live Graph 的一个
-`ComputeRequestCoordinator`、事件服务、平台 context，以及每个 intent 的一个 execution
-binding。每个 binding 只包含精确 route ID 与非零 generation。Embedded composition root
-还会在 Kernel 之前创建一个私有固定 `ExecutionService`。该 service 独占 Host 权威
-resource ledger、policy binding、有界 ready store、reserved-start transaction、物理 route
-与 completion callback；Kernel 会把该 owner 注入每个 request-local `ComputeService`。
+`ComputeRequestCoordinator`、事件服务、Graph lifetime anchor，以及每个 intent 的一个
+execution binding。每个 binding 只包含精确 route ID 与非零 generation。`GraphRuntime`
+不拥有 native platform context。Embedded composition root 还会在 Kernel 之前创建一个私有固定
+`ExecutionService`。该 service 独占 Host/device 权威 resource ledger、policy binding、有界 ready
+store、reserved-start transaction、物理 route 与 completion callback；Kernel 会把该 owner
+注入每个 request-local `ComputeService`。
 
 `ps::Host` 是面向 frontend 的 public interface。embedded Host adapter 会复制 public
 request/result value，并在内部使用 `InteractionService` wrapper 与 `Kernel`；CLI/TUI code
@@ -55,12 +56,23 @@ CLI/REPL 前端是固定的批处理取向界面。它不暴露 RT intent 命令
 
 固定 service thread 属于基础设施，不是 per-Run reservation。Execution 配置会把 `0` 解析
 为 bounded automatic value，或保留显式 `1..8`，随后冻结 CPU service 数量、启动固定 CPU
-pool，并启动一个私有 Metal worker lane。Host 不暴露 Metal 时，该 lane 保持空闲；它不是可
-独立配置的 worker grant。
-之后的零或相同请求保持幂等，冲突的正数请求会被拒绝。发布 work 前，每个 Run 都会从
-service-owned Host ledger 原子预留完整的 CPU、retained-memory、scratch、ready-entry 与
-ready-byte vector。Graph load 只复制 route ID 与 generation，不拥有 worker grant。该契约不
-声称覆盖 compute、operation 或私有 GPU backend 使用的全部 thread。
+pool，并把一个私有 Metal worker lane 作为固定基础设施启动。Device availability 只来自固定
+`DeviceExecutorRegistry`：启用 operation plugin 的 Apple profile 会安装一个 Metal executor，
+unsupported 与 dependency-disabled profile 则让 registry 中没有 Metal executor，并使
+`gpu_pipeline` 只暴露 CPU。Metal lane 不是可独立配置的 worker grant。之后的零或相同请求保持
+幂等，冲突的正数请求会被拒绝。发布 work 前，每个 Run 都会从 service-owned Host ledger
+原子预留完整的 CPU、retained-memory、scratch、ready-entry 与 ready-byte vector。Graph load
+只复制 route ID 与 generation，不拥有 worker grant。该契约不声称覆盖 compute、operation
+或私有 GPU backend 使用的全部 thread。
+
+Device allocation 与 Run admission 具有不同生命周期。一个完整非 CPU `DeviceId` account 会在同一
+ledger root mutex 下原子预留 persistent-memory 与 scratch plan。Metal Perlin 路径会在首个
+native allocation 前规划 output texture、permutation/scale buffer 与 readback buffer；
+CPU-to-Metal upload 会在两项 allocation 前规划 destination texture 与 staging buffer。Native
+heap size/alignment 提供 plan，`allocatedSize` 提供 actual byte，只有完成 actual 校准后才会
+command commit。随后 persistent memory 随 native Value owner 跨 residency 延续，scratch
+则保持计费直到精确 native completion owner 退役。Provider/Run return 都不能提前释放任一
+owner，queue/pipeline infrastructure 也不按 invocation scratch 计费。
 
 Benchmark 配置不会重新配置该进程池。对于每次 benchmark Run，`execution.threads` 会解析为
 一个可选正值 `maximum_parallelism`：缺失或 `0` 会在 `[1,8]` 中选择有界自动值，
@@ -149,10 +161,10 @@ work 协调二者，不会创建 cross-domain task dependency。
 | `RealTimeUpdate` | 交互式 realtime 更新，需要 dirty ROI，并启用 HP/RT 双路径。 |
 
 意图模型是正式的。`ComputeService` 仍是 compute facade 和 planning boundary。私有 route
-metadata 会选择物理路径。`cpu` 与 `serial_debug` route 只暴露 CPU；Host 报告 Metal 时，
-`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。CPU、serial-debug、GPU、
-connected-parameter preflight、full 与 dirty 阶段都使用固定注入 service；GraphRuntime 只保存
-复制的 route ID 与 generation。
+metadata 会选择物理路径。`cpu` 与 `serial_debug` route 只暴露 CPU；固定 service registry
+拥有 Metal executor 时，`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。CPU、
+serial-debug、GPU、connected-parameter preflight、full 与 dirty 阶段都使用固定注入 service；
+GraphRuntime 只保存复制的 route ID 与 generation，不拥有 native device resource。
 
 HP/RT 双路径语义属于 realtime intent，而不是 parallel 执行模式。Realtime 模式下，HP
 计算完整尺寸的权威 node 工作，RT 计算降采样代理版本，目前为宽高各四分之一，也就是像素数的
@@ -186,19 +198,22 @@ parallelism 都不会推断 class、deadline 或 weight。
 并行计算先展开完整 task graph，再从 `topo_postorder_from` 通过 `NodeCacheTaskGraphPruner`
 裁剪得到 `ComputePlan`。`ComputeDispatchPlanBuilder` 会记录这个 cache-pruned plan 供检查使用。
 Request `ComputeRun` 拥有 `TaskSubmissionPlan`；后者把 plan 中的 `ComputeTaskGraph`
-materialize 为 dependency counter、ready value、operation variant、selected device 和临时结果槽。Dispatcher 会创建不可变、由 lease 支撑的 `ReadyTaskSubmission`，并把一个 initial ready
-batch 提交到注入的 `ExecutionService`；dependent completion 会通过同一个 active Run 创建
-后续 submission，并进入同一个有界 store。Tiled 操作可能产生微任务，并减少选中私有 route
-的 logical completion count。
+materialize 为 dependency counter、ready value、operation variant、selected device 和临时结果槽。
+它会为每个逻辑 task（包括每个 tiled micro-task）预先分配一份独立计费的 operation-constraint
+record，并在 materialize 对应 task 的 submission 时恰好移动一次该 record。Dispatcher 会创建
+不可变、由 lease 支撑的 `ReadyTaskSubmission`，并把一个 initial ready batch 提交到注入的
+`ExecutionService`；dependent completion 会通过同一个 active Run 创建后续 submission，并进入
+同一个有界 store。Tiled 操作可能产生微任务，并减少选中私有 route 的 logical completion count。
 
 Run 发布前，service 会原子预留完整且经过检查的 CPU、retained-memory、scratch、ready-entry
 与 ready-byte vector。CPU slot 及 uniform per-task retained/scratch envelope 使用固定 worker 数、
 逻辑 task 数与 Run 可选正值 maximum parallelism 三者的最小值；ready entry 与 byte 仍覆盖每个
 逻辑 task。Initial 与 dependent entry 持有 child ready grant；reserved start 会在进入 submission
-所冻结的 CPU 或 Metal lane 前，把该 authority 交换为 CPU/memory/scratch。如果 device 不在已配置
-route/Host inventory 中，service 会在发布 Run 前拒绝它。Failure、queue purge 与成功 settlement
-都会精确释放容量。固定 lane 绝不会按 Run 调整大小，CPU/Metal callback 共用该 Run 已准入的
-parallelism ceiling。Execution inspection 与
+所冻结的 CPU 或 Metal lane 前，把该 authority 交换为 CPU/memory/scratch。Metal-lane start
+随后会进入匹配的固定 registry executor，并在 callback 返回前借用其 queue、invocation allocator
+与 pipeline cache。如果 device 不在已配置 route/registry inventory 中，service 会在发布 Run
+前拒绝它。Failure、queue purge 与成功 settlement 都会精确释放容量。固定 lane 绝不会按 Run
+调整大小，CPU/Metal callback 共用该 Run 已准入的 parallelism ceiling。Execution inspection 与
 replacement 和 compute 共用 per-graph compute-request lane，使复制的 route generation 保持
 一致。Replacement 会校验封闭词汇中的 route，并在一个 transaction 中发布新的非零
 generation；失败保留旧 binding。
@@ -273,7 +288,7 @@ binding 比 Graph 存活更久；复制的 route binding 没有需要停止的�
 Execution information 会在 compute-request lane 内复制 route/statistics，不会暴露物理 owner
 或 queue capability。
 
-每条产品 compute path 现在都使用 staged output。每条产品 compute path 现在都使用 staged output。Kernel 在同一 identity/revision 捕获完整 Graph
+每条产品 compute path 现在都使用 staged output。Kernel 在同一 identity/revision 捕获完整 Graph
 与可选 RT proxy，关闭 snapshot 磁盘写入，并且只针对这些 snapshot 执行 sequential、policy-selected、dirty HP 与 RT work。本地 output validation 后，ComputeService 会把匹配 Run
 推进到 `CommitPending`。私有产品 commit policy 会验证精确 Run/staged/live identity、权威
 revision 与 current supersession key/generation，执行符合条件的延迟 HP cache persistence，并在
@@ -296,6 +311,36 @@ unregistration 前等待精确 physical/resource settlement。worker-local queue
 cooperative 而非 preemptive execution；不声称支持 provider preemption 或 public Host/CLI/IPC
 cancellation。Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 HP/RT intent 语义既不定义
 可见性，也不定义 cancellation authority。
+
+## 当前完成与结果层级
+
+当前 compute I/O 存在若干可分别观察的完成层级：
+
+1. operation provider 可以在 pending `Value` ready 前返回；
+2. `ComputeRun` 只有在 dependency completion、staged output validation 与适用的 Graph/RT
+   publication gate 后才进入终态；
+3. 同步 Host call 返回或异步 Host future resolve 发生在 public result translation 完成后；
+4. protocol-v2 `compute.submit` 报告 request acceptance，而 daemon job terminal state 是稍后的
+   process-local observation；
+5. image daemon job 只有在 Host compute 与受保护 `OutputStore` publication 后才报告成功，但该
+   store 由进程级 lease/TTL 保留，而不是 crash durable；以及
+6. 已配置 disk-cache write、Graph 文档保存与 operation 自有外部副作用是不同的持久化观察。
+
+因此，`ComputeRun` 成功表示已验证 Graph/RT result 已发布，或一个已准入 no-op 到达其合法终态。
+它不承诺 disk-cache persistence、Graph 文档保存、daemon acknowledgement、result delivery 或
+durable user-output commit。旧 `io/save` operation 可以在包围它的 staged Run 提交前暴露文件
+副作用；这种 callback-owned 行为不是 Run commit protocol。
+
+当前 product transaction 仍会在 no-throw live Graph swap 前执行符合条件的延迟 HP cache write。
+既有 live predicate 通过后，graph-state policy 会把每个 staged cache-save codec/filesystem
+callback 提交给进程级、按 task/estimated-byte 有界的 `ComputeIoExecutor`，以 prepared
+transaction 作为 task lifetime token，并等待 typed completion。该等待绝不发生在
+`ExecutionService` CPU worker 上。因此 cache admission、codec 或 filesystem failure 仍可能让
+当前 Run 失败，且不发布可见 Graph。
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+接受一个目标：把可选 cache persistence 移到独立结果之后，并引入带 receipt 的独立 durable
+output commit。Executor mechanism 已是当前行为；Run publication 之后的目标顺序与 durable
+output commit 尚未实现。
 
 ## GlobalHighPrecision
 
@@ -351,14 +396,15 @@ predicate 失败。
 
 Realtime planning 有意按路径分别执行，而不是通过一次混合 domain 的 planner 调用生成两份任务池。
 `IntentUpdateCoordinator` 会分发 sibling HP 与 RT update callback，并为 Dirty RT request
-记录 RT-first/concurrent 阶段。每条路径都使用一个 single-domain request plan 和同 domain 的
-dirty snapshot：HP callback 使用
-`GlobalHighPrecision` node/cache-pruned plan 与 HP dirty snapshot，RT callback 使用
-`RealTimeUpdate` node/cache-pruned plan 与 RT dirty snapshot。HP dirty node execution 写入
+记录 RT-first/concurrent 阶段。每条路径都使用一个 single-domain retained request-cone plan 和同
+domain 的 dirty snapshot：HP callback 使用
+`GlobalHighPrecision` request-cone plan 与 HP dirty snapshot，RT callback 使用
+`RealTimeUpdate` request-cone plan 与 RT dirty snapshot。HP dirty node execution 写入
 `HighPrecisionDirtyWriteBuffer`；RT dirty node execution 写入 `RealtimeProxyWriteBuffer`，
 并且只提交到 `RealtimeProxyGraph`。Dirty snapshot 会从该路径的 task graph 中裁剪或激活
-update work set。这样会把完整 task expansion、node/cache pruning、dirty snapshot pruning
-和 output commit 保持为每个 compute domain 的独立契约。
+update work set。Exact 旧 HP output 可以 seed 局部 staging，但绝不会抑制该 snapshot 选中的
+work。这样会把完整 task expansion、callback-free cone 保留、dirty/external-boundary
+selection 与 output commit 保持为每个 compute domain 的独立契约。
 
 传入的 dirty ROI 会在当前请求中转换为图级 planner state。Public `ps::Host` 的
 begin/update/end 方法会通过 embedded adapter 转换到内部 `Kernel` / `InteractionService`
@@ -429,6 +475,12 @@ ledger 耗尽时，`GraphErrc::ComputeError` 会通过 embedded Host 与 IPC sta
 `ComputeError`。Public `maximum_parallelism` 显式为零是非法值，会在图执行前由 Host 或
 IPC decoding 拒绝。
 
+当前 deferred disk-cache persistence 是 live Graph publication 前 product commit-policy work
+item 的一部分，因此 codec/filesystem error 可能让 Run 失败且不发布 staged Graph output。若受
+保护 artifact publication 失败，image daemon job 会失败，即使其底层 Host compute 可能已经
+成功返回。Graph 文档保存仍是拥有自身 status 的独立 graph-state operation，绝不会改写 Run
+terminal state。
+
 ## 边界与原理
 
 - 同一份 request plan 同时提供顺序与并行执行语义；execution strategy 只改变机制，不改变
@@ -462,6 +514,8 @@ graph-state/dispatch 区分。已接受的
 lease/completion isolation、权威 revision/generation-safe staging、RT-first 独立 commit gate、
 cooperative Run cancellation、确定性 `RunGroup` settlement、latest-wins supersession、
 admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有权。
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+把当前 completion observation 与已接受 persistence target 分离。
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)保留长期所有权方向，但不改变
 这些当前事实。
 
@@ -471,6 +525,10 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
 - `src/lib/ipc/request_router.cpp`
+- `src/lib/ipc/output_store.*`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/execution/compute_io_executor.*`
+- `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
@@ -484,6 +542,7 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_host_adapter.cpp`

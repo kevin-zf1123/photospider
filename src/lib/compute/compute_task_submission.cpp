@@ -12,8 +12,13 @@
 #include <variant>
 #include <vector>
 
+#include "compute/compute_cache_policy.hpp"
 #include "compute/compute_dispatch_plan_builder.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+#include "compute/execution_service_test_probe.hpp"
+#endif
 #include "compute/resource_demand_estimator.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_traversal_service.hpp"
 
 namespace ps::compute {
@@ -56,46 +61,6 @@ std::exception_ptr dispatch_failure(const GraphModel& graph, int node_id,
 }
 
 /**
- * @brief Checks whether a candidate matches the planned task shape.
- *
- * @param impl Registered operation implementation candidate.
- * @param require_tiled Whether the task graph materializes tile work.
- * @return true when the implementation shape is compatible.
- * @throws Nothing.
- */
-bool implementation_shape_compatible(const OpImplementation& impl,
-                                     bool require_tiled) {
-  return !require_tiled || impl.is_tiled();
-}
-
-/**
- * @brief Chooses a shape-compatible per-device implementation for HP compute.
- *
- * @param node Graph node whose operation is being resolved.
- * @param available_devices Devices exposed by the execution runtime.
- * @param require_tiled Whether the task graph requires TileOpFunc.
- * @return Selected implementation snapshot, or nullopt.
- * @throws std::bad_alloc if registry candidate storage allocates
- * unsuccessfully.
- * @note Device priority and cost scoring remain registry policy.
- */
-std::optional<OpImplementation> select_device_aware_hp_implementation(
-    const Node& node, const std::vector<Device>& available_devices,
-    bool require_tiled) {
-  const OpRegistry& registry = OpRegistry::instance();
-  const auto best = registry.select_best_implementation(
-      node.type, node.subtype, available_devices,
-      ComputeIntent::GlobalHighPrecision,
-      [require_tiled](const OpImplementation& impl) {
-        return implementation_shape_compatible(impl, require_tiled);
-      });
-  if (!best) {
-    return std::nullopt;
-  }
-  return best;
-}
-
-/**
  * @brief Best-effort settles a batch whose bootstrap submission threw.
  *
  * @param task_runtime Runtime whose empty batch owns one completion unit.
@@ -134,24 +99,29 @@ void settle_rejected_bootstrap(ExecutionTaskRuntime& task_runtime,
  * @param available_devices Execution-runtime device labels.
  * @param publish_plan_inspection Whether construction immediately updates graph
  * diagnostics.
+ * @param allow_reusable_cache Whether exact complete formal HP cache may
+ * satisfy nodes before task population.
  * @throws GraphError or standard exceptions from planning and allocation.
  */
 TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
                                        GraphTraversalService& traversal,
                                        int node_id,
                                        std::vector<Device> available_devices,
-                                       bool publish_plan_inspection)
+                                       bool publish_plan_inspection,
+                                       bool allow_reusable_cache)
     : run_id_(run_id),
       graph_(graph),
       compute_plan_(
           ComputeDispatchPlanBuilder(traversal).build_high_precision_plan(
-              graph, node_id, publish_plan_inspection)),
+              graph, node_id, available_devices, publish_plan_inspection,
+              allow_reusable_cache)),
       execution_order_(compute_plan_.planned_nodes),
       available_devices_(std::move(available_devices)),
       dependency_state_(execution_order_, compute_plan_.task_graph) {
   resolve_operations();
   temp_results_.resize(execution_order_.size());
   task_execution_states_ = std::vector<std::atomic<std::uint8_t>>(size());
+  deferred_value_waits_.resize(size());
   for (auto& state : task_execution_states_) {
     state.store(static_cast<std::uint8_t>(TaskExecutionState::Pending),
                 std::memory_order_relaxed);
@@ -227,6 +197,8 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
       static_cast<std::uint64_t>(submitted_initial_task_ids_.size()));
   estimate.add_objects<std::atomic<std::uint8_t>>(
       static_cast<std::uint64_t>(task_execution_states_.capacity()));
+  estimate.add_objects<std::optional<ReadyFenceWaitRegistration>>(
+      static_cast<std::uint64_t>(deferred_value_waits_.capacity()));
   estimate.add_objects<std::shared_ptr<RuntimeCompletionRecord>>(
       static_cast<std::uint64_t>(runtime_completion_records_.capacity()));
   estimate.add_objects<RuntimeCompletionRecord>(
@@ -245,8 +217,36 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
       estimate.add_bytes(node_output_dynamic_retained_memory_bytes(*result));
     }
   }
-  estimate.add_objects<std::optional<OpRegistry::OpVariant>>(
+  estimate.add_objects<std::optional<OpImplementation>>(
       static_cast<std::uint64_t>(resolved_ops_.capacity()));
+  for (const std::optional<OpImplementation>& implementation : resolved_ops_) {
+    if (implementation.has_value()) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+      const std::uint64_t before_operation_key = estimate.bytes();
+#endif
+      estimate.add_string_payload(implementation->metadata.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+      testing::notify_retained_operation_string_charge_for_testing(
+          testing::RetainedOperationStringOwner::FullPlanResolvedOperation,
+          implementation->metadata.exclusive_key, before_operation_key,
+          estimate.bytes());
+#endif
+    }
+  }
+  estimate.add_objects<OperationExecutionConstraints>(
+      static_cast<std::uint64_t>(operation_constraints_.capacity()));
+  for (const OperationExecutionConstraints& constraints :
+       operation_constraints_) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_constraint_key = estimate.bytes();
+#endif
+    estimate.add_string_payload(constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::FullPlanExecutionConstraint,
+        constraints.exclusive_key, before_constraint_key, estimate.bytes());
+#endif
+  }
   return estimate.bytes();
 }
 
@@ -309,9 +309,9 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
          ExecutionTaskRuntime& task_runtime) {
         ready_lease.execute_task(ready_identity, task_runtime);
       },
-      ExecutionTaskPriority::Normal,
-      ReadyTaskSubmission::default_resource_demand(),
-      execution_devices_.at(execution_index));
+      ExecutionTaskPriority::Normal, task_resource_demand_,
+      execution_devices_.at(execution_index),
+      std::move(operation_constraints_.at(task_index)));
 }
 
 /**
@@ -469,6 +469,9 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
   task_runtime.log_event(execute_action, task.node_id);
   try {
     task_runner_->run_task(task_id);
+    if (defer_pending_value(task, identity, lease, task_runtime)) {
+      return;
+    }
     (void)lease.observe_cancellation();
     if (!lease.terminal_outcome().has_value()) {
       release_dependents(task.task_id, task.node_id, lease, task_runtime);
@@ -490,44 +493,181 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
   }
 }
 
-/**
- * @brief Resolves operation variants once for all planned nodes.
- *
- * @return Nothing.
- * @throws std::bad_alloc from registry candidate or output allocation.
- */
+/** @copydoc TaskSubmissionPlan::defer_pending_value */
+bool TaskSubmissionPlan::defer_pending_value(
+    const PlannedTask& task, const ComputeRunTaskIdentity& identity,
+    const ComputeRunLease& lease, ExecutionTaskRuntime& task_runtime) {
+  const auto index = dependency_state_.id_to_idx().find(task.node_id);
+  if (index == dependency_state_.id_to_idx().end()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Completed task has no temporary result index.");
+  }
+  std::optional<NodeOutput>& result =
+      temp_results_.at(static_cast<std::size_t>(index->second));
+  if (!result.has_value() || !result->image_value.valid()) {
+    return false;
+  }
+
+  const ReadyFenceSnapshot observed = result->image_value.ready_fence().poll();
+  if (observed.state() == ReadyFenceState::Ready) {
+    if (result->image_buffer.width == 0 && result->image_buffer.height == 0 &&
+        result->image_buffer.channels == 0) {
+      result->image_buffer =
+          value_image_adapter::snapshot_cpu_image_buffer(result->image_value);
+    }
+    return false;
+  }
+  if (observed.state() != ReadyFenceState::Pending) {
+    throw ReadyFenceAccessError(observed);
+  }
+
+  std::lock_guard<std::recursive_mutex> publication_lock(publication_mutex_);
+  if (publication_closed_ || lease.terminal_outcome().has_value()) {
+    return false;
+  }
+  const int task_id = task.task_id;
+  std::shared_ptr<ReadyFenceExecutor> executor =
+      task_runtime.make_ready_fence_executor();
+  ComputeRunLease continuation_lease = lease;
+  ReadyFence::Callback callback =
+      [lease = std::move(continuation_lease), identity,
+       runtime = &task_runtime](ReadyFenceSnapshot snapshot) mutable {
+        lease.complete_deferred_value(identity, *runtime, std::move(snapshot));
+      };
+
+  task_execution_states_.at(static_cast<std::size_t>(task_id))
+      .store(static_cast<std::uint8_t>(TaskExecutionState::AwaitingValue),
+             std::memory_order_release);
+  bool completion_counted = false;
+  try {
+    task_runtime.inc_tasks_to_complete(1);
+    completion_counted = true;
+    ReadyFenceWaitRegistration registration =
+        result->image_value.ready_fence().async_wait(std::move(executor),
+                                                     std::move(callback));
+    deferred_value_waits_.at(static_cast<std::size_t>(task_id))
+        .emplace(std::move(registration));
+  } catch (...) {
+    task_execution_states_.at(static_cast<std::size_t>(task_id))
+        .store(static_cast<std::uint8_t>(TaskExecutionState::Failed),
+               std::memory_order_release);
+    if (completion_counted) {
+      task_runtime.dec_tasks_to_complete();
+    }
+    throw;
+  }
+  return true;
+}
+
+/** @copydoc TaskSubmissionPlan::complete_deferred_value */
+void TaskSubmissionPlan::complete_deferred_value(
+    const ComputeRunTaskIdentity& identity, const ComputeRunLease& lease,
+    ExecutionTaskRuntime& task_runtime, ReadyFenceSnapshot snapshot) {
+  if (!contains_task_identity(identity)) {
+    throw std::invalid_argument(
+        "Deferred Value identity does not belong to this submission plan.");
+  }
+  const int task_id = static_cast<int>(identity.local_task_id().value());
+  std::uint8_t expected =
+      static_cast<std::uint8_t>(TaskExecutionState::AwaitingValue);
+  if (!task_execution_states_.at(static_cast<std::size_t>(task_id))
+           .compare_exchange_strong(
+               expected,
+               static_cast<std::uint8_t>(TaskExecutionState::CompletingValue),
+               std::memory_order_acq_rel, std::memory_order_acquire)) {
+    throw std::logic_error(
+        "Deferred Value continuation entered more than once.");
+  }
+
+  const PlannedTask& task =
+      compute_plan_.task_graph.tasks.at(static_cast<std::size_t>(task_id));
+  try {
+    if (snapshot.state() != ReadyFenceState::Ready) {
+      throw ReadyFenceAccessError(std::move(snapshot));
+    }
+    const auto index = dependency_state_.id_to_idx().find(task.node_id);
+    if (index == dependency_state_.id_to_idx().end()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Deferred task has no temporary result index.");
+    }
+    std::optional<NodeOutput>& result =
+        temp_results_.at(static_cast<std::size_t>(index->second));
+    if (!result.has_value() || !result->image_value.valid()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Deferred task lost its pending Value result.");
+    }
+    if (result->image_buffer.width == 0 && result->image_buffer.height == 0 &&
+        result->image_buffer.channels == 0) {
+      result->image_buffer =
+          value_image_adapter::snapshot_cpu_image_buffer(result->image_value);
+    }
+    (void)lease.observe_cancellation();
+    if (!lease.terminal_outcome().has_value()) {
+      release_dependents(task.task_id, task.node_id, lease, task_runtime);
+    }
+    task_execution_states_.at(static_cast<std::size_t>(task_id))
+        .store(static_cast<std::uint8_t>(TaskExecutionState::Completed),
+               std::memory_order_release);
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    task_execution_states_.at(static_cast<std::size_t>(task_id))
+        .store(static_cast<std::uint8_t>(TaskExecutionState::Failed),
+               std::memory_order_release);
+    try {
+      task_runtime.log_event(ExecutionTraceAction::RethrowException,
+                             task.node_id);
+    } catch (...) {
+    }
+    std::rethrow_exception(failure);
+  }
+}
+
+/** @copydoc TaskSubmissionPlan::resolve_operations */
 void TaskSubmissionPlan::resolve_operations() {
   resolved_ops_.resize(execution_order_.size());
   execution_devices_.assign(execution_order_.size(), Device::CPU);
+  operation_constraints_.resize(compute_plan_.task_graph.tasks.size());
+  task_resource_demand_ = ReadyTaskSubmission::default_resource_demand();
   for (std::size_t i = 0; i < execution_order_.size(); ++i) {
     const auto& node = graph_.node(execution_order_[i]);
-    const bool has_tile_task = std::any_of(
-        compute_plan_.task_graph.tasks.begin(),
-        compute_plan_.task_graph.tasks.end(), [&](const PlannedTask& task) {
-          return task.node_id == node.id && task.kind == PlannedTaskKind::Tile;
+    const auto planned_work = std::find_if(
+        compute_plan_.planned_work.begin(), compute_plan_.planned_work.end(),
+        [&](const PlannedNodeWork& work) {
+          return work.node_id == execution_order_[i];
         });
-    if (has_tile_task) {
-      if (auto implementation = select_device_aware_hp_implementation(
-              node, available_devices_, true)) {
-        execution_devices_[i] = implementation->metadata.device_preference;
-        resolved_ops_[i] = std::move(implementation->func);
-        continue;
-      }
-      const auto impls =
-          OpRegistry::instance().get_implementations(node.type, node.subtype);
-      if (impls && impls->tiled_hp) {
-        resolved_ops_[i] = OpRegistry::OpVariant{*impls->tiled_hp};
-        continue;
-      }
-    }
-    if (auto implementation = select_device_aware_hp_implementation(
-            node, available_devices_, false)) {
-      execution_devices_[i] = implementation->metadata.device_preference;
-      resolved_ops_[i] = std::move(implementation->func);
+    if (planned_work == compute_plan_.planned_work.end() ||
+        !planned_work->operation_route.has_value()) {
       continue;
     }
-    resolved_ops_[i] = OpRegistry::instance().resolve_for_intent(
-        node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
+
+    const PlannedOperationRoute& route = *planned_work->operation_route;
+    const auto implementation = OpRegistry::instance().select_implementation(
+        node.type, node.subtype, available_devices_,
+        ComputeIntent::GlobalHighPrecision);
+    if (!implementation ||
+        implementation->implementation_identity !=
+            route.implementation_identity ||
+        implementation->metadata.device_preference != route.device ||
+        implementation->is_tiled() != route.tiled) {
+      continue;
+    }
+    execution_devices_[i] = implementation->metadata.device_preference;
+    resolved_ops_[i] = *implementation;
+    for (const int task_id : planned_work->task_ids) {
+      operation_constraints_.at(static_cast<std::size_t>(task_id)) =
+          OperationExecutionConstraints{
+              implementation->implementation_identity,
+              implementation->metadata.reentrant,
+              implementation->metadata.maximum_parallelism,
+              implementation->metadata.exclusive_key,
+          };
+    }
+    task_resource_demand_.retained_memory_bytes =
+        std::max(task_resource_demand_.retained_memory_bytes,
+                 implementation->metadata.retained_memory_bytes);
+    task_resource_demand_.scratch_bytes =
+        std::max(task_resource_demand_.scratch_bytes,
+                 implementation->metadata.scratch_bytes);
   }
 }
 
@@ -667,14 +807,23 @@ bool TaskSubmissionPlan::publish_service_submission(
 
 /** @copydoc TaskSubmissionPlan::close_publication */
 void TaskSubmissionPlan::close_publication() noexcept {
+  std::vector<std::optional<ReadyFenceWaitRegistration>> retired_waits;
   try {
-    std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
-    if (publication_closed_) {
-      return;
+    {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      if (publication_closed_) {
+        return;
+      }
+      publication_closed_ = true;
+      for (const auto& record : runtime_completion_records_) {
+        record->retire_plan_owned();
+      }
+      retired_waits.swap(deferred_value_waits_);
     }
-    publication_closed_ = true;
-    for (const auto& record : runtime_completion_records_) {
-      record->retire_plan_owned();
+    for (auto& wait : retired_waits) {
+      if (wait.has_value()) {
+        (void)wait->cancel();
+      }
     }
   } catch (...) {
     std::terminate();
@@ -758,23 +907,25 @@ void TaskSubmissionPlan::log_initial_assignments(
 /**
  * @brief Establishes one execution epoch and submits a leased bootstrap.
  *
- * @param graph Graph used to validate empty-plan target output.
+ * @param graph Graph used to validate exact complete empty-plan target output.
  * @param task_runtime Runtime receiving the empty epoch batch and callbacks.
  * @param node_id Target node id.
  * @param plan Run-owned plan.
  * @param dispatcher_lease Lease copied into bootstrap callback.
  * @return Nothing.
- * @throws GraphError for an invalid empty plan.
+ * @throws GraphError for an empty plan without ComputeCachePolicy-approved
+ * complete target output.
  * @throws Execution-runtime or task exceptions unchanged.
  * @note The only ExecutionTaskHandle batch is empty; full HP work uses owned
- * callbacks.
+ * callbacks. Partial persistent Region state never authorizes the early
+ * return.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionTaskRuntime& task_runtime, int node_id,
                             TaskSubmissionPlan& plan,
                             const ComputeRunLease& dispatcher_lease) {
   if (plan.empty() && graph.has_node(node_id)) {
-    if (!graph.node(node_id).cached_output_high_precision.has_value()) {
+    if (!ComputeCachePolicy::has_reusable_output(graph.node(node_id))) {
       throw GraphError(
           GraphErrc::ComputeError,
           "Planned dispatch produced no executable tasks for node " +
@@ -803,15 +954,20 @@ void dispatch_planned_tasks(GraphModel& graph,
 /**
  * @brief Establishes one service-owned CPU batch from ready submissions.
  *
- * @param graph Graph used only for empty-plan target validation.
+ * @param graph Graph used only for exact complete empty-plan target validation.
  * @param execution_service Injected process CPU service.
  * @param host Active Graph observation context.
  * @param node_id Requested target node.
  * @param plan Run-owned dispatcher submission plan.
  * @param dispatcher_lease Matching Run lease.
  * @return Nothing after service settlement.
- * @throws GraphError for an invalid empty plan.
+ * @throws GraphError for an empty plan without ComputeCachePolicy-approved
+ * complete target output.
  * @throws Service setup or exact task exceptions unchanged.
+ * @note Partial persistent Region state never authorizes the early return.
+ * The complete shared Run estimate is frozen before initial submission
+ * materialization moves each task's already-charged constraint-key allocation
+ * out of the plan.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionService& execution_service,
@@ -820,7 +976,7 @@ void dispatch_planned_tasks(GraphModel& graph,
                             TaskSubmissionPlan& plan,
                             const ComputeRunLease& dispatcher_lease) {
   if (plan.empty() && graph.has_node(node_id)) {
-    if (!graph.node(node_id).cached_output_high_precision.has_value()) {
+    if (!ComputeCachePolicy::has_reusable_output(graph.node(node_id))) {
       throw GraphError(
           GraphErrc::ComputeError,
           "Planned dispatch produced no executable tasks for node " +
@@ -830,11 +986,10 @@ void dispatch_planned_tasks(GraphModel& graph,
     return;
   }
 
+  const CpuRunResourceDemand resource_demand{
+      dispatcher_lease.retained_memory_bytes(), plan.task_resource_demand()};
   std::vector<ReadyTaskSubmission> initial_submissions =
       plan.make_initial_ready_submissions(dispatcher_lease);
-  const CpuRunResourceDemand resource_demand{
-      dispatcher_lease.retained_memory_bytes(),
-      ReadyTaskSubmission::default_resource_demand()};
   execution_service.execute_run(host, execution_type,
                                 std::move(initial_submissions),
                                 static_cast<int>(plan.size()), resource_demand);

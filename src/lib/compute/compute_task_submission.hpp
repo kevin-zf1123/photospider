@@ -29,9 +29,9 @@ namespace ps::compute {
  *
  * TaskSubmissionPlan converts a cache-pruned ComputePlan into dense indexes,
  * dependency counters, dependent adjacency lists, composite Run-local task
- * identity, an owned NodeTaskRunner, resolved operation variants, and
- * temporary result slots. It is the authority for which nodes run during one
- * ComputeTaskDispatcher::execute() call.
+ * identity, an owned NodeTaskRunner, resolved operation implementation
+ * snapshots, and temporary result slots. It is the authority for which nodes
+ * run during one ComputeTaskDispatcher::execute() call.
  *
  * @throws GraphError or standard exceptions through individual construction,
  * execution, and submission operations.
@@ -53,15 +53,19 @@ class TaskSubmissionPlan {
    * @param available_devices Devices exposed by the active execution runtime.
    * @param publish_plan_inspection Whether planning immediately updates graph
    * diagnostics; admission-aware callers defer it until installation.
+   * @param allow_reusable_cache Whether exact complete formal HP cache may
+   * satisfy nodes before task population.
    * @throws GraphError or standard exceptions from plan construction, graph
    * lookup, allocation, or operation resolution.
    * @note The underlying ComputePlan remains owned by this value regardless of
-   * diagnostic publication timing.
+   * diagnostic publication timing. Force-recache callers disable reusable
+   * cache without mutating Graph output during fallible plan construction.
    */
   TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
                      GraphTraversalService& traversal, int node_id,
                      std::vector<Device> available_devices,
-                     bool publish_plan_inspection = true);
+                     bool publish_plan_inspection = true,
+                     bool allow_reusable_cache = true);
 
   /**
    * @brief Reports whether the pruned plan contains no executable tasks.
@@ -94,9 +98,14 @@ class TaskSubmissionPlan {
    * @brief Estimates complete Host-owned submission-plan retained storage.
    * @return Checked plan, dependency, runner, output-slot, and container bytes.
    * @throws GraphError when checked structural arithmetic overflows.
-   * @note Graph/cache/services are borrowed. Image pixels plus opaque
-   * operation/plugin/backend callable allocations are excluded because their
-   * sizes are not available from the host-side planning contract.
+   * @note Every retained operation-snapshot and execution-constraint key is
+   * charged by its actual copied string capacity plus the null terminator.
+   * Service admission freezes this estimate before constraint allocations move
+   * into their one ready submission, so the same storage remains charged
+   * exactly once throughout its ownership transfer. Graph/cache/services are
+   * borrowed. Image pixels plus opaque operation, plugin, backend, and
+   * callable allocations are excluded because their sizes are not available
+   * from the host-side planning contract.
    */
   std::uint64_t retained_memory_bytes() const;
 
@@ -131,15 +140,28 @@ class TaskSubmissionPlan {
   }
 
   /**
-   * @brief Returns resolved operations for planned high-precision nodes.
+   * @brief Returns exact resolved implementations for planned HP nodes.
    *
-   * @return Optional variants aligned with execution_order_.
+   * @return Optional callback, metadata, and identity snapshots aligned with
+   * execution_order_.
    * @throws Nothing.
-   * @note Missing operations remain empty for worker-time node diagnostics.
+   * @note Missing or identity-drifted operations remain empty for admission
+   * validation. Successful values retain one coherent callback/metadata pair.
    */
-  const std::vector<std::optional<OpRegistry::OpVariant>>& resolved_ops()
-      const {
+  const std::vector<std::optional<OpImplementation>>& resolved_ops() const {
     return resolved_ops_;
+  }
+
+  /**
+   * @brief Returns the uniform conservative per-task operation demand.
+   * @return Component-wise maximum retained/scratch demand across selected
+   * operation routes, with one ordering work unit.
+   * @throws Nothing.
+   * @note The complete Run reserves this value using its maximum callback
+   * concurrency, so heterogeneous planned nodes cannot be undercounted.
+   */
+  ReadyTaskResourceDemand task_resource_demand() const noexcept {
+    return task_resource_demand_;
   }
 
   /**
@@ -243,6 +265,8 @@ class TaskSubmissionPlan {
    * @note The operation is idempotent and may race callback execution,
    * dependency release, inline runtime submission, failure, and cancellation.
    * Callback-owned units remain owned by their exact-once retirement tokens.
+   * Pending Value registrations are cancelled outside the publication gate;
+   * a callback that already entered keeps its executor alive through exit.
    */
   void close_publication() noexcept;
 
@@ -257,11 +281,51 @@ class TaskSubmissionPlan {
     Pending = 0U,
     /** @brief One matching callback owns execution. */
     Executing = 1U,
+    /** @brief Provider returned a Value whose producer is still pending. */
+    AwaitingValue = 2U,
+    /** @brief One fence continuation owns terminal value processing. */
+    CompletingValue = 3U,
     /** @brief Execution and dependent release succeeded. */
-    Completed = 2U,
+    Completed = 4U,
     /** @brief Execution or completion routing threw. */
-    Failed = 3U,
+    Failed = 5U,
   };
+
+  /**
+   * @brief Defers dependency release when a task published a pending Value.
+   * @param task Registered task whose provider just returned.
+   * @param identity Exact Run/local task identity.
+   * @param lease Matching Run lease retained by the fence callback.
+   * @param task_runtime Runtime whose completion count and executor are used.
+   * @return True when a pending fence continuation was registered.
+   * @throws std::bad_alloc, runtime, fence-registration, or access errors.
+   * @note The method increments completion before registering the wait. A
+   * Ready value is materialized synchronously and returns false; Failed or
+   * ProducerCancelled values throw without releasing dependents. Terminal
+   * publication observed under the publication gate installs no wait.
+   */
+  bool defer_pending_value(const PlannedTask& task,
+                           const ComputeRunTaskIdentity& identity,
+                           const ComputeRunLease& lease,
+                           ExecutionTaskRuntime& task_runtime);
+
+  /**
+   * @brief Completes one exact task after its pending Value becomes terminal.
+   * @param identity Exact task identity previously moved to AwaitingValue.
+   * @param lease Matching Run lease used for cancellation and dependent
+   * release.
+   * @param task_runtime Runtime used for trace and dependent submission.
+   * @param snapshot Terminal ReadyFence snapshot delivered asynchronously.
+   * @return Nothing.
+   * @throws ReadyFenceAccessError for failed/cancelled producer completion.
+   * @throws GraphError or runtime exceptions from materialization and release.
+   * @note ComputeRunLease owns the extra completion-unit retirement and failure
+   * publication around this method.
+   */
+  void complete_deferred_value(const ComputeRunTaskIdentity& identity,
+                               const ComputeRunLease& lease,
+                               ExecutionTaskRuntime& task_runtime,
+                               ReadyFenceSnapshot snapshot);
 
   /**
    * @brief Exact completion ownership for one runtime pre-counted plan task.
@@ -375,13 +439,18 @@ class TaskSubmissionPlan {
   };
 
   /**
-   * @brief Resolves GlobalHighPrecision operation variants for planned nodes.
+   * @brief Re-resolves exact planned HP operation identities and declarations.
    *
    * @return Nothing.
-   * @throws std::bad_alloc from registry candidate or result storage.
-   * @note Missing variants remain empty so callers that only exercise
-   * Run-owned storage retain worker-time error semantics. Admission-aware
-   * production preparation validates the complete vector before installation.
+   * @throws std::bad_alloc from registry candidates, callback/key copies, or
+   * result storage.
+   * @note Identity/device/shape mismatches remain empty so admission-aware
+   * production preparation rejects them before operation/resource/physical
+   * admission. Successful snapshots preserve the exact selected callback,
+   * metadata, and identity, populate node-aligned execution devices and one
+   * independently owned constraint record per planned task, and contribute
+   * retained/scratch declarations to one component-wise maximum task demand
+   * for the physical Run.
    */
   void resolve_operations();
 
@@ -479,7 +548,11 @@ class TaskSubmissionPlan {
    * @throws std::invalid_argument for an unexpected lease/identity mismatch.
    * @throws std::bad_alloc from metadata or executable ownership.
    * @note The executable captures no plan, runner, Graph, or dispatcher stack
-   * pointer; it reaches Run-owned state only through the supplied lease.
+   * pointer; it reaches Run-owned state only through the supplied lease. The
+   * submission takes its task-aligned exact-identity constraints from the plan
+   * without duplicating that task's already-admitted string allocation, and
+   * carries the uniform conservative operation demand resolved before
+   * admission. Each task may be materialized at most once.
    */
   ReadyTaskSubmission make_ready_submission(
       const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
@@ -554,6 +627,16 @@ class TaskSubmissionPlan {
   std::vector<std::atomic<std::uint8_t>> task_execution_states_;
 
   /**
+   * @brief Move-only cancellation owners aligned with local task identities.
+   *
+   * @note The vector is sized before execution. Publication-gate locking
+   * serializes registration with terminal close, which swaps all remaining
+   * waits into lock-free cancellation. The retaining ComputeRunLease prevents
+   * plan destruction until a callback that already entered exits.
+   */
+  std::vector<std::optional<ReadyFenceWaitRegistration>> deferred_value_waits_;
+
+  /**
    * @brief Linearizes plan-owned/callback-owned transfer with terminal closure.
    * @note Recursive locking is required for an inline runtime, which may run
    * a callback and publish its dependent before the submission call returns.
@@ -577,8 +660,26 @@ class TaskSubmissionPlan {
   /** @brief Temporary worker outputs aligned with execution_order_. */
   std::vector<std::optional<NodeOutput>> temp_results_;
 
-  /** @brief Resolved operations aligned with execution_order_. */
-  std::vector<std::optional<OpRegistry::OpVariant>> resolved_ops_;
+  /**
+   * @brief Exact operation snapshots aligned with execution_order_.
+   * @note Every present value keeps the selected callback, scheduling metadata,
+   * implementation identity, and any plugin lease in one owned snapshot.
+   */
+  std::vector<std::optional<OpImplementation>> resolved_ops_;
+
+  /**
+   * @brief Exact-identity start constraints aligned with dense planned task
+   * ids.
+   * @note Tiled tasks receive independent key allocations during resolution.
+   * Each allocation is charged while plan-owned, then moves exactly once into
+   * its matching service submission after the complete Run estimate is frozen.
+   */
+  std::vector<OperationExecutionConstraints> operation_constraints_;
+
+  /** @brief Uniform conservative demand carried by every service task. */
+  ReadyTaskResourceDemand task_resource_demand_;
+
+  friend class ComputeRunLease;
 };
 
 /**
@@ -592,10 +693,12 @@ class TaskSubmissionPlan {
  * @param dispatcher_lease Lease retained by dispatcher/commit and copied into
  * the bootstrap callback.
  * @return Nothing.
- * @throws GraphError when an empty plan lacks reusable target output.
+ * @throws GraphError when an empty plan lacks exact complete reusable target
+ * output.
  * @throws Execution-runtime or task exceptions through completion wait.
  * @note The full HP path submits no non-empty ExecutionTaskHandle and exposes
- * no borrowed ExecutionTaskExecutor pointer. Empty plans bypass batch setup.
+ * no borrowed ExecutionTaskExecutor pointer. Empty plans bypass batch setup
+ * only after ComputeCachePolicy accepts complete Region validity.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionTaskRuntime& task_runtime, int node_id,
@@ -605,18 +708,21 @@ void dispatch_planned_tasks(GraphModel& graph,
 /**
  * @brief Submits one planned full-HP Run through the injected CPU service.
  *
- * @param graph GraphModel used only to validate an empty reusable target.
+ * @param graph GraphModel used only to validate an empty target with exact
+ * complete reusable validity.
  * @param execution_service Process-owned CPU execution service.
  * @param host Active Graph execution observation context.
  * @param node_id Target node used in empty-plan diagnostics.
  * @param plan Run-owned execution submission plan.
  * @param dispatcher_lease Matching lease copied into ready submissions.
  * @return Nothing after the service batch settles.
- * @throws GraphError when an empty plan lacks reusable target output.
+ * @throws GraphError when an empty plan lacks exact complete reusable target
+ * output.
  * @throws std::bad_alloc from submission/service setup.
  * @throws The exact service worker or operation exception after settlement.
  * @note Dispatcher readiness and completion state stay inside plan/Run
- * ownership. Only move-owned ready submissions cross into the service.
+ * ownership. Only move-owned ready submissions cross into the service. Empty
+ * plans require ComputeCachePolicy to accept complete Region validity.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionService& execution_service,

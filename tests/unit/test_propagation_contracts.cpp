@@ -46,7 +46,8 @@ static_assert(std::is_same_v<decltype(InputTileView::roi), PixelRect>);
 static_assert(std::is_same_v<decltype(OutputTileView::roi), PixelRect>);
 static_assert(std::is_same_v<decltype(InputTile::roi), PixelRect>);
 static_assert(std::is_same_v<decltype(OutputTile::roi), PixelRect>);
-static_assert(std::is_same_v<decltype(Node::hp_roi), std::optional<PixelRect>>);
+static_assert(
+    std::is_same_v<decltype(Node::hp_region), std::optional<RegionSet>>);
 static_assert(std::is_same_v<decltype(Node::last_input_size_hp),
                              std::optional<PixelSize>>);
 static_assert(std::is_same_v<typename decltype(DependencyLutCacheIdentity::
@@ -59,9 +60,13 @@ static_assert(
 static_assert(
     std::is_same_v<decltype(compute::HpPlanEntry::roi_hp), PixelRect>);
 static_assert(
+    std::is_same_v<decltype(compute::HpPlanEntry::region_hp), RegionSet>);
+static_assert(
     std::is_same_v<decltype(compute::HpPlanEntry::hp_size), PixelSize>);
 static_assert(
     std::is_same_v<decltype(compute::RtPlanEntry::roi_rt), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::RtPlanEntry::region_hp), RegionSet>);
 static_assert(
     std::is_same_v<decltype(compute::RtPlanEntry::rt_size), PixelSize>);
 static_assert(std::is_same_v<
@@ -69,14 +74,25 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<typename decltype(compute::DirtySourceNodeState::
                                                    source_rois)::value_type,
                              PixelRect>);
+static_assert(std::is_same_v<typename decltype(compute::DirtySourceNodeState::
+                                                   source_regions)::value_type,
+                             RegionSet>);
 static_assert(
     std::is_same_v<decltype(compute::DirtyTileKey::pixel_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyTileKey::region), RegionSet>);
 static_assert(std::is_same_v<
               decltype(compute::DirtyMonolithicRegion::pixel_roi), PixelRect>);
+static_assert(std::is_same_v<decltype(compute::DirtyMonolithicRegion::region),
+                             RegionSet>);
 static_assert(
     std::is_same_v<decltype(compute::DirtyEdgeMapping::from_roi), PixelRect>);
 static_assert(
     std::is_same_v<decltype(compute::DirtyEdgeMapping::to_roi), PixelRect>);
+static_assert(std::is_same_v<decltype(compute::DirtyEdgeMapping::from_region),
+                             RegionSet>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyEdgeMapping::to_region), RegionSet>);
 static_assert(
     std::is_same_v<
         typename decltype(compute::DirtyRegionSnapshot::per_node_dirty_rois)::
@@ -86,6 +102,11 @@ static_assert(std::is_same_v<
               typename decltype(compute::DirtyRegionSnapshot::
                                     actual_dirty_rois)::mapped_type::value_type,
               PixelRect>);
+static_assert(
+    std::is_same_v<
+        typename decltype(compute::DirtyRegionSnapshot::actual_dirty_regions)::
+            mapped_type::value_type,
+        RegionSet>);
 static_assert(
     std::is_same_v<decltype(compute::PlannedDependency::to_roi), PixelRect>);
 static_assert(
@@ -875,6 +896,39 @@ TEST(OperationHostAdapter,
   }
 }
 
+/**
+ * @brief Verifies the installed operation ABI forwards all routing metadata.
+ *
+ * @return Nothing; GoogleTest assertions report translation mismatches.
+ * @throws Adapter validation and string-allocation exceptions unchanged.
+ * @note This tests the ABI-to-private boundary only; execution gates consume
+ * the resulting private value in ExecutionService tests.
+ */
+TEST(OperationHostAdapter, ConvertsCompleteOperationRoutingMetadata) {
+  plugin::OperationMetadata metadata;
+  metadata.reentrant = false;
+  metadata.maximum_parallelism = 5U;
+  metadata.retained_memory_bytes = 4096U;
+  metadata.scratch_bytes = 8192U;
+  metadata.exclusive_key = "plugin-shared-context";
+
+  const OpMetadata converted =
+      plugin_host::operation_metadata_to_private(metadata);
+  EXPECT_FALSE(converted.reentrant);
+  EXPECT_EQ(converted.maximum_parallelism, 5U);
+  EXPECT_EQ(converted.retained_memory_bytes, 4096U);
+  EXPECT_EQ(converted.scratch_bytes, 8192U);
+  EXPECT_EQ(converted.exclusive_key, "plugin-shared-context");
+}
+
+/**
+ * @brief Verifies malformed ABI metadata is rejected before registration.
+ *
+ * @return Nothing; GoogleTest assertions report accepted invalid values.
+ * @throws Adapter validation exceptions are consumed by GoogleTest.
+ * @note Every case starts from a fresh default metadata value so failures are
+ * attributable to exactly one malformed field.
+ */
 TEST(OperationHostAdapter, RejectsInvalidRegistrarMetadataValues) {
   plugin::OperationMetadata metadata;
   metadata.tile_preference = static_cast<plugin::TileSizePreference>(999);
@@ -890,6 +944,15 @@ TEST(OperationHostAdapter, RejectsInvalidRegistrarMetadataValues) {
                std::invalid_argument);
   metadata = plugin::OperationMetadata{};
   metadata.cost_score = -1;
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.exclusive_key.assign(
+      plugin::OperationMetadata::kExclusiveKeyMaxBytes + 1U, 'x');
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.exclusive_key = std::string("invalid\0key", 11U);
   EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
                std::invalid_argument);
   EXPECT_THROW(

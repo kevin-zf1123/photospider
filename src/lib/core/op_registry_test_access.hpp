@@ -40,8 +40,6 @@ struct OpRegistryDeviceOwnershipInspection {
   std::uint64_t monolithic_hp_revision = 0;
   /** @brief Revision currently owning the HP tiled compatibility slot. */
   std::uint64_t tiled_hp_revision = 0;
-  /** @brief Revision currently owning the HP metadata slot. */
-  std::uint64_t meta_hp_revision = 0;
 };
 
 /**

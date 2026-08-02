@@ -29,6 +29,9 @@ option(PHOTOSPIDER_ENABLE_OPENCV
     "Enable OpenCV-backed image processing, codecs, and public adapters" ON)
 option(PHOTOSPIDER_ENABLE_YAML
     "Enable YAML graph-document and cache-metadata persistence" ON)
+option(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER
+    "Build the optional single-part deep-scanline OpenEXR provider"
+    OFF)
 set(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER_DEFAULT
     ${PHOTOSPIDER_ENABLE_OPENCV})
 option(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER
@@ -149,11 +152,23 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     core/image_buffer.hpp
     core/inspection_types.hpp
     core/result_types.hpp
+    data/image_view.hpp
+    data/extension.hpp
+    data/packed_dense_tensor_view.hpp
+    data/region.hpp
+    data/value.hpp
     host/compute_request.hpp
     host/event_stream.hpp
     host/graph_session.hpp
     host/host.hpp
+    memory/access_plan.hpp
+    memory/blocked_layout.hpp
+    memory/buffer_handle.hpp
+    memory/ready_fence.hpp
+    memory/strided_layout.hpp
     plugin/node_view.hpp
+    plugin/data_definition_registry.hpp
+    plugin/data_provider_api.h
     plugin/op_contract.hpp
     plugin/plugin_api.hpp
     policy/policy_plugin_api.h
@@ -170,7 +185,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 17)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 29)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -242,14 +257,30 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/Photospider"
     CACHE STRING "Install directory for Photospider CMake package files")
 
-# Public image-buffer factory implementation. This target deliberately has no
-# OpenCV, yaml-cpp, Threads, graph, registry, or embedded product dependency.
-add_library(photospider_operation_runtime STATIC
-    src/lib/core/image_buffer.cpp)
+# Public image-buffer factory, ReadyFence, process-wide Value identity,
+# provider-defined data contracts, and shared private device-invocation
+# context implementation.
+# Host products and Value-using operation DSOs dynamically depend on this one
+# runtime image so allocation/revision minting cannot restart per DSO. The
+# target deliberately has no OpenCV, yaml-cpp, graph, policy registry, or
+# embedded product dependency. DataDefinitionRegistry is an injected object;
+# this shared runtime owns its one implementation but creates no singleton.
+add_library(photospider_operation_runtime SHARED
+    src/lib/core/extension.cpp
+    src/lib/core/image_buffer.cpp
+    src/lib/core/ready_fence.cpp
+    src/lib/core/region.cpp
+    src/lib/core/value.cpp
+    src/lib/core/packed_dense_tensor.cpp
+    src/lib/plugin/data_definition_registry.cpp
+    src/lib/execution/device_execution_context.cpp)
 add_library(Photospider::operation_runtime ALIAS
     photospider_operation_runtime)
 set_target_properties(photospider_operation_runtime PROPERTIES
-    EXPORT_NAME operation_runtime)
+    EXPORT_NAME operation_runtime
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)
 target_compile_features(photospider_operation_runtime PUBLIC cxx_std_17)
 target_include_directories(photospider_operation_runtime
     PUBLIC
@@ -270,6 +301,21 @@ target_include_directories(photospider_operation_sdk INTERFACE
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(photospider_operation_sdk INTERFACE
     Photospider::operation_runtime)
+
+# Public data-definition SDK: one dependency-neutral pure-C ABI header. C11
+# and C++17 definition producers receive only the generated/installed include
+# root; registry/runtime authority remains a Host-side concern and therefore
+# does not cross this interface target.
+add_library(photospider_data_provider_sdk INTERFACE)
+add_library(Photospider::data_provider_sdk ALIAS
+    photospider_data_provider_sdk)
+set_target_properties(photospider_data_provider_sdk PROPERTIES
+    EXPORT_NAME data_provider_sdk)
+target_compile_features(photospider_data_provider_sdk INTERFACE
+    c_std_11 cxx_std_17)
+target_include_directories(photospider_data_provider_sdk INTERFACE
+    "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 
 # Public policy SDK: one dependency-neutral pure C ABI header. C11 producers
 # and C++17 producers/consumers receive only the generated/installed include
@@ -295,6 +341,13 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
 endif()
 if(PHOTOSPIDER_ENABLE_YAML)
     find_package(yaml-cpp REQUIRED)
+endif()
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    find_package(OpenEXR 3 CONFIG REQUIRED)
+    if(NOT TARGET OpenEXR::OpenEXR)
+        message(FATAL_ERROR
+            "OpenEXR did not provide the required OpenEXR::OpenEXR target")
+    endif()
 endif()
 find_package(CURL) 
 find_package(OpenSSL)
@@ -352,6 +405,41 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
         Photospider::operation_sdk
         Photospider::operation_runtime
         ${PHOTOSPIDER_OPENCV_CORE_TARGET})
+endif()
+
+# Optional V-15 definition provider and source-private Host codec adapter.
+# Neither target participates in the dependency-neutral product, operation
+# runtime, or provider SDK. The DSO publishes only the frozen v3 candidate
+# entry points; the adapter is a private C++ seam used by Host composition and
+# long-lived product tests.
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    add_library(photospider_openexr_deep_provider MODULE
+        plugins/data/openexr_deep_scanline_provider.cpp)
+    add_library(Photospider::openexr_deep_provider ALIAS
+        photospider_openexr_deep_provider)
+    set_target_properties(photospider_openexr_deep_provider PROPERTIES
+        EXPORT_NAME openexr_deep_provider
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+        LIBRARY_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}/data")
+    target_compile_features(photospider_openexr_deep_provider PRIVATE
+        cxx_std_17)
+    target_compile_definitions(photospider_openexr_deep_provider PRIVATE
+        PS_DATA_PROVIDER_BUILD)
+    target_include_directories(photospider_openexr_deep_provider PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+    target_link_libraries(photospider_openexr_deep_provider PRIVATE
+        Photospider::data_provider_sdk
+        OpenEXR::OpenEXR)
+
+    add_library(photospider_openexr_deep_adapter STATIC
+        src/lib/adapters/openexr/openexr_deep_scanline_adapter.cpp)
+    target_compile_features(photospider_openexr_deep_adapter PUBLIC cxx_std_17)
+    target_include_directories(photospider_openexr_deep_adapter PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+    target_link_libraries(photospider_openexr_deep_adapter PRIVATE
+        Photospider::operation_runtime
+        OpenEXR::OpenEXR)
 endif()
 
 # --- FTXUI (Frontend UI Lib) ---
@@ -443,7 +531,10 @@ endif()
 # Module: private graph model, registry behavior, dependency-neutral cache
 # coordination, and format-neutral graph services.
 set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
+    src/lib/core/cpu_dense_image_operation.cpp
     src/lib/core/ops.cpp
+    src/lib/core/region_image_adapter.cpp
+    src/lib/core/value_image_adapter.cpp
     src/lib/graph/in_memory_graph_document_adapter.cpp
     src/lib/graph/graph_model.cpp
     src/lib/graph/graph_state_executor.cpp
@@ -551,9 +642,38 @@ target_link_libraries(photospider_policy_internal PRIVATE
 
 # Module: private physical execution resources and accounting.
 set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+    src/lib/execution/compute_io_executor.cpp
+    src/lib/execution/device_completion.cpp
+    src/lib/execution/device_executor_registry.cpp
+    src/lib/execution/execution_task_runtime.cpp
     src/lib/execution/physical_execution_routes.cpp
+    src/lib/execution/residency_manager.cpp
+    src/lib/execution/value_transfer_task.cpp
     src/lib/runtime/resource_ledger.cpp
 )
+set(PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES)
+set(PHOTOSPIDER_HAS_METAL_EXECUTOR OFF)
+if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+    enable_language(OBJCXX)
+    find_library(METAL_FRAMEWORK NAMES Metal)
+    find_library(FOUNDATION_FRAMEWORK NAMES Foundation)
+    if(NOT METAL_FRAMEWORK OR NOT FOUNDATION_FRAMEWORK)
+        message(FATAL_ERROR
+            "Photospider Metal execution requires Metal and Foundation")
+    endif()
+    set(PHOTOSPIDER_HAS_METAL_EXECUTOR ON)
+    list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+        src/lib/execution/metal_device_executor.mm)
+    list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES
+        ${METAL_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK})
+    set_source_files_properties(
+        src/lib/execution/metal_device_executor.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+else()
+    list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+        src/lib/execution/metal_device_executor_stub.cpp)
+endif()
 
 add_library(photospider_execution_internal STATIC
     ${PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES})
@@ -561,7 +681,11 @@ target_include_directories(photospider_execution_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_execution_internal PRIVATE
     photospider_core_internal
-    Threads::Threads)
+    Photospider::operation_runtime
+    Threads::Threads
+    ${PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES})
+target_link_libraries(photospider_graph_internal PRIVATE
+    photospider_execution_internal)
 
 # Module: compute, dirty execution, GraphRuntime, and interaction ownership.
 set(KERNEL_FACADE_SOURCES
@@ -611,14 +735,8 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_service.cpp
     src/lib/runtime/graph_event_service.cpp
     src/lib/runtime/interaction.cpp
-    src/lib/runtime/graph_runtime.mm
+    src/lib/runtime/graph_runtime.cpp
 )
-
-if(APPLE)
-    enable_language(OBJCXX)
-else()
-    set_source_files_properties(src/lib/runtime/graph_runtime.mm PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
-endif()
 
 add_library(photospider_compute_internal STATIC
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES})
@@ -697,13 +815,17 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-# These five translation units own the Issue #72, Issue #75, and Issue #76
-# deterministic observation seams. The installable archive always receives
-# their production objects; focused tests receive a non-installed variant while
-# reusing every common object. Keeping the split at translation-unit
-# granularity avoids compiling a second copy of the complete embedded product.
+# These eight translation units own the Issue #72, Issue #75, Issue #76, and
+# Issue #82 deterministic observation seams. The installable archive always
+# receives their production objects; focused tests receive a non-installed
+# variant while reusing every common object. Keeping the split at
+# translation-unit granularity avoids compiling a second copy of the complete
+# embedded product.
 set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
+    src/lib/compute/compute_task_submission.cpp
+    src/lib/compute/dirty_update_executor.cpp
     src/lib/compute/execution_service.cpp
+    src/lib/compute/resource_demand_estimator.cpp
     src/lib/graph/graph_cache_service.cpp
     src/lib/graph/graph_state_executor.cpp
     src/lib/runtime/kernel.cpp
@@ -722,7 +844,7 @@ list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
 
 # Apply the private compile environment shared by production and test-only
 # product object variants. Test-seam definitions are intentionally added by
-# the caller only to the five-source test object target.
+# the caller only to the eight-source test object target.
 function(configure_photospider_product_objects TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
@@ -806,6 +928,7 @@ add_library(photospider STATIC
 configure_photospider_product_archive(photospider)
 
 set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
+    PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING
     PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
@@ -833,7 +956,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 endif()
 
 # Fail configuration if a future refactor accidentally restores an Issue #72,
-# Issue #75, or Issue #76 test definition on any production product target.
+# Issue #75, Issue #76, or Issue #82 test definition on any production product
+# target.
 function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
     get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
         ${TARGET_NAME} COMPILE_DEFINITIONS)
@@ -919,6 +1043,40 @@ if(PHOTOSPIDER_BUILD_IPC)
         photospider_ipc_client
         photospider
         Threads::Threads)
+    # GNUInstallDirs permits nested relative directories and absolute
+    # destinations. For a relative LIBDIR, derive the loader-relative lookup
+    # from the configured full daemon directory to the configured full runtime
+    # directory instead of assuming one ".." level. An absolute LIBDIR is an
+    # explicit non-relocatable request and must remain an absolute lookup;
+    # DESTDIR is intentionally absent because it is only a staging prefix.
+    if(APPLE OR UNIX)
+        if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+            set(PHOTOSPIDERD_INSTALL_RUNTIME_RPATH
+                "${CMAKE_INSTALL_FULL_LIBDIR}")
+        else()
+            file(RELATIVE_PATH PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR
+                "${CMAKE_INSTALL_FULL_BINDIR}"
+                "${CMAKE_INSTALL_FULL_LIBDIR}")
+            if(PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR STREQUAL "")
+                set(PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR ".")
+            endif()
+            if(APPLE)
+                set(PHOTOSPIDERD_INSTALL_RUNTIME_RPATH
+                    "@loader_path/${PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR}")
+            else()
+                set(PHOTOSPIDERD_INSTALL_RUNTIME_RPATH
+                    "$ORIGIN/${PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR}")
+            endif()
+        endif()
+    endif()
+    if(APPLE)
+        set_target_properties(photospiderd PROPERTIES
+            MACOSX_RPATH ON
+            INSTALL_RPATH "${PHOTOSPIDERD_INSTALL_RUNTIME_RPATH}")
+    elseif(UNIX)
+        set_target_properties(photospiderd PROPERTIES
+            INSTALL_RPATH "${PHOTOSPIDERD_INSTALL_RUNTIME_RPATH}")
+    endif()
 
     message(STATUS
         "Photospider IPC: enabled (Unix socket client + photospiderd v${PROJECT_VERSION})")
@@ -935,6 +1093,7 @@ install(TARGETS photospider
 )
 
 install(TARGETS
+    photospider_data_provider_sdk
     photospider_operation_sdk
     photospider_operation_runtime
     photospider_policy_sdk
@@ -952,6 +1111,14 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+endif()
+
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    install(TARGETS photospider_openexr_deep_provider
+        EXPORT PhotospiderOpenEXRTargets
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/photospider/providers
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
 endif()
 
@@ -989,10 +1156,38 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     )
 endif()
 
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    install(EXPORT PhotospiderOpenEXRTargets
+        NAMESPACE Photospider::
+        DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
+    )
+endif()
+
 install(EXPORT PhotospiderEmbeddedTargets
     NAMESPACE Photospider::
     DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
 )
+
+# Keep the disabled installation free of an inert optional-package lookup.
+# The enabled package substitutes this complete block; the disabled package
+# receives an empty string while still reporting the absent lowercase
+# component through the ordinary component loop.
+if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+    set(PHOTOSPIDER_OPENEXR_COMPONENT_DISCOVERY [=[
+if(_Photospider_need_openexr)
+  if(Photospider_FIND_REQUIRED_openexr_deep_provider)
+    find_dependency(OpenEXR 3 CONFIG)
+  else()
+    find_package(OpenEXR 3 QUIET CONFIG)
+    if(NOT TARGET OpenEXR::OpenEXR)
+      set(Photospider_openexr_deep_provider_FOUND FALSE)
+    endif()
+  endif()
+endif()
+]=])
+else()
+    set(PHOTOSPIDER_OPENEXR_COMPONENT_DISCOVERY "")
+endif()
 
 configure_package_config_file(
     "${PROJECT_SOURCE_DIR}/cmake/PhotospiderConfig.cmake.in"
@@ -1223,25 +1418,37 @@ if(BUILD_TESTING)
     set_target_properties(v1_only_op_plugin PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/v1_only"
         RUNTIME_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/v1_only")
+
+    foreach(VALUE_IDENTITY_DSO_NAME
+            value_identity_dso_a value_identity_dso_b)
+        add_library(${VALUE_IDENTITY_DSO_NAME} SHARED
+            tests/fixtures/value_identity_dso.cpp)
+        set_target_properties(${VALUE_IDENTITY_DSO_NAME} PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY
+                "${CMAKE_BINARY_DIR}/test_value_identity_dsos/${VALUE_IDENTITY_DSO_NAME}"
+            RUNTIME_OUTPUT_DIRECTORY
+                "${CMAKE_BINARY_DIR}/test_value_identity_dsos/${VALUE_IDENTITY_DSO_NAME}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+            WINDOWS_EXPORT_ALL_SYMBOLS ON)
+        if(APPLE)
+            set_target_properties(${VALUE_IDENTITY_DSO_NAME} PROPERTIES
+                MACOSX_RPATH ON)
+        endif()
+        target_link_libraries(${VALUE_IDENTITY_DSO_NAME} PRIVATE
+            Photospider::operation_sdk)
+    endforeach()
 endif()
 
 # ==============================================================================
 # 7. Metal Support (Apple Only)
 # ==============================================================================
-if(APPLE)
+if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     set(METAL_ROOT_DIR ${CMAKE_BINARY_DIR}/high_performance/metal)
     set(METAL_OPS_DIR  ${METAL_ROOT_DIR}/ops)
     file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
     file(MAKE_DIRECTORY ${METAL_OPS_DIR})
 
-    find_library(METAL_FRAMEWORK NAMES Metal)
-    find_library(FOUNDATION_FRAMEWORK NAMES Foundation)
-    if(NOT METAL_FRAMEWORK OR NOT FOUNDATION_FRAMEWORK)
-        message(FATAL_ERROR
-            "Photospider requires Metal and Foundation on Apple platforms")
-    endif()
-
-    # Core product needs Metal framework for Objective-C++ runtime sources.
+    # The real process executor makes the product depend on native Metal.
     target_link_libraries(photospider PRIVATE
         "-framework Metal"
         "-framework Foundation"
@@ -1253,56 +1460,49 @@ if(APPLE)
         )
     endif()
 
-    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-        find_library(COREIMAGE_FRAMEWORK NAMES CoreImage)
-        find_library(COREVIDEO_FRAMEWORK NAMES CoreVideo)
-        if(NOT COREIMAGE_FRAMEWORK OR NOT COREVIDEO_FRAMEWORK)
-            message(FATAL_ERROR
-                "Photospider Metal operation plugins require CoreImage and CoreVideo")
-        endif()
+    # 1. The Implementation Library (the actual op logic)
+    add_library(perlin_noise_metal SHARED
+        plugins/ops/metal/perlin_noise_metal.mm)
+    set_source_files_properties(
+        plugins/ops/metal/perlin_noise_metal.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_target_properties(perlin_noise_metal PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
+        MACOSX_RPATH ON
+    )
+    target_link_libraries(perlin_noise_metal PRIVATE
+        Photospider::operation_opencv
+        ${METAL_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK}
+    )
+    target_include_directories(perlin_noise_metal PRIVATE
+        "${PROJECT_SOURCE_DIR}/plugins/ops"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+    )
 
-        # 1. The Implementation Library (the actual op logic)
-        add_library(perlin_noise_metal SHARED
-            plugins/ops/metal/perlin_noise_metal.mm)
-        set_target_properties(perlin_noise_metal PROPERTIES
-            LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
-            MACOSX_RPATH ON
-        )
-        target_link_libraries(perlin_noise_metal PRIVATE
-            Photospider::operation_opencv
-            ${METAL_FRAMEWORK}
-            ${FOUNDATION_FRAMEWORK}
-            ${COREIMAGE_FRAMEWORK}
-            ${COREVIDEO_FRAMEWORK}
-        )
-        target_include_directories(perlin_noise_metal PRIVATE
-            "${PROJECT_SOURCE_DIR}/plugins/ops"
-        )
+    # 2. The Loader Plugin (registers the op with the Kernel)
+    add_library(metal_ops_loader SHARED
+        plugins/ops/metal/metal_ops_loader.cpp)
+    target_compile_definitions(metal_ops_loader PRIVATE
+        PHOTOSPIDER_PLUGIN_BUILD)
+    set_target_properties(metal_ops_loader PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
+        # Point RPATH to 'ops' subdir so loader can find perlin_noise_metal
+        BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}/lib"
+        INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
+        MACOSX_RPATH ON
+    )
 
-        # 2. The Loader Plugin (registers the op with the Kernel)
-        add_library(metal_ops_loader SHARED
-            plugins/ops/metal/metal_ops_loader.cpp)
-        target_compile_definitions(metal_ops_loader PRIVATE
-            PHOTOSPIDER_PLUGIN_BUILD)
-        set_target_properties(metal_ops_loader PROPERTIES
-            LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
-            # Point RPATH to 'ops' subdir so loader can find perlin_noise_metal
-            BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}/lib"
-            INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
-            MACOSX_RPATH ON
-        )
+    target_include_directories(metal_ops_loader PRIVATE
+        "${PROJECT_SOURCE_DIR}/plugins/ops"
+    )
 
-        target_include_directories(metal_ops_loader PRIVATE
-            "${PROJECT_SOURCE_DIR}/plugins/ops"
-        )
-
-        # The loader directly calls implementation symbols and therefore owns
-        # the implementation DSO dependency.
-        target_link_libraries(metal_ops_loader PRIVATE
-            perlin_noise_metal
-            Photospider::operation_sdk
-        )
-    endif()
+    # The loader directly calls implementation symbols and therefore owns
+    # the implementation DSO dependency.
+    target_link_libraries(metal_ops_loader PRIVATE
+        perlin_noise_metal
+        Photospider::operation_sdk
+    )
 
 endif()
 
@@ -1313,6 +1513,121 @@ set(PHOTOSPIDER_BUILD_SMOKE_LABEL "build-smoke")
 if(BUILD_TESTING)
     enable_testing()
     find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+    include(GoogleTest)
+    find_package(GTest REQUIRED)
+    set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
+    file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
+
+    # This production-chain integration target is dependency-neutral and must
+    # remain buildable when both optional image/document capabilities are off.
+    add_executable(test_cpu_dense_tensor_image_operation
+        tests/integration/test_cpu_dense_tensor_image_operation.cpp)
+    set_target_properties(test_cpu_dense_tensor_image_operation PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+    target_include_directories(test_cpu_dense_tensor_image_operation PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        "${PROJECT_SOURCE_DIR}/tests")
+    target_link_libraries(test_cpu_dense_tensor_image_operation PRIVATE
+        photospider
+        GTest::gtest
+        GTest::gtest_main)
+    gtest_discover_tests(test_cpu_dense_tensor_image_operation
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+
+    # Long-lived V-13 dependency-neutral packed FP4/quantization vertical.
+    add_executable(test_packed_fp4_dense_tensor
+        tests/integration/test_packed_fp4_dense_tensor.cpp)
+    set_target_properties(test_packed_fp4_dense_tensor PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+    target_include_directories(test_packed_fp4_dense_tensor PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        "${PROJECT_SOURCE_DIR}/tests")
+    target_link_libraries(test_packed_fp4_dense_tensor PRIVATE
+        photospider
+        GTest::gtest
+        GTest::gtest_main)
+    gtest_discover_tests(test_packed_fp4_dense_tensor
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS value-runtime
+            TIMEOUT 30)
+
+    # Long-lived V-14 dependency-neutral synthetic VariableSampleField proof.
+    add_executable(test_variable_sample_field_extensions
+        tests/integration/test_variable_sample_field_extensions.cpp)
+    set_target_properties(test_variable_sample_field_extensions PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+    target_include_directories(test_variable_sample_field_extensions PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        "${PROJECT_SOURCE_DIR}/tests")
+    target_link_libraries(test_variable_sample_field_extensions PRIVATE
+        Photospider::operation_runtime
+        GTest::gtest
+        GTest::gtest_main)
+    gtest_discover_tests(test_variable_sample_field_extensions
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS value-runtime
+            TIMEOUT 30)
+
+    if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+        add_executable(test_openexr_deep_scanline_provider
+            tests/integration/test_openexr_deep_scanline_provider.cpp)
+        set_target_properties(test_openexr_deep_scanline_provider PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_definitions(test_openexr_deep_scanline_provider PRIVATE
+            "PS_OPENEXR_DEEP_PROVIDER_PATH=\"$<TARGET_FILE:photospider_openexr_deep_provider>\"")
+        target_include_directories(test_openexr_deep_scanline_provider PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests")
+        target_link_libraries(test_openexr_deep_scanline_provider PRIVATE
+            photospider_openexr_deep_adapter
+            photospider_execution_internal
+            Photospider::operation_runtime
+            OpenEXR::OpenEXR
+            GTest::gtest
+            GTest::gtest_main
+            ${CMAKE_DL_LIBS})
+        add_dependencies(test_openexr_deep_scanline_provider
+            photospider_openexr_deep_provider)
+        gtest_discover_tests(test_openexr_deep_scanline_provider
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS openexr-provider
+                TIMEOUT 60)
+    endif()
+
+    add_executable(test_value_identity_across_dsos
+        tests/integration/test_value_identity_dso.cpp)
+    set_target_properties(test_value_identity_across_dsos PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
+    target_compile_definitions(test_value_identity_across_dsos PRIVATE
+        PS_VALUE_IDENTITY_RUNTIME_PATH="$<TARGET_FILE:photospider_operation_runtime>"
+        PS_VALUE_IDENTITY_DSO_A_PATH="$<TARGET_FILE:value_identity_dso_a>"
+        PS_VALUE_IDENTITY_DSO_B_PATH="$<TARGET_FILE:value_identity_dso_b>")
+    target_link_libraries(test_value_identity_across_dsos PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+        ${CMAKE_DL_LIBS})
+    add_dependencies(test_value_identity_across_dsos
+        photospider_operation_runtime
+        value_identity_dso_a
+        value_identity_dso_b)
+    gtest_discover_tests(test_value_identity_across_dsos
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS value-runtime
+            TIMEOUT 30)
+
     add_test(NAME DependencyDisabledInstallSmoke
         COMMAND ${Python3_EXECUTABLE} -B
             "${PROJECT_SOURCE_DIR}/tests/integration/dependency_disabled_install_smoke.py"
@@ -1326,14 +1641,49 @@ if(BUILD_TESTING)
         LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
         RUN_SERIAL TRUE
         TIMEOUT 900)
+
+    # Keep optional-component build smokes in the complete inventory. Focused
+    # nested configurations intentionally expose their pre-existing bounded
+    # inventories and are validated independently by the parent smoke.
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+        add_test(NAME OpenExrDeepProviderOptionOffSmoke
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/openexr_deep_provider_option_off_smoke.py"
+                --repo "${PROJECT_SOURCE_DIR}"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/openexr_deep_provider_option_off_smoke"
+                --producer-build "${CMAKE_BINARY_DIR}"
+                --cmake-executable "${CMAKE_COMMAND}"
+                --ctest-executable "${CMAKE_CTEST_COMMAND}"
+                --symbol-tool "${CMAKE_NM}"
+                --config $<CONFIG>
+                --mode off)
+        set_tests_properties(OpenExrDeepProviderOptionOffSmoke PROPERTIES
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
+
+        if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+            add_test(NAME OpenExrDeepProviderInstallConsumerSmoke
+                COMMAND ${Python3_EXECUTABLE} -B
+                    "${PROJECT_SOURCE_DIR}/tests/integration/openexr_deep_provider_option_off_smoke.py"
+                    --repo "${PROJECT_SOURCE_DIR}"
+                    --work
+                        "${CMAKE_BINARY_DIR}/tests/openexr_deep_provider_install_consumer_smoke"
+                    --producer-build "${CMAKE_BINARY_DIR}"
+                    --cmake-executable "${CMAKE_COMMAND}"
+                    --config $<CONFIG>
+                    --mode enabled)
+            set_tests_properties(OpenExrDeepProviderInstallConsumerSmoke
+                PROPERTIES
+                    LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+                    RUN_SERIAL TRUE
+                    TIMEOUT 900)
+        endif()
+    endif()
 endif()
 
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
-    set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
-    file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
-
-    include(GoogleTest)
-    find_package(GTest REQUIRED)
     macro(add_ps_test TEST_NAME SOURCE_FILE)
         set(PHOTOSPIDER_TEST_PRODUCT_TARGET photospider)
         if(NOT "${ARGV2}" STREQUAL "")
@@ -1363,6 +1713,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     add_ps_test(test_kernel_contracts
         tests/integration/test_kernel_contracts.cpp
         photospider_internal_test_product)
+    target_sources(test_kernel_contracts PRIVATE
+        tests/integration/test_kernel_lineage_close_contract.cpp)
     target_compile_definitions(test_kernel_contracts PRIVATE
         PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
@@ -1372,6 +1724,15 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         target_compile_definitions(test_kernel_contracts PRIVATE
             PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     endif()
+
+    add_ps_test(test_compute_io_executor
+        tests/unit/test_compute_io_executor.cpp
+        photospider_execution_internal)
+    gtest_discover_tests(test_compute_io_executor
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS execution
+            TIMEOUT 30)
 
     add_ps_test(test_disk_cache_diagnostic_concurrency
         tests/integration/test_disk_cache_diagnostic_concurrency.cpp)
@@ -1559,6 +1920,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_propagation tests/integration/test_propagation.cpp)
     add_ps_test(test_propagation_contracts
         tests/unit/test_propagation_contracts.cpp)
+    add_ps_test(test_region_contracts
+        tests/unit/test_region_contracts.cpp)
     add_ps_test(test_graph_topology_boundaries
         tests/unit/test_graph_topology_boundaries.cpp)
     add_ps_test(test_graph_document_adapter
@@ -1647,6 +2010,12 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_physical_execution_routes
         tests/unit/test_physical_execution_routes.cpp
         photospider_execution_internal)
+    add_ps_test(test_device_executor_registry
+        tests/unit/test_device_executor_registry.cpp
+        photospider_execution_internal)
+    add_ps_test(test_device_residency
+        tests/unit/test_device_residency.cpp
+        photospider_execution_internal)
     add_ps_test(test_policy_registry tests/unit/test_policy_registry.cpp
         photospider_policy_internal)
     target_compile_definitions(test_policy_registry PRIVATE
@@ -1663,7 +2032,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>")
     target_link_libraries(test_policy_execution PRIVATE ${CMAKE_DL_LIBS})
     add_dependencies(test_policy_execution test_policy_plugin)
-    add_ps_test(test_compute_run tests/unit/test_compute_run.cpp)
+    add_ps_test(test_compute_run tests/unit/test_compute_run.cpp
+        photospider_internal_test_product)
+    target_compile_definitions(test_compute_run PRIVATE
+        PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
     add_ps_test(test_run_lifecycle_registry
         tests/unit/test_run_lifecycle_registry.cpp)
     add_ps_test(test_execution_lifecycle_telemetry
@@ -1683,14 +2055,22 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PHOTOSPIDER_THRESHOLD_BAD_ALLOC_TESTING)
     target_link_libraries(test_bad_alloc_boundaries PRIVATE
         photospider_cli_common)
-    if(APPLE)
+    if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
         target_sources(test_bad_alloc_boundaries PRIVATE
             plugins/ops/metal/perlin_noise_metal.mm)
+        target_compile_definitions(test_bad_alloc_boundaries PRIVATE
+            PHOTOSPIDER_INTERNAL_METAL_PERLIN_TESTING)
         target_link_libraries(test_bad_alloc_boundaries PRIVATE
             ${METAL_FRAMEWORK}
-            ${FOUNDATION_FRAMEWORK}
-            ${COREIMAGE_FRAMEWORK}
-            ${COREVIDEO_FRAMEWORK})
+            ${FOUNDATION_FRAMEWORK})
+    endif()
+    if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+        add_ps_test(test_metal_device_executor
+            tests/integration/test_metal_device_executor.cpp)
+        target_include_directories(test_metal_device_executor PRIVATE
+            "${PROJECT_SOURCE_DIR}/plugins/ops")
+        target_link_libraries(test_metal_device_executor PRIVATE
+            perlin_noise_metal)
     endif()
     add_ps_test(test_cli_dirty_snapshot_formatter
         tests/integration/test_cli_dirty_snapshot_formatter.cpp)
@@ -1699,7 +2079,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_link_libraries(test_cli_dirty_snapshot_formatter PRIVATE
         photospider_cli_common)
     add_ps_test(test_compute_service_split
-        tests/integration/test_compute_service_split.cpp)
+        tests/integration/test_compute_service_split.cpp
+        photospider_internal_test_product)
+    target_compile_definitions(test_compute_service_split PRIVATE
+        PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING
+        PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
     add_ps_test(test_stride_aware_compute_paths
         tests/integration/test_stride_aware_compute_paths.cpp)
     add_ps_test(test_node_editor_layout
@@ -1829,6 +2213,22 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
             RUN_SERIAL TRUE
             TIMEOUT 900)
+        add_test(NAME PhotospiderdInstallLayoutSmoke
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke.py"
+                --repo "${PROJECT_SOURCE_DIR}"
+                --build-root "${CMAKE_BINARY_DIR}"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_smoke"
+                --cmake-executable "${CMAKE_COMMAND}"
+                --generator "${CMAKE_GENERATOR}"
+                --config $<CONFIG>
+                --osx-architectures "${CMAKE_OSX_ARCHITECTURES}"
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        set_tests_properties(PhotospiderdInstallLayoutSmoke PROPERTIES
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
     endif()
     add_test(NAME IpcDisabledInstallSmoke
         COMMAND ${Python3_EXECUTABLE} -B
@@ -1934,6 +2334,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
     # gtest discovery on it.
     gtest_discover_tests(test_propagation_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_region_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_graph_topology_boundaries WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_graph_document_adapter
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
@@ -1973,6 +2374,16 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_resource_ledger
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_device_executor_registry
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS execution
+            TIMEOUT 30)
+    gtest_discover_tests(test_device_residency
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS execution
+            TIMEOUT 30)
     gtest_discover_tests(test_policy_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -1993,6 +2404,13 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PROPERTIES TIMEOUT 60)
     gtest_discover_tests(test_bad_alloc_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+        gtest_discover_tests(test_metal_device_executor
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS metal
+                TIMEOUT 60)
+    endif()
     gtest_discover_tests(test_cli_dirty_snapshot_formatter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
@@ -2070,13 +2488,20 @@ if(TARGET photospider_internal_test_product)
                 ${PHOTOSPIDER_ROOT_TARGET})
         endif()
     endforeach()
-    set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
-        test_kernel_contracts)
-    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
-        list(APPEND PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
-            test_host_adapter
-            test_policy_execution)
-    endif()
+    set(PHOTOSPIDER_ALLOWED_INTERNAL_TEST_PRODUCT_CONSUMERS
+        test_compute_run
+        test_compute_service_split
+        test_host_adapter
+        test_kernel_contracts
+        test_policy_execution)
+    set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS "")
+    foreach(PHOTOSPIDER_ALLOWED_INTERNAL_TEST_PRODUCT_CONSUMER
+            IN LISTS PHOTOSPIDER_ALLOWED_INTERNAL_TEST_PRODUCT_CONSUMERS)
+        if(TARGET ${PHOTOSPIDER_ALLOWED_INTERNAL_TEST_PRODUCT_CONSUMER})
+            list(APPEND PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
+                ${PHOTOSPIDER_ALLOWED_INTERNAL_TEST_PRODUCT_CONSUMER})
+        endif()
+    endforeach()
     list(SORT PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS)
     list(SORT PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS)
     if(NOT PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS STREQUAL
@@ -2091,6 +2516,7 @@ message(STATUS "-----------------------------------------------------------")
 message(STATUS "Build Configuration Summary:")
 message(STATUS "  Product Lib (Static): libphotospider (Embedded frontend)")
 message(STATUS "  OpenCV Capability : ${PHOTOSPIDER_ENABLE_OPENCV}")
+message(STATUS "  OpenEXR Deep      : ${PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER}")
 message(STATUS "  YAML Capability   : ${PHOTOSPIDER_ENABLE_YAML}")
 message(STATUS "  Graph CLI         : ${PHOTOSPIDER_BUILD_GRAPH_CLI}")
 message(STATUS "  OpenCV Op Plugins : ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS}")

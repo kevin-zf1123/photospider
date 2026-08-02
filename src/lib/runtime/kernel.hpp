@@ -333,10 +333,12 @@ class Kernel {
    *       to Closing and requests GraphClose, stops external compute-request
    *       admission, settles and unregisters every indexed Run/candidate,
    *       removes the empty row, drains and joins compute-request while
-   *       graph-state remains available for commit denial/discard, then drains
-   *       graph-state and removes runtime/routes. Final map removal and success
-   *       publication are atomic to later name lookups. After lifecycle
-   *       linearization the Graph is never reopened.
+   *       graph-state remains available for commit denial/discard, retires the
+   *       exact Graph's residency lineages only after every prepared
+   *       candidate ticket settles, then drains graph-state and removes
+   *       runtime/routes. Final map removal and success publication are atomic
+   *       to later name lookups. After lifecycle linearization the Graph is
+   *       never reopened.
    */
   bool close_graph(const std::string& name);
 
@@ -863,18 +865,6 @@ class Kernel {
    */
   PluginManager& plugins() { return PluginManager::process_instance(); }
   std::optional<double> get_last_io_time(const std::string& name);
-
-  /**
-   * @brief Copies the platform Metal device handle for one published runtime.
-   * @param name Graph/session name to resolve.
-   * @return Runtime device handle, or null when the name is absent.
-   * @throws std::system_error if graph-registry locking fails.
-   * @note Kernel retains a shared runtime owner while copying the handle, so a
-   * concurrent close cannot destroy the runtime during lookup. The returned
-   * platform handle follows the existing platform ownership contract and does
-   * not grant Graph admission.
-   */
-  id get_metal_device(const std::string& name);
 
   /**
    * @brief Copies canonical policy types visible to this process domain.
@@ -1450,7 +1440,8 @@ class Kernel {
    * and GraphInstanceId before selecting again. Pre-linearization failure is
    * published to exact-generation joiners before rethrow and permits a later
    * fresh-generation retry after all old joiners observe it. Registry row
-   * removal precedes compute-request lane drain, then graph-state drain and
+   * removal precedes compute-request lane drain; exact-Graph residency lineage
+   * retirement follows that drain and precedes graph-state drain plus
    * route/model retirement. Final graph-map removal and successful close
    * publication are one registry-locked transaction, so no caller observes an
    * absent name before the generation is complete.

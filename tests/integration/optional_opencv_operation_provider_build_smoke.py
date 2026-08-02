@@ -13,6 +13,18 @@ import subprocess
 from cmake_build_smoke_support import remove_work_tree
 
 
+#: @brief Exact focused targets built by the provider-disabled nested profile.
+#: @note `test_kernel_contracts` is the profile's only direct consumer of the
+#:   internal test product when the dependency-gated full suite is unavailable.
+PROVIDER_DISABLED_BUILD_TARGETS = (
+    "test_optional_opencv_operation_provider",
+    "test_cpu_dense_tensor_image_operation",
+    "test_value_identity_across_dsos",
+    "test_disk_cache_diagnostic_concurrency",
+    "test_kernel_lifecycle_concurrency",
+    "test_kernel_contracts",
+)
+
 #: @brief Build-relative directory containing CMake-owned validation manifests.
 #: @note The directory is generated during configure and is never installed.
 CI_INVENTORY_RELATIVE_DIRECTORY = pathlib.Path("generated/ci_inventory")
@@ -372,7 +384,7 @@ def validate_provider_disabled_inventory(
     inventory: dict[str, dict[str, object]],
     expected_sentinels: set[str],
 ) -> None:
-    """@brief Require the runnable provider-disabled CTest surface.
+    """@brief Require the exact provider-disabled CTest surface.
 
     @param inventory Unique registered tests and properties from the nested
       build.
@@ -386,6 +398,9 @@ def validate_provider_disabled_inventory(
     @note `test_kernel_contracts` remains a buildable focused target for the
       separate injected-codec smoke but is deliberately not broadly discovered
       in this provider-disabled CTest inventory.
+    @note The current V-13 closure deliberately leaves the compute-I/O and
+      packed-FP4 behavior targets unbuilt. Their placeholders are observations
+      derived from the configured target manifest, not hard-coded inputs.
     """
 
     disk_cache_tests = {
@@ -412,6 +427,203 @@ def validate_provider_disabled_inventory(
             "ShutdownAndGraphPublicationShareOneProductionAdmissionBoundary"
         ),
     }
+    dense_image_tests = {
+        (
+            "CpuDenseTensorImageOperation."
+            "ReadyFenceQueuesWaitsAndCancellationIsObserverLocal"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ReadyFenceRetainsFailureAndDroppedCompleterPublishesCancellation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "PendingWaitRetainsSoleExecutorUntilCallbackCompletion"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TerminalWaitRetainsSoleExecutorUntilCallbackCompletion"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TransferRetainsSoleExecutorUntilDestinationCompletion"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ConcurrentWaitRegistrationAndPublicationDeliverExactlyOnce"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ConcurrentCancellationAndCallbackEntryHaveOneWinner"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ConcurrentTransferDestructionAndCallbackSettleDestination"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "PendingProducerMakesPayloadReadableOnlyAfterReady"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "FailedPendingValueRetainsMetadataAndRejectsPayloadAccess"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ExplicitTransferRunsOnlyAsQueuedFakeDeviceTask"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "CpuToMetalTransferUsesInjectedProviderAndRejectsHostRead"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ExternalTransferFailureIsTypedAndLaterTransferRecovers"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ChainedTransferReadinessQueuesDistinctLaterTaskWithoutBlocking"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DestroyedTransferCancelsDestinationAndQueuedCallbackBecomesNoOp"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TransferPropagatesFailedAndCancelledSourcesWithoutPayloadAccess"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ValueRejectsMalformedFacetStrideAndEnvelope"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "BuilderScopesWriteAuthorityAndReadLeaseLifetime"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "AllocationIdentityValidityDoesNotQueryAllocationLiveness"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ImmutableSignedOffsetViewsShareAllocationAndMintRevisions"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ValueCopiesShareBytesAndViewsRetainLifetime"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DenseTensorViewMovesPreserveSourceAndReplaceDestination"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ImageViewMovesPreserveSourceAndReplaceDestination"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ValueDeepCopiesLvaluePayloadShapeAndStrides"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ValueDeepCopiesRvaluePayloadBeforeSourceOwnerRetires"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "GenericFloatingMatrixPreservesChannelsLatentsStridesAndBoundaries"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "FormalHpCachePreservesAliasesAndResealsDirtyAndReplacementBytes"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "PartialHpValidityRemovesDiskArtifactsAndCannotBeReused"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorDirtyStagingPublishesFreshIdentityAndExactRegionAtCommit"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DiskReloadMintsFreshRuntimeIdentitiesWithoutChangingCachePath"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DiskSaveSerializesSealedValueInsteadOfMutableCompatibilitySnapshot"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DenseInvertInferencePreservesExactLogicalDescriptor"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DenseRunnerConsumesSealedValueAndPublishesExactResultRevision"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ProductRegistryAndExecutorInvertPaddedMultiChannelInput"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ProductExecutorInvertsOnlySelectedPaddedImageRect"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ProductExecutorUsesAllRankFourTensorSliceAxes"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ProductExecutorHandlesEmptyWholeAndRejectsRankMismatch"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorDirtyPlanExecutesRegisteredProductAndStagesExactValidity"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorTargetPlanRejectsPreferredRouteAddedBeforeTaskPopulation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorAllExternallySatisfiedPlanIgnoresDeviceInventoryMutation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorDirtySelectedCompleteCacheRejectsDeviceInventoryMutation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorPartialActivePlanRejectsDeviceInventoryMutation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorDirtyPlanRecomputesMissingAndPartialIntermediateParents"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorUpstreamPlanRejectsPreferredRouteAddedBeforeTaskPopulation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorDirtyUpdateMergesSelectedBytesIntoExistingFullOutput"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "FreshTensorPartialOutputBecomesReusableOnlyAfterWholeCommit"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "RunnerRejectsExecuteDescriptorMismatchAsComputeError"
+        ),
+    }
+    value_runtime_tests = {
+        "ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide"
+    }
     malformed_sentinels = sorted(
         name
         for name in expected_sentinels
@@ -428,7 +640,13 @@ def validate_provider_disabled_inventory(
             "OptionalOpenCvOperationProvider."
             "ReplacementExecutesAndRestores"
         ),
-    } | disk_cache_tests | lifecycle_tests | expected_sentinels
+    } | (
+        disk_cache_tests
+        | lifecycle_tests
+        | dense_image_tests
+        | value_runtime_tests
+        | expected_sentinels
+    )
     names = set(inventory)
     if names != expected:
         raise RuntimeError(
@@ -458,6 +676,10 @@ def validate_provider_disabled_inventory(
         **{
             name: {"LABELS": ["kernel-concurrency"], "TIMEOUT": 60}
             for name in lifecycle_tests
+        },
+        **{
+            name: {"LABELS": ["value-runtime"], "TIMEOUT": 30}
+            for name in value_runtime_tests
         },
     }
     property_mismatches = {
@@ -539,7 +761,8 @@ def configured_test_executable(
 def main() -> int:
     """@brief Configure, build, and run the provider-disabled regression.
 
-    @return Zero after the focused provider and concurrency cases succeed.
+    @return Zero after the focused provider, Value-runtime, and concurrency
+      cases succeed.
     @throws OSError If path handling or command startup fails.
     @throws SystemExit If command-line parsing rejects the invocation.
     @throws UnicodeError If the nested CMake cache is not valid UTF-8 text.
@@ -590,9 +813,7 @@ def main() -> int:
         "--build",
         str(work),
         "--target",
-        "test_optional_opencv_operation_provider",
-        "test_disk_cache_diagnostic_concurrency",
-        "test_kernel_lifecycle_concurrency",
+        *PROVIDER_DISABLED_BUILD_TARGETS,
         "-j",
         "4",
     ]
@@ -623,7 +844,9 @@ def main() -> int:
             "-R",
             (
                 "^(DiskCacheDiagnosticConcurrency\\..*|"
+                "CpuDenseTensorImageOperation\\..*|"
                 "KernelLifecycleConcurrency\\..*|"
+                "ValueIdentityAcrossDsos\\..*|"
                 "OptionalOpenCvOperationProvider\\."
                 "ReplacementExecutesAndRestores)$"
             ),

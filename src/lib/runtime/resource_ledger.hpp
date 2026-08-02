@@ -8,6 +8,11 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "photospider/core/device.hpp"
 
 namespace ps {
 
@@ -88,6 +93,159 @@ std::optional<ResourceVector> checked_multiply_resources(
 bool resources_fit(const ResourceVector& requested,
                    const ResourceVector& available) noexcept;
 
+/**
+ * @brief Exact bytes accounted for one concrete non-CPU device.
+ *
+ * Persistent allocation bytes and invocation/transfer scratch are independent
+ * dimensions. Neither field can borrow from the other or from `ResourceVector`.
+ *
+ * @throws Nothing for value construction, copying, and comparison.
+ * @note This value carries no reservation or release authority.
+ */
+struct DeviceResourceVector final {
+  /** @brief Native bytes retained by persistent device-resident allocations. */
+  std::uint64_t device_memory_bytes = 0U;
+
+  /** @brief Native bytes used by invocation or transfer workspace. */
+  std::uint64_t device_scratch_bytes = 0U;
+};
+
+/**
+ * @brief Compares every device resource dimension for equality.
+ * @param lhs First device vector.
+ * @param rhs Second device vector.
+ * @return True only when both byte dimensions are equal.
+ * @throws Nothing.
+ */
+bool operator==(const DeviceResourceVector& lhs,
+                const DeviceResourceVector& rhs) noexcept;
+
+/**
+ * @brief Compares device resource vectors for any difference.
+ * @param lhs First device vector.
+ * @param rhs Second device vector.
+ * @return True when either byte dimension differs.
+ * @throws Nothing.
+ */
+bool operator!=(const DeviceResourceVector& lhs,
+                const DeviceResourceVector& rhs) noexcept;
+
+/**
+ * @brief Adds two device resource vectors without wraparound.
+ * @param lhs First vector.
+ * @param rhs Second vector.
+ * @return Exact sum, or `std::nullopt` if either dimension overflows.
+ * @throws Nothing.
+ * @note No dimension is clamped and no partial sum is returned.
+ */
+std::optional<DeviceResourceVector> checked_add_device_resources(
+    const DeviceResourceVector& lhs, const DeviceResourceVector& rhs) noexcept;
+
+/**
+ * @brief Tests whether one device vector fits within another.
+ * @param requested Vector requiring capacity.
+ * @param available Vector supplying capacity.
+ * @return True only when both requested dimensions fit.
+ * @throws Nothing.
+ */
+bool device_resources_fit(const DeviceResourceVector& requested,
+                          const DeviceResourceVector& available) noexcept;
+
+/**
+ * @brief Immutable composition limit for one complete concrete device.
+ *
+ * @throws Nothing for aggregate value operations.
+ * @note CPU identities are invalid configuration because the existing Host
+ * vector remains the sole CPU capacity authority.
+ */
+struct DeviceResourceLimit final {
+  /** @brief Complete process-local non-CPU device identity. */
+  DeviceId device{DeviceBackend::Metal};
+
+  /** @brief Maximum persistent-memory and scratch commitments. */
+  DeviceResourceVector resources;
+};
+
+/**
+ * @brief Stable category for allocator-facing device accounting failures.
+ *
+ * @throws Nothing for value operations.
+ */
+enum class DeviceResourceErrorCode : std::uint32_t {
+  /** @brief The configured device account could not admit the complete plan. */
+  AdmissionRejected = 0U,
+
+  /** @brief Native reported actual bytes exceeded the admitted plan. */
+  ActualExceedsReservation = 1U,
+
+  /** @brief A native size/alignment or allocated-size fact was invalid. */
+  InvalidNativeSize = 2U,
+};
+
+/**
+ * @brief Typed device resource planning or reconciliation failure.
+ *
+ * @throws std::bad_alloc when diagnostic ownership cannot allocate.
+ * @note This private source-tree exception carries observation only and mints
+ * no resource authority.
+ */
+class DeviceResourceError final : public std::runtime_error {
+ public:
+  /**
+   * @brief Creates one owned typed device accounting failure.
+   * @param code Stable failure category.
+   * @param device Exact device whose plan failed.
+   * @param planned Complete admitted or requested plan.
+   * @param actual Native actual bytes, or zero before native allocation.
+   * @param message Stable human-readable diagnostic.
+   * @throws std::bad_alloc when the diagnostic string cannot allocate.
+   */
+  DeviceResourceError(DeviceResourceErrorCode code, DeviceId device,
+                      DeviceResourceVector planned, DeviceResourceVector actual,
+                      std::string message);
+
+  /**
+   * @brief Returns the stable failure category.
+   * @return Error classification supplied at construction.
+   * @throws Nothing.
+   */
+  DeviceResourceErrorCode code() const noexcept { return code_; }
+
+  /**
+   * @brief Returns the exact affected device.
+   * @return Complete process-local device identity.
+   * @throws Nothing.
+   */
+  DeviceId device() const noexcept { return device_; }
+
+  /**
+   * @brief Returns the admitted or requested plan.
+   * @return Complete planned device resource vector.
+   * @throws Nothing.
+   */
+  DeviceResourceVector planned() const noexcept { return planned_; }
+
+  /**
+   * @brief Returns native actual bytes known at failure.
+   * @return Complete actual vector, or zero before allocation.
+   * @throws Nothing.
+   */
+  DeviceResourceVector actual() const noexcept { return actual_; }
+
+ private:
+  /** @brief Stable failure category. */
+  DeviceResourceErrorCode code_;
+
+  /** @brief Exact concrete device involved in the failure. */
+  DeviceId device_;
+
+  /** @brief Requested or admitted complete plan. */
+  DeviceResourceVector planned_;
+
+  /** @brief Native actual bytes observed before failure. */
+  DeviceResourceVector actual_;
+};
+
 /** @brief Opaque shared root state retained by outstanding reservations. */
 struct ResourceLedgerRootState;
 
@@ -95,12 +253,14 @@ struct ResourceLedgerRootState;
 struct ResourceReservationState;
 
 /**
- * @brief Host-authoritative resource reservation and child-grant ledger.
+ * @brief Host/device-authoritative reservation, grant, and lease ledger.
  *
  * One ledger owns immutable composition-root limits. Root reservations commit
  * complete checked vectors atomically. A live reservation may suballocate only
  * within its committed vector, and root capacity remains committed until both
- * the reservation owner is gone and every child grant has released.
+ * the reservation owner is gone and every child grant has released. Separate
+ * per-device plans reconcile native actual bytes into independently lived
+ * persistent-memory and completion-scratch leases.
  *
  * @throws std::bad_alloc when private authority state cannot allocate.
  * @throws std::system_error when internal mutex operations fail.
@@ -236,6 +396,241 @@ class ResourceLedger final {
 
   /** @brief Move-only exact child authority minted by one reservation. */
   class Grant;
+
+  /** @brief Move-only committed authority for one device resource component. */
+  class DeviceLease;
+
+  /** @brief Completed pair defined after the concrete lease owner. */
+  struct DeviceLeasePair;
+
+  /**
+   * @brief Move-only planned device allocation reservation.
+   *
+   * The reservation owns both planned dimensions until `commit_actual()`
+   * transfers exact actual components into independent leases. Destruction
+   * before commit returns the complete plan once.
+   */
+  class DeviceReservation final {
+   public:
+    /**
+     * @brief Transfers one planned reservation.
+     * @param other Reservation made inactive by the transfer.
+     * @throws Nothing.
+     */
+    DeviceReservation(DeviceReservation&& other) noexcept;
+
+    /**
+     * @brief Replaces this plan after returning prior ownership.
+     * @param other Reservation made inactive by the transfer.
+     * @return Reference to this reservation.
+     * @throws Nothing; synchronization failure during release terminates.
+     */
+    DeviceReservation& operator=(DeviceReservation&& other) noexcept;
+
+    /**
+     * @brief Returns an uncommitted complete plan once.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     */
+    ~DeviceReservation() noexcept;
+
+    /**
+     * @brief Prevents duplicating planned authority.
+     * @param other Unused source because copying is forbidden.
+     * @throws Nothing because this operation is deleted.
+     */
+    DeviceReservation(const DeviceReservation& other) = delete;
+
+    /**
+     * @brief Prevents assigning duplicate planned authority.
+     * @param other Unused source because copying is forbidden.
+     * @return No value because this operation is deleted.
+     * @throws Nothing because this operation is deleted.
+     */
+    DeviceReservation& operator=(const DeviceReservation& other) = delete;
+
+    /**
+     * @brief Reports whether this owner still holds an uncommitted plan.
+     * @return True before movement, commit, or destruction.
+     * @throws Nothing.
+     */
+    bool active() const noexcept;
+
+    /**
+     * @brief Returns the exact device of an active plan.
+     * @return Configured device identity, or CPU sentinel after movement.
+     * @throws Nothing.
+     */
+    DeviceId device() const noexcept;
+
+    /**
+     * @brief Copies the complete planned vector.
+     * @return Planned bytes, or zero after movement or commit.
+     * @throws Nothing.
+     */
+    DeviceResourceVector planned_resources() const noexcept;
+
+    /**
+     * @brief Reconciles native actual bytes and transfers exact authority.
+     * @param actual Complete native-reported memory and scratch totals.
+     * @return Independent persistent-memory and scratch leases.
+     * @throws DeviceResourceError when actual bytes exceed the plan.
+     * @throws std::logic_error when this reservation is inactive.
+     * @throws std::system_error when ledger synchronization fails.
+     * @note Fitting commit returns unused planned bytes under the root lock.
+     * No partial lease is published on failure.
+     */
+    DeviceLeasePair commit_actual(DeviceResourceVector actual);
+
+   private:
+    friend class ResourceLedger;
+
+    /**
+     * @brief Wraps one root-committed complete device plan.
+     * @param root Matching shared ledger root.
+     * @param device Exact configured device.
+     * @param planned Complete vector already committed at the root.
+     * @throws Nothing.
+     */
+    DeviceReservation(std::shared_ptr<ResourceLedgerRootState> root,
+                      DeviceId device, DeviceResourceVector planned) noexcept;
+
+    /**
+     * @brief Returns this uncommitted plan for destruction or assignment.
+     * @return Nothing.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     */
+    void reset() noexcept;
+
+    /** @brief Root authority retained until commit or rollback. */
+    std::shared_ptr<ResourceLedgerRootState> root_;
+
+    /** @brief Exact configured device for this plan. */
+    DeviceId device_{DeviceBackend::CPU};
+
+    /** @brief Complete plan returned or transferred once. */
+    DeviceResourceVector planned_;
+  };
+
+  /**
+   * @brief Move-only exact committed device resource authority.
+   *
+   * One lease owns either persistent memory, scratch, or a checked vector of
+   * both. Actual-byte commit returns separate single-component leases. The
+   * lease performs no identity lookup; destruction subtracts its exact vector
+   * from its exact device account once.
+   */
+  class DeviceLease final {
+   public:
+    /**
+     * @brief Transfers one committed device authority.
+     * @param other Lease made inactive by the transfer.
+     * @throws Nothing.
+     */
+    DeviceLease(DeviceLease&& other) noexcept;
+
+    /**
+     * @brief Replaces this lease after returning prior ownership.
+     * @param other Lease made inactive by the transfer.
+     * @return Reference to this lease.
+     * @throws Nothing; synchronization failure during release terminates.
+     */
+    DeviceLease& operator=(DeviceLease&& other) noexcept;
+
+    /**
+     * @brief Returns the exact committed bytes once.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     */
+    ~DeviceLease() noexcept;
+
+    /**
+     * @brief Prevents duplicating device authority.
+     * @param other Unused source because copying is forbidden.
+     * @throws Nothing because this operation is deleted.
+     */
+    DeviceLease(const DeviceLease& other) = delete;
+
+    /**
+     * @brief Prevents assigning duplicate device authority.
+     * @param other Unused source because copying is forbidden.
+     * @return No value because this operation is deleted.
+     * @throws Nothing because this operation is deleted.
+     */
+    DeviceLease& operator=(const DeviceLease& other) = delete;
+
+    /**
+     * @brief Reports whether this lease owns a nonzero exact vector.
+     * @return True before movement or destruction.
+     * @throws Nothing.
+     */
+    bool active() const noexcept;
+
+    /**
+     * @brief Returns the exact device for this lease.
+     * @return Configured device identity, or CPU sentinel when inactive.
+     * @throws Nothing.
+     */
+    DeviceId device() const noexcept;
+
+    /**
+     * @brief Copies the exact committed vector.
+     * @return Owned bytes, or zero when inactive.
+     * @throws Nothing.
+     */
+    DeviceResourceVector resources() const noexcept;
+
+   private:
+    friend class DeviceReservation;
+
+    /**
+     * @brief Creates an active exact lease.
+     * @param root Matching shared root authority.
+     * @param device Exact configured device.
+     * @param resources Nonzero exact committed vector.
+     * @throws Nothing.
+     */
+    DeviceLease(std::shared_ptr<ResourceLedgerRootState> root, DeviceId device,
+                DeviceResourceVector resources) noexcept;
+
+    /**
+     * @brief Creates an inactive zero lease for a zero actual component.
+     * @throws Nothing.
+     */
+    DeviceLease() noexcept = default;
+
+    /**
+     * @brief Returns this exact vector and makes the lease inactive.
+     * @return Nothing.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     */
+    void reset() noexcept;
+
+    /** @brief Shared root retained through native/completion lifetime. */
+    std::shared_ptr<ResourceLedgerRootState> root_;
+
+    /** @brief Exact device account debited by this lease. */
+    DeviceId device_{DeviceBackend::CPU};
+
+    /** @brief Exact vector returned once. */
+    DeviceResourceVector resources_;
+  };
+
+  /**
+   * @brief Independently owned leases returned by actual-byte commit.
+   *
+   * A zero actual component produces an inactive lease. Nonzero memory and
+   * scratch leases release independently, so completion may return scratch
+   * while a persistent native owner retains memory.
+   *
+   * @throws Nothing after staged lease construction.
+   */
+  struct DeviceLeasePair final {
+    /** @brief Persistent device-memory authority for a native owner. */
+    DeviceLease persistent_memory;
+
+    /** @brief Invocation/transfer scratch authority for completion ownership.
+     */
+    DeviceLease scratch;
+  };
 
   /**
    * @brief Move-only exact root commitment minted only by the ledger.
@@ -445,6 +840,24 @@ class ResourceLedger final {
   };
 
   /**
+   * @brief Immutable diagnostic snapshot for one exact device.
+   * @throws Nothing for value copying.
+   */
+  struct DeviceSnapshot final {
+    /** @brief Complete configured concrete device identity. */
+    DeviceId device{DeviceBackend::Metal};
+
+    /** @brief Immutable configured memory and scratch limits. */
+    DeviceResourceVector limits;
+
+    /** @brief Current planned or committed byte ownership. */
+    DeviceResourceVector reserved;
+
+    /** @brief Checked component-wise limit minus reservation. */
+    DeviceResourceVector available;
+  };
+
+  /**
    * @brief Returns the structural bytes allocated for one reservation state.
    * @return Reservation state object plus shared-allocation control payload.
    * @throws Nothing.
@@ -455,11 +868,14 @@ class ResourceLedger final {
 
   /**
    * @brief Creates one independent ledger with immutable composition limits.
-   * @param limits Maximum committed vector.
+   * @param limits Maximum committed Host vector.
+   * @param device_limits Immutable non-CPU per-device byte limits.
+   * @throws std::invalid_argument for CPU or duplicate device limits.
    * @throws std::bad_alloc when root state allocation fails.
    * @note Zero limits are valid and reject only positive requests.
    */
-  explicit ResourceLedger(ResourceVector limits);
+  explicit ResourceLedger(ResourceVector limits,
+                          std::vector<DeviceResourceLimit> device_limits = {});
 
   /**
    * @brief Releases root state after every outstanding owner is gone.
@@ -470,14 +886,14 @@ class ResourceLedger final {
   ~ResourceLedger() noexcept;
 
   /**
-   * @brief Prevents duplicating one Host authority.
+   * @brief Prevents duplicating one ledger authority.
    * @param other Ledger whose authority cannot be copied.
    * @throws Nothing because this operation is unavailable.
    */
   ResourceLedger(const ResourceLedger& other) = delete;
 
   /**
-   * @brief Prevents assigning duplicated Host authority.
+   * @brief Prevents assigning duplicated ledger authority.
    * @param other Ledger whose authority cannot be copied.
    * @return No value because this operation is unavailable.
    * @throws Nothing because this operation is unavailable.
@@ -492,7 +908,7 @@ class ResourceLedger final {
   ResourceLedger(ResourceLedger&& other) = delete;
 
   /**
-   * @brief Prevents move-assigning Host authority.
+   * @brief Prevents move-assigning ledger authority.
    * @param other Ledger whose authority cannot be transferred.
    * @return No value because this operation is unavailable.
    * @throws Nothing because this operation is unavailable.
@@ -532,11 +948,40 @@ class ResourceLedger final {
                                                   const ResourceVector& second);
 
   /**
+   * @brief Atomically commits one complete device allocation plan.
+   * @param device Exact configured non-CPU device.
+   * @param planned Complete persistent-memory and scratch plan.
+   * @return Move-only planned reservation, or `std::nullopt` without mutation
+   * for an unknown device, overflow, or exhausted dimension.
+   * @throws std::system_error when root synchronization fails.
+   * @note Admission is immediate and linearizable; it provides no FIFO wait,
+   * starvation guarantee, implicit retry, or cross-device borrowing.
+   */
+  std::optional<DeviceReservation> try_reserve_device(
+      DeviceId device, const DeviceResourceVector& planned);
+
+  /**
    * @brief Copies limits and current root commitments for diagnostics/tests.
    * @return Non-authoritative immutable snapshot.
    * @throws std::system_error when internal mutex locking fails.
    */
   Snapshot snapshot() const;
+
+  /**
+   * @brief Copies one exact configured device account.
+   * @param device Device identity to inspect.
+   * @return Immutable snapshot, or `std::nullopt` when unconfigured.
+   * @throws std::system_error when root synchronization fails.
+   */
+  std::optional<DeviceSnapshot> device_snapshot(DeviceId device) const;
+
+  /**
+   * @brief Copies every configured device account in deterministic order.
+   * @return Snapshots ordered by `DeviceId::operator<`.
+   * @throws std::bad_alloc from result allocation.
+   * @throws std::system_error when root synchronization fails.
+   */
+  std::vector<DeviceSnapshot> device_snapshots() const;
 
  private:
   /** @brief Shared root retained until all deferred releases complete. */

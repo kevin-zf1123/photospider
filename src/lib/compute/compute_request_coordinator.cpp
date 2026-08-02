@@ -175,7 +175,7 @@ void ComputeRequestCoordinator::publish(
     PreparedCandidate prepared,
     std::shared_ptr<ComputeRequestCancellationSource> cancellation,
     ExecuteCallback execute, SupersededCallback settle_superseded,
-    FailureCallback settle_failure) {
+    FailureCallback settle_failure, CurrentGenerationCallback publish_current) {
   if (prepared.coordinator_ != this || cancellation == nullptr || !execute ||
       !settle_superseded || !settle_failure) {
     throw std::invalid_argument(
@@ -185,8 +185,9 @@ void ComputeRequestCoordinator::publish(
   auto candidate = std::make_shared<Candidate>(
       Candidate{prepared.identity_, std::move(cancellation), std::move(execute),
                 std::move(settle_superseded), std::move(settle_failure)});
-  (void)graph_state_.submit([this, prepared = std::move(prepared),
-                             candidate](GraphModel&) mutable {
+  (void)graph_state_.submit([this, prepared = std::move(prepared), candidate,
+                             publish_current = std::move(publish_current)](
+                                GraphModel&) mutable {
     try {
       GraphStateExecutor::ContinuationTicket cleanup_ticket;
       GraphStateExecutor::ContinuationTicket published_ticket;
@@ -212,6 +213,13 @@ void ComputeRequestCoordinator::publish(
         }
 
         if (!rejected_by_close && !born_superseded) {
+          if (publish_current) {
+            try {
+              publish_current(prepared.identity_);
+            } catch (...) {
+              std::terminate();
+            }
+          }
           row.current_generation = prepared.identity_.generation;
           displaced_pending = std::move(row.pending);
           if (row.active != nullptr) {

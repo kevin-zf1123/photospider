@@ -16,6 +16,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -24,12 +25,16 @@
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
 #include "compute/execution_service_test_probe.hpp"
 #endif
+#include "execution/compute_io_executor.hpp"
+#include "execution/device_executor_registry.hpp"
 #include "execution/physical_execution_routes.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/host/host.hpp"
 #include "policy/policy_registry.hpp"
 
 namespace ps::compute {
+
+using execution::make_default_device_executor_registry;
 
 /** @copydoc operator==(const ReadyTaskResourceDemand&, const
  * ReadyTaskResourceDemand&) */
@@ -67,6 +72,7 @@ ReadyTaskMetadata::ReadyTaskMetadata(const ComputeRunDescriptor& descriptor,
       intent_(descriptor.intent()),
       quality_(descriptor.quality()),
       qos_(descriptor.qos()),
+      supersession_(descriptor.supersession()),
       trace_node_id_(trace_node_id),
       device_(device),
       is_initial_ready_(is_initial_ready) {
@@ -77,13 +83,14 @@ ReadyTaskSubmission::ReadyTaskSubmission(
     ComputeRunLease lease, ComputeRunTaskIdentity identity, int trace_node_id,
     bool is_initial_ready, Executable executable,
     ExecutionTaskPriority priority, ReadyTaskResourceDemand resource_demand,
-    Device device)
+    Device device, OperationExecutionConstraints operation_constraints)
     : metadata_(lease.descriptor(), trace_node_id, is_initial_ready, device),
       identity_(identity),
       lease_(std::move(lease)),
       executable_(std::move(executable)),
       priority_(priority),
-      resource_demand_(resource_demand) {
+      resource_demand_(resource_demand),
+      operation_constraints_(std::move(operation_constraints)) {
   if (identity_.run_id() != metadata_.run_id()) {
     throw std::invalid_argument(
         "ReadyTaskSubmission identity does not match its Run lease.");
@@ -91,6 +98,21 @@ ReadyTaskSubmission::ReadyTaskSubmission(
   if (!executable_) {
     throw std::invalid_argument(
         "ReadyTaskSubmission requires an owned executable.");
+  }
+  if ((!operation_constraints_.reentrant ||
+       operation_constraints_.maximum_parallelism != 0U) &&
+      operation_constraints_.implementation_identity == 0U) {
+    throw std::invalid_argument(
+        "Operation execution caps require a nonzero implementation identity.");
+  }
+  if (operation_constraints_.exclusive_key.size() >
+      OperationExecutionConstraints::kExclusiveKeyMaxBytes) {
+    throw std::invalid_argument(
+        "Operation execution exclusive key exceeds 128 bytes.");
+  }
+  if (operation_constraints_.exclusive_key.find('\0') != std::string::npos) {
+    throw std::invalid_argument(
+        "Operation execution exclusive key contains an embedded NUL.");
   }
 }
 
@@ -223,42 +245,137 @@ class ShutdownWorkerJoinGuard final {
 };
 
 /**
+ * @brief Adapts one started ready submission to stack-bounded device entry.
+ *
+ * @throws Provider exceptions unchanged from `run()`.
+ * @note The worker owns both borrowed objects through synchronous executor
+ * return. The adapter creates no queue, completion, grant, or heap owner.
+ */
+class ReadySubmissionDeviceInvocation final
+    : public execution::DeviceExecutorInvocation {
+ public:
+  /**
+   * @brief Binds one worker-owned submission and its existing runtime.
+   * @param submission Started submission retained by the worker QueueEntry.
+   * @param runtime Matching execution service completion boundary.
+   * @param resource_ledger Service-owned device accounting authority.
+   * @throws Nothing.
+   */
+  ReadySubmissionDeviceInvocation(ReadyTaskSubmission& submission,
+                                  ExecutionTaskRuntime& runtime,
+                                  ResourceLedger& resource_ledger) noexcept
+      : submission_(submission),
+        runtime_(runtime),
+        resource_ledger_(resource_ledger) {}
+
+  /** @copydoc execution::DeviceExecutorInvocation::run */
+  void run() override { submission_.execute(runtime_); }
+
+  /** @copydoc execution::DeviceExecutorInvocation::resource_ledger */
+  ResourceLedger& resource_ledger() noexcept override {
+    return resource_ledger_;
+  }
+
+  /** @copydoc execution::DeviceExecutorInvocation::completion_seed */
+  std::optional<execution::DeviceCompletionSeed> completion_seed()
+      const override {
+    const ReadyTaskMetadata& metadata = submission_.metadata();
+    return execution::DeviceCompletionSeed(
+        metadata.graph_instance_id().value(), metadata.target_node_id(),
+        metadata.supersession().key.request_intent(),
+        metadata.supersession().generation.value(),
+        submission_.identity().run_id().value(),
+        submission_.identity().local_task_id().value());
+  }
+
+ private:
+  /** @brief Worker-owned submission borrowed through executor return. */
+  ReadyTaskSubmission& submission_;
+
+  /** @brief Existing Run-scoped task runtime used by provider execution. */
+  ExecutionTaskRuntime& runtime_;
+
+  /** @brief Service-owned ledger borrowed through synchronous executor entry.
+   */
+  ResourceLedger& resource_ledger_;
+};
+
+/**
+ * @brief Type-erased non-inline fence continuation admission.
+ *
+ * @throws std::bad_alloc while copying the admission callable at construction.
+ * @note submit() contains all admission failures and delegates exact Run
+ * failure publication to the captured service operation.
+ */
+class ServiceReadyFenceExecutor final : public ReadyFenceExecutor {
+ public:
+  /** @brief Nonthrowing service admission callable. */
+  using Submitter = std::function<void(Task)>;
+  /** @brief Nonthrowing pending-continuation retirement callable. */
+  using Releaser = std::function<void()>;
+
+  /**
+   * @brief Owns one exact Run-scoped admission callable.
+   * @param submitter Nonempty callable that never propagates.
+   * @param releaser Nonempty callable that retires one pending continuation.
+   * @throws std::invalid_argument for an empty callable.
+   * @throws std::bad_alloc when callable ownership cannot allocate.
+   */
+  ServiceReadyFenceExecutor(Submitter submitter, Releaser releaser)
+      : submitter_(std::move(submitter)), releaser_(std::move(releaser)) {
+    if (!submitter_ || !releaser_) {
+      throw std::invalid_argument(
+          "Service fence executor requires admission and release callables.");
+    }
+  }
+
+  /**
+   * @brief Retires the Run's pending continuation ownership.
+   * @throws Nothing; the supplied releaser contains synchronization failure.
+   * @note ReadyFence retains this executor through callback exit, so
+   * destruction cannot precede admitted callback completion.
+   */
+  ~ServiceReadyFenceExecutor() noexcept override {
+    try {
+      releaser_();
+    } catch (...) {
+    }
+  }
+
+  /** @copydoc ReadyFenceExecutor::submit */
+  void submit(Task task) noexcept override {
+    try {
+      submitter_(std::move(task));
+    } catch (...) {
+    }
+  }
+
+ private:
+  /** @brief Exact Run-scoped service admission operation. */
+  Submitter submitter_;
+  /** @brief Exact-once Run pending-continuation retirement operation. */
+  Releaser releaser_;
+};
+
+/**
  * @brief Tests a frozen private-route inventory for one selected device.
  * @param execution_type Exact private route id.
- * @param metal_available Metal capability captured before Run publication.
+ * @param metal_registered Registry capability captured before Run publication.
  * @param device Device frozen with the operation snapshot.
- * @return True only for CPU on every route or available Metal on
+ * @return True only for CPU on every route or registered Metal on
  * `gpu_pipeline`.
  * @throws Nothing.
- * @note The scalar snapshot avoids Host virtual calls while service and Run
+ * @note The scalar snapshot avoids registry access while service and Run
  * locks are held.
  */
 bool route_inventory_exposes_device(const std::string& execution_type,
-                                    bool metal_available,
+                                    bool metal_registered,
                                     Device device) noexcept {
   if (device == Device::CPU) {
     return execution::PhysicalExecutionRoutes::is_supported(execution_type);
   }
   return execution_type == "gpu_pipeline" && device == Device::GPU_METAL &&
-         metal_available;
-}
-
-/**
- * @brief Captures whether one Host-aware private route exposes a device.
- * @param host Borrowed process capability observer.
- * @param execution_type Exact private route id.
- * @param device Device requested for the inventory snapshot.
- * @return True when the route and current Host capability expose the device.
- * @throws Nothing.
- * @note Callers invoke this boundary before acquiring service or Run locks.
- */
-bool route_exposes_device(const ExecutionHostContext& host,
-                          const std::string& execution_type,
-                          Device device) noexcept {
-  const bool metal_available = execution_type == "gpu_pipeline" &&
-                               host.is_device_available(Device::GPU_METAL);
-  return route_inventory_exposes_device(execution_type, metal_available,
-                                        device);
+         metal_registered;
 }
 
 }  // namespace
@@ -280,7 +397,7 @@ struct ExecutionService::RunState final
    * @param qos Explicit immutable service-class, deadline, and weight inputs.
    * @param host_context Borrowed Graph observation target.
    * @param execution_type Private physical route fixed for this Run.
-   * @param metal_available Metal capability captured before publication.
+   * @param metal_registered Registry capability captured before publication.
    * @param total_task_count Positive logical completion count.
    * @param task_resources Uniform adapter declaration for every submission.
    * @param ready_task_bytes Complete service-plus-adapter ready charge.
@@ -291,7 +408,7 @@ struct ExecutionService::RunState final
   RunState(ComputeRunId run_id, std::string graph_identity,
            std::string graph_key, ComputeRunQos qos,
            ExecutionHostContext& host_context, std::string execution_type,
-           bool metal_available, int total_task_count,
+           bool metal_registered, int total_task_count,
            ReadyTaskResourceDemand task_resources,
            std::uint64_t ready_task_bytes, std::uint64_t execution_task_bytes,
            ResourceLedger::Reservation run_reservation) noexcept
@@ -301,7 +418,7 @@ struct ExecutionService::RunState final
         policy_qos(std::move(qos)),
         host(&host_context),
         route(std::move(execution_type)),
-        route_metal_available(metal_available),
+        route_metal_registered(metal_registered),
         resource_demand(task_resources),
         ready_bytes_per_task(ready_task_bytes),
         execution_retained_bytes_per_task(execution_task_bytes),
@@ -309,15 +426,16 @@ struct ExecutionService::RunState final
         tasks_to_complete(total_task_count) {}
 
   /**
-   * @brief Tests the immutable route/Host inventory captured for this Run.
+   * @brief Tests the immutable route/registry inventory captured for this Run.
    * @param device Device retained by one ready submission.
    * @return True when the frozen inventory exposes the device.
    * @throws Nothing.
-   * @note This method performs no Host callback and is safe under pool/Run
+   * @note This method performs no registry access and is safe under pool/Run
    * locks during frontier formation and reserved-start revalidation.
    */
   bool exposes_device(Device device) const noexcept {
-    return route_inventory_exposes_device(route, route_metal_available, device);
+    return route_inventory_exposes_device(route, route_metal_registered,
+                                          device);
   }
 
   /**
@@ -330,7 +448,7 @@ struct ExecutionService::RunState final
    * the synchronous waiter while a callback is still executing.
    */
   bool settled() const noexcept {
-    return in_flight == 0 &&
+    return in_flight == 0 && pending_fence_continuations == 0 &&
            (cancelled || first_exception != nullptr || tasks_to_complete == 0);
   }
 
@@ -358,8 +476,8 @@ struct ExecutionService::RunState final
   /** @brief Immutable private execution route used by every Run callback. */
   const std::string route;
 
-  /** @brief Host Metal capability captured before active-Run publication. */
-  const bool route_metal_available;
+  /** @brief Registry Metal capability frozen before active-Run publication. */
+  const bool route_metal_registered;
 
   /** @brief Nonzero route generation captured when this Run was admitted. */
   const std::uint64_t route_generation = 1U;
@@ -392,6 +510,13 @@ struct ExecutionService::RunState final
   /** @brief Worker callbacks that have left the service queue but not exited.
    */
   int in_flight = 0;
+
+  /**
+   * @brief Fence executors that may still deliver or execute a continuation.
+   * @note Settlement waits for zero even after failure or cancellation, keeping
+   * the borrowed service/runtime alive through every asynchronous callback.
+   */
+  int pending_fence_continuations = 0;
 
   /** @brief Successful starts committed for this Run. */
   std::uint64_t committed_starts = 0U;
@@ -457,6 +582,9 @@ struct ExecutionService::QueueEntry final {
   /** @brief CPU/memory/scratch authority held across callback execution. */
   std::optional<ResourceLedger::Grant> execution_grant;
 
+  /** @brief Whether reserved start acquired operation-gate ownership. */
+  bool operation_gate_started = false;
+
   /** @brief Checked work plus ready-byte quanta used only for ordering. */
   const std::uint64_t policy_service_cost;
 
@@ -498,6 +626,51 @@ struct ExecutionService::QueueEntry final {
 };
 
 /**
+ * @brief Exact-once rendezvous between provider return and fence readiness.
+ *
+ * @throws std::system_error when synchronization fails and std::bad_alloc when
+ * a callback is parked.
+ * @note The gate retains the Run and lease until either no continuation was
+ * registered or the continuation reaches ordinary ready-store ownership. It
+ * owns no resource grant, native allocation, or worker.
+ */
+struct ExecutionService::FenceContinuationGate final {
+  /**
+   * @brief Captures exact continuation routing before fence registration.
+   * @param active_run Matching service Run.
+   * @param active_lease Matching non-forgeable Run lease.
+   * @param active_identity Exact Run/local task identity.
+   * @param active_trace_node_id Planned node for diagnostics.
+   * @throws Nothing after argument evaluation.
+   */
+  FenceContinuationGate(std::shared_ptr<RunState> active_run,
+                        ComputeRunLease active_lease,
+                        ComputeRunTaskIdentity active_identity,
+                        int active_trace_node_id) noexcept
+      : run(std::move(active_run)),
+        lease(std::move(active_lease)),
+        identity(active_identity),
+        trace_node_id(active_trace_node_id) {}
+
+  /** @brief Protects retirement, submission, and parked callback state. */
+  std::mutex mutex;
+  /** @brief Matching active Run retained through continuation admission. */
+  std::shared_ptr<RunState> run;
+  /** @brief Matching Run lease copied into the eventual ready submission. */
+  ComputeRunLease lease;
+  /** @brief Exact Run/local task identity resumed by the callback. */
+  ComputeRunTaskIdentity identity;
+  /** @brief Planned node used for continuation trace metadata. */
+  int trace_node_id = -1;
+  /** @brief True after the original QueueEntry fully retired. */
+  bool original_retired = false;
+  /** @brief True after ReadyFence delivered its callback exactly once. */
+  bool callback_delivered = false;
+  /** @brief Callback parked until original_retired becomes true. */
+  std::optional<ReadyFenceExecutor::Task> parked_task;
+};
+
+/**
  * @brief Complete checked service admission calculation for one CPU Run.
  *
  * @throws Nothing for value movement after successful calculation.
@@ -535,8 +708,7 @@ std::uint64_t ExecutionService::service_submission_envelope_bytes(
   estimate.add_objects<std::shared_ptr<QueueEntry>>();
   estimate.add_objects<void*>(2U);
   estimate.add_shared_control_block();
-  estimate.add_bytes(static_cast<std::uint64_t>(graph_identity.capacity()));
-  estimate.add_bytes(1U);
+  estimate.add_string_payload(graph_identity);
   return estimate.bytes();
 }
 
@@ -850,6 +1022,32 @@ struct ReservedStartProbeState final {
 };
 
 /**
+ * @brief Process-local operation-admission observer state for test products.
+ * @throws Nothing for atomic initialization and access.
+ * @note The callback publishes fixture state only. It never owns service,
+ * Run, gate, resource, ready-entry, or provider authority.
+ */
+struct OperationAdmissionWaitProbeState final {
+  /** @brief Borrowed opaque fixture context. */
+  std::atomic<void*> context{nullptr};
+  /** @brief Optional allocation-free notification callback. */
+  std::atomic<testing::OperationAdmissionWaitObserver> observer{nullptr};
+};
+
+/**
+ * @brief Process-local retained operation-string observer state for tests.
+ * @throws Nothing for atomic initialization and access.
+ * @note The callback only records actual owner capacity and estimator totals.
+ * It owns no string, estimator, gate, resource, Run, or service state.
+ */
+struct RetainedOperationStringChargeProbeState final {
+  /** @brief Borrowed opaque fixture context. */
+  std::atomic<void*> context{nullptr};
+  /** @brief Optional allocation-free observation callback. */
+  std::atomic<testing::RetainedOperationStringChargeObserver> observer{nullptr};
+};
+
+/**
  * @brief Returns the unique test-product probe state.
  * @return Process-lifetime allocation-free storage.
  * @throws Nothing.
@@ -857,6 +1055,48 @@ struct ReservedStartProbeState final {
 ReservedStartProbeState& reserved_start_probe_state() noexcept {
   static ReservedStartProbeState state;
   return state;
+}
+
+/**
+ * @brief Returns the unique test-product admission observer state.
+ * @return Process-lifetime allocation-free observer storage.
+ * @throws Nothing.
+ */
+OperationAdmissionWaitProbeState&
+operation_admission_wait_probe_state() noexcept {
+  static OperationAdmissionWaitProbeState state;
+  return state;
+}
+
+/**
+ * @brief Returns the unique test-product retained-string observer state.
+ * @return Process-lifetime allocation-free observer storage.
+ * @throws Nothing.
+ */
+RetainedOperationStringChargeProbeState&
+retained_operation_string_charge_probe_state() noexcept {
+  static RetainedOperationStringChargeProbeState state;
+  return state;
+}
+
+/**
+ * @brief Notifies one denied exact-identity or exclusive-key gate start.
+ * @param constraints Exact operation declaration rejected by can_start().
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The caller holds the pool mutex. The borrowed callback therefore may
+ * only publish atomic fixture state and notify non-service synchronization.
+ */
+void notify_operation_admission_wait_for_testing(
+    const OperationExecutionConstraints& constraints) noexcept {
+  OperationAdmissionWaitProbeState& state =
+      operation_admission_wait_probe_state();
+  const testing::OperationAdmissionWaitObserver observer =
+      state.observer.load(std::memory_order_acquire);
+  if (observer != nullptr) {
+    observer(state.context.load(std::memory_order_relaxed),
+             constraints.implementation_identity);
+  }
 }
 
 /**
@@ -898,6 +1138,205 @@ bool record_reserved_start_attempt_for_testing(
 
 }  // namespace
 #endif
+
+/**
+ * @brief Tracks exact-identity parallelism and cross-identity exclusive keys.
+ *
+ * @throws std::bad_alloc when a first active identity or key allocates map
+ * storage.
+ * @note Every method is called with `PoolState::mutex` held. The gate owns no
+ * callback, Run, ready entry, resource grant, key string, or synchronization
+ * primitive. A nonempty key row borrows the stable constraint string from the
+ * active QueueEntry or `OperationExecutionLeaseState` and is erased before
+ * that exact owner retires. Direct acquisition never borrows the caller's
+ * input constraints after the lease-state copy has been constructed.
+ */
+class ExecutionService::OperationStartGate final {
+ public:
+  /**
+   * @brief Tests whether one operation may start without changing ownership.
+   * @param constraints Exact constraints copied into a ready submission.
+   * @return True when identity capacity and exclusive-key ownership are free.
+   * @throws Nothing.
+   */
+  bool can_start(
+      const OperationExecutionConstraints& constraints) const noexcept {
+    if (constraints.implementation_identity != 0U) {
+      const auto identity =
+          identities_.find(constraints.implementation_identity);
+      if (identity != identities_.end()) {
+        const std::uint64_t limit = effective_limit(constraints);
+        if (limit != 0U && identity->second.active >= limit) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+          notify_operation_admission_wait_for_testing(constraints);
+#endif
+          return false;
+        }
+      }
+    }
+    if (!constraints.exclusive_key.empty()) {
+      const auto key =
+          exclusive_keys_.find(std::string_view(constraints.exclusive_key));
+      if (key != exclusive_keys_.end() && key->second != 0U) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+        notify_operation_admission_wait_for_testing(constraints);
+#endif
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * @brief Commits one operation start after a successful can_start() check.
+   * @param constraints Exact identity/cap/key declaration.
+   * @return True when ownership was committed, false when no longer startable.
+   * @throws std::logic_error when one active identity presents inconsistent
+   * constraints.
+   * @throws std::overflow_error when an active counter cannot advance.
+   * @throws std::bad_alloc when first-use map storage cannot allocate.
+   * @note All allocating map nodes are staged before any active counter
+   * changes. A failed key insertion erases a newly staged identity row.
+   */
+  bool try_start(const OperationExecutionConstraints& constraints) {
+    if (!can_start(constraints)) {
+      return false;
+    }
+
+    bool identity_inserted = false;
+    auto identity = identities_.end();
+    if (constraints.implementation_identity != 0U) {
+      auto inserted = identities_.try_emplace(
+          constraints.implementation_identity,
+          IdentityState{0U, constraints.reentrant,
+                        constraints.maximum_parallelism});
+      identity = inserted.first;
+      identity_inserted = inserted.second;
+      if (!identity_inserted &&
+          (identity->second.reentrant != constraints.reentrant ||
+           identity->second.maximum_parallelism !=
+               constraints.maximum_parallelism)) {
+        throw std::logic_error(
+            "Active operation identity has inconsistent constraints.");
+      }
+    }
+
+    auto key = exclusive_keys_.end();
+    try {
+      if (!constraints.exclusive_key.empty()) {
+        key = exclusive_keys_
+                  .try_emplace(std::string_view(constraints.exclusive_key), 0U)
+                  .first;
+      }
+    } catch (...) {
+      if (identity_inserted) {
+        identities_.erase(identity);
+      }
+      throw;
+    }
+
+    if ((identity != identities_.end() &&
+         identity->second.active ==
+             std::numeric_limits<std::uint64_t>::max()) ||
+        (key != exclusive_keys_.end() &&
+         key->second == std::numeric_limits<std::uint64_t>::max())) {
+      if (identity_inserted) {
+        identities_.erase(identity);
+      }
+      if (key != exclusive_keys_.end() && key->second == 0U) {
+        exclusive_keys_.erase(key);
+      }
+      throw std::overflow_error("Operation start-gate counter exhausted.");
+    }
+
+    if (identity != identities_.end()) {
+      ++identity->second.active;
+    }
+    if (key != exclusive_keys_.end()) {
+      ++key->second;
+    }
+    return true;
+  }
+
+  /**
+   * @brief Releases one previously committed operation start.
+   * @param constraints Exact declaration passed to try_start().
+   * @return Nothing.
+   * @throws Nothing; inconsistent ownership terminates.
+   */
+  void finish(const OperationExecutionConstraints& constraints) noexcept {
+    if (constraints.implementation_identity != 0U) {
+      const auto identity =
+          identities_.find(constraints.implementation_identity);
+      if (identity == identities_.end() || identity->second.active == 0U ||
+          identity->second.reentrant != constraints.reentrant ||
+          identity->second.maximum_parallelism !=
+              constraints.maximum_parallelism) {
+        std::terminate();
+      }
+      --identity->second.active;
+      if (identity->second.active == 0U) {
+        identities_.erase(identity);
+      }
+    }
+    if (!constraints.exclusive_key.empty()) {
+      const auto key =
+          exclusive_keys_.find(std::string_view(constraints.exclusive_key));
+      if (key == exclusive_keys_.end() || key->second != 1U) {
+        std::terminate();
+      }
+      exclusive_keys_.erase(key);
+    }
+  }
+
+  /**
+   * @brief Reports whether no operation start remains owned.
+   * @return True when identity and exclusive-key tables are empty.
+   * @throws Nothing.
+   */
+  bool empty() const noexcept {
+    return identities_.empty() && exclusive_keys_.empty();
+  }
+
+ private:
+  /**
+   * @brief Active declaration retained for one exact implementation identity.
+   * @throws Nothing for scalar value operations.
+   */
+  struct IdentityState final {
+    /** @brief Currently executing callbacks. */
+    std::uint64_t active = 0U;
+    /** @brief Frozen reentrancy declaration for this identity. */
+    bool reentrant = true;
+    /** @brief Frozen positive cap, or zero for unbounded. */
+    std::uint32_t maximum_parallelism = 0U;
+  };
+
+  /**
+   * @brief Resolves the effective callback cap for one declaration.
+   * @param constraints Exact operation constraints.
+   * @return One for non-reentrant callbacks, the positive explicit cap, or zero
+   * for no identity-specific cap.
+   * @throws Nothing.
+   */
+  static std::uint64_t effective_limit(
+      const OperationExecutionConstraints& constraints) noexcept {
+    if (!constraints.reentrant) {
+      return 1U;
+    }
+    return constraints.maximum_parallelism;
+  }
+
+  /** @brief Active callbacks keyed by exact registry identity. */
+  std::map<std::uint64_t, IdentityState> identities_;
+
+  /**
+   * @brief Active exclusion ownership indexed by borrowed stable key views.
+   * @note Each view is erased by finish() before its QueueEntry/direct-lease
+   * constraint owner can be destroyed.
+   */
+  std::map<std::string_view, std::uint64_t> exclusive_keys_;
+};
 
 /**
  * @brief Owns one policy-aware entry/byte-bounded service ready store.
@@ -988,13 +1427,16 @@ class ExecutionService::BoundedReadyStore final {
    * @param entry_limit Maximum stored entries across both service classes.
    * @param byte_limit Maximum accounted bytes across both service classes.
    * @param telemetry Stable physical-counter owner outliving this store.
+   * @param operation_gate Stable execution-domain operation start gate.
    * @throws Nothing.
    */
   BoundedReadyStore(std::uint64_t entry_limit, std::uint64_t byte_limit,
-                    ExecutionLifecycleTelemetry& telemetry) noexcept
+                    ExecutionLifecycleTelemetry& telemetry,
+                    OperationStartGate& operation_gate) noexcept
       : entry_limit_(entry_limit),
         byte_limit_(byte_limit),
-        telemetry_(telemetry) {}
+        telemetry_(telemetry),
+        operation_gate_(operation_gate) {}
 
   /**
    * @brief Returns conservative per-Run policy-map structural ownership.
@@ -1243,8 +1685,10 @@ class ExecutionService::BoundedReadyStore final {
    * @param lane Fixed physical lane owned by the calling worker.
    * @param routes Host-owned route state updated by the no-throw commit.
    * @return Started, obsolete, unavailable grant, or identity exhaustion.
-   * @throws std::system_error only while staging the reservation child grant;
-   * exceptional exits precede every ready/fairness/in-flight mutation.
+   * @throws std::bad_alloc, std::logic_error, or std::overflow_error while
+   * staging operation-gate ownership.
+   * @throws std::system_error while staging the reservation child grant.
+   * @note Exceptional exits precede every ready/fairness/in-flight mutation.
    * @note Caller holds the service/store mutex. This method locks the Run and
    * then its reservation through `try_grant`, preserving the frozen order.
    */
@@ -1307,10 +1751,16 @@ class ExecutionService::BoundedReadyStore final {
       return StartResult::Obsolete;
     }
 #endif
-    const Device device = pin.entry->submission.metadata().device();
-    if (!routes.commit_start(run.route, device)) {
+    if (!operation_gate_.try_start(
+            pin.entry->submission.operation_constraints())) {
       return StartResult::Obsolete;
     }
+    const Device device = pin.entry->submission.metadata().device();
+    if (!routes.commit_start(run.route, device)) {
+      operation_gate_.finish(pin.entry->submission.operation_constraints());
+      return StartResult::Obsolete;
+    }
+    pin.entry->operation_gate_started = true;
 
     pin.entry->execution_grant.emplace(std::move(*staged_grant));
     remove_entry(*pin.entry, run_state);
@@ -1384,10 +1834,19 @@ class ExecutionService::BoundedReadyStore final {
   /**
    * @brief Purges every queued entry belonging to one Run.
    * @param run Matching retained Run state.
+   * @param retired_entries Empty caller-owned list receiving removed nodes.
    * @return Number of removed entries; the empty policy row remains active.
    * @throws Nothing; an accounting invariant violation terminates.
+   * @note Nodes are spliced without allocation and MUST be destroyed only
+   * after the caller releases the pool and Run locks. Their callbacks may
+   * retire asynchronous fence-executor ownership that reacquires the Run.
    */
-  std::size_t erase_run(const std::shared_ptr<RunState>& run) noexcept {
+  std::size_t erase_run(
+      const std::shared_ptr<RunState>& run,
+      std::list<std::shared_ptr<QueueEntry>>& retired_entries) noexcept {
+    if (!retired_entries.empty()) {
+      std::terminate();
+    }
     const auto found = run_states_.find(run->id.value());
     if (found == run_states_.end()) {
       return 0U;
@@ -1398,11 +1857,11 @@ class ExecutionService::BoundedReadyStore final {
     }
     std::size_t removed = 0U;
     while (state.high.head != nullptr) {
-      remove_entry(*state.high.head, state);
+      remove_entry(*state.high.head, state, &retired_entries);
       ++removed;
     }
     while (state.normal.head != nullptr) {
-      remove_entry(*state.normal.head, state);
+      remove_entry(*state.normal.head, state, &retired_entries);
       ++removed;
     }
     return removed;
@@ -1881,16 +2340,19 @@ class ExecutionService::BoundedReadyStore final {
    * @return True only for a live, uncancelled, class/route-capable Run.
    * @throws Nothing.
    */
-  static bool route_startable(
+  bool route_startable(
       const RunState& run, const QueueEntry& entry, int worker_id,
       execution::PhysicalExecutionLane lane,
-      const execution::PhysicalExecutionRoutes& routes) noexcept {
+      const execution::PhysicalExecutionRoutes& routes) const noexcept {
     if (!run.accepting || run.cancelled || run.first_exception != nullptr) {
       return false;
     }
     if (run.policy_qos.maximum_parallelism.has_value() &&
         static_cast<std::uint64_t>(run.in_flight) >=
             *run.policy_qos.maximum_parallelism) {
+      return false;
+    }
+    if (!operation_gate_.can_start(entry.submission.operation_constraints())) {
       return false;
     }
     const Device device = entry.submission.metadata().device();
@@ -2489,10 +2951,16 @@ class ExecutionService::BoundedReadyStore final {
    * @brief Unlinks and destroys one store list node with exact accounting.
    * @param entry Store-owned entry selected or purged.
    * @param state Matching Run policy row retained after removal.
+   * @param retired_entries Optional list receiving the unlinked node without
+   * destruction while the caller owns service locks.
    * @return Nothing.
    * @throws Nothing; invalid linkage/accounting terminates.
+   * @note A non-null destination uses allocation-free list splicing. The
+   * caller destroys those nodes only after releasing pool and Run locks.
    */
-  void remove_entry(QueueEntry& entry, PolicyRunState& state) noexcept {
+  void remove_entry(QueueEntry& entry, PolicyRunState& state,
+                    std::list<std::shared_ptr<QueueEntry>>* retired_entries =
+                        nullptr) noexcept {
     if (!entry.store_owned || entry.run.get() != state.run ||
         !entry.ready_grant.has_value() || !entry.ready_grant->active()) {
       std::terminate();
@@ -2523,7 +2991,12 @@ class ExecutionService::BoundedReadyStore final {
     entry.store_owned = false;
     entry.run_previous = nullptr;
     entry.run_next = nullptr;
-    entries_.erase(entry.store_position);
+    if (retired_entries == nullptr) {
+      entries_.erase(entry.store_position);
+    } else {
+      retired_entries->splice(retired_entries->end(), entries_,
+                              entry.store_position);
+    }
     telemetry_.decrement_physical_counter(
         ExecutionLifecyclePhysicalCounter::ReadyEntry);
   }
@@ -2536,6 +3009,9 @@ class ExecutionService::BoundedReadyStore final {
 
   /** @brief Stable non-owning physical lifecycle counter owner. */
   ExecutionLifecycleTelemetry& telemetry_;
+
+  /** @brief Stable execution-domain exact-identity and exclusion gate. */
+  OperationStartGate& operation_gate_;
 
   /** @brief Store-owned list node for every currently ready value. */
   std::list<std::shared_ptr<QueueEntry>> entries_;
@@ -2601,6 +3077,9 @@ struct PreparedExecutionRunState final {
   std::shared_ptr<ExecutionService::RunState> run;
   /** @brief Fully detached ready-store map/list publication nodes. */
   ExecutionService::BoundedReadyStore::PreparedBatch batch;
+  /** @brief Representative exact lineage observed immediately before publish.
+   */
+  std::optional<execution::DeviceCompletionSeed> completion_seed;
   /** @brief Cancellation cleanup active through publication and settlement. */
   ComputeRunCancellationRegistration cancellation_registration;
 };
@@ -2700,10 +3179,8 @@ std::uint64_t ExecutionService::service_run_envelope_bytes(
   estimate.add_objects<RunState>();
   estimate.add_shared_control_block();
   estimate.add_bytes(BoundedReadyStore::run_policy_envelope_bytes());
-  estimate.add_bytes(static_cast<std::uint64_t>(graph_identity.capacity()));
-  estimate.add_bytes(1U);
-  estimate.add_bytes(static_cast<std::uint64_t>(graph_key.capacity()));
-  estimate.add_bytes(1U);
+  estimate.add_string_payload(graph_identity);
+  estimate.add_string_payload(graph_key);
   estimate.add_bytes(ResourceLedger::reservation_state_retained_memory_bytes());
   estimate.add_bytes(
       ComputeRunLease::cancellation_notification_retained_memory_bytes(
@@ -2859,10 +3336,88 @@ class ThroughputReservationAccount final
   ResourceVector reserved_;
 };
 
+/**
+ * @brief Tests whether a fixed registry executes one complete device identity.
+ *
+ * The current registry exposes one provisional device label per backend.
+ * Therefore each populated slot represents ordinal zero; later ordinals and
+ * Vulkan have no executable registry representation in this service.
+ *
+ * @param device_executors Frozen process-owned registry to inspect.
+ * @param device Complete candidate ledger identity.
+ * @return True only for a registered matching ordinal-zero executor.
+ * @throws Nothing.
+ * @note This observation neither mutates the registry nor creates an account.
+ */
+bool registry_executes_device_id(
+    const execution::DeviceExecutorRegistry& device_executors,
+    DeviceId device) noexcept {
+  if (device.ordinal() != 0U) {
+    return false;
+  }
+  switch (device.backend()) {
+    case DeviceBackend::CPU:
+      return false;
+    case DeviceBackend::Metal:
+      return device_executors.contains(Device::GPU_METAL);
+    case DeviceBackend::CUDA:
+      return device_executors.contains(Device::GPU_CUDA);
+    case DeviceBackend::Vulkan:
+      return false;
+    case DeviceBackend::NPU:
+      return device_executors.contains(Device::ASIC_NPU);
+  }
+  return false;
+}
+
+/**
+ * @brief Validates device-limit candidates and removes non-executable accounts.
+ *
+ * First, the complete caller-supplied list is checked for CPU identities and
+ * duplicates so filtering cannot hide invalid composition. Second, limits
+ * whose complete `DeviceId` has no matching executor in the already frozen
+ * registry are erased before `ResourceLedger` construction.
+ *
+ * @param resource_limits Mutable composition limits owned by construction.
+ * @param device_executors Frozen registry defining executable device identity.
+ * @return Nothing.
+ * @throws std::invalid_argument for CPU or duplicate device candidates.
+ * @note The operation allocates no storage, registers no executor, and leaves
+ * an executor without a configured limit unable to reserve device capacity.
+ */
+void retain_executable_device_limits(
+    ExecutionResourceLimits& resource_limits,
+    const execution::DeviceExecutorRegistry& device_executors) {
+  for (std::size_t index = 0U; index < resource_limits.device_limits.size();
+       ++index) {
+    const DeviceId device = resource_limits.device_limits[index].device;
+    if (device.backend() == DeviceBackend::CPU) {
+      throw std::invalid_argument(
+          "ResourceLedger device limits must not contain CPU.");
+    }
+    for (std::size_t previous = 0U; previous < index; ++previous) {
+      if (resource_limits.device_limits[previous].device == device) {
+        throw std::invalid_argument(
+            "ResourceLedger device limits contain a duplicate DeviceId.");
+      }
+    }
+  }
+
+  const auto first_unavailable = std::remove_if(
+      resource_limits.device_limits.begin(),
+      resource_limits.device_limits.end(),
+      [&device_executors](const DeviceResourceLimit& limit) noexcept {
+        return !registry_executes_device_id(device_executors, limit.device);
+      });
+  resource_limits.device_limits.erase(first_unavailable,
+                                      resource_limits.device_limits.end());
+}
+
 }  // namespace
 
 /**
- * @brief Owns all fixed-pool, bounded-store, registry, and ledger state.
+ * @brief Owns fixed compute/I/O workers, bounded stores, registries, and
+ * ledgers.
  *
  * @throws std::bad_alloc from container growth and worker creation staging.
  * @note One mutex defines queue-to-Run lock order: pool mutex is acquired
@@ -2872,16 +3427,25 @@ class ExecutionService::PoolState final {
  public:
   /**
    * @brief Creates one unconfigured execution domain with immutable limits.
-   * @param resource_limits Complete ledger and ready-store limits.
+   * @param resource_limits Complete Host, ready-store, compute-I/O, and device
+   * limits whose device accounts already match the fixed registry.
+   * @param device_executors Complete fixed device registry.
    * @param telemetry Stable physical counter owner.
    * @param policy_observer Stable non-owning service callback/binding observer.
-   * @throws std::invalid_argument when interactive headroom exceeds a limit.
-   * @throws std::bad_alloc when ledger state cannot allocate.
+   * @throws std::invalid_argument when interactive headroom exceeds a limit or
+   * either compute-I/O limit is zero.
+   * @throws std::bad_alloc or std::system_error when ledger or worker state
+   * cannot be constructed.
    */
   PoolState(ExecutionResourceLimits resource_limits,
+            execution::DeviceExecutorRegistry device_executors,
             ExecutionLifecycleTelemetry& telemetry,
             policy::PolicyLifecycleObserver policy_observer)
       : registry(policy::PolicyRegistry::process_instance()),
+        device_executors(std::move(device_executors)),
+        compute_io_executor(execution::ComputeIoExecutorLimits{
+            resource_limits.compute_io_task_limit,
+            resource_limits.compute_io_planned_bytes_limit}),
         interactive_binding(registry.create_binding(
             "interactive", PolicyClass::Interactive, 1U, policy_observer)),
         throughput_binding(registry.create_binding(
@@ -2889,9 +3453,10 @@ class ExecutionService::PoolState final {
         throughput_reservations(std::make_shared<ThroughputReservationAccount>(
             calculate_general_capacity(resource_limits.resource_vector(),
                                        resource_limits.interactive_headroom))),
-        ledger(resource_limits.resource_vector()),
+        ledger(resource_limits.resource_vector(),
+               std::move(resource_limits.device_limits)),
         ready_store(resource_limits.ready_entries, resource_limits.ready_bytes,
-                    telemetry) {
+                    telemetry, operation_gate) {
     interactive_binding->mark_service_published();
     throughput_binding->mark_service_published();
   }
@@ -2964,6 +3529,16 @@ class ExecutionService::PoolState final {
   /** @brief Process registry shared by all execution-service instances. */
   policy::PolicyRegistry& registry;
 
+  /**
+   * @brief Fixed process-owned device executors destroyed after worker join.
+   */
+  execution::DeviceExecutorRegistry device_executors;
+
+  /**
+   * @brief Independent process I/O worker with private task/byte accounting.
+   */
+  execution::ComputeIoExecutor compute_io_executor;
+
   /** @brief Serializes preparation/publication of policy replacements only. */
   mutable std::mutex policy_mutation_mutex;
 
@@ -2990,6 +3565,9 @@ class ExecutionService::PoolState final {
   /** @brief Sole host-authoritative resource mint for this service. */
   ResourceLedger ledger;
 
+  /** @brief Exact-identity and exclusive-key start ownership. */
+  OperationStartGate operation_gate;
+
   /** @brief Sole policy-aware entry/byte-bounded ready-store owner. */
   BoundedReadyStore ready_store;
 
@@ -3015,9 +3593,143 @@ class ExecutionService::PoolState final {
   std::condition_variable shutdown_cv;
 };
 
+/**
+ * @brief Complete direct callback resource/gate ownership behind one lease.
+ *
+ * @throws Nothing from destruction; trusted release failure terminates.
+ * @note The service outlives every request lease. Resource capacity returns
+ * before the operation gate opens and workers are notified. The retained
+ * constraints key is charged by its actual copied capacity plus the trailing
+ * null before admission.
+ */
+struct OperationExecutionLeaseState final {
+  /**
+   * @brief Stages allocation-owned state before gate/resource acquisition.
+   * @param active_owner Exact execution service.
+   * @param active_run_lease Matching Run lease.
+   * @param active_constraints Exact implementation constraints.
+   * @throws std::bad_alloc when exclusive-key copying allocates.
+   */
+  OperationExecutionLeaseState(
+      ExecutionService& active_owner, ComputeRunLease active_run_lease,
+      const OperationExecutionConstraints& active_constraints)
+      : owner(&active_owner),
+        run_lease(std::move(active_run_lease)),
+        constraints(active_constraints) {}
+
+  /**
+   * @brief Returns reservation and operation ownership exactly once.
+   * @throws Nothing; synchronization or ownership inconsistency terminates.
+   */
+  ~OperationExecutionLeaseState() noexcept {
+    if (!gate_started) {
+      return;
+    }
+    try {
+      {
+        std::lock_guard<std::mutex> lock(owner->pool_->mutex);
+        reservation.reset();
+        owner->pool_->operation_gate.finish(constraints);
+        gate_started = false;
+        owner->pool_->advance_worker_notification_epoch();
+      }
+      owner->pool_->ready_cv.notify_all();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+  /** @brief Exact service owning ledger and gate state. */
+  ExecutionService* owner = nullptr;
+  /** @brief Matching Run retained through resource settlement. */
+  ComputeRunLease run_lease;
+  /** @brief Frozen exact-identity and exclusive-key declaration. */
+  OperationExecutionConstraints constraints;
+  /** @brief Direct CPU/retained/scratch root reservation. */
+  std::optional<ResourceLedger::Reservation> reservation;
+  /** @brief Whether gate ownership must be released. */
+  bool gate_started = false;
+};
+
+namespace {
+
+/**
+ * @brief Calculates key-independent retained bytes for one direct lease.
+ * @return Checked lease-state and ledger-reservation structural bytes.
+ * @throws GraphError when retained-memory arithmetic overflows.
+ * @note Declared operation bytes and the actual retained key payload are added
+ * separately so tests can verify the exact string boundary without exposing
+ * or duplicating the private lease-state layout.
+ */
+std::uint64_t direct_operation_fixed_retained_memory_bytes() {
+  RetainedMemoryEstimator retained(
+      "ExecutionService direct operation fixed envelope");
+  retained.add_objects<OperationExecutionLeaseState>();
+  retained.add_bytes(ResourceLedger::reservation_state_retained_memory_bytes());
+  return retained.bytes();
+}
+
+/**
+ * @brief Calculates the complete ledger vector for one direct operation lease.
+ * @param constraints Exact identity and exclusive-key value retained by the
+ * already-created lease state.
+ * @param demand Additional operation retained/scratch declaration.
+ * @return One CPU slot plus checked mandatory and declared retained/scratch.
+ * @throws GraphError when retained-memory arithmetic overflows.
+ * @note The retained key uses its actual copied capacity plus the trailing
+ * null. The returned value owns no gate, Run, reservation, or callback.
+ */
+ResourceVector direct_operation_execution_resources(
+    const OperationExecutionConstraints& constraints,
+    ReadyTaskResourceDemand demand) {
+  RetainedMemoryEstimator retained(
+      "ExecutionService direct operation envelope");
+  retained.add_bytes(demand.retained_memory_bytes);
+  retained.add_bytes(direct_operation_fixed_retained_memory_bytes());
+  retained.add_string_payload(constraints.exclusive_key);
+  return ResourceVector{1U, retained.bytes(), demand.scratch_bytes, 0U, 0U};
+}
+
+}  // namespace
+
+/** @copydoc OperationExecutionLease::OperationExecutionLease */
+OperationExecutionLease::OperationExecutionLease() noexcept = default;
+
+/** @copydoc OperationExecutionLease::OperationExecutionLease */
+OperationExecutionLease::OperationExecutionLease(
+    std::unique_ptr<OperationExecutionLeaseState> state) noexcept
+    : state_(std::move(state)) {}
+
+/** @copydoc OperationExecutionLease::OperationExecutionLease */
+OperationExecutionLease::OperationExecutionLease(
+    OperationExecutionLease&& other) noexcept = default;  // NOLINT
+
+/** @copydoc OperationExecutionLease::operator= */
+OperationExecutionLease& OperationExecutionLease::operator=(
+    OperationExecutionLease&& other) noexcept {
+  if (this != &other) {
+    if (state_) {
+      std::terminate();
+    }
+    state_ = std::move(other.state_);
+  }
+  return *this;
+}
+
+/** @copydoc OperationExecutionLease::~OperationExecutionLease */
+OperationExecutionLease::~OperationExecutionLease() noexcept = default;
+
 /** @brief Current service-worker Run context, null outside callbacks. */
 thread_local ExecutionService::RunState* ExecutionService::tls_run_state_ =
     nullptr;
+
+/** @brief Current worker-owned started QueueEntry, or null outside callback. */
+thread_local ExecutionService::QueueEntry* ExecutionService::tls_queue_entry_ =
+    nullptr;
+
+/** @brief Lazy fence/original-retirement rendezvous for current callback. */
+thread_local std::shared_ptr<ExecutionService::FenceContinuationGate>
+    ExecutionService::tls_fence_continuation_gate_;
 
 /** @brief Exact service owning the entered callback, or null outside one. */
 thread_local ExecutionService* ExecutionService::tls_service_ = nullptr;
@@ -3078,11 +3790,73 @@ void disarm_reserved_start_rollback_probe_for_testing() noexcept {
   reserved_start_probe_state().armed.store(false, std::memory_order_release);
 }
 
+/** @copydoc estimate_direct_operation_resources_for_testing */
+ResourceVector estimate_direct_operation_resources_for_testing(
+    const OperationExecutionConstraints& constraints,
+    ReadyTaskResourceDemand demand) {
+  const OperationExecutionConstraints retained_constraints(constraints);
+  return direct_operation_execution_resources(retained_constraints, demand);
+}
+
+/** @copydoc direct_operation_fixed_retained_memory_bytes_for_testing */
+std::uint64_t direct_operation_fixed_retained_memory_bytes_for_testing() {
+  return direct_operation_fixed_retained_memory_bytes();
+}
+
+/** @copydoc set_operation_admission_wait_observer_for_testing */
+void set_operation_admission_wait_observer_for_testing(
+    OperationAdmissionWaitObserver observer, void* context) noexcept {
+  OperationAdmissionWaitProbeState& state =
+      operation_admission_wait_probe_state();
+  state.context.store(context, std::memory_order_relaxed);
+  state.observer.store(observer, std::memory_order_release);
+}
+
+/** @copydoc clear_operation_admission_wait_observer_for_testing */
+void clear_operation_admission_wait_observer_for_testing() noexcept {
+  OperationAdmissionWaitProbeState& state =
+      operation_admission_wait_probe_state();
+  state.observer.store(nullptr, std::memory_order_release);
+  state.context.store(nullptr, std::memory_order_relaxed);
+}
+
+/** @copydoc set_retained_operation_string_charge_observer_for_testing */
+void set_retained_operation_string_charge_observer_for_testing(
+    RetainedOperationStringChargeObserver observer, void* context) noexcept {
+  RetainedOperationStringChargeProbeState& state =
+      retained_operation_string_charge_probe_state();
+  state.context.store(context, std::memory_order_relaxed);
+  state.observer.store(observer, std::memory_order_release);
+}
+
+/** @copydoc clear_retained_operation_string_charge_observer_for_testing */
+void clear_retained_operation_string_charge_observer_for_testing() noexcept {
+  RetainedOperationStringChargeProbeState& state =
+      retained_operation_string_charge_probe_state();
+  state.observer.store(nullptr, std::memory_order_release);
+  state.context.store(nullptr, std::memory_order_relaxed);
+}
+
+/** @copydoc notify_retained_operation_string_charge_for_testing */
+void notify_retained_operation_string_charge_for_testing(
+    RetainedOperationStringOwner owner, const std::string& value,
+    std::uint64_t before_bytes, std::uint64_t after_bytes) noexcept {
+  RetainedOperationStringChargeProbeState& state =
+      retained_operation_string_charge_probe_state();
+  const RetainedOperationStringChargeObserver observer =
+      state.observer.load(std::memory_order_acquire);
+  if (observer != nullptr) {
+    observer(state.context.load(std::memory_order_relaxed), owner,
+             static_cast<std::uint64_t>(value.capacity()), before_bytes,
+             after_bytes);
+  }
+}
+
 }  // namespace testing
 #endif
 
 /** @copydoc ExecutionService::default_resource_limits */
-ExecutionResourceLimits ExecutionService::default_resource_limits() noexcept {
+ExecutionResourceLimits ExecutionService::default_resource_limits() {
   constexpr std::uint64_t kOneMebibyte = 1024U * 1024U;
   return ExecutionResourceLimits{
       32U,
@@ -3090,8 +3864,13 @@ ExecutionResourceLimits ExecutionService::default_resource_limits() noexcept {
       512U * kOneMebibyte,
       65536U,
       256U * kOneMebibyte,
+      64U,
+      256U * kOneMebibyte,
       ResourceVector{1U, 64U * kOneMebibyte, 32U * kOneMebibyte, 1024U,
                      16U * kOneMebibyte},
+      std::vector<DeviceResourceLimit>{DeviceResourceLimit{
+          DeviceId(DeviceBackend::Metal),
+          DeviceResourceVector{512U * kOneMebibyte, 256U * kOneMebibyte}}},
   };
 }
 
@@ -3100,12 +3879,20 @@ ExecutionService::ExecutionService()
     : ExecutionService(default_resource_limits()) {}
 
 /** @copydoc ExecutionService::ExecutionService */
-ExecutionService::ExecutionService(ExecutionResourceLimits resource_limits)
+ExecutionService::ExecutionService(ExecutionResourceLimits limits)
+    : ExecutionService(limits, make_default_device_executor_registry()) {}
+
+/** @copydoc ExecutionService::ExecutionService */
+ExecutionService::ExecutionService(
+    ExecutionResourceLimits resource_limits,
+    execution::DeviceExecutorRegistry device_executors)
     : lifecycle_telemetry_(std::make_unique<ExecutionLifecycleTelemetry>()),
       lifecycle_registry_(
-          std::make_unique<RunLifecycleRegistry>(*lifecycle_telemetry_)),
-      pool_(std::make_unique<PoolState>(resource_limits, *lifecycle_telemetry_,
-                                        policy_lifecycle_observer())) {
+          std::make_unique<RunLifecycleRegistry>(*lifecycle_telemetry_)) {
+  retain_executable_device_limits(resource_limits, device_executors);
+  pool_ = std::make_unique<PoolState>(
+      std::move(resource_limits), std::move(device_executors),
+      *lifecycle_telemetry_, policy_lifecycle_observer());
   const ExecutionLifecycleCounters counters = lifecycle_registry_->counters();
   lifecycle_telemetry_->publish(ExecutionLifecycleEventKind::ServiceStarted,
                                 ExecutionLifecycleCategory::None, 0U, 0U, 0U,
@@ -3133,6 +3920,23 @@ ExecutionService::~ExecutionService() noexcept {
   } catch (...) {
     std::terminate();
   }
+}
+
+/** @copydoc ExecutionService::prepare_supersession_lineage */
+void ExecutionService::prepare_supersession_lineage(
+    GraphInstanceId graph_instance_id, const SupersessionIdentity& identity) {
+  pool_->device_executors.track_lineage(graph_instance_id.value(),
+                                        identity.key.target_node_id(),
+                                        identity.key.request_intent());
+}
+
+/** @copydoc ExecutionService::observe_current_supersession */
+void ExecutionService::observe_current_supersession(
+    GraphInstanceId graph_instance_id,
+    const SupersessionIdentity& identity) noexcept {
+  pool_->device_executors.publish_current_generation(
+      graph_instance_id.value(), identity.key.target_node_id(),
+      identity.key.request_intent(), identity.generation.value());
 }
 
 /** @copydoc ExecutionService::policy_lifecycle_observer */
@@ -3275,6 +4079,8 @@ bool ExecutionService::is_configured() const {
 
 /** @copydoc ExecutionService::get_stats */
 std::string ExecutionService::get_stats() const {
+  const execution::ComputeIoExecutorSnapshot compute_io =
+      pool_->compute_io_executor.snapshot();
   std::lock_guard<std::mutex> lock(pool_->mutex);
   const ResourceLedger::Snapshot resources = pool_->ledger.snapshot();
   std::ostringstream stream;
@@ -3282,7 +4088,9 @@ std::string ExecutionService::get_stats() const {
          << ", Active runs: " << pool_->ready_store.run_count()
          << ", Ready tasks: " << pool_->ready_store.entry_count()
          << ", Ready bytes: " << pool_->ready_store.byte_count()
-         << ", Reserved CPU: " << resources.reserved.cpu_slots;
+         << ", Reserved CPU: " << resources.reserved.cpu_slots
+         << ", Compute I/O tasks: " << compute_io.active_tasks
+         << ", Compute I/O bytes: " << compute_io.active_planned_bytes;
   return stream.str();
 }
 
@@ -3441,6 +4249,23 @@ ResourceLedger::Snapshot ExecutionService::resource_snapshot() const {
   return pool_->ledger.snapshot();
 }
 
+/** @copydoc ExecutionService::compute_io_executor */
+execution::ComputeIoExecutor& ExecutionService::compute_io_executor() noexcept {
+  return pool_->compute_io_executor;
+}
+
+/** @copydoc ExecutionService::compute_io_executor */
+const execution::ComputeIoExecutor& ExecutionService::compute_io_executor()
+    const noexcept {
+  return pool_->compute_io_executor;
+}
+
+/** @copydoc ExecutionService::device_resource_snapshot */
+std::optional<ResourceLedger::DeviceSnapshot>
+ExecutionService::device_resource_snapshot(DeviceId device) const {
+  return pool_->ledger.device_snapshot(device);
+}
+
 /** @copydoc ExecutionService::register_graph_lifecycle */
 void ExecutionService::register_graph_lifecycle(
     std::shared_ptr<GraphLifetimeAnchor> anchor) {
@@ -3507,10 +4332,23 @@ void ExecutionService::finish_graph_close_lifecycle(
   lifecycle_registry_->finish_graph_close(graph_instance_id);
 }
 
+/** @copydoc ExecutionService::retire_graph_supersession_lineages */
+std::size_t ExecutionService::retire_graph_supersession_lineages(
+    GraphInstanceId graph_instance_id) noexcept {
+  try {
+    return pool_->device_executors.retire_graph_lineages(
+        graph_instance_id.value());
+  } catch (...) {
+    std::terminate();
+  }
+}
+
 /** @copydoc ExecutionService::close_graph_lifecycle */
 void ExecutionService::close_graph_lifecycle(
     GraphInstanceId graph_instance_id, ComputeRunCancellationReason reason) {
-  lifecycle_registry_->close_graph(graph_instance_id, reason);
+  (void)begin_graph_close_lifecycle(graph_instance_id, reason);
+  finish_graph_close_lifecycle(graph_instance_id);
+  (void)retire_graph_supersession_lineages(graph_instance_id);
 }
 
 /** @copydoc ExecutionService::validate_shutdown_caller */
@@ -3551,6 +4389,15 @@ void ExecutionService::shutdown() {
 
   try {
     lifecycle_registry_->wait_until_empty();
+    pool_->compute_io_executor.shutdown();
+    const execution::ComputeIoExecutorSnapshot compute_io =
+        pool_->compute_io_executor.snapshot();
+    if (compute_io.active_tasks != 0U ||
+        compute_io.active_planned_bytes != 0U ||
+        !compute_io.shutdown_complete) {
+      throw std::logic_error(
+          "ExecutionService compute-I/O executor did not drain.");
+    }
     const ResourceLedger::Snapshot before_stop = pool_->ledger.snapshot();
     if (before_stop.reserved != ResourceVector{}) {
       throw std::logic_error(
@@ -3569,6 +4416,10 @@ void ExecutionService::shutdown() {
       if (!pool_->ready_store.empty()) {
         throw std::logic_error(
             "ExecutionService registry settled with ready entries.");
+      }
+      if (!pool_->operation_gate.empty()) {
+        throw std::logic_error(
+            "ExecutionService registry settled with active operation gates.");
       }
       pool_->ready_store.clear();
       pool_->advance_worker_notification_epoch();
@@ -3671,9 +4522,18 @@ PreparedExecutionRun ExecutionService::prepare_run(
     throw std::invalid_argument(
         "ExecutionService initial ready count exceeds total task count.");
   }
-  const bool route_metal_available =
-      route_exposes_device(host, execution_type, Device::GPU_METAL);
+  const bool route_metal_registered =
+      execution_type == "gpu_pipeline" &&
+      pool_->device_executors.contains(Device::GPU_METAL);
   const ComputeRunId run_id = initial_submissions.front().metadata().run_id();
+  const ReadyTaskSubmission& representative = initial_submissions.front();
+  const execution::DeviceCompletionSeed completion_seed(
+      representative.metadata().graph_instance_id().value(),
+      representative.metadata().target_node_id(),
+      representative.metadata().supersession().key.request_intent(),
+      representative.metadata().supersession().generation.value(),
+      representative.identity().run_id().value(),
+      representative.identity().local_task_id().value());
   ComputeRunLease service_lease = initial_submissions.front().lease_;
   for (const ReadyTaskSubmission& submission : initial_submissions) {
     if (submission.metadata().run_id() != run_id) {
@@ -3684,7 +4544,7 @@ PreparedExecutionRun ExecutionService::prepare_run(
       throw std::invalid_argument(
           "ExecutionService initial batch resource declaration mismatch.");
     }
-    if (!route_inventory_exposes_device(execution_type, route_metal_available,
+    if (!route_inventory_exposes_device(execution_type, route_metal_registered,
                                         submission.metadata().device())) {
       throw std::invalid_argument(
           "ExecutionService submission device is unavailable on its route.");
@@ -3740,7 +4600,7 @@ PreparedExecutionRun ExecutionService::prepare_run(
       run_id, std::move(admission.policy_graph_identity),
       std::move(admission.policy_graph_key),
       initial_submissions.front().metadata().qos(), host, execution_type,
-      route_metal_available, total_task_count, run_resource_demand.task,
+      route_metal_registered, total_task_count, run_resource_demand.task,
       admission.ready_bytes_per_task,
       admission.execution_retained_bytes_per_task, std::move(*reservation));
 
@@ -3786,6 +4646,7 @@ PreparedExecutionRun ExecutionService::prepare_run(
   state->owner = this;
   state->run = std::move(run);
   state->batch = std::move(batch);
+  state->completion_seed = completion_seed;
   state->cancellation_registration = std::move(cancellation_registration);
   return PreparedExecutionRun(std::move(state));
 }
@@ -3847,6 +4708,114 @@ PreparedExecutionSharedReservation ExecutionService::prepare_shared_reservation(
   return PreparedExecutionSharedReservation(std::move(state));
 }
 
+/** @copydoc ExecutionService::acquire_operation_execution */
+OperationExecutionLease ExecutionService::acquire_operation_execution(
+    const ComputeRunLease& run_lease,
+    const OperationExecutionConstraints& constraints,
+    ReadyTaskResourceDemand demand) {
+  if (demand.work_units == 0U) {
+    throw std::invalid_argument(
+        "Direct operation execution requires positive work units.");
+  }
+  if ((!constraints.reentrant || constraints.maximum_parallelism != 0U) &&
+      constraints.implementation_identity == 0U) {
+    throw std::invalid_argument(
+        "Direct operation caps require a nonzero implementation identity.");
+  }
+  if (constraints.exclusive_key.size() >
+          OperationExecutionConstraints::kExclusiveKeyMaxBytes ||
+      constraints.exclusive_key.find('\0') != std::string::npos) {
+    throw std::invalid_argument(
+        "Direct operation execution has an invalid exclusive key.");
+  }
+
+  ComputeRunLease service_lease(run_lease);
+  auto state = std::make_unique<OperationExecutionLeaseState>(
+      *this, std::move(service_lease), constraints);
+  const ResourceVector resources =
+      direct_operation_execution_resources(state->constraints, demand);
+  OperationExecutionLeaseState* const state_ptr = state.get();
+  const OperationExecutionConstraints& retained_constraints =
+      state->constraints;
+
+  {
+    std::unique_lock<std::mutex> lock(pool_->mutex);
+    while (!pool_->operation_gate.can_start(retained_constraints)) {
+      if (pool_->stopping) {
+        throw std::logic_error("ExecutionService is stopping.");
+      }
+      const std::uint64_t observed_epoch = pool_->worker_notification_epoch;
+      (void)pool_->ready_cv.wait_for(
+          lock, std::chrono::milliseconds(50),
+          [this, state_ptr, observed_epoch]() {
+            return pool_->stopping ||
+                   pool_->worker_notification_epoch != observed_epoch ||
+                   pool_->operation_gate.can_start(state_ptr->constraints);
+          });
+      lock.unlock();
+      if (state->run_lease.observe_cancellation().has_value()) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "ComputeRun cancelled while waiting for operation admission.");
+      }
+      lock.lock();
+    }
+    if (pool_->stopping) {
+      throw std::logic_error("ExecutionService is stopping.");
+    }
+    if (!pool_->operation_gate.try_start(retained_constraints)) {
+      throw std::logic_error(
+          "Operation startability changed under the service lock.");
+    }
+    state->gate_started = true;
+    pool_->advance_worker_notification_epoch();
+  }
+  pool_->ready_cv.notify_all();
+
+  if (state->run_lease.observe_cancellation().has_value()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ComputeRun cancelled before operation resource admission.");
+  }
+
+  const ResourceLedger::ReservationSettlementObserver settlement_observer =
+      state->run_lease.begin_resource_settlement_observation(
+          *lifecycle_telemetry_);
+  std::optional<ResourceLedger::Reservation> reservation;
+  try {
+    std::lock_guard<std::mutex> lock(pool_->mutex);
+    if (pool_->stopping) {
+      throw std::logic_error("ExecutionService is stopping.");
+    }
+    reservation = pool_->try_reserve_for_policy(
+        resources, state->run_lease.descriptor().qos().service_class,
+        settlement_observer);
+  } catch (...) {
+    state->run_lease.cancel_resource_settlement_observation();
+    throw;
+  }
+  if (!reservation.has_value()) {
+    state->run_lease.cancel_resource_settlement_observation();
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ExecutionService policy/ledger cannot admit direct operation.");
+  }
+  state->reservation.emplace(std::move(*reservation));
+  state->run_lease.commit_resource_settlement_observation();
+  return OperationExecutionLease(std::move(state));
+}
+
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+/**
+ * @copydoc ExecutionService::direct_operation_gate_can_start_for_testing
+ */
+bool ExecutionService::direct_operation_gate_can_start_for_testing(
+    const OperationExecutionConstraints& constraints) {
+  std::lock_guard<std::mutex> lock(pool_->mutex);
+  return pool_->operation_gate.can_start(constraints);
+}
+#endif
+
 /** @copydoc ExecutionService::execute_prepared_run */
 void ExecutionService::execute_prepared_run(PreparedExecutionRun prepared) {
   if (!prepared.state_ || prepared.state_->owner != this) {
@@ -3855,6 +4824,11 @@ void ExecutionService::execute_prepared_run(PreparedExecutionRun prepared) {
   }
   std::unique_ptr<PreparedExecutionRunState> state = std::move(prepared.state_);
   const std::shared_ptr<RunState> run = state->run;
+  if (!state->completion_seed.has_value()) {
+    throw std::logic_error(
+        "Prepared execution Run has no completion-lineage seed.");
+  }
+  pool_->device_executors.observe_generation(*state->completion_seed);
 
   {
     std::lock_guard<std::mutex> pool_lock(pool_->mutex);
@@ -4022,17 +4996,184 @@ void ExecutionService::submit_ready_submission(ReadyTaskSubmission submission) {
   enqueue_submission(run, std::move(submission));
 }
 
+/** @copydoc ExecutionService::make_ready_fence_executor */
+std::shared_ptr<ReadyFenceExecutor>
+ExecutionService::make_ready_fence_executor() {
+  if (tls_service_ != this || tls_run_state_ == nullptr ||
+      tls_queue_entry_ == nullptr ||
+      tls_queue_entry_->run.get() != tls_run_state_) {
+    throw std::logic_error(
+        "Fence continuation executor requires the matching service worker.");
+  }
+  if (!tls_fence_continuation_gate_) {
+    tls_fence_continuation_gate_ = std::make_shared<FenceContinuationGate>(
+        tls_queue_entry_->run, tls_queue_entry_->submission.lease_,
+        tls_queue_entry_->submission.identity(),
+        tls_queue_entry_->submission.metadata().trace_node_id());
+  }
+  const std::shared_ptr<FenceContinuationGate> gate =
+      tls_fence_continuation_gate_;
+  const std::shared_ptr<RunState> run = gate->run;
+  ComputeRunLease lease = gate->lease;
+  const ComputeRunTaskIdentity identity = gate->identity;
+  const int trace_node_id = gate->trace_node_id;
+  ServiceReadyFenceExecutor::Submitter submitter =
+      [this, gate, run, lease = std::move(lease), identity,
+       trace_node_id](ReadyFenceExecutor::Task task) mutable {
+        deliver_fence_continuation(gate, run, std::move(lease), identity,
+                                   trace_node_id, std::move(task));
+      };
+  ServiceReadyFenceExecutor::Releaser releaser = [this, run]() noexcept {
+    retire_fence_continuation(run);
+  };
+  retain_fence_continuation(run);
+  try {
+    return std::make_shared<ServiceReadyFenceExecutor>(std::move(submitter),
+                                                       std::move(releaser));
+  } catch (...) {
+    retire_fence_continuation(run);
+    throw;
+  }
+}
+
+/** @copydoc ExecutionService::retain_fence_continuation */
+void ExecutionService::retain_fence_continuation(
+    const std::shared_ptr<RunState>& run) {
+  if (!run) {
+    throw std::invalid_argument(
+        "Fence continuation retention requires an active Run.");
+  }
+  std::lock_guard<std::mutex> lock(run->mutex);
+  if (run->pending_fence_continuations == std::numeric_limits<int>::max()) {
+    throw std::overflow_error("Pending fence continuation count is exhausted.");
+  }
+  ++run->pending_fence_continuations;
+}
+
+/** @copydoc ExecutionService::retire_fence_continuation */
+void ExecutionService::retire_fence_continuation(
+    const std::shared_ptr<RunState>& run) noexcept {
+  if (!run) {
+    return;
+  }
+  try {
+    bool settled = false;
+    {
+      std::lock_guard<std::mutex> lock(run->mutex);
+      if (run->pending_fence_continuations <= 0) {
+        std::terminate();
+      }
+      --run->pending_fence_continuations;
+      settled = run->settled();
+    }
+    if (settled) {
+      run->settled_cv.notify_all();
+    }
+  } catch (...) {
+    std::terminate();
+  }
+}
+
+/** @copydoc ExecutionService::deliver_fence_continuation */
+void ExecutionService::deliver_fence_continuation(
+    const std::shared_ptr<FenceContinuationGate>& gate,
+    const std::shared_ptr<RunState>& run, ComputeRunLease lease,
+    ComputeRunTaskIdentity identity, int trace_node_id,
+    ReadyFenceExecutor::Task task) noexcept {
+  try {
+    if (!run) {
+      return;
+    }
+    if (!gate || !task || gate->run != run || gate->identity != identity ||
+        gate->trace_node_id != trace_node_id ||
+        lease.descriptor().id() != identity.run_id()) {
+      fail_run(run, std::make_exception_ptr(std::invalid_argument(
+                        "Fence continuation identity is inconsistent.")));
+      return;
+    }
+    bool enqueue_now = false;
+    {
+      std::lock_guard<std::mutex> lock(gate->mutex);
+      if (gate->callback_delivered) {
+        fail_run(run, std::make_exception_ptr(std::logic_error(
+                          "Fence continuation was delivered more than once.")));
+        return;
+      }
+      gate->callback_delivered = true;
+      if (gate->original_retired) {
+        enqueue_now = true;
+      } else {
+        gate->parked_task.emplace(std::move(task));
+      }
+    }
+    if (enqueue_now) {
+      enqueue_fence_continuation(gate, std::move(task));
+    }
+  } catch (...) {
+    fail_run(run, std::current_exception());
+  }
+}
+
+/** @copydoc ExecutionService::release_fence_continuation */
+void ExecutionService::release_fence_continuation(
+    const std::shared_ptr<FenceContinuationGate>& gate) noexcept {
+  if (!gate) {
+    return;
+  }
+  try {
+    std::optional<ReadyFenceExecutor::Task> parked;
+    {
+      std::lock_guard<std::mutex> lock(gate->mutex);
+      if (gate->original_retired) {
+        fail_run(gate->run,
+                 std::make_exception_ptr(std::logic_error(
+                     "Fence continuation original task retired twice.")));
+        return;
+      }
+      gate->original_retired = true;
+      parked = std::move(gate->parked_task);
+    }
+    if (parked.has_value()) {
+      enqueue_fence_continuation(gate, std::move(*parked));
+    }
+  } catch (...) {
+    fail_run(gate->run, std::current_exception());
+  }
+}
+
+/** @copydoc ExecutionService::enqueue_fence_continuation */
+void ExecutionService::enqueue_fence_continuation(
+    const std::shared_ptr<FenceContinuationGate>& gate,
+    ReadyFenceExecutor::Task task) noexcept {
+  try {
+    if (!gate || !gate->run || !task) {
+      throw std::invalid_argument(
+          "Fence continuation requires complete routed ownership.");
+    }
+    ReadyTaskSubmission submission(
+        gate->lease, gate->identity, gate->trace_node_id, false,
+        [task = std::move(task)](ComputeRunLease&,
+                                 const ComputeRunTaskIdentity&,
+                                 ExecutionTaskRuntime&) mutable { task(); },
+        ExecutionTaskPriority::High, gate->run->resource_demand, Device::CPU);
+    enqueue_submission(gate->run, std::move(submission));
+  } catch (...) {
+    if (gate && gate->run) {
+      fail_run(gate->run, std::current_exception());
+    }
+  }
+}
+
 /** @copydoc ExecutionService::available_devices */
 std::vector<Device> ExecutionService::available_devices() const {
   return {Device::CPU};
 }
 
-/** @copydoc ExecutionService::available_devices(const ExecutionHostContext&,
- * const std::string&) */
+/** @copydoc ExecutionService::available_devices(const std::string&) */
 std::vector<Device> ExecutionService::available_devices(
-    const ExecutionHostContext& host, const std::string& execution_type) const {
+    const std::string& execution_type) const {
   if (execution_type == "gpu_pipeline") {
-    if (route_exposes_device(host, execution_type, Device::GPU_METAL)) {
+    if (pool_->device_executors.contains(Device::GPU_METAL)) {
       return {Device::GPU_METAL, Device::CPU};
     }
     return {Device::CPU};
@@ -4042,6 +5183,17 @@ std::vector<Device> ExecutionService::available_devices(
   }
   throw GraphError(GraphErrc::NotFound,
                    "Unknown private execution route: " + execution_type);
+}
+
+/** @copydoc ExecutionService::has_device_executor */
+bool ExecutionService::has_device_executor(Device device) const noexcept {
+  return pool_->device_executors.contains(device);
+}
+
+/** @copydoc ExecutionService::device_executor_diagnostics */
+execution::DeviceExecutorDiagnostics
+ExecutionService::device_executor_diagnostics(Device device) const {
+  return pool_->device_executors.diagnostics(device);
 }
 
 /** @copydoc ExecutionService::submit_initial_task_handles */
@@ -4144,6 +5296,7 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
   if (!failure) {
     return;
   }
+  std::list<std::shared_ptr<QueueEntry>> retired_entries;
   try {
     {
       std::lock_guard<std::mutex> pool_lock(pool_->mutex);
@@ -4155,10 +5308,11 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
         run->accepting = false;
       }
       if (run->published) {
-        (void)pool_->ready_store.erase_run(run);
+        (void)pool_->ready_store.erase_run(run, retired_entries);
       }
       pool_->advance_worker_notification_epoch();
     }
+    retired_entries.clear();
     pool_->ready_cv.notify_all();
     run->settled_cv.notify_all();
   } catch (...) {
@@ -4169,6 +5323,7 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
 void ExecutionService::cancel_run(
     const std::shared_ptr<RunState>& run,
     ComputeRunCancellationReason reason) noexcept {
+  std::list<std::shared_ptr<QueueEntry>> retired_entries;
   try {
     {
       std::lock_guard<std::mutex> pool_lock(pool_->mutex);
@@ -4180,10 +5335,11 @@ void ExecutionService::cancel_run(
       run->first_exception = nullptr;
       run->accepting = false;
       if (run->published) {
-        (void)pool_->ready_store.erase_run(run);
+        (void)pool_->ready_store.erase_run(run, retired_entries);
       }
       pool_->advance_worker_notification_epoch();
     }
+    retired_entries.clear();
     pool_->ready_cv.notify_all();
     run->settled_cv.notify_all();
   } catch (...) {
@@ -4206,6 +5362,11 @@ void ExecutionService::retire_worker_entry(
       if (!pool_->physical_routes.finish(run->route, device)) {
         std::terminate();
       }
+      if (!entry->operation_gate_started) {
+        std::terminate();
+      }
+      pool_->operation_gate.finish(entry->submission.operation_constraints());
+      entry->operation_gate_started = false;
       pool_->advance_worker_notification_epoch();
     }
 
@@ -4234,6 +5395,8 @@ void ExecutionService::retire_worker_entry(
 /** @copydoc ExecutionService::worker_loop */
 void ExecutionService::worker_loop(
     int worker_id, execution::PhysicalExecutionLane lane) noexcept {
+  const execution::ComputeIoWaitProhibitionScope compute_io_wait_prohibition(
+      lane == execution::PhysicalExecutionLane::Cpu);
   for (;;) {
     std::shared_ptr<QueueEntry> entry;
     std::exception_ptr selection_failure;
@@ -4499,6 +5662,8 @@ void ExecutionService::worker_loop(
 
     tls_service_ = this;
     tls_run_state_ = run.get();
+    tls_queue_entry_ = entry.get();
+    tls_fence_continuation_gate_.reset();
     tls_worker_id_ = worker_id;
     run->host->set_task_context(worker_id, run->id.value());
     lifecycle_telemetry_->increment_physical_counter(
@@ -4508,7 +5673,14 @@ void ExecutionService::worker_loop(
         log_event(ExecutionTraceAction::AssignInitial,
                   entry->submission.metadata().trace_node_id());
       }
-      entry->submission.execute(*this);
+      if (entry->submission.metadata().device() == Device::CPU) {
+        entry->submission.execute(*this);
+      } else {
+        ReadySubmissionDeviceInvocation invocation(entry->submission, *this,
+                                                   pool_->ledger);
+        pool_->device_executors.execute(entry->submission.metadata().device(),
+                                        invocation);
+      }
       const std::optional<ComputeRunCancellationReason> cancellation =
           entry->submission.lease_.observe_cancellation();
       if (cancellation.has_value()) {
@@ -4520,10 +5692,14 @@ void ExecutionService::worker_loop(
     lifecycle_telemetry_->decrement_physical_counter(
         ExecutionLifecyclePhysicalCounter::EnteredCallback);
     run->host->clear_task_context();
+    std::shared_ptr<FenceContinuationGate> fence_gate =
+        std::move(tls_fence_continuation_gate_);
+    tls_queue_entry_ = nullptr;
     tls_worker_id_ = -1;
     tls_run_state_ = nullptr;
     tls_service_ = nullptr;
     retire_worker_entry(entry, run);
+    release_fence_continuation(fence_gate);
   }
 }
 

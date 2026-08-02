@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -11,6 +12,12 @@
 #include "compute/task_graph_planning.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/graph_error.hpp"
+
+namespace ps {
+
+class RegionSet;
+
+}  // namespace ps
 
 namespace ps::compute {
 
@@ -54,6 +61,35 @@ class RetainedMemoryEstimator final {
           std::string(boundary_) + " retained-memory estimate overflow.");
     }
     bytes_ += bytes;
+  }
+
+  /**
+   * @brief Adds the complete owned payload of one copied `std::string`.
+   * @param value String whose actual capacity and trailing null are retained.
+   * @return Nothing.
+   * @throws GraphError when capacity conversion, the terminator addition, or
+   * checked accumulation cannot be represented by `std::uint64_t`.
+   * @note Small-string payloads may be inline; charging their capacity plus
+   * one remains a deliberate conservative bound. Callers must invoke this
+   * once for each independently retained string value and must not substitute
+   * `size()` for the actual copied capacity.
+   */
+  void add_string_payload(const std::string& value) {
+    if constexpr (sizeof(std::size_t) > sizeof(std::uint64_t)) {
+      if (value.capacity() >
+          static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            std::string(boundary_) + " retained-memory estimate overflow.");
+      }
+    }
+    const std::uint64_t capacity = static_cast<std::uint64_t>(value.capacity());
+    if (capacity == std::numeric_limits<std::uint64_t>::max()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          std::string(boundary_) + " retained-memory estimate overflow.");
+    }
+    add_bytes(capacity + 1U);
   }
 
   /**
@@ -123,6 +159,16 @@ std::uint64_t compute_plan_dynamic_retained_memory_bytes(
  */
 std::uint64_t dirty_selection_dynamic_retained_memory_bytes(
     const DirtyTaskSelectionOverlay& selection);
+
+/**
+ * @brief Estimates dynamic storage owned by one canonical logical Region.
+ * @param region Region whose atom and TensorSlice-axis capacities are charged.
+ * @return Checked dynamic bytes excluding `sizeof(RegionSet)`.
+ * @throws GraphError when checked structural arithmetic overflows.
+ * @note ImageRect atoms have no nested allocation. The atom vector capacity is
+ *       charged for every Region kind; Empty and Whole normally report zero.
+ */
+std::uint64_t region_dynamic_retained_memory_bytes(const RegionSet& region);
 
 /**
  * @brief Estimates complete Host-owned HP dirty-plan storage.

@@ -37,6 +37,70 @@ enum class PlannedTaskKind {
 };
 
 /**
+ * @brief Callback-free operation route frozen by task-shape planning.
+ *
+ * @throws std::bad_alloc when copied exclusive-key storage cannot allocate.
+ * @note The scalar identity and metadata originate from one coherent
+ * OpRegistry snapshot. Planning deliberately retains no callback or plugin DSO
+ * lease; execution must re-resolve the same nonzero identity before admission.
+ */
+struct PlannedOperationRoute {
+  /** @brief Nonzero registry ownership revision of the selected callback. */
+  std::uint64_t implementation_identity = 0U;
+  /** @brief Device selected by registry intent/cost policy. */
+  Device device = Device::CPU;
+  /** @brief Complete scheduling and resource metadata from the same snapshot.
+   */
+  OpMetadata metadata;
+  /** @brief Whether the selected callback uses the tiled operation shape. */
+  bool tiled = false;
+};
+
+/**
+ * @brief Copies one coherent registry implementation into a callback-free
+ * route.
+ *
+ * @param implementation Selected registry value whose scalar identity,
+ * device, metadata, and callback shape are frozen together.
+ * @return Callback-free planning route.
+ * @throws std::bad_alloc when copied metadata string storage cannot allocate.
+ * @note The returned value never retains `implementation.func` or its plugin
+ * DSO lease. Callers must keep the source implementation alive only for this
+ * call.
+ */
+PlannedOperationRoute make_planned_operation_route(
+    const OpImplementation& implementation);
+
+/**
+ * @brief Compares every execution-relevant field of two planned routes.
+ *
+ * @param lhs First callback-free route.
+ * @param rhs Second callback-free route.
+ * @return True only when identity, device, callback shape, and every
+ * `OpMetadata` field match.
+ * @throws Nothing.
+ * @note Keep this centralized comparison and retained-memory accounting in
+ * sync whenever `OpMetadata` gains a field.
+ */
+bool planned_operation_routes_equal(const PlannedOperationRoute& lhs,
+                                    const PlannedOperationRoute& rhs) noexcept;
+
+/**
+ * @brief Checks one current registry implementation against a frozen route.
+ *
+ * @param route Callback-free planning authority.
+ * @param implementation Newly selected callable snapshot.
+ * @return True only when the current implementation is exactly the same
+ * revision, device, shape, and metadata.
+ * @throws Nothing.
+ * @note The comparison never invokes or copies the callback and therefore
+ * cannot extend a plugin DSO lifetime.
+ */
+bool planned_operation_route_matches(
+    const PlannedOperationRoute& route,
+    const OpImplementation& implementation) noexcept;
+
+/**
  * @brief Node-level dependency edge represented in a ComputeTaskGraph.
  *
  * PlannedDependency records the logical relationship between two planned
@@ -126,7 +190,13 @@ struct PlannedNodeWork {
   PixelRect execution_roi;
   /** @brief Whether the work item must recompute the whole output. */
   bool whole_output = false;
-  /** @brief Whether a formal reusable HP cache was available during pruning. */
+  /**
+   * @brief Whether planning observed exact complete formal HP cache.
+   *
+   * @note This is request-scoped diagnostic metadata, not a durable cache claim
+   * or dirty execution decision. Snapshot selection never promotes it into
+   * satisfaction.
+   */
   bool reusable_cache_available = false;
   /** @brief Dirty ROIs associated with this node after snapshot pruning. */
   std::vector<PixelRect> dirty_rois;
@@ -136,6 +206,12 @@ struct PlannedNodeWork {
   std::vector<int> dependent_node_ids;
   /** @brief Task ids in ComputeTaskGraph::tasks that belong to this node. */
   std::vector<int> task_ids;
+  /**
+   * @brief Callback-free route selected while this node's task shape was built.
+   * @note Graphless compatibility plans may leave this empty. Product graph
+   * execution re-resolves and validates the exact identity before admission.
+   */
+  std::optional<PlannedOperationRoute> operation_route;
 };
 
 /**
@@ -180,7 +256,7 @@ struct DirtyUpdateWorkSet {
  * @brief Dirty ROI metadata selected for one node in a generation overlay.
  *
  * DirtyTaskSelectionOverlay keeps these records outside ComputePlan so the
- * node/cache-pruned plan can remain immutable and reusable across repeated ROI
+ * retained complete request-cone plan remains immutable across repeated ROI
  * updates. The record contains only generation-local ROI overrides required by
  * dirty execution and inspection summaries.
  *
@@ -208,8 +284,8 @@ struct DirtyNodeSelection {
  * and the source/downstream work sets used by source-first dirty execution.
  * It avoids copying the full ComputePlan on high-frequency dirty paths.
  *
- * @note Task ids refer to the node/cache-pruned ComputePlan used to create the
- * overlay. The overlay never creates new task shapes.
+ * @note Task ids refer to the retained request-cone ComputePlan used to create
+ * the overlay. The overlay never creates new task shapes.
  */
 struct DirtyTaskSelectionOverlay {
   /** @brief Dirty snapshot generation used for this active view. */
@@ -240,13 +316,15 @@ struct DirtyTaskSelectionOverlay {
  * @brief Request attributes used by task graph expansion and pruning.
  *
  * ComputeRequest is the planning-layer description of intent, target node,
- * parallel execution preference, and optional dirty ROI. It is narrower than
- * internal ComputeService request options and contains only data needed to
- * produce a
+ * parallel execution preference, optional dirty ROI, and whether formal HP
+ * cache may satisfy requested work. It is narrower than internal
+ * ComputeService request options and contains only data needed to produce a
  * ComputePlan.
  *
  * @note RealTimeUpdate requests are still planned as a single domain per call;
- * HP/RT sibling coordination happens outside this struct.
+ * HP/RT sibling coordination happens outside this struct. Force-recache
+ * callers disable reusable cache before pruning instead of clearing visible
+ * Graph output during fallible preparation.
  */
 struct ComputeRequest {
   /** @brief Compute intent whose domain controls task expansion. */
@@ -257,6 +335,22 @@ struct ComputeRequest {
   bool parallel = false;
   /** @brief Optional dirty ROI used by dirty update callers. */
   std::optional<PixelRect> dirty_roi;
+  /**
+   * @brief Whether exact complete formal HP cache may satisfy planned work.
+   *
+   * @note This flag never promotes RT proxy or partial Region state. Ordinary
+   * pruning delegates exact completeness to ComputeCachePolicy. Dirty
+   * selection does not apply it to snapshot-selected work.
+   */
+  bool allow_reusable_cache = true;
+  /**
+   * @brief Whether dirty selection owns final request-cone demand cutting.
+   *
+   * @note Dirty preparation enables this after Region planning so node/cache
+   * pruning retains the complete callback-free request cone. Ordinary full HP
+   * dispatch leaves it disabled and may consume exact cache immediately.
+   */
+  bool defer_reusable_cache_pruning = false;
 };
 
 /**
@@ -278,14 +372,34 @@ struct ComputePlan {
   int target_node_id = -1;
   /** @brief Whether the caller intended route-backed execution. */
   bool parallel = false;
-  /** @brief Original traversal order for the request target. */
+  /**
+   * @brief Traversal order retained for this request plan.
+   *
+   * @note Ordinary plans contain the cache-pruned executable order. Dirty plans
+   * retain the complete request cone until snapshot selection.
+   */
   std::vector<int> execution_order;
-  /** @brief Node ids that survived pruning and should be considered planned. */
+  /**
+   * @brief Node ids whose callback-free task shapes remain in this plan.
+   *
+   * @note Dirty plans include inactive boundary nodes and exclusive upstream
+   * shape so selection can apply request-local demand cuts without destroying
+   * task identities.
+   */
   std::vector<int> planned_nodes;
-  /** @brief Per-node work summaries aligned with planned_nodes by content. */
+  /**
+   * @brief Request-cone work and cache-boundary summaries.
+   *
+   * Records for retained task-shape nodes carry task ids and appear in
+   * planned_nodes. Ordinary cache-pruned plans may also retain metadata-only
+   * records for boundaries and exclusive upstream work. Dirty plans retain task
+   * ids for the complete request cone until snapshot demand cutting.
+   */
   std::vector<PlannedNodeWork> planned_work;
   /** @brief Executable task graph derived from planned work. */
   ComputeTaskGraph task_graph;
+  /** @brief Canonical device inventory used for operation route selection. */
+  std::vector<Device> available_devices;
 };
 
 /**
@@ -361,6 +475,8 @@ struct FullTaskGraph {
   std::vector<PlannedNodeWork> expanded_work;
   /** @brief Full task graph before request pruning. */
   ComputeTaskGraph task_graph;
+  /** @brief Canonical device inventory covered by this cached expansion. */
+  std::vector<Device> available_devices;
   /**
    * @brief Expanded work index keyed by graph node id.
    *
@@ -398,18 +514,24 @@ class FullTaskGraphExpander {
    *
    * @param graph Source graph whose nodes and op metadata are inspected.
    * @param intent Compute intent used to choose HP or RT task domain.
+   * @param available_devices Canonical route-visible device inventory.
    * @return FullTaskGraph containing all expanded node work and tasks.
    * @throws GraphError or standard exceptions from graph access, extent
    * resolution, op metadata lookup, or allocation.
    */
-  FullTaskGraph expand(const GraphModel& graph, ComputeIntent intent) const;
+  FullTaskGraph expand(const GraphModel& graph, ComputeIntent intent,
+                       const std::vector<Device>& available_devices = {
+                           Device::CPU}) const;
 };
 
 /**
  * @brief Prunes a FullTaskGraph to a target/cache-aware request plan.
  *
- * @note Cache hits are recorded as metadata; execution still resolves cache
- * reads and writes through dispatcher/NodeTaskRunner semantics.
+ * @note Exact complete formal HP cache forms a request-local read boundary for
+ * ordinary requests. Dirty requests retain the complete callback-free request
+ * cone and only record the planning-time observation; a node selected by the
+ * dirty snapshot remains executable because its old bytes are a merge base,
+ * not proof that the requested Region is current.
  */
 class NodeCacheTaskGraphPruner {
  public:
@@ -420,9 +542,17 @@ class NodeCacheTaskGraphPruner {
    * @param request Planning request containing target and intent.
    * @param execution_order Target postorder derived from GraphTraversalService.
    * @param graph GraphModel used to validate nodes and check reusable cache.
-   * @return ComputePlan limited to execution_order and selected dependencies.
+   * @return Ordinary ComputePlan limited to executable demand before cache
+   * boundaries, or a complete request-cone plan when deferred dirty selection
+   * is enabled.
    * @throws GraphError when requested nodes are missing from graph or full
    * expansion.
+   * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+   * std::bad_alloc when exact cache validity or result storage cannot be
+   * evaluated.
+   * @note RealTimeUpdate and requests with allow_reusable_cache=false never
+   * treat formal HP cache as executable-task satisfaction. Deferred dirty
+   * plans preserve tasks and dependencies even when planning observes cache.
    */
   ComputePlan prune(const FullTaskGraph& full_graph,
                     const ComputeRequest& request,
@@ -431,32 +561,41 @@ class NodeCacheTaskGraphPruner {
 };
 
 /**
- * @brief Applies a DirtyRegionSnapshot to a node/cache-pruned plan.
+ * @brief Applies a DirtyRegionSnapshot to a request-cone plan.
  *
  * DirtySnapshotTaskGraphPruner annotates already-expanded tasks with dirty
  * metadata and materializes source/downstream task id groups. It does not
  * create new task shapes.
  *
- * @note The input plan must already be single-domain and cache-pruned for the
- * caller's HP or RT path.
+ * @note The input plan must already be single-domain. Dirty preparation retains
+ * the complete request cone and delegates snapshot/external boundary demand
+ * cutting to select().
  */
 class DirtySnapshotTaskGraphPruner {
  public:
   /**
-   * @brief Selects dirty tasks without copying the node/cache-pruned plan.
+   * @brief Selects dirty tasks without copying the request-cone plan.
    *
    * @param node_cache_plan Immutable plan produced by
-   * NodeCacheTaskGraphPruner.
+   * NodeCacheTaskGraphPruner with dirty cache pruning deferred.
    * @param snapshot Graph-scoped dirty facts for the same compute domain.
    * @param graph Graph used for exact task-level ROI dependencies.
    * @param externally_satisfied_node_ids Optional request-local node identities
    * whose outputs are already staged and must not execute in this phase.
    * @return Generation-local active task overlay and source/downstream groups.
-   * @throws std::bad_alloc if overlay vectors or maps cannot grow.
+   * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+   * std::bad_alloc when dependency metadata or overlay storage cannot be
+   * evaluated.
    * @note This is the dirty execution path: it does not mutate or duplicate
    * PlannedTask records, and it preserves task ids from node_cache_plan.
+   * Selection never lets old formal cache satisfy dirty work. Explicit
+   * current-request external satisfaction may suppress a dirty candidate.
+   * Demand traversal includes inactive connector and externally satisfied
+   * boundary nodes, stops at each boundary, and emits only dirty candidates.
    * Dependencies on explicitly satisfied nodes remain outside the active view
    * and are therefore treated as completed without reusing their task ids.
+   * Upstream tasks needed only through a satisfied boundary are also removed;
+   * shared upstream work remains active when another unsatisfied sink needs it.
    */
   DirtyTaskSelectionOverlay select(
       const ComputePlan& node_cache_plan, const DirtyRegionSnapshot& snapshot,
@@ -465,9 +604,11 @@ class DirtySnapshotTaskGraphPruner {
           nullptr) const;
 
   /**
-   * @brief Annotates and clips a node/cache-pruned plan with dirty metadata.
+   * @brief Annotates and clips a request-scoped plan with dirty metadata.
    *
-   * @param node_cache_plan Plan produced by NodeCacheTaskGraphPruner.
+   * @param node_cache_plan Request-scoped plan produced by
+   * NodeCacheTaskGraphPruner. Dirty execution supplies the retained complete
+   * request cone.
    * @param snapshot Graph-scoped dirty facts for the same compute domain.
    * @return ComputePlan copy with dirty ROI/work metadata refreshed.
    * @throws std::bad_alloc if copied vectors or maps cannot grow.
@@ -535,6 +676,7 @@ class TaskGraphReadyChecker {
  *
  * @param graph Graph whose topology generation participates in the key.
  * @param intent Compute intent whose HP/RT domain is expanded.
+ * @param available_devices Route-visible device inventory.
  * @return Cache key covering topology generation, intent, task-shape
  * configuration version, and operation-registry task-shape generation.
  * @throws std::bad_alloc if string construction fails.
@@ -542,14 +684,16 @@ class TaskGraphReadyChecker {
  *       selection semantics change. A plugin callback-shape override or unload
  *       advances the registry generation and cannot reuse predecessor tasks.
  */
-std::string full_task_graph_cache_key(const GraphModel& graph,
-                                      ComputeIntent intent);
+std::string full_task_graph_cache_key(
+    const GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices = {Device::CPU});
 
 /**
  * @brief Returns a cached immutable FullTaskGraph or expands and stores one.
  *
  * @param graph GraphModel owning the per-topology full graph cache.
  * @param intent Compute intent whose single-domain full graph is required.
+ * @param available_devices Route-visible device inventory.
  * @return Shared immutable full graph for request/cache/dirty pruning.
  * @throws GraphError when the operation registry changes continuously across
  *         all bounded expansion attempts.
@@ -560,7 +704,8 @@ std::string full_task_graph_cache_key(const GraphModel& graph,
  *       is discarded and retried.
  */
 std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
-    GraphModel& graph, ComputeIntent intent);
+    GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices = {Device::CPU});
 
 /**
  * @brief Builds a bounded summary for compute plan inspection.

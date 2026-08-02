@@ -1264,6 +1264,8 @@ bool ComputeRun::is_terminal() const {
  * ownership.
  * @param publish_plan_inspection Whether construction immediately updates graph
  * diagnostics.
+ * @param allow_reusable_cache Whether exact complete formal HP cache may
+ * satisfy nodes before task population.
  * @return Mutable Run-owned submission plan.
  * @throws std::logic_error for duplicate storage or terminal Run.
  * @throws GraphError or standard exceptions from TaskSubmissionPlan.
@@ -1271,7 +1273,8 @@ bool ComputeRun::is_terminal() const {
  */
 TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
     GraphModel& graph, GraphTraversalService& traversal, int node_id,
-    std::vector<Device> available_devices, bool publish_plan_inspection) {
+    std::vector<Device> available_devices, bool publish_plan_inspection,
+    bool allow_reusable_cache) {
   std::lock_guard<std::mutex> lock(control_->mutex);
   if (control_->arbiter_state != ComputeRunArbiterState::Open) {
     throw std::logic_error(
@@ -1282,7 +1285,8 @@ TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
   }
   control_->submission_plan = std::make_unique<TaskSubmissionPlan>(
       control_->descriptor.id(), graph, traversal, node_id,
-      std::move(available_devices), publish_plan_inspection);
+      std::move(available_devices), publish_plan_inspection,
+      allow_reusable_cache);
   return *control_->submission_plan;
 }
 
@@ -1482,9 +1486,7 @@ std::uint64_t ComputeRunLease::retained_memory_bytes() const {
   RetainedMemoryEstimator estimate("ComputeRunControl");
   estimate.add_objects<ComputeRunControl>();
   estimate.add_shared_control_block();
-  estimate.add_bytes(static_cast<std::uint64_t>(
-      control_->descriptor.graph_identity().capacity()));
-  estimate.add_bytes(1U);
+  estimate.add_string_payload(control_->descriptor.graph_identity());
   estimate.add_objects<std::weak_ptr<ComputeRunCancellationSlot>>(
       static_cast<std::uint64_t>(control_->cancellation_slots.capacity()));
   if (control_->submission_plan) {
@@ -1734,6 +1736,46 @@ void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
     }
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
+    (void)publish_task_failure(identity, failure);
+    std::rethrow_exception(failure);
+  }
+}
+
+/** @copydoc ComputeRunLease::complete_deferred_value */
+void ComputeRunLease::complete_deferred_value(
+    const ComputeRunTaskIdentity& identity, ExecutionTaskRuntime& task_runtime,
+    ReadyFenceSnapshot snapshot) {
+  (void)observe_cancellation();
+  TaskSubmissionPlan* plan = nullptr;
+  bool skip_terminal_run = false;
+  {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    if (control_->submission_plan == nullptr ||
+        !control_->submission_plan->contains_task_identity(identity)) {
+      throw std::invalid_argument(
+          "Deferred Value task identity does not match its retaining lease.");
+    }
+    if (control_->terminal_outcome.has_value()) {
+      skip_terminal_run = true;
+    } else {
+      plan = control_->submission_plan.get();
+    }
+  }
+  if (skip_terminal_run) {
+    task_runtime.dec_tasks_to_complete();
+    return;
+  }
+
+  try {
+    plan->complete_deferred_value(identity, *this, task_runtime,
+                                  std::move(snapshot));
+    task_runtime.dec_tasks_to_complete();
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    try {
+      task_runtime.dec_tasks_to_complete();
+    } catch (...) {
+    }
     (void)publish_task_failure(identity, failure);
     std::rethrow_exception(failure);
   }

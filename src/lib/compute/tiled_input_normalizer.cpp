@@ -243,9 +243,11 @@ ImageBuffer normalize_channels(const ImageBuffer& current_buffer,
  * std::bad_alloc from descriptor, allocation, and copy primitives.
  * @throws std::exception when the selected resize/channel implementation fails.
  * @note Returned NodeOutput preserves named data, spatial/debug metadata, and
- * plugin-library leases from the original input; only its normalized image
- * descriptor changes. Spatial metadata continues to describe upstream
- * provenance even when resize/crop maps pixels into the mixing base extent.
+ * plugin-library leases from the original input. Its image descriptor changes
+ * and its sealed image Value identity is cleared because normalized bytes use
+ * a different mutable allocation. Spatial metadata continues to describe
+ * upstream provenance even when resize/crop maps pixels into the mixing base
+ * extent.
  */
 std::optional<NodeOutput> normalize_secondary_input(
     const NodeOutput* input, const ImageShape& base_shape,
@@ -267,6 +269,7 @@ std::optional<NodeOutput> normalize_secondary_input(
 
   NodeOutput normalized = *input;
   normalized.image_buffer = std::move(normalized_buffer);
+  normalized.image_value = Value{};
   return normalized;
 }
 

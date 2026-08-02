@@ -3,10 +3,12 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <vector>
 
 #include "photospider/core/device.hpp"
+#include "photospider/memory/ready_fence.hpp"
 
 /**
  * @file execution_task_runtime.hpp
@@ -63,22 +65,14 @@ enum class ExecutionTraceAction : std::uint32_t {
  *
  * The Graph runtime owns this object through every accepted Run callback. The
  * service may publish worker/epoch attribution and trace values, but receives
- * no Graph, cache, native device, lifecycle owner, or mutable observation
- * storage through this boundary.
+ * no Graph, cache, device inventory, native device, lifecycle owner, or
+ * mutable observation storage through this boundary.
  *
  * @throws Nothing from every virtual operation.
  * @note The protected destructor prevents deletion through a borrowed pointer.
  */
 class ExecutionHostContext {
  public:
-  /**
-   * @brief Tests one fixed physical device capability.
-   * @param device Device label to test.
-   * @return True when the process owns that capability.
-   * @throws Nothing.
-   */
-  virtual bool is_device_available(Device device) const noexcept = 0;
-
   /**
    * @brief Publishes worker and epoch identity on the calling thread.
    * @param worker_id Private worker id, or -1 when unavailable.
@@ -270,6 +264,18 @@ class ExecutionTaskRuntime {
       Task&& task,
       ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
       std::optional<std::uint64_t> epoch = std::nullopt) = 0;
+
+  /**
+   * @brief Creates an asynchronous ReadyFence continuation route.
+   * @return Shared executor that owns callbacks until runtime admission.
+   * @throws std::bad_alloc when executor state cannot allocate.
+   * @throws std::logic_error when a concrete runtime requires an active worker
+   * context and none is present.
+   * @note The default adapter forwards to submit_ready_task_any_thread() and
+   * converts admission exceptions into set_exception(). Multi-Run services
+   * override this method to retain exact Run/lease/submission identity.
+   */
+  virtual std::shared_ptr<ReadyFenceExecutor> make_ready_fence_executor();
 
   /**
    * @brief Waits for the active batch and rethrows its first task exception.

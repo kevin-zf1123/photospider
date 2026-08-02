@@ -1,8 +1,10 @@
 # 插件 ABI
 
-Photospider 支持操作插件和策略插件。操作插件通过 Host 提供的 registrar 扩展进程拥有的
-`OpRegistry`，它仍是临时 C++ ABI。策略插件通过带版本的纯 C ABI 对 Host 已准入的不可变
-候选项排序；它不拥有工作线程、队列、设备、资源、Run 或 Graph 能力。可安装的插件开发契约
+Photospider 支持操作插件、数据定义 provider 和策略插件。操作插件通过 Host 提供的 registrar
+扩展进程拥有的 `OpRegistry`，它仍是临时 C++ ABI。数据定义 provider 通过纯 C ABI v3
+发布不可变 Schema/Facet/Layout bundle 和受界限约束的语义回调；它不获得 access、conversion、
+execution、device、registry mutation 或 graph 能力。策略插件通过纯 C ABI v1 对 Host 已准入的
+不可变候选项排序；它不拥有工作线程、队列、设备、资源、Run 或 Graph 能力。可安装的开发契约
 只位于 `include/photospider/plugin/` 和
 `include/photospider/policy/policy_plugin_api.h`。
 
@@ -42,6 +44,23 @@ output、ROI 与 dependency callback 类型，不能复用旧符号。
 | Dependency LUT builder | 数据依赖空间依赖映射。 |
 | Device implementation | CPU、Metal、CUDA 或其他受支持的公共 `Device` capability。 |
 
+每个可执行 registration 都携带一个 `OperationMetadata` 值。除 tile、device、cost 与
+dependency hint 外，CPU execution contract 还包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `reentrant` | 精确 implementation 的 callback 是否可以重叠；默认 `true`。 |
+| `maximum_parallelism` | 精确 implementation 的 callback 上限；零表示没有 implementation-specific cap。 |
+| `retained_memory_bytes` | 每个飞行中 callback 额外占用的 Host-retained byte；零是显式声明。 |
+| `scratch_bytes` | 每个飞行中 callback 额外占用的 Host scratch byte；零是显式声明。 |
+| `exclusive_key` | 跨 implementation、Run 与 Graph 共享的可选 execution-domain exclusion key。 |
+
+无论 `maximum_parallelism` 为何，`reentrant=false` 的有效上限都是一。非空
+`exclusive_key` 最多 128 byte，且不能包含 embedded NUL。Host 会在发布前对 core 与 plugin
+registration 执行相同校验。这些字段扩展了临时 C++ v2 metadata layout，但没有改变 registrar
+symbol 或 callback signature。已有 v2 DSO 必须针对匹配 SDK 重新构建；不存在 missing-tail、
+stale-layout 或 compatibility interpretation。
+
 Canonical registry identity 为 `type:subtype`。两个 segment 都必须非空，且都不能包含保留分隔符 `:`，
 否则不同 pair 可能发生 identity collision。Public C++ registrar helper 还会在调用 `.c_str()` 前拒绝
 embedded NUL byte，防止 raw ABI 截断改变 identity；host raw callback 会独立校验它实际可见的 C-string
@@ -79,8 +98,14 @@ representation 与显式 `1..9` 数值。
 操作插件不会为了访问 registry 符号而链接宽泛的静态 `photospider` 产品。仓库内 operation plugin 通过
 `OperationPluginRegistrar` 注册。普通插件请求 `operation_sdk` package component，并且只链接
 `Photospider::operation_sdk`。该 interface target 提供安装头，并传递链接
-`Photospider::operation_runtime`；后者的静态归档实现公共 image-buffer factory，不反向链接 SDK，
-也不要求外部 package。
+`Photospider::operation_runtime`；后者的 shared library 实现公共 image-buffer factory、
+explicit-binding DenseTensor Value 与 checked view symbol、dependency-neutral device/access
+fact，以及 Region value/algebra，不反向链接 SDK，也不要求外部 package。静态 Host product 与独立加载且使用
+Value 的 operation DSO 因而都通过同一个 runtime image
+解析 allocation/revision minting，而不会把 counter 复制进每个 DSO。这是普通 dynamic
+dependency，不是 ELF/Mach-O symbol interposition 或 plugin ABI callback。这些 data/memory
+header 可用于 dependency-neutral plugin-internal 工作，但 operation v2 callback
+record 仍接收并返回当前 ImageBuffer/OperationOutput value。
 
 OpenCV 是显式 opt-in。使用 `photospider/plugin/opencv_adapter.hpp` 的插件额外请求并链接
 `Photospider::operation_opencv`。该 target 拥有 adapter 实现，只发现 OpenCV `core`，不会带入
@@ -97,8 +122,12 @@ descriptor 及其完整 extent 执行明确的 backend-preserving passthrough；
 
 - 静态 Photospider 进程拥有一个 `OpRegistry` 和一个 operation `PluginManager`，由所有 embedded Host 共享。
 - 动态 operation plugin 从 host 接收注册 callback，因此 registry mutation 始终发生在该进程拥有的实例中。
-- `Photospider::operation_runtime` 只包含 value-factory 实现，不包含 registry、loader、Graph、policy、
-  execution 或 compute state。
+- `Photospider::operation_runtime` 只包含 ImageBuffer、immutable DenseTensor value/view、
+  Region value/algebra、provider-defined Value、extension envelope 和
+  `DataDefinitionRegistry` 实现，不包含 operation/policy registry、loader、Graph、policy、
+  execution 或 compute state。其唯一进程级 identity authority 持有彼此独立的单调 allocation
+  与 Value-revision 序列；注入的 definition registry 则独立拥有自己的 provider generation
+  序列。
 - 插件 callback object 和插件实例化的返回值内部状态仍可能指向插件代码，因此进程 owner 和复制值中的 lease
   必须保留插件库，直到这些状态全部销毁。
 
@@ -166,6 +195,13 @@ state，而不会复制进 restoration state。publication 后的 same-key direc
 取得新 token。Direct 与 plugin-owned slot 共存期间，source inspection 报告 `mixed`，不会继续把完整
 key 归因于 plugin。
 
+可执行 scalar slot 是原子的可调度值，而不是 callback 加一份可变的 intent-wide
+metadata record。Monolithic HP、tiled HP 与 tiled RT 各自在一个 `OpImplementation`
+中拥有自己的精确 callback、`OperationMetadata` 与非零 implementation identity。
+注册 sibling shape 不能改写已有 slot 的调度声明或 identity。Replacement、capture、
+retirement 与 unload 会交换完整 slot，因此 reader 绝不会把一个 scalar callback 与另一次
+registration 的 reentrancy、cap、retained byte、scratch byte 或 exclusive key 组合起来。
+
 Live device implementation element 使用稳定、不可变的 owner，而不是把 `std::function` target 直接存进
 会增长的 registry vector。新的 monolithic 或 tiled device value（包括其 plugin lease wrapper）会在获取
 registry lock 前完整构造。加锁后，registration 只增长并发布 shared owner 及其平行 revision token。
@@ -176,11 +212,14 @@ swap 进已经清空的 gap；移除尾部时因此只会析构空 owner。任�
 都不会在 registry lock 内被复制、移动、析构，也不会在锁内释放最后一个 library lease。新的稳定 value
 或 compatibility bridge 构造失败发生在 key、callback 或 ownership 发布之前，并保持 registry 不变。
 
-稳定所有权不等于执行 mutex。第一个 CPU device value 与其 HP compatibility bridge 会保留同一个 callback
-target，executor 或 reader snapshot 也可能保留同一个逻辑 target。这些路径可以并发调用它。因此，callback
-provider 必须保证 target 可重入，或自行同步其共享可变 state。Registry 只串行化 ownership mutation、
-coherent snapshot capture、publication 与 unload；它绝不会持有 state lock 来串行化 callback execution。
-Caller 不得因为 operation key、device 或 intent 相同，就推断 callback 只会单线程执行。
+稳定所有权本身不等于执行 mutex。Registry 只串行化 ownership mutation、coherent snapshot capture、
+publication 与 unload；callback execution 期间绝不会持有 registry state lock。Product planning
+会选择一份 coherent callback、metadata、device 与非零 ownership revision，在 plan 中只保存
+callback-free identity/metadata，并在 admission 前重新解析并要求精确 identity 相同。随后，在同一个
+注入的 `ExecutionService` 内，Host 会在 reserved start 时跨 Run 与 Graph 执行 `reentrant`、
+`maximum_parallelism` 与 `exclusive_key`。共享 operation key、device、intent 或 callback owner
+本身不意味着串行，除非选中的 metadata 明确声明。Provider 仍必须保护从该 Host boundary 外部访问、
+或者没有在声明中覆盖的共享 state。
 
 仓库自有 CPU OpenCV provider 会用不可变 input、callback-local 或 task-owned `cv::Mat` state，
 以及不使用进程范围的外层 operation mutex 来实现该契约。可选 builtin provider 会在 callback
@@ -189,7 +228,9 @@ provider-local fence 会把 OpenCV 资源耗尽转换为新建的 `std::bad_allo
 `cv::Exception` 转换为 host-owned `GraphError`。使用
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 构建会省略这些 slot，同时 registry 与 public
 v2 registrar 仍可由其他 provider 使用。真实共享 backend state 仍要求 provider-local 同步：
-Metal Perlin 的 DSO mutex 只保护其共享 Metal lifecycle。
+但该要求只适用于 provider 真正拥有的 state。Metal Perlin DSO 既不拥有 native lifecycle，
+也不拥有 lifecycle mutex；它会从当前进程 executor 借用 command queue、invocation-scoped
+allocator 与 pipeline cache，而 execution metadata gate 则提供 implementation/key 串行化。
 [ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md)记录了该决策
 及其 accounting 边界。
 
@@ -260,6 +301,137 @@ predecessor，也适用于原本不存在的 key；每个 retired plugin callbac
 
 内置 callback 注册同样归进程 owner 管理。它最多执行一次，并且发生在 process-owner plugin 发布之前；
 后续 Host seed 调用只对齐 source label，不能把内置实现重播到 active plugin replacement 之上。
+## 数据定义 Provider ABI v3
+
+数据定义 provider 精确导出由自包含 C11/C++17 头文件声明的两个函数：
+
+```c
+uint32_t ps_data_provider_get_abi_version(void);
+ps_data_status_v3 ps_data_provider_get_api_v3(
+    ps_data_provider_api_v3 *api);
+```
+
+数值握手必须返回 `PS_DATA_PROVIDER_ABI_VERSION`，其精确值为三。在等值检查成功前，
+Host 不会调用候选项的其他任何函数。随后，Host 提供一张预先清零且大小精确的 API 表。
+Provider 返回一个非零永久 provider identity、一个受界限约束的 implementation version、
+一个受界限约束且不可变的 typed definition array、一个 opaque context，以及全部必需回调：
+
+| 回调 | V-14 职责 |
+| --- | --- |
+| `validate` | 校验完整 Schema/Facet/Layout 以及经过检查的多 buffer payload。 |
+| `query` | 计算一个纯 metadata-only property 请求。 |
+| `evaluate_region` | 计算一个纯且受界限约束的 metadata-only Region 请求。 |
+| `evaluate_spec` | 计算一个纯且受界限约束的 metadata-only DataSpec 关系。 |
+| `visit_content` | 按 provider 的 canonical 顺序追加逻辑内容 byte。 |
+| `create_owner` / `destroy_owner` | 在精确 generation 保持映射期间拥有一个可选 opaque object。 |
+| `destroy_provider` | 在 module lease 释放前完成最终 generation 退役。 |
+
+这只是 definition suite。V-14 不包含 access/map/import/transfer、conversion、inference、
+execution、asynchronous completion、native-device 或 operation ABI replacement 回调。
+纯 property、Region 与 DataSpec 调用会接收 descriptor、Layout、envelope、byte size、index、
+role 和 allocation identity metadata，但所有 payload pointer 与 payload-available flag 都会被清除。
+只有显式 validation 和 canonical-content traversal 能在保留调用期间访问 payload。
+
+每个 callback 还会接收一个 callback-local `ps_data_output_sink_v3`。借用的
+`ps_data_bytes_v3` view 只用于输入：diagnostic 与 BYTES property 携带 scalar
+`message_size` / `bytes_size` 字段，并在 provider 源数据仍存活时，通过 output sink 复制完整
+变长字段。非空 diagnostic 恰好使用一次 diagnostic channel；空 diagnostic 不使用该 channel。
+Available BYTES property 即使为空也恰好使用一次 property channel。Host 会在解引用前检查
+channel permission、pointer/count framing、重复使用、4 KiB diagnostic 上限与 64 KiB property
+上限，同步复制到每次 invocation 私有的 state；即使 provider 忽略 sink error，第一个 failure
+仍具有权威性。因此 callback return、并发调用、generation replacement 与 module retirement
+都不会暴露延迟读取的 provider output pointer。
+
+`visit_content` 使用的 `ps_data_byte_sink_v3` 是独立的同步 streaming channel，而不是上述
+受限的 diagnostic/property field。Host 可以为一个 digest 多次调用 callback：它先用 checked
+`uint64_t` 累计计量，写入冻结的 canonical field length，再在同一个不可变 Value view 与
+payload read lease 下重复调用同一 active generation，同时直接 hash 每个 segment。每次
+invocation 拥有独立的 diagnostic 与 sticky-failure state。Provider 必须重现相同逻辑 byte
+sequence，但 append-call 边界可以不同。Host 会拒绝 null/nonzero pointer-count 对、计量
+overflow、被忽略的 sink failure 与 measured/hash count 漂移。累计 stream 不会被物化，也不受
+4 KiB/64 KiB output bound 或任意 64 MiB content 上限约束；它只受冻结的 SHA-256 length
+framing 限制。
+
+ABI adapter 的 Region request 仍是 rank-general。Provider 对规范非空 TensorSlice 返回 Exact
+时，Host 会计算全部半开轴长度的 checked `uint64_t` product。Provider 的
+`selected_site_count` 必须精确匹配；product overflow、错误的非零 count，或非空 slice 的零
+count，都会返回 count 为零的 InvalidDescriptor。Empty 与非 Exact outcome 保持既有带类型语义。
+
+所有记录都使用固定宽度标量、借用且受界限约束的输入 view、精确 struct size、必须为零的
+reserved storage，以及平台 C calling convention。支持的 profile 要求 8-bit byte、8-byte
+data/function pointer 和自然 8-byte alignment。头文件冻结以下 v3 布局：
+
+| 记录 | 大小 | 对齐 |
+| --- | ---: | ---: |
+| `ps_data_identity_v3` / `ps_data_bytes_v3` | 16 | 8 |
+| `ps_data_definition_v3` / `ps_data_extension_v3` | 64 | 8 |
+| `ps_data_buffer_view_v3` | 56 | 8 |
+| `ps_data_buffer_envelope_v3` | 48 | 8 |
+| `ps_data_value_view_v3` | 88 | 8 |
+| `ps_data_diagnostic_v3` | 48 | 8 |
+| `ps_data_property_query_v3` / `ps_data_property_result_v3` | 40 / 56 | 8 |
+| `ps_data_region_request_v3` / `ps_data_region_result_v3` | 72 / 40 | 8 |
+| `ps_data_spec_request_v3` / `ps_data_spec_result_v3` | 64 / 40 | 8 |
+| `ps_data_byte_sink_v3` | 40 | 8 |
+| `ps_data_output_sink_v3` | 40 | 8 |
+| `ps_data_provider_api_v3` | 160 | 8 |
+
+这里没有 tail-extension 规则。Host 会拒绝非预期的 size、offset、kind、enum、bound、
+pointer/count pair、必需 callback、reserved byte 或重复 typed key。Definition name 是诊断用途的
+小写 ASCII `[a-z][a-z0-9_.-]*`；永久 128-bit identity 和非零 structural version 才具有权威性。
+Schema、Facet 和 Layout 位于三个独立 typed namespace，因此不同 kind 使用相同数值 identity
+不会冲突。
+
+`DataDefinitionRegistry` 是注入的 C++ 权威，不是 global 或 function-static singleton。
+它拥有一个 publication mutex、一个 generation source、一个 provider map 和三个 typed
+definition map。候选项加载会复制并校验完整 bundle，暂存全部 next map，然后将它们一起发布。
+ABI 不匹配、回调失败、metadata 畸形、重复项或由另一 active provider 拥有的 typed key 都不会
+发布任何内容，并保留旧 generation。Provider callback 绝不在持有 registry mutex 时执行；
+provider callback 对 registry 的同线程 mutation 会被拒绝。
+
+Replacement 按永久 provider identity 执行，并原子发布一个全新完整 generation。Unload 会从新查找
+可见性中移除 active generation。已有 `DataDefinitionLease`、provider-defined `Value`、带 index 的
+`ProviderReadLease`、callback staging 和 `ProviderOwner` 值会让正在退役的 callback、context、
+definition 与 module lease 保持存活。最终 owner destroy 恰好运行一次；最终 provider destroy
+在全部 generation user 之后、module lease 释放之前运行。
+
+如果最后一个 `ProviderOwner` 或 generation 引用在同一 Host 线程的任意 provider callback 内释放，
+Host 不会递归进入对应的 destroy callback。Owner/generation state 内嵌自己的 cleanup node，因此最终
+shared release 无需分配即可将它追加到 per-thread FIFO。外层 callback guard 会先清除 active-callback
+fence，再在 provider code 返回后 drain 该 FIFO；provider 返回成功、返回失败以及 Host invocation
+进行正常 C++ stack unwinding 时都遵循此规则。Destroy callback 或 cleanup member 析构所释放的 owner
+或 generation 会加入 FIFO 尾部；单次迭代式 drain 会保留已有 FIFO 顺序，并防止 cleanup callback
+递归进入。Provider callback 外的释放使用同一队列，但会同步 drain。Owner state 在整个
+`destroy_owner` 期间保留其精确 generation，generation state 在整个 `destroy_provider` 期间保留
+module lease，callback-tail 级联也不例外。正常 callback 返回会在正常 thread exit 前清空 per-thread
+queue；永不返回的 callback 仍可无限期保留其 generation。这项 Host-side lifetime 修复不会改变
+任何 v3 record layout、callback signature 或 provider responsibility。V-14 不提供强制展开或
+进程隔离。
+
+## 数据定义 SDK Target 与链接方式
+
+Producer 请求 `data_provider_sdk` package component，并链接
+`Photospider::data_provider_sdk`。这个纯 interface target 携带安装后的 include 目录以及
+C11/C++17 compile feature。它不链接 operation runtime、静态产品、OpenCV、yaml-cpp、Threads、
+registry、loader、executor 或 device SDK。C11 和 C++17 producer 导出相同的两个精确 C 名称；
+C++ 声明使用 `extern "C"` 和 `noexcept`。
+
+实例化 `DataDefinitionRegistry` 或创建 provider-defined `Value` 的 C++ Host-side consumer，
+直接链接 `Photospider::operation_runtime`，或通过 `Photospider::operation_sdk` 间接链接。
+提供平台解析出的 function pointer 和非空 module lease 是显式的 composition 职责；V-14
+不会安装目录 scanner 或第二个 mutable registry authority。Dependency-disabled install smoke
+会从安装包独立构建并运行采用精确名称的 C11 与 C++17 producer，编译独立的 output
+record/sink layout assertion，从 callback-local storage 发出非空 property，并通过真实 registry
+transaction 分别加载它们。
+
+V-15 新增一个必须单独请求的 installed component：`openexr_deep_provider`。当
+`PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON` 时，请求该 component 会导入
+`Photospider::openexr_deep_provider`，随后发现 `OpenEXR::OpenEXR`；只请求 neutral
+component 时，两件事都不会发生。使用默认 OFF build 时，optional request 会报告该 component
+不可用，required request 则会在 OpenEXR discovery 前，以 Photospider 自有 component diagnostic
+失败。Installed target 只有 provider MODULE；其 source-private C++ codec adapter 既不安装也不
+export，而 provider 仍只暴露冻结的两个 v3 C entry point。
+
 ## 策略插件 ABI
 
 策略插件恰好导出由自包含 C11/C++17 头文件声明的两个函数：
@@ -397,12 +569,76 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 
 ## 边界与原理
 
-当前两个插件边界刻意采用不同的兼容 profile：
+当前三个扩展边界刻意采用不同的兼容与权限 profile：
 
 | 边界 | 数据 ABI | 权限 |
 | --- | --- | --- |
 | 操作插件 v2 | 临时 C++ registrar 与回调值 | 在 Host 校验下执行操作计算并返回值 |
+| 数据定义 provider v3 | 冻结 64 位 profile 下、大小精确的纯 C definition-suite 记录 | 只执行 Schema/Facet/Layout 校验和受界限约束的语义观察 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
+
+### 已实现的 V-2 至 V-15 SDK 与 definition-provider 子集
+
+[ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+接受分别版本化的纯 C provider suite，用于 Schema、Facet、Layout、access、conversion、
+inference、query、region、digest 与 execution。V-14 实现上文所述的精确 v3 definition suite，
+并同时提供公共 C++ envelope、`DataDefinitionRegistry`、generation lease、provider owner 和
+provider-defined `Value` access。它不会把 STL、exception、RTTI、virtual class、allocator
+ownership 或 `Value` PImpl 放到 C 边界上。Access、conversion、inference、execution、
+asynchronous 与 native-device suite 仍是未来各自受界限约束的工作，不属于隐含的 v3 权限。
+
+V-2 在 `operation_runtime` 中实现 dependency-neutral C++ CPU DenseTensor `Value`、
+`StridedLayout`、`DenseTensorView` 与 `ImageView` 子集。V-3 新增 installed BufferHandle
+range、read/write lease、ValueBuilder seal、byte offset、受界限约束的 signed immutable view
+与 process-local allocation/revision identity。该 runtime 为 shared，因此 Host 与每个使用
+Value 的 DSO 都调用同一个 minting authority；长期 loader regression 会打开两个独立 DSO，
+并证明两类 identity 均保持不同。一条内建 operation 会在 private 双重表示 bridge
+后使用该 surface：它保留 sealed result Value，再派生 ImageBuffer compatibility snapshot。
+
+V-4 把 installed `RegionSet` 与 bounded algebra 加入 `operation_runtime`。Region 不会进入新的
+public v2 slot。Source-private bridge 只识别通过 execution 的 route-visible device inventory
+与 request intent 选出的实际 revisioned implementation 中的精确 core dense callback，并调用其
+Region-aware implementation。该 bridge 绝不会执行 scalar-only lookup，也不会通过过滤 candidate
+强制回退到 core；route 选中的 same-key device 或 plugin override 保持普通 complete-output v2
+behavior。精确 ImageRect 可以适配当前 propagation callback，而 TensorSlice 绝不跨越
+rectangular v2 contract。
+
+V-6 把 installed、dependency-neutral 的 `ReadyFence` observer 与同步 Value readiness 加入
+`operation_runtime`。Pending publication authority 与 `ValueTransferTask` 保持 source-private，
+因此 SDK consumer 可以观察 readiness，但不能创建 pending producer 或 transfer task。
+
+V-8 新增 installed、经过检查的 `DeviceBackend`、`DeviceId`、`MemoryDomain`、
+`StorageBinding`、producer identity 与纯 `AccessPlan` observation。Native allocation
+construction、native handle、mutable pending-device producer、completion admission、
+`ResidencyManager` 与 CPU/Metal transfer submission 都保持 source-private。仓库 Metal operation
+只通过 source-private invocation 边界接收借用的 device/queue/allocator context，在内部发布
+pending native Value，并执行显式 asynchronous readback。第三方 v2 callback 不会获得这个
+context，也不能从 `ImageBuffer::context` 推断它。
+
+V-14 新增 installed、保留 byte 的 Schema/Facet/Layout envelope、typed
+property/DataSpec/Region outcome、带 tag 的 canonical digest、artifact-envelope serialization、
+精确的 v3 C 头文件，以及一个可注入的 C++ registry。Runtime 使用 dependency-neutral 的合成
+`VariableSampleField` generation，证明 provider-defined multi-buffer Value。通用 Host validation
+先于 provider callback 和 identity mint；纯调用不暴露 payload；content traversal 控制逻辑 byte，
+但绝不拥有 Host digest state；旧 Value、read、callback 与 owner 在原子 replacement 和 unload 后
+继续存活。这个切片既不安装平台 DSO scanner，也不让 provider-defined Value 进入 graph compute、
+operation ABI v2、cache policy 或 codec。
+
+V-15 提供同一套未扩展 definition suite 的一个仓库自有实现。该 module 精确发布四项
+definition：`VariableSampleField` Schema、`ImageFacet`、`DeepSampleFacet` 与 deep
+multi-buffer Layout，并通过既有 callback 校验其版本化 payload 与完整 Value envelope。其显式
+implementation-version byte 只用于诊断；永久 provider/definition identity 与 structural version
+决定 interpretation。该 module 不 export codec entry point，也不拥有 registry、path policy、
+executor、cache 或 commit policy。Source-private adapter 会执行 OpenEXR read/write，并在保留
+module lease 时调用普通 registry/Value API。因此 OpenEXR 是一项可选 codec/provider 实现，
+而不是新的 v3 权限或第四条 ABI 边界。
+
+这些切片都不会把 Value、BufferHandle、lease、Region、ReadyFence、device/access record 或
+PImpl 放进 v2 callback record。V-14 在不改变另外两个边界的前提下向表中加入第三个边界。
+在每个仓库自有 operation 与 installed consumer 完成 migration 前，
+operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry point、SDK、
+fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding header 或
+v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
 
 操作插件的 C linkage 入口名称只是身份/代次 gate，并不是稳定 C data ABI。
 二进制兼容性仍依赖匹配的 SDK、编译器、标准库、C++ ABI、分配器/runtime、
@@ -431,6 +667,15 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - 操作插件链接 `Photospider::operation_sdk`；只有使用公共 OpenCV adapter
   时才增加 `Photospider::operation_opencv`。它们不得仅为了共享注册表状态
   而链接宽泛的静态产品。
+- 数据定义 provider 包含 `photospider/plugin/data_provider_api.h`，请求
+  `data_provider_sdk`，链接 `Photospider::data_provider_sdk`，并且只导出
+  `ps_data_provider_get_abi_version` 与 `ps_data_provider_get_api_v3`。
+- Definition provider 填写大小精确的记录，保留全部必须为零的 reserved 字段，
+  让 callback metadata 存活到最终 generation destroy，并且绝不保留借用的 per-call view。
+  C++ registry consumer 链接 `Photospider::operation_runtime`；这不意味着安装了 provider scanner。
+- 仓库自有 OpenEXR provider 只能通过单独请求的 `openexr_deep_provider` component 使用。它
+  export 相同两个 v3 symbol，绝不把 OpenEXR type 放入 public record，并且在默认 OFF 安装中
+  完全不存在，包括 dependency discovery 与 target export。
 - 策略插件包含 `photospider/policy/policy_plugin_api.h`、请求
   `policy_sdk` component，并链接 `Photospider::policy_sdk`。
 - 策略插件导出精确的两个 v1 符号、填写大小精确的记录、保持每个 Host 初始化
@@ -442,16 +687,44 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 
 ## 实现与验证入口
 
+- `include/photospider/data/value.hpp`
+- `include/photospider/data/extension.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/access_plan.hpp`
+- `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/memory/ready_fence.hpp`
+- `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/plugin_api.hpp`
+- `include/photospider/plugin/data_definition_registry.hpp`
+- `include/photospider/plugin/data_provider_api.h`
 - `include/photospider/plugin/op_contract.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
+- `src/lib/core/value.cpp`
+- `src/lib/core/extension.cpp`
+- `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
+- `src/lib/plugin/data_definition_registry.cpp`
+- `plugins/data/openexr_deep_scanline_provider.cpp`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/policy/policy_registry.*`
 - `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_variable_sample_field_extensions.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
+- `tests/integration/openexr_deep_provider_option_off_smoke.py`
+- `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/test_plugin_manager.cpp`
 - `tests/unit/test_op_registry_m31.cpp`
 - `tests/unit/test_policy_registry.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
+- `tests/unit/test_device_residency.cpp`
+- `tests/fixtures/value_identity_dso.cpp`
+- `tests/integration/test_value_identity_dso.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

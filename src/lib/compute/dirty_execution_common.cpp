@@ -12,6 +12,7 @@
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/resource_demand_estimator.hpp"
+#include "core/region_image_adapter.hpp"
 #include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
@@ -139,8 +140,10 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
   if (!run_task || request.compute_plan == nullptr ||
       request.source_task_ids == nullptr ||
       request.downstream_task_ids == nullptr ||
-      request.task_devices == nullptr ||
+      request.task_devices == nullptr || request.task_constraints == nullptr ||
       request.task_devices->size() !=
+          request.compute_plan->task_graph.tasks.size() ||
+      request.task_constraints->size() !=
           request.compute_plan->task_graph.tasks.size()) {
     throw std::invalid_argument(
         "Dirty source-first preparation requires complete plan and task "
@@ -169,21 +172,23 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
     if (!source_task_ids.empty()) {
       auto source_context = std::make_shared<DirtyReadyTaskContext>(
           compute_plan, state->request.selection, source_task_ids,
-          *state->request.task_devices, owned_run_task,
+          *state->request.task_devices, *state->request.task_constraints,
+          state->request.task_operation_resource_demand, owned_run_task,
           run_task_retained_memory_bytes, phase_lease, false,
           ExecutionTaskPriority::High);
-      std::vector<ReadyTaskSubmission> source_submissions =
-          source_context->make_submissions(source_task_ids, true);
       RetainedMemoryEstimator source_phase_retained(
           "dirty source phase retained demand");
       source_phase_retained.add_bytes(
           prepared_dirty_phase_retained_bytes(state->request, source_task_ids));
       source_phase_retained.add_bytes(run_task_retained_memory_bytes);
+      const CpuRunResourceDemand source_resource_demand =
+          source_context->run_resource_demand(source_phase_retained.bytes());
+      std::vector<ReadyTaskSubmission> source_submissions =
+          source_context->make_submissions(source_task_ids, true);
       state->source_run = state->request.execution_service->prepare_run(
           *state->request.host, state->request.execution_type,
           std::move(source_submissions),
-          static_cast<int>(source_task_ids.size()),
-          source_context->run_resource_demand(source_phase_retained.bytes()));
+          static_cast<int>(source_task_ids.size()), source_resource_demand);
     }
 
     if (!downstream_task_ids.empty()) {
@@ -200,21 +205,25 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
           owned_run_task, [&](std::function<void(int)> transferred_run_task) {
             return std::make_shared<DirtyReadyTaskContext>(
                 compute_plan, state->request.selection, downstream_task_ids,
-                *state->request.task_devices, std::move(transferred_run_task),
-                run_task_retained_memory_bytes, phase_lease, true,
+                *state->request.task_devices, *state->request.task_constraints,
+                state->request.task_operation_resource_demand,
+                std::move(transferred_run_task), run_task_retained_memory_bytes,
+                phase_lease, true,
                 state->request.intent == ComputeIntent::RealTimeUpdate
                     ? ExecutionTaskPriority::High
                     : ExecutionTaskPriority::Normal);
           });
+      const CpuRunResourceDemand downstream_resource_demand =
+          downstream_context->run_resource_demand(
+              prepared_dirty_phase_retained_bytes(state->request,
+                                                  downstream_task_ids));
       std::vector<ReadyTaskSubmission> downstream_submissions =
           downstream_context->make_submissions(initial_downstream_ids, true);
       state->downstream_run = state->request.execution_service->prepare_run(
           *state->request.host, state->request.execution_type,
           std::move(downstream_submissions),
           static_cast<int>(downstream_task_ids.size()),
-          downstream_context->run_resource_demand(
-              prepared_dirty_phase_retained_bytes(state->request,
-                                                  downstream_task_ids)));
+          downstream_resource_demand);
     }
     return PreparedDirtySourceFirstRun(std::move(state));
   }
@@ -333,7 +342,10 @@ std::uint64_t DirtyNodeSynchronization::retained_memory_bytes() const {
 DirtyReadyTaskContext::DirtyReadyTaskContext(
     const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay* selection,
     const std::vector<int>& active_task_ids,
-    const std::vector<Device>& task_devices, std::function<void(int)> run_task,
+    const std::vector<Device>& task_devices,
+    const std::vector<OperationExecutionConstraints>& task_constraints,
+    ReadyTaskResourceDemand task_operation_resource_demand,
+    std::function<void(int)> run_task,
     std::uint64_t run_task_retained_memory_bytes, ComputeRunLease lease,
     bool release_dependents, ExecutionTaskPriority priority)
     : compute_plan_(compute_plan),
@@ -342,6 +354,8 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
                      : std::nullopt),
       active_task_ids_(active_task_ids),
       task_devices_(task_devices),
+      task_constraints_(task_constraints),
+      task_operation_resource_demand_(task_operation_resource_demand),
       active_task_id_set_(active_task_ids.begin(), active_task_ids.end()),
       run_task_(std::move(run_task)),
       run_task_retained_memory_bytes_(run_task_retained_memory_bytes),
@@ -355,6 +369,11 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
   if (task_devices_.size() != compute_plan_.task_graph.tasks.size()) {
     throw std::invalid_argument(
         "DirtyReadyTaskContext requires one device per planned task.");
+  }
+  if (task_constraints_.size() != compute_plan_.task_graph.tasks.size()) {
+    throw std::invalid_argument(
+        "DirtyReadyTaskContext requires one operation constraint per planned "
+        "task.");
   }
   if (selection_) {
     dependency_state_ = std::make_unique<TaskDependencyState>(
@@ -381,6 +400,11 @@ std::uint64_t DirtyReadyTaskContext::retained_memory_bytes() const {
       static_cast<std::uint64_t>(active_task_ids_.capacity()));
   estimate.add_objects<Device>(
       static_cast<std::uint64_t>(task_devices_.capacity()));
+  estimate.add_objects<OperationExecutionConstraints>(
+      static_cast<std::uint64_t>(task_constraints_.capacity()));
+  for (const OperationExecutionConstraints& constraints : task_constraints_) {
+    estimate.add_string_payload(constraints.exclusive_key);
+  }
   estimate.add_objects<void*>(
       static_cast<std::uint64_t>(active_task_id_set_.bucket_count()));
   estimate.add_objects<decltype(active_task_id_set_)::value_type>(
@@ -404,9 +428,19 @@ CpuRunResourceDemand DirtyReadyTaskContext::run_resource_demand(
   shared.add_bytes(retained_memory_bytes());
   shared.add_bytes(lease_.retained_memory_bytes());
   shared.add_bytes(additional_shared_retained_memory_bytes);
-  return CpuRunResourceDemand{
-      shared.bytes(), owned_callback_resource_demand(static_cast<std::uint64_t>(
-                          sizeof(std::shared_ptr<DirtyReadyTaskContext>)))};
+  const ReadyTaskResourceDemand callback_demand =
+      owned_callback_resource_demand(static_cast<std::uint64_t>(
+          sizeof(std::shared_ptr<DirtyReadyTaskContext>)));
+  RetainedMemoryEstimator per_task_retained("dirty operation task demand");
+  per_task_retained.add_bytes(callback_demand.retained_memory_bytes);
+  per_task_retained.add_bytes(
+      task_operation_resource_demand_.retained_memory_bytes);
+  ReadyTaskResourceDemand combined_demand = callback_demand;
+  combined_demand.retained_memory_bytes = per_task_retained.bytes();
+  combined_demand.scratch_bytes = task_operation_resource_demand_.scratch_bytes;
+  combined_demand.work_units = std::max(
+      callback_demand.work_units, task_operation_resource_demand_.work_units);
+  return CpuRunResourceDemand{shared.bytes(), combined_demand};
 }
 
 /** @copydoc DirtyReadyTaskContext::make_submissions */
@@ -415,6 +449,7 @@ std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
   std::vector<ReadyTaskSubmission> submissions;
   submissions.reserve(task_ids.size());
   const std::shared_ptr<DirtyReadyTaskContext> self = shared_from_this();
+  const ReadyTaskResourceDemand task_demand = run_resource_demand(0U).task;
   for (int task_id : task_ids) {
     if (task_id < 0 ||
         task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size()) ||
@@ -433,10 +468,9 @@ std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
                ExecutionTaskRuntime& task_runtime) {
           self->execute(lease, accepted_identity, task_runtime);
         },
-        priority_,
-        owned_callback_resource_demand(
-            static_cast<std::uint64_t>(sizeof(self))),
-        task_devices_.at(static_cast<std::size_t>(task_id)));
+        priority_, task_demand,
+        task_devices_.at(static_cast<std::size_t>(task_id)),
+        std::move(task_constraints_.at(static_cast<std::size_t>(task_id))));
   }
   return submissions;
 }
@@ -527,10 +561,11 @@ void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan,
 
 ComputePlan prune_node_cache_task_graph(
     GraphModel& graph, const ComputeRequest& request,
-    const std::vector<int>& execution_order) {
+    const std::vector<int>& execution_order,
+    const std::vector<Device>& available_devices) {
   NodeCacheTaskGraphPruner node_cache_pruner;
   const std::shared_ptr<const FullTaskGraph> full_graph =
-      get_or_expand_full_task_graph(graph, request.intent);
+      get_or_expand_full_task_graph(graph, request.intent, available_devices);
   return node_cache_pruner.prune(*full_graph, request, execution_order, graph);
 }
 
@@ -651,6 +686,83 @@ std::pair<int, DataType> infer_output_spec(
   return {1, DataType::FLOAT32};
 }
 
+/** @copydoc validate_dirty_region_operation_routes */
+void validate_dirty_region_operation_routes(
+    const GraphModel& graph,
+    const DirtyRegionOperationRouteSnapshot& route_snapshot,
+    const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay& selection,
+    const ComputeRequest& request) {
+  if (route_snapshot.node_routes.empty()) {
+    return;
+  }
+  if (selection.active_task_ids.empty()) {
+    return;
+  }
+  if (route_snapshot.intent != request.intent ||
+      route_snapshot.intent != compute_plan.intent) {
+    throw GraphError(
+        GraphErrc::NoOperation,
+        "Dirty Region operation route intent changed before task population.");
+  }
+  if (route_snapshot.available_devices != compute_plan.available_devices) {
+    throw GraphError(
+        GraphErrc::NoOperation,
+        "Dirty Region operation device inventory changed before task "
+        "population.");
+  }
+
+  std::vector<int> active_node_ids;
+  active_node_ids.reserve(selection.active_task_ids.size());
+  std::unordered_set<int> active_nodes;
+  active_nodes.reserve(selection.active_task_ids.size());
+  for (int task_id : selection.active_task_ids) {
+    if (task_id < 0 || static_cast<std::size_t>(task_id) >=
+                           compute_plan.task_graph.tasks.size()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Dirty task selection contains an invalid task id.");
+    }
+    const int node_id =
+        compute_plan.task_graph.tasks.at(static_cast<std::size_t>(task_id))
+            .node_id;
+    if (active_nodes.insert(node_id).second) {
+      active_node_ids.push_back(node_id);
+    }
+  }
+
+  for (int node_id : active_node_ids) {
+    const auto frozen = route_snapshot.node_routes.find(node_id);
+    const Node* node = graph.find_node(node_id);
+    const auto planned = std::find_if(compute_plan.planned_work.begin(),
+                                      compute_plan.planned_work.end(),
+                                      [node_id](const PlannedNodeWork& work) {
+                                        return work.node_id == node_id;
+                                      });
+    const bool route_matches =
+        frozen != route_snapshot.node_routes.end() && node != nullptr &&
+        frozen->second.operation_key == make_key(node->type, node->subtype) &&
+        planned != compute_plan.planned_work.end() &&
+        planned->operation_route.has_value() &&
+        planned_operation_routes_equal(frozen->second.route,
+                                       *planned->operation_route);
+    if (!route_matches) {
+      throw GraphError(
+          GraphErrc::NoOperation,
+          "Dirty Region operation route changed before task population at "
+          "node " +
+              std::to_string(node_id) + ".");
+    }
+  }
+}
+
+/**
+ * @brief Applies selected HP image work to derived ROI and Region metadata.
+ * @param entries HP plan entries retained by the prepared request.
+ * @param selection Active task-selection overlay.
+ * @return Nothing.
+ * @throws std::bad_alloc when exact ImageRect Region storage cannot allocate.
+ * @note TensorSlice plans have no represented_hp_roi and retain their original
+ *       authoritative Region.
+ */
 void apply_planned_work_rois(std::unordered_map<int, HpPlanEntry>& entries,
                              const DirtyTaskSelectionOverlay& selection) {
   for (const auto& [node_id, node_selection] : selection.node_selections) {
@@ -661,10 +773,20 @@ void apply_planned_work_rois(std::unordered_map<int, HpPlanEntry>& entries,
     if (!is_rect_empty(node_selection.represented_hp_roi)) {
       entry_it->second.roi_hp = clip_rect(node_selection.represented_hp_roi,
                                           entry_it->second.hp_size);
+      entry_it->second.region_hp =
+          region_image_adapter::from_pixel_rect(entry_it->second.roi_hp);
     }
   }
 }
 
+/**
+ * @brief Applies selected RT image work to HP Region and RT ROI projections.
+ * @param entries RT plan entries retained by the prepared request.
+ * @param selection Active task-selection overlay.
+ * @return Nothing.
+ * @throws std::bad_alloc when exact ImageRect Region storage cannot allocate.
+ * @note RT selection remains image-only; no TensorSlice projection occurs.
+ */
 void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
                              const DirtyTaskSelectionOverlay& selection) {
   for (const auto& [node_id, node_selection] : selection.node_selections) {
@@ -675,6 +797,8 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
     if (!is_rect_empty(node_selection.represented_hp_roi)) {
       entry_it->second.roi_hp = clip_rect(node_selection.represented_hp_roi,
                                           entry_it->second.hp_size);
+      entry_it->second.region_hp =
+          region_image_adapter::from_pixel_rect(entry_it->second.roi_hp);
     }
     if (!is_rect_empty(node_selection.execution_roi)) {
       entry_it->second.roi_rt =

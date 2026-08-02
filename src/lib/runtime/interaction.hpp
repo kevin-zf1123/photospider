@@ -573,11 +573,6 @@ class InteractionService {
     return kernel_.get_last_io_time(graph);
   }
 
-  // [新增] GPU 上下文访问器
-  id cmd_get_metal_device(const std::string& graph) {
-    return kernel_.get_metal_device(graph);
-  }
-
   /** @copydoc Kernel::policy_available_types */
   std::vector<std::string> cmd_policy_available_types() const;
 

@@ -31,8 +31,11 @@ cache, traversal, inspection, and persistence services.
 The per-graph resource container. It owns one `GraphModel`, one bounded
 graph-state lane, one bounded private compute-request lane, one private
 supersession coordinator, copied HP/RT execution-route bindings, events,
-execution traces, one stable Graph lifetime anchor, and platform runtime
-resources. It is not the owner of compute dependency planning, policy
+execution traces, and one stable Graph lifetime anchor. It owns graph topology
+and session-scoped state, not native platform state. The process
+`ExecutionService` owns the fixed `DeviceExecutorRegistry` and its native
+device, command queue, invocation allocator, and pipeline cache.
+`GraphRuntime` is not the owner of compute dependency planning, policy
 contexts, or physical route workers.
 
 **`GraphModel`**
@@ -66,6 +69,39 @@ worker is uncharged infrastructure, not a Run execution grant.
 The persisted representation used to create or update graph state. YAML is the
 current concrete format; the term graph document describes the behavior
 without treating a serialization library as graph state.
+
+**Graph-document save completion**
+The current observation that graph serialization opened, wrote, flushed, and
+closed its destination without a reported error. It is separate from a
+`ComputeRun` and currently promises no expected-version transaction, atomic
+replacement, directory synchronization, or crash-durability receipt.
+
+**Disk-cache artifact**
+Discardable acceleration state owned by the graph cache path. The current
+image payload and metadata are written as separate direct files, so their
+individual save success is neither an atomic cache-entry commit nor durable
+user output.
+
+**`OutputStore` publication**
+The current image-daemon observation that a protected process-scoped artifact
+passed identity checks and was published by no-replace rename after file
+synchronization. Its index is in memory and retention is lease/TTL based; no
+directory synchronization or crash-recoverable index is claimed.
+
+**Daemon compute-job terminal**
+The process-local job-registry state reached after queued/running work either
+fails or completes Host compute and, for image results, `OutputStore`
+publication. It is not a durable acknowledgement and is lost with the process.
+
+**Durable output commit (accepted target only)**
+A future user-output transaction identified by a stable `OutputCommitId` and
+completed only after full payload/metadata validation and file synchronization,
+canonical manifest staging/validation/file synchronization, atomic no-replace
+manifest-last publication, and any requested leaf-to-durability-root directory
+barriers. Its typed receipt distinguishes atomic-visible from crash-durable
+achievement, it recovers ambiguous retries idempotently, and it supports
+at-least-once delivery; it does not claim exactly-once delivery. See
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md).
 
 **Per-graph exclusive access**
 The current behavior in which visible Graph capture, mutation, commit
@@ -136,6 +172,28 @@ preflight tasks execute owned callbacks through the Host-owned
 `ExecutionService` and a closed private route, and publish failure only through
 a matching `(RunId, RunLocalTaskId)`.
 
+**Operation return**
+The observation that one operation provider callback returned. A callback may
+return a pending `Value`; therefore operation return does not imply value
+readiness, Run terminal state, result availability, or persistence.
+
+**Value ready**
+The observation that a `Value` producer published terminal readiness and that
+dependent execution may consume the value. It is later than operation return
+for pending producers and earlier than Run success when commit is still
+required.
+
+**Run terminal**
+The outcome published by the `ComputeRun` terminal arbiter. `Succeeded` means
+validated Graph/RT publication, or the admitted valid no-op path; it does not
+include cache save, Graph-document save, daemon terminal state, result
+delivery, or durable output commit.
+
+**Result available**
+The observation that a Host/daemon result can be returned or fetched after
+public translation and any transport-owned publication. It is not itself a
+durability guarantee.
+
 **`RunGroup`**
 The current private request owner for one realtime HP/RT pair. It captures one
 realtime supersession identity, owns distinct HP Full and RT Interactive child
@@ -185,9 +243,10 @@ and dependency cone. It remains immutable while execution-visible tasks derived
 from it may execute.
 
 **`DirtyRegionSnapshot`**
-Graph-scoped ROI and lifecycle state that records dirty sources, affected
-regions, tiles, and edge mappings. It is not a compute task graph, policy
-snapshot, ready store, or execution route.
+Graph-scoped Region and lifecycle state that records dirty sources,
+authoritative affected Regions, derived image tiles, monolithic work, and edge
+mappings. It is not a compute task graph, policy snapshot, ready store, or
+execution route.
 
 **`DirtyUpdateWorkSet`**
 The active task subset selected from an existing request plan by a dirty
@@ -266,14 +325,17 @@ Zero declares no amount in that dimension; it never means an unknown amount
 that the ledger may invent.
 
 **`ResourceLedger`**
-The private Host-authoritative mint exclusively owned by one
-`ExecutionService`. It atomically admits complete vectors, mints only bounded
-child grants, and releases exact capacity after parent and child ownership
-ends. A private release observer may update non-authoritative companion
-accounting at that exact root-release point, but it cannot mint or enlarge
-capacity. Default limits belong to the Host composition, not a static process
-singleton. The ledger owns no worker, ready ordering, dependency, lifecycle
-registry, device/I/O/plugin estimate, or fairness authority.
+The private Host/device-authoritative mint exclusively owned by one
+`ExecutionService`. It atomically admits complete Host vectors and isolated
+per-`DeviceId` memory/scratch plans, mints only bounded child grants or exact
+device leases, and releases capacity after the true owner ends. A private
+release observer may update non-authoritative companion accounting at the exact
+Host root-release point, but it cannot mint or enlarge capacity. Default
+candidate limits belong to Host composition, not a static process singleton;
+service construction creates accounts only for matching executors in the
+frozen registry and never inserts one lazily. The ledger owns no worker, ready
+ordering, dependency, lifecycle registry, unregistered-device/I/O/plugin
+estimate, residency eviction, or fairness authority.
 
 **`ExecutionLifecycleTelemetry`**
 The source-private schema-v1 process lifecycle proof store owned by one
@@ -347,17 +409,58 @@ image result stored on a graph node.
 Runtime-owned transient RT output state. It is not authoritative HP cache and
 is not persisted as reusable graph cache.
 
+**`AllocationIdentity`**
+An opaque process-local identity for one CPU allocation control block.
+BufferHandle subranges over that allocation compare equal by allocation
+identity even when their ranges differ. It is not a Value revision, content
+digest, persistent cache key, or task identity. `valid()` reports only that the
+token is nonzero and was issued; it is not a liveness query, and a copied token
+remains nonzero after the final allocation owner is destroyed. The shared
+operation runtime mints tokens through one process-wide authority used by the
+Host and Value-using DSOs.
+
+**`BufferHandle`**
+A checked immutable nonempty byte range over one allocation identity. It does
+not expose a raw pointer. Consumers reach bytes through retaining `ReadLease`
+objects; construction-time writes are controlled by `ValueBuilder`.
+
+**`ReadLease` / `WriteLease`**
+`ReadLease` is a copyable retaining capability for immutable byte access.
+`WriteLease` is the unique move-only builder-scoped capability for mutable byte
+access before seal. A live write lease blocks seal; sealed Values never issue
+one.
+
+**`ValueRevisionId`**
+An opaque process-local identity minted whenever `ValueBuilder` seals a new
+Value publication. Ordinary Value/cache copies preserve it; dirty mutation,
+replacement, and disk reload mint a new one. It is not `GraphRevision`, an
+allocation identity, a persistent digest/artifact id, or a task/cache key.
+
 **`ImageBuffer`**
 The current image payload contract: two-dimensional extent, channel count,
 one scalar type, device, row stride, shared data ownership, and optional
-backend context. It is not a general Tensor, Deep Image, or vector-scene model.
+backend context. In a formal CPU image cache entry with a valid sealed
+`image_value`, it is an independent compatibility snapshot rather than the
+allocation/revision identity authority. It is not a general Tensor, Deep
+Image, or vector-scene model.
+
+**`RegionDomainKey` / `RegionSet`**
+`RegionDomainKey` is a permanent 128-bit logical coordinate-domain identity.
+`RegionSet` is the immutable normalized logical work/validity value. The V-4
+MVP supports canonical Empty, Whole, one bounded nonempty conjunction, signed
+half-open ImageRect, rank-general unsigned half-open TensorSlice, explicit
+complexity budgets, typed algebra outcomes, and containment. It is not
+physical tile geometry, a cache owner, a Value revision, or an uncertainty
+placeholder.
 
 **`PixelRect` / `PixelSize`**
-External-library-neutral integer geometry values used by public Host and
-operation contracts and by private Graph, ROI propagation, dirty-region,
-cache-identity, planning, and task state. OpenCV geometry may be constructed
-only locally in an OpenCV adapter or provider at the actual matrix/library
-call; it is not stored or passed through those kernel contracts.
+External-library-neutral two-dimensional integer geometry used by current
+Host/IPC v2 inspection, operation ABI v2, ImageBuffer processing, and physical
+image tile/task records. It is derived from one exact built-in ImageRect where
+logical Region authority is required. It cannot represent TensorSlice, Whole,
+custom domains, multi-atom clauses, or uncertainty. OpenCV geometry may be
+constructed only locally in an OpenCV adapter or provider at the actual
+matrix/library call.
 
 **Operation provider**
 An implementation source for operation callbacks, propagation contracts, and
@@ -383,8 +486,18 @@ planning, cache, policy, or physical-execution semantics.
 - `DirtyRegionSnapshot` is not `ComputeTaskGraph`.
 - A ready task is not a task graph.
 - HP cache is not RT proxy state.
+- `AllocationIdentity` is not `ValueRevisionId`; neither is a persistent
+  content/cache identity.
 - `ImageBuffer` is not the
   [target general data model](../roadmap/Kernel-Evolution.md#general-data-and-regions).
+- Operation return is not `Value` readiness, and neither is Run terminal
+  publication.
+- Run success is not cache persistence, Graph-document save, durable output
+  commit, daemon terminal state, or result delivery.
+- Current `OutputStore` publication is not crash-durable output commit.
+- Daemon job terminal state or acknowledgement is not a durable receipt.
+- `RegionSet` is not `PixelRect`; the latter is a checked image-edge
+  projection and never TensorSlice authority.
 - An execution worker request is not a Run reservation or child grant.
 - A policy candidate id or decision is not execution authority; only a
   committed reserved-start transaction may enter a private route.
@@ -402,6 +515,8 @@ planning, cache, policy, or physical-execution semantics.
 
 ## Implementation and Validation Entry Points
 
+- `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/data/value.hpp`
 - `include/photospider/host/host.hpp`
 - `include/photospider/core/compute_intent.hpp`
 - `include/photospider/core/image_buffer.hpp`
@@ -409,6 +524,11 @@ planning, cache, policy, or physical-execution semantics.
 - `src/lib/runtime/graph_runtime.hpp`
 - `src/lib/graph/graph_model.hpp`
 - `src/lib/graph/graph_state_executor.hpp`
+- `src/lib/graph/graph_io_service.*`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
+- `src/lib/ipc/request_router.cpp`
+- `plugins/ops/save_op.cpp`
 - `src/lib/compute/task_graph_planning.hpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
 - `src/lib/compute/execution_service.hpp`

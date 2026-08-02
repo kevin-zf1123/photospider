@@ -4,14 +4,18 @@
  * @file export.hpp
  * @brief Defines public Photospider symbol visibility annotations.
  *
- * The macro in this file is shared by stable public value contracts. The
- * supported runtime product is a static archive, while operation plugins
- * export only `register_photospider_ops_v2` through
- * `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT`; public Photospider declarations
- * therefore need no dynamic import/export annotation.
+ * The supported embedded product remains a static archive. The separate
+ * `Photospider::operation_runtime` is a shared library whose ordinary external
+ * C++ symbols are exported by its CMake target (including a generated Windows
+ * export table), while operation plugins export only
+ * `register_photospider_ops_v2` through
+ * `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT`. `PHOTOSPIDER_API` therefore remains
+ * the static embedded-product annotation and does not control operation
+ * runtime exports.
  *
  * @note The macro only affects declarations that explicitly opt in. Header-only
- *       value types that do not cross a dynamic-library ABI do not need it.
+ *       value types and operation-runtime declarations continue to use
+ *       ordinary external linkage.
  */
 
 #if defined(PHOTOSPIDER_STATIC)
@@ -33,8 +37,10 @@
  * Operation plugin targets are loaded through a registrar ABI and may link only
  * the public operation runtime and optional adapter components rather than the
  * private backend library. Keeping `PHOTOSPIDER_API` empty in those plugin
- * builds prevents Windows `dllimport` annotations from requiring backend DLL
- * symbols for public value contracts such as `ps::GraphError`.
+ * builds prevents Windows `dllimport` annotations from requiring the static
+ * backend product for public value contracts such as `ps::GraphError`. The
+ * separately linked operation-runtime import library remains independent of
+ * this macro.
  *
  * @note Plugin entry points must use
  *       `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT`; this macro does not export
@@ -50,8 +56,9 @@
  * definition. They use ordinary C++ linkage, matching the static product.
  *
  * @note Dynamic-library backend import/export compatibility is intentionally
- *       absent. Reintroducing a shared backend requires a new explicit ABI
- *       design rather than reviving the removed dynamic-backend macro branch.
+ *       absent. The narrow shared operation runtime does not make the complete
+ *       backend dynamic and does not revive the removed dynamic-backend macro
+ *       branch.
  */
 #define PHOTOSPIDER_API
 #endif

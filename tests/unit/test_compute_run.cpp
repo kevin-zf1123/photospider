@@ -32,6 +32,7 @@
 #include "compute/resource_demand_estimator.hpp"
 #include "compute/run_group.hpp"
 #include "core/image_buffer_processing.hpp"
+#include "core/pending_value.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -42,6 +43,7 @@
 #include "runtime/graph_runtime.hpp"
 #include "support/cache_test_dependencies.hpp"
 #include "support/execution_service_test_access.hpp"
+#include "support/fake_device_executor.hpp"
 #include "support/graph_model_test_access.hpp"
 #include "support/graph_revision_test_access.hpp"
 #include "support/scoped_execution_graph_lifecycle.hpp"
@@ -266,6 +268,440 @@ std::atomic_int g_resource_dirty_hp_operation_calls{0};
  */
 std::atomic_int g_resource_dirty_rt_operation_calls{0};
 
+/** @brief Shared process-domain key used by the tiled constraint regression. */
+constexpr char kTiledGateKey[] = "compute-run-tiled-constraint-exclusive-key";
+
+/**
+ * @brief Synchronizes and observes blocking tiled provider entries.
+ *
+ * @throws std::invalid_argument when constructed with an invalid release
+ * future.
+ * @note The operation registry is process-persistent, so the registered
+ * callback obtains this state through a scoped process-global binding instead
+ * of retaining test-local references.
+ */
+class TiledConstraintGateProbe final {
+ public:
+  /**
+   * @brief Retains the shared release signal used by every callback.
+   * @param release Valid shared future opened by the owning test.
+   * @throws std::invalid_argument when release has no shared state.
+   */
+  explicit TiledConstraintGateProbe(std::shared_future<void> release)
+      : release_(std::move(release)) {
+    if (!release_.valid()) {
+      throw std::invalid_argument(
+          "Tiled constraint probe requires a valid release future.");
+    }
+  }
+
+  /**
+   * @brief Records one active provider interval and waits for release.
+   * @return Nothing.
+   * @throws std::future_error if the retained future unexpectedly loses state.
+   * @note Atomic maximum tracking makes unintended overlap observable without
+   * granting scheduling authority to the test.
+   */
+  void enter() {
+    const int now_active = active.fetch_add(1, std::memory_order_acq_rel) + 1;
+    int observed_maximum = maximum_active.load(std::memory_order_acquire);
+    while (observed_maximum < now_active &&
+           !maximum_active.compare_exchange_weak(observed_maximum, now_active,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+    }
+    entered.fetch_add(1, std::memory_order_release);
+    release_.wait();
+    active.fetch_sub(1, std::memory_order_acq_rel);
+  }
+
+  /** @brief Total provider callbacks that crossed their operation gate. */
+  std::atomic_int entered{0};
+
+  /** @brief Provider callbacks currently blocked inside the probe. */
+  std::atomic_int active{0};
+
+  /** @brief Largest concurrently active provider population observed. */
+  std::atomic_int maximum_active{0};
+
+  /** @brief Shared release state retained for all tiled provider entries. */
+  std::shared_future<void> release_;
+};
+
+/** @brief Serializes access to the process-global tiled constraint probe. */
+std::mutex g_tiled_constraint_probe_mutex;
+
+/** @brief Active tiled constraint probe, or null outside its owning test. */
+std::shared_ptr<TiledConstraintGateProbe> g_tiled_constraint_probe;
+
+/**
+ * @brief Copies the currently bound tiled constraint probe for one callback.
+ * @return Shared ownership that remains valid through provider completion.
+ * @throws std::logic_error when no owning test has installed a probe.
+ * @throws std::system_error when process-global probe locking fails.
+ * @note The returned owner contains only test synchronization state and grants
+ * no registry, Run, gate, or resource-ledger authority.
+ */
+std::shared_ptr<TiledConstraintGateProbe> current_tiled_constraint_probe() {
+  std::lock_guard<std::mutex> lock(g_tiled_constraint_probe_mutex);
+  if (!g_tiled_constraint_probe) {
+    throw std::logic_error("No tiled constraint probe is currently installed.");
+  }
+  return g_tiled_constraint_probe;
+}
+
+/**
+ * @brief Installs one test-owned tiled constraint probe for a bounded scope.
+ *
+ * @throws std::invalid_argument when probe is null.
+ * @throws std::logic_error when another test already owns the binding.
+ * @throws std::system_error when process-global probe locking fails.
+ * @note Destruction clears only the exact owner installed by this guard. Test
+ * futures must settle before guard destruction so no callback observes absence.
+ */
+class ScopedTiledConstraintProbeBinding final {
+ public:
+  /**
+   * @brief Publishes one non-null probe to the registered callback.
+   * @param probe Shared probe that outlives every asynchronous test Run.
+   * @throws std::invalid_argument when probe is null.
+   * @throws std::logic_error when another binding is already active.
+   * @throws std::system_error when process-global probe locking fails.
+   */
+  explicit ScopedTiledConstraintProbeBinding(
+      std::shared_ptr<TiledConstraintGateProbe> probe)
+      : probe_(std::move(probe)) {
+    if (!probe_) {
+      throw std::invalid_argument(
+          "Tiled constraint probe binding requires a non-null probe.");
+    }
+    std::lock_guard<std::mutex> lock(g_tiled_constraint_probe_mutex);
+    if (g_tiled_constraint_probe) {
+      throw std::logic_error(
+          "A tiled constraint probe binding is already active.");
+    }
+    g_tiled_constraint_probe = probe_;
+  }
+
+  /**
+   * @brief Clears the exact process-global probe installed by this guard.
+   * @throws Nothing; unexpected mutex failures terminate through noexcept
+   * destruction.
+   */
+  ~ScopedTiledConstraintProbeBinding() noexcept {
+    std::lock_guard<std::mutex> lock(g_tiled_constraint_probe_mutex);
+    if (g_tiled_constraint_probe == probe_) {
+      g_tiled_constraint_probe.reset();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of one global probe binding.
+   * @param other Binding whose ownership remains unchanged.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedTiledConstraintProbeBinding(
+      const ScopedTiledConstraintProbeBinding& other) = delete;
+
+  /**
+   * @brief Prevents replacement of one global probe binding.
+   * @param other Binding whose ownership remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedTiledConstraintProbeBinding& operator=(
+      const ScopedTiledConstraintProbeBinding& other) = delete;
+
+ private:
+  /** @brief Exact owner installed in the process-global callback seam. */
+  std::shared_ptr<TiledConstraintGateProbe> probe_;
+};
+
+/**
+ * @brief Registers the tiled CPU operation used by the constraint regression.
+ * @return Nothing.
+ * @throws Registry allocation, metadata-copy, or callback-copy exceptions.
+ * @note Registration is process-persistent and idempotent. The callback writes
+ * no pixel value because this regression observes gate ownership, not image
+ * arithmetic.
+ */
+void ensure_tiled_constraint_operation_registered() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    OpMetadata metadata;
+    metadata.tile_preference = TileSizePreference::MICRO;
+    metadata.reentrant = true;
+    metadata.exclusive_key = kTiledGateKey;
+    OpRegistry::instance().register_op_hp_tiled(
+        "compute_run_tiled_constraint", "filter",
+        TileOpFunc(
+            [](const Node&, const OutputTile&, const std::vector<InputTile>&) {
+              current_tiled_constraint_probe()->enter();
+            }),
+        metadata);
+  });
+}
+
+/**
+ * @brief Builds one complete cached input for the tiled constraint regression.
+ * @param id Stable graph-local node id.
+ * @return Node with exact 32-by-16 formal HP validity.
+ * @throws GraphError or std::bad_alloc when buffer, Region, strings, or
+ * parameters allocate.
+ * @note The complete cache prunes this boundary from execution while still
+ * satisfying the tiled provider's required image input.
+ */
+Node make_tiled_constraint_cached_input_node(int id) {
+  Node node;
+  node.id = id;
+  node.name = "tiled_constraint_input_" + std::to_string(id);
+  node.type = "compute_run_tiled_constraint_input";
+  node.subtype = "source";
+  node.parameters["width"] = 32;
+  node.parameters["height"] = 16;
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->image_buffer =
+      make_aligned_cpu_image_buffer(32, 16, 1, DataType::FLOAT32);
+  node.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 32, 0, 16});
+  node.hp_version = 1;
+  return node;
+}
+
+/**
+ * @brief Builds a filter whose 32-by-16 output expands into two micro tiles.
+ * @param id Stable graph-local node id.
+ * @param input_id Cached upstream image node required by tiled execution.
+ * @return Node resolved by the persistent tiled constraint operation.
+ * @throws std::bad_alloc when node strings, input ownership, or parameters
+ * allocate.
+ * @note The exact two-task shape makes repeated node-level constraint movement
+ * observable on the second task.
+ */
+Node make_tiled_constraint_node(int id, int input_id) {
+  Node node;
+  node.id = id;
+  node.name = "tiled_constraint_node_" + std::to_string(id);
+  node.type = "compute_run_tiled_constraint";
+  node.subtype = "filter";
+  node.parameters["width"] = 32;
+  node.parameters["height"] = 16;
+  node.image_inputs.push_back(ImageInput{input_id, "image"});
+  return node;
+}
+
+/** @brief Test-product category for one retained operation-string owner. */
+using RetainedOperationStringOwner = testing::RetainedOperationStringOwner;
+
+/**
+ * @brief Immutable copy of one retained operation-string charge observation.
+ *
+ * @throws Nothing for value construction and movement.
+ */
+struct RetainedOperationStringCharge final {
+  /** @brief Exact product ownership boundary that charged the string. */
+  RetainedOperationStringOwner owner =
+      RetainedOperationStringOwner::ComputePlanOperationRoute;
+  /** @brief Actual capacity of the owned `std::string`. */
+  std::uint64_t capacity = 0U;
+  /** @brief Checked estimator total immediately before the charge. */
+  std::uint64_t before_bytes = 0U;
+  /** @brief Checked estimator total immediately after the charge. */
+  std::uint64_t after_bytes = 0U;
+};
+
+/**
+ * @brief Records retained operation-string charges without callback allocation.
+ *
+ * @throws Nothing from construction and callback recording.
+ * @note Product estimators emit synchronously in the owning tests. Atomic slots
+ * nevertheless make accidental cross-thread emission race-free, while the
+ * fixed bound prevents the observer from changing the retained-memory path it
+ * measures.
+ */
+class RetainedOperationStringChargeProbe final {
+ public:
+  /** @brief Maximum observations retained by one focused product path. */
+  static constexpr std::size_t kMaximumObservations = 64U;
+
+  /**
+   * @brief Records one product-owned string and estimator interval.
+   * @param context Non-null probe installed by the scoped observer.
+   * @param owner Exact product ownership category.
+   * @param capacity Actual copied `std::string::capacity()`.
+   * @param before_bytes Estimator total before the charge.
+   * @param after_bytes Estimator total after the charge.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The callback performs only bounded atomic stores and retains no
+   * borrowed string, estimator, service, gate, or resource reference.
+   */
+  static void observe(void* context, RetainedOperationStringOwner owner,
+                      std::uint64_t capacity, std::uint64_t before_bytes,
+                      std::uint64_t after_bytes) noexcept {
+    auto* probe = static_cast<RetainedOperationStringChargeProbe*>(context);
+    const std::size_t index =
+        probe->next_.fetch_add(1U, std::memory_order_acq_rel);
+    if (index >= kMaximumObservations) {
+      return;
+    }
+    Slot& slot = probe->slots_.at(index);
+    slot.owner.store(static_cast<std::uint8_t>(owner),
+                     std::memory_order_relaxed);
+    slot.capacity.store(capacity, std::memory_order_relaxed);
+    slot.before_bytes.store(before_bytes, std::memory_order_relaxed);
+    slot.after_bytes.store(after_bytes, std::memory_order_relaxed);
+    slot.published.store(true, std::memory_order_release);
+  }
+
+  /**
+   * @brief Copies every completely published observation.
+   * @return Ordered charge observations emitted by the synchronous path.
+   * @throws std::logic_error when an observed slot was not fully published.
+   * @throws std::bad_alloc when result storage cannot allocate.
+   */
+  std::vector<RetainedOperationStringCharge> snapshot() const {
+    const std::size_t observed = next_.load(std::memory_order_acquire);
+    if (observed > kMaximumObservations) {
+      throw std::logic_error(
+          "Retained operation-string observation capacity exceeded.");
+    }
+    std::vector<RetainedOperationStringCharge> result;
+    result.reserve(observed);
+    for (std::size_t index = 0U; index < observed; ++index) {
+      const Slot& slot = slots_.at(index);
+      if (!slot.published.load(std::memory_order_acquire)) {
+        throw std::logic_error(
+            "Retained operation-string observation was not published.");
+      }
+      result.push_back(RetainedOperationStringCharge{
+          static_cast<RetainedOperationStringOwner>(
+              slot.owner.load(std::memory_order_relaxed)),
+          slot.capacity.load(std::memory_order_relaxed),
+          slot.before_bytes.load(std::memory_order_relaxed),
+          slot.after_bytes.load(std::memory_order_relaxed),
+      });
+    }
+    return result;
+  }
+
+ private:
+  /**
+   * @brief Allocation-free storage for one test-product observer callback.
+   * @throws Nothing for atomic initialization and access.
+   */
+  struct Slot final {
+    /** @brief True after every remaining field has been stored. */
+    std::atomic_bool published{false};
+    /** @brief Encoded `RetainedOperationStringOwner`. */
+    std::atomic<std::uint8_t> owner{0U};
+    /** @brief Actual copied string capacity. */
+    std::atomic<std::uint64_t> capacity{0U};
+    /** @brief Estimator bytes before the charge. */
+    std::atomic<std::uint64_t> before_bytes{0U};
+    /** @brief Estimator bytes after the charge. */
+    std::atomic<std::uint64_t> after_bytes{0U};
+  };
+
+  /** @brief Monotonic next slot, including any overflowed observations. */
+  std::atomic<std::size_t> next_{0U};
+  /** @brief Fixed observation storage that never allocates in the callback. */
+  std::array<Slot, kMaximumObservations> slots_;
+};
+
+/**
+ * @brief Installs one retained operation-string observer for a focused path.
+ *
+ * @throws Nothing from construction and destruction.
+ * @note The supplied service documents isolated test ownership; observer state
+ * is process-local because several seam translation units emit the events.
+ */
+class ScopedRetainedOperationStringChargeObserver final {
+ public:
+  /**
+   * @brief Installs the allocation-free observer.
+   * @param service Isolated internal test-product service.
+   * @param probe Fixed-capacity destination that outlives this guard.
+   * @throws Nothing.
+   */
+  ScopedRetainedOperationStringChargeObserver(
+      ExecutionService& service,
+      RetainedOperationStringChargeProbe& probe) noexcept
+      : service_(service) {
+    ::ps::testing::ExecutionServiceTestAccess::
+        set_retained_operation_string_charge_observer(
+            service_, &RetainedOperationStringChargeProbe::observe, &probe);
+  }
+
+  /** @brief Clears the process-local observer after synchronous estimation. */
+  ~ScopedRetainedOperationStringChargeObserver() noexcept {
+    ::ps::testing::ExecutionServiceTestAccess::
+        clear_retained_operation_string_charge_observer(service_);
+  }
+
+  /** @brief Prevents duplicate observer-clearing ownership. */
+  ScopedRetainedOperationStringChargeObserver(
+      const ScopedRetainedOperationStringChargeObserver&) = delete;
+
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedRetainedOperationStringChargeObserver& operator=(
+      const ScopedRetainedOperationStringChargeObserver&) = delete;
+
+ private:
+  /** @brief Isolated service documenting the active test-product path. */
+  ExecutionService& service_;
+};
+
+/**
+ * @brief Verifies actual capacity-plus-terminator deltas and owner counts.
+ * @param probe Completed fixed-capacity observation.
+ * @param expected_counts Required exact count for selected owner categories.
+ * @return Nothing; GoogleTest records every mismatch.
+ * @throws std::logic_error for incomplete/overflowed observation state.
+ * @throws std::bad_alloc when snapshot storage cannot allocate.
+ * @note Every event is checked, including categories not listed in
+ * expected_counts. This independently compares the actual owned capacity with
+ * the production estimator delta instead of calibrating from a complete Run
+ * reservation.
+ */
+void expect_retained_operation_string_charges(
+    const RetainedOperationStringChargeProbe& probe,
+    std::initializer_list<std::pair<RetainedOperationStringOwner, std::size_t>>
+        expected_counts) {
+  const std::vector<RetainedOperationStringCharge> observations =
+      probe.snapshot();
+  ASSERT_FALSE(observations.empty());
+  constexpr std::size_t kOwnerCount =
+      static_cast<std::size_t>(RetainedOperationStringOwner::Count);
+  std::array<std::size_t, kOwnerCount> actual_by_owner{};
+  for (std::size_t index = 0U; index < observations.size(); ++index) {
+    const RetainedOperationStringCharge& observation = observations.at(index);
+    const std::size_t owner_index = static_cast<std::size_t>(observation.owner);
+    SCOPED_TRACE("retained operation-string observation " +
+                 std::to_string(index) + ", owner " +
+                 std::to_string(owner_index));
+    ASSERT_LT(owner_index, kOwnerCount);
+    ++actual_by_owner.at(owner_index);
+    EXPECT_GT(observation.capacity, 15U);
+    ASSERT_GE(observation.after_bytes, observation.before_bytes);
+    EXPECT_EQ(observation.after_bytes - observation.before_bytes,
+              observation.capacity + 1U);
+  }
+  std::array<std::size_t, kOwnerCount> expected_by_owner{};
+  for (const auto& expected : expected_counts) {
+    const std::size_t owner_index = static_cast<std::size_t>(expected.first);
+    ASSERT_LT(owner_index, kOwnerCount);
+    ASSERT_EQ(expected_by_owner.at(owner_index), 0U);
+    expected_by_owner.at(owner_index) = expected.second;
+  }
+  for (std::size_t owner_index = 0U; owner_index < kOwnerCount; ++owner_index) {
+    SCOPED_TRACE("retained operation-string owner " +
+                 std::to_string(owner_index));
+    EXPECT_EQ(actual_by_owner.at(owner_index),
+              expected_by_owner.at(owner_index));
+  }
+}
+
 /** @brief Counts Issue #75 CPU implementation entries. */
 std::atomic_int g_issue75_cpu_operation_calls{0};
 
@@ -481,13 +917,15 @@ void ensure_issue75_device_operations_registered() {
  *
  * @return Nothing.
  * @throws Registry allocation or callback-copy exceptions unchanged.
- * @note Registration is process-persistent and idempotent. Both callbacks
- * return named data so successful execution cannot be confused with an empty
- * output.
+ * @note Registration is process-persistent and idempotent. Every operation
+ * uses a heap-backed exclusive key, and each callback returns named data so
+ * successful execution cannot be confused with an empty output.
  */
 void ensure_resource_product_operations_registered() {
   static std::once_flag once;
   std::call_once(once, [] {
+    OpMetadata full_metadata;
+    full_metadata.exclusive_key = "resource-accounting-full-plan-exclusive-key";
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "full_source",
         MonolithicOpFunc(
@@ -497,7 +935,11 @@ void ensure_resource_product_operations_registered() {
               NodeOutput output;
               output.data["value"] = 7;
               return output;
-            }));
+            }),
+        full_metadata);
+    OpMetadata parameter_metadata;
+    parameter_metadata.exclusive_key =
+        "resource-accounting-connected-preflight-exclusive-key";
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "parameter_source",
         MonolithicOpFunc(
@@ -507,7 +949,8 @@ void ensure_resource_product_operations_registered() {
               NodeOutput output;
               output.data["value"] = 9;
               return output;
-            }));
+            }),
+        parameter_metadata);
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "parameter_source_fail_second",
         MonolithicOpFunc(
@@ -523,7 +966,11 @@ void ensure_resource_product_operations_registered() {
               NodeOutput output;
               output.data["value"] = 9;
               return output;
-            }));
+            }),
+        parameter_metadata);
+    OpMetadata dirty_hp_metadata;
+    dirty_hp_metadata.exclusive_key =
+        "resource-accounting-dirty-hp-exclusive-key";
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "dirty_hp",
         MonolithicOpFunc(
@@ -531,7 +978,11 @@ void ensure_resource_product_operations_registered() {
               g_resource_dirty_hp_operation_calls.fetch_add(
                   1, std::memory_order_relaxed);
               return make_resource_dirty_output(11);
-            }));
+            }),
+        dirty_hp_metadata);
+    OpMetadata dirty_rt_metadata;
+    dirty_rt_metadata.exclusive_key =
+        "resource-accounting-dirty-rt-exclusive-key";
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "dirty_rt",
         MonolithicOpFunc(
@@ -539,7 +990,8 @@ void ensure_resource_product_operations_registered() {
               g_resource_dirty_rt_operation_calls.fetch_add(
                   1, std::memory_order_relaxed);
               return make_resource_dirty_output(12);
-            }));
+            }),
+        dirty_rt_metadata);
   });
 }
 
@@ -564,7 +1016,7 @@ Node make_resource_product_node(int id) {
  *
  * @param node_id Graph-local node identity.
  * @param subtype Registered HP or RT-fallback operation subtype.
- * @return Node with an 8-by-8 reusable HP output and full-frame ROI.
+ * @return Node with an 8-by-8 reusable HP output and full-frame Region.
  * @throws GraphError or std::bad_alloc when node/output ownership allocates.
  * @note The reusable output supplies deterministic dirty planning geometry;
  * successful execution replaces it through the production staging buffer.
@@ -573,7 +1025,8 @@ Node make_resource_dirty_product_node(int node_id, const std::string& subtype) {
   Node node = make_resource_product_node(node_id);
   node.subtype = subtype;
   node.cached_output_high_precision = make_resource_dirty_output(3);
-  node.hp_roi = PixelRect{0, 0, 8, 8};
+  node.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
   node.hp_version = 1;
   return node;
 }
@@ -620,35 +1073,6 @@ class ScopedResourceRuntimeDirectory final {
  private:
   /** @brief Test-owned root removed at destruction. */
   std::filesystem::path path_;
-};
-
-/**
- * @brief GraphRuntime test double with deterministic fake Metal capability.
- *
- * @throws Standard GraphRuntime construction exceptions unchanged.
- * @note The runtime still owns real graph, trace, route, and proxy state. Only
- * capability discovery is overridden; no native Metal object is fabricated.
- */
-class FakeMetalGraphRuntime final : public GraphRuntime {
- public:
-  /**
-   * @brief Constructs a runtime with controlled fake Metal availability.
-   * @param info Ordinary graph-runtime ownership configuration.
-   * @param metal_available Whether `GPU_METAL` is reported available.
-   * @throws Standard GraphRuntime construction exceptions unchanged.
-   */
-  FakeMetalGraphRuntime(const Info& info, bool metal_available)
-      : GraphRuntime(info), metal_available_(metal_available) {}
-
-  /** @copydoc GraphRuntime::is_device_available */
-  bool is_device_available(Device device) const noexcept override {
-    return device == Device::CPU ||
-           (metal_available_ && device == Device::GPU_METAL);
-  }
-
- private:
-  /** @brief Controlled fake Metal capability. */
-  bool metal_available_ = false;
 };
 
 /**
@@ -930,20 +1354,12 @@ class CompletionTrackingRuntime final : public ExecutionTaskRuntime {
  *
  * @throws std::bad_alloc when a copied trace snapshot cannot allocate.
  * @throws std::system_error when trace snapshot locking fails.
- * @note The fixture owns no Graph or cache state. Worker-facing callbacks
- * remain noexcept; trace recording failures are retained as an explicit test
- * signal.
+ * @note The fixture owns no Graph, cache, or device capability state.
+ * Worker-facing callbacks remain noexcept; trace recording failures are
+ * retained as an explicit test signal.
  */
 class ExecutionServiceHost final : public ExecutionHostContext {
  public:
-  /**
-   * @brief Creates a trace Host with optional fake Metal capability.
-   * @param metal_available Whether `GPU_METAL` is reported available.
-   * @throws Nothing.
-   */
-  explicit ExecutionServiceHost(bool metal_available = false) noexcept
-      : metal_available_(metal_available) {}
-
   /**
    * @brief Complete immutable execution trace tuple observed by one Host.
    *
@@ -963,17 +1379,6 @@ class ExecutionServiceHost final : public ExecutionHostContext {
     /** @brief Opaque Run epoch active on that worker. */
     std::uint64_t epoch = 0;
   };
-
-  /**
-   * @brief Reports the fixture's only physical capability.
-   * @param device Capability requested by the execution service.
-   * @return True for CPU and for the configured fake Metal capability.
-   * @throws Nothing.
-   */
-  bool is_device_available(Device device) const noexcept override {
-    return device == Device::CPU ||
-           (metal_available_ && device == Device::GPU_METAL);
-  }
 
   /**
    * @brief Records one worker-context entry.
@@ -1091,9 +1496,6 @@ class ExecutionServiceHost final : public ExecutionHostContext {
   }
 
  private:
-  /** @brief Controlled fake Metal capability. */
-  bool metal_available_ = false;
-
   /** @brief Top-level CPU callback context entries. */
   std::atomic_int context_entries_{0};
 
@@ -1336,6 +1738,7 @@ RetainedSubmissionObservation observe_retained_submission(
  * @param entered Counter incremented when the service executes the value.
  * @param priority Ready-store ordering hint.
  * @param resource_demand Exact trusted-host task demand.
+ * @param operation_constraints Exact operation gate metadata.
  * @return Move-owned ready task.
  * @throws std::bad_alloc from metadata or executable ownership.
  * @note The helper is intentionally independent from TaskSubmissionPlan so
@@ -1346,7 +1749,8 @@ ReadyTaskSubmission make_counted_ready_submission(
     std::atomic_int& entered,
     ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
     ReadyTaskResourceDemand resource_demand =
-        ReadyTaskSubmission::default_resource_demand()) {
+        ReadyTaskSubmission::default_resource_demand(),
+    OperationExecutionConstraints operation_constraints = {}) {
   const ComputeRunTaskIdentity identity = lease.task_identity(local_task_id);
   return ReadyTaskSubmission(
       std::move(lease), identity, trace_node_id, true,
@@ -1360,7 +1764,29 @@ ReadyTaskSubmission make_counted_ready_submission(
         entered.fetch_add(1, std::memory_order_relaxed);
         runtime.dec_tasks_to_complete();
       },
-      priority, resource_demand);
+      priority, resource_demand, Device::CPU, std::move(operation_constraints));
+}
+
+/**
+ * @brief Waits until an atomic counter reaches one minimum value.
+ *
+ * @param value Counter advanced by service callbacks.
+ * @param expected Minimum accepted value.
+ * @return True when expected is reached within two seconds.
+ * @throws Nothing.
+ * @note This helper observes outcomes only and grants no scheduling authority.
+ */
+bool wait_for_atomic_count(const std::atomic_int& value,
+                           int expected) noexcept {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  do {
+    if (value.load(std::memory_order_acquire) >= expected) {
+      return true;
+    }
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < deadline);
+  return value.load(std::memory_order_acquire) >= expected;
 }
 
 /**
@@ -1451,6 +1877,76 @@ static_assert(std::is_nothrow_move_constructible_v<AsyncPolicyRun>,
               "Async policy owner adoption must not throw during movement.");
 static_assert(std::is_nothrow_move_assignable_v<AsyncPolicyRun>,
               "Async policy owner replacement must not throw during movement.");
+
+/**
+ * @brief Publishes one Run whose constrained callbacks share a release gate.
+ *
+ * @param service Fixed-worker execution domain under test.
+ * @param submission Descriptor naming one Graph/Run.
+ * @param task_count Positive number of initially ready callbacks.
+ * @param constraints Exact implementation cap and exclusion declaration.
+ * @param entered Total callbacks that reached provider work.
+ * @param active Currently entered callbacks.
+ * @param maximum_active Maximum overlapping callbacks observed.
+ * @param release Shared callback release future.
+ * @param throwing_task Optional local task id that throws after entering.
+ * @return Owned asynchronous Run, Host, and completion future.
+ * @throws std::invalid_argument when task_count is not positive.
+ * @throws std::bad_alloc, std::future_error, or std::system_error from setup.
+ * @note Every normal callback retires one logical completion unit. Throwing
+ * callbacks leave failure settlement to ReadyTaskSubmission and the service.
+ */
+AsyncPolicyRun launch_constrained_operation_run(
+    ExecutionService& service, ComputeRunSubmission submission, int task_count,
+    const OperationExecutionConstraints& constraints, std::atomic_int& entered,
+    std::atomic_int& active, std::atomic_int& maximum_active,
+    std::shared_future<void> release, int throwing_task = -1) {
+  if (task_count <= 0) {
+    throw std::invalid_argument(
+        "Constrained operation test Run requires positive task count.");
+  }
+  auto host = std::make_unique<ExecutionServiceHost>();
+  auto run = std::make_unique<ComputeRun>(std::move(submission));
+  std::vector<ReadyTaskSubmission> ready;
+  ready.reserve(static_cast<std::size_t>(task_count));
+  for (int task_id = 0; task_id < task_count; ++task_id) {
+    ComputeRunLease lease = run->acquire_lease();
+    const ComputeRunTaskIdentity identity =
+        lease.task_identity(static_cast<std::uint64_t>(task_id));
+    ready.emplace_back(
+        std::move(lease), identity, task_id, true,
+        [&entered, &active, &maximum_active, release, task_id, throwing_task](
+            ComputeRunLease&, const ComputeRunTaskIdentity&,
+            ExecutionTaskRuntime& runtime) {
+          const int now_active =
+              active.fetch_add(1, std::memory_order_acq_rel) + 1;
+          int observed_maximum = maximum_active.load(std::memory_order_acquire);
+          while (observed_maximum < now_active &&
+                 !maximum_active.compare_exchange_weak(
+                     observed_maximum, now_active, std::memory_order_acq_rel,
+                     std::memory_order_acquire)) {
+          }
+          entered.fetch_add(1, std::memory_order_release);
+          release.wait();
+          active.fetch_sub(1, std::memory_order_acq_rel);
+          if (task_id == throwing_task) {
+            throw std::runtime_error("constrained provider failure");
+          }
+          runtime.dec_tasks_to_complete();
+        },
+        ExecutionTaskPriority::Normal,
+        ReadyTaskSubmission::default_resource_demand(), Device::CPU,
+        constraints);
+  }
+
+  ExecutionServiceHost* host_pointer = host.get();
+  std::future<void> completion = std::async(
+      std::launch::async,
+      [&service, host_pointer, ready = std::move(ready), task_count]() mutable {
+        service.execute_run(*host_pointer, "cpu", std::move(ready), task_count);
+      });
+  return AsyncPolicyRun{std::move(host), std::move(run), std::move(completion)};
+}
 
 /**
  * @brief Publishes one policy-test Run whose initial tasks record markers.
@@ -1685,9 +2181,15 @@ void expect_policy_runs_settle(std::vector<AsyncPolicyRun>& runs) {
  */
 ExecutionResourceLimits execution_limits(const ResourceVector& resources) {
   return ExecutionResourceLimits{
-      resources.cpu_slots,     resources.retained_memory_bytes,
-      resources.scratch_bytes, resources.ready_entries,
-      resources.ready_bytes,   ResourceVector{},
+      resources.cpu_slots,
+      resources.retained_memory_bytes,
+      resources.scratch_bytes,
+      resources.ready_entries,
+      resources.ready_bytes,
+      8U,
+      16U * 1024U * 1024U,
+      ResourceVector{},
+      {},
   };
 }
 
@@ -1983,7 +2485,7 @@ class ScopedInitialSubmissionStorageObserver final {
   ScopedInitialSubmissionStorageObserver(
       ExecutionService& service, InitialSubmissionStorageProbe& probe) noexcept
       : service_(&service) {
-    testing::ExecutionServiceTestAccess::
+    ::ps::testing::ExecutionServiceTestAccess::
         set_initial_submission_storage_observer(
             service, &InitialSubmissionStorageProbe::observe, &probe);
   }
@@ -1993,7 +2495,7 @@ class ScopedInitialSubmissionStorageObserver final {
    * @throws Nothing.
    */
   ~ScopedInitialSubmissionStorageObserver() noexcept {
-    testing::ExecutionServiceTestAccess::
+    ::ps::testing::ExecutionServiceTestAccess::
         clear_initial_submission_storage_observer(*service_);
   }
 
@@ -2131,14 +2633,15 @@ class ScopedWorkerEntryRetirementObserver final {
   ScopedWorkerEntryRetirementObserver(
       ExecutionService& service, WorkerEntryRetirementProbe& probe) noexcept
       : service_(&service) {
-    testing::ExecutionServiceTestAccess::set_worker_entry_retirement_observer(
-        service, &WorkerEntryRetirementProbe::observe, &probe);
+    ::ps::testing::ExecutionServiceTestAccess::
+        set_worker_entry_retirement_observer(
+            service, &WorkerEntryRetirementProbe::observe, &probe);
   }
 
   /** @brief Clears the observer after all observed Runs settle. */
   ~ScopedWorkerEntryRetirementObserver() noexcept {
-    testing::ExecutionServiceTestAccess::clear_worker_entry_retirement_observer(
-        *service_);
+    ::ps::testing::ExecutionServiceTestAccess::
+        clear_worker_entry_retirement_observer(*service_);
   }
 
   /** @brief Prevents duplicating observer-clearing ownership. */
@@ -2211,8 +2714,11 @@ ResourceVector independently_estimate_large_dirty_phase_resources(
       static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
   const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
                                          Device::CPU);
+  const std::vector<OperationExecutionConstraints> task_constraints(
+      compute_plan.task_graph.tasks.size());
   auto context = std::make_shared<DirtyReadyTaskContext>(
-      compute_plan, nullptr, phase_task_ids, task_devices,
+      compute_plan, nullptr, phase_task_ids, task_devices, task_constraints,
+      ReadyTaskSubmission::default_resource_demand(),
       std::function<void(int)>(LargeDirtyPhaseTask(task_probe)), callable_bytes,
       run.acquire_lease(), !source_phase,
       source_phase ? ExecutionTaskPriority::High
@@ -2270,6 +2776,8 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
       source_phase ? std::vector<int>{} : phase_task_ids;
   const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
                                          Device::CPU);
+  const std::vector<OperationExecutionConstraints> task_constraints(
+      compute_plan.task_graph.tasks.size());
   DirtySourceFirstRunRequest request;
   request.intent = ComputeIntent::GlobalHighPrecision;
   request.execution_service = &service;
@@ -2277,6 +2785,7 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
   request.run = &run;
   request.compute_plan = &compute_plan;
   request.task_devices = &task_devices;
+  request.task_constraints = &task_constraints;
   request.additional_shared_retained_memory_bytes = additional_shared_bytes;
   request.source_task_ids = &source_task_ids;
   request.downstream_task_ids = &downstream_task_ids;
@@ -2355,18 +2864,23 @@ ComputeRunSubmission make_dirty_resource_submission(
  * @param synchronization_node_ids Owner ids; these must include node_id and
  * may add unused ids that do not change the product plan.
  * @param limits Immutable service limits for this endpoint.
+ * @param retained_string_probe Optional fixed-capacity observer for actual
+ * operation-string charge intervals during this endpoint.
  * @return Result containing exact admission, callback-visible output, and
  * post-settlement ledger state.
  * @throws Unexpected allocation, filesystem, graph, or service exceptions
  * unchanged. Expected GraphError rejection is captured in the result.
  * @note Every call rebuilds the same one-node graph and request state so a
  * successful endpoint cannot seed cache/proxy state for the next endpoint.
+ * Explicit force-recache keeps the fixture's seeded formal HP output from
+ * satisfying the resource-admission work under measurement.
  */
 DirtyProductResourceResult execute_dirty_product_resource_case(
     const std::string& directory_label, const std::string& graph_identity,
     int node_id, const std::string& subtype, ComputeIntent intent,
     const std::vector<int>& synchronization_node_ids,
-    ExecutionResourceLimits limits) {
+    ExecutionResourceLimits limits,
+    RetainedOperationStringChargeProbe* retained_string_probe = nullptr) {
   ScopedResourceRuntimeDirectory directory(directory_label);
   GraphRuntime::Info info;
   info.name = graph_identity;
@@ -2385,6 +2899,7 @@ DirtyProductResourceResult execute_dirty_product_resource_case(
   request.disable_disk_cache = true;
   request.dirty_roi = PixelRect{0, 0, 8, 8};
   request.suppress_graph_downsample = intent != ComputeIntent::RealTimeUpdate;
+  request.force_recache = true;
   request.node_synchronization =
       std::make_shared<DirtyNodeSynchronization>(synchronization_node_ids);
 
@@ -2392,6 +2907,11 @@ DirtyProductResourceResult execute_dirty_product_resource_case(
   result.synchronization_bytes =
       request.node_synchronization->retained_memory_bytes();
   ExecutionService service(1U, limits);
+  std::optional<ScopedRetainedOperationStringChargeObserver>
+      retained_string_observer;
+  if (retained_string_probe != nullptr) {
+    retained_string_observer.emplace(service, *retained_string_probe);
+  }
   InitialSubmissionStorageProbe observation;
   ScopedInitialSubmissionStorageObserver observer(service, observation);
   ComputeRun run(make_dirty_resource_submission(
@@ -2604,10 +3124,10 @@ TEST(Issue75DeviceRouting, FullPlanSelectsGpuAndFallsBackToCpu) {
   EXPECT_EQ(gpu_ready.front().metadata().device(), Device::GPU_METAL);
   ASSERT_EQ(gpu_plan.resolved_ops().size(), 1U);
   ASSERT_TRUE(gpu_plan.resolved_ops().front().has_value());
-  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(
-      *gpu_plan.resolved_ops().front()));
+  const OpImplementation& gpu_implementation = *gpu_plan.resolved_ops().front();
+  ASSERT_TRUE(gpu_implementation.is_monolithic());
   const NodeOutput gpu_output = std::get<MonolithicOpFunc>(
-      *gpu_plan.resolved_ops().front())(gpu_graph.node(501), {});
+      gpu_implementation.func)(gpu_graph.node(501), {});
   EXPECT_EQ(gpu_output.data.at("value").as_int64(), 76);
 
   GraphModel cpu_graph("cache/issue75-full-cpu");
@@ -2626,11 +3146,152 @@ TEST(Issue75DeviceRouting, FullPlanSelectsGpuAndFallsBackToCpu) {
   ASSERT_EQ(cpu_ready.size(), 1U);
   EXPECT_EQ(cpu_ready.front().metadata().device(), Device::CPU);
   ASSERT_TRUE(cpu_plan.resolved_ops().front().has_value());
+  const OpImplementation& cpu_implementation = *cpu_plan.resolved_ops().front();
+  ASSERT_TRUE(cpu_implementation.is_monolithic());
   const NodeOutput cpu_output = std::get<MonolithicOpFunc>(
-      *cpu_plan.resolved_ops().front())(cpu_graph.node(502), {});
+      cpu_implementation.func)(cpu_graph.node(502), {});
   EXPECT_EQ(cpu_output.data.at("value").as_int64(), 75);
   EXPECT_EQ(g_issue75_gpu_operation_calls.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(g_issue75_cpu_operation_calls.load(std::memory_order_relaxed), 1);
+}
+
+/**
+ * @brief Verifies full planning carries one coherent operation route to ready.
+ *
+ * @return Nothing; assertions report identity, metadata, or resource mismatch.
+ * @throws Registry, Graph, Run, planning, and callback-copy exceptions.
+ * @note The test stops before provider execution. It proves the immutable route
+ * selected during planning is the same identity/metadata snapshot attached to
+ * admission and resource declarations.
+ */
+TEST(OperationMetadataRouting, FullPlanCarriesIdentityConstraintsAndResources) {
+  constexpr const char* kType = "issue82_plan";
+  constexpr const char* kSubtype = "metadata";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  OpMetadata metadata;
+  metadata.reentrant = false;
+  metadata.maximum_parallelism = 2U;
+  metadata.retained_memory_bytes = 1234U;
+  metadata.scratch_bytes = 5678U;
+  metadata.exclusive_key = "issue82-plan-context";
+  registry.register_impl(
+      kType, kSubtype, Device::CPU,
+      MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
+        NodeOutput output;
+        output.data["value"] = 82;
+        return output;
+      }),
+      metadata);
+
+  GraphModel graph("cache/issue82-plan");
+  Node node = make_plan_node(582);
+  node.type = kType;
+  node.subtype = kSubtype;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  ComputeRun run(
+      make_test_submission("issue82-plan", graph.revision().value(), 582));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, 582, std::vector<Device>{Device::CPU});
+  std::vector<ReadyTaskSubmission> ready =
+      plan.make_initial_ready_submissions(run.acquire_lease());
+
+  ASSERT_EQ(plan.compute_plan().planned_work.size(), 1U);
+  ASSERT_TRUE(
+      plan.compute_plan().planned_work.front().operation_route.has_value());
+  const PlannedOperationRoute& route =
+      *plan.compute_plan().planned_work.front().operation_route;
+  ASSERT_NE(route.implementation_identity, 0U);
+  EXPECT_EQ(route.device, Device::CPU);
+  EXPECT_FALSE(route.metadata.reentrant);
+  EXPECT_EQ(route.metadata.maximum_parallelism, 2U);
+  EXPECT_EQ(route.metadata.retained_memory_bytes, 1234U);
+  EXPECT_EQ(route.metadata.scratch_bytes, 5678U);
+  EXPECT_EQ(route.metadata.exclusive_key, "issue82-plan-context");
+  EXPECT_EQ(plan.task_resource_demand().retained_memory_bytes, 1234U);
+  EXPECT_EQ(plan.task_resource_demand().scratch_bytes, 5678U);
+
+  ASSERT_EQ(ready.size(), 1U);
+  const OperationExecutionConstraints& constraints =
+      ready.front().operation_constraints();
+  EXPECT_EQ(constraints.implementation_identity, route.implementation_identity);
+  EXPECT_FALSE(constraints.reentrant);
+  EXPECT_EQ(constraints.maximum_parallelism, 2U);
+  EXPECT_EQ(constraints.exclusive_key, "issue82-plan-context");
+  EXPECT_EQ(ready.front().resource_demand(), plan.task_resource_demand());
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Verifies route inventory canonicalization and mixed-operation demand.
+ *
+ * @return Nothing; assertions report cache-key or component maximum mismatch.
+ * @throws Registry, Graph, Run, planning, and callback-copy exceptions.
+ * @note The two operations place their maxima in different byte dimensions,
+ * proving the uniform task vector is a component-wise maximum rather than one
+ * selected operation's complete vector.
+ */
+TEST(OperationMetadataRouting,
+     MixedPlanCanonicalizesInventoryAndMaximizesEachResource) {
+  constexpr const char* kType = "issue82_mixed_plan";
+  constexpr const char* kProducerSubtype = "producer";
+  constexpr const char* kTargetSubtype = "target";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kProducerSubtype));
+  registry.unregister_key(make_key(kType, kTargetSubtype));
+
+  const MonolithicOpFunc operation = [](const Node&,
+                                        const std::vector<const NodeOutput*>&) {
+    return NodeOutput{};
+  };
+  OpMetadata producer_metadata;
+  producer_metadata.retained_memory_bytes = 4321U;
+  producer_metadata.scratch_bytes = 99U;
+  registry.register_impl(kType, kProducerSubtype, Device::CPU, operation,
+                         producer_metadata);
+  OpMetadata target_metadata;
+  target_metadata.retained_memory_bytes = 1234U;
+  target_metadata.scratch_bytes = 5678U;
+  registry.register_impl(kType, kTargetSubtype, Device::CPU, operation,
+                         target_metadata);
+
+  GraphModel graph("cache/issue82-mixed-plan");
+  Node producer = make_plan_node(583);
+  producer.type = kType;
+  producer.subtype = kProducerSubtype;
+  Node target = make_plan_node(584);
+  target.type = kType;
+  target.subtype = kTargetSubtype;
+  target.image_inputs.push_back(ImageInput{583, "image"});
+  graph.add_node(std::move(producer));
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  ComputeRun run(make_test_submission("issue82-mixed-plan",
+                                      graph.revision().value(), 584));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, 584, std::vector<Device>{Device::CPU, Device::CPU});
+
+  EXPECT_EQ(plan.compute_plan().available_devices,
+            (std::vector<Device>{Device::CPU}));
+  EXPECT_EQ(plan.task_resource_demand().retained_memory_bytes, 4321U);
+  EXPECT_EQ(plan.task_resource_demand().scratch_bytes, 5678U);
+  EXPECT_EQ(full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision,
+                                      {Device::CPU, Device::CPU}),
+            full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision,
+                                      {Device::CPU}));
+  EXPECT_NE(
+      full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision, {}),
+      full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision,
+                                {Device::CPU}));
+
+  registry.unregister_key(make_key(kType, kProducerSubtype));
+  registry.unregister_key(make_key(kType, kTargetSubtype));
 }
 
 /**
@@ -2640,8 +3301,10 @@ TEST(Issue75DeviceRouting, FullPlanSelectsGpuAndFallsBackToCpu) {
  * @return Nothing; GoogleTest reports output, worker, or ledger failures.
  * @throws Filesystem, graph, planning, registry, or service exceptions
  * unchanged.
- * @note Each domain uses a fresh fake-Metal GraphRuntime and real source-first
- * service dispatch, so HP cache state cannot seed RT selection.
+ * @note Each domain uses a fresh GraphRuntime plus an injected fake process
+ * Metal executor and real source-first service dispatch. Explicit
+ * force-recache keeps the seeded dirty product node executable for the
+ * GPU-route assertion; HP cache state cannot seed RT selection.
  */
 TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
   ensure_issue75_device_operations_registered();
@@ -2662,7 +3325,7 @@ TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
     info.cache_root = directory.path() / "cache";
     info.hp_execution_type = "gpu_pipeline";
     info.rt_execution_type = "gpu_pipeline";
-    FakeMetalGraphRuntime runtime(info, true);
+    GraphRuntime runtime(info);
     GraphModel& graph = runtime.model();
     Node node = make_resource_dirty_product_node(503, "source");
     node.type = "issue75_device_route";
@@ -2675,9 +3338,13 @@ TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
     request.disable_disk_cache = true;
     request.dirty_roi = PixelRect{0, 0, 8, 8};
     request.suppress_graph_downsample = true;
+    request.force_recache = true;
     GraphTraversalService traversal;
     GraphEventService events;
-    ExecutionService service(1U);
+    ExecutionService service(
+        ExecutionService::default_resource_limits(),
+        ::ps::testing::make_fake_metal_executor_registry());
+    service.configure_worker_count(1U);
     ComputeRun run(make_dirty_resource_submission(
         suffix, graph.revision().value(), 503, intent));
     ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
@@ -2708,8 +3375,9 @@ TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
  *
  * @return Nothing; GoogleTest reports snapshot, worker, or ledger failures.
  * @throws Graph, registry, service, or callback exceptions unchanged.
- * @note A fake-Metal Host drives the real preflight service path without a
- * native backend; the selected callback remains a normal host function.
+ * @note An injected fake Metal executor drives the real preflight service path
+ * without a native backend; the selected callback remains a normal host
+ * function.
  */
 TEST(Issue75DeviceRouting, ConnectedParameterPreflightUsesGpuLane) {
   ensure_issue75_device_operations_registered();
@@ -2726,8 +3394,10 @@ TEST(Issue75DeviceRouting, ConnectedParameterPreflightUsesGpuLane) {
   graph.add_node(std::move(target));
   graph.validate_topology();
   GraphTraversalService traversal;
-  ExecutionService service(1U);
-  ExecutionServiceHost host(true);
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(1U);
+  ExecutionServiceHost host;
   ComputeRun run(
       make_registered_test_submission(graph, "issue75-preflight-gpu", 505));
 
@@ -2905,7 +3575,7 @@ TEST(GraphRevision, ConcurrentIdentityMintIssuesMaximumOnceThenExhausts) {
       start_signal.wait();
       try {
         return std::optional<GraphInstanceId>{
-            testing::GraphInstanceIdTestAccess::mint_from(last_issued)};
+            ::ps::testing::GraphInstanceIdTestAccess::mint_from(last_issued)};
       } catch (const std::overflow_error&) {
         return std::optional<GraphInstanceId>{};
       }
@@ -2930,8 +3600,9 @@ TEST(GraphRevision, ConcurrentIdentityMintIssuesMaximumOnceThenExhausts) {
   EXPECT_EQ(maximum_issuances, 1U);
   EXPECT_EQ(exhaustion_count, kWorkerCount - 1U);
   EXPECT_EQ(last_issued.load(std::memory_order_relaxed), maximum);
-  EXPECT_THROW((void)testing::GraphInstanceIdTestAccess::mint_from(last_issued),
-               std::overflow_error);
+  EXPECT_THROW(
+      (void)::ps::testing::GraphInstanceIdTestAccess::mint_from(last_issued),
+      std::overflow_error);
   EXPECT_EQ(last_issued.load(std::memory_order_relaxed), maximum);
 }
 
@@ -2947,7 +3618,7 @@ TEST(GraphRevision, StructuralMutationOverflowPreservesPublishedGraph) {
   GraphModel graph(std::filesystem::path{});
   graph.add_node(make_plan_node(1));
   const uint64_t topology_before = graph.topology_generation();
-  testing::GraphModelTestAccess::set_revision(
+  ::ps::testing::GraphModelTestAccess::set_revision(
       graph, GraphRevision{std::numeric_limits<uint64_t>::max()});
 
   EXPECT_THROW(graph.add_node(make_plan_node(2)), std::overflow_error);
@@ -3188,6 +3859,36 @@ TEST(RunGroupLifecycle, ReleasesBothTerminalChildLeasesTogether) {
   EXPECT_THROW((void)group.rt_lease(), std::logic_error);
   EXPECT_EQ(group.aggregate_terminal_outcome().kind,
             ComputeRunTerminalKind::Succeeded);
+}
+
+/**
+ * @brief Proves service Graph close retires residency generation maintenance.
+ * @return Nothing; GoogleTest reports retained lineage rows after close.
+ * @throws Service, Graph-anchor, residency, or lifecycle exceptions unchanged.
+ * @note The test retains the injected process manager outside the moved
+ * registry. A post-close retirement count of zero proves the service already
+ * removed both exact Graph rows; settled resident replicas are not involved.
+ */
+TEST(ExecutionServiceLifecycle,
+     GraphCloseRetiresResidencyGenerationMaintenance) {
+  execution::DeviceExecutorRegistry registry;
+  std::shared_ptr<execution::ResidencyManager> residency =
+      registry.residency_manager();
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           std::move(registry));
+  const GraphInstanceId graph_instance_id{611U};
+  auto anchor = std::make_shared<GraphLifetimeAnchor>(graph_instance_id);
+  service.register_graph_lifecycle(anchor);
+  residency->track_lineage(graph_instance_id.value(), 71,
+                           ComputeIntent::GlobalHighPrecision);
+  residency->track_lineage(graph_instance_id.value(), 72,
+                           ComputeIntent::RealTimeUpdate);
+
+  service.close_graph_lifecycle(graph_instance_id,
+                                ComputeRunCancellationReason::GraphClose);
+  anchor->mark_retired();
+
+  EXPECT_EQ(residency->retire_graph_lineages(graph_instance_id.value()), 0U);
 }
 
 /**
@@ -3649,6 +4350,26 @@ TEST(ReadyTaskSubmission,
 }
 
 /**
+ * @brief Proves process composition rejects either zero compute-I/O limit.
+ *
+ * @note Each failed service construction must unwind its partially composed
+ * process resources without publishing an executable domain.
+ */
+TEST(ExecutionService, RejectsZeroComputeIoLimitsDuringComposition) {
+  ExecutionResourceLimits task_limits =
+      ExecutionService::default_resource_limits();
+  task_limits.compute_io_task_limit = 0U;
+  EXPECT_THROW((void)ExecutionService(std::move(task_limits)),
+               std::invalid_argument);
+
+  ExecutionResourceLimits byte_limits =
+      ExecutionService::default_resource_limits();
+  byte_limits.compute_io_planned_bytes_limit = 0U;
+  EXPECT_THROW((void)ExecutionService(std::move(byte_limits)),
+               std::invalid_argument);
+}
+
+/**
  * @brief Verifies one isolated service executes one Run and can be reused.
  *
  * @note Equal local task values across sequential Runs remain isolated by
@@ -3678,6 +4399,474 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
   EXPECT_FALSE(host.trace_recording_failed());
   EXPECT_EQ(host.trace_events().size(), 2U);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves non-reentrant metadata serializes one exact implementation.
+ *
+ * @return Nothing; assertions report overlap or settlement leaks.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Two initially ready callbacks share one identity. The first blocks
+ * while the second remains startable only after gate release.
+ */
+TEST(OperationExecutionGate, NonReentrantImplementationSerializesCallbacks) {
+  ExecutionService service(4U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints constraints{101U, false, 0U, ""};
+  AsyncPolicyRun run = launch_constrained_operation_run(
+      service, make_test_submission("non-reentrant", 101U, 1), 2, constraints,
+      entered, active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 1));
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(run.completion.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run.completion.get());
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves reentrant metadata permits overlap on available CPU workers.
+ *
+ * @return Nothing; assertions report missing overlap or settlement leaks.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Both callbacks block in provider work until the test opens one shared
+ * release gate, making overlap deterministic.
+ */
+TEST(OperationExecutionGate, ReentrantImplementationAllowsOverlap) {
+  ExecutionService service(2U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints constraints{102U, true, 0U, ""};
+  AsyncPolicyRun run = launch_constrained_operation_run(
+      service, make_test_submission("reentrant", 102U, 1), 2, constraints,
+      entered, active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 2));
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 2);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run.completion.get());
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves a positive implementation cap bounds callback overlap.
+ *
+ * @return Nothing; assertions report cap violations or settlement leaks.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Four ready callbacks use four workers, but only two may enter provider
+ * work at once for the same exact implementation identity.
+ */
+TEST(OperationExecutionGate, MaximumParallelismCapsExactImplementation) {
+  ExecutionService service(4U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints constraints{103U, true, 2U, ""};
+  AsyncPolicyRun run = launch_constrained_operation_run(
+      service, make_test_submission("capped", 103U, 1), 4, constraints, entered,
+      active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 2));
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 2);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run.completion.get());
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 4);
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves equal exclusive keys serialize across Graphs and identities.
+ *
+ * @return Nothing; assertions report cross-Graph overlap or leaked roots.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note The two Runs carry different Graph identities and implementation
+ * revisions. Their equal nonempty key is the only shared exclusion contract.
+ */
+TEST(OperationExecutionGate, EqualExclusiveKeySerializesAcrossGraphsAndRuns) {
+  ExecutionService service(2U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints first_constraints{
+      201U, true, 0U, "shared-device-context"};
+  const OperationExecutionConstraints second_constraints{
+      202U, true, 0U, "shared-device-context"};
+  AsyncPolicyRun first = launch_constrained_operation_run(
+      service, make_test_submission("exclusive-graph-a", 201U, 1), 1,
+      first_constraints, entered, active, maximum_active, release_future);
+  AsyncPolicyRun second = launch_constrained_operation_run(
+      service, make_test_submission("exclusive-graph-b", 202U, 1), 1,
+      second_constraints, entered, active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 1));
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(first.completion.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  EXPECT_EQ(second.completion.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 1);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(first.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(second.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(first.completion.get());
+  EXPECT_NO_THROW(second.completion.get());
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves every tile keeps its node-level exclusive key after planning.
+ *
+ * @return Nothing; assertions report overlap, missing queueing, or settlement
+ * residue.
+ * @throws Standard registry, graph, cache, Run, service, future, and
+ * synchronization exceptions from product-path setup and execution.
+ * @note One real 32-by-16 filter expands into two initially ready micro tiles.
+ * While its first provider blocks, the second tile and a different Run sharing
+ * the key must both remain ready. A same-key recovery Run then proves all
+ * operation-gate and resource grants were released.
+ */
+TEST(OperationExecutionGate,
+     FullPlanTiledTasksRetainExclusiveKeyAndReleaseGate) {
+  ensure_tiled_constraint_operation_registered();
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  auto probe = std::make_shared<TiledConstraintGateProbe>(release_future);
+  ScopedTiledConstraintProbeBinding probe_binding(probe);
+
+  constexpr int kInputNodeId = 210;
+  constexpr int kNodeId = 211;
+  ExecutionService service(3U);
+  ExecutionServiceHost tiled_host;
+  GraphModel graph("cache/tiled-constraint-product");
+  graph.add_node(make_tiled_constraint_cached_input_node(kInputNodeId));
+  graph.add_node(make_tiled_constraint_node(kNodeId, kInputNodeId));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ComputeRun tiled_run(make_test_submission("tiled-constraint-product",
+                                            graph.revision().value(), kNodeId));
+  ASSERT_TRUE(tiled_run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = tiled_run.emplace_submission_plan(
+      graph, traversal, kNodeId, std::vector<Device>{Device::CPU});
+  ASSERT_EQ(plan.size(), 2U);
+  for (const PlannedTask& task : plan.compute_plan().task_graph.tasks) {
+    EXPECT_EQ(task.node_id, kNodeId);
+    EXPECT_EQ(task.kind, PlannedTaskKind::Tile);
+  }
+
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(tiled_run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(tiled_run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease tiled_lease = tiled_run.acquire_lease();
+
+  std::future<void> tiled_completion;
+  AsyncPolicyRun peer;
+  {
+    ScopedPromiseRelease release_guard(release);
+    tiled_completion = std::async(std::launch::async, [&] {
+      dispatch_planned_tasks(graph, service, tiled_host, "cpu", kNodeId, plan,
+                             tiled_lease);
+    });
+    if (!wait_for_atomic_count(probe->entered, 1)) {
+      EXPECT_TRUE(release_guard.release());
+      ASSERT_EQ(tiled_completion.wait_for(std::chrono::seconds(2)),
+                std::future_status::ready);
+      EXPECT_NO_THROW(tiled_completion.get());
+      FAIL() << "The first planned tile did not reach provider work.";
+    }
+
+    peer = launch_constrained_operation_run(
+        service,
+        make_test_submission("tiled-constraint-peer", 212U, kNodeId + 1), 1,
+        OperationExecutionConstraints{9001U, true, 0U, kTiledGateKey},
+        probe->entered, probe->active, probe->maximum_active, release_future);
+    ASSERT_TRUE(wait_for_ready_task_count(service, 2U));
+    EXPECT_EQ(probe->entered.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(probe->maximum_active.load(std::memory_order_acquire), 1);
+
+    EXPECT_TRUE(release_guard.release());
+    ASSERT_EQ(tiled_completion.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    ASSERT_EQ(peer.completion.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    EXPECT_NO_THROW(tiled_completion.get());
+    EXPECT_NO_THROW(peer.completion.get());
+  }
+
+  EXPECT_EQ(probe->entered.load(std::memory_order_acquire), 3);
+  EXPECT_EQ(probe->active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(probe->maximum_active.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(tiled_host.context_entries(), 2);
+  EXPECT_EQ(tiled_host.context_entries(), tiled_host.context_exits());
+  ASSERT_EQ(plan.temp_results().size(), 1U);
+  EXPECT_TRUE(plan.temp_results().front().has_value());
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+
+  AsyncPolicyRun recovery = launch_constrained_operation_run(
+      service,
+      make_test_submission("tiled-constraint-recovery", 213U, kNodeId + 2), 1,
+      OperationExecutionConstraints{9002U, true, 0U, kTiledGateKey},
+      probe->entered, probe->active, probe->maximum_active, release_future);
+  ASSERT_EQ(recovery.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(recovery.completion.get());
+  EXPECT_EQ(probe->entered.load(std::memory_order_acquire), 4);
+  EXPECT_EQ(probe->active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(probe->maximum_active.load(std::memory_order_acquire), 1);
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+}
+
+/**
+ * @brief Proves different exclusive keys retain independent parallelism.
+ *
+ * @return Nothing; assertions report false serialization or leaked roots.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Each callback has a distinct implementation identity and key.
+ */
+TEST(OperationExecutionGate, DifferentExclusiveKeysAllowOverlap) {
+  ExecutionService service(2U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  AsyncPolicyRun first = launch_constrained_operation_run(
+      service, make_test_submission("key-graph-a", 203U, 1), 1,
+      OperationExecutionConstraints{203U, true, 0U, "context-a"}, entered,
+      active, maximum_active, release_future);
+  AsyncPolicyRun second = launch_constrained_operation_run(
+      service, make_test_submission("key-graph-b", 204U, 1), 1,
+      OperationExecutionConstraints{204U, true, 0U, "context-b"}, entered,
+      active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 2));
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 2);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(first.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(second.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(first.completion.get());
+  EXPECT_NO_THROW(second.completion.get());
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves callback failure releases identity/key gates for later Runs.
+ *
+ * @return Nothing; assertions report the injected failure or recovery outcome.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Recovery uses the same exact identity and key, so any leaked gate count
+ * would keep the second Run from reaching provider work.
+ */
+TEST(OperationExecutionGate, ProviderFailureReleasesGateAndResources) {
+  ExecutionService service(2U);
+  std::promise<void> released;
+  released.set_value();
+  const std::shared_future<void> release_future = released.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints constraints{205U, false, 0U,
+                                                  "failure-recovery"};
+  AsyncPolicyRun failing = launch_constrained_operation_run(
+      service, make_test_submission("failing-operation", 205U, 1), 1,
+      constraints, entered, active, maximum_active, release_future, 0);
+  ASSERT_EQ(failing.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_THROW(failing.completion.get(), std::runtime_error);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  AsyncPolicyRun recovery = launch_constrained_operation_run(
+      service, make_test_submission("recovered-operation", 206U, 1), 1,
+      constraints, entered, active, maximum_active, release_future);
+  ASSERT_EQ(recovery.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(recovery.completion.get());
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves direct sequential leases charge declared bytes and roll back.
+ *
+ * @return Nothing; assertions report missing charges, rejection, or release.
+ * @throws Standard Run, service, and resource-admission exceptions.
+ * @note A rejected scratch declaration stages then releases the same gate
+ * before a smaller declaration with the exact identity and key succeeds.
+ */
+TEST(OperationExecutionGate, DirectLeaseChargesBytesAndRecoversAfterRejection) {
+  constexpr std::uint64_t kRetainedLimit = 1U << 20U;
+  ExecutionResourceLimits limits = ExecutionService::default_resource_limits();
+  limits.cpu_slots = 1U;
+  limits.retained_memory_bytes = kRetainedLimit;
+  limits.scratch_bytes = 7U;
+  limits.interactive_headroom = ResourceVector{};
+  ExecutionService service(1U, limits);
+  ComputeRun run(make_test_submission("direct-operation", 207U, 1));
+  const OperationExecutionConstraints constraints{207U, false, 0U,
+                                                  "direct-operation-context"};
+
+  EXPECT_THROW((void)service.acquire_operation_execution(
+                   run.acquire_lease(), constraints,
+                   ReadyTaskResourceDemand{4096U, 8U, 0U, 1U}),
+               GraphError);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  {
+    OperationExecutionLease lease = service.acquire_operation_execution(
+        run.acquire_lease(), constraints,
+        ReadyTaskResourceDemand{4096U, 7U, 0U, 1U});
+    const ResourceVector reserved = service.resource_snapshot().reserved;
+    EXPECT_EQ(reserved.cpu_slots, 1U);
+    EXPECT_GE(reserved.retained_memory_bytes, 4096U);
+    EXPECT_EQ(reserved.scratch_bytes, 7U);
+    EXPECT_EQ(reserved.ready_entries, 0U);
+    EXPECT_EQ(reserved.ready_bytes, 0U);
+  }
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves a direct gate borrows only the lease-state constraints copy.
+ *
+ * @return Nothing; assertions report caller-key aliasing or release residue.
+ * @throws Standard Run, service, string, or synchronization exceptions.
+ * @note The caller key is changed in place only after acquisition returns,
+ * while its allocation remains alive and stable. A gate that retained the
+ * caller's view would incorrectly consider the original key startable. The
+ * original characters are restored before lease destruction so even that
+ * incorrect implementation can unwind without corrupting the test process.
+ */
+TEST(OperationExecutionGate,
+     DirectLeaseGateIgnoresCallerConstraintMutationAfterAcquisition) {
+  constexpr std::uint64_t kLeaseIdentity = 208U;
+  constexpr std::uint64_t kContenderIdentity = 209U;
+  const std::string original_key(96U, 'o');
+  const std::string replacement_key(96U, 'r');
+  ASSERT_EQ(original_key.size(), replacement_key.size());
+
+  ExecutionService service(1U);
+  ComputeRun run(make_test_submission("direct-stable-key-owner", 208U, 1));
+  OperationExecutionConstraints caller_constraints{kLeaseIdentity, true, 0U,
+                                                   original_key};
+  ASSERT_GT(caller_constraints.exclusive_key.capacity(), 15U);
+  const OperationExecutionConstraints same_key_contender{
+      kContenderIdentity, true, 0U, original_key};
+  const OperationExecutionConstraints different_key_contender{
+      kContenderIdentity, true, 0U, std::string(96U, 'd')};
+
+  {
+    OperationExecutionLease lease = service.acquire_operation_execution(
+        run.acquire_lease(), caller_constraints, ReadyTaskResourceDemand{});
+    char* const retained_caller_allocation =
+        caller_constraints.exclusive_key.data();
+    std::copy(replacement_key.begin(), replacement_key.end(),
+              caller_constraints.exclusive_key.begin());
+    ASSERT_EQ(caller_constraints.exclusive_key.data(),
+              retained_caller_allocation);
+
+    EXPECT_FALSE(
+        ::ps::testing::ExecutionServiceTestAccess::
+            direct_operation_gate_can_start(service, same_key_contender));
+    EXPECT_TRUE(
+        ::ps::testing::ExecutionServiceTestAccess::
+            direct_operation_gate_can_start(service, different_key_contender));
+
+    std::copy(original_key.begin(), original_key.end(),
+              caller_constraints.exclusive_key.begin());
+  }
+
+  EXPECT_TRUE(::ps::testing::ExecutionServiceTestAccess::
+                  direct_operation_gate_can_start(service, same_key_contender));
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_NO_THROW(service.shutdown());
+}
+
+/**
+ * @brief Proves owned string accounting includes the trailing null atomically.
+ *
+ * @return Nothing; assertions report an incorrect exact byte count or partial
+ * overflow accumulation.
+ * @throws Standard string allocation exceptions from fixture setup.
+ * @note Explicit reserve forces heap-backed storage whose actual capacity can
+ * differ from logical size. The overflow endpoint has room for capacity but
+ * not its one-byte terminator and must preserve the prior estimate.
+ */
+TEST(RetainedMemoryEstimator,
+     StringPayloadChargesActualCapacityAndTerminatorAtomically) {
+  std::string key(96U, 'k');
+  key.reserve(127U);
+  ASSERT_GE(key.capacity(), 127U);
+
+  RetainedMemoryEstimator exact("string payload exact boundary");
+  exact.add_string_payload(key);
+  EXPECT_EQ(exact.bytes(), static_cast<std::uint64_t>(key.capacity()) + 1U);
+
+  const std::uint64_t prefix = std::numeric_limits<std::uint64_t>::max() -
+                               static_cast<std::uint64_t>(key.capacity());
+  RetainedMemoryEstimator overflow("string payload terminator boundary");
+  overflow.add_bytes(prefix);
+  EXPECT_THROW(overflow.add_string_payload(key), GraphError);
+  EXPECT_EQ(overflow.bytes(), prefix);
 }
 
 /**
@@ -3714,8 +4903,8 @@ TEST(ExecutionService, RejectsEveryNonCpuRunDimensionAndRecoversExactly) {
  */
 TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
   constexpr std::uint64_t kMaximum = std::numeric_limits<std::uint64_t>::max();
-  const ExecutionResourceLimits limits{1U,       kMaximum, kMaximum,
-                                       kMaximum, kMaximum, ResourceVector{}};
+  const ExecutionResourceLimits limits{
+      1U, kMaximum, kMaximum, kMaximum, kMaximum, 1U, 1U, ResourceVector{}, {}};
   constexpr ReadyTaskResourceDemand kOverflowDemand{1U, 1U, kMaximum};
   ExecutionService service(1U, limits);
   ExecutionServiceHost host;
@@ -3956,7 +5145,7 @@ TEST(ExecutionService, ReleaseHelperRetiresInitialSubmissionStorage) {
   ASSERT_FALSE(submissions.empty());
   ASSERT_GE(submissions.capacity(), 8U);
 
-  testing::ExecutionServiceTestAccess::release_initial_submission_storage(
+  ::ps::testing::ExecutionServiceTestAccess::release_initial_submission_storage(
       submissions);
 
   EXPECT_TRUE(submissions.empty());
@@ -3982,8 +5171,9 @@ TEST(ExecutionService,
   ComputeRun run(
       make_test_submission("production-released-initial-staging", 1U, 1));
   InitialSubmissionStorageProbe observation;
-  testing::ExecutionServiceTestAccess::set_initial_submission_storage_observer(
-      service, &InitialSubmissionStorageProbe::observe, &observation);
+  ::ps::testing::ExecutionServiceTestAccess::
+      set_initial_submission_storage_observer(
+          service, &InitialSubmissionStorageProbe::observe, &observation);
 
   std::promise<void> callback_entered;
   std::future<void> callback_entered_future = callback_entered.get_future();
@@ -4040,7 +5230,7 @@ TEST(ExecutionService,
   ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_NO_THROW(run_future.get());
-  testing::ExecutionServiceTestAccess::
+  ::ps::testing::ExecutionServiceTestAccess::
       clear_initial_submission_storage_observer(service);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
@@ -4100,6 +5290,8 @@ TEST(DirtyExecutionCommon,
             success_probe.live_targets.load(std::memory_order_relaxed);
         return std::make_shared<DirtyReadyTaskContext>(
             compute_plan, nullptr, task_ids, task_devices,
+            std::vector<OperationExecutionConstraints>(task_devices.size()),
+            ReadyTaskSubmission::default_resource_demand(),
             std::move(transferred_holder).release_for_context(), callable_bytes,
             run.acquire_lease(), true, ExecutionTaskPriority::Normal);
       });
@@ -4259,6 +5451,8 @@ TEST(ExecutionServiceProductResources,
   const std::vector<int> downstream_task_ids{1};
   const std::vector<Device> task_devices(combined_plan.task_graph.tasks.size(),
                                          Device::CPU);
+  const std::vector<OperationExecutionConstraints> task_constraints(
+      combined_plan.task_graph.tasks.size());
 
   ExecutionService combined_service(1U);
   ExecutionServiceHost combined_host;
@@ -4279,6 +5473,7 @@ TEST(ExecutionServiceProductResources,
   combined_request.run = &combined_run;
   combined_request.compute_plan = &combined_plan;
   combined_request.task_devices = &task_devices;
+  combined_request.task_constraints = &task_constraints;
   combined_request.phase_shared_retained_memory_bytes =
       [&combined_probe, &phase_live_targets,
        &phase_observation_index](const std::vector<int>&) {
@@ -4344,19 +5539,19 @@ TEST(ExecutionServiceProductResources,
 }
 
 /**
- * @brief Exercises full-HP product admission below and above its estimate.
+ * @brief Exercises full-HP product admission at exact retained boundaries.
  *
  * @return Nothing.
  * @throws Standard allocation, registry, codec, or graph exceptions from
  * fixture setup.
  * @note The exact service-only envelope is first proved usable, then rejects
  * the real `TaskSubmissionPlan` adapter before operation entry because it
- * omits the Run-owned plan/runner interval. A default-capacity service
- * executes the same production adapter and releases its complete root
- * reservation.
+ * omits the Run-owned plan/runner interval. The complete calibrated vector
+ * includes heap-backed retained operation keys; one byte less rejects, while
+ * exact capacity executes and releases the complete root reservation.
  */
 TEST(ExecutionServiceProductResources,
-     FullPlanRejectsSmallLimitAndExecutesWithDefaultLimit) {
+     FullPlanRejectsOneByteShortAndExecutesAtExactLimit) {
   ensure_resource_product_operations_registered();
   g_resource_product_operation_calls.store(0, std::memory_order_relaxed);
   const std::string graph_identity = "resource-full-product";
@@ -4370,7 +5565,7 @@ TEST(ExecutionServiceProductResources,
   graph.validate_topology();
   GraphTraversalService traversal;
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
-                          testing::make_yaml_cache_metadata_codec()};
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
 
   ExecutionService small_service(1U, execution_limits(service_only));
@@ -4402,9 +5597,24 @@ TEST(ExecutionServiceProductResources,
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Running));
   ComputeRunLease small_lease = small_run.acquire_lease();
-  const std::uint64_t adapter_shared_bytes =
-      small_lease.retained_memory_bytes();
+  RetainedOperationStringChargeProbe retained_string_probe;
+  std::uint64_t adapter_shared_bytes = 0U;
+  {
+    ScopedRetainedOperationStringChargeObserver retained_string_observer(
+        small_service, retained_string_probe);
+    adapter_shared_bytes = small_lease.retained_memory_bytes();
+  }
+  ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+      retained_string_probe,
+      {{RetainedOperationStringOwner::ComputePlanOperationRoute, 1U},
+       {RetainedOperationStringOwner::FullPlanResolvedOperation, 1U},
+       {RetainedOperationStringOwner::FullPlanExecutionConstraint, 1U}}));
   ASSERT_GT(adapter_shared_bytes, 0U);
+  ASSERT_EQ(small_plan.resolved_ops().size(), 1U);
+  ASSERT_TRUE(small_plan.resolved_ops().front().has_value());
+  ASSERT_GT(
+      small_plan.resolved_ops().front()->metadata.exclusive_key.capacity(),
+      15U);
   std::atomic_int estimate_entered{0};
   ReadyTaskSubmission adapter_representative =
       make_counted_ready_submission(small_lease, 0U, 101, estimate_entered);
@@ -4429,7 +5639,50 @@ TEST(ExecutionServiceProductResources,
   ASSERT_EQ(small_plan.temp_results().size(), 1U);
   EXPECT_FALSE(small_plan.temp_results().front().has_value());
 
-  ExecutionService large_service(1U);
+  ResourceVector one_short_resources = with_adapter;
+  ASSERT_GT(one_short_resources.retained_memory_bytes, 0U);
+  --one_short_resources.retained_memory_bytes;
+  ExecutionService one_short_service(1U, execution_limits(one_short_resources));
+  ExecutionServiceHost one_short_host;
+  ComputeRun one_short_run(
+      make_test_submission(graph_identity, graph.revision().value(), 101));
+  ASSERT_TRUE(one_short_run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& one_short_plan = one_short_run.emplace_submission_plan(
+      graph, traversal, 101, std::vector<Device>{Device::CPU});
+  TimingCollector one_short_timings;
+  std::mutex one_short_timing_mutex;
+  one_short_plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      one_short_service,
+      one_short_timings,
+      one_short_timing_mutex,
+      one_short_plan.execution_order(),
+      one_short_plan.id_to_idx(),
+      one_short_plan.temp_results(),
+      one_short_plan.resolved_ops(),
+      one_short_plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(one_short_run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(one_short_run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease one_short_lease = one_short_run.acquire_lease();
+  EXPECT_THROW(
+      dispatch_planned_tasks(graph, one_short_service, one_short_host, "cpu",
+                             101, one_short_plan, one_short_lease),
+      GraphError);
+  EXPECT_EQ(g_resource_product_operation_calls.load(std::memory_order_relaxed),
+            0);
+  EXPECT_EQ(one_short_host.context_entries(), 0);
+  EXPECT_EQ(one_short_service.resource_snapshot().reserved, ResourceVector{});
+  ASSERT_EQ(one_short_plan.temp_results().size(), 1U);
+  EXPECT_FALSE(one_short_plan.temp_results().front().has_value());
+
+  ExecutionService large_service(1U, execution_limits(with_adapter));
   ExecutionServiceHost large_host;
   ComputeRun large_run(
       make_test_submission(graph_identity, graph.revision().value(), 101));
@@ -4471,17 +5724,16 @@ TEST(ExecutionServiceProductResources,
 }
 
 /**
- * @brief Proves HP and RT charge complete dirty synchronization ownership.
+ * @brief Proves HP and RT charge exact dirty retained ownership.
  *
  * @return Nothing.
  * @throws Standard allocation, filesystem, graph, or service exceptions from
  * fixture setup.
  * @note For each real product path, a default-capacity calibration with a
- * small owner captures the complete admitted vector. That exact vector then
- * admits an identical fresh graph/plan with the same small owner. Changing
- * only the owner to add unused ids exceeds the retained cap before callback
- * entry. Removing either production synchronization-demand injection makes
- * the corresponding large-owner endpoint execute and fail this regression.
+ * small owner and heap-backed operation key captures the complete admitted
+ * vector. That exact vector admits an identical fresh graph/plan, one byte
+ * less rejects, and changing only the owner to add unused ids also exceeds the
+ * retained cap before callback entry.
  */
 TEST(ExecutionServiceProductResources,
      DirtyHpAndRtUseExactSmallLargeSynchronizationInterval) {
@@ -4497,16 +5749,38 @@ TEST(ExecutionServiceProductResources,
     std::atomic_int& operation_calls =
         is_rt ? g_resource_dirty_rt_operation_calls
               : g_resource_dirty_hp_operation_calls;
+    const std::optional<OpImplementation> selected_operation =
+        OpRegistry::instance().select_implementation(
+            "compute_run_resource", subtype, {Device::CPU}, intent);
+    ASSERT_TRUE(selected_operation.has_value());
+    ASSERT_GT(selected_operation->metadata.exclusive_key.capacity(), 15U);
     const std::vector<int> small_owner_ids{node_id};
     const std::vector<int> large_owner_ids{node_id, node_id + 1000,
                                            node_id + 2000, node_id + 3000};
 
     operation_calls.store(0, std::memory_order_relaxed);
+    RetainedOperationStringChargeProbe retained_string_probe;
     const DirtyProductResourceResult calibration =
         execute_dirty_product_resource_case(
             is_rt ? "dirty-rt-sync-calibration" : "dirty-hp-sync-calibration",
             graph_identity, node_id, subtype, intent, small_owner_ids,
-            ExecutionService::default_resource_limits());
+            ExecutionService::default_resource_limits(),
+            &retained_string_probe);
+    if (is_rt) {
+      ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+          retained_string_probe,
+          {{RetainedOperationStringOwner::ComputePlanOperationRoute, 3U},
+           {RetainedOperationStringOwner::DirtyResolvedOperation, 1U},
+           {RetainedOperationStringOwner::DirtyRealTimeExecutionConstraint,
+            1U}}));
+    } else {
+      ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+          retained_string_probe,
+          {{RetainedOperationStringOwner::ComputePlanOperationRoute, 3U},
+           {RetainedOperationStringOwner::DirtyResolvedOperation, 1U},
+           {RetainedOperationStringOwner::DirtyHighPrecisionExecutionConstraint,
+            1U}}));
+    }
     EXPECT_FALSE(calibration.failure_code.has_value());
     ASSERT_TRUE(calibration.admitted_resources.has_value());
     EXPECT_EQ(calibration.observation_count, 1);
@@ -4548,6 +5822,27 @@ TEST(ExecutionServiceProductResources,
     } else {
       EXPECT_FALSE(exact_small.real_time_value.has_value());
     }
+
+    ResourceVector one_short_resources = *calibration.admitted_resources;
+    ASSERT_GT(one_short_resources.retained_memory_bytes, 0U);
+    --one_short_resources.retained_memory_bytes;
+    const ExecutionResourceLimits one_short_limits =
+        execution_limits(one_short_resources);
+    operation_calls.store(0, std::memory_order_relaxed);
+    const DirtyProductResourceResult one_short =
+        execute_dirty_product_resource_case(
+            is_rt ? "dirty-rt-key-one-byte-short"
+                  : "dirty-hp-key-one-byte-short",
+            graph_identity, node_id, subtype, intent, small_owner_ids,
+            one_short_limits);
+    ASSERT_TRUE(one_short.failure_code.has_value());
+    EXPECT_EQ(*one_short.failure_code, GraphErrc::ComputeError);
+    EXPECT_FALSE(one_short.admitted_resources.has_value());
+    EXPECT_EQ(one_short.observation_count, 0);
+    EXPECT_EQ(operation_calls.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(one_short.reserved_after, ResourceVector{});
+    EXPECT_EQ(one_short.high_precision_value, 3);
+    EXPECT_FALSE(one_short.real_time_value.has_value());
 
     operation_calls.store(0, std::memory_order_relaxed);
     const DirtyProductResourceResult rejected_large =
@@ -4620,6 +5915,8 @@ TEST(ExecutionServiceProductResources,
   std::atomic_int source_calls{0};
   auto source_context = std::make_shared<DirtyReadyTaskContext>(
       compute_plan, nullptr, std::vector<int>{0}, task_devices,
+      std::vector<OperationExecutionConstraints>(task_devices.size()),
+      ReadyTaskSubmission::default_resource_demand(),
       [&graph, &hp_buffer, &source_calls](int) {
         (void)hp_buffer.ensure_output(graph.node(kSourceNodeId));
         source_calls.fetch_add(1, std::memory_order_relaxed);
@@ -4662,6 +5959,8 @@ TEST(ExecutionServiceProductResources,
   const std::vector<int> downstream_task_ids{1, 2};
   auto downstream_context = std::make_shared<DirtyReadyTaskContext>(
       compute_plan, nullptr, downstream_task_ids, task_devices,
+      std::vector<OperationExecutionConstraints>(task_devices.size()),
+      ReadyTaskSubmission::default_resource_demand(),
       [&downstream_calls](int) {
         downstream_calls.fetch_add(1, std::memory_order_relaxed);
       },
@@ -4819,7 +6118,10 @@ TEST(ExecutionServiceProductResources,
   ResourceVector exact;
   ExecutionService calibration_service(1U);
   ExecutionServiceHost calibration_host;
+  RetainedOperationStringChargeProbe retained_string_probe;
   {
+    ScopedRetainedOperationStringChargeObserver retained_string_observer(
+        calibration_service, retained_string_probe);
     ComputeRun run(make_registered_test_submission(graph, graph_identity, 303));
     ps::testing::ScopedExecutionGraphLifecycle graph_lifecycle(
         calibration_service, graph);
@@ -4840,6 +6142,12 @@ TEST(ExecutionServiceProductResources,
     EXPECT_GT(exact.retained_memory_bytes, 0U);
     EXPECT_GT(exact.ready_entries, 0U);
   }
+  ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+      retained_string_probe,
+      {{RetainedOperationStringOwner::ConnectedPreflightOperationConstraint,
+        2U},
+       {RetainedOperationStringOwner::ConnectedPreflightSubmissionConstraint,
+        2U}}));
   EXPECT_EQ(calibration_service.resource_snapshot().reserved, ResourceVector{});
 
   ResourceVector one_byte_short = exact;
@@ -6066,10 +7374,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   ASSERT_EQ(interactive_entered_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      ResourceVector{});
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            ResourceVector{});
 
   throughput = launch_blocking_policy_run(
       service,
@@ -6079,10 +7386,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   ASSERT_EQ(throughput_entered_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_EQ(service.resource_snapshot().reserved, *doubled);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      required);
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            required);
 
   EXPECT_TRUE(interactive_release_guard.release());
   ASSERT_EQ(interactive.completion.wait_for(std::chrono::seconds(2)),
@@ -6090,10 +7396,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_NO_THROW(interactive.completion.get());
   EXPECT_TRUE(wait_for_resource_reservation(service, required));
   EXPECT_EQ(service.resource_snapshot().reserved, required);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      required);
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            required);
 
   std::atomic_int rejected_entered{0};
   ComputeRun rejected_run(make_policy_submission(
@@ -6112,10 +7417,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   }
   EXPECT_EQ(rejected_entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      required);
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            required);
 
   EXPECT_TRUE(throughput_release_guard.release());
   ASSERT_EQ(throughput.completion.wait_for(std::chrono::seconds(2)),
@@ -6123,10 +7427,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_NO_THROW(throughput.completion.get());
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      ResourceVector{});
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            ResourceVector{});
 
   targets.push_back(launch_ordered_policy_run(
       service,
@@ -6137,10 +7440,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_EQ(execution_order, (std::vector<int>{5}));
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      ResourceVector{});
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            ResourceVector{});
 }
 
 /**
@@ -6219,10 +7521,9 @@ TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
   EXPECT_EQ(entered.load(std::memory_order_acquire), 1);
   EXPECT_EQ(settled_while_blocked, 1U);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      required);
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            required);
 
   EXPECT_TRUE(callback_release_guard.release());
   int successful = 0;
@@ -6242,10 +7543,9 @@ TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
   EXPECT_EQ(rejected, 1);
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      ResourceVector{});
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            ResourceVector{});
 }
 
 /**
@@ -7184,6 +8484,610 @@ TEST(ExecutionService,
 }
 
 /**
+ * @brief Proves an early fence callback waits for original grant retirement.
+ *
+ * @return Nothing; GoogleTest reports ordering, admission, or ledger failures.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and execution.
+ * @note The provider submits its continuation before returning. The production
+ * retirement seam blocks after the original QueueEntry and grant are gone;
+ * while blocked, the continuation must remain unentered. Releasing the seam
+ * admits the continuation through the ordinary bounded ready store and settles
+ * the extra completion unit exactly once.
+ */
+TEST(ExecutionService, EarlyFenceContinuationWaitsForOriginalGrantRetirement) {
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  WorkerEntryRetirementProbe probe;
+  ScopedWorkerEntryRetirementObserver observer(service, probe);
+  ComputeRun run(make_test_submission("early-fence-continuation", 1100U, 73));
+  ComputeRunLease lease = run.acquire_lease();
+  const ComputeRunTaskIdentity identity = lease.task_identity(0U);
+  std::shared_ptr<void> callable_token = std::make_shared<int>(85);
+  const std::weak_ptr<void> weak_callable = callable_token;
+  std::atomic_int continuation_entries{0};
+
+  std::vector<ReadyTaskSubmission> ready;
+  ready.emplace_back(
+      std::move(lease), identity, 73, true,
+      [owner = std::move(callable_token), &continuation_entries](
+          ComputeRunLease&, const ComputeRunTaskIdentity&,
+          ExecutionTaskRuntime& runtime) {
+        (void)owner;
+        std::shared_ptr<ReadyFenceExecutor> executor =
+            runtime.make_ready_fence_executor();
+        runtime.inc_tasks_to_complete(1);
+        executor->submit([task_runtime = &runtime, &continuation_entries]() {
+          continuation_entries.fetch_add(1, std::memory_order_release);
+          task_runtime->dec_tasks_to_complete();
+        });
+        runtime.dec_tasks_to_complete();
+      });
+  probe.arm(weak_callable);
+
+  auto completion =
+      std::async(std::launch::async,
+                 [&service, &host, submissions = std::move(ready)]() mutable {
+                   service.execute_run(host, "cpu", std::move(submissions), 1);
+                 });
+  const bool observed = probe.wait_until_observed();
+  if (!observed) {
+    probe.release();
+  }
+  ASSERT_TRUE(observed);
+  {
+    std::lock_guard<std::mutex> lock(probe.mutex);
+    EXPECT_TRUE(probe.callable_retired);
+    EXPECT_EQ(probe.run_id, run.descriptor().id().value());
+  }
+  EXPECT_EQ(continuation_entries.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(5)),
+            std::future_status::timeout);
+  EXPECT_NE(service.resource_snapshot().reserved, ResourceVector{});
+
+  probe.release();
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_EQ(continuation_entries.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(host.context_entries(), 2);
+  EXPECT_EQ(host.context_exits(), 2);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_TRUE(run.publish_succeeded());
+}
+
+/**
+ * @brief Proves a retained fence executor prevents premature Run settlement.
+ *
+ * @return Nothing; GoogleTest reports lifetime, settlement, or ledger failures.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and execution.
+ * @note The provider creates a Run-scoped executor but publishes no callback.
+ * Logical task count reaches zero after provider return, yet execute_run must
+ * remain blocked until the last executor owner retires. This protects the
+ * service/runtime borrowed by a genuinely pending ReadyFence callback.
+ */
+TEST(ExecutionService, RetainedFenceExecutorExtendsRunSettlementLifetime) {
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("retained-fence-executor", 1101U, 74));
+  std::shared_ptr<ReadyFenceExecutor> retained_executor;
+  std::promise<void> executor_retained;
+  std::future<void> executor_retained_future = executor_retained.get_future();
+  ComputeRunLease lease = run.acquire_lease();
+  const ComputeRunTaskIdentity identity = lease.task_identity(0U);
+  std::vector<ReadyTaskSubmission> ready;
+  ready.emplace_back(std::move(lease), identity, 74, true,
+                     [&retained_executor, &executor_retained](
+                         ComputeRunLease&, const ComputeRunTaskIdentity&,
+                         ExecutionTaskRuntime& runtime) {
+                       retained_executor = runtime.make_ready_fence_executor();
+                       executor_retained.set_value();
+                       runtime.dec_tasks_to_complete();
+                     });
+
+  auto completion =
+      std::async(std::launch::async,
+                 [&service, &host, submissions = std::move(ready)]() mutable {
+                   service.execute_run(host, "cpu", std::move(submissions), 1);
+                 });
+  ASSERT_EQ(executor_retained_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_NE(retained_executor, nullptr);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_NE(service.resource_snapshot().reserved, ResourceVector{});
+
+  retained_executor.reset();
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_EQ(host.context_entries(), 1);
+  EXPECT_EQ(host.context_exits(), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_TRUE(run.publish_succeeded());
+}
+
+/**
+ * @brief Proves a real TaskSubmissionPlan defers dependent release for Value.
+ *
+ * @return Nothing; GoogleTest reports provider, continuation, or output
+ * failures.
+ * @throws Registry, Graph, Value, future, service, and synchronization
+ * exceptions from complete product-path setup and execution.
+ * @note A fake CPU provider publishes a pending image Value and returns. The
+ * dependent must remain unentered until the test settles the producer fence;
+ * then the Run-scoped continuation materializes ImageBuffer, releases the
+ * dependency, and settles every logical/dynamic completion unit.
+ */
+TEST(TaskSubmissionPlan,
+     PendingValueDefersDependentUntilRunScopedContinuation) {
+  /**
+   * @brief Shared fake-provider state retained by registered callbacks.
+   * @throws Standard synchronization and allocation exceptions from members.
+   */
+  struct PendingPlanProbe final {
+    /** @brief Protects the unique pending producer handoff. */
+    std::mutex mutex;
+    /** @brief Wakes the test after source publication returns its Value. */
+    std::promise<void> source_published;
+    /** @brief Unique producer moved to the test for terminal publication. */
+    std::optional<PendingValueProducer> producer;
+    /** @brief Number of source provider entries. */
+    std::atomic_int source_entries{0};
+    /** @brief Number of dependent provider entries. */
+    std::atomic_int dependent_entries{0};
+  };
+
+  constexpr const char* kType = "issue85_pending_value_plan";
+  constexpr const char* kSourceSubtype = "source";
+  constexpr const char* kDependentSubtype = "dependent";
+  constexpr int kSourceNodeId = 685;
+  constexpr int kDependentNodeId = 686;
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+  auto probe = std::make_shared<PendingPlanProbe>();
+  std::future<void> source_published = probe->source_published.get_future();
+
+  registry.register_impl(
+      kType, kSourceSubtype, Device::CPU,
+      MonolithicOpFunc([probe](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+        PendingValuePublication publication =
+            PendingValuePublisher::allocate_cpu_dense_tensor(
+                DenseTensorDescriptor{
+                    {1U, 4U},
+                    ElementSemantics::FloatingPoint,
+                    StorageEncoding{32U},
+                },
+                ImageFacet{1U, 0U, std::nullopt},
+                StridedLayout{{static_cast<std::ptrdiff_t>(4U * sizeof(float)),
+                               static_cast<std::ptrdiff_t>(sizeof(float))},
+                              0U},
+                4U * sizeof(float));
+        NodeOutput output;
+        output.image_value = publication.value;
+        {
+          std::lock_guard<std::mutex> lock(probe->mutex);
+          probe->producer.emplace(std::move(publication.producer));
+        }
+        probe->source_entries.fetch_add(1, std::memory_order_release);
+        probe->source_published.set_value();
+        return output;
+      }));
+  registry.register_impl(
+      kType, kDependentSubtype, Device::CPU,
+      MonolithicOpFunc(
+          [probe](const Node&, const std::vector<const NodeOutput*>& inputs) {
+            if (inputs.size() != 1U || inputs.front() == nullptr ||
+                inputs.front()->image_buffer.width != 4 ||
+                inputs.front()->image_buffer.height != 1 ||
+                inputs.front()->image_buffer.channels != 1) {
+              throw std::logic_error(
+                  "Pending Value dependent received no materialized image.");
+            }
+            probe->dependent_entries.fetch_add(1, std::memory_order_release);
+            NodeOutput output;
+            output.data["value"] = 85;
+            return output;
+          }));
+
+  GraphModel graph("cache/issue85-pending-value-plan");
+  Node source = make_plan_node(kSourceNodeId);
+  source.type = kType;
+  source.subtype = kSourceSubtype;
+  Node dependent = make_plan_node(kDependentNodeId);
+  dependent.type = kType;
+  dependent.subtype = kDependentSubtype;
+  dependent.image_inputs.push_back(ImageInput{kSourceNodeId, "image"});
+  graph.add_node(std::move(source));
+  graph.add_node(std::move(dependent));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("issue85-pending-value-plan",
+                                      graph.revision().value(),
+                                      kDependentNodeId));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kDependentNodeId, std::vector<Device>{Device::CPU});
+  ASSERT_EQ(plan.size(), 2U);
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease lease = run.acquire_lease();
+  auto completion = std::async(std::launch::async, [&] {
+    dispatch_planned_tasks(graph, service, host, "cpu", kDependentNodeId, plan,
+                           lease);
+  });
+
+  ASSERT_EQ(source_published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(probe->source_entries.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  PendingValueProducer producer = [&probe]() {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    if (!probe->producer.has_value()) {
+      throw std::logic_error("Fake pending provider lost its producer.");
+    }
+    PendingValueProducer result = std::move(*probe->producer);
+    probe->producer.reset();
+    return result;
+  }();
+  ASSERT_TRUE(producer.complete_ready());
+
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 1);
+  const std::size_t source_index =
+      static_cast<std::size_t>(plan.id_to_idx().at(kSourceNodeId));
+  ASSERT_TRUE(plan.temp_results().at(source_index).has_value());
+  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.width, 4);
+  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.height, 1);
+  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.channels, 1);
+  EXPECT_EQ(host.context_entries(), 3);
+  EXPECT_EQ(host.context_exits(), 3);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_TRUE(run.publish_succeeded());
+
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+}
+
+/**
+ * @brief Proves Run cancellation retires a pending Value wait without waiting
+ * for its physical producer.
+ *
+ * @return Nothing; GoogleTest reports cancellation, settlement, or resource
+ * leaks.
+ * @throws Registry, Graph, Value, future, service, and synchronization
+ * exceptions from complete product-path setup and execution.
+ * @note Cancellation closes the plan, removes the unentered fence callback,
+ * and releases its Run-scoped executor. The producer remains independently
+ * Pending until the test explicitly cancels it after execute_run returns.
+ */
+TEST(TaskSubmissionPlan,
+     CancellationRetiresPendingValueContinuationWithoutProducerCompletion) {
+  /**
+   * @brief Shared pending publication handed from the fake provider to test.
+   * @throws Standard synchronization and allocation exceptions from members.
+   */
+  struct CancellationProbe final {
+    /** @brief Protects producer and Value publication handoff. */
+    std::mutex mutex;
+    /** @brief Wakes the test after the provider publishes pending state. */
+    std::promise<void> source_published;
+    /** @brief Pending Value retained for fence-state observation. */
+    Value value;
+    /** @brief Unique physical producer retained past Run cancellation. */
+    std::optional<PendingValueProducer> producer;
+    /** @brief Number of fake provider entries. */
+    std::atomic_int source_entries{0};
+  };
+
+  constexpr const char* kType = "issue85_pending_value_cancel";
+  constexpr const char* kSubtype = "source";
+  constexpr int kNodeId = 687;
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto probe = std::make_shared<CancellationProbe>();
+  std::future<void> source_published = probe->source_published.get_future();
+  registry.register_impl(
+      kType, kSubtype, Device::CPU,
+      MonolithicOpFunc([probe](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+        PendingValuePublication publication =
+            PendingValuePublisher::allocate_cpu_dense_tensor(
+                DenseTensorDescriptor{
+                    {1U, 4U},
+                    ElementSemantics::FloatingPoint,
+                    StorageEncoding{32U},
+                },
+                ImageFacet{1U, 0U, std::nullopt},
+                StridedLayout{{static_cast<std::ptrdiff_t>(4U * sizeof(float)),
+                               static_cast<std::ptrdiff_t>(sizeof(float))},
+                              0U},
+                4U * sizeof(float));
+        NodeOutput output;
+        output.image_value = publication.value;
+        {
+          std::lock_guard<std::mutex> lock(probe->mutex);
+          probe->value = publication.value;
+          probe->producer.emplace(std::move(publication.producer));
+        }
+        probe->source_entries.fetch_add(1, std::memory_order_release);
+        probe->source_published.set_value();
+        return output;
+      }));
+
+  GraphModel graph("cache/issue85-pending-value-cancel");
+  Node source = make_plan_node(kNodeId);
+  source.type = kType;
+  source.subtype = kSubtype;
+  graph.add_node(std::move(source));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("issue85-pending-value-cancel",
+                                      graph.revision().value(), kNodeId));
+  const ComputeRunCancellationSource cancellation = run.cancellation_source();
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kNodeId, std::vector<Device>{Device::CPU});
+  ASSERT_EQ(plan.size(), 1U);
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease lease = run.acquire_lease();
+  auto completion = std::async(std::launch::async, [&] {
+    dispatch_planned_tasks(graph, service, host, "cpu", kNodeId, plan, lease);
+  });
+
+  ASSERT_EQ(source_published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(probe->source_entries.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  ASSERT_TRUE(cancellation.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
+
+  PendingValueProducer producer = [&probe]() {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    if (!probe->producer.has_value() || !probe->value.valid()) {
+      throw std::logic_error("Cancelled pending provider lost its state.");
+    }
+    EXPECT_EQ(probe->value.ready_fence().poll().state(),
+              ReadyFenceState::Pending);
+    PendingValueProducer result = std::move(*probe->producer);
+    probe->producer.reset();
+    return result;
+  }();
+  ASSERT_TRUE(producer.cancel());
+  EXPECT_EQ(probe->value.ready_fence().poll().state(),
+            ReadyFenceState::ProducerCancelled);
+
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves a stale-typed pending Value fails its exact Run without
+ * releasing dependent work.
+ *
+ * @return Nothing; GoogleTest reports failure identity, settlement, or
+ * resource leaks.
+ * @throws Registry, Graph, Value, future, service, and synchronization
+ * exceptions from complete product-path setup and execution.
+ * @note The terminal fence continuation runs through the service ready store,
+ * preserves the typed stale-completion failure in ReadyFenceAccessError,
+ * publishes the matching Run failure, never enters the dependent provider,
+ * and retires dynamic completion exactly once.
+ */
+TEST(TaskSubmissionPlan, FailedPendingValueFailsMatchingRunAndSettles) {
+  /**
+   * @brief Shared failed-publication handoff for the fake provider.
+   * @throws Standard synchronization and allocation exceptions from members.
+   */
+  struct FailureProbe final {
+    /** @brief Protects producer and Value publication handoff. */
+    std::mutex mutex;
+    /** @brief Wakes the test after the provider publishes pending state. */
+    std::promise<void> source_published;
+    /** @brief Value retained for typed terminal-state observation. */
+    Value value;
+    /** @brief Unique producer settled by the test with typed failure. */
+    std::optional<PendingValueProducer> producer;
+    /** @brief Dependent entries, which must remain zero after source failure.
+     */
+    std::atomic_int dependent_entries{0};
+  };
+
+  constexpr const char* kType = "issue85_pending_value_failure";
+  constexpr const char* kSourceSubtype = "source";
+  constexpr const char* kDependentSubtype = "dependent";
+  constexpr int kSourceNodeId = 688;
+  constexpr int kDependentNodeId = 689;
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+  auto probe = std::make_shared<FailureProbe>();
+  std::future<void> source_published = probe->source_published.get_future();
+  registry.register_impl(
+      kType, kSourceSubtype, Device::CPU,
+      MonolithicOpFunc([probe](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+        PendingValuePublication publication =
+            PendingValuePublisher::allocate_cpu_dense_tensor(
+                DenseTensorDescriptor{
+                    {1U, 4U},
+                    ElementSemantics::FloatingPoint,
+                    StorageEncoding{32U},
+                },
+                ImageFacet{1U, 0U, std::nullopt},
+                StridedLayout{{static_cast<std::ptrdiff_t>(4U * sizeof(float)),
+                               static_cast<std::ptrdiff_t>(sizeof(float))},
+                              0U},
+                4U * sizeof(float));
+        NodeOutput output;
+        output.image_value = publication.value;
+        {
+          std::lock_guard<std::mutex> lock(probe->mutex);
+          probe->value = publication.value;
+          probe->producer.emplace(std::move(publication.producer));
+        }
+        probe->source_published.set_value();
+        return output;
+      }));
+  registry.register_impl(
+      kType, kDependentSubtype, Device::CPU,
+      MonolithicOpFunc(
+          [probe](const Node&, const std::vector<const NodeOutput*>&) {
+            probe->dependent_entries.fetch_add(1, std::memory_order_release);
+            return NodeOutput{};
+          }));
+
+  GraphModel graph("cache/issue85-pending-value-failure");
+  Node source = make_plan_node(kSourceNodeId);
+  source.type = kType;
+  source.subtype = kSourceSubtype;
+  Node dependent = make_plan_node(kDependentNodeId);
+  dependent.type = kType;
+  dependent.subtype = kDependentSubtype;
+  dependent.image_inputs.push_back(ImageInput{kSourceNodeId, "image"});
+  graph.add_node(std::move(source));
+  graph.add_node(std::move(dependent));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("issue85-pending-value-failure",
+                                      graph.revision().value(),
+                                      kDependentNodeId));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kDependentNodeId, std::vector<Device>{Device::CPU});
+  ASSERT_EQ(plan.size(), 2U);
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease lease = run.acquire_lease();
+  auto completion = std::async(std::launch::async, [&] {
+    dispatch_planned_tasks(graph, service, host, "cpu", kDependentNodeId, plan,
+                           lease);
+  });
+
+  ASSERT_EQ(source_published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  PendingValueProducer producer = [&probe]() {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    if (!probe->producer.has_value()) {
+      throw std::logic_error("Failed pending provider lost its producer.");
+    }
+    PendingValueProducer result = std::move(*probe->producer);
+    probe->producer.reset();
+    return result;
+  }();
+  ASSERT_TRUE(producer.complete_failed(ReadyFenceFailure(
+      ReadyFenceFailureDomain::Execution, 85,
+      "completion was superseded before destination publication")));
+
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_THROW(completion.get(), ReadyFenceAccessError);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Failed);
+  const ReadyFenceSnapshot terminal = probe->value.ready_fence().poll();
+  ASSERT_EQ(terminal.state(), ReadyFenceState::Failed);
+  ASSERT_NE(terminal.failure(), nullptr);
+  EXPECT_EQ(terminal.failure()->domain(), ReadyFenceFailureDomain::Execution);
+  EXPECT_EQ(terminal.failure()->code(), 85);
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(host.context_entries(), 2);
+  EXPECT_EQ(host.context_exits(), 2);
+
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+}
+
+/**
  * @brief Verifies cancellation before service publication admits no callback.
  *
  * @return Nothing; GoogleTest assertions report premature admission or leaked
@@ -7221,7 +9125,8 @@ TEST(ExecutionServiceCancellation,
  * @note The Host hook runs after the worker counts the task in flight. The
  * submission executable must remain unentered. Production now destroys the
  * worker's QueueEntry/callable/lease before decrementing `in_flight`, so
- * synchronous return itself proves exact root settlement without polling.
+ * synchronous return itself proves exact root settlement without polling. A
+ * second Run reuses the same operation identity and key to prove gate release.
  */
 TEST(ExecutionServiceCancellation,
      CancellationAfterDequeueSuppressesExecutableAndDrainsExactly) {
@@ -7231,9 +9136,12 @@ TEST(ExecutionServiceCancellation,
   const ComputeRunCancellationSource source = run.cancellation_source();
   host.cancel_on_next_initial_assignment(source);
   std::atomic_int entered{0};
+  const OperationExecutionConstraints constraints{
+      301U, false, 0U, "cancelled-operation-context"};
   std::vector<ReadyTaskSubmission> ready;
-  ready.push_back(
-      make_counted_ready_submission(run.acquire_lease(), 0U, 72, entered));
+  ready.push_back(make_counted_ready_submission(
+      run.acquire_lease(), 0U, 72, entered, ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(), constraints));
 
   EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(ready), 1));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
@@ -7242,6 +9150,17 @@ TEST(ExecutionServiceCancellation,
   EXPECT_FALSE(host.trace_recording_failed());
   ASSERT_TRUE(run.terminal_outcome().has_value());
   EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  ComputeRun recovery(
+      make_test_submission("cancel-after-dequeue-recovery", 63U, 73));
+  std::vector<ReadyTaskSubmission> recovery_ready;
+  recovery_ready.push_back(make_counted_ready_submission(
+      recovery.acquire_lease(), 0U, 73, entered, ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(), constraints));
+  EXPECT_NO_THROW(
+      service.execute_run(host, "cpu", std::move(recovery_ready), 1));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
@@ -7516,7 +9435,7 @@ TEST(ComputeRunCancellation,
 
     GraphTraversalService traversal;
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
-                            testing::make_yaml_cache_metadata_codec()};
+                            ::ps::testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
     CompletionTrackingRuntime runtime;
     TimingCollector timings;

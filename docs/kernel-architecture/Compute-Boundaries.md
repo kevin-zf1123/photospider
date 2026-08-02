@@ -16,10 +16,12 @@ translates public `HostComputeRequest` values into internal Kernel and
 `ComputeService` requests. No public API exposes a `ComputeService`, plan, task
 graph, or physical executor/policy pointer. A public compute request may carry
 an optional positive `maximum_parallelism` Run ceiling; it cannot resize or
-select the process executor. Request, propagation, planning, and execution
-geometry remains `PixelRect`/`PixelSize` through `NodeExecutor`; OpenCV geometry
-exists only inside a provider or algorithm implementation at the library call
-that consumes it.
+select the process executor. Logical dirty work and cache validity remain
+normalized `RegionSet` through planning, staging, and the Region-aware core
+dense path. Current image tile shapes, Host/IPC v2 inspection, ImageBuffer
+helpers, and operation ABI v2 use checked derived `PixelRect`/`PixelSize`.
+OpenCV geometry exists only inside a provider or algorithm implementation at
+the library call that consumes it.
 
 ## Ownership Map
 
@@ -28,7 +30,7 @@ flowchart TD
   HOST["ps::Host"] --> ADAPTER["embedded Host adapter"]
   ADAPTER --> KERNEL["Kernel"]
   KERNEL --> EXEC["injected CPU ExecutionService"]
-  EXEC --> LEDGER["host-authoritative ResourceLedger"]
+  EXEC --> LEDGER["Host/device-authoritative ResourceLedger"]
   EXEC --> STORE["bounded ready store"]
   EXEC --> POLICY["Interactive/Throughput policy bindings"]
   KERNEL --> REQUEST["bounded compute-request lane"]
@@ -105,19 +107,19 @@ reserved-start transaction.
 | `ComputeCachePolicy` | HP cache eligibility and cache-path decisions | Disk I/O ownership or operation execution |
 | `NodeInputResolver` | Runtime parameters and ready image inputs | Graph traversal or output commit |
 | `FullTaskGraphExpander` | Complete node/tile task shape for one graph generation and domain | Request target, cache pruning, dirty pruning |
-| `NodeCacheTaskGraphPruner` | Target/dependency cone and cache-aware request plan | New node or tile task shapes |
+| `NodeCacheTaskGraphPruner` | Target/dependency cone, ordinary cache cut, and dirty request-cone retention | New node or tile task shapes |
 | `ComputeDispatchPlanBuilder` | Cache-pruned high-precision plan and inspection record | Ready-store or route ordering |
 | `DirtyRegionPlanner` | Graph-scoped dirty propagation snapshot | Compute dependency counters |
 | `DirtySnapshotTaskGraphPruner` | Active dirty work selected from an existing plan | Task expansion |
 | `IntentUpdateCoordinator` | HP-only or HP/RT sibling semantics | Physical priority or worker ownership |
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, policy ranking, or physical execution |
-| `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, and callback owner for one full HP request | Execution-route workers, Run terminal state, or dirty-path execution |
-| `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, one private lifecycle-admission registry, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, or visible commit |
+| `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, callback owner, and cancellation owner for pending-Value fence waits for one full HP request | Execution-route workers, Run terminal state, native completion freshness, or dirty-path execution |
+| `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, exact operation constraints, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
+| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources and shared exact `ResidencyManager`, private `serial_debug` and `gpu_pipeline` routes, one Host/device-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, Run-scoped ReadyFence continuation routing, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, access-plan selection, residency eviction, or resource ordering/fairness |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
 | `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
-| `ResourceLedger` | Atomically reserve checked CPU, retained-memory, scratch, ready-entry, and ready-byte vectors; mint bounded child grants; release exact vectors after parent/child ownership ends | Worker creation, ordering policy, task dependencies, device/I/O/plugin resource guesses, or lifecycle admission |
+| `ResourceLedger` | Atomically reserve checked Host vectors and isolated per-`DeviceId` memory/scratch plans; reconcile native actual bytes; mint bounded Host grants and split device leases; release exact authority after its true owner ends; copy deterministic diagnostics | Worker creation, ordering policy, task dependencies, queue/in-flight/I/O/plugin guesses, residency eviction, or lifecycle admission |
 | `GraphRuntime::ExecutionRouteBinding` | Store one copied private route id and nonzero generation per intent | Physical route ownership, policy context, workers, queues, or reservations |
 
 Compute collaborators live under `src/lib/compute/`; the ledger and Graph route
@@ -127,6 +129,124 @@ bindings live under `src/lib/runtime/`; policy loading/binding lives under
 not form an installable API. The only installed extension contract in this
 area is the pure-C policy ABI declared by
 `include/photospider/policy/policy_plugin_api.h`.
+
+V-4 kept the public monolithic registry slot, registrar entry, and callback
+signatures unchanged while one source-private core lookup bridge recognizes
+only the exact selected core dense callback. V-5 retains those entry/callback
+shapes but intentionally extends the provisional C++ v2 metadata layout; an
+operation DSO therefore requires a matching-SDK rebuild. Each scalar HP/RT
+registry slot now owns callback, metadata, and nonzero identity as one atomic
+implementation value; registering another callback shape cannot overwrite its
+sibling's scheduling declarations. The private core
+runner reuses a
+valid sealed CPU image Value or snapshots the legacy ImageBuffer when no Value
+exists, deep-copies the request-effective ParameterMap into a configuration
+that omits Node output/cache/topology state, invokes pure inference with only
+that configuration and logical DenseTensor/Image descriptors, invokes execute
+with the same configuration, checked ImageViews, and inferred descriptor, and
+validates the complete Value result. It also receives the normalized Region
+from planning/`NodeExecutor`, copies unselected logical coordinates, and
+inverts exact ImageRect or rank-general TensorSlice coordinates through
+checked strides. A same-key plugin override cannot inherit this private
+contract; generic v2 monolithic callbacks retain complete-output behavior.
+Publication preserves the exact sealed result allocation/revision and derives
+a separate ImageBuffer compatibility snapshot.
+
+HP compute-service, result-committer, dirty-write, and disk-load boundaries
+normalize missing CPU image Values before formal publication. Mutable dirty
+clones clear old Value authority and reseal settled bytes. V-5 adds no new
+callback slot or general planner inference. It does add a callback-free
+implementation identity/metadata route to planned work and requires exact
+identity re-resolution before provider entry.
+
+V-6 adds a bounded source-private physical task without inserting transfer
+nodes into graph planning or a `ComputeRun`. `ValueTransferTask` prepares a
+distinct pending CPU Value and registers one asynchronous source-ReadyFence
+wait with a shared executor. The preconstructed continuation retains that
+executor while pending or queued and transfers the owner to callback-local
+retention on entry, so a sole executor owner survives through callback
+completion while an executor-owned queue self-reference is released. The queued
+callback alone acquires source payload access, copies the validated envelope,
+retires destination producer access, and publishes the terminal state. The
+fence and task own no worker, queue, route, ledger grant, or device identity.
+The deterministic thread-safe fake executor and test-only C++17 mutex/CV race
+rendezvous are test-owned.
+
+V-7 adds a source-private fixed `DeviceExecutorRegistry` to
+`ExecutionService`. In the enabled repository Metal-plugin profile, the Apple
+executor owns and reuses its device, command queue, and validated
+compute-pipeline cache; one callback-scoped
+allocator retains textures and buffers until provider return. A reserved-start
+Metal submission enters the matching executor synchronously and uses the same
+Run completion/exception/retirement path. A non-virtual source-private executor
+entry installs an exact-identity callback frame before concrete admission.
+Direct recursion and indirect cycles such as `A -> B -> A` fail with a stable
+`std::logic_error` before submission/entry counters, context installation, or
+provider entry, while a distinct executor may nest synchronously. Scoped frame
+restoration preserves the outer context and propagates provider exceptions
+unchanged.
+
+V-8 adds explicit device/binding observations and AccessPlan classification,
+revision-preserving CPU/Metal transfer, and exact residency without inserting
+implicit payload work into `Value` accessors. A Metal provider publishes a
+pending source-private Value and returns immediately after command commit.
+CPU-copy and injected external-device transfer preparation reuse one core
+positive, zero-offset, exact-envelope, non-overlap producer validator. The
+external path completes that check before retaining its owner, minting
+destination identities, creating a ReadyFence, invoking its provider, or
+publishing a Pending destination. This preparation boundary does not narrow
+the general native publisher's checked signed immutable aliases.
+`TaskSubmissionPlan` increments completion before registering the fence wait;
+the production ReadyFence executor retains the exact Run, lease, task, and
+ready-store route, parks an early callback until the original QueueEntry and
+grant retire, and keeps terminal settlement blocked until every continuation
+owner retires. A successful continuation materializes the CPU compatibility
+snapshot and only then releases dependants. Failed, ProducerCancelled, stale,
+or mismatched completion releases none.
+
+V-13 extends the same explicit task boundary by layout family rather than by
+implicit conversion. A packed FP4 source is validated against the version-1
+Blocked producer envelope: rank-matched complete quantization blocks,
+nibble-aligned bit offset/strides, non-overlapping complete block spans, and an
+exact retained byte size. CPU and injected external-device destinations retain
+the full descriptor/scale schema, Blocked layout, bit order/offset, unused
+nibble bits, and logical revision while receiving fresh binding/producer
+identity. An oversized immutable BufferHandle alias remains a valid bounded
+view but is not an exact transfer producer; preparation rejects it before
+destination publication or provider effects. The transfer performs no
+dequantization, requantization, ImageBuffer adaptation, or implicit wait.
+
+The registry's shared `ResidencyManager` admits complete Graph/target/intent/
+generation/Run/task/producer/revision/binding identity before native commit.
+Before coordinator publication is submitted, Kernel fallibly pretracks the
+request lineage with an internal zero-generation placeholder. Only an accepted
+current publication invokes the manager's no-allocation generation advance
+while the coordinator mutex still excludes `is_current()`; rejected and
+born-stale candidates do not advance it. Consequently, if N+1 becomes current
+before generation N starts its physical Run, N's later observation cannot move
+the manager backwards and its transfer admission is stale.
+Current-generation validation, producer Ready transitions, and resident
+insertion form one manager-locked linearization interval. A newer generation
+therefore either precedes an old callback and gives its destination a typed
+failure before Ready, or follows a completion already published as current.
+Duplicate and proper-subset identities cannot consume another admission. The
+Perlin provider encodes an explicit texture-to-buffer blit and calls neither
+`waitUntilCompleted` nor `getBytes`; CPU-to-Metal uses the inverse explicit
+blit. `GraphRuntime` still owns no native Metal state, #74 remains the final
+visible-commit gate, and #86 keeps device-memory/scratch authority inside the
+service ledger rather than residency or the Run.
+
+Metal obtains a complete preallocation plan from native heap texture/buffer
+size-and-alignment queries before its first allocation. Actual
+`MTLResource::allocatedSize` values must fit that atomic plan before command
+commit. The plan then becomes two unique owners: persistent memory follows the
+type-erased native `Value` owner across copies and residency, while scratch
+follows the exact command-completion object across success, native failure,
+stale/rejected publication, and callback unwind. Unused planned bytes return
+at actual commit. Device accounts are isolated by complete `DeviceId`, do not
+borrow Host capacity, and provide copied limits/reserved/available snapshots.
+Command queues, fixed lanes, and pipeline cache entries remain infrastructure,
+not per-invocation scratch.
 
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
@@ -138,12 +258,30 @@ task so dependency release is already covered. The same cap is enforced again
 against Run in-flight state at reserved start; it does not resize the fixed
 pool. Initial and dependent entries use the same estimator and insertion
 boundary.
+For a mixed-operation physical Run, the adapter component-wise maximizes the
+selected operations' declared `retained_memory_bytes` and `scratch_bytes`, then
+checked-adds its existing owned-callback envelope. The resulting conservative
+uniform task vector is used for full HP, dirty HP/RT, and connected preflight.
+Zero is an explicit provider declaration; absent or malformed metadata does not
+silently become zero and is rejected before provider entry.
 Copied graph-identity metadata is charged by actual string capacity plus its
-terminator. After every initial value and ready grant has moved into a staged
-queue entry, `ExecutionService` destroys the caller-side submission-vector
-backing before active-Run publication and settlement waiting; only the staged
-entries and then the bounded store retain those submissions. Before each dirty
-or connected-preflight service segment, the adapter adds current
+terminator. Every independently retained operation/constraint key follows the
+same rule. The full-plan adapter preallocates one independently owned,
+already-charged constraint record per logical task, including every tile, and
+moves each record exactly once into that task's unique submission. The dirty
+adapter applies the same rule to every active task. Both freeze the shared
+charge before moving any record. Connected preflight and direct leases charge
+their independent copies, while the operation gate borrows a stable view
+instead of duplicating the string. A queued gate view borrows from the owning
+`QueueEntry`. Direct acquisition first copies the caller constraints into the
+returned lease state; every gate query, wait predicate, start, and finish then
+borrows that state-owned copy, so a helper-local caller may retire or mutate
+its input after acquisition returns without changing active gate identity.
+After every initial value and ready grant has moved into a staged queue entry,
+`ExecutionService` destroys the caller-side submission-vector backing before
+active-Run publication and settlement waiting; only the staged entries and then
+the bounded store retain those submissions. Before each dirty or
+connected-preflight service segment, the adapter adds current
 staging/snapshot storage and deduplicated missing staging-map entries,
 including ordered-map linkage and deterministic empty or seeded visible output
 metadata. HP downstream demand reads the current Run-owned write buffer through
@@ -218,10 +356,14 @@ pure-C policy ABI v1 and receives no execution resource.
    cancellation remains local.
 4. Connected parameter producers are stabilized into one request-local HP
    snapshot before extent, ROI, or task-shape decisions use them.
-5. The planner expands the complete task shape for one domain and prunes it to
-   the requested target and dependency cone.
-6. A dirty request selects an active work set from that plan. Dirty state does
-   not create new task shapes.
+5. The planner expands the complete task shape for one domain and limits it to
+   the requested target and dependency cone. Ordinary full HP planning may
+   consume exact formal cache immediately; dirty planning records that
+   observation but retains the complete callback-free cone.
+6. A dirty request keeps every snapshot-selected task executable, treats old
+   exact cache only as a possible staging merge base, and applies
+   current-request external-satisfaction demand cuts across the retained
+   dependency universe. Dirty state does not create new task shapes.
 7. Every execution phase materializes move-only
    `ReadyTaskSubmission` values that retain a Run lease and
    `(RunId, RunLocalTaskId)`, then sends only ready work to the Host-owned
@@ -251,20 +393,80 @@ pure-C policy ABI v1 and receives no execution resource.
 
 ## Planning Invariants
 
-- Full expansion is keyed by graph topology generation, compute intent, and
+- Full expansion is keyed by graph topology generation, compute intent,
+  canonical route-visible device inventory, operation-registry generation, and
   task-shape configuration.
 - A force-recache request invalidates reusable expansion when current input or
-  parameter state may change output extent without changing topology.
+  parameter state may change output extent without changing topology. It also
+  disables request-time cache satisfaction before task population; fallible
+  preparation does not clear visible Graph output.
 - Request target, cache availability, and dirty state prune existing task
-  shapes; they do not redefine graph topology.
+  shapes; they do not redefine graph topology. For ordinary HP planning, exact
+  complete formal cache is consumed immediately as a read boundary. Dirty
+  planning instead retains the complete callback-free target cone and records
+  only the planning-time observation. Selection never omits a node explicitly
+  selected by the dirty snapshot merely because old output still has exact
+  complete validity: those bytes may seed staging and preserve unselected
+  coordinates, but the selected Region must execute. Removal or partial
+  reduction after planning likewise leaves the retained dirty provider cone
+  active. Force-recache disables even staging reuse, and RT intent never
+  promotes formal HP cache into task satisfaction.
+- Dirty demand traversal uses the complete retained node/dependency universe,
+  including inactive connector nodes and external-satisfaction boundaries.
+  Traversal stops at a satisfied boundary but final emission is
+  restricted to dirty candidates. Thus `A(dirty) -> B(satisfied, inactive) ->
+  C(dirty)` executes C without A, while another unsatisfied consumer of A still
+  preserves A as shared demand.
 - A `ComputeTaskGraph` is immutable while an execution-visible callback derived
   from it may still execute.
+- Planned node work retains only selected implementation identity, device,
+  metadata, and callback shape. Submission must re-resolve the same nonzero
+  identity before retaining a callback, so cached plans own no DSO lease.
+- TensorSlice HP Region planning uses its eligibility selection once per
+  executable target/upstream node and retains a callback-free operation key
+  plus complete identity/device/shape/metadata route. Immediately after dirty
+  active-task selection, an empty active view completes route validation before
+  comparing intent, device inventory, task ids, or node routes because no
+  planned operation can execute. Otherwise preparation compares each active
+  task-population route with that Region-plan authority. A mismatch is
+  `NoOperation` before ROI mutation, task materialization, callable resolution,
+  or any provider/gate/grant/reservation/ledger ownership.
+- Dirty HP/RT revalidates every unique active task node after planning and
+  selection. The Graph or realtime-bundle logical lifecycle may already be
+  installed at that point, but revalidation precedes constraint construction,
+  resource estimation, source-first physical preparation, provider entry, and
+  operation/resource/physical admission. A missing or changed active route
+  fails with `NoOperation`, and the installed logical lifecycle must then
+  finalize without gate, grant, root-reservation, or ledger residue. Inactive
+  tasks and nodes already satisfied by connected preflight are deliberately
+  excluded from this check. If request-local external satisfaction removes
+  every task, context drift is irrelevant and preparation remains a successful
+  no-work result; if any task remains active, the complete context and every
+  active route are still required to match. The no-work
+  shortcut is inside the already installed outer request lifecycle: the
+  candidate, standalone/RunGroup bundle, successful terminal, quiescence,
+  resource settlement, and unregistration still occur, while ready entries,
+  callbacks, operation gates, policy invocations, root reservations, child
+  grants, provider entry, and ledger demand remain zero.
 - HP and RT are separate compute domains. One plan does not create cross-domain
   task dependencies.
-- Host, graph, planning, dirty work-set, staged-write, and `NodeExecutor`
-  boundaries carry kernel-owned `PixelRect`/`PixelSize`, never OpenCV geometry.
+- Logical propagation, dirty planning, source history, per-node state, edge
+  mappings, staged-write validity, and the Region-aware dense callback carry
+  normalized `RegionSet`.
+- Region propagation and dirty planning gate TensorSlice by selecting the
+  actual revisioned implementation with the same canonical route-visible
+  device inventory and compute-domain intent as execution. Only an exact
+  selected core dense monolithic callback has the private tensor contract; a
+  selected same-key device replacement is Unsupported, without scalar
+  fallback.
+- Current image tiling, ImageBuffer processing, Host/IPC v2 inspection, and
+  operation ABI v2 carry checked derived `PixelRect`/`PixelSize`, never OpenCV
+  geometry. TensorSlice is HP-only monolithic work and never gets a rectangle.
 - Tiled input normalization occurs once per node invocation where possible,
   rather than once per tile callback.
+- The V-3 dense invert inference callback cannot inspect payload bytes, and its
+  execute result must match the inferred DenseTensor descriptor and Image
+  Facet before publication preserves the exact sealed result revision.
 
 These rules make planning deterministic and keep policy/physical execution
 independent of graph semantics. Planning cost therefore follows full expansion before
@@ -300,9 +502,10 @@ dependent work is released by `TaskSubmissionPlan` as another
 `ReadyTaskSubmission`; the Host alone validates the candidate, commits its
 start, and transfers callback ownership to the copied Graph route binding.
 
-The CPU service delivered by Issues #70 and #71 is explicitly composed before
-Kernel and owns one direct fixed CPU worker pool, one private Metal worker lane,
-one host-authoritative ledger, and one bounded ready store. Configuration
+The process service is explicitly composed before Kernel and owns one direct
+fixed CPU worker pool, one private Metal worker lane, one fixed
+device-executor registry, one Host-and-per-device authoritative ledger, and one
+bounded ready store. Configuration
 resolves and freezes `[1,8]` CPU infrastructure workers once; Graph load,
 replacement, Run execution, and dirty phases never resize either lane.
 Benchmark `execution.threads` is a per-Run ceiling rather than an execution
@@ -348,17 +551,43 @@ route id and nonzero generation. The Host-owned `ExecutionService` owns the
 closed `cpu`, `serial_debug`, and `gpu_pipeline` implementations and applies the
 same ledger/reserved-start boundary to all of them. Route replacement validates
 and publishes a fresh generation without constructing a per-Graph executor or
-reservation. The ledger does not invent device, I/O, or plugin-specific
-dimensions.
+reservation. Service composition validates candidate device limits and creates
+native memory/scratch accounts only for devices represented by the frozen
+executor registry. It invents no unregistered-device, I/O, or plugin
+utilization dimension, and keeps I/O/plugin dimensions outside ledger
+authority.
 
-The canonical inventory is route and Host aware: `cpu` and `serial_debug`
-expose CPU only; `gpu_pipeline` exposes Metal then CPU when Metal is available,
-otherwise CPU only. Full, dirty HP/RT, and connected-preflight planning freeze
-the chosen implementation and device before admission. CPU work enters the
-fixed pool and Metal work enters the single GPU lane, while both consume the
-same Run root grants and maximum-parallelism ceiling. An unavailable device is
+The canonical inventory is route and registry aware: `cpu` and `serial_debug`
+expose CPU only; `gpu_pipeline` exposes Metal then CPU when a Metal executor is
+registered, otherwise CPU only. Full, dirty HP/RT, and connected-preflight planning freeze
+the chosen implementation identity, metadata, shape, and device before
+admission. Submission re-resolves the same identity; replacement or unload
+racing a cached plan therefore fails before provider entry instead of mixing
+callback and metadata revisions. CPU work enters the
+fixed pool and Metal work enters the single GPU lane and then the matching
+registry executor. Both consume the same Host Run-root grants and
+maximum-parallelism ceiling; native allocation additionally consumes only the
+selected concrete device account. An unavailable device is
 rejected before active-Run publication, and completion, exception, cancellation,
-reuse, shutdown, and drainage retire the exact common ledger/Run state.
+reuse, shutdown, and drainage retire the exact Host, device, and Run state.
+
+Every operation ready submission also carries the exact implementation
+identity plus `reentrant`, `maximum_parallelism`, and `exclusive_key`.
+Candidate startability checks the implementation counter and nonempty key in
+the process execution domain. Reserved start commits those gates with the
+resource child grant, physical route, ready removal, fairness charge, and
+in-flight ownership. Worker retirement releases the resource grant and both
+operation gates after provider exit or callback skip, then wakes blocked work.
+Provider entry that does not run inside a physical-service worker still uses
+the same authority. Sequential compute, nonparallel dirty HP/RT, and
+connected-parameter preflight acquire a move-only direct lease around the exact
+provider invocation. Dependencies and image inputs are resolved first; dirty
+tiled output storage is also prepared before acquisition. The lease commits
+the selected implementation/key gate and one-callback CPU, retained-memory,
+and scratch vector through the common ledger, then releases them on ordinary
+return, throw, or accepted cancellation. Physical workers already own the
+equivalent ready-entry grant and gates and therefore never double-acquire the
+direct lease.
 
 ## OpenCV Operation Concurrency
 
@@ -371,12 +600,13 @@ may run concurrently across tiles, Graphs, and HP/RT intent routes. Callback
 inputs are immutable; mutable `cv::Mat` headers, temporaries, and output regions
 are callback-local or task-owned.
 
-The same rule applies at the registry boundary. Registry locks serialize
-ownership mutation, publication, coherent snapshot capture, and unload, but
-they are released before callback invocation. Every provider must therefore
-make its callback reentrant or synchronize its own shared mutable state. A
-shared operation key, device, intent, or callback owner never implies
-single-threaded execution.
+Registry locks still serialize only ownership mutation, publication, coherent
+snapshot capture, and unload, and are released before callback invocation.
+Repository OpenCV operations explicitly retain the default `reentrant=true`
+metadata with no implementation cap or exclusive key. Other providers may
+declare non-reentrancy, a positive cap, or a shared exclusive key, which the
+Host enforces across Graphs and Runs. A shared operation registry key, device,
+intent, or callback owner alone never implies single-threaded execution.
 
 The optional OpenCV provider calls `cv::setNumThreads(1)` exactly once before
 publishing its callbacks. It uses `cv::Mat`, does not call
@@ -395,12 +625,18 @@ the absent operation, or replace an enabled OpenCV operation through the same
 slots. Manager-driven unload retires the replacement and restores the captured
 predecessor.
 
-Synchronization around genuine backend state remains provider-local. The
-Metal Perlin provider retains a DSO-private mutex around its shared Metal
-device, queue, pipeline, and buffers; that mutex is neither an OpenCV operation
-lock nor a scheduler exclusivity contract. OpenCV use outside repository-owned
-providers, third-party internal threads, and platform runtime workers remain
-outside Host execution accounting.
+Synchronization around genuine backend state remains backend-owned. The
+process Metal executor serializes access to its command queue, invocation
+allocator counters, and pipeline cache. Initial acquisition of its admission
+mutex may propagate `std::system_error` before a submission is published. The
+C++17 non-timed condition-variable wait uses a non-throwing predicate; it is
+not an exception-propagating synchronization boundary, and failure to re-lock
+and satisfy its postcondition terminates the process. The Metal Perlin provider
+retains no static native state or DSO-private executor mutex; it borrows
+executor resources only for the callback scope. This executor lock is neither
+an OpenCV operation lock nor a scheduler exclusivity contract. OpenCV use
+outside repository-owned providers, third-party internal threads, and platform
+runtime workers remain outside Host execution accounting.
 
 [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
 records this decision. Durable integration coverage proves exact callback
@@ -457,6 +693,61 @@ still generation-stale. Failure of the newest generation never reactivates an
 older commit right. The installed Host, CLI, and IPC protocol version 2
 surfaces expose no cancellation entry; IPC jobs continue to report
 `cancellable: false`.
+
+### Current compute-I/O completion limits
+
+The current HP product transaction performs eligible configured disk-cache
+writes after revision validation and before the no-throw live Graph swap.
+Graph-state policy now submits the cache codec/filesystem mechanism through
+the process-owned `ComputeIoExecutor`, whose independent worker atomically
+bounds task count and estimated retained bytes. The prepared transaction is
+retained until typed completion, and CPU compute workers cannot synchronously
+wait for that completion. Consequently, admission or cache
+codec/filesystem failure can still resolve that Run as `Failed` with no live
+Graph publication. This is an implemented commit-policy ordering rule, not a
+claim that disk cache is durable user output.
+
+The V-12 generic-data matrix also submits admitted observation work that
+retains an immutable image or latent `Value` directly. Under a non-null
+lifetime token and exact planned-byte charge, the I/O worker observes the same
+descriptor, optional Image Facet, layout, binding, allocation, logical
+revision, and complete storage envelope, then returns both budgets at typed
+settlement. This proves that the bounded execution mechanism does not itself
+narrow FP64, channels, rank, or strides. It does not define generic
+serialization: the current product cache still crosses an image-only
+`ImageBuffer`/selected-precision codec boundary, and latent Values have no such
+artifact path.
+
+V-13 does not widen that persistence boundary. Formal HP memory-cache state may
+retain a packed Value and exact TensorSlice validity, but configured image disk
+save validates ImageBuffer compatibility before estimating or admitting a
+`ComputeIoExecutor` task. Packed, quantized, or latent formal Values raise
+`GraphError{InvalidParameter}` before filesystem paths or codecs are touched.
+This fail-closed result is a typed boundary observation, not a generic artifact
+format, digest, manifest, or durable-output completion state.
+
+Provider return, pending-Value readiness, Run terminal publication, Host result
+return, daemon job terminal state, result delivery, cache save, Graph-document
+save, and user-visible file side effects are separate observations. In
+particular:
+
+- a pending producer can return before `ValueReady`;
+- an operation callback such as legacy `io/save` can expose an external side
+  effect before the enclosing staged Run commits;
+- protocol-v2 `compute.submit` reports only accepted queued work;
+- an image daemon job becomes terminal after Host compute and protected
+  artifact publication, but that artifact is process-scoped and lease/TTL
+  retained rather than crash durable; and
+- Graph-document save is a different graph-state operation and never a Run
+  phase.
+
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+accepts a target in which optional cache persistence and durable output commit
+have independent outcomes after Run publication. That behavior, stable output
+commit receipts, and durable commit remain future work. The bounded executor
+and its first staged HP cache-save vertical are current code; synchronous cache
+administration/load and the other persistence owners listed above are
+unchanged.
 
 ## Failure and Lifetime Semantics
 
@@ -516,10 +807,13 @@ surfaces expose no cancellation entry; IPC jobs continue to report
   every installed Run in that row. Finalization waits for terminal outcome,
   physical quiescence, graph commit/discard, exact root/child grant release,
   and registry unregistration. Only after the empty row is removed does Kernel
-  stop the compute-request lane, stop the graph-state lane, and destroy Graph
-  state. After Closing linearizes, cleanup callback failures are contained and
-  synchronization/structural failure that could lose cancellation authority
-  fails stop. Unrelated Graphs and process-owned routes continue running.
+  stop and drain the compute-request lane, retire exact-Graph residency lineage
+  rows, stop the graph-state lane, and destroy Graph state. The request lane
+  joins first because a prepared candidate owns a reserved ticket before
+  fallible lineage pretracking. After Closing linearizes, cleanup callback
+  failures are contained and synchronization/structural failure that could
+  lose cancellation authority fails stop. Unrelated Graphs and process-owned
+  routes continue running.
 - Process execution shutdown uses the same registry fence to stop global
   admission and close every Graph row, requests `ProcessShutdown`
   cancellation, drains every admitted Run, then retires ready work, routes,
@@ -543,16 +837,30 @@ four independent correctness points:
 
 [ADR 0003](../adr/0003-process-owned-execution-resources.md),
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md),
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md),
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #76: all HP/RT ready work enters one Host-owned
+is authoritative for the currently implemented compute boundary, including
+Issue #89's V-12 verification scope: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
-commits resources before a closed private route starts execution. Graphs retain
-only copied route ids/generations; no worker-owning scheduler SDK, scheduler
-plugin, per-Graph physical owner, or compatibility adapter remains. Separate
-realtime child Runs, request-owned staging, strong identity/revision checks,
+commits resources plus exact implementation/key gates before a closed private
+route starts execution. Every `GPU_METAL` start then enters the matching fixed,
+process-owned registry executor and borrows its queue, invocation allocator,
+and pipeline cache through provider return. Before native allocation, its
+complete memory/scratch plan must fit the account for that same executable
+device; a CPU fallback or empty registry creates no Metal account, and a
+registered executor without a configured account cannot bypass admission.
+Sequential provider entry uses the same ledger and gates through a direct
+lease. Pending device work returns a Value whose Run-scoped continuation
+re-enters this same ready store; exact freshness gates destination Ready and
+process residency before dependency release, while the graph-state transaction
+remains final publication authority. Graphs retain only copied route
+ids/generations and no native device owner; no worker-owning scheduler SDK,
+scheduler plugin, per-Graph physical owner, or compatibility adapter remains.
+Separate realtime child Runs, request-owned staging, strong identity/revision
+checks,
 latest-wins supersession, cancellation observation, exact-Run queued purge,
 dependent suppression, and Run-owned commit arbitration remain unchanged.
 `RunLifecycleRegistry` now supplies the atomic candidate/close/shutdown fence,
@@ -560,10 +868,19 @@ Graph lifetime leases, standalone and realtime-bundle installation, exact
 finalization/unregistration, and monotonic close generations.
 `ExecutionLifecycleTelemetry` supplies source-private bounded lifecycle proof;
 it is not a public Host/CLI/IPC control surface. Public cancellation entry
-points remain future behavior.
+points remain future behavior. One independent process I/O worker additionally
+bounds staged HP cache-save mechanism by task count and estimated retained
+bytes; graph-state policy waits for its typed completion, while CPU workers
+cannot.
 
 ## Implementation and Validation Entry Points
 
+- `include/photospider/data/value.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/data/region.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/memory/access_plan.hpp`
+- `include/photospider/memory/ready_fence.hpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_supersession.*`
@@ -573,6 +890,7 @@ points remain future behavior.
 - `src/lib/compute/execution_service.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
+- `src/lib/execution/compute_io_executor.*`
 - `src/lib/compute/task_graph_planning.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_submission.*`
@@ -580,8 +898,19 @@ points remain future behavior.
 - `src/lib/compute/dirty_region_planner.*`
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
+- `src/lib/core/cpu_dense_image_operation.*`
+- `src/lib/core/packed_dense_tensor.cpp`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
+- `plugins/ops/save_op.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/policy/policy_registry.*`
 - `src/lib/providers/configured_operation_providers.*`
 - `src/lib/providers/opencv/*`
@@ -597,8 +926,12 @@ points remain future behavior.
 - `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_resource_ledger.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_compute_supersession.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_opencv_operation_concurrency.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
+- `tests/unit/test_region_contracts.cpp`

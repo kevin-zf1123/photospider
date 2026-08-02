@@ -3,8 +3,8 @@
 This document describes the dirty-region behavior implemented by the current
 kernel. It separates graph-scoped dirty facts, request planning, task selection,
 policy/ready-store selection, private-route execution, output commit, and the
-cooperative Run-cancellation/latest-wins observations implemented through
-issue #75. Proposed Macro
+cooperative Run-cancellation/latest-wins observations and unified logical
+Region behavior implemented through issue #81. Proposed Macro
 retile and adaptive
 coarsening belong in the kernel evolution roadmap, not in this current-state
 contract. The dirty-geometry path and the private
@@ -18,11 +18,12 @@ so compute/runtime code does not directly declare OpenCV.
 snapshot. A lifecycle event may name it explicitly; a request planner may infer
 it as an upstream root of the selected dependency cone.
 
-**Dirty ROI** is a rectangular affected or demanded region. Across the Host,
-graph, propagation, planning, snapshot, task/work-set, write-buffer, and
-`NodeExecutor` boundaries, the kernel-owned representation is `PixelRect`;
-output extents use `PixelSize`. OpenCV rectangles and sizes are created only
-locally inside providers or algorithms at actual matrix or algorithm calls.
+**Dirty Region** is normalized logical affected or demanded work represented
+by `RegionSet`. V-4 supports exact ImageRect and rank-general TensorSlice for
+HP; RT accepts only exact ImageRect. Current Host/IPC v2 inspection, operation
+ABI v2, ImageBuffer processing, and physical image tiles use checked derived
+`PixelRect`/`PixelSize`. OpenCV rectangles and sizes are created only locally
+inside providers or algorithms at actual matrix or algorithm calls.
 
 **Dirty generation** is the value stored in a `DirtyRegionSnapshot` and copied
 into selected task metadata. It identifies dirty inspection and source-commit
@@ -39,8 +40,8 @@ Ownership is divided as follows:
 | --- | --- | --- |
 | `DirtyControlLane` | Apply explicit begin/update/end source events on the serialized graph-state path and derive wake/cutoff hints | Compute tasks, ready-store entries, or execution routes |
 | `DirtyRegionPlanner` | Build HP or RT request snapshots and update lifecycle snapshots | Worker execution or result commit |
-| `DirtyRegionSnapshotBuilder` | Normalize source ROIs and materialize snapshot-only Micro tile or monolithic records | Graph traversal or compute requests |
-| `RoiPropagationService` | Compute operator-specific forward inspection and backward demand projections | Graph topology ownership |
+| `DirtyRegionSnapshotBuilder` | Normalize source Regions and materialize derived image Micro tiles or monolithic records | Graph traversal or compute requests |
+| `RoiPropagationService` | Compute typed Region forward inspection and backward demand projections, adapting exact ImageRect to current callbacks | Graph topology ownership |
 | `DirtySnapshotTaskGraphPruner` | Select and clip active tasks from an existing request plan | New task shapes |
 | dirty executors and write buffers | Execute source-first work, observe the matching Run lease at existing phase/node/tile/provider boundaries, and stage HP/RT output; standalone non-realtime HP staging is owned by its `ComputeRun`, while paired realtime sibling buffers remain callback-local | Cancellation authority, Run grouping, or graph revision policy |
 
@@ -49,13 +50,13 @@ Ownership is divided as follows:
 ```mermaid
 flowchart TD
   EVENT["Host dirty lifecycle call"] --> LANE["DirtyControlLane"]
-  LANE --> FACTS["source membership, lifecycle, ROI records"]
+  LANE --> FACTS["source membership, lifecycle, Region records"]
   FACTS --> SNAPSHOT["DirtyRegionSnapshot"]
 
   REQUEST["HP or RT dirty compute request"] --> PLAN["DirtyRegionPlanner"]
   PLAN --> SNAPSHOT
   SNAPSHOT --> SELECT["DirtySnapshotTaskGraphPruner"]
-  STATIC["node/cache-pruned ComputePlan"] --> SELECT
+  STATIC["retained request-cone ComputePlan"] --> SELECT
   SELECT --> SOURCE["source task group"]
   SELECT --> DOWNSTREAM["downstream task group"]
   SOURCE --> VALIDATE["source-boundary validation"]
@@ -66,7 +67,8 @@ flowchart TD
 
 Dirty lifecycle calls update graph state; they do not automatically start a
 compute request. Parallel execution always begins from a separately constructed
-node/cache-pruned `ComputePlan`.
+request-cone `ComputePlan`; dirty preparation retains its callback-free shape
+until dirty/external-boundary selection.
 
 ## `DirtyRegionSnapshot`
 
@@ -75,11 +77,11 @@ snapshots. A snapshot contains value records, not graph or task pointers:
 
 - `graph_generation`;
 - `dirty_source_nodes`;
-- per-source lifecycle state and accumulated source ROI records;
+- per-source lifecycle state and accumulated authoritative Region records plus derived image ROI records;
 - `dirty_updating_count`;
 - `dirty_tiles` and `dirty_monolithic_nodes`;
-- `per_node_dirty_rois` and `actual_dirty_rois`;
-- edge-level ROI mappings.
+- `per_node_dirty_regions` and `actual_dirty_regions`, with image ROI projections;
+- edge-level Region mappings with image ROI projections where exact.
 
 It intentionally excludes dependency counters, ready-store entries, policy
 snapshots/bindings, task reference counts, resource grants, cancellation state,
@@ -90,7 +92,8 @@ history.
 ### Lifecycle-produced snapshots
 
 `begin_dirty_source()` and `update_dirty_source()` validate the node and a
-non-empty source ROI, add the node to source membership, append the ROI, and set
+non-empty finite source Region, add the node to source membership, append the
+Region, and set
 the source state to `Updating`. `end_dirty_source()` changes that source to
 `Settled` without appending an ROI. Source membership and previous ROI records
 remain in the snapshot; an end followed by another begin does not itself open a
@@ -98,7 +101,7 @@ new generation. The state is cleared by graph runtime-state reset.
 `dirty_updating_count` is recomputed from all source states after every event.
 
 The planner copies the graph's latest snapshot. It allocates a generation only
-when the copied snapshot has generation zero, then rebuilds the derived ROI,
+when the copied snapshot has generation zero, then rebuilds the derived Region,
 tile, monolithic, and edge containers from stored source records for the domain
 of the current event. The current lifecycle rebuild is source-local: it
 normalizes recorded source nodes but does not traverse downstream graph edges.
@@ -112,23 +115,65 @@ an automatic compute trigger.
 ### Request-planned snapshots
 
 `plan_high_precision()` and `plan_real_time()` create a new request snapshot for
-one target and dirty ROI. The planner validates the target and ROI, obtains a
+one target and dirty Region. The planner validates the target and Region, obtains a
 target-rooted topological postorder, resolves HP-authoritative extents, and
 walks the selected graph backwards to derive upstream demand. Upstream roots of
 the resulting plan become settled dirty sources.
+
+For TensorSlice, the walk stops only at an upstream formal output whose exact
+validity proves complete coverage. A missing or partially valid intermediate
+exact-core dense node remains in the plan before its consumer and receives the
+same logical demand. An uncached leaf source is a categorized missing
+dependency. The planner records direct TensorSlice source Regions; it does not
+infer source provenance from an empty PixelRect compatibility projection.
+For every executable target or upstream node, the same route selection that
+passes the exact-core check is reduced immediately to a callback-free
+operation key and complete identity/device/shape/metadata record. The request
+plan retains these revisioned records, not the callable or DSO lease.
+After dirty/external-satisfaction selection identifies active task nodes, dirty
+preparation treats an empty active view as successful no-work before comparing
+intent, device inventory, task ids, or node routes. Otherwise it compares every
+active task-population route with those records before applying ROIs or
+materializing work. Target or upstream replacement for remaining active work
+therefore fails with `NoOperation` before
+provider/gate/grant/reservation/ledger ownership; ordinary execution still
+re-resolves the callable afterward.
+
+The production node/cache pruner, rather than test-owned execution-order
+mutation, records formal HP cache eligibility. Ordinary full HP planning may
+consume an exact complete `ComputeCachePolicy` result immediately. Dirty
+preparation retains the complete callback-free request cone, but the dirty
+selector excludes every snapshot-selected node from formal-cache satisfaction.
+Old exact output is a staging merge base for preserving unselected coordinates,
+not evidence that the current dirty Region is already current. Exact, removed,
+and partial target-cache states therefore all retain the selected provider cone.
+Force-recache disables cache reuse, and RT intent never consumes formal HP
+cache as task satisfaction.
 
 The planner records `BackwardDemand` edge mappings. Forward affected-region
 projection exists as a separate `RoiPropagationService` inspection behavior; it
 is not the traversal used to materialize the current dirty execution plan.
 
-## ROI Propagation
+## Region Propagation
 
-For each image-input edge, `RoiPropagationService` asks the registered operation
-for an upstream projection. Static operation formulas cover identity,
-neighborhood, crop, resize, and other geometric behavior. Data-dependent
-operations may provide a validated dependency LUT. Multiple demands for the
-same parent are combined as one bounding rectangle and clipped to the resolved
-extent; the current representation does not retain a sparse ROI set.
+For exact built-in ImageRect, `RoiPropagationService` converts through the
+checked private adapter, asks the selected current v2 callback for its
+projection, validates the returned rectangle, and wraps it as Exact Region.
+Static formulas still cover identity, neighborhood, crop, resize, and other
+image geometry; data-dependent operations may provide a validated dependency
+LUT. Image demands for the same parent retain current bounded rectangular
+behavior.
+
+TensorSlice never enters a rectangular callback. The request-bound
+`RoiPropagationService` selects the actual revisioned implementation with the
+same canonical route device inventory and HP/RT intent used by execution, then
+accepts TensorSlice only when that selected callback is the exact
+source-private core dense identity implementation. It does not filter
+candidates to core identity or consult a scalar-only fallback. A same-key
+device or plugin replacement selected by the route therefore returns
+Unsupported instead of inheriting a contract it did not declare. Missing
+transforms and unrepresentable operations remain typed Unknown, Unsupported,
+or TooComplex, not fake Regions.
 
 Connected parameter producers affect geometry. When the request has not first
 stabilized those values, the planner conservatively expands the affected
@@ -138,7 +183,7 @@ planning graph so extent, halo, propagation, and task-shape decisions observe
 one parameter snapshot.
 
 An operation with a monolithic HP callback and no tiled HP callback is treated
-as a monolithic boundary. Its local dirty ROI is promoted to the whole output
+as a monolithic boundary. Its local image dirty ROI is promoted to the whole output
 and recorded as one `DirtyMonolithicRegion`. This test is registry-based and is
 also used when the requested domain is RT. Propagation outside that local node
 may still yield a narrower ROI.
@@ -154,7 +199,7 @@ Current constants are implementation parameters, not public ABI:
 | RT dirty Micro tile | 16 x 16 | RT proxy space |
 | preferred HP Macro task size | 256 x 256 | task-shape planning, not dirty snapshot materialization |
 
-HP request planning aligns and clips propagated ROIs to 64 pixels. RT request
+For ImageRect, HP request planning aligns and clips propagated ROIs to 64 pixels. RT request
 planning retains HP-space propagation ROIs aligned to 64, then divides extents
 and work ROIs by four with conservative rounding, aligns them to 16, and clips
 them in proxy space.
@@ -175,13 +220,37 @@ clipped ROI and does not clip the resulting key again, so a boundary
 `DirtyTileKey::pixel_roi` may extend beyond the output extent. Expanded
 execution tasks retain their own clipped boundary shapes.
 
+TensorSlice planning is HP-only. It clips every axis to a concrete sealed
+DenseTensor shape, retains the exact Region in source, node, monolithic, and
+edge records, and creates dependency-first monolithic work with no PixelRect or
+tile coordinates. A complete upstream cache is a read boundary; a missing or
+partial intermediate output is planned and staged before downstream execution.
+
 ## Task Selection and Execution
 
-Dirty execution first obtains the immutable node/cache-pruned plan for the
+Dirty execution first obtains the immutable retained request-cone plan for the
 requested domain. `DirtySnapshotTaskGraphPruner::select()` overlays the snapshot
-on already-expanded tasks, clips execution ROIs, preserves task ids, derives
-task-level dependencies, and separates source-boundary and downstream task ids.
-It does not expand nodes, create a new tile shape, or insert a retile task.
+on already-expanded tasks, keeps dirty candidates executable, clips image
+execution ROIs, preserves task ids, derives task-level dependencies, and
+separates source-boundary and downstream task ids. It does not expand nodes,
+create a new tile shape, or insert a retile task.
+Nonempty nonprojectable Region records select existing non-tile work and
+suppress extent-derived rectangles; they never select a physical tile without
+an exact image projection.
+
+Current-request external satisfaction is a demand cut, not an isolated task
+filter. Selection walks the complete retained dependency
+universe, including inactive connector and satisfied nodes, upstream from each
+unsatisfied sink. It stops at a satisfied node and keeps shared upstream nodes
+if another unsatisfied sink still needs them; only dirty candidate tasks are
+emitted. A dirty candidate itself is never satisfied by old cache. This
+prevents an inactive satisfied connector from turning its exclusive upstream
+producer into a false sink. If explicit external satisfaction leaves no active
+task, the enclosing product request still completes candidate admission,
+logical Run/RunGroup installation, successful terminal arbitration,
+quiescence, resource settlement, and unregistration. It creates no ready
+entry, callback, operation gate, policy invocation, physical
+reservation/grant, provider entry, or ledger demand.
 
 Before a selected tiled `image_mixing` node dispatches its borrowed
 `InputTile`/`OutputTile` views, `NodeExecutor` normalizes required secondary
@@ -222,8 +291,9 @@ or route/runtime epoch into cancellation authority.
 
 ## Staging and Commit
 
-HP dirty tasks stage output in `HighPrecisionDirtyWriteBuffer`; RT dirty tasks
-stage output in `RealtimeProxyWriteBuffer`. A successful request commits staged
+HP dirty tasks stage output and Region validity in
+`HighPrecisionDirtyWriteBuffer`; RT dirty tasks stage image output and
+HP-space ImageRect validity in `RealtimeProxyWriteBuffer`. A successful request commits staged
 HP state to `GraphModel` or RT state to `RealtimeProxyGraph` through the
 intent-specific commit path. A standalone non-realtime HP request owns one
 `ComputeRun`. Each `RealTimeUpdate` creates distinct HP and RT child Runs inside
@@ -231,6 +301,17 @@ one request-owned `RunGroup` before preflight; both capture the same strong
 Graph instance identity, authoritative revision, and request supersession
 generation while retaining independent domain, lease, phase, terminal, and
 staging state. No mixed-domain Run is created.
+
+The exact core Region bridge returns a complete-shaped dense result, but only
+the selected coordinates are authoritative for a partial invocation.
+`HighPrecisionDirtyWriteBuffer` merges those coordinates into existing staged
+bytes and reseals one fresh Value; unselected coordinates remain unchanged. If
+the prior output was complete, its complete validity remains true even when a
+full ImageRect proof and TensorSlice update use different Region domains. A
+fresh partial output has only partial validity, so whole-output dependency
+resolution and current regionless disk persistence reject it until a normal
+Whole commit replaces it. Generic ABI v2 monolithic callbacks retain
+complete-output replacement behavior.
 
 Kernel's product commit policy materializes publication copies and then checks
 that each child Run is `CommitPending`, owns the exact staged Graph/proxy, and
@@ -261,21 +342,21 @@ The current implementation does not provide:
 
 - `ReTileTask` insertion or Micro-to-Macro/Macro-to-Micro dirty conversion;
 - Macro dirty-key materialization or dynamic Micro/Macro coarsening;
-- sparse ROI sets, dirty-area caps, time-window merging, or adaptive batching;
+- multiple-clause sparse Region sets, dirty-area caps, time-window merging, or
+  adaptive batching;
 - a node-to-backend dirty subscription that automatically launches compute;
 - public or lifecycle-driven cancellation, or preemption of an already-entered
   provider callback. Dirty work does use the current policy and reserved-start
   admission path.
 
-Current dirty geometry uses kernel-owned `PixelRect` and `PixelSize` values
-across the Host request, graph state, ROI propagation, planning, snapshot,
-task/work-set, write-buffer, and `NodeExecutor` boundaries. Checked geometry
-helpers perform endpoint arithmetic in a wider integer representation before
-narrowing. OpenCV rectangles and sizes are created only inside provider or
-adapter implementations at actual matrix or algorithm calls. Private compute
-helpers use `image_processing::*`; the standard-library profile provides
-stride-safe deterministic bilinear resize, channel conversion, cloning, and ROI
-copy without OpenCV discovery.
+Current logical dirty authority uses normalized `RegionSet` across propagation,
+planning, source history, per-node state, edge mappings, HP validity, staging,
+and the Region-aware core dense operation. Checked derived `PixelRect` and
+`PixelSize` remain only at image tile/task, ImageBuffer, Host/IPC v2, and
+operation ABI v2 edges. Region endpoint and tensor-shape arithmetic is checked;
+the image adapter rejects uncertainty, TensorSlice, custom domains,
+multi-atom clauses, and narrowing overflow. OpenCV rectangles and sizes are
+created only inside provider or adapter implementations at actual calls.
 
 Keeping dirty facts, static task shape, ready dispatch, and staged commit as
 separate values prevents ROI updates from rewriting topology or transferring
@@ -286,6 +367,9 @@ can currently guarantee.
 ## Implementation and Validation Entry Points
 
 - `src/lib/compute/compute_geometry.hpp`
+- `include/photospider/data/region.hpp`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/core/image_buffer_processing.*`
 - `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
@@ -308,3 +392,5 @@ can currently guarantee.
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
+- `tests/unit/test_region_contracts.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

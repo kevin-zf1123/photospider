@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <initializer_list>
 #include <limits>
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -24,8 +26,11 @@
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/compute_metrics_recorder.hpp"
+#include "compute/compute_run.hpp"
 #include "compute/compute_service.hpp"
+#include "compute/dirty_node_executor.hpp"
 #include "compute/dirty_region_planner.hpp"
+#include "compute/dirty_update_executor_test_access.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/downsample_executor.hpp"
 #include "compute/execution_service.hpp"
@@ -37,6 +42,7 @@
 #include "compute/task_population_strategy.hpp"
 #include "compute/tiled_input_normalizer.hpp"
 #include "core/param_utils.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
@@ -48,6 +54,8 @@
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
+#include "support/execution_service_test_access.hpp"
+#include "support/fake_image_artifact_codec.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
 #include "support/scoped_execution_graph_lifecycle.hpp"
@@ -63,6 +71,47 @@ namespace {
  * cache hit should have satisfied the node.
  */
 std::atomic_int g_disk_cache_guard_tile_calls{0};
+
+/**
+ * @brief Counts recomputations of a producer with partial persistent validity.
+ *
+ * @note The owning regression resets the counter after publishing the partial
+ * dirty state and reads it only after synchronous parallel settlement.
+ */
+std::atomic_int g_partial_cache_producer_calls{0};
+
+/**
+ * @brief Counts whole-output consumers reached after producer recomputation.
+ *
+ * @note Exactly one call proves dependency release occurred after the planned
+ * producer task completed.
+ */
+std::atomic_int g_partial_cache_consumer_calls{0};
+
+/**
+ * @brief Records the first producer pixel observed by the whole-output
+ * consumer.
+ *
+ * @note The regression distinguishes the recomputed value 5 from stale partial
+ * state 91 without retaining a borrowed NodeOutput pointer.
+ */
+std::atomic_int g_partial_cache_consumer_observed_value{0};
+
+/** @brief Counts selected tiled sibling callbacks in exact-metadata tests. */
+std::atomic_int g_exact_sibling_tiled_calls{0};
+
+/**
+ * @brief Counts tiled callbacks whose input ROI did not cover the full source.
+ * @note Exact RandomAccess metadata keeps this value zero; a generic
+ * same-key metadata lookup would instead expose spatially aligned tile ROIs.
+ */
+std::atomic_int g_exact_sibling_input_roi_mismatches{0};
+
+/**
+ * @brief Counts monolithic sibling entries that route selection must avoid.
+ * @note The operation shares a key with the selected device-tiled callback.
+ */
+std::atomic_int g_exact_sibling_monolithic_calls{0};
 
 /**
  * @brief Request-visible kernel size emitted by the dynamic blur parameter op.
@@ -324,6 +373,989 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
 }
 
 /**
+ * @brief Coordinates deterministic overlap observations inside direct dirty
+ * provider callbacks.
+ *
+ * @throws std::system_error from mutex or condition-variable operations.
+ * @note Tests arm blocking only while no callback is active, release every
+ * waiter before joining futures, and retain this object through callback-owned
+ * shared pointers until registry cleanup.
+ */
+class DirectDirtyProviderProbe final {
+ public:
+  /**
+   * @brief Resets counters and blocks subsequent provider entries.
+   * @return Nothing.
+   * @throws std::system_error from locking.
+   * @note Callers invoke this only after all initialization computes settle.
+   */
+  void reset_and_block() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    entered_ = 0;
+    active_ = 0;
+    maximum_active_ = 0;
+    released_ = false;
+  }
+
+  /**
+   * @brief Records one provider interval and waits for test release.
+   * @return Nothing after decrementing the active callback count.
+   * @throws std::system_error from locking or waiting.
+   * @note The callback notifies waiters after incrementing both entry and
+   * active counts. Test release is monotonic for the armed interval.
+   */
+  void enter() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++entered_;
+    ++active_;
+    maximum_active_ = std::max(maximum_active_, active_);
+    condition_.notify_all();
+    condition_.wait(lock, [this] { return released_; });
+    --active_;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Waits until at least the requested callbacks have entered.
+   * @param expected Minimum cumulative entry count.
+   * @param timeout Maximum bounded wait.
+   * @return True when the count is reached before timeout.
+   * @throws std::system_error from locking or waiting.
+   */
+  bool wait_for_entries(int expected, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(
+        lock, timeout, [this, expected] { return entered_ >= expected; });
+  }
+
+  /**
+   * @brief Releases every provider waiting in the current armed interval.
+   * @return Nothing.
+   * @throws std::system_error from locking.
+   */
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Returns the largest simultaneous provider count.
+   * @return Maximum active callbacks observed since reset.
+   * @throws std::system_error from locking.
+   */
+  int maximum_active() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return maximum_active_;
+  }
+
+  /**
+   * @brief Returns the cumulative provider entry count.
+   * @return Entries observed since reset.
+   * @throws std::system_error from locking.
+   */
+  int entered() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return entered_;
+  }
+
+ private:
+  /** @brief Protects all counters and the monotonic release flag. */
+  mutable std::mutex mutex_;
+  /** @brief Announces provider entry and release transitions. */
+  std::condition_variable condition_;
+  /** @brief Cumulative callbacks entered since the last reset. */
+  int entered_ = 0;
+  /** @brief Callbacks currently inside the provider interval. */
+  int active_ = 0;
+  /** @brief High-water mark for active provider intervals. */
+  int maximum_active_ = 0;
+  /** @brief Whether the current blocked interval may complete. */
+  bool released_ = true;
+};
+
+/**
+ * @brief Coordinates the sequential-provider and post-provider lease boundary.
+ *
+ * One sequential callback blocks inside provider entry while a second request
+ * reaches the same implementation/key admission gate. After the test releases
+ * the sequential callback, the injected cache encoder blocks and ultimately
+ * throws, providing a deterministic Host post-processing interval.
+ *
+ * @throws std::system_error from mutex and condition-variable operations.
+ * @note The owning test releases both waits before joining asynchronous work
+ * and unregisters both callback slots before this shared probe is destroyed.
+ */
+class SequentialLeaseBoundaryProbe final {
+ public:
+  /**
+   * @brief Enters and blocks the sequential provider interval.
+   * @return Nothing after the owning test releases provider execution.
+   * @throws std::system_error from locking or waiting.
+   * @note The active count remains nonzero for the complete provider callback
+   * interval and excludes later Host normalization or cache persistence.
+   */
+  void enter_sequential_provider() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    sequential_provider_entered_ = true;
+    ++active_providers_;
+    maximum_active_providers_ =
+        std::max(maximum_active_providers_, active_providers_);
+    condition_.notify_all();
+    condition_.wait(lock, [this] { return sequential_provider_released_; });
+    --active_providers_;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Records one route-backed provider interval.
+   * @return Nothing after atomically recording entry and exit.
+   * @throws std::system_error from locking.
+   * @note A maximum active count above one would prove the shared exclusive key
+   * failed to protect provider execution.
+   */
+  void enter_route_provider() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    route_provider_entered_ = true;
+    ++active_providers_;
+    maximum_active_providers_ =
+        std::max(maximum_active_providers_, active_providers_);
+    condition_.notify_all();
+    --active_providers_;
+    route_provider_exited_ = true;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Publishes one test-product operation admission denial.
+   * @param context Non-null SequentialLeaseBoundaryProbe instance.
+   * @param implementation_identity Exact implementation rejected by the gate.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The service pool mutex is held, so this callback uses atomics plus
+   * condition-variable notification and never calls service code or locks the
+   * fixture mutex.
+   */
+  static void observe_operation_admission_wait(
+      void* context, std::uint64_t implementation_identity) noexcept {
+    auto* probe = static_cast<SequentialLeaseBoundaryProbe*>(context);
+    probe->waited_implementation_identity_.store(implementation_identity,
+                                                 std::memory_order_relaxed);
+    probe->operation_admission_waited_.store(true, std::memory_order_release);
+    probe->condition_.notify_all();
+  }
+
+  /**
+   * @brief Blocks Host cache persistence and then injects a typed failure.
+   * @return No value because the configured failure is always thrown.
+   * @throws GraphError with GraphErrc::Io after the test releases persistence.
+   * @throws std::system_error from locking or waiting.
+   * @note Entry occurs only after the sequential provider has returned and its
+   * result has been normalized and published into request-local Graph state.
+   */
+  [[noreturn]] void block_post_provider_cache_and_fail() {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      post_provider_cache_entered_ = true;
+      condition_.notify_all();
+      condition_.wait(lock, [this] { return post_provider_cache_released_; });
+    }
+    throw GraphError(GraphErrc::Io,
+                     "injected sequential post-provider cache failure");
+  }
+
+  /**
+   * @brief Waits for sequential provider entry.
+   * @param timeout Maximum bounded wait.
+   * @return True when the sequential provider entered before the deadline.
+   * @throws std::system_error from locking or waiting.
+   */
+  bool wait_for_sequential_provider(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return sequential_provider_entered_; });
+  }
+
+  /**
+   * @brief Waits for route-backed provider entry.
+   * @param timeout Maximum bounded wait.
+   * @return True when the route-backed provider entered before the deadline.
+   * @throws std::system_error from locking or waiting.
+   */
+  bool wait_for_route_provider(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return route_provider_entered_; });
+  }
+
+  /**
+   * @brief Waits until the contender reaches gate denial or enters erroneously.
+   * @param timeout Maximum bounded wait.
+   * @return True when either observable event occurs before the deadline.
+   * @throws std::system_error from locking or waiting.
+   * @note The disjunction makes a gate-disabled mutant fail immediately on
+   * provider entry instead of timing out while still proving correct execution
+   * reached the blocking admission point.
+   */
+  bool wait_for_admission_or_route_provider(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this] {
+      return operation_admission_waited_.load(std::memory_order_acquire) ||
+             route_provider_entered_;
+    });
+  }
+
+  /**
+   * @brief Waits for route-backed provider callback exit.
+   * @param timeout Maximum bounded wait.
+   * @return True after the provider interval ends before the deadline.
+   * @throws std::system_error from locking or waiting.
+   */
+  bool wait_for_route_provider_exit(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return route_provider_exited_; });
+  }
+
+  /**
+   * @brief Waits for Host post-provider cache persistence.
+   * @param timeout Maximum bounded wait.
+   * @return True when the injected encoder entered before the deadline.
+   * @throws std::system_error from locking or waiting.
+   */
+  bool wait_for_post_provider_cache(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return post_provider_cache_entered_; });
+  }
+
+  /**
+   * @brief Releases the blocked sequential provider.
+   * @return Nothing.
+   * @throws std::system_error from locking.
+   */
+  void release_sequential_provider() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    sequential_provider_released_ = true;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Releases blocked cache persistence so its injected failure settles.
+   * @return Nothing.
+   * @throws std::system_error from locking.
+   */
+  void release_post_provider_cache() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    post_provider_cache_released_ = true;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Returns the maximum overlapping provider intervals.
+   * @return High-water mark for sequential plus route provider execution.
+   * @throws std::system_error from locking.
+   */
+  int maximum_active_providers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return maximum_active_providers_;
+  }
+
+  /**
+   * @brief Reports whether the test-product gate observer saw denial.
+   * @return True after one operation admission attempt was denied.
+   * @throws Nothing.
+   */
+  bool operation_admission_waited() const noexcept {
+    return operation_admission_waited_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns the exact implementation identity denied by the gate.
+   * @return Nonzero identity after operation_admission_waited() becomes true.
+   * @throws Nothing.
+   */
+  std::uint64_t waited_implementation_identity() const noexcept {
+    return waited_implementation_identity_.load(std::memory_order_relaxed);
+  }
+
+  /**
+   * @brief Reports whether the route-backed provider has entered.
+   * @return True after the route callback begins.
+   * @throws std::system_error from locking.
+   */
+  bool route_provider_entered() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return route_provider_entered_;
+  }
+
+ private:
+  /** @brief Serializes every transition and provider overlap counter. */
+  mutable std::mutex mutex_;
+  /** @brief Announces provider, cache, and release transitions. */
+  std::condition_variable condition_;
+  /** @brief True after the sequential provider enters. */
+  bool sequential_provider_entered_ = false;
+  /** @brief True after the owning test releases the sequential provider. */
+  bool sequential_provider_released_ = false;
+  /** @brief True after the route-backed provider enters. */
+  bool route_provider_entered_ = false;
+  /** @brief True after the route-backed provider exits. */
+  bool route_provider_exited_ = false;
+  /** @brief True while the injected cache encoder is waiting. */
+  bool post_provider_cache_entered_ = false;
+  /** @brief True after the owning test releases cache persistence. */
+  bool post_provider_cache_released_ = false;
+  /** @brief Number of callbacks currently inside provider entry. */
+  int active_providers_ = 0;
+  /** @brief Largest simultaneous provider-entry count. */
+  int maximum_active_providers_ = 0;
+  /** @brief Whether a contender reached a denied operation admission check. */
+  std::atomic_bool operation_admission_waited_{false};
+  /** @brief Exact implementation identity observed at the denied gate. */
+  std::atomic<std::uint64_t> waited_implementation_identity_{0U};
+};
+
+/**
+ * @brief Owns one isolated operation-admission observer installation.
+ *
+ * @throws Nothing from destruction.
+ * @note The observed asynchronous work must settle before this guard retires.
+ * The underlying free-function seam exists only in the non-installed internal
+ * test product and changes no production ExecutionService object layout.
+ */
+class ScopedOperationAdmissionWaitObservation final {
+ public:
+  /**
+   * @brief Installs one observer for the supplied isolated service.
+   * @param service Test-product service that will deny the contender.
+   * @param probe Fixture receiving allocation-free notification.
+   * @throws Nothing.
+   */
+  ScopedOperationAdmissionWaitObservation(
+      compute::ExecutionService& service,
+      SequentialLeaseBoundaryProbe& probe) noexcept
+      : service_(service) {
+    testing::ExecutionServiceTestAccess::set_operation_admission_wait_observer(
+        service_,
+        &SequentialLeaseBoundaryProbe::observe_operation_admission_wait,
+        &probe);
+  }
+
+  /**
+   * @brief Clears the process-local observer.
+   * @throws Nothing.
+   */
+  ~ScopedOperationAdmissionWaitObservation() noexcept {
+    testing::ExecutionServiceTestAccess::
+        clear_operation_admission_wait_observer(service_);
+  }
+
+  /** @brief Prevents duplicate observer-clearing ownership. */
+  ScopedOperationAdmissionWaitObservation(
+      const ScopedOperationAdmissionWaitObservation&) = delete;
+
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedOperationAdmissionWaitObservation& operator=(
+      const ScopedOperationAdmissionWaitObservation&) = delete;
+
+ private:
+  /** @brief Isolated service used to document observer ownership. */
+  compute::ExecutionService& service_;
+};
+
+/**
+ * @brief Owns one test-product dirty post-plan observer installation.
+ *
+ * @throws std::bad_alloc when copying the observer cannot allocate.
+ * @note The hook is thread-local and active only for the lexical synchronous
+ * compute call. It runs after the planning Graph mutex is released, may mutate
+ * OpRegistry for route-revalidation tests, and must not access or retain the
+ * planned Graph. Destruction clears the test-product seam before captured
+ * registry state or counters can retire.
+ */
+class ScopedDirtyPostPlanObservation final {
+ public:
+  /**
+   * @brief Installs one callback after planning-lock release.
+   * @param observer Registry mutation or observation to perform once notified.
+   * @throws std::bad_alloc when callback ownership cannot allocate.
+   */
+  explicit ScopedDirtyPostPlanObservation(std::function<void()> observer)
+      : observer_(std::move(observer)),
+        hook_{this, &ScopedDirtyPostPlanObservation::notify} {
+    compute::testing::set_dirty_post_plan_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Clears the thread-local observer.
+   * @throws Nothing.
+   */
+  ~ScopedDirtyPostPlanObservation() noexcept {
+    compute::testing::set_dirty_post_plan_test_hook(nullptr);
+  }
+
+  /** @brief Prevents duplicate ownership of the thread-local observer. */
+  ScopedDirtyPostPlanObservation(const ScopedDirtyPostPlanObservation&) =
+      delete;
+
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedDirtyPostPlanObservation& operator=(
+      const ScopedDirtyPostPlanObservation&) = delete;
+
+ private:
+  /**
+   * @brief Dispatches the test-product callback through the opaque context.
+   * @param context Non-null ScopedDirtyPostPlanObservation instance.
+   * @return Nothing.
+   * @throws Any exception selected by the installed observer.
+   */
+  static void notify(void* context) {
+    static_cast<ScopedDirtyPostPlanObservation*>(context)->observer_();
+  }
+
+  /** @brief Owned callback invoked by the borrowed test hook. */
+  std::function<void()> observer_;
+  /** @brief Borrowed test-product hook installed for this lexical scope. */
+  compute::testing::DirtyPostPlanTestHook hook_;
+};
+
+/**
+ * @brief Owns one test-product dirty pre-selection cache observer.
+ *
+ * @throws std::bad_alloc when copying the observer cannot allocate.
+ * @note The callback runs synchronously while the planning Graph mutex remains
+ * held, after the complete request cone and planning-time cache observations
+ * exist but before dirty selection. Formal cache observations remain diagnostic
+ * merge-base facts and cannot satisfy dirty-selected work; only explicit
+ * current-request external satisfaction can form a selection boundary. The
+ * callback must not acquire that mutex or retain either borrowed argument.
+ */
+class ScopedDirtyNodeCachePlanObservation final {
+ public:
+  /**
+   * @brief Installs one callback at the retained-cone/selection boundary.
+   * @param observer Controlled request-scoped cache mutation to perform once
+   * notified.
+   * @throws std::bad_alloc when callback ownership cannot allocate.
+   */
+  explicit ScopedDirtyNodeCachePlanObservation(
+      std::function<void(const compute::ComputePlan&, GraphModel&)> observer)
+      : observer_(std::move(observer)),
+        hook_{this, nullptr, &ScopedDirtyNodeCachePlanObservation::notify} {
+    compute::testing::set_dirty_post_plan_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Clears the thread-local observer.
+   * @throws Nothing.
+   */
+  ~ScopedDirtyNodeCachePlanObservation() noexcept {
+    compute::testing::set_dirty_post_plan_test_hook(nullptr);
+  }
+
+  /** @brief Prevents duplicate ownership of the thread-local observer. */
+  ScopedDirtyNodeCachePlanObservation(
+      const ScopedDirtyNodeCachePlanObservation&) = delete;
+
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedDirtyNodeCachePlanObservation& operator=(
+      const ScopedDirtyNodeCachePlanObservation&) = delete;
+
+ private:
+  /**
+   * @brief Dispatches the test-product callback through the opaque context.
+   * @param context Non-null ScopedDirtyNodeCachePlanObservation instance.
+   * @param node_cache_plan Retained request-cone task shape and cache facts.
+   * @param graph Borrowed planning Graph whose runtime cache state may change.
+   * @return Nothing.
+   * @throws Any exception selected by the installed observer.
+   */
+  static void notify(void* context, const compute::ComputePlan& node_cache_plan,
+                     GraphModel& graph) {
+    static_cast<ScopedDirtyNodeCachePlanObservation*>(context)->observer_(
+        node_cache_plan, graph);
+  }
+
+  /** @brief Owned synchronous runtime-cache mutation callback. */
+  std::function<void(const compute::ComputePlan&, GraphModel&)> observer_;
+  /** @brief Borrowed test-product hook installed for this lexical scope. */
+  compute::testing::DirtyPostPlanTestHook hook_;
+};
+
+/**
+ * @brief Builds a monolithic image callback observed by one blocking probe.
+ * @param probe Shared deterministic provider observer.
+ * @param value Pixel value emitted after release.
+ * @return Callback suitable for one HP scalar registry slot.
+ * @throws std::bad_alloc when callback ownership cannot allocate.
+ * @note Output extent comes from node width/height parameters and defaults to
+ * eight pixels in each dimension.
+ */
+MonolithicOpFunc make_probed_image_operation(
+    std::shared_ptr<DirectDirtyProviderProbe> probe, float value) {
+  return [probe = std::move(probe), value](
+             const Node& node,
+             const std::vector<const NodeOutput*>&) -> NodeOutput {
+    probe->enter();
+    return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                             as_int_flexible(node.parameters, "height", 8), 1,
+                             value);
+  };
+}
+
+/**
+ * @brief Builds a tiled image callback observed by one blocking probe.
+ * @param probe Shared deterministic provider observer.
+ * @param value Pixel value written after release.
+ * @return Callback suitable for one RT scalar registry slot.
+ * @throws std::bad_alloc when callback ownership cannot allocate.
+ * @note One 8x8 dirty fixture produces one provider entry per active task.
+ */
+TileOpFunc make_probed_tile_operation(
+    std::shared_ptr<DirectDirtyProviderProbe> probe, float value) {
+  return
+      [probe = std::move(probe), value](const Node&, const OutputTile& output,
+                                        const std::vector<InputTile>&) {
+        probe->enter();
+        toCvMat(output).setTo(value);
+      };
+}
+
+/**
+ * @brief Builds a data-only connected-parameter callback with probe entry.
+ * @param probe Shared deterministic provider observer.
+ * @return Monolithic callback publishing radius seven after release.
+ * @throws std::bad_alloc when output-map storage cannot allocate.
+ */
+MonolithicOpFunc make_probed_parameter_operation(
+    std::shared_ptr<DirectDirtyProviderProbe> probe) {
+  return [probe = std::move(probe)](
+             const Node&, const std::vector<const NodeOutput*>&) -> NodeOutput {
+    probe->enter();
+    NodeOutput output;
+    output.data["radius"] = 7;
+    return output;
+  };
+}
+
+/**
+ * @brief Owns one direct ComputeService graph while sharing process authority.
+ *
+ * @throws Allocation, codec, lifecycle-registration, or service exceptions
+ * from construction.
+ * @note Each harness owns independent graph/cache/event state. Only the
+ * injected ExecutionService is shared, making cross-Graph gate observations
+ * attributable to process authority rather than graph-local serialization.
+ */
+class DirectDirtyComputeHarness final {
+ public:
+  /**
+   * @brief Creates one registered empty graph and direct service facade.
+   * @param authority Shared process execution authority.
+   * @param graph_name Unique graph/cache diagnostic name.
+   * @throws std::bad_alloc when Graph, cache, or lifecycle storage cannot
+   * allocate.
+   * @throws GraphError or codec exceptions when configured dependencies or
+   * lifecycle registration cannot initialize.
+   * @note Member declaration order keeps every service dependency alive until
+   * after the facade and lifecycle registration retire.
+   */
+  DirectDirtyComputeHarness(compute::ExecutionService& authority,
+                            std::string graph_name)
+      : graph_("cache/" + std::move(graph_name)),
+        cache_(providers::make_configured_image_artifact_codec(),
+               testing::make_yaml_cache_metadata_codec()),
+        service_(traversal_, cache_, events_, authority),
+        lifecycle_(authority, graph_) {}
+
+  /**
+   * @brief Returns mutable graph ownership for fixture population.
+   * @return Borrowed graph that remains valid for this harness lifetime.
+   * @throws Nothing.
+   */
+  GraphModel& graph() noexcept { return graph_; }
+
+  /**
+   * @brief Returns the bound direct ComputeService facade.
+   * @return Borrowed facade sharing the harness Graph and process authority.
+   * @throws Nothing.
+   */
+  ComputeService& service() noexcept { return service_; }
+
+ private:
+  /** @brief Independent graph and visible dirty state. */
+  GraphModel graph_;
+  /** @brief Independent topology service. */
+  GraphTraversalService traversal_;
+  /** @brief Independent disk/memory cache service. */
+  GraphCacheService cache_;
+  /** @brief Independent compute event sink. */
+  GraphEventService events_;
+  /** @brief Direct facade borrowing all preceding owners. */
+  ComputeService service_;
+  /** @brief Explicit graph lifecycle row in shared process authority. */
+  testing::ScopedExecutionGraphLifecycle lifecycle_;
+};
+
+/** @brief Shared subtype for an unprobed complete image dependency. */
+constexpr const char* kDirectCachedSourceSubtype = "cached_image_source";
+
+/**
+ * @brief Registers the input-free monolithic dependency used by tiled tests.
+ * @return Nothing.
+ * @throws Registry allocation or callback-copy exceptions unchanged.
+ * @note The owning test unregisters this key after all synchronous work
+ * settles. Keeping it distinct from the target prevents a tiled RT callback
+ * from being selected for the input-free source.
+ */
+void register_direct_cached_source_operation() {
+  OpRegistry::instance().register_op_hp_monolithic(
+      "issue82_direct_dirty", kDirectCachedSourceSubtype,
+      MonolithicOpFunc([](const Node& node,
+                          const std::vector<const NodeOutput*>&) {
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 1.0f);
+      }));
+}
+
+/**
+ * @brief Populates one input-free image node for direct dirty execution.
+ * @param graph Empty graph receiving the node.
+ * @param subtype Registered operation subtype.
+ * @param seed_cache Whether to install a complete reusable 8x8 HP output.
+ * @param connect_cached_source Whether to add a complete upstream image input
+ * required by tiled execution.
+ * @return Nothing.
+ * @throws Graph topology or image allocation exceptions unchanged.
+ */
+void populate_direct_dirty_graph(GraphModel& graph, const std::string& subtype,
+                                 bool seed_cache = false,
+                                 bool connect_cached_source = false) {
+  Node node = make_node(1, "issue82_direct_dirty", subtype);
+  node.parameters["width"] = 8;
+  node.parameters["height"] = 8;
+  if (connect_cached_source) {
+    Node source =
+        make_node(0, "issue82_direct_dirty", kDirectCachedSourceSubtype);
+    source.parameters["width"] = 8;
+    source.parameters["height"] = 8;
+    source.cached_output_high_precision = make_image_output(8, 8, 1, 1.0f);
+    source.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+    source.hp_version = 1;
+    graph.add_node(source);
+    node.image_inputs.push_back({0, "image"});
+  }
+  if (seed_cache) {
+    node.cached_output_high_precision = make_image_output(8, 8, 1, 1.0f);
+    node.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+    node.hp_version = 1;
+  }
+  graph.add_node(node);
+  graph.validate_topology();
+}
+
+/**
+ * @brief Asserts that one direct process authority retained no failed Run.
+ * @param authority ExecutionService whose lifecycle and ledger must be empty.
+ * @return Nothing.
+ * @throws std::bad_alloc or synchronization exceptions from snapshot copy.
+ */
+void expect_direct_authority_settled(
+    const compute::ExecutionService& authority);
+
+/**
+ * @brief Creates one focused nonparallel dirty request.
+ * @param intent HP or RT dirty domain.
+ * @param target_node_id Graph-local target node.
+ * @return Request with disk cache disabled and a one-pixel dirty ROI.
+ * @throws Nothing.
+ */
+ComputeService::Request make_direct_dirty_request(ComputeIntent intent,
+                                                  int target_node_id);
+
+/**
+ * @brief Target-cache state retained or mutated after dirty planning.
+ *
+ * @note Every variant begins with an exact complete target cache so the
+ * planning-time observation is identical. A dirty-selected target remains
+ * executable whether the old cache stays exact, disappears, or becomes
+ * partial before selection.
+ */
+enum class PlannedCacheState {
+  /** @brief Keeps the exact target cache unchanged through selection. */
+  KeepExact,
+  /** @brief Removes both the target output and its formal validity Region. */
+  RemoveOutput,
+  /** @brief Retains bytes but reduces formal validity to a partial Region. */
+  ReduceCoverage,
+};
+
+/**
+ * @brief Populates an uncached producer feeding one exactly cached target.
+ * @param graph Empty graph receiving source node 1 and target node 2.
+ * @param source_subtype Registered input-free monolithic source subtype.
+ * @param target_subtype Registered monolithic consumer subtype.
+ * @return Nothing.
+ * @throws Graph topology or image allocation exceptions unchanged.
+ * @note The target's complete 8x8 output is reusable during planning while the
+ * producer deliberately has no committed output.
+ */
+void populate_direct_cache_revalidation_graph(
+    GraphModel& graph, const std::string& source_subtype,
+    const std::string& target_subtype) {
+  Node source = make_node(1, "issue82_cache_revalidation", source_subtype);
+  source.parameters["width"] = 8;
+  source.parameters["height"] = 8;
+  Node target = make_node(2, "issue82_cache_revalidation", target_subtype);
+  target.parameters["width"] = 8;
+  target.parameters["height"] = 8;
+  target.image_inputs.push_back({1, "image"});
+  target.cached_output_high_precision = make_image_output(8, 8, 1, 1.0f);
+  target.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+  target.hp_version = 1;
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+}
+
+/**
+ * @brief Runs one dirty-selected target-cache boundary regression.
+ * @param cache_state Cache state retained or applied by the planning observer.
+ * @param case_name Unique suffix used for registry and graph ownership.
+ * @return Nothing; GoogleTest records retained-shape and provider failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions are
+ * reported by GoogleTest around the synchronous compute boundary.
+ * @note The observer proves planning saw exact target reuse and a full retained
+ * cone. Selection must keep both monolithic providers active because snapshot
+ * dirtiness, not old whole-output cache, governs executable dirty work.
+ */
+void run_direct_dirty_cache_selection_case(PlannedCacheState cache_state,
+                                           const std::string& case_name) {
+  const std::string source_subtype = case_name + "_source";
+  const std::string target_subtype = case_name + "_target";
+  auto source_entries = std::make_shared<std::atomic_int>(0);
+  auto target_entries = std::make_shared<std::atomic_int>(0);
+  auto target_observed_source = std::make_shared<std::atomic_int>(0);
+  auto& registry = OpRegistry::instance();
+  registry.register_op_hp_monolithic(
+      "issue82_cache_revalidation", source_subtype,
+      MonolithicOpFunc([source_entries](const Node& node,
+                                        const std::vector<const NodeOutput*>&) {
+        source_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 7.0f);
+      }));
+  registry.register_op_hp_monolithic(
+      "issue82_cache_revalidation", target_subtype,
+      MonolithicOpFunc(
+          [target_entries, target_observed_source](
+              const Node& node,
+              const std::vector<const NodeOutput*>& inputs) -> NodeOutput {
+            target_entries->fetch_add(1, std::memory_order_relaxed);
+            if (inputs.empty() || inputs.front() == nullptr) {
+              throw GraphError(GraphErrc::MissingDependency,
+                               "dirty cache target requires source");
+            }
+            target_observed_source->store(
+                static_cast<int>(
+                    toCvMat(inputs.front()->image_buffer).at<float>(0, 0)),
+                std::memory_order_relaxed);
+            return make_image_output(
+                as_int_flexible(node.parameters, "width", 8),
+                as_int_flexible(node.parameters, "height", 8), 1, 17.0f);
+          }));
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority,
+                                    "issue82-cache-revalidate-" + case_name);
+  populate_direct_cache_revalidation_graph(harness.graph(), source_subtype,
+                                           target_subtype);
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 2);
+  int observer_calls = 0;
+  NodeOutput* output = nullptr;
+  {
+    ScopedDirtyNodeCachePlanObservation observation(
+        [&](const compute::ComputePlan& node_cache_plan,
+            GraphModel& planning_graph) {
+          ++observer_calls;
+          EXPECT_EQ(node_cache_plan.planned_nodes, (std::vector<int>{1, 2}));
+          const auto target_work =
+              std::find_if(node_cache_plan.planned_work.begin(),
+                           node_cache_plan.planned_work.end(),
+                           [](const compute::PlannedNodeWork& work) {
+                             return work.node_id == 2;
+                           });
+          ASSERT_NE(target_work, node_cache_plan.planned_work.end());
+          EXPECT_TRUE(target_work->reusable_cache_available);
+          const Node& target = planning_graph.node(2);
+          EXPECT_TRUE(target.cached_output_high_precision.has_value());
+          EXPECT_TRUE(target.hp_region.has_value());
+          planning_graph.mutate_node_runtime_state(
+              2, [&](GraphModel::NodeRuntimeState& state) {
+                if (cache_state == PlannedCacheState::RemoveOutput) {
+                  state.cached_output_high_precision.reset();
+                  state.hp_region = RegionSet::empty();
+                } else if (cache_state == PlannedCacheState::ReduceCoverage) {
+                  state.hp_region = RegionSet::from_image_rect(
+                      {image_region_domain(), 0, 4, 0, 8});
+                }
+              });
+        });
+    EXPECT_NO_THROW(output =
+                        &harness.service().compute(harness.graph(), dirty));
+  }
+
+  EXPECT_EQ(observer_calls, 1);
+  EXPECT_EQ(source_entries->load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(target_entries->load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(target_observed_source->load(std::memory_order_relaxed), 7);
+  if (output != nullptr) {
+    EXPECT_FLOAT_EQ(toCvMat(output->image_buffer).at<float>(0, 0), 17.0f);
+  }
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(
+      make_key("issue82_cache_revalidation", source_subtype));
+  registry.unregister_key(
+      make_key("issue82_cache_revalidation", target_subtype));
+}
+
+/**
+ * @brief Populates one data producer connected to an image target.
+ * @param graph Empty graph receiving parameter and target nodes.
+ * @param parameter_subtype Registered probed producer subtype.
+ * @param target_subtype Registered unprobed image target subtype.
+ * @param seed_cache Whether to seed both nodes with complete committed output.
+ * @return Nothing.
+ * @throws Graph topology or image/data allocation exceptions unchanged.
+ * @note Dirty target requests execute the producer during connected preflight;
+ * phase-two target work remains unobserved by the producer probe.
+ */
+void populate_direct_preflight_graph(GraphModel& graph,
+                                     const std::string& parameter_subtype,
+                                     const std::string& target_subtype,
+                                     bool seed_cache = false) {
+  Node parameter = make_node(1, "issue82_direct_preflight", parameter_subtype);
+  Node target = make_node(2, "issue82_direct_preflight", target_subtype);
+  target.parameters["width"] = 8;
+  target.parameters["height"] = 8;
+  target.parameters["radius"] = 0;
+  target.parameter_inputs.push_back({1, "radius", "radius"});
+  if (seed_cache) {
+    NodeOutput parameter_output;
+    parameter_output.data["radius"] = 7;
+    parameter.cached_output_high_precision = std::move(parameter_output);
+    parameter.hp_version = 1;
+    target.cached_output_high_precision = make_image_output(8, 8, 1, 1.0f);
+    target.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+    target.hp_version = 1;
+  }
+  graph.add_node(parameter);
+  graph.add_node(target);
+  graph.validate_topology();
+}
+
+/**
+ * @brief Creates one focused nonparallel dirty request.
+ * @param intent HP or RT dirty domain.
+ * @param target_node_id Graph-local target node.
+ * @return Request with disk cache disabled and a one-pixel dirty ROI.
+ * @throws Nothing.
+ */
+ComputeService::Request make_direct_dirty_request(ComputeIntent intent,
+                                                  int target_node_id) {
+  ComputeService::Request request;
+  request.node_id = target_node_id;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  request.intent = intent;
+  request.dirty_roi = PixelRect{0, 0, 1, 1};
+  return request;
+}
+
+/**
+ * @brief Asserts that one direct process authority retained no failed Run.
+ * @param authority ExecutionService whose lifecycle and ledger must be empty.
+ * @return Nothing.
+ * @throws std::bad_alloc or synchronization exceptions from snapshot copy.
+ * @note A succeeding retry in each caller separately proves identity/key gate
+ * ownership was released; this helper checks the remaining visible lifecycle
+ * and physical-resource residue.
+ */
+void expect_direct_authority_settled(
+    const compute::ExecutionService& authority) {
+  const compute::ExecutionLifecyclePage lifecycle =
+      authority.lifecycle_snapshot(0U, 4096U);
+  EXPECT_EQ(lifecycle.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_run_group_count, 0U);
+  EXPECT_EQ(lifecycle.counters.live_root_reservation_count, 0U);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Recomputes one complete producer output for a Whole dependency.
+ *
+ * @param node Producer identity used in dependency diagnostics.
+ * @param inputs Exactly one complete image dependency.
+ * @return Complete same-shaped image filled with the stable value 5.
+ * @throws GraphError when the required image dependency is missing.
+ * @throws std::invalid_argument or std::bad_alloc when output allocation fails.
+ * @throws std::runtime_error or cv::Exception when CPU image adaptation or
+ * filling fails.
+ * @note The callback count is the primary witness that partial persistent HP
+ * state did not suppress the planned producer task.
+ */
+NodeOutput execute_partial_cache_producer(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  if (inputs.size() != 1U || inputs.front() == nullptr) {
+    throw GraphError(
+        GraphErrc::MissingDependency,
+        "partial-cache producer requires one image input: " + node.name);
+  }
+  g_partial_cache_producer_calls.fetch_add(1, std::memory_order_relaxed);
+  return make_image_output(inputs.front()->image_buffer.width,
+                           inputs.front()->image_buffer.height,
+                           inputs.front()->image_buffer.channels, 5.0f);
+}
+
+/**
+ * @brief Captures and republishes a producer value at a whole-read boundary.
+ *
+ * @param node Consumer identity used in dependency diagnostics.
+ * @param inputs Exactly one complete producer image.
+ * @return Complete same-shaped image filled with the observed first pixel.
+ * @throws GraphError when the required producer dependency is missing.
+ * @throws std::invalid_argument or std::bad_alloc when input adaptation or
+ * output allocation fails.
+ * @throws std::runtime_error or cv::Exception when CPU pixel access or filling
+ * fails.
+ * @note Seeing 91 would expose the stale exact-partial producer output; seeing
+ * 5 proves the producer recomputed before dependency release.
+ */
+NodeOutput execute_partial_cache_consumer(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  if (inputs.size() != 1U || inputs.front() == nullptr) {
+    throw GraphError(
+        GraphErrc::MissingDependency,
+        "partial-cache consumer requires one image input: " + node.name);
+  }
+  const ImageBuffer& input = inputs.front()->image_buffer;
+  const float observed = toCvMat(input).at<float>(0, 0);
+  g_partial_cache_consumer_observed_value.store(static_cast<int>(observed),
+                                                std::memory_order_release);
+  g_partial_cache_consumer_calls.fetch_add(1, std::memory_order_relaxed);
+  return make_image_output(input.width, input.height, input.channels, observed);
+}
+
+/**
  * @brief Emits the image and connected value used by host-preparation tests.
  *
  * @param node Source node providing the requested output extent.
@@ -562,6 +1594,71 @@ void execute_request_local_parameter_probe_tile(
 }
 
 /**
+ * @brief Executes the device-tiled sibling and validates exact RandomAccess
+ * ROI.
+ *
+ * @param node Target node retained for diagnostic identity.
+ * @param output_tile Writable tile selected from the exact implementation.
+ * @param input_tiles Destination-indexed input views supplied by the executor.
+ * @return Nothing.
+ * @throws std::invalid_argument or std::runtime_error from CPU adaptation.
+ * @throws cv::Exception when output filling fails.
+ * @note The callback records, rather than asserts, ROI mismatch so execution
+ * can settle before the owning test examines every provider invocation.
+ */
+void execute_exact_sibling_metadata_tile(
+    const Node& node, const OutputTile& output_tile,
+    const std::vector<InputTile>& input_tiles) {
+  (void)node;
+  g_exact_sibling_tiled_calls.fetch_add(1, std::memory_order_relaxed);
+  bool full_input =
+      input_tiles.size() == 1U && input_tiles.front().buffer != nullptr;
+  if (full_input) {
+    const ImageBuffer& input = *input_tiles.front().buffer;
+    full_input =
+        input_tiles.front().roi == (PixelRect{0, 0, input.width, input.height});
+  }
+  if (!full_input) {
+    g_exact_sibling_input_roi_mismatches.fetch_add(1,
+                                                   std::memory_order_relaxed);
+  }
+  toCvMat(output_tile).setTo(13.0f);
+}
+
+/**
+ * @brief Maps every output tile to the complete first image-input extent.
+ *
+ * @param node Downstream node retained for the propagator contract.
+ * @param roi Output ROI whose exact shape is intentionally ignored.
+ * @param graph Graph retained for the propagator contract.
+ * @param output_extent Complete downstream output extent.
+ * @param input_extents Destination-indexed upstream image extents.
+ * @param parameters Effective request parameters.
+ * @param available_inputs Optional current input outputs.
+ * @return Full first-input rectangle, or roi when no usable extent exists.
+ * @throws Nothing.
+ * @note The owning sibling implementation marks itself RandomAccess, so both
+ * dependency lowering and provider tile construction must invoke this mapping.
+ */
+PixelRect propagate_exact_sibling_full_input(
+    const Node& node, const PixelRect& roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* available_inputs) {
+  (void)node;
+  (void)graph;
+  (void)output_extent;
+  (void)parameters;
+  (void)available_inputs;
+  if (input_extents.empty() || input_extents.front().width <= 0 ||
+      input_extents.front().height <= 0) {
+    return roi;
+  }
+  return PixelRect{0, 0, input_extents.front().width,
+                   input_extents.front().height};
+}
+
+/**
  * @brief Registers deterministic split-test operations once per process.
  *
  * The registration set supplies HP/RT source, tiled, random-access, cache,
@@ -573,7 +1670,9 @@ void execute_request_local_parameter_probe_tile(
  * @throws Any registry exception unchanged; std::call_once retries a later
  * invocation when registration does not complete.
  * @note OpRegistry is process-global, so callbacks and metadata remain valid
- * until process shutdown and must use stable operation keys.
+ * until process shutdown and must use stable operation keys. The dynamic blur
+ * parameter source is deliberately nonreentrant so direct-preflight failure
+ * tests also prove gate release and retry.
  */
 void register_split_ops() {
   static std::once_flag once;
@@ -599,6 +1698,8 @@ void register_split_ops() {
     registry.register_op_hp_monolithic(
         "split_plan", "spatial_uncached_parameter_source",
         MonolithicOpFunc(execute_spatial_parameter_source));
+    OpMetadata dynamic_parameter_metadata;
+    dynamic_parameter_metadata.reentrant = false;
     registry.register_op_hp_monolithic(
         "split_plan", "dynamic_blur_parameter",
         MonolithicOpFunc(
@@ -612,7 +1713,8 @@ void register_split_ops() {
               output.data["ksize"] =
                   g_dynamic_blur_ksize.load(std::memory_order_acquire);
               return output;
-            }));
+            }),
+        dynamic_parameter_metadata);
     registry.register_op_hp_monolithic(
         "split_plan", "dynamic_extent_parameter",
         MonolithicOpFunc(
@@ -689,6 +1791,12 @@ void register_split_ops() {
               output.data["ksize"] = generation;
               return output;
             }));
+    registry.register_op_hp_monolithic(
+        "split_plan", "partial_cache_producer",
+        MonolithicOpFunc(execute_partial_cache_producer));
+    registry.register_op_hp_monolithic(
+        "split_plan", "partial_cache_consumer",
+        MonolithicOpFunc(execute_partial_cache_consumer));
     registry.register_op_hp_monolithic(
         "image_generator", "host_preparation_source",
         MonolithicOpFunc(execute_host_preparation_source));
@@ -772,6 +1880,32 @@ void register_split_ops() {
     ps::OpMetadata random_meta = micro_meta;
     random_meta.access_pattern =
         ps::OpMetadata::InputAccessPattern::RandomAccess;
+    ps::OpMetadata exact_sibling_monolithic_meta;
+    exact_sibling_monolithic_meta.tile_preference =
+        ps::TileSizePreference::UNDEFINED;
+    exact_sibling_monolithic_meta.access_pattern =
+        ps::OpMetadata::InputAccessPattern::SpatialAligned;
+    registry.register_op_hp_monolithic(
+        "split_plan", "exact_sibling_metadata",
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>& inputs) {
+          g_exact_sibling_monolithic_calls.fetch_add(1,
+                                                     std::memory_order_relaxed);
+          const int width = inputs.empty() || !inputs.front()
+                                ? as_int_flexible(node.parameters, "width", 1)
+                                : inputs.front()->image_buffer.width;
+          const int height = inputs.empty() || !inputs.front()
+                                 ? as_int_flexible(node.parameters, "height", 1)
+                                 : inputs.front()->image_buffer.height;
+          return make_image_output(width, height, 1, 17.0f);
+        }),
+        exact_sibling_monolithic_meta);
+    ps::OpMetadata exact_sibling_tiled_meta = micro_meta;
+    exact_sibling_tiled_meta.access_pattern =
+        ps::OpMetadata::InputAccessPattern::RandomAccess;
+    registry.register_impl("split_plan", "exact_sibling_metadata", Device::CPU,
+                           TileOpFunc(execute_exact_sibling_metadata_tile),
+                           exact_sibling_tiled_meta);
     registry.register_op_hp_tiled(
         "split_plan", "random_tile",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -823,6 +1957,9 @@ void register_split_ops() {
                                  : static_cast<int>(found->second.as_int64());
           return compute::expand_rect(roi, radius);
         }));
+    registry.register_dirty_propagator(
+        "split_plan", "exact_sibling_metadata",
+        DirtyRoiPropFunc(propagate_exact_sibling_full_input));
     registry.register_dirty_propagator(
         "split_plan", "domain_random_tile",
         DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
@@ -881,6 +2018,148 @@ compute::ComputePlan dirty_snapshot_pruned_plan(
     const compute::DirtyRegionSnapshot& snapshot, GraphModel& graph) {
   compute::DirtySnapshotTaskGraphPruner pruner;
   return pruner.prune(node_cache_plan, snapshot, graph);
+}
+
+/**
+ * @brief Registers one counted monolithic image provider.
+ * @param type Shared operation type.
+ * @param subtype Unique operation subtype.
+ * @param entries Counter incremented exactly once per callback entry.
+ * @param value Constant pixel value returned by the provider.
+ * @return Nothing.
+ * @throws Registry allocation or callback-copy exceptions unchanged.
+ * @note Input resolution remains owned by HighPrecisionDirtyNodeExecutor; the
+ * callback itself accepts either source or consumer node shapes.
+ */
+void register_counted_monolithic_operation(
+    const std::string& type, const std::string& subtype,
+    const std::shared_ptr<std::atomic_int>& entries, float value) {
+  OpRegistry::instance().register_op_hp_monolithic(
+      type, subtype,
+      MonolithicOpFunc([entries, value](const Node& node,
+                                        const std::vector<const NodeOutput*>&)
+                           -> NodeOutput {
+        entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, value);
+      }));
+}
+
+/**
+ * @brief Builds a sparse dirty plan over a complete monolithic node universe.
+ * @param graph Graph whose current topology generation is frozen.
+ * @param execution_order Complete dependency order retained for demand cuts.
+ * @param dirty_node_ids Nodes carrying actual phase-two dirty work.
+ * @return HP plan whose snapshot selects exactly dirty_node_ids.
+ * @throws std::bad_alloc when plan or snapshot storage grows.
+ * @note Nodes omitted from dirty_node_ids remain valid topology boundaries but
+ * have neither an HpPlanEntry nor an active dirty task candidate.
+ */
+compute::HighPrecisionDirtyPlan make_sparse_monolithic_dirty_plan(
+    const GraphModel& graph, const std::vector<int>& execution_order,
+    const std::vector<int>& dirty_node_ids) {
+  compute::HighPrecisionDirtyPlan plan;
+  plan.execution_order = execution_order;
+  plan.snapshot.graph_generation = graph.topology_generation();
+  const PixelRect roi{0, 0, 8, 8};
+  const PixelSize extent{8, 8};
+  const RegionSet region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+  for (int node_id : dirty_node_ids) {
+    plan.entries.emplace(node_id, compute::HpPlanEntry{region, roi, extent, 0});
+    plan.snapshot.per_node_dirty_rois[node_id].push_back(roi);
+    plan.snapshot.actual_dirty_rois[node_id].push_back(roi);
+    plan.snapshot.dirty_monolithic_nodes.push_back(
+        compute::DirtyMonolithicRegion{
+            node_id, compute::DirtyDomain::HighPrecision, roi, true, region});
+  }
+  return plan;
+}
+
+/**
+ * @brief Lists selected node ids in retained topological order.
+ * @param prepared Prepared dirty plan whose active task overlay is inspected.
+ * @return Unique active node ids ordered by dirty execution_order.
+ * @throws std::bad_alloc when temporary membership or result storage grows.
+ * @note Monolithic fixtures produce one task per node, but uniqueness keeps the
+ * helper correct if task population later changes shape.
+ */
+std::vector<int> selected_dirty_node_ids(
+    const compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan>&
+        prepared) {
+  std::unordered_set<int> active_nodes;
+  for (int task_id : prepared.selection.active_task_ids) {
+    if (task_id < 0 || static_cast<std::size_t>(task_id) >=
+                           prepared.compute_plan.task_graph.tasks.size()) {
+      continue;
+    }
+    active_nodes.insert(
+        prepared.compute_plan.task_graph.tasks[task_id].node_id);
+  }
+  std::vector<int> result;
+  result.reserve(active_nodes.size());
+  for (int node_id : prepared.dirty_plan.execution_order) {
+    if (active_nodes.count(node_id)) {
+      result.push_back(node_id);
+    }
+  }
+  return result;
+}
+
+/**
+ * @brief Executes every selected HP monolithic provider through the real node
+ * executor.
+ * @param graph Graph supplying committed boundary inputs.
+ * @param prepared Prepared selection and per-node HP entries.
+ * @return Nothing after synchronous provider execution and request-local
+ * staging.
+ * @throws Graph, registry, allocation, or provider exceptions unchanged.
+ * @note The helper intentionally supplies no process authority: the regression
+ * validates demand selection and provider entry, while admission contracts are
+ * covered by dedicated ComputeService tests. Upstream staged output remains
+ * visible to later selected consumers through HighPrecisionDirtyWriteBuffer.
+ */
+void execute_selected_dirty_providers(
+    GraphModel& graph,
+    const compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan>&
+        prepared) {
+  const std::vector<int> selected_nodes = selected_dirty_node_ids(prepared);
+  compute::DirtyResolvedOperationMap operations;
+  operations.reserve(selected_nodes.size());
+  for (int node_id : selected_nodes) {
+    const Node& node = graph.node(node_id);
+    const auto selected = OpRegistry::instance().select_implementation(
+        node.type, node.subtype, {Device::CPU},
+        ComputeIntent::GlobalHighPrecision);
+    if (!selected.has_value()) {
+      ADD_FAILURE() << "missing selected provider for node " << node_id;
+      return;
+    }
+    if (!selected->is_monolithic()) {
+      ADD_FAILURE() << "expected monolithic provider for node " << node_id;
+      return;
+    }
+    operations.emplace(
+        node_id, compute::DirtyResolvedOperation{
+                     selected->func, selected->metadata.device_preference,
+                     selected->implementation_identity, selected->metadata});
+  }
+
+  GraphEventService events;
+  compute::DirtyNodeSynchronization synchronization(graph.node_ids());
+  compute::HighPrecisionDirtyWriteBuffer staging;
+  compute::DirtyNodeExecutionContext context{
+      graph,           nullptr,
+      events,          prepared.dirty_plan.snapshot,
+      operations,      prepared.dirty_plan.snapshot.graph_generation,
+      synchronization, nullptr,
+      nullptr,         nullptr};
+  compute::HighPrecisionDirtyNodeExecutor executor(context, staging);
+  for (int node_id : selected_nodes) {
+    Node node_copy = graph.node(node_id);
+    executor.execute(node_copy, prepared.dirty_plan.entries.at(node_id));
+  }
 }
 
 /**
@@ -1038,6 +2317,8 @@ TEST(ComputeCachePolicySplit, PreservesHpAuthorityAndRtNonAuthority) {
       node, compute::CacheReadMode::InteractivePreferred));
 
   node.cached_output_high_precision = make_image_output(8, 8);
+  node.hp_region = value_image_adapter::full_node_output_region(
+      *node.cached_output_high_precision);
   EXPECT_EQ(
       compute::ComputeCachePolicy::reusable_output(node)->image_buffer.width,
       8);
@@ -1057,6 +2338,8 @@ TEST(NodeInputResolverSplit,
   GraphModel graph("cache/split-input-resolver");
   Node parent = make_node(10, "split", "parent");
   parent.cached_output_high_precision = make_image_output(12, 7);
+  parent.hp_region = value_image_adapter::full_node_output_region(
+      *parent.cached_output_high_precision);
   parent.cached_output_high_precision->data["threshold"] = 42;
   graph.add_node(parent);
 
@@ -1616,6 +2899,8 @@ TEST(TaskGraphPlanningSplit, ExpandsFullGraphBeforeNodeCachePruning) {
   source.parameters["width"] = 32;
   source.parameters["height"] = 16;
   source.cached_output_high_precision = make_image_output(32, 16);
+  source.hp_region = value_image_adapter::full_node_output_region(
+      *source.cached_output_high_precision);
   Node downstream = make_node(2, "split_plan", "tile");
   downstream.parameters["width"] = 32;
   downstream.parameters["height"] = 16;
@@ -1645,19 +2930,434 @@ TEST(TaskGraphPlanningSplit, ExpandsFullGraphBeforeNodeCachePruning) {
   request.target_node_id = 2;
   const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
 
-  EXPECT_EQ(plan.planned_nodes, (std::vector<int>{1, 2}));
+  EXPECT_EQ(plan.planned_nodes, (std::vector<int>{2}));
   ASSERT_EQ(plan.planned_work.size(), 2u);
-  EXPECT_TRUE(plan.planned_work.front().reusable_cache_available)
-      << "node/cache pruning records cache state without changing full graph";
-  ASSERT_EQ(plan.task_graph.tasks.size(), 4u);
+  EXPECT_EQ(plan.planned_work.front().node_id, 1);
+  EXPECT_TRUE(plan.planned_work.front().reusable_cache_available);
+  EXPECT_TRUE(plan.planned_work.front().task_ids.empty());
+  EXPECT_EQ(plan.planned_work.back().node_id, 2);
+  EXPECT_FALSE(plan.planned_work.back().reusable_cache_available);
+  ASSERT_EQ(plan.task_graph.tasks.size(), 2u);
+  EXPECT_TRUE(plan.task_graph.dependencies.empty());
   for (const auto& task : plan.task_graph.tasks) {
     EXPECT_NE(task.node_id, 99);
+    EXPECT_NE(task.node_id, 1)
+        << "a complete formal HP cache is a task-population boundary";
     EXPECT_EQ(task.kind, compute::PlannedTaskKind::Tile);
     EXPECT_EQ(task.domain, compute::DirtyDomain::HighPrecision);
     EXPECT_EQ(task.tile_size, 16);
     EXPECT_TRUE(task.dirty_selected)
         << "without a dirty snapshot, all full-frame tasks are active";
   }
+}
+
+/**
+ * @brief Proves cache pruning cuts satisfied branches but preserves shared
+ * work.
+ *
+ * @return Nothing; GoogleTest reports node order, cache-boundary metadata,
+ * dependency, partial-Region, force-recache, or RT-authority failures.
+ * @throws Graph, registry, planning, Region, or allocation exceptions
+ * unchanged.
+ * @note A shared producer feeds cached branch A and uncached branch B. Exact
+ * complete HP cache removes A while B keeps the producer alive. Partial
+ * validity, disabled reuse, and RT intent each retain the complete executable
+ * cone.
+ */
+TEST(TaskGraphPlanningSplit,
+     CacheBoundaryCutsOnlyItsBranchAndPreservesSharedDemand) {
+  register_split_ops();
+  GraphModel graph("cache/split-cache-branch-cut");
+  Node producer = make_node(1, "split_plan", "tile");
+  producer.parameters["width"] = 16;
+  producer.parameters["height"] = 16;
+  Node cached_branch = make_node(2, "split_plan", "tile");
+  cached_branch.parameters["width"] = 16;
+  cached_branch.parameters["height"] = 16;
+  cached_branch.image_inputs.push_back({1, "image"});
+  cached_branch.cached_output_high_precision = make_image_output(16, 16);
+  cached_branch.hp_region = value_image_adapter::full_node_output_region(
+      *cached_branch.cached_output_high_precision);
+  Node active_branch = make_node(3, "split_plan", "tile");
+  active_branch.parameters["width"] = 16;
+  active_branch.parameters["height"] = 16;
+  active_branch.image_inputs.push_back({1, "image"});
+  Node target = make_node(4, "split_plan", "tile");
+  target.parameters["width"] = 16;
+  target.parameters["height"] = 16;
+  target.image_inputs.push_back({2, "image"});
+  target.image_inputs.push_back({3, "image"});
+  graph.add_node(producer);
+  graph.add_node(cached_branch);
+  graph.add_node(active_branch);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  const std::vector<int> execution_order{1, 2, 3, 4};
+  compute::ComputeRequest hp_request;
+  hp_request.intent = ComputeIntent::GlobalHighPrecision;
+  hp_request.target_node_id = 4;
+  const auto cache_pruned =
+      node_cache_pruned_plan(graph, hp_request, execution_order);
+  EXPECT_EQ(cache_pruned.planned_nodes, (std::vector<int>{1, 3, 4}));
+  const auto cached_work = std::find_if(
+      cache_pruned.planned_work.begin(), cache_pruned.planned_work.end(),
+      [](const compute::PlannedNodeWork& work) { return work.node_id == 2; });
+  ASSERT_NE(cached_work, cache_pruned.planned_work.end());
+  EXPECT_TRUE(cached_work->reusable_cache_available);
+  EXPECT_TRUE(cached_work->task_ids.empty());
+  EXPECT_TRUE(std::none_of(cache_pruned.task_graph.dependencies.begin(),
+                           cache_pruned.task_graph.dependencies.end(),
+                           [](const compute::PlannedDependency& dependency) {
+                             return dependency.from_node_id == 2 ||
+                                    dependency.to_node_id == 2;
+                           }));
+  EXPECT_NE(std::find_if(cache_pruned.task_graph.dependencies.begin(),
+                         cache_pruned.task_graph.dependencies.end(),
+                         [](const compute::PlannedDependency& dependency) {
+                           return dependency.from_node_id == 1 &&
+                                  dependency.to_node_id == 3;
+                         }),
+            cache_pruned.task_graph.dependencies.end());
+
+  graph.mutate_node_runtime_state(2, [](GraphModel::NodeRuntimeState& state) {
+    state.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 16});
+  });
+  const auto partial_plan =
+      node_cache_pruned_plan(graph, hp_request, execution_order);
+  EXPECT_EQ(partial_plan.planned_nodes, execution_order);
+
+  graph.mutate_node_runtime_state(2, [](GraphModel::NodeRuntimeState& state) {
+    state.hp_region = value_image_adapter::full_node_output_region(
+        *state.cached_output_high_precision);
+  });
+  compute::ComputeRequest forced_request = hp_request;
+  forced_request.allow_reusable_cache = false;
+  const auto forced_plan =
+      node_cache_pruned_plan(graph, forced_request, execution_order);
+  EXPECT_EQ(forced_plan.planned_nodes, execution_order);
+
+  compute::ComputeRequest rt_request = hp_request;
+  rt_request.intent = ComputeIntent::RealTimeUpdate;
+  const auto rt_plan =
+      node_cache_pruned_plan(graph, rt_request, execution_order);
+  EXPECT_EQ(rt_plan.planned_nodes, execution_order);
+  EXPECT_TRUE(std::none_of(rt_plan.planned_work.begin(),
+                           rt_plan.planned_work.end(),
+                           [](const compute::PlannedNodeWork& work) {
+                             return work.reusable_cache_available;
+                           }));
+}
+
+/**
+ * @brief Proves external satisfaction is an upstream demand-cut boundary.
+ *
+ * @return Nothing; GoogleTest reports active task, node, or dependency-cut
+ * failures.
+ * @throws Graph, registry, planning, or allocation exceptions unchanged.
+ * @note Satisfying only the target removes its entire upstream cone. Satisfying
+ * the intermediate instead keeps the uncached target active while removing the
+ * intermediate and producer work needed only through that boundary.
+ */
+TEST(TaskGraphPlanningSplit,
+     ExternalSatisfactionCutsUpstreamButKeepsUncachedDownstream) {
+  register_split_ops();
+  GraphModel graph("cache/split-external-demand-cut");
+  Node producer = make_node(1, "split_plan", "tile");
+  producer.parameters["width"] = 16;
+  producer.parameters["height"] = 16;
+  Node intermediate = make_node(2, "split_plan", "tile");
+  intermediate.parameters["width"] = 16;
+  intermediate.parameters["height"] = 16;
+  intermediate.image_inputs.push_back({1, "image"});
+  Node target = make_node(3, "split_plan", "tile");
+  target.parameters["width"] = 16;
+  target.parameters["height"] = 16;
+  target.image_inputs.push_back({2, "image"});
+  graph.add_node(producer);
+  graph.add_node(intermediate);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 3;
+  const compute::ComputePlan plan =
+      node_cache_pruned_plan(graph, request, {1, 2, 3});
+  compute::DirtyRegionSnapshot snapshot;
+  snapshot.graph_generation = graph.topology_generation();
+  for (int node_id : {1, 2, 3}) {
+    snapshot.per_node_dirty_rois[node_id].push_back(PixelRect{0, 0, 16, 16});
+    snapshot.actual_dirty_rois[node_id] = snapshot.per_node_dirty_rois[node_id];
+  }
+
+  compute::DirtySnapshotTaskGraphPruner pruner;
+  const std::unordered_set<int> target_satisfied{3};
+  const compute::DirtyTaskSelectionOverlay empty =
+      pruner.select(plan, snapshot, graph, &target_satisfied);
+  EXPECT_TRUE(empty.active_task_ids.empty());
+
+  const std::unordered_set<int> intermediate_satisfied{2};
+  const compute::DirtyTaskSelectionOverlay target_only =
+      pruner.select(plan, snapshot, graph, &intermediate_satisfied);
+  ASSERT_FALSE(target_only.active_task_ids.empty());
+  for (int task_id : target_only.active_task_ids) {
+    ASSERT_GE(task_id, 0);
+    ASSERT_LT(static_cast<std::size_t>(task_id), plan.task_graph.tasks.size());
+    EXPECT_EQ(plan.task_graph.tasks[task_id].node_id, 3);
+  }
+}
+
+/**
+ * @brief Proves an inactive external boundary stops its dirty-only upstream.
+ *
+ * @return Nothing; GoogleTest reports selection or real provider counts.
+ * @throws Graph, registry, planning, execution, or allocation exceptions
+ * unchanged.
+ * @note A and C are dirty candidates in A→B→C, while B is externally
+ * satisfied and deliberately absent from dirty candidates. Cache reuse is
+ * disabled for selection so only the external boundary can remove A.
+ */
+TEST(TaskGraphPlanningSplit,
+     InactiveExternalBoundaryCutsDirtyProducerProviderExecution) {
+  constexpr const char* kType = "issue82_demand_universe";
+  constexpr const char* kProducerSubtype = "external_cut_producer";
+  constexpr const char* kBoundarySubtype = "external_cut_boundary";
+  constexpr const char* kTargetSubtype = "external_cut_target";
+  auto producer_entries = std::make_shared<std::atomic_int>(0);
+  auto boundary_entries = std::make_shared<std::atomic_int>(0);
+  auto target_entries = std::make_shared<std::atomic_int>(0);
+  register_counted_monolithic_operation(kType, kProducerSubtype,
+                                        producer_entries, 1.0f);
+  register_counted_monolithic_operation(kType, kBoundarySubtype,
+                                        boundary_entries, 2.0f);
+  register_counted_monolithic_operation(kType, kTargetSubtype, target_entries,
+                                        3.0f);
+
+  GraphModel graph("cache/issue82-inactive-external-cut");
+  Node producer = make_node(1, kType, kProducerSubtype);
+  producer.parameters["width"] = 8;
+  producer.parameters["height"] = 8;
+  Node boundary = make_node(2, kType, kBoundarySubtype);
+  boundary.parameters["width"] = 8;
+  boundary.parameters["height"] = 8;
+  boundary.image_inputs.push_back({1, "image"});
+  boundary.cached_output_high_precision = make_image_output(8, 8, 1, 2.0f);
+  boundary.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+  Node target = make_node(3, kType, kTargetSubtype);
+  target.parameters["width"] = 8;
+  target.parameters["height"] = 8;
+  target.image_inputs.push_back({2, "image"});
+  graph.add_node(producer);
+  graph.add_node(boundary);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 3;
+  request.allow_reusable_cache = false;
+  const std::unordered_set<int> externally_satisfied{2};
+  auto prepared = compute::prepare_dirty_execution(
+      graph, make_sparse_monolithic_dirty_plan(graph, {1, 2, 3}, {1, 3}),
+      request, {Device::CPU}, &externally_satisfied);
+  EXPECT_EQ(selected_dirty_node_ids(prepared), (std::vector<int>{3}));
+  execute_selected_dirty_providers(graph, prepared);
+  EXPECT_EQ(producer_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(boundary_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(target_entries->load(std::memory_order_relaxed), 1);
+
+  OpRegistry::instance().unregister_key(make_key(kType, kProducerSubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kBoundarySubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kTargetSubtype));
+}
+
+/**
+ * @brief Proves a shared consumer preserves upstream work across an external
+ * boundary cut.
+ *
+ * @return Nothing; GoogleTest reports selection or real provider counts.
+ * @throws Graph, registry, planning, execution, or allocation exceptions
+ * unchanged.
+ * @note In A→B→C plus A→D, external B still removes the A work needed only by
+ * C, but dirty D independently demands A. The selected providers must therefore
+ * be A, C, and D exactly once, with B inactive.
+ */
+TEST(TaskGraphPlanningSplit,
+     SharedDirtyConsumerPreservesProducerAcrossInactiveExternalBoundary) {
+  constexpr const char* kType = "issue82_demand_universe";
+  constexpr const char* kProducerSubtype = "external_shared_producer";
+  constexpr const char* kBoundarySubtype = "external_shared_boundary";
+  constexpr const char* kTargetSubtype = "external_shared_target";
+  constexpr const char* kSharedSubtype = "external_shared_consumer";
+  auto producer_entries = std::make_shared<std::atomic_int>(0);
+  auto boundary_entries = std::make_shared<std::atomic_int>(0);
+  auto target_entries = std::make_shared<std::atomic_int>(0);
+  auto shared_entries = std::make_shared<std::atomic_int>(0);
+  register_counted_monolithic_operation(kType, kProducerSubtype,
+                                        producer_entries, 1.0f);
+  register_counted_monolithic_operation(kType, kBoundarySubtype,
+                                        boundary_entries, 2.0f);
+  register_counted_monolithic_operation(kType, kTargetSubtype, target_entries,
+                                        3.0f);
+  register_counted_monolithic_operation(kType, kSharedSubtype, shared_entries,
+                                        4.0f);
+
+  GraphModel graph("cache/issue82-inactive-external-shared");
+  Node producer = make_node(1, kType, kProducerSubtype);
+  producer.parameters["width"] = 8;
+  producer.parameters["height"] = 8;
+  Node boundary = make_node(2, kType, kBoundarySubtype);
+  boundary.parameters["width"] = 8;
+  boundary.parameters["height"] = 8;
+  boundary.image_inputs.push_back({1, "image"});
+  boundary.cached_output_high_precision = make_image_output(8, 8, 1, 2.0f);
+  boundary.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+  Node target = make_node(3, kType, kTargetSubtype);
+  target.parameters["width"] = 8;
+  target.parameters["height"] = 8;
+  target.image_inputs.push_back({2, "image"});
+  Node shared = make_node(4, kType, kSharedSubtype);
+  shared.parameters["width"] = 8;
+  shared.parameters["height"] = 8;
+  shared.image_inputs.push_back({1, "image"});
+  graph.add_node(producer);
+  graph.add_node(boundary);
+  graph.add_node(target);
+  graph.add_node(shared);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 3;
+  request.allow_reusable_cache = false;
+  const std::unordered_set<int> externally_satisfied{2};
+  auto prepared = compute::prepare_dirty_execution(
+      graph, make_sparse_monolithic_dirty_plan(graph, {1, 2, 3, 4}, {1, 3, 4}),
+      request, {Device::CPU}, &externally_satisfied);
+  EXPECT_EQ(selected_dirty_node_ids(prepared), (std::vector<int>{1, 3, 4}));
+  execute_selected_dirty_providers(graph, prepared);
+  EXPECT_EQ(producer_entries->load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(boundary_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(target_entries->load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(shared_entries->load(std::memory_order_relaxed), 1);
+
+  OpRegistry::instance().unregister_key(make_key(kType, kProducerSubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kBoundarySubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kTargetSubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kSharedSubtype));
+}
+
+/**
+ * @brief Proves an exact old cache cannot satisfy a dirty-selected target.
+ *
+ * @return Nothing; GoogleTest reports task-shape, cache, or provider failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions are
+ * reported by the shared synchronous regression helper.
+ */
+TEST(ComputeServiceDirtyCacheSelection,
+     ExactCacheAtSelectionStillExecutesProviderCone) {
+  run_direct_dirty_cache_selection_case(PlannedCacheState::KeepExact, "exact");
+}
+
+/**
+ * @brief Proves cache deletion after planning retains the dirty provider cone.
+ *
+ * @return Nothing; GoogleTest reports task-shape, cache, or provider failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions are
+ * reported by the shared synchronous regression helper.
+ */
+TEST(ComputeServiceDirtyCacheSelection,
+     RemovedExactCacheAfterPlanningRetainsProviderCone) {
+  run_direct_dirty_cache_selection_case(PlannedCacheState::RemoveOutput,
+                                        "remove");
+}
+
+/**
+ * @brief Proves partial coverage after planning retains the dirty provider
+ * cone.
+ *
+ * @return Nothing; GoogleTest reports task-shape, cache, or provider failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions are
+ * reported by the shared synchronous regression helper.
+ */
+TEST(ComputeServiceDirtyCacheSelection,
+     PartialCacheAfterPlanningRetainsProviderCone) {
+  run_direct_dirty_cache_selection_case(PlannedCacheState::ReduceCoverage,
+                                        "partial");
+}
+
+/**
+ * @brief Proves an exact old cache cannot hide dirty route replacement.
+ *
+ * @return Nothing; GoogleTest reports cache reuse, route validation, provider
+ * entry, or authority-residue failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions
+ * unchanged.
+ * @note The post-plan hook replaces the planned implementation after planning
+ * observes complete target cache. Because the target is dirty-selected, the
+ * active request must reject route drift before either provider executes.
+ */
+TEST(ComputeServiceDirtyCacheSelection,
+     CompleteCacheKeepsDirtyRouteValidationActive) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "complete_cache_no_work";
+  auto old_entries = std::make_shared<std::atomic_int>(0);
+  auto replacement_entries = std::make_shared<std::atomic_int>(0);
+  auto& registry = OpRegistry::instance();
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([old_entries](const Node& node,
+                                     const std::vector<const NodeOutput*>&) {
+        old_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 10.0f);
+      }));
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority, "issue82-cache-route-drift");
+  populate_direct_dirty_graph(harness.graph(), kSubtype, true);
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  int observer_calls = 0;
+  {
+    ScopedDirtyPostPlanObservation observation([&] {
+      ++observer_calls;
+      registry.register_op_hp_monolithic(
+          kType, kSubtype,
+          MonolithicOpFunc(
+              [replacement_entries](
+                  const Node& node,
+                  const std::vector<const NodeOutput*>&) -> NodeOutput {
+                replacement_entries->fetch_add(1, std::memory_order_relaxed);
+                return make_image_output(
+                    as_int_flexible(node.parameters, "width", 8),
+                    as_int_flexible(node.parameters, "height", 8), 1, 11.0f);
+              }));
+    });
+    try {
+      (void)harness.service().compute(harness.graph(), dirty);
+      FAIL() << "dirty-selected exact cache must not suppress route checks";
+    } catch (const GraphError& error) {
+      EXPECT_EQ(error.code(), GraphErrc::NoOperation);
+    }
+  }
+
+  EXPECT_EQ(observer_calls, 1);
+  EXPECT_EQ(old_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(replacement_entries->load(std::memory_order_relaxed), 0);
+  ASSERT_TRUE(harness.graph().node(1).cached_output_high_precision.has_value());
+  EXPECT_FLOAT_EQ(
+      toCvMat(
+          harness.graph().node(1).cached_output_high_precision->image_buffer)
+          .at<float>(0, 0),
+      1.0f);
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(make_key(kType, kSubtype));
 }
 
 TEST(TaskGraphPlanningSplit,
@@ -1815,6 +3515,64 @@ TEST(TaskGraphPlanningSplit, TileDependenciesUseRandomAccessInputRoi) {
   ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 3u)
       << "random-access input ROI expands the middle tile across three "
          "upstream tiles";
+  for (int dependency_task_id : middle_downstream_task->dependency_task_ids) {
+    EXPECT_EQ(plan.task_graph.tasks.at(dependency_task_id).node_id, 1);
+  }
+}
+
+/**
+ * @brief Proves dependency lowering uses the exact selected sibling metadata.
+ *
+ * @return Nothing; GoogleTest reports route or dependency mismatches.
+ * @throws Graph, registry, extent-resolution, or allocation exceptions when
+ * the production planner cannot build the focused graph.
+ * @note A monolithic SpatialAligned sibling is registered before the selected
+ * device-tiled RandomAccess implementation. Generic key metadata would give
+ * the middle downstream tile only one producer dependency; the exact route
+ * requires all three.
+ */
+TEST(TaskGraphPlanningSplit,
+     ExactSelectedSiblingMetadataShapesTileDependencies) {
+  register_split_ops();
+  GraphModel graph("cache/split-exact-sibling-metadata-dependencies");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 48;
+  source.parameters["height"] = 16;
+  Node downstream = make_node(2, "split_plan", "exact_sibling_metadata");
+  downstream.parameters["width"] = 48;
+  downstream.parameters["height"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
+
+  const auto work =
+      std::find_if(plan.planned_work.begin(), plan.planned_work.end(),
+                   [](const compute::PlannedNodeWork& candidate) {
+                     return candidate.node_id == 2;
+                   });
+  ASSERT_NE(work, plan.planned_work.end());
+  ASSERT_TRUE(work->operation_route.has_value());
+  EXPECT_TRUE(work->operation_route->tiled);
+  EXPECT_EQ(work->operation_route->metadata.tile_preference,
+            TileSizePreference::MICRO);
+  EXPECT_EQ(work->operation_route->metadata.access_pattern,
+            OpMetadata::InputAccessPattern::RandomAccess);
+
+  const compute::PlannedTask* middle_downstream_task = nullptr;
+  for (const compute::PlannedTask& task : plan.task_graph.tasks) {
+    if (task.node_id == 2 && task.output_roi == (PixelRect{16, 0, 16, 16})) {
+      middle_downstream_task = &task;
+      break;
+    }
+  }
+  ASSERT_NE(middle_downstream_task, nullptr);
+  ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 3U);
   for (int dependency_task_id : middle_downstream_task->dependency_task_ids) {
     EXPECT_EQ(plan.task_graph.tasks.at(dependency_task_id).node_id, 1);
   }
@@ -1982,6 +3740,483 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_TRUE(graph.node(1).runtime_parameters.empty());
   EXPECT_TRUE(graph.node(2).runtime_parameters.empty());
   EXPECT_TRUE(graph.node(3).runtime_parameters.empty());
+}
+
+/**
+ * @brief Proves sequential direct authority ends at provider callback return.
+ *
+ * @return Nothing; GoogleTest reports gate ordering, failure typing, or
+ * authority residue.
+ * @throws Setup, graph, registry, service, future, synchronization, cache, or
+ * provider exceptions unchanged when fixture construction itself fails.
+ * @note Both Graphs use the same revisioned HP implementation, cap one, shared
+ * exclusive key, and declared retained/scratch demand. A test-product observer
+ * first proves the route-backed contender reached a denied operation-admission
+ * check. It must then enter and exit while the injected cache encoder remains
+ * blocked. The encoder subsequently throws, proving post-provider failure
+ * settlement leaves no operation gate, resource ledger, or Run residue.
+ */
+TEST(ComputeServiceSequentialAdmission,
+     ProviderLeaseEndsBeforeBlockingPostProviderCacheFailure) {
+  constexpr const char* kType = "issue82_sequential_lease";
+  constexpr const char* kSubtype = "shared_provider";
+  constexpr const char* kExclusiveKey =
+      "issue82-sequential-post-provider-boundary";
+  constexpr int kSequentialRole = 1;
+  constexpr int kRouteRole = 2;
+  auto probe = std::make_shared<SequentialLeaseBoundaryProbe>();
+
+  OpMetadata metadata;
+  metadata.maximum_parallelism = 1U;
+  metadata.exclusive_key = kExclusiveKey;
+  metadata.retained_memory_bytes = 64U;
+  metadata.scratch_bytes = 32U;
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [probe](const Node& node,
+                  const std::vector<const NodeOutput*>&) -> NodeOutput {
+            const int role = as_int_flexible(node.parameters, "role", 0);
+            if (role == kSequentialRole) {
+              probe->enter_sequential_provider();
+            } else if (role == kRouteRole) {
+              probe->enter_route_provider();
+            } else {
+              throw GraphError(GraphErrc::InvalidParameter,
+                               "unknown sequential lease provider role");
+            }
+            return make_image_output(
+                as_int_flexible(node.parameters, "width", 8),
+                as_int_flexible(node.parameters, "height", 8), 1,
+                role == kSequentialRole ? 2.0f : 3.0f);
+          }),
+      metadata);
+  const auto selected = OpRegistry::instance().select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_NE(selected->implementation_identity, 0U);
+
+  const ScopedTestDirectory root(
+      std::filesystem::temp_directory_path() /
+      "photospider-sequential-provider-lease-boundary");
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      testing::FakeImageArtifactCodec::DecodeCallback{},
+      [probe](const std::filesystem::path&, const ImageBuffer&,
+              ImageArtifactPrecision) {
+        probe->block_post_provider_cache_and_fail();
+      });
+  compute::ExecutionService authority(1U);
+  ScopedOperationAdmissionWaitObservation admission_observation(authority,
+                                                                *probe);
+
+  GraphModel sequential_graph((root.path() / "sequential-cache").string());
+  Node sequential_node = make_node(1, kType, std::string(kSubtype));
+  sequential_node.parameters["width"] = 8;
+  sequential_node.parameters["height"] = 8;
+  sequential_node.parameters["role"] = kSequentialRole;
+  sequential_node.caches.push_back({"image", "output.png"});
+  sequential_graph.add_node(std::move(sequential_node));
+  sequential_graph.validate_topology();
+  GraphTraversalService sequential_traversal;
+  GraphCacheService sequential_cache(image_codec,
+                                     testing::make_yaml_cache_metadata_codec());
+  GraphEventService sequential_events;
+  ComputeService sequential_service(sequential_traversal, sequential_cache,
+                                    sequential_events, authority);
+  testing::ScopedExecutionGraphLifecycle sequential_lifecycle(authority,
+                                                              sequential_graph);
+
+  GraphRuntime::Info route_info;
+  route_info.name = "issue82-sequential-route-peer";
+  route_info.root = root.path() / "route";
+  route_info.cache_root = root.path() / "route-cache";
+  GraphRuntime route_runtime(route_info);
+  route_runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                        "cpu");
+  route_runtime.start();
+  GraphModel& route_graph = route_runtime.model();
+  Node route_node = make_node(1, kType, std::string(kSubtype));
+  route_node.parameters["width"] = 8;
+  route_node.parameters["height"] = 8;
+  route_node.parameters["role"] = kRouteRole;
+  route_graph.add_node(std::move(route_node));
+  route_graph.validate_topology();
+  GraphTraversalService route_traversal;
+  GraphCacheService route_cache(
+      providers::make_configured_image_artifact_codec(),
+      testing::make_yaml_cache_metadata_codec());
+  GraphEventService route_events;
+  ComputeService route_service(route_traversal, route_cache, route_events,
+                               authority);
+  testing::ScopedExecutionGraphLifecycle route_lifecycle(authority,
+                                                         route_graph);
+
+  ComputeService::Request sequential_request;
+  sequential_request.node_id = 1;
+  sequential_request.cache.precision = "int8";
+  sequential_request.cache.force_recache = true;
+  sequential_request.graph_identity = "issue82-sequential-provider";
+  auto route_cancellation =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  ComputeService::Request route_request;
+  route_request.node_id = 1;
+  route_request.cache.precision = "int8";
+  route_request.cache.disable_disk_cache = true;
+  route_request.graph_identity = "issue82-route-provider";
+  route_request.cancellation_source = route_cancellation;
+
+  auto sequential_future = std::async(std::launch::async, [&] {
+    return &sequential_service.compute(sequential_graph, sequential_request);
+  });
+  const bool sequential_provider_entered =
+      probe->wait_for_sequential_provider(std::chrono::seconds(2));
+  auto route_future = std::async(std::launch::async, [&] {
+    return &route_service.compute_parallel(route_graph, route_runtime,
+                                           route_request);
+  });
+  const bool contender_became_observable =
+      probe->wait_for_admission_or_route_provider(std::chrono::seconds(2));
+  const bool admission_waited_during_provider =
+      probe->operation_admission_waited();
+  const bool route_entered_during_provider = probe->route_provider_entered();
+  const std::uint64_t waited_implementation_identity =
+      probe->waited_implementation_identity();
+
+  probe->release_sequential_provider();
+  const bool post_provider_cache_entered =
+      probe->wait_for_post_provider_cache(std::chrono::seconds(2));
+  const bool route_entered_during_post_provider_cache =
+      probe->wait_for_route_provider(std::chrono::seconds(2));
+  const bool route_exited_during_post_provider_cache =
+      probe->wait_for_route_provider_exit(std::chrono::seconds(2));
+  const bool route_settled_during_post_provider_cache =
+      route_future.wait_for(std::chrono::seconds(2)) ==
+      std::future_status::ready;
+  NodeOutput* route_output = nullptr;
+  if (route_settled_during_post_provider_cache) {
+    EXPECT_NO_THROW(route_output = route_future.get());
+  } else {
+    (void)route_cancellation->request_cancellation();
+  }
+  const ResourceVector resources_during_post_provider_cache =
+      authority.resource_snapshot().reserved;
+  const bool sequential_waited_for_cache =
+      sequential_future.wait_for(std::chrono::milliseconds(0)) ==
+      std::future_status::timeout;
+  probe->release_post_provider_cache();
+
+  bool sequential_saw_cache_failure = false;
+  try {
+    (void)sequential_future.get();
+  } catch (const GraphError& error) {
+    sequential_saw_cache_failure = true;
+    EXPECT_EQ(error.code(), GraphErrc::Io);
+    EXPECT_NE(std::string(error.what())
+                  .find("injected sequential post-provider cache failure"),
+              std::string::npos);
+  }
+  if (!route_settled_during_post_provider_cache) {
+    EXPECT_THROW((void)route_future.get(), GraphError);
+  }
+
+  EXPECT_TRUE(sequential_provider_entered);
+  EXPECT_TRUE(contender_became_observable);
+  EXPECT_TRUE(admission_waited_during_provider);
+  EXPECT_FALSE(route_entered_during_provider);
+  EXPECT_EQ(waited_implementation_identity, selected->implementation_identity);
+  EXPECT_TRUE(post_provider_cache_entered);
+  EXPECT_TRUE(route_entered_during_post_provider_cache);
+  EXPECT_TRUE(route_exited_during_post_provider_cache);
+  EXPECT_TRUE(route_settled_during_post_provider_cache);
+  EXPECT_TRUE(sequential_waited_for_cache);
+  EXPECT_TRUE(sequential_saw_cache_failure);
+  EXPECT_NE(route_output, nullptr);
+  EXPECT_EQ(probe->maximum_active_providers(), 1);
+  EXPECT_EQ(resources_during_post_provider_cache, ResourceVector{});
+  expect_direct_authority_settled(authority);
+
+  route_runtime.stop();
+  OpRegistry::instance().unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves every direct resource component releases before Host cache I/O.
+ *
+ * @return Nothing; GoogleTest reports admission, capacity, failure typing, or
+ * authority residue.
+ * @throws Setup, graph, registry, service, future, synchronization, cache, or
+ * provider exceptions unchanged when fixture construction itself fails.
+ * @note Both requests use one callback identity, `maximum_parallelism=1`, and
+ * one heap-backed exclusive key. The service CPU, retained-memory, and scratch
+ * ceilings equal exactly one production direct-lease vector after an
+ * independent capacity-plus-terminator check; a one-byte-short limit and a
+ * terminator-only overflow declaration reject without residue. The peer first
+ * reaches a denied gate while the sequential provider is active, then must
+ * enter and exit while the sequential codec remains blocked.
+ */
+TEST(ComputeServiceSequentialAdmission,
+     ExactDirectCapacityReleasesBeforeBlockingPostProviderCacheFailure) {
+  constexpr const char* kType = "issue82_sequential_exact_capacity";
+  constexpr const char* kSubtype = "shared_provider";
+  constexpr const char* kExclusiveKey =
+      "resource-accounting-sequential-direct-exclusive-key";
+  constexpr int kSequentialRole = 1;
+  constexpr int kPeerRole = 2;
+  auto probe = std::make_shared<SequentialLeaseBoundaryProbe>();
+
+  OpMetadata metadata;
+  metadata.maximum_parallelism = 1U;
+  metadata.exclusive_key = kExclusiveKey;
+  metadata.retained_memory_bytes = 64U;
+  metadata.scratch_bytes = 32U;
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [probe](const Node& node,
+                  const std::vector<const NodeOutput*>&) -> NodeOutput {
+            const int role = as_int_flexible(node.parameters, "role", 0);
+            if (role == kSequentialRole) {
+              probe->enter_sequential_provider();
+            } else if (role == kPeerRole) {
+              probe->enter_route_provider();
+            } else {
+              throw GraphError(GraphErrc::InvalidParameter,
+                               "unknown exact-capacity provider role");
+            }
+            return make_image_output(
+                as_int_flexible(node.parameters, "width", 8),
+                as_int_flexible(node.parameters, "height", 8), 1,
+                role == kSequentialRole ? 4.0f : 5.0f);
+          }),
+      metadata);
+  const auto selected = OpRegistry::instance().select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_NE(selected->implementation_identity, 0U);
+  const compute::OperationExecutionConstraints constraints{
+      selected->implementation_identity,
+      selected->metadata.reentrant,
+      selected->metadata.maximum_parallelism,
+      selected->metadata.exclusive_key,
+  };
+  ASSERT_GT(constraints.exclusive_key.capacity(), 15U);
+  const compute::ReadyTaskResourceDemand demand{
+      selected->metadata.retained_memory_bytes,
+      selected->metadata.scratch_bytes,
+      0U,
+      1U,
+  };
+  const ResourceVector exact_resources =
+      testing::ExecutionServiceTestAccess::estimate_direct_operation_resources(
+          constraints, demand);
+  ASSERT_EQ(exact_resources.cpu_slots, 1U);
+  const compute::OperationExecutionConstraints retained_constraints(
+      constraints);
+  const std::uint64_t fixed_retained_bytes =
+      testing::ExecutionServiceTestAccess::
+          direct_operation_fixed_retained_memory_bytes();
+  ASSERT_EQ(exact_resources.retained_memory_bytes,
+            metadata.retained_memory_bytes + fixed_retained_bytes +
+                static_cast<std::uint64_t>(
+                    retained_constraints.exclusive_key.capacity()) +
+                1U);
+  ASSERT_EQ(exact_resources.scratch_bytes, metadata.scratch_bytes);
+  ASSERT_EQ(exact_resources.ready_entries, 0U);
+  ASSERT_EQ(exact_resources.ready_bytes, 0U);
+
+  ResourceVector one_byte_short = exact_resources;
+  ASSERT_GT(one_byte_short.retained_memory_bytes, 0U);
+  --one_byte_short.retained_memory_bytes;
+  compute::ExecutionResourceLimits short_limits =
+      compute::ExecutionService::default_resource_limits();
+  short_limits.cpu_slots = one_byte_short.cpu_slots;
+  short_limits.retained_memory_bytes = one_byte_short.retained_memory_bytes;
+  short_limits.scratch_bytes = one_byte_short.scratch_bytes;
+  short_limits.interactive_headroom = ResourceVector{};
+  compute::ExecutionService short_authority(short_limits);
+  compute::ComputeRun short_run(compute::ComputeRunSubmission{
+      "direct-key-one-byte-short",
+      GraphInstanceId{8201U},
+      GraphRevision{8201U},
+      1,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
+                             std::nullopt, 1U, std::nullopt},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey{1, ComputeIntent::GlobalHighPrecision},
+          compute::SupersessionGeneration{1U}},
+  });
+  EXPECT_THROW((void)short_authority.acquire_operation_execution(
+                   short_run.acquire_lease(), constraints, demand),
+               GraphError);
+  EXPECT_EQ(short_authority.resource_snapshot().reserved, ResourceVector{});
+
+  const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+  const std::uint64_t copied_capacity =
+      static_cast<std::uint64_t>(retained_constraints.exclusive_key.capacity());
+  ASSERT_LT(fixed_retained_bytes + copied_capacity, maximum);
+  const compute::ReadyTaskResourceDemand overflow_demand{
+      maximum - fixed_retained_bytes - copied_capacity, 0U, 0U, 1U};
+  compute::ExecutionResourceLimits overflow_limits =
+      compute::ExecutionService::default_resource_limits();
+  overflow_limits.cpu_slots = 1U;
+  overflow_limits.retained_memory_bytes = maximum;
+  overflow_limits.scratch_bytes = 0U;
+  overflow_limits.interactive_headroom = ResourceVector{};
+  compute::ExecutionService overflow_authority(overflow_limits);
+  compute::ComputeRun overflow_run(compute::ComputeRunSubmission{
+      "direct-key-terminator-overflow",
+      GraphInstanceId{8202U},
+      GraphRevision{8202U},
+      1,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
+                             std::nullopt, 1U, std::nullopt},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey{1, ComputeIntent::GlobalHighPrecision},
+          compute::SupersessionGeneration{1U}},
+  });
+  EXPECT_THROW((void)overflow_authority.acquire_operation_execution(
+                   overflow_run.acquire_lease(), constraints, overflow_demand),
+               GraphError);
+  EXPECT_EQ(overflow_authority.resource_snapshot().reserved, ResourceVector{});
+
+  compute::ExecutionResourceLimits limits =
+      compute::ExecutionService::default_resource_limits();
+  limits.cpu_slots = exact_resources.cpu_slots;
+  limits.retained_memory_bytes = exact_resources.retained_memory_bytes;
+  limits.scratch_bytes = exact_resources.scratch_bytes;
+  limits.interactive_headroom = ResourceVector{};
+  compute::ExecutionService authority(limits);
+  ScopedOperationAdmissionWaitObservation admission_observation(authority,
+                                                                *probe);
+
+  const ScopedTestDirectory root(
+      std::filesystem::temp_directory_path() /
+      "photospider-sequential-exact-direct-capacity");
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      testing::FakeImageArtifactCodec::DecodeCallback{},
+      [probe](const std::filesystem::path&, const ImageBuffer&,
+              ImageArtifactPrecision) {
+        probe->block_post_provider_cache_and_fail();
+      });
+
+  GraphModel sequential_graph((root.path() / "sequential-cache").string());
+  Node sequential_node = make_node(1, kType, std::string(kSubtype));
+  sequential_node.parameters["width"] = 8;
+  sequential_node.parameters["height"] = 8;
+  sequential_node.parameters["role"] = kSequentialRole;
+  sequential_node.caches.push_back({"image", "output.png"});
+  sequential_graph.add_node(std::move(sequential_node));
+  sequential_graph.validate_topology();
+  GraphTraversalService sequential_traversal;
+  GraphCacheService sequential_cache(image_codec,
+                                     testing::make_yaml_cache_metadata_codec());
+  GraphEventService sequential_events;
+  ComputeService sequential_service(sequential_traversal, sequential_cache,
+                                    sequential_events, authority);
+  testing::ScopedExecutionGraphLifecycle sequential_lifecycle(authority,
+                                                              sequential_graph);
+
+  GraphModel peer_graph((root.path() / "peer-cache").string());
+  Node peer_node = make_node(1, kType, std::string(kSubtype));
+  peer_node.parameters["width"] = 8;
+  peer_node.parameters["height"] = 8;
+  peer_node.parameters["role"] = kPeerRole;
+  peer_graph.add_node(std::move(peer_node));
+  peer_graph.validate_topology();
+  GraphTraversalService peer_traversal;
+  GraphCacheService peer_cache(
+      providers::make_configured_image_artifact_codec(),
+      testing::make_yaml_cache_metadata_codec());
+  GraphEventService peer_events;
+  ComputeService peer_service(peer_traversal, peer_cache, peer_events,
+                              authority);
+  testing::ScopedExecutionGraphLifecycle peer_lifecycle(authority, peer_graph);
+
+  ComputeService::Request sequential_request;
+  sequential_request.node_id = 1;
+  sequential_request.cache.precision = "int8";
+  sequential_request.cache.force_recache = true;
+  sequential_request.graph_identity = "issue82-exact-capacity-sequential";
+  auto peer_cancellation =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  ComputeService::Request peer_request;
+  peer_request.node_id = 1;
+  peer_request.cache.precision = "int8";
+  peer_request.cache.disable_disk_cache = true;
+  peer_request.graph_identity = "issue82-exact-capacity-peer";
+  peer_request.cancellation_source = peer_cancellation;
+
+  auto sequential_future = std::async(std::launch::async, [&] {
+    return &sequential_service.compute(sequential_graph, sequential_request);
+  });
+  const bool sequential_provider_entered =
+      probe->wait_for_sequential_provider(std::chrono::seconds(2));
+  auto peer_future = std::async(std::launch::async, [&] {
+    return &peer_service.compute(peer_graph, peer_request);
+  });
+  const bool contender_became_observable =
+      probe->wait_for_admission_or_route_provider(std::chrono::seconds(2));
+  const bool admission_waited_during_provider =
+      probe->operation_admission_waited();
+  const bool peer_entered_during_provider = probe->route_provider_entered();
+  const std::uint64_t waited_implementation_identity =
+      probe->waited_implementation_identity();
+
+  probe->release_sequential_provider();
+  const bool post_provider_cache_entered =
+      probe->wait_for_post_provider_cache(std::chrono::seconds(2));
+  const bool peer_entered_during_post_provider_cache =
+      probe->wait_for_route_provider(std::chrono::seconds(2));
+  const bool peer_exited_during_post_provider_cache =
+      probe->wait_for_route_provider_exit(std::chrono::seconds(2));
+  const bool peer_settled_during_post_provider_cache =
+      peer_future.wait_for(std::chrono::seconds(2)) ==
+      std::future_status::ready;
+  NodeOutput* peer_output = nullptr;
+  if (peer_settled_during_post_provider_cache) {
+    EXPECT_NO_THROW(peer_output = peer_future.get());
+  } else {
+    (void)peer_cancellation->request_cancellation();
+  }
+  const ResourceVector resources_during_post_provider_cache =
+      authority.resource_snapshot().reserved;
+  const bool sequential_waited_for_cache =
+      sequential_future.wait_for(std::chrono::milliseconds(0)) ==
+      std::future_status::timeout;
+  probe->release_post_provider_cache();
+
+  bool sequential_saw_cache_failure = false;
+  try {
+    (void)sequential_future.get();
+  } catch (const GraphError& error) {
+    sequential_saw_cache_failure = true;
+    EXPECT_EQ(error.code(), GraphErrc::Io);
+  }
+  if (!peer_settled_during_post_provider_cache) {
+    EXPECT_THROW((void)peer_future.get(), GraphError);
+  }
+
+  EXPECT_TRUE(sequential_provider_entered);
+  EXPECT_TRUE(contender_became_observable);
+  EXPECT_TRUE(admission_waited_during_provider);
+  EXPECT_FALSE(peer_entered_during_provider);
+  EXPECT_EQ(waited_implementation_identity, selected->implementation_identity);
+  EXPECT_TRUE(post_provider_cache_entered);
+  EXPECT_TRUE(peer_entered_during_post_provider_cache);
+  EXPECT_TRUE(peer_exited_during_post_provider_cache);
+  EXPECT_TRUE(peer_settled_during_post_provider_cache);
+  EXPECT_TRUE(sequential_waited_for_cache);
+  EXPECT_TRUE(sequential_saw_cache_failure);
+  EXPECT_NE(peer_output, nullptr);
+  EXPECT_EQ(probe->maximum_active_providers(), 1);
+  EXPECT_EQ(resources_during_post_provider_cache, ResourceVector{});
+  expect_direct_authority_settled(authority);
+
+  OpRegistry::instance().unregister_key(make_key(kType, kSubtype));
 }
 
 TEST(TaskGraphPlanningSplit,
@@ -2260,6 +4495,760 @@ TEST(ComputeServiceSplit,
       << "each dirty request stabilizes its data-only producer exactly once";
 }
 
+/**
+ * @brief Proves nonparallel HP dirty callbacks share nonreentrant authority
+ * across independent Graphs.
+ *
+ * @return Nothing; GoogleTest reports overlap, settlement, or output failures.
+ * @throws Graph, service, registry, future, or provider exceptions unchanged.
+ * @note Explicit force-recache keeps both HP requests executable after their
+ * setup computes have populated complete caches. The first provider blocks
+ * after entry; the second Graph reaches the same identity but cannot enter
+ * until release, proving dependency-free inline topology still uses the
+ * process OperationStartGate.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     NonparallelHpSerializesNonreentrantIdentityAcrossGraphs) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "hp_nonreentrant";
+  auto probe = std::make_shared<DirectDirtyProviderProbe>();
+  OpMetadata metadata;
+  metadata.reentrant = false;
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kSubtype, make_probed_image_operation(probe, 2.0f), metadata);
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness first(authority, "issue82-hp-nonreentrant-first");
+  DirectDirtyComputeHarness second(authority, "issue82-hp-nonreentrant-second");
+  populate_direct_dirty_graph(first.graph(), kSubtype);
+  populate_direct_dirty_graph(second.graph(), kSubtype);
+  ComputeService::Request full =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  full.intent.reset();
+  full.dirty_roi.reset();
+  (void)first.service().compute(first.graph(), full);
+  (void)second.service().compute(second.graph(), full);
+
+  probe->reset_and_block();
+  ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  dirty.cache.force_recache = true;
+  auto first_future = std::async(std::launch::async, [&] {
+    (void)first.service().compute(first.graph(), dirty);
+  });
+  EXPECT_TRUE(probe->wait_for_entries(1, std::chrono::seconds(2)));
+  auto second_future = std::async(std::launch::async, [&] {
+    (void)second.service().compute(second.graph(), dirty);
+  });
+  const bool second_entered_while_blocked =
+      probe->wait_for_entries(2, std::chrono::milliseconds(200));
+  probe->release();
+
+  EXPECT_FALSE(second_entered_while_blocked);
+  EXPECT_NO_THROW(first_future.get());
+  EXPECT_NO_THROW(second_future.get());
+  EXPECT_EQ(probe->entered(), 2);
+  EXPECT_EQ(probe->maximum_active(), 1);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+  OpRegistry::instance().unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves nonparallel RT dirty callbacks honor the exact implementation
+ * parallelism cap across Graphs.
+ *
+ * @return Nothing; GoogleTest reports overlap or settlement failures.
+ * @throws Graph, service, registry, future, or provider exceptions unchanged.
+ * @note HP sibling work uses an unobserved monolithic slot. Only the RT tiled
+ * slot carries `maximum_parallelism=1`, so the observation also proves domain
+ * metadata remains paired with the selected RT callback.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     NonparallelRtHonorsImplementationCapAcrossGraphs) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "rt_identity_cap";
+  auto probe = std::make_shared<DirectDirtyProviderProbe>();
+  register_direct_cached_source_operation();
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([](const Node& node,
+                          const std::vector<const NodeOutput*>&) {
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 3.0f);
+      }));
+  OpMetadata rt_metadata;
+  rt_metadata.reentrant = true;
+  rt_metadata.maximum_parallelism = 1U;
+  rt_metadata.tile_preference = TileSizePreference::MICRO;
+  OpRegistry::instance().register_op_rt_tiled(
+      kType, kSubtype, make_probed_tile_operation(probe, 4.0f), rt_metadata);
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness first(authority, "issue82-rt-cap-first");
+  DirectDirtyComputeHarness second(authority, "issue82-rt-cap-second");
+  populate_direct_dirty_graph(first.graph(), kSubtype, false, true);
+  populate_direct_dirty_graph(second.graph(), kSubtype, false, true);
+  ComputeService::Request full =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  full.intent.reset();
+  full.dirty_roi.reset();
+  (void)first.service().compute(first.graph(), full);
+  (void)second.service().compute(second.graph(), full);
+
+  probe->reset_and_block();
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::RealTimeUpdate, 1);
+  auto first_future = std::async(std::launch::async, [&] {
+    (void)first.service().compute(first.graph(), dirty);
+  });
+  EXPECT_TRUE(probe->wait_for_entries(1, std::chrono::seconds(2)));
+  auto second_future = std::async(std::launch::async, [&] {
+    (void)second.service().compute(second.graph(), dirty);
+  });
+  const bool second_entered_while_blocked =
+      probe->wait_for_entries(2, std::chrono::milliseconds(200));
+  probe->release();
+
+  EXPECT_FALSE(second_entered_while_blocked);
+  EXPECT_NO_THROW(first_future.get());
+  EXPECT_NO_THROW(second_future.get());
+  EXPECT_EQ(probe->entered(), 2);
+  EXPECT_EQ(probe->maximum_active(), 1);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+  OpRegistry::instance().unregister_key(make_key(kType, kSubtype));
+  OpRegistry::instance().unregister_key(
+      make_key(kType, kDirectCachedSourceSubtype));
+}
+
+/**
+ * @brief Proves HP and RT helper-local constraints do not own active gate keys.
+ *
+ * @return Nothing; GoogleTest reports cross-identity key overlap or residue.
+ * @throws Graph, service, registry, future, or provider exceptions unchanged.
+ * @note Each intent uses two different reentrant implementation identities
+ * with no identity cap and one equal heap-backed exclusive key. The first
+ * direct dirty helper returns its lease after its stack-local constraints have
+ * retired; the key must still serialize the second Graph through the
+ * lease-state owner. The HP iteration explicitly force-recomputes after setup
+ * populated formal caches; RT never treats formal HP cache as RT task
+ * satisfaction. The lower-level mutation regression makes the lifetime
+ * distinction deterministic, while this case covers both real product helper
+ * paths.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     HeapBackedExclusiveKeySurvivesHelperLocalConstraintsForHpAndRt) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  const std::string exclusive_key =
+      "issue82-direct-dirty-stable-owner-exclusive-key";
+
+  for (const ComputeIntent intent :
+       {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
+    const bool is_rt = intent == ComputeIntent::RealTimeUpdate;
+    SCOPED_TRACE(is_rt ? "RT" : "HP");
+    const std::string first_subtype =
+        is_rt ? "rt_stable_key_first" : "hp_stable_key_first";
+    const std::string second_subtype =
+        is_rt ? "rt_stable_key_second" : "hp_stable_key_second";
+    auto probe = std::make_shared<DirectDirtyProviderProbe>();
+    OpMetadata metadata;
+    metadata.exclusive_key = exclusive_key;
+
+    if (is_rt) {
+      register_direct_cached_source_operation();
+      OpRegistry::instance().register_op_hp_monolithic(
+          kType, first_subtype,
+          MonolithicOpFunc(
+              [](const Node& node, const std::vector<const NodeOutput*>&) {
+                return make_image_output(
+                    as_int_flexible(node.parameters, "width", 8),
+                    as_int_flexible(node.parameters, "height", 8), 1, 3.0f);
+              }));
+      OpRegistry::instance().register_op_hp_monolithic(
+          kType, second_subtype,
+          MonolithicOpFunc(
+              [](const Node& node, const std::vector<const NodeOutput*>&) {
+                return make_image_output(
+                    as_int_flexible(node.parameters, "width", 8),
+                    as_int_flexible(node.parameters, "height", 8), 1, 4.0f);
+              }));
+      metadata.tile_preference = TileSizePreference::MICRO;
+      OpRegistry::instance().register_op_rt_tiled(
+          kType, first_subtype, make_probed_tile_operation(probe, 5.0f),
+          metadata);
+      OpRegistry::instance().register_op_rt_tiled(
+          kType, second_subtype, make_probed_tile_operation(probe, 6.0f),
+          metadata);
+    } else {
+      OpRegistry::instance().register_op_hp_monolithic(
+          kType, first_subtype, make_probed_image_operation(probe, 2.0f),
+          metadata);
+      OpRegistry::instance().register_op_hp_monolithic(
+          kType, second_subtype, make_probed_image_operation(probe, 3.0f),
+          metadata);
+    }
+
+    const std::optional<OpImplementation> first_selected =
+        OpRegistry::instance().select_implementation(kType, first_subtype,
+                                                     {Device::CPU}, intent);
+    const std::optional<OpImplementation> second_selected =
+        OpRegistry::instance().select_implementation(kType, second_subtype,
+                                                     {Device::CPU}, intent);
+    ASSERT_TRUE(first_selected.has_value());
+    ASSERT_TRUE(second_selected.has_value());
+    EXPECT_NE(first_selected->implementation_identity,
+              second_selected->implementation_identity);
+    EXPECT_EQ(first_selected->metadata.exclusive_key, exclusive_key);
+    EXPECT_EQ(second_selected->metadata.exclusive_key, exclusive_key);
+    EXPECT_GT(first_selected->metadata.exclusive_key.capacity(), 15U);
+    EXPECT_GT(second_selected->metadata.exclusive_key.capacity(), 15U);
+
+    compute::ExecutionService authority;
+    DirectDirtyComputeHarness first(
+        authority,
+        is_rt ? "issue82-rt-stable-key-first" : "issue82-hp-stable-key-first");
+    DirectDirtyComputeHarness second(authority,
+                                     is_rt ? "issue82-rt-stable-key-second"
+                                           : "issue82-hp-stable-key-second");
+    populate_direct_dirty_graph(first.graph(), first_subtype, false, is_rt);
+    populate_direct_dirty_graph(second.graph(), second_subtype, false, is_rt);
+    ComputeService::Request full =
+        make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+    full.intent.reset();
+    full.dirty_roi.reset();
+    (void)first.service().compute(first.graph(), full);
+    (void)second.service().compute(second.graph(), full);
+
+    probe->reset_and_block();
+    ComputeService::Request dirty = make_direct_dirty_request(intent, 1);
+    dirty.cache.force_recache = !is_rt;
+    auto first_future = std::async(std::launch::async, [&] {
+      (void)first.service().compute(first.graph(), dirty);
+    });
+    EXPECT_TRUE(probe->wait_for_entries(1, std::chrono::seconds(2)));
+    auto second_future = std::async(std::launch::async, [&] {
+      (void)second.service().compute(second.graph(), dirty);
+    });
+    const bool second_entered_while_blocked =
+        probe->wait_for_entries(2, std::chrono::milliseconds(200));
+    probe->release();
+
+    EXPECT_FALSE(second_entered_while_blocked);
+    EXPECT_NO_THROW(first_future.get());
+    EXPECT_NO_THROW(second_future.get());
+    EXPECT_EQ(probe->entered(), 2);
+    EXPECT_EQ(probe->maximum_active(), 1);
+    expect_direct_authority_settled(authority);
+
+    OpRegistry::instance().unregister_key(make_key(kType, first_subtype));
+    OpRegistry::instance().unregister_key(make_key(kType, second_subtype));
+    if (is_rt) {
+      OpRegistry::instance().unregister_key(
+          make_key(kType, kDirectCachedSourceSubtype));
+    }
+  }
+}
+
+/**
+ * @brief Proves connected-preflight direct callbacks serialize equal keys and
+ * overlap different keys across independent identities.
+ *
+ * @return Nothing; GoogleTest reports incorrect key gating or settlement.
+ * @throws Graph, service, registry, future, or provider exceptions unchanged.
+ * @note Each round uses two different parameter operation identities. Equal
+ * keys must serialize; different keys must both enter while blocked. The
+ * target callback is unobserved and runs only after connected stabilization.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     NonparallelPreflightHonorsSameAndDifferentExclusiveKeys) {
+  constexpr const char* kType = "issue82_direct_preflight";
+  constexpr const char* kTargetSubtype = "exclusive_key_target";
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kTargetSubtype,
+      MonolithicOpFunc([](const Node& node,
+                          const std::vector<const NodeOutput*>&) {
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 5.0f);
+      }));
+
+  const auto run_round =
+      [&](const std::string& label, const std::string& first_key,
+          const std::string& second_key, bool expect_overlap) {
+        const std::string first_subtype = label + "_first";
+        const std::string second_subtype = label + "_second";
+        auto probe = std::make_shared<DirectDirtyProviderProbe>();
+        OpMetadata first_metadata;
+        first_metadata.exclusive_key = first_key;
+        OpMetadata second_metadata;
+        second_metadata.exclusive_key = second_key;
+        OpRegistry::instance().register_op_hp_monolithic(
+            kType, first_subtype, make_probed_parameter_operation(probe),
+            first_metadata);
+        OpRegistry::instance().register_op_hp_monolithic(
+            kType, second_subtype, make_probed_parameter_operation(probe),
+            second_metadata);
+
+        compute::ExecutionService authority;
+        DirectDirtyComputeHarness first(authority, label + "-first");
+        DirectDirtyComputeHarness second(authority, label + "-second");
+        populate_direct_preflight_graph(first.graph(), first_subtype,
+                                        kTargetSubtype);
+        populate_direct_preflight_graph(second.graph(), second_subtype,
+                                        kTargetSubtype);
+        ComputeService::Request full =
+            make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 2);
+        full.intent.reset();
+        full.dirty_roi.reset();
+        (void)first.service().compute(first.graph(), full);
+        (void)second.service().compute(second.graph(), full);
+
+        probe->reset_and_block();
+        const ComputeService::Request dirty =
+            make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 2);
+        auto first_future = std::async(std::launch::async, [&] {
+          (void)first.service().compute(first.graph(), dirty);
+        });
+        EXPECT_TRUE(probe->wait_for_entries(1, std::chrono::seconds(2)));
+        auto second_future = std::async(std::launch::async, [&] {
+          (void)second.service().compute(second.graph(), dirty);
+        });
+        const bool overlapped = probe->wait_for_entries(
+            2, expect_overlap ? std::chrono::seconds(2)
+                              : std::chrono::milliseconds(200));
+        probe->release();
+
+        EXPECT_EQ(overlapped, expect_overlap);
+        EXPECT_NO_THROW(first_future.get());
+        EXPECT_NO_THROW(second_future.get());
+        EXPECT_EQ(probe->entered(), 2);
+        EXPECT_EQ(probe->maximum_active(), expect_overlap ? 2 : 1);
+        EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+        OpRegistry::instance().unregister_key(make_key(kType, first_subtype));
+        OpRegistry::instance().unregister_key(make_key(kType, second_subtype));
+      };
+
+  run_round("issue82-preflight-same-key", "shared-context", "shared-context",
+            false);
+  run_round("issue82-preflight-different-key", "context-a", "context-b", true);
+  OpRegistry::instance().unregister_key(make_key(kType, kTargetSubtype));
+}
+
+/**
+ * @brief Proves RT scratch rejection happens before provider entry and leaves
+ * direct authority reusable.
+ *
+ * @return Nothing; GoogleTest reports error typing, callback entry, or residue.
+ * @throws Graph, service, registry, or provider exceptions unchanged.
+ * @note Re-registering the exact RT slot with an admissible demand mints a new
+ * identity; a succeeding retry proves both the failed resource attempt and its
+ * gate ownership were released.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     NonparallelRtRejectsScratchBeforeProviderAndRecovers) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "rt_scratch_rejection";
+  auto probe = std::make_shared<DirectDirtyProviderProbe>();
+  register_direct_cached_source_operation();
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([](const Node& node,
+                          const std::vector<const NodeOutput*>&) {
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 6.0f);
+      }));
+  OpMetadata rejected_metadata;
+  rejected_metadata.tile_preference = TileSizePreference::MICRO;
+  rejected_metadata.scratch_bytes = 2U;
+  OpRegistry::instance().register_op_rt_tiled(
+      kType, kSubtype, make_probed_tile_operation(probe, 7.0f),
+      rejected_metadata);
+
+  compute::ExecutionResourceLimits limits =
+      compute::ExecutionService::default_resource_limits();
+  limits.scratch_bytes = 1U;
+  limits.interactive_headroom = ResourceVector{};
+  compute::ExecutionService authority(limits);
+  DirectDirtyComputeHarness harness(authority, "issue82-rt-scratch-rejection");
+  populate_direct_dirty_graph(harness.graph(), kSubtype, true, true);
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::RealTimeUpdate, 1);
+
+  bool saw_typed_rejection = false;
+  try {
+    (void)harness.service().compute(harness.graph(), dirty);
+  } catch (const GraphError& error) {
+    saw_typed_rejection = true;
+    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+  }
+  EXPECT_TRUE(saw_typed_rejection);
+  EXPECT_EQ(probe->entered(), 0);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+
+  OpMetadata recovered_metadata;
+  recovered_metadata.tile_preference = TileSizePreference::MICRO;
+  recovered_metadata.scratch_bytes = 0U;
+  OpRegistry::instance().register_op_rt_tiled(
+      kType, kSubtype, make_probed_tile_operation(probe, 8.0f),
+      recovered_metadata);
+  EXPECT_NO_THROW((void)harness.service().compute(harness.graph(), dirty));
+  EXPECT_GT(probe->entered(), 0);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+  OpRegistry::instance().unregister_key(make_key(kType, kSubtype));
+  OpRegistry::instance().unregister_key(
+      make_key(kType, kDirectCachedSourceSubtype));
+}
+
+/**
+ * @brief Proves connected-preflight retained-memory rejection happens before
+ * provider entry and leaves no gate or ledger residue.
+ *
+ * @return Nothing; GoogleTest reports error typing, entry, or recovery failure.
+ * @throws Graph, service, registry, or provider exceptions unchanged.
+ * @note The declared retained bytes equal the complete service limit, so the
+ * mandatory direct-lease envelope makes admission impossible. A zero-demand
+ * replacement then executes successfully through the same process authority.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     NonparallelPreflightRejectsRetainedMemoryBeforeProviderAndRecovers) {
+  constexpr const char* kType = "issue82_direct_preflight";
+  constexpr const char* kParameterSubtype = "retained_rejection_parameter";
+  constexpr const char* kTargetSubtype = "retained_rejection_target";
+  constexpr std::uint64_t kRetainedLimit = 4096U;
+  auto probe = std::make_shared<DirectDirtyProviderProbe>();
+  OpMetadata rejected_metadata;
+  rejected_metadata.retained_memory_bytes = kRetainedLimit;
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kParameterSubtype, make_probed_parameter_operation(probe),
+      rejected_metadata);
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kTargetSubtype,
+      MonolithicOpFunc([](const Node& node,
+                          const std::vector<const NodeOutput*>&) {
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 9.0f);
+      }));
+
+  compute::ExecutionResourceLimits limits =
+      compute::ExecutionService::default_resource_limits();
+  limits.retained_memory_bytes = kRetainedLimit;
+  limits.interactive_headroom = ResourceVector{};
+  compute::ExecutionService authority(limits);
+  DirectDirtyComputeHarness harness(authority,
+                                    "issue82-preflight-retained-rejection");
+  populate_direct_preflight_graph(harness.graph(), kParameterSubtype,
+                                  kTargetSubtype, true);
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 2);
+
+  bool saw_typed_rejection = false;
+  try {
+    (void)harness.service().compute(harness.graph(), dirty);
+  } catch (const GraphError& error) {
+    saw_typed_rejection = true;
+    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+  }
+  EXPECT_TRUE(saw_typed_rejection);
+  EXPECT_EQ(probe->entered(), 0);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kParameterSubtype, make_probed_parameter_operation(probe),
+      OpMetadata{});
+  EXPECT_NO_THROW((void)harness.service().compute(harness.graph(), dirty));
+  EXPECT_EQ(probe->entered(), 1);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+  OpRegistry::instance().unregister_key(make_key(kType, kParameterSubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kTargetSubtype));
+}
+
+/**
+ * @brief Proves HP stale identity settles an installed logical lifecycle.
+ *
+ * @return Nothing; GoogleTest reports error typing, entry, residue, or retry
+ * failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions
+ * unchanged.
+ * @note The observer first proves the standalone Run is logically admitted
+ * with no callback, grant, root reservation, or resource ledger ownership,
+ * then replaces the active scalar slot before exact revalidation. Explicit
+ * force-recache keeps the target active despite its seeded complete cache.
+ * Rejection occurs before provider and operation/resource/physical admission,
+ * settles the logical lifecycle, and a clean retry executes only the
+ * replacement.
+ */
+TEST(ComputeServiceDirtyIdentity,
+     HpReplacementAfterPlanFailsBeforeProviderAndRecovers) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "hp_replace";
+  auto old_entries = std::make_shared<std::atomic_int>(0);
+  auto new_entries = std::make_shared<std::atomic_int>(0);
+  auto& registry = OpRegistry::instance();
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([old_entries](const Node& node,
+                                     const std::vector<const NodeOutput*>&) {
+        old_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 10.0f);
+      }));
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority, "issue82-hp-stale-identity");
+  populate_direct_dirty_graph(harness.graph(), kSubtype, true);
+  ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+  dirty.cache.force_recache = true;
+  int observer_calls = 0;
+  bool saw_logical_standalone_admission = false;
+  bool saw_no_physical_admission = false;
+  bool saw_no_operation = false;
+  {
+    ScopedDirtyPostPlanObservation observation([&] {
+      ++observer_calls;
+      const compute::ExecutionLifecyclePage lifecycle =
+          authority.lifecycle_snapshot(0U, 4096U);
+      saw_logical_standalone_admission =
+          lifecycle.counters.pending_candidate_count == 0U &&
+          lifecycle.counters.admitted_standalone_run_count == 1U &&
+          lifecycle.counters.admitted_run_group_count == 0U;
+      saw_no_physical_admission =
+          lifecycle.counters.ready_entry_count == 0U &&
+          lifecycle.counters.entered_callback_count == 0U &&
+          lifecycle.counters.live_root_reservation_count == 0U &&
+          lifecycle.counters.live_child_grant_count == 0U &&
+          authority.resource_snapshot().reserved == ResourceVector{};
+      registry.register_op_hp_monolithic(
+          kType, kSubtype,
+          MonolithicOpFunc(
+              [new_entries](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+                new_entries->fetch_add(1, std::memory_order_relaxed);
+                return make_image_output(
+                    as_int_flexible(node.parameters, "width", 8),
+                    as_int_flexible(node.parameters, "height", 8), 1, 11.0f);
+              }));
+    });
+    try {
+      (void)harness.service().compute(harness.graph(), dirty);
+    } catch (const GraphError& error) {
+      saw_no_operation = true;
+      EXPECT_EQ(error.code(), GraphErrc::NoOperation);
+    }
+  }
+
+  EXPECT_TRUE(saw_no_operation);
+  EXPECT_EQ(observer_calls, 1);
+  EXPECT_TRUE(saw_logical_standalone_admission);
+  EXPECT_TRUE(saw_no_physical_admission);
+  EXPECT_EQ(old_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(new_entries->load(std::memory_order_relaxed), 0);
+  expect_direct_authority_settled(authority);
+
+  EXPECT_NO_THROW((void)harness.service().compute(harness.graph(), dirty));
+  EXPECT_EQ(old_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(new_entries->load(std::memory_order_relaxed), 1);
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves RT stale identity settles an installed logical RunGroup.
+ *
+ * @return Nothing; GoogleTest reports restoration, error typing, provider,
+ * residue, or retry failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions
+ * unchanged.
+ * @note HP preparation notifies first without mutating. At the second
+ * notification the test proves the two child Runs are logically admitted as
+ * one group with no callback, grant, root reservation, or resource ledger
+ * ownership, then restores the plugin capture. Explicit force-recache keeps
+ * both sibling paths active for the stale-route assertion. Exact revalidation
+ * rejects before either provider or operation/resource/physical admission and
+ * the group lifecycle settles before retry.
+ */
+TEST(ComputeServiceDirtyIdentity,
+     RtPluginUnloadAfterPlanFailsBeforeProvidersAndRecovers) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  constexpr const char* kSubtype = "rt_plugin_unload";
+  const std::string operation_key = make_key(kType, kSubtype);
+  auto hp_entries = std::make_shared<std::atomic_int>(0);
+  auto core_rt_entries = std::make_shared<std::atomic_int>(0);
+  auto plugin_rt_entries = std::make_shared<std::atomic_int>(0);
+  auto& registry = OpRegistry::instance();
+  register_direct_cached_source_operation();
+  registry.register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc([hp_entries](const Node& node,
+                                    const std::vector<const NodeOutput*>&) {
+        hp_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 12.0f);
+      }));
+  OpMetadata tiled_metadata;
+  tiled_metadata.tile_preference = TileSizePreference::MICRO;
+  registry.register_op_rt_tiled(
+      kType, kSubtype,
+      TileOpFunc([core_rt_entries](const Node&, const OutputTile& output,
+                                   const std::vector<InputTile>&) {
+        core_rt_entries->fetch_add(1, std::memory_order_relaxed);
+        toCvMat(output).setTo(13.0f);
+      }),
+      tiled_metadata);
+  OpRegistry::RegistrationCapture plugin_capture;
+  registry.capture_registration(
+      [&] {
+        registry.register_op_rt_tiled(
+            kType, kSubtype,
+            TileOpFunc([plugin_rt_entries](const Node&,
+                                           const OutputTile& output,
+                                           const std::vector<InputTile>&) {
+              plugin_rt_entries->fetch_add(1, std::memory_order_relaxed);
+              toCvMat(output).setTo(14.0f);
+            }),
+            tiled_metadata);
+      },
+      plugin_capture);
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority, "issue82-rt-stale-identity");
+  populate_direct_dirty_graph(harness.graph(), kSubtype, true, true);
+  ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::RealTimeUpdate, 1);
+  dirty.cache.force_recache = true;
+  OpRegistry::RegistryEntrySnapshot retirement;
+  retirement.implementations.emplace();
+  int observer_calls = 0;
+  bool unload_changed_registry = false;
+  bool saw_logical_group_admission = false;
+  bool saw_no_physical_admission = false;
+  bool saw_no_operation = false;
+  {
+    ScopedDirtyPostPlanObservation observation([&] {
+      ++observer_calls;
+      if (observer_calls == 2) {
+        const compute::ExecutionLifecyclePage lifecycle =
+            authority.lifecycle_snapshot(0U, 4096U);
+        saw_logical_group_admission =
+            lifecycle.counters.pending_candidate_count == 0U &&
+            lifecycle.counters.admitted_standalone_run_count == 0U &&
+            lifecycle.counters.admitted_run_group_count == 1U &&
+            lifecycle.counters.admitted_child_run_count == 2U;
+        saw_no_physical_admission =
+            lifecycle.counters.ready_entry_count == 0U &&
+            lifecycle.counters.entered_callback_count == 0U &&
+            lifecycle.counters.live_root_reservation_count == 0U &&
+            lifecycle.counters.live_child_grant_count == 0U &&
+            authority.resource_snapshot().reserved == ResourceVector{};
+        unload_changed_registry = registry.retire_owned_entry_noexcept(
+            operation_key, plugin_capture.owned_entries.at(operation_key),
+            plugin_capture.previous_entries.at(operation_key), retirement);
+      }
+    });
+    try {
+      (void)harness.service().compute(harness.graph(), dirty);
+    } catch (const GraphError& error) {
+      saw_no_operation = true;
+      EXPECT_EQ(error.code(), GraphErrc::NoOperation);
+    }
+  }
+
+  EXPECT_TRUE(saw_no_operation);
+  EXPECT_EQ(observer_calls, 2);
+  EXPECT_TRUE(unload_changed_registry);
+  EXPECT_TRUE(saw_logical_group_admission);
+  EXPECT_TRUE(saw_no_physical_admission);
+  EXPECT_EQ(hp_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(core_rt_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(plugin_rt_entries->load(std::memory_order_relaxed), 0);
+  expect_direct_authority_settled(authority);
+
+  EXPECT_NO_THROW((void)harness.service().compute(harness.graph(), dirty));
+  EXPECT_GT(hp_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_GT(core_rt_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(plugin_rt_entries->load(std::memory_order_relaxed), 0);
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(operation_key);
+  registry.unregister_key(make_key(kType, kDirectCachedSourceSubtype));
+}
+
+/**
+ * @brief Proves an externally satisfied preflight producer is excluded from
+ * phase-two exact-identity revalidation.
+ *
+ * @return Nothing; GoogleTest reports incorrect preflight, replacement, target
+ * execution, or authority residue.
+ * @throws Graph, registry, service, allocation, or provider exceptions
+ * unchanged.
+ * @note Connected preflight executes the old producer first. The post-plan
+ * observer then replaces that producer while the target remains active; phase
+ * two must ignore the externally staged node and execute the unchanged target.
+ */
+TEST(ComputeServiceDirtyIdentity,
+     ExternallySatisfiedReplacementDoesNotInvalidateActiveDirtyTarget) {
+  constexpr const char* kType = "issue82_direct_preflight";
+  constexpr const char* kParameterSubtype = "external_identity_parameter";
+  constexpr const char* kTargetSubtype = "external_identity_target";
+  auto old_parameter_entries = std::make_shared<std::atomic_int>(0);
+  auto new_parameter_entries = std::make_shared<std::atomic_int>(0);
+  auto target_entries = std::make_shared<std::atomic_int>(0);
+  auto& registry = OpRegistry::instance();
+  registry.register_op_hp_monolithic(
+      kType, kParameterSubtype,
+      MonolithicOpFunc([old_parameter_entries](
+                           const Node&, const std::vector<const NodeOutput*>&) {
+        old_parameter_entries->fetch_add(1, std::memory_order_relaxed);
+        NodeOutput output;
+        output.data["radius"] = 7;
+        return output;
+      }));
+  registry.register_op_hp_monolithic(
+      kType, kTargetSubtype,
+      MonolithicOpFunc([target_entries](const Node& node,
+                                        const std::vector<const NodeOutput*>&) {
+        target_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 15.0f);
+      }));
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority, "issue82-external-identity");
+  populate_direct_preflight_graph(harness.graph(), kParameterSubtype,
+                                  kTargetSubtype, true);
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 2);
+  int observer_calls = 0;
+  {
+    ScopedDirtyPostPlanObservation observation([&] {
+      ++observer_calls;
+      registry.register_op_hp_monolithic(
+          kType, kParameterSubtype,
+          MonolithicOpFunc(
+              [new_parameter_entries](const Node&,
+                                      const std::vector<const NodeOutput*>&) {
+                new_parameter_entries->fetch_add(1, std::memory_order_relaxed);
+                NodeOutput output;
+                output.data["radius"] = 9;
+                return output;
+              }));
+    });
+    EXPECT_NO_THROW((void)harness.service().compute(harness.graph(), dirty));
+  }
+
+  EXPECT_EQ(observer_calls, 1);
+  EXPECT_EQ(old_parameter_entries->load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(new_parameter_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(target_entries->load(std::memory_order_relaxed), 1);
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(make_key(kType, kParameterSubtype));
+  registry.unregister_key(make_key(kType, kTargetSubtype));
+}
+
 TEST(ComputeServiceSplit,
      PreflightAndPhaseTwoShareStagedImageDataAndDerivedParameter) {
   register_split_ops();
@@ -2411,6 +5400,18 @@ TEST(ComputeServiceSplit,
       << "an image-carrying parameter producer remains executable in RT";
 }
 
+/**
+ * @brief Proves a throwing nonreentrant connected preflight publishes no HP
+ * state and releases direct operation authority for retry.
+ *
+ * @return Nothing; GoogleTest reports cache, error, resource, or retry
+ * failures.
+ * @throws Graph, service, registry, allocation, or provider exceptions
+ * unchanged outside the expected failure assertion.
+ * @note The initial full compute establishes committed versions. The failing
+ * dirty request must preserve both parameter and target state, while a later
+ * request must reenter the same identity exactly once.
+ */
 TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
   register_split_ops();
   g_dynamic_parameter_fail.store(false, std::memory_order_release);
@@ -2448,6 +5449,15 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
           toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
           cv::NORM_INF),
       0.0);
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+
+  const int calls_before_recovery =
+      g_dynamic_parameter_calls.load(std::memory_order_relaxed);
+  EXPECT_NO_THROW((void)service.compute(graph, request));
+  EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed),
+            calls_before_recovery + 1)
+      << "the nonreentrant preflight identity must be reusable after throw";
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
 }
 
 TEST(ComputeServiceSplit,
@@ -2523,15 +5533,19 @@ TEST(ComputeServiceSplit,
     const int source_version_before = graph.node(1).hp_version;
     const int target_version_before = graph.node(2).hp_version;
     const int parameter_version_before = graph.node(3).hp_version;
-    const std::optional<PixelRect> source_roi_before = graph.node(1).hp_roi;
-    const std::optional<PixelRect> target_roi_before = graph.node(2).hp_roi;
-    const std::optional<PixelRect> parameter_roi_before = graph.node(3).hp_roi;
+    const std::optional<RegionSet> source_region_before =
+        graph.node(1).hp_region;
+    const std::optional<RegionSet> target_region_before =
+        graph.node(2).hp_region;
+    const std::optional<RegionSet> parameter_region_before =
+        graph.node(3).hp_region;
 
     const compute::RealtimeProxyGraph::NodeState* proxy_before_ptr =
         runtime.realtime_proxy_graph().find_state(2);
     ASSERT_NE(proxy_before_ptr, nullptr);
     const int proxy_version_before = proxy_before_ptr->version;
-    const std::optional<PixelRect> proxy_roi_before = proxy_before_ptr->roi_hp;
+    const std::optional<RegionSet> proxy_region_before =
+        proxy_before_ptr->region_hp;
     const std::optional<std::uint64_t> proxy_generation_before =
         proxy_before_ptr->dirty_source_generation;
     const bool proxy_had_output_before = proxy_before_ptr->output.has_value();
@@ -2598,9 +5612,9 @@ TEST(ComputeServiceSplit,
     EXPECT_EQ(graph.node(1).hp_version, source_version_before);
     EXPECT_EQ(graph.node(2).hp_version, target_version_before);
     EXPECT_EQ(graph.node(3).hp_version, parameter_version_before);
-    EXPECT_EQ(graph.node(1).hp_roi, source_roi_before);
-    EXPECT_EQ(graph.node(2).hp_roi, target_roi_before);
-    EXPECT_EQ(graph.node(3).hp_roi, parameter_roi_before);
+    EXPECT_EQ(graph.node(1).hp_region, source_region_before);
+    EXPECT_EQ(graph.node(2).hp_region, target_region_before);
+    EXPECT_EQ(graph.node(3).hp_region, parameter_region_before);
     EXPECT_DOUBLE_EQ(
         cv::norm(
             source_pixels_before,
@@ -2627,7 +5641,7 @@ TEST(ComputeServiceSplit,
         runtime.realtime_proxy_graph().find_state(2);
     ASSERT_NE(proxy_after, nullptr);
     EXPECT_EQ(proxy_after->version, proxy_version_before);
-    EXPECT_EQ(proxy_after->roi_hp, proxy_roi_before);
+    EXPECT_EQ(proxy_after->region_hp, proxy_region_before);
     EXPECT_EQ(proxy_after->dirty_source_generation, proxy_generation_before);
     EXPECT_EQ(proxy_after->output.has_value(), proxy_had_output_before);
     if (proxy_after->output && proxy_had_output_before) {
@@ -2771,9 +5785,12 @@ TEST(ComputeServiceCancellation,
     const int source_version_before = graph.node(1).hp_version;
     const int target_version_before = graph.node(2).hp_version;
     const int parameter_version_before = graph.node(3).hp_version;
-    const std::optional<PixelRect> source_roi_before = graph.node(1).hp_roi;
-    const std::optional<PixelRect> target_roi_before = graph.node(2).hp_roi;
-    const std::optional<PixelRect> parameter_roi_before = graph.node(3).hp_roi;
+    const std::optional<RegionSet> source_region_before =
+        graph.node(1).hp_region;
+    const std::optional<RegionSet> target_region_before =
+        graph.node(2).hp_region;
+    const std::optional<RegionSet> parameter_region_before =
+        graph.node(3).hp_region;
     const std::size_t dirty_snapshots_before =
         graph.recent_dirty_region_snapshots.size();
     const std::size_t compute_plans_before = graph.recent_compute_plans.size();
@@ -2831,9 +5848,9 @@ TEST(ComputeServiceCancellation,
     EXPECT_EQ(graph.node(1).hp_version, source_version_before);
     EXPECT_EQ(graph.node(2).hp_version, target_version_before);
     EXPECT_EQ(graph.node(3).hp_version, parameter_version_before);
-    EXPECT_EQ(graph.node(1).hp_roi, source_roi_before);
-    EXPECT_EQ(graph.node(2).hp_roi, target_roi_before);
-    EXPECT_EQ(graph.node(3).hp_roi, parameter_roi_before);
+    EXPECT_EQ(graph.node(1).hp_region, source_region_before);
+    EXPECT_EQ(graph.node(2).hp_region, target_region_before);
+    EXPECT_EQ(graph.node(3).hp_region, parameter_region_before);
     EXPECT_DOUBLE_EQ(
         cv::norm(
             source_pixels_before,
@@ -2849,6 +5866,75 @@ TEST(ComputeServiceCancellation,
     EXPECT_EQ(runtime.realtime_proxy_graph().find_state(2), nullptr);
     runtime.stop();
   }
+}
+
+/**
+ * @brief Proves nonparallel connected cancellation releases direct operation
+ * authority and permits a later request.
+ *
+ * @return Nothing; GoogleTest reports cancellation typing, residue, or retry
+ * failures.
+ * @throws Graph, service, allocation, or provider exceptions unchanged.
+ * @note The source requests cancellation immediately before returning while
+ * its direct lease is active. The dependent provider must not enter, all
+ * ledger state must settle, and an uncancelled retry must traverse both
+ * preflight nodes plus phase two.
+ */
+TEST(ComputeServiceCancellation,
+     NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers) {
+  register_split_ops();
+  GraphModel graph("cache/nonparallel-connected-direct-cancellation");
+  populate_host_preparation_failure_graph(graph);
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  (void)service.compute(graph, request);
+
+  g_host_preparation_source_calls.store(0, std::memory_order_relaxed);
+  g_host_preparation_plugin_calls.store(0, std::memory_order_relaxed);
+  g_host_preparation_hp_target_calls.store(0, std::memory_order_relaxed);
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.dirty_roi = PixelRect{8, 0, 4, 4};
+  auto cancellation_source =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  request.cancellation_source = cancellation_source;
+  bool saw_cancellation = false;
+  {
+    ScopedHostPreparationCancellationSource cancellation_hook(
+        cancellation_source);
+    try {
+      (void)service.compute(graph, request);
+    } catch (const GraphError& error) {
+      saw_cancellation = true;
+      EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+      EXPECT_NE(std::string(error.what())
+                    .find("ComputeRun cancelled: explicit request."),
+                std::string::npos);
+    }
+  }
+  EXPECT_TRUE(saw_cancellation);
+  EXPECT_EQ(g_host_preparation_source_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_host_preparation_plugin_calls.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(g_host_preparation_hp_target_calls.load(std::memory_order_relaxed),
+            0);
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+
+  request.cancellation_source.reset();
+  EXPECT_NO_THROW((void)service.compute(graph, request));
+  EXPECT_GT(g_host_preparation_source_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_GT(g_host_preparation_plugin_calls.load(std::memory_order_relaxed), 0);
+  EXPECT_GT(g_host_preparation_hp_target_calls.load(std::memory_order_relaxed),
+            0);
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
 }
 
 TEST(ComputeServiceSplit,
@@ -3125,6 +6211,8 @@ TEST(GraphCacheServiceSplit,
   node.cached_output_high_precision->image_buffer.context =
       std::make_shared<int>(7);
   node.cached_output_high_precision->data["marker"] = 9;
+  node.hp_region = value_image_adapter::full_node_output_region(
+      *node.cached_output_high_precision);
   graph.add_node(node);
 
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
@@ -3179,14 +6267,18 @@ TEST(DownsampleExecutorSplit,
     EXPECT_FALSE(expected_owner.owner_before(output.context));
     EXPECT_EQ(state->output->data.at("marker").as_int64(), 17);
     EXPECT_EQ(state->version, version);
-    ASSERT_TRUE(state->roi_hp.has_value());
-    EXPECT_EQ(*state->roi_hp, expected_roi);
+    ASSERT_TRUE(state->region_hp.has_value());
+    EXPECT_EQ(*state->region_hp,
+              RegionSet::from_image_rect(
+                  {image_region_domain(), expected_roi.x,
+                   expected_roi.x + expected_roi.width, expected_roi.y,
+                   expected_roi.y + expected_roi.height}));
   };
   assert_passthrough(5, (PixelRect{8, 4, 16, 8}));
 
   graph.mutate_node_runtime_state(1, [](auto& state) { state.hp_version = 6; });
   downsample.execute({{1, (PixelRect{40, 20, 8, 4}), 6}});
-  assert_passthrough(6, (PixelRect{8, 4, 40, 20}));
+  assert_passthrough(6, (PixelRect{40, 20, 8, 4}));
 
   const ComputeEventBatch recorded = events.drain(kComputeEventDrainMaxLimit);
   ASSERT_EQ(recorded.events.size(), 2u);
@@ -3194,6 +6286,173 @@ TEST(DownsampleExecutorSplit,
                           [](const ComputeEventSnapshot& event) {
                             return event.source == "downsample_passthrough";
                           }));
+}
+
+/**
+ * @brief Proves a Whole parallel read recomputes an exact-partial producer.
+ *
+ * @return Nothing; GoogleTest reports producer execution, dependency value,
+ * validity, or final-output failures.
+ * @throws Graph, runtime, cache, allocation, Region, or image-adaptation
+ * exceptions when the production fixture cannot execute.
+ * @note The test publishes value 91 through the real HP dirty write buffer with
+ * partial TensorSlice validity. The planned producer must execute and publish
+ * value 5 before its whole-output consumer runs; raw optional-presence checks
+ * would instead bypass the producer and expose 91 downstream.
+ */
+TEST(ComputeTaskRunnerSplit,
+     ParallelWholeReadRecomputesPartialProducerBeforeConsumer) {
+  register_split_ops();
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-partial-producer-whole-read");
+  GraphRuntime::Info info;
+  info.name = "partial-producer-whole-read";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 4;
+  source.parameters["height"] = 4;
+  source.cached_output_high_precision = make_image_output(4, 4, 1, 3.0f);
+  source.hp_region = value_image_adapter::full_node_output_region(
+      *source.cached_output_high_precision);
+
+  Node producer = make_node(2, "split_plan", "partial_cache_producer");
+  producer.image_inputs.push_back({1, "image"});
+  Node consumer = make_node(3, "split_plan", "partial_cache_consumer");
+  consumer.image_inputs.push_back({2, "image"});
+
+  graph.add_node(source);
+  graph.add_node(producer);
+  graph.add_node(consumer);
+  graph.validate_topology();
+
+  const RegionSet partial_region = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 2U}, {0U, 4U}, {0U, 1U}}});
+  compute::HighPrecisionDirtyWriteBuffer dirty_buffer(false);
+  NodeOutput& staged = dirty_buffer.ensure_output(graph.node(2));
+  staged = make_image_output(4, 4, 1, 91.0f);
+  (void)dirty_buffer.mark_updated(graph.node(2), partial_region, true, 1U);
+  dirty_buffer.commit_to_graph(graph);
+
+  ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+  ASSERT_TRUE(graph.node(2).hp_region.has_value());
+  EXPECT_EQ(*graph.node(2).hp_region, partial_region);
+  EXPECT_FALSE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
+  EXPECT_FLOAT_EQ(
+      toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
+          .at<float>(0, 0),
+      91.0f);
+
+  g_partial_cache_producer_calls.store(0, std::memory_order_relaxed);
+  g_partial_cache_consumer_calls.store(0, std::memory_order_relaxed);
+  g_partial_cache_consumer_observed_value.store(0, std::memory_order_relaxed);
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(2U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+
+  ComputeService::Request request;
+  request.node_id = 3;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  NodeOutput& output = service.compute_parallel(graph, runtime, request);
+
+  EXPECT_EQ(g_partial_cache_producer_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_partial_cache_consumer_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(
+      g_partial_cache_consumer_observed_value.load(std::memory_order_acquire),
+      5);
+  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 0), 5.0f);
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(3)));
+  ASSERT_TRUE(graph.node(2).hp_region.has_value());
+  EXPECT_FALSE(*graph.node(2).hp_region == partial_region);
+
+  runtime.stop();
+}
+
+/**
+ * @brief Proves a tiled callback receives its own exact sibling metadata.
+ *
+ * @return Nothing; GoogleTest reports callback choice, tile count, input ROI,
+ * output, or cache publication mismatches.
+ * @throws Graph, runtime, cache, registry, allocation, or image-adaptation
+ * exceptions when the product parallel path cannot execute.
+ * @note The cached source removes producer work from this request. Two MICRO
+ * target tiles must each receive the complete source ROI through the selected
+ * RandomAccess device implementation; a generic same-key lookup would expose
+ * the monolithic SpatialAligned sibling metadata.
+ */
+TEST(ComputeTaskRunnerSplit,
+     SelectedTiledSiblingExecutesWithExactMetadataSnapshot) {
+  register_split_ops();
+  g_exact_sibling_tiled_calls.store(0, std::memory_order_relaxed);
+  g_exact_sibling_input_roi_mismatches.store(0, std::memory_order_relaxed);
+  g_exact_sibling_monolithic_calls.store(0, std::memory_order_relaxed);
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-exact-sibling-metadata");
+  GraphRuntime::Info info;
+  info.name = "exact-sibling-metadata";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  source.cached_output_high_precision = make_image_output(32, 16, 1, 3.0f);
+  source.hp_region = value_image_adapter::full_node_output_region(
+      *source.cached_output_high_precision);
+  source.hp_version = 1;
+  Node target = make_node(2, "split_plan", "exact_sibling_metadata");
+  target.parameters["width"] = 32;
+  target.parameters["height"] = 16;
+  target.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(2U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  NodeOutput& output = service.compute_parallel(graph, runtime, request);
+
+  EXPECT_EQ(g_exact_sibling_tiled_calls.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(
+      g_exact_sibling_input_roi_mismatches.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(g_exact_sibling_monolithic_calls.load(std::memory_order_relaxed),
+            0);
+  ASSERT_EQ(output.image_buffer.width, 32);
+  ASSERT_EQ(output.image_buffer.height, 16);
+  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 0), 13.0f);
+  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 31), 13.0f);
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
+
+  runtime.stop();
 }
 
 TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
@@ -3217,6 +6476,8 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   cached_tile.caches.push_back({"image", "output.png"});
   cached_tile.cached_output_high_precision =
       make_image_output(256, 256, 1, 64.0f / 255.0f);
+  cached_tile.hp_region = value_image_adapter::full_node_output_region(
+      *cached_tile.cached_output_high_precision);
   graph.add_node(cached_tile);
   graph.validate_topology();
 
@@ -3227,8 +6488,10 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   cache.save_cache_if_configured(graph, graph.node(1), "int8");
   const auto cache_file = cache.node_cache_dir(graph, 1) / "output.png";
   ASSERT_TRUE(std::filesystem::exists(cache_file));
-  graph.mutate_node_runtime_state(
-      1, [](auto& state) { state.cached_output_high_precision.reset(); });
+  graph.mutate_node_runtime_state(1, [](auto& state) {
+    state.cached_output_high_precision.reset();
+    state.hp_region.reset();
+  });
 
   compute::ExecutionService execution_service(1U);
   ComputeService compute(traversal, cache, events, execution_service);
@@ -3249,6 +6512,11 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
 
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
   EXPECT_EQ(&output, &*graph.node(1).cached_output_high_precision);
+  EXPECT_EQ(graph.node(1).hp_version, 1);
+  ASSERT_TRUE(graph.node(1).hp_region.has_value());
+  EXPECT_EQ(
+      *graph.node(1).hp_region,
+      RegionSet::from_image_rect({image_region_domain(), 0, 256, 0, 256}));
   ASSERT_EQ(output.image_buffer.width, 256);
   ASSERT_EQ(output.image_buffer.height, 256);
   const cv::Mat output_mat = toCvMat(output.image_buffer);
@@ -3573,13 +6841,16 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   compute::RealtimeProxyGraph::NodeState initial_state;
   initial_state.output = make_image_output(4, 4, 1, 3.0f);
   initial_state.version = 7;
-  initial_state.roi_hp = (PixelRect{0, 0, 1, 1});
+  initial_state.region_hp =
+      RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1});
   proxy_graph.commit_node_state(1, std::move(initial_state));
 
   compute::RealtimeProxyWriteBuffer buffer(proxy_graph);
   NodeOutput& staged = buffer.ensure_output(1);
   toCvMat(staged.image_buffer).setTo(9.0f);
-  buffer.mark_updated(1, (PixelRect{1, 1, 2, 2}), (PixelSize{4, 4}), true, 42);
+  buffer.mark_updated(
+      1, RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}), true,
+      42);
 
   ASSERT_NE(proxy_graph.find_output(1), nullptr);
   EXPECT_FLOAT_EQ(
@@ -3594,7 +6865,10 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   EXPECT_FLOAT_EQ(
       toCvMat(committed_state->output->image_buffer).at<float>(0, 0), 9.0f);
   EXPECT_EQ(committed_state->version, 8);
-  EXPECT_EQ(committed_state->roi_hp, (PixelRect{0, 0, 3, 3}));
+  EXPECT_EQ(committed_state->region_hp,
+            RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}))
+      << "a corner-touching union is not one exact rectangle; proxy validity "
+         "must retain the fresh update instead of a false bounding superset";
   ASSERT_TRUE(committed_state->dirty_source_generation.has_value());
   EXPECT_EQ(*committed_state->dirty_source_generation, 42u);
 }
@@ -3617,7 +6891,8 @@ TEST(RealtimeProxyGraph,
   compute::RealtimeProxyGraph::NodeState initial_state;
   initial_state.output = make_image_output(4, 4, 1, 3.0f);
   initial_state.version = 7;
-  initial_state.roi_hp = (PixelRect{0, 0, 4, 4});
+  initial_state.region_hp =
+      RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 4});
   initial_state.dirty_source_generation = 42;
   proxy_graph.commit_node_state(1, std::move(initial_state));
 
@@ -3686,14 +6961,17 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
   Node node = make_node(1, "split_plan", "tile");
   node.cached_output_high_precision = make_image_output(4, 4, 1, 2.0f);
   node.hp_version = 3;
-  node.hp_roi = (PixelRect{0, 0, 1, 1});
+  node.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1});
   graph.add_node(node);
 
   compute::HighPrecisionDirtyWriteBuffer buffer;
   NodeOutput& staged = buffer.ensure_output(graph.node(1));
   toCvMat(staged.image_buffer).setTo(6.0f);
-  buffer.mark_updated(graph.node(1), (PixelRect{1, 1, 2, 2}), (PixelSize{4, 4}),
-                      true, 77);
+  buffer.mark_updated(
+      graph.node(1),
+      RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}), true,
+      77);
 
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
   EXPECT_FLOAT_EQ(
@@ -3701,7 +6979,8 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
           .at<float>(0, 0),
       2.0f);
   EXPECT_EQ(graph.node(1).hp_version, 3);
-  EXPECT_EQ(graph.node(1).hp_roi, (PixelRect{0, 0, 1, 1}));
+  EXPECT_EQ(graph.node(1).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1}));
   EXPECT_FALSE(graph.dirty_source_hp_commit_generation.count(1));
 
   buffer.commit_to_graph(graph);
@@ -3712,7 +6991,10 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
           .at<float>(0, 0),
       6.0f);
   EXPECT_EQ(graph.node(1).hp_version, 4);
-  EXPECT_EQ(graph.node(1).hp_roi, (PixelRect{0, 0, 3, 3}));
+  EXPECT_EQ(graph.node(1).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}))
+      << "a non-representable disjoint validity union must retain the fresh "
+         "exact update, never publish an invalid rectangular superset";
   EXPECT_EQ(graph.dirty_source_hp_commit_generation[1], 77u);
 }
 
@@ -3947,6 +7229,9 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   ASSERT_TRUE(sequential.has_value());
   const uint64_t sequential_hp_version = graph.node(2).hp_version;
   EXPECT_GT(sequential_hp_version, 0u);
+  ASSERT_TRUE(graph.node(2).hp_region.has_value());
+  EXPECT_EQ(*graph.node(2).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 32, 0, 16}));
 
   testing::KernelTestAccess::clear_execution_trace(kernel, kGraphName);
   request.execution.parallel = true;
@@ -3968,6 +7253,9 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
                                    GraphRuntime::ExecutionEvent::EXECUTE_TILE;
                           }));
   EXPECT_GT(graph.node(2).hp_version, sequential_hp_version);
+  ASSERT_TRUE(graph.node(2).hp_region.has_value());
+  EXPECT_EQ(*graph.node(2).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 32, 0, 16}));
   const cv::Mat sequential_matrix = toCvMat(*sequential);
   const cv::Mat parallel_matrix = toCvMat(*parallel);
   ASSERT_EQ(sequential_matrix.size(), parallel_matrix.size());
@@ -3977,6 +7265,17 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
                    0.0);
 }
 
+/**
+ * @brief Proves async HP and parallel realtime siblings share Kernel service.
+ *
+ * @return Nothing; GoogleTest reports async completion, event, image, or
+ * ordering failures.
+ * @throws Graph, Kernel, registry, allocation, future, or provider exceptions
+ * unchanged.
+ * @note Both requests explicitly force recomputation so the test continues to
+ * exercise concurrent HP/RT provider events after the first HP request
+ * publishes a complete formal cache.
+ */
 TEST(KernelComputeRuntimeSplit,
      AsyncHpThenParallelRtDirtyUsesSharedServiceAndExposesState) {
   register_split_ops();
@@ -4024,7 +7323,7 @@ TEST(KernelComputeRuntimeSplit,
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
 
   Kernel::ComputeRequest rt_request = hp_request;
-  rt_request.cache.force_recache = false;
+  rt_request.cache.force_recache = true;
   rt_request.execution.parallel = true;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
   rt_request.dirty_roi = (PixelRect{8, 8, 16, 16});

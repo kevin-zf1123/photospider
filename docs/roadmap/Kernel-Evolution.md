@@ -272,9 +272,9 @@ Created -> Admitted -> Queued -> Running -> CommitPending -> Terminal
 Safe paths may skip nonterminal phases but never move backward. Exactly one
 `Succeeded`, `Failed`, or `Cancelled` outcome is published. Completion alone is
 not success: dependency aggregation and the serialized graph-state commit
-predicate must succeed. Cancellation, failure, and commit share one terminal
-arbiter. Terminal publication may precede physical quiescence when
-non-preemptible work must drain.
+predicate must succeed. Cancellation, Run-internal failure, and the Graph/RT
+result-commit contender share one Run terminal arbiter. Terminal publication
+may precede physical quiescence when non-preemptible work must drain.
 
 `ComputeRun` gives request-local state a stable lifetime. It does not own the
 meaning of dependency transitions: `ComputeTaskDispatcher` remains responsible
@@ -307,25 +307,31 @@ Run destruction is non-throwing and occurs only after one terminal outcome,
 quiescence, release of every lease, and exact release of every reservation and
 grant. Dropping a caller observer does not implicitly cancel admitted work.
 
-### Target `GraphRuntime`
+### Current `GraphRuntime` through Issue #76
 
-The current issue #75 `GraphRuntime` owns `GraphModel`, graph-scoped runtime
-state, separate graph-state and compute-request lanes, monotonic
+The current `GraphRuntime` through Issue #76 owns `GraphModel`, graph-scoped
+runtime state, separate graph-state and compute-request lanes, monotonic
 `GraphRevision`, revision capture, serialized commit validation/publication,
-graph events, stable graph-instance identity, and platform/session metadata.
-The graph-lifetime anchor remains target behavior.
+graph events, stable graph-instance identity, platform/session metadata, and
+one `GraphLifetimeAnchor` for that exact Graph identity. The anchor supplies
+the close coordinator and lease root used by lifecycle admission.
 
 It owns no Run, admitted-Run index, CPU/device/I/O/plugin worker, process ready
 store, process admission, `ResourceLedger`, `PolicyRegistry`, policy binding,
-or physical execution route. It stores only copied HP and RT route ids and
-their nonzero generations. A Run may hold a graph-lifetime lease without
-reversing that ownership.
+or physical execution route. The process-owned `ExecutionService` owns the
+private `RunLifecycleRegistry`; that registry owns the admitted-Run index and
+the admission/Graph-close/process-shutdown lifetime fence. `GraphRuntime`
+stores only copied HP and RT route ids and their nonzero generations. A Run may
+hold a registry-validated Graph lifetime lease without reversing either
+ownership.
 
 The graph-state lane is held for immutable revision capture and validated
 visible commit, not for long-running planning/execution. The private
 compute-request lane currently serializes same-Graph requests without owning
-an executor or policy lifetime; the target registry/lifetime fence remains
-future behavior.
+an executor or policy lifetime. The Issue #76 registry/lifetime fence is
+current behavior; future work here is limited to public cancellation/control
+surfaces and separately approved later execution-domain capabilities, not the
+Graph anchor or lifecycle registry.
 
 ## Process Execution Domain
 
@@ -396,21 +402,25 @@ closing and releases the fence before waiting for the lane, so commit-first
 publication may finish and close-first validation denies commit without a
 registry/lane lock cycle.
 
-`ExecutionService` exclusively owns a host-authoritative `ResourceLedger`
+`ExecutionService` exclusively owns a Host/device-authoritative `ResourceLedger`
 initialized from composition-root limits. Only trusted host code mints its
 move-only, non-forgeable reservations and grants. A policy or plugin may request
 or suggest resources but cannot construct, duplicate, enlarge, or directly
 release a token.
 
 The current ledger validates transactional vectors for CPU slots, ready-store
-entries and bytes, retained/in-flight Host memory, and scratch memory. Device
-queues/memory/in-flight work, compute-I/O operations/bytes, and
+entries and bytes, retained/in-flight Host memory, and Host scratch. It also
+owns isolated immutable memory/scratch limits for each configured non-CPU
+`DeviceId`. Native allocation plans commit both dimensions atomically, return
+unused bytes after `allocatedSize` reconciliation, and split actual ownership
+between persistent native Value owners and asynchronous completion scratch.
+Device queue depth/in-flight command limits, compute-I/O operations/bytes, and
 plugin-process/invocation/IPC remain future dimensions and are not represented
 by fake zero-valued authority. Current success, failure, rejection, rollback,
-replacement, and worker-exception paths release every reservation and grant
-exactly once. Current cancellation and close/shutdown finalization preserve
-that contract. Capacity exhaustion and checked overflow fail without
-partial reservation, overcommit, or silent clamping.
+replacement, worker-exception, stale completion, eviction, cancellation, and
+close/shutdown paths release every authority exactly once. Capacity exhaustion
+and checked overflow fail without partial reservation, overcommit, cross-device
+borrowing, or silent clamping.
 
 Each policy binding is a comparison seam, not a physical executor or resource
 authority. The current Interactive and Throughput bindings rank immutable
@@ -467,12 +477,12 @@ mutate visible Graph/proxy state or write deferred cache artifacts.
 
 Issue #73 makes cancellation part of that current predicate. One private
 request source and immutable monotonic deadline contend through the same Run
-arbiter as failure and commit. Built-in ready entries are purged by exact Run
-identity, dependent re-entry is rejected, queued plan/callback completion units
-retire exactly once, and entered non-preemptible work drains without permitting
-staged publication. The accepted commit contender, exact predicate, eligible
-persistence, visible swap, and terminal resolution share one serialized
-graph-state work item.
+arbiter as Run-internal failure and the Graph/RT result-commit contender.
+Built-in ready entries are purged by exact Run identity, dependent re-entry is
+rejected, queued plan/callback completion units retire exactly once, and
+entered non-preemptible work drains without permitting staged publication. The
+accepted commit contender, exact predicate, eligible persistence, visible
+swap, and terminal resolution share one serialized graph-state work item.
 
 Issue #74 extends that predicate with a current supersession generation.
 Supersession selects a newer generation and requests
@@ -595,33 +605,364 @@ leakage, and runs an external Host consumer.
 
 ## General Data and Regions
 
-`ImageBuffer` remains the current image payload while the general model is
-introduced alongside it. The target hierarchy is intentionally incremental:
+Current baseline: `ImageBuffer`, `DataType`, `Device`, `PixelRect`,
+`ParameterMap`, operation ABI v2, and the existing cache/execution ownership
+remain implemented compatibility contracts. V-2 implemented a bounded
+dependency-neutral CPU DenseTensor `Value`/`ImageView` subset and one built-in
+operation. V-3 now adds checked BufferHandle ownership, lease-controlled
+construction, process-local allocation/revision identity, bounded signed
+layouts, and formal HP cache identity authority for CPU image Values. V-4 now
+adds the public bounded Region contract, logical dirty/cache validity, and
+ImageRect/TensorSlice execution through the exact core dense path. V-5 routes
+CPU implementation metadata and checked resource demand.
+V-6 now adds a dependency-neutral ReadyFence/Value readiness contract and one
+explicit source-private CPU Value-copy task proved with a deterministic fake
+device executor. V-7 now adds a fixed source-private
+`DeviceExecutorRegistry` to the process execution domain and runs the
+repository Metal Perlin operation through its owned device/queue,
+invocation-scoped allocator, and persistent pipeline cache. V-8 now adds
+checked CPU/Metal binding facts, pure explicit access planning,
+revision-preserving bidirectional transfer, process-owned residency, exact
+stale-completion arbitration, pending-Value continuation, and asynchronous
+Perlin readback. V-9 now adds isolated memory/scratch accounts only for
+executable devices in the fixed registry, admits native plans before
+allocation, reconciles allocator-reported actual bytes, and binds exact leases
+to persistent Values and asynchronous completion. V-10 ratifies typed
+compute-I/O completion and keeps persistence authorities separate; V-11 runs
+the first bounded cache/codec mechanism through `ComputeIoExecutor`. V-12 now
+verifies the installed generic model across 1/3/4/8/16-channel FP32/FP64
+images, rank-one through rank-five FP32/FP64 latent Values, padded and
+signed/zero strides, exact Region merge, explicit CPU/external-device transfer,
+and bounded compute-I/O retention. V-13 now installs one packed FP4 E2M1,
+block-scale quantized DenseTensor vertical with version-1 Blocked addressing,
+checked packed access, block-aligned TensorSlice copy, representation-preserving
+transfer, exact memory-cache retention, and fail-closed image disk persistence.
+V-14 now installs a dependency-neutral provider-defined Value vertical with
+byte-preserving Schema/Facet/Layout envelopes, checked multi-buffer bindings,
+one injected typed registry, pure-C definition-suite ABI v3, pure
+property/DataSpec/Region evaluation, canonical descriptor/content/layout
+digests, artifact-envelope round-trip, and generation-safe replacement/unload.
+V-15 now binds that unchanged generic model to an optional repository OpenEXR
+single-part deep-scanline provider/codec, with explicit channel identities,
+typed shape/error rejection, bounded compute-I/O execution, generation-safe
+lifetime, and a dependency-clean default-OFF package profile. Their exact
+behavior is documented in
+[Kernel Data Model](../kernel-architecture/Data-Model.md),
+[ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
+[Plugin ABI](../kernel-architecture/Plugin-ABI.md), and
+[Kernel Cache Model](../kernel-architecture/Cache-Model.md), with execution
+ownership in
+[Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md)
+and [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md). The
+complete model below is the accepted target; only the explicit V-2 through
+V-15 subset called out here is a current runtime fact.
+
+[ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+is authoritative for the complete target contract. Its central separation is:
 
 ```text
 Value
-├── DenseTensor
-│   └── ImageView
-├── SparseTensor
-├── DeepImage
-├── PathSet / VectorScene
-└── Structured values
+├── DataDescriptor
+│   ├── exactly one versioned RepresentationSchema
+│   └── zero or more orthogonal versioned Facets
+└── one or more authoritative StorageBindings
+    ├── StorageLayout
+    ├── BufferHandle[]
+    ├── ReadyFence
+    └── AccessProvider lease
 ```
 
-The first supported vertical slice is `DenseTensor + ImageView`, based on:
+`DataDescriptor` is logical. Allocation, stride, packing, device, byte range,
+mapping, and readiness are physical binding facts. `Value` is logically and
+structurally immutable after one exclusive `ValueBuilder::seal`; checked views
+retain the complete Value. Seal revokes every ordinary builder/caller
+`WriteLease` and every consumer write path. A Pending producer may retain only
+the unique private write capability transferred atomically at seal for its
+prevalidated binding envelope. The stable core is extensible through permanent
+Schema/Facet/Layout identities, canonical versioned payloads, pure nonblocking
+queries, explicit operations, and immutable process-owned provider generations
+with leases.
 
-- `DataDescriptor`: kind, rank, shape, byte strides, element format, planes,
-  channel schema, color/alpha semantics, and quantization;
-- `BufferHandle`: memory domain, device identity, byte range, allocation
-  identity, mutability, release behavior, and synchronization fence;
-- `Region`: `ImageRect`, `TensorSlice`, object/time ranges, or whole value.
+The first representation is homogeneous rank-N DenseTensor. An ordinary image
+is `DenseTensor + ImageFacet`; channel, color, alpha, and time meaning is
+explicit and never inferred from names. Per-site variable samples use
+`VariableSampleField`; an OpenEXR Deep logical value is
+`VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
+self-contained and does not contain runtime child Values.
 
-FP64, 8/16-channel images, padded rows, and N-dimensional latent values must be
-validated without silent float32 conversion or channel-role guessing. Packed
-FP4 additionally requires bits, packing, quantization block, and offset-aware
-region semantics; it cannot be modeled as one byte per scalar.
+The implemented V-2 through V-15 subset is deliberately narrower:
+
+- `DenseTensorDescriptor` contains positive concrete shape, independent
+  unsigned/signed integer or floating element semantics, 8/16/32/64-bit native
+  scalar storage or the explicit four-bit FP4 E2M1 encoding, and optional V-13
+  block-scale quantization with a rank-matched positive block shape and one
+  finite positive scale per complete row-major logical block;
+- `ImageFacet` explicitly maps distinct x/y and optional channel axes;
+- public `BufferHandle` is a checked nonempty range over one opaque
+  process-local `AllocationIdentity`; subranges retain allocation lifetime.
+  CPU allocations may issue host read leases, while source-private native
+  bindings retain an external owner and expose only checked binding facts;
+  neither path exposes a public raw or native pointer;
+- move-only `ValueBuilder` controls the only move-only `WriteLease`, requires a
+  zero-offset positive exact-envelope Strided producer or a version-1
+  nibble-aligned exact-envelope non-overlapping Blocked producer, refuses seal
+  while the lease is live, and publishes a fresh process-local
+  `ValueRevisionId`;
+- final copyable `Value` shares immutable descriptor/layout/handle state;
+  DenseTensor Values over sealed handles retain exactly one tagged Strided or Blocked
+  layout; Strided aliases may use a bounded byte offset and positive, zero, or
+  negative signed strides, while V-13 Blocked aliases use checked bit offsets
+  and block bit strides;
+- retaining checked `DenseTensorView`/`ImageView` hold a `ReadLease` and expose
+  read-only whole-byte addresses; `PackedDenseTensorView` instead exposes
+  checked FP4 codes and scale-dequantized values without a fake element byte
+  pointer;
+- installed `ReadyFence` is a copyable nonblocking observer of Pending, Ready,
+  Failed, or ProducerCancelled; its move-only completer publishes one terminal
+  state, dropped completion publishes cancellation, and waits are enqueued
+  through a shared non-inline executor retained while pending or queued and
+  through callback completion, with queued self-retention released on callback
+  entry;
+- synchronous Values start Ready, while source-private CPU and native pending
+  producers retain the only mutable completion capability and revoke it before
+  every terminal state; pending/failed/cancelled Values preserve immutable
+  metadata but reject BufferHandle and checked-view payload access;
+- checked `DeviceId`, `MemoryDomain`, `StorageBinding`, producer identity, and
+  pure `AccessPlan` make direct, map, import, transfer, or unsupported access
+  explicit. `ValueTransferTask` preserves the logical revision across a fresh
+  destination binding and performs CPU copy, CPU-to-Metal upload, or
+  Metal-to-CPU readback only as explicit queued work after source readiness;
+- one process-owned `ResidencyManager` indexes eligible exact revision/binding
+  replicas. It atomically validates the complete Graph/Run/generation/task/
+  producer/binding completion identity, publishes readiness, and inserts
+  residency, so late, duplicate, or mismatched completions cannot release
+  dependency work or regain a stale commit right. Kernel pretracks each
+  lineage before coordinator submission, and only accepted current publication
+  advances that row before currentness becomes observable, preventing a later
+  older Run start from regressing freshness;
+- source-private `DeviceExecutorRegistry` composition owns fixed non-CPU
+  executors under `ExecutionService`; in the enabled Apple repository-plugin
+  profile, the Metal executor owns one reusable native device/queue and
+  validated pipeline cache, retains
+  callback-scoped textures/buffers through an invocation allocator, and enters
+  one selected Perlin operation after reserved start without exposing native
+  handles through Graph, policy, metadata, or public Host state. Perlin
+  publishes a pending native Value and encodes asynchronous texture-to-shared-
+  buffer readback without command-buffer waits or synchronous `getBytes`;
+- service composition validates all candidate per-`DeviceId` limits, then
+  creates device memory/scratch accounts only for matching executors in the
+  frozen registry. Empty or non-Apple default registries expose no Metal
+  account, while a registered executor without a candidate budget remains
+  unable to admit native allocation;
+- `image_process:invert_dense` separates exact descriptor-only inference from
+  stride-aware unsigned-8 execution, reuses a sealed input Value when present,
+  and publishes the exact sealed result revision plus an independent
+  ImageBuffer compatibility snapshot; and
+- private formal HP CPU image cache entries treat a valid sealed
+  `NodeOutput::image_value` as allocation/revision authority. Ordinary copies
+  preserve identity; dirty mutation, replacement, and disk decode create fresh
+  identity; disk save reads Value bytes; and runtime tokens are never
+  persistent cache/task keys. V-13 formal memory-cache copies also retain
+  packed Values and exact TensorSlice validity, while the image-only disk cache
+  rejects packed, quantized, or latent formal Values before executor admission,
+  filesystem mutation, or codec calls;
+- installed `RegionSet` supports canonical Empty/Whole, one bounded nonempty
+  conjunction of ImageRect or rank-general TensorSlice atoms, checked
+  normalization/clipping/algebra/containment, explicit budgets, and typed
+  Exact/ConservativeSuperset/Unknown/Unsupported/TooComplex outcomes;
+- dirty source, per-node, edge, monolithic, and HP validity records retain
+  normalized Region, while current image tiles, ImageBuffer helpers, Host/IPC
+  v2 inspection, and operation ABI v2 use checked derived PixelRect; and
+- the exact selected core `invert_dense` callback executes ImageRect or
+  TensorSlice through checked strides; TensorSlice is HP-only monolithic work,
+  and same-key plugin replacement cannot inherit that source-private contract.
+
+V-14 adds a second explicit `ProviderDefined` representation. Its
+`DataDescriptorEnvelope` owns one Schema and bounded ordered Facets; its
+`ProviderDefinedLayout` owns one Layout definition plus checked buffer-role
+envelopes; and its Value retains multiple sealed host-readable `BufferHandle`s
+plus one immutable provider generation. DenseTensor-only accessors and current
+transfer paths reject this representation. Indexed `ProviderReadLease` retains
+both the selected buffer and interpretation generation.
+
+One injected `DataDefinitionRegistry` owns a single generation source,
+provider table, and strict typed Schema/Facet/Layout maps under one publication
+lock. It stages and validates complete candidate bundles, publishes new or
+replacement generations atomically, rejects cross-provider typed-key
+conflicts without partial visibility, and invokes no provider callback while
+locked. Unload denies new lookup while old Values, reads, callbacks, and opaque
+owners retain the retiring generation through final provider destroy and
+module release.
+
+V-12 adds verification rather than a new representation or provider ABI. Its
+dependency-neutral matrix proves active logical FP32/FP64 image elements for
+1/3/4/8/16 channels through padded Values and the CPU ImageBuffer bridge;
+rank-one through rank-five FP32/FP64 latent Values through full-rank
+TensorSlice; selected/unselected ImageRect/TensorSlice merge; complete positive
+producer-envelope preservation across explicit CPU and injected external-device
+transfer; exact binding, allocation, revision, and Pending-to-Ready facts; and
+immutable negative/zero-stride reads plus explicit transfer rejection. An
+independent direct-offset byte oracle proves that the rank-one sole stride is
+wider than the element, its required storage span is padded, its active bytes
+remain exact, and its padding sentinel is untouched. CPU-copy and external
+preparation reuse one core positive, zero-offset, exact-envelope, non-overlap
+authority; external rejection precedes destination-owner retention, identity
+minting, fence creation, provider invocation, and Pending publication without
+narrowing the general signed immutable publisher. An admitted compute-I/O task
+retains and observes the same Value metadata and bytes under bounded budgets,
+but creates no artifact or persistence identity.
+
+V-13 adds one executable packed vertical. FP4 E2M1 encoding, floating-point
+semantics, and block-scale quantization remain independent facts. Version-1
+`BlockedLayout` records matching block shape, nibble-aligned block bit strides,
+absolute bit offset, and explicit nibble order. Checked publication proves
+complete blocks, exact byte bounds, and non-overlapping block spans. The packed
+TensorSlice copy accepts only full-rank nonempty block-aligned intervals,
+projects row-major scales, directly copies codes, and publishes a fresh
+canonical blocked CPU Value. CPU and injected external-device transfer preserve
+descriptor, quantization, layout, byte envelope (including unused nibble bits),
+logical revision, and Pending-to-Ready facts in a distinct binding. Formal
+memory cache retains the exact Value/Region facts; image disk persistence fails
+closed without inventing widened image bytes or a generic artifact format.
+
+V-14 implements one bounded concrete `DataSpec`, typed pure property and Region
+outcomes, the exact-size C11/C++17 v3 definition-suite ABI, and tagged SHA-256
+Descriptor/Content/StorageLayout digests. Pure callbacks receive no payload;
+validation and canonical-content traversal receive only retained checked
+buffer views. Versioned artifact-envelope encoding preserves unknown
+Schema/Facet/Layout bytes and digest metadata without a provider. It is not a
+graph document, filesystem codec, cache manifest/chunk store, or durable output
+authority.
+
+V-15 implements the first concrete optional `VariableSampleField` +
+`ImageFacet` + `DeepSampleFacet` codec. Its v3 provider publishes four fixed
+definitions and uses explicit versioned mapping metadata; diagnostic channel
+names never imply roles. A canonical provider-defined Value contains row-major
+counts, checked prefix offsets, and one identity-ordered FP32 stream per
+unit-sampled channel. Reusing V-14's nonempty semantic-buffer invariant bounds
+an all-zero image to count/offset storage only; channel mappings remain in
+versioned metadata without a sentinel payload or zero-length envelope.
+The source-private adapter reads and writes complete single-part deep-scanline
+files, materializes through the injected registry, retains exact generation
+and Value/read leases, and translates every foreign failure to Host-owned
+errors. Each indivisible codec call runs as one positively budgeted
+`ComputeIoExecutor` task with OpenEXR internal threads disabled.
+
+V-15 still has no public device registry, device queue/in-flight dimensions,
+additional packed encodings or quantization formulae, unaligned requantizing
+slices, access/conversion/inference/execution provider suites, generic graph or
+cache Value persistence, manifests/chunks, deep-tiled/multipart/mixed-part
+OpenEXR, or general named graph Value outputs. Its native executor, transfer
+submission, mutable producer, completion admission, and residency owner remain
+source-private.
+ImageBuffer remains the
+compatibility representation for operation ABI v2, tiled writes, existing
+image codecs, and Host surfaces; V-15 does not adapt its deep Value through it.
+
+`ElementSemantics`, `StorageEncoding`, and `QuantizationSchema` are independent.
+Describable, executable, and convertible support are also independent, and
+conversion is always explicit. This allows FP64, arbitrary channels, padded or
+signed strides, N-dimensional latent values, and packed FP4 to be represented
+without silent float32 conversion, one-byte-per-element assumptions, or
+channel-role guessing.
+
+For the current V-15 subset, `BufferHandle` is a checked immutable byte range.
+Consumer reads and ordinary builder writes require leases; sealed Values never
+issue `WriteLease`, and consumer writes are always rejected. A source-private
+producer may complete one sealed pending CPU or native payload through its
+noncopyable capability inside the prevalidated binding/Layout/handle envelope.
+It retires that capability happens-before publishing Ready, Failed, or
+ProducerCancelled. Pending, Failed, and ProducerCancelled expose no
+consumer-readable payload. A CPU binding may provide direct host visibility;
+a device-local binding does not. Strided, Blocked, and ProviderDefined Layouts
+retain bounded buffer envelopes. `DeviceBackend`, `DeviceId`, and
+`MemoryDomain` are separate, and current access is explicitly represented by a
+`Direct | Map | Import | Transfer | Unsupported` plan. Only direct CPU access
+and explicit CPU/Metal transfer have production execution in V-8; the other
+plan kinds remain typed outcomes rather than hidden work.
+
+The implemented `RegionSet` is bounded DNF over explicit logical domain keys.
+The MVP supports Whole, Empty, ImageRect, TensorSlice, and one nonempty clause.
+Region algebra returns Exact, labelled ConservativeSuperset, Unknown,
+Unsupported, or TooComplex rather than silently widening. The V-14 provider
+subset of `DataSpec` constrains Schema identity/version and logical-site bounds
+and returns subset, disjointness, a conditional runtime guard, or
+`CannotEvaluate`; it never authorizes implicit conversion or device access.
+
+Runtime revision, descriptor/content/Layout digests, and artifact identity are
+different identities. Persistence is divided into graph documents, canonical
+descriptor envelopes, artifact/cache manifests plus chunks, and
+never-persisted runtime bindings. Unknown valid extension bytes are preserved
+without interpretation when a provider is absent.
+
+The public migration is complete rather than permanently dual:
+
+```text
+ImageBuffer     -> Value + ImageFacet + ImageView
+PixelRect       -> RegionSet atom ImageRect
+Device          -> DeviceBackend + DeviceId + MemoryDomain
+OperationOutput -> named Value outputs
+ParameterMap    -> configuration only
+```
+
+Operation providers migrate from provisional C++ ABI v2 to separately
+versioned pure-C provider ABI v3 only after exact records and owned consumers
+exist. The completion boundary deletes v2 without a permanent wrapper, alias,
+forwarding header, dual loader, or v2-to-v3 shim. Policy ABI v1 remains
+independent.
+
+### Project 4 implementation dependency contract
+
+The table fixes architectural ordering, not live completion status. Each linked
+Issue remains a separately verifiable implementation slice and its Issue and
+Project fields remain the status authority.
+
+| Slice | Delivery boundary | Blocking slices |
+| --- | --- | --- |
+| [#78 / V-1](https://github.com/kevin-zf1123/photospider/issues/78) | Ratify the generic data, memory, and Region ADR; documentation only | #63, #65 |
+| [#79 / V-2](https://github.com/kevin-zf1123/photospider/issues/79) | Run one operation with CPU DenseTensor plus ImageView | #78 |
+| [#80 / V-3](https://github.com/kevin-zf1123/photospider/issues/80) | Connect BufferHandle ownership, allocation identity, and cache | #79 |
+| [#81 / V-4](https://github.com/kevin-zf1123/photospider/issues/81) | Run ImageRect and TensorSlice through unified Region | #79, #72 |
+| [#82 / V-5](https://github.com/kevin-zf1123/photospider/issues/82) | Drive CPU implementation and resource routing from operation metadata | #80, #70 |
+| [#83 / V-6](https://github.com/kevin-zf1123/photospider/issues/83) | Prove fences, asynchronous completion, and explicit transfer with a fake device | #80, #81, #82, #70 |
+| [#84 / V-7](https://github.com/kevin-zf1123/photospider/issues/84) | Run one Metal operation through DeviceExecutorRegistry | #83 |
+| [#85 / V-8](https://github.com/kevin-zf1123/photospider/issues/85) | Implement explicit CPU/GPU transfer, residency, and stale completion | #84, #74 |
+| [#86 / V-9](https://github.com/kevin-zf1123/photospider/issues/86) | Account device memory and scratch in ResourceLedger | #84, #70 |
+| [#87 / V-10](https://github.com/kevin-zf1123/photospider/issues/87) | Ratify typed compute-I/O completion and separate cache, Graph-document, daemon, and durable-output authorities; documentation only | #65 |
+| [#88 / V-11](https://github.com/kevin-zf1123/photospider/issues/88) | Route bounded cache/asset/codec I/O mechanism through `ComputeIoExecutor` without moving commit policy | #87, #70 |
+| [#89 / V-12](https://github.com/kevin-zf1123/photospider/issues/89) | Verify the multi-channel, FP64, latent, and stride matrix | #81, #85 |
+| [#90 / V-13](https://github.com/kevin-zf1123/photospider/issues/90) | Run one packed FP4/quantized DenseTensor slice | #89 |
+| [#117 / V-14](https://github.com/kevin-zf1123/photospider/issues/117) | Prove dependency-free VariableSampleField definitions, multi-buffer Values, pure queries/digests, and generation replacement/unload | #90 |
+| [#118 / V-15](https://github.com/kevin-zf1123/photospider/issues/118) | Add the first optional OpenEXR deep-scanline provider/codec without leaking the dependency | #117 |
+
+V-14 is the current separate dependency-free synthetic
+`VariableSampleField` slice. “Dependency-free” means the proof uses neither
+OpenEXR nor another optional codec. It exercises registration, unknown-byte
+preservation, multi-buffer Layout and binding, Region/DataSpec/query without
+payload authority, independent exact canonical digests, generation
+replacement, leases, and unload directly. Its ABI v3 is the definition suite
+only and does not pre-implement access, conversion, inference, execution, or
+codec authority.
+
+V-15 is the current separate optional OpenEXR provider/codec slice. Its first
+format is single-part deep-scanline read/write, following the core and V-14
+proof rather than replacing it. Deep tiled, multipart, and mixed shallow/deep
+parts remain later work. The build option defaults OFF; that profile removes
+OpenEXR headers, links, types, symbols, package discovery, target exports, and
+transitive dependencies from the kernel, public ABI, and dependency-disabled
+product. Explicit component consumption is the only installed package path
+that discovers OpenEXR and imports the provider MODULE.
 
 ## Heterogeneous Executors
+
+A current V-9 Metal route combines process ownership, registry dispatch,
+queue/allocator/cache reuse, provider-state removal, asynchronous pending
+Values, explicit CPU/Metal transfer, process residency, and exact stale-result
+arbitration. Its sole service ledger now atomically admits per-device
+memory/scratch plans before native allocation, reconciles native actual bytes,
+binds memory to persistent Value ownership, and binds scratch to exact command
+completion. Queue, lane, and pipeline-cache infrastructure remain outside
+per-invocation accounting.
 
 A GPU executor is not a second ordinary CPU worker pool. Each physical device
 executor owns its native queue/stream, allocator, in-flight limit, memory and
@@ -629,10 +970,113 @@ scratch reservations, pipeline cache, transfer queues, and completion fences.
 CPU workers do not block waiting for GPU completion. A stale device completion
 releases resources but cannot commit to a newer graph revision.
 
-The compute I/O executor handles bounded cache/asset reads and writes and data
-movement around codecs. It is budgeted by both operation count and bytes. It
-does not own daemon framing, graph document persistence, or `OutputStore`
-identity and lease semantics. CPU-heavy codec work returns to the CPU executor.
+Current V-11 adds one source-private process `ComputeIoExecutor` with an
+independent worker and atomic task/estimated-retained-byte admission before
+lazy payload construction or side effects. Accepted work retains an explicit
+transaction lifetime token and exposes typed completion with exactly-once
+settlement across failure, cancellation, late return, and shutdown. CPU
+compute workers cannot synchronously wait for it.
+
+The first production vertical runs staged HP cache-save codec/filesystem
+mechanism through this executor while graph-state policy keeps eligibility,
+paths, error interpretation, and the existing pre-publication commit point.
+The current indivisible image-codec call runs wholly on the I/O worker; a
+future split API must return independently admitted CPU-heavy phases to the
+CPU executor. Synchronous cache administration/load, daemon framing,
+Graph-document persistence, `OutputStore` commit policy, user paths, retries,
+and durability claims remain with their existing owners.
+
+### Compute I/O durability and completion target
+
+The current baseline has the bounded executor and staged HP cache-save vertical
+described above, but no crash-durable output store. Deferred HP cache writes
+still occur before live Graph publication and can fail the Run; Graph-document
+save writes its destination directly; daemon job state and acknowledgement are
+process-local; and the private IPC `OutputStore` provides protected,
+no-replace process-scoped delivery with in-memory lease/TTL indexing. The
+legacy `io/save` callback can also expose a file before its enclosing staged
+Run commits.
+
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+accepts a target typed partial order:
+
+```text
+successful value-producing Run:
+  OperationReturned(success)
+    -> producer fences succeed
+    -> ValueReady
+    -> validated Graph/RT publication
+    -> RunTerminal(Succeeded)
+
+pre-terminal ComputeRun failure:
+  operation/readiness/dependency failure
+  OR Graph/RT validation/publication/Run-result commit failure
+  typed failure -> RunTerminal(Failed)
+  (no fabricated ValueReady or OutputCommitted)
+
+Run cancellation:
+  cancellation wins -> RunTerminal(Cancelled)
+  late/stale completion -> cleanup only
+  (no new ValueReady or durable receipt)
+
+validated empty-plan / zero-work / no-op:
+  no-work validation -> RunTerminal(Succeeded)
+  (no new OperationReturned, ValueReady, or durable receipt)
+
+RunTerminal(Succeeded) -> ResultAvailable   (when a result is retained)
+
+compute-and-persist success =
+  RunTerminal(Succeeded) AND OutputCommitted
+
+post-Run output transaction failure =
+  RunTerminal(unchanged) AND OutputCommitFailed
+  (no new or revoked ValueReady; no requested-durability receipt)
+
+RequestAccepted, OutputCommitFailed, GraphDocumentSaved, and ResponseObserved
+are separately ordered by the operation that owns them.
+```
+
+Only dependency-valid Graph/RT publication, or an admitted valid no-op,
+resolves `ComputeRun::Succeeded`. Cache persistence, durable output commit,
+Graph-document save, daemon terminal state, result availability, and caller
+observation remain independent outcomes. Post-Run cache, codec, and output work
+has its own typed outcome and cannot delay or rewrite the published Run
+terminal. An output failure after Run terminal reports `OutputCommitFailed`,
+not `RunTerminal(Failed)`, and neither creates nor revokes `ValueReady`. A
+caller or daemon may report a composite request failure, but it preserves the
+Run terminal and the output, Graph-document, cache/codec, and response facts
+instead of projecting that aggregate result back into Run state. A receipt
+committed independently before a later Run cancellation remains authoritative
+for that output transaction.
+
+| Persistence domain | Target authority | Completion and durability contract |
+| --- | --- | --- |
+| Graph document | Graph-state save transaction | Versioned, same-directory staging with expected-version validation, atomic replacement, and an explicit achieved-durability result |
+| Disk cache | Graph cache policy using bounded I/O mechanism | Discardable acceleration; failure does not rewrite successful Run/output outcomes |
+| User output | `OutputStore` commit authority | Stable `OutputCommitId`; complete payload/metadata validation and file synchronization; canonical manifest validation, synchronization, and atomic no-replace publication; leaf-to-durability-root directory barriers; typed achieved-durability receipt or `OutputCommitFailed`; recovery; and no-overwrite by default |
+| Daemon transport | Job registry and result delivery | Acceptance, terminal state, and response observation only; no durability inference |
+| Codec | Injected representation adapter | Conversion and error translation only; no path, retry, identity, or commit authority |
+
+Durable output retry is idempotent by stable commit identity and delivery is
+at least once, not exactly once. Cancellation before manifest publication may
+abort and clean staging; after the manifest commit point it reports the
+committed receipt rather than pretending the output was cancelled. Requested
+crash durability requires complete payload/metadata validation and file
+synchronization, a completely written and validated canonical manifest,
+manifest-file synchronization before atomic no-replace publication, published
+identity validation, and directory barriers for every directory created,
+renamed, or modified by the transaction from the leaf to the configured
+durability root. An atomic-visible receipt can be returned after its weaker
+commit point; a crash-durable receipt is returned only after all stronger
+barriers succeed. Unsupported file synchronization, directory barriers, or
+atomic no-replace publication fail explicitly; durability is never silently
+downgraded.
+
+All persistent paths are rooted and normalized, reject escapes and symlink
+substitution through no-follow/identity checks, apply quotas before retained
+work, and expose achieved durability as a capability/result. The
+`ComputeIoExecutor` supplies bounded mechanism only; the domain authorities
+above retain identity, ordering, policy, and receipt ownership.
 
 ## Execution Profiles
 
@@ -698,6 +1142,26 @@ cross-process GPU handles require a later device/fence protocol.
     must quiesce and release first.
 11. `(RunId, RunLocalTaskId)` is the completion identity; a policy-binding or
     execution-route generation is not a Run identity.
+12. Run success means validated Graph/RT publication or a valid no-op; it does
+    not imply cache, output, Graph-document, daemon, delivery, or response
+    completion.
+13. Cache is discardable acceleration and never the durable user-output
+    authority; cache persistence failure cannot rewrite an already successful
+    Run or output commit.
+14. Durable output commit uses stable identity, completely validated and
+    synchronized payload/metadata and canonical manifest files, atomic
+    no-replace manifest-last publication, leaf-to-durability-root directory
+    barriers, and a typed achieved-durability receipt; recovery is idempotent
+    and delivery is at least once, not exactly once.
+15. Graph-document save remains a separately versioned transaction, and daemon
+    terminal state or acknowledgement remains a non-durable transport
+    observation.
+16. A requested durability level that the platform cannot achieve fails
+    explicitly and is never silently downgraded.
+17. A caller or daemon may aggregate Run, output, Graph-document, cache/codec,
+    and response facts into one request outcome, but it preserves each
+    authority-owned fact and never projects composite failure back into Run
+    state.
 
 ## Dependency Ordering
 

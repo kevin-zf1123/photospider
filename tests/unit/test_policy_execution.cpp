@@ -22,6 +22,7 @@
 #include "photospider/host/host.hpp"
 #include "policy/policy_registry.hpp"
 #include "support/execution_service_test_access.hpp"
+#include "support/fake_device_executor.hpp"
 #include "support/policy_fixture_controller.hpp"
 
 #ifndef PS_TEST_POLICY_PLUGIN_PATH
@@ -64,25 +65,11 @@ ComputeRunSubmission make_submission(
 /**
  * @brief Minimal thread-safe Host observation context for route integration.
  * @throws std::bad_alloc only when copied worker-id observations grow.
- * @note Tests opt into a deterministic fake Metal capability; no native
- * backend, command queue, or platform probe is required.
+ * @note Device inventory belongs to the injected execution service. This
+ * object observes callback attribution only.
  */
 class TestHostContext final : public ExecutionHostContext {
  public:
-  /**
-   * @brief Creates a Host context with optional fake Metal availability.
-   * @param metal_available Whether `GPU_METAL` should be reported available.
-   * @throws Nothing.
-   */
-  explicit TestHostContext(bool metal_available = false) noexcept
-      : metal_available_(metal_available) {}
-
-  /** @copydoc ExecutionHostContext::is_device_available */
-  bool is_device_available(Device device) const noexcept override {
-    return device == Device::CPU ||
-           (metal_available_ && device == Device::GPU_METAL);
-  }
-
   /** @copydoc ExecutionHostContext::set_task_context */
   void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
     (void)epoch;
@@ -148,9 +135,6 @@ class TestHostContext final : public ExecutionHostContext {
   }
 
  private:
-  /** @brief Deterministic fake Metal capability. */
-  bool metal_available_ = false;
-
   /** @brief Current entered callback contexts. */
   std::atomic_int active_contexts_{0};
 
@@ -691,20 +675,97 @@ TEST_F(PolicyExecutionFixture,
  * @brief Verifies route-aware device discovery has deterministic fallback.
  */
 TEST(PhysicalExecutionIntegration, PublishesRouteAwareDeviceInventory) {
-  ExecutionService service(2U);
-  TestHostContext cpu_only_host;
-  TestHostContext metal_host(true);
+  execution::DeviceExecutorRegistry empty_registry;
+  ExecutionService cpu_service(ExecutionService::default_resource_limits(),
+                               std::move(empty_registry));
+  cpu_service.configure_worker_count(2U);
+  ExecutionService metal_service(
+      ExecutionService::default_resource_limits(),
+      ::ps::testing::make_fake_metal_executor_registry());
+  metal_service.configure_worker_count(2U);
 
-  EXPECT_EQ(service.available_devices(cpu_only_host, "cpu"),
+  EXPECT_EQ(cpu_service.available_devices("cpu"),
             (std::vector<Device>{Device::CPU}));
-  EXPECT_EQ(service.available_devices(metal_host, "serial_debug"),
+  EXPECT_EQ(metal_service.available_devices("serial_debug"),
             (std::vector<Device>{Device::CPU}));
-  EXPECT_EQ(service.available_devices(cpu_only_host, "gpu_pipeline"),
+  EXPECT_EQ(cpu_service.available_devices("gpu_pipeline"),
             (std::vector<Device>{Device::CPU}));
-  EXPECT_EQ(service.available_devices(metal_host, "gpu_pipeline"),
+  EXPECT_EQ(metal_service.available_devices("gpu_pipeline"),
             (std::vector<Device>{Device::GPU_METAL, Device::CPU}));
-  EXPECT_THROW(service.available_devices(metal_host, "heterogeneous"),
-               GraphError);
+  EXPECT_THROW(metal_service.available_devices("heterogeneous"), GraphError);
+}
+
+/**
+ * @brief Verifies an explicitly empty registry creates no phantom account.
+ *
+ * @throws ExecutionService construction or diagnostic failures unchanged.
+ * @note Default candidate limits include Metal, so this regression fails if
+ * ledger construction ignores the fixed empty registry.
+ */
+TEST(PhysicalExecutionIntegration, EmptyRegistryCreatesNoMetalAccount) {
+  execution::DeviceExecutorRegistry empty_registry;
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           std::move(empty_registry));
+
+  EXPECT_FALSE(service.has_device_executor(Device::GPU_METAL));
+  EXPECT_FALSE(service.device_resource_snapshot(DeviceId(DeviceBackend::Metal))
+                   .has_value());
+  EXPECT_EQ(service.available_devices("gpu_pipeline"),
+            (std::vector<Device>{Device::CPU}));
+}
+
+/**
+ * @brief Verifies default composition publishes exactly its Metal capability.
+ *
+ * @throws Platform registry discovery, construction, or diagnostic failures
+ * unchanged.
+ * @note On non-Apple builds the factory is a null stub, so this directly proves
+ * CPU-only default service construction has no fake Metal account.
+ */
+TEST(PhysicalExecutionIntegration,
+     DefaultServiceMatchesMetalAccountToPlatformRegistry) {
+  ExecutionService service;
+  const bool has_metal_executor =
+      service.has_device_executor(Device::GPU_METAL);
+  const bool has_metal_account =
+      service.device_resource_snapshot(DeviceId(DeviceBackend::Metal))
+          .has_value();
+
+  EXPECT_EQ(has_metal_account, has_metal_executor);
+#if !defined(__APPLE__)
+  EXPECT_FALSE(has_metal_executor);
+  EXPECT_FALSE(has_metal_account);
+#endif
+}
+
+/**
+ * @brief Verifies a fixed Metal executor retains its exact configured budget.
+ *
+ * @throws ExecutionService construction or diagnostic failures unchanged.
+ * @note The additional unexecutable CUDA candidate proves construction keeps
+ * only the frozen registry intersection without changing Metal byte limits.
+ */
+TEST(PhysicalExecutionIntegration,
+     RegisteredMetalExecutorRetainsConfiguredBudget) {
+  ExecutionResourceLimits limits = ExecutionService::default_resource_limits();
+  const DeviceResourceVector metal_budget{12345U, 6789U};
+  limits.device_limits = {
+      DeviceResourceLimit{DeviceId(DeviceBackend::Metal), metal_budget},
+      DeviceResourceLimit{DeviceId(DeviceBackend::CUDA),
+                          DeviceResourceVector{111U, 222U}},
+  };
+  ExecutionService service(std::move(limits),
+                           ::ps::testing::make_fake_metal_executor_registry());
+
+  ASSERT_TRUE(service.has_device_executor(Device::GPU_METAL));
+  const std::optional<ResourceLedger::DeviceSnapshot> metal =
+      service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
+  ASSERT_TRUE(metal.has_value());
+  EXPECT_EQ(metal->limits, metal_budget);
+  EXPECT_EQ(metal->reserved, DeviceResourceVector{});
+  EXPECT_EQ(metal->available, metal_budget);
+  EXPECT_FALSE(service.device_resource_snapshot(DeviceId(DeviceBackend::CUDA))
+                   .has_value());
 }
 
 /**
@@ -736,8 +797,10 @@ TEST(PhysicalExecutionIntegration, RejectsDeviceOutsideRouteInventory) {
  * @brief Verifies CPU fallback and Metal work overlap on distinct fixed lanes.
  */
 TEST(PhysicalExecutionIntegration, CpuAndGpuPipelineLanesOverlapAndDrain) {
-  ExecutionService service(2U);
-  TestHostContext host(true);
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(2U);
+  TestHostContext host;
   ComputeRun run(make_submission("cpu-gpu-overlap", 70U, 1));
   std::promise<void> cpu_entered_promise;
   std::future<void> cpu_entered = cpu_entered_promise.get_future();
@@ -801,7 +864,9 @@ TEST(PhysicalExecutionIntegration, CpuAndGpuPipelineLanesOverlapAndDrain) {
  * @brief Verifies all three routes execute repeatedly and recover after fault.
  */
 TEST(PhysicalExecutionIntegration, ExecutesAndReusesEveryPrivateRoute) {
-  ExecutionService service(2U);
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(2U);
   std::uint64_t revision = 1U;
   for (const std::string& route :
        std::vector<std::string>{"cpu", "gpu_pipeline", "serial_debug"}) {
@@ -818,7 +883,7 @@ TEST(PhysicalExecutionIntegration, ExecutesAndReusesEveryPrivateRoute) {
     EXPECT_EQ(second_host.exits(), 1);
   }
 
-  TestHostContext failure_host(true);
+  TestHostContext failure_host;
   ComputeRun failing(make_submission("gpu-failure", revision++, 1));
   std::vector<ReadyTaskSubmission> failing_ready;
   failing_ready.push_back(make_ready(
@@ -836,7 +901,7 @@ TEST(PhysicalExecutionIntegration, ExecutesAndReusesEveryPrivateRoute) {
     EXPECT_STREQ(error.what(), "exact gpu-pipeline failure");
   }
   std::atomic_int recovered{0};
-  TestHostContext recovery_host(true);
+  TestHostContext recovery_host;
   EXPECT_NO_THROW(execute_successful_run(service, "gpu_pipeline",
                                          "gpu-recovery", revision++, recovered,
                                          recovery_host, Device::GPU_METAL));
@@ -1042,11 +1107,13 @@ TEST_F(PolicyExecutionFixture,
  */
 TEST_F(PolicyExecutionFixture,
        GrantBlockedGpuCandidateDoesNotStarveIndependentRun) {
-  ExecutionService service(1U);
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(1U);
   control_.set_select_mode(PS_POLICY_FIXTURE_SELECT_FIRST);
   service.replace_policy(PolicyClass::Throughput, "fixture_policy");
 
-  TestHostContext host_a(true);
+  TestHostContext host_a;
   ComputeRun run_a(make_submission("grant-blocked-a", 61U, 1));
   std::atomic_int cpu_a_entries{0};
   std::atomic_int gpu_a_entries{0};
@@ -1086,7 +1153,7 @@ TEST_F(PolicyExecutionFixture,
         runtime.dec_tasks_to_complete();
       }));
 
-  TestHostContext host_b(true);
+  TestHostContext host_b;
   ComputeRun run_b(make_submission("grant-blocked-b", 62U, 1));
   std::atomic_int gpu_b_entries{0};
   std::promise<void> gpu_b_entered_promise;
@@ -1151,11 +1218,13 @@ TEST_F(PolicyExecutionFixture,
  */
 TEST_F(PolicyExecutionFixture,
        SoleGrantBlockedCandidateWaitsAndCancellationWakesWorker) {
-  ExecutionService service(1U);
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(1U);
   control_.set_select_mode(PS_POLICY_FIXTURE_SELECT_FIRST);
   service.replace_policy(PolicyClass::Throughput, "fixture_policy");
 
-  TestHostContext host(true);
+  TestHostContext host;
   ComputeRun run(make_submission("grant-blocked-cancel", 63U, 1));
   const ComputeRunCancellationSource cancellation = run.cancellation_source();
   std::atomic_int cpu_entries{0};

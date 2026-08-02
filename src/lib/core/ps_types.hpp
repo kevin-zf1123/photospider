@@ -23,6 +23,7 @@
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/geometry.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/value.hpp"
 #include "photospider/plugin/node_view.hpp"
 
 namespace ps {
@@ -132,9 +133,10 @@ struct DebugMeta {
  *
  * Private operation callbacks and compute services exchange this value after
  * the operation host adapter has converted the public `OperationOutput`.
- * Besides image, format-neutral named data, spatial, and debug state, the host
- * may attach a dynamic-library lease so plugin-provided image deleters cannot
- * run after their library is unmapped.
+ * Besides the current ImageBuffer compatibility snapshot, an identity-bearing
+ * sealed CPU image Value, format-neutral named data, spatial, and debug state,
+ * the host may attach a dynamic-library lease so plugin-provided image deleters
+ * cannot run after their library is unmapped.
  *
  * Copy construction first retains the source lease and then copies payload
  * state. Copy assignment stages a complete replacement before swapping, while
@@ -240,6 +242,7 @@ struct NodeOutput {
   void swap(NodeOutput& other) noexcept {
     static_assert(std::is_nothrow_swappable_v<std::shared_ptr<void>> &&
                       std::is_nothrow_swappable_v<ImageBuffer> &&
+                      std::is_nothrow_swappable_v<Value> &&
                       std::is_nothrow_swappable_v<decltype(data)> &&
                       std::is_nothrow_swappable_v<SpatialContext> &&
                       std::is_nothrow_swappable_v<DebugMeta>,
@@ -247,6 +250,7 @@ struct NodeOutput {
     using std::swap;
     plugin_library_lifetime.swap(other.plugin_library_lifetime);
     swap(image_buffer, other.image_buffer);
+    swap(image_value, other.image_value);
     data.swap(other.data);
     swap(space, other.space);
     swap(debug, other.debug);
@@ -271,6 +275,17 @@ struct NodeOutput {
    * result's dynamic-library lease is released.
    */
   ps::ImageBuffer image_buffer;
+
+  /**
+   * @brief Sealed CPU image Value and formal cache memory identity authority.
+   *
+   * @note A valid value is authoritative for allocation/revision identity and
+   * disk-cache image bytes. `image_buffer` remains an independent plugin ABI
+   * v2, tiled-write, codec, Host, and legacy-operation compatibility snapshot.
+   * Dirty staging must clear this member before mutating cloned CPU bytes and
+   * reseal at the HP commit boundary.
+   */
+  ps::Value image_value;
 
   /**
    * @brief Named non-image outputs represented as owned ParameterValue values.
@@ -576,12 +591,16 @@ enum class TileSizePreference {
 };
 
 /**
- * @brief Private scheduling and dependency metadata for one implementation.
- * @throws Nothing for value operations.
+ * @brief Private scheduling, resource, and dependency metadata for one
+ * implementation.
+ * @throws std::bad_alloc when copied exclusive-key storage cannot allocate.
  * @note The registry copies this value with its callback snapshot. Dependency
  * builder state uses a separate revisioned snapshot for cache identity.
  */
 struct OpMetadata {
+  /** @brief Maximum accepted bytes in a nonempty process exclusive key. */
+  static constexpr std::size_t kExclusiveKeyMaxBytes = 128U;
+
   /** @brief Preferred private tile granularity. */
   TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
   /** @brief Preferred execution device. */
@@ -600,6 +619,22 @@ struct OpMetadata {
   InputAccessPattern access_pattern = InputAccessPattern::SpatialAligned;
   /** @brief Whether dependency mapping depends on upstream pixel content. */
   bool data_dependent = false;
+  /** @brief Whether callbacks of this exact implementation may overlap. */
+  bool reentrant = true;
+  /**
+   * @brief Process-domain cap for this exact implementation identity.
+   * @note Zero means no implementation-specific cap.
+   */
+  std::uint32_t maximum_parallelism = 0U;
+  /** @brief Additional retained bytes held for each in-flight callback. */
+  std::uint64_t retained_memory_bytes = 0U;
+  /** @brief Additional scratch bytes held for each in-flight callback. */
+  std::uint64_t scratch_bytes = 0U;
+  /**
+   * @brief Optional process-domain mutual-exclusion key.
+   * @note Registration validates bounded length and rejects embedded NUL.
+   */
+  std::string exclusive_key;
 };
 
 /**
@@ -785,6 +820,15 @@ struct OpImplementation {
   OpMetadata metadata;
 
   /**
+   * @brief Nonzero process-unique revision identifying this callback slot.
+   *
+   * @note Planning retains this scalar without retaining the callback or plugin
+   * DSO. Replacement mints a different value and unload restores the
+   * predecessor's recorded revision.
+   */
+  std::uint64_t implementation_identity = 0U;
+
+  /**
    * @brief Checks whether the callable consumes complete NodeOutput values.
    *
    * @return True for a `MonolithicOpFunc`, otherwise false.
@@ -896,10 +940,13 @@ class OpRegistry {
   /**
    * @brief Owns all callable slots and metadata for one canonical operation.
    *
-   * HP/RT slots support intent-specific execution, while the device list
-   * supports registry-owned implementation selection. Propagation and
-   * dependency callbacks remain grouped with the same operation key so unload
-   * can restore one coherent snapshot.
+   * Each scalar HP/RT slot owns its callback, metadata, and nonzero
+   * implementation identity as one `OpImplementation` value. Registration,
+   * capture, restoration, and retirement therefore exchange a complete
+   * schedulable candidate instead of independently mutable callback and
+   * metadata fields. The device list supports registry-owned implementation
+   * selection. Propagation and dependency callbacks remain grouped with the
+   * same operation key so unload can restore one coherent snapshot.
    *
    * @throws std::bad_alloc when copied callback/vector storage cannot allocate.
    * @throws Any exception raised while copying a callback target.
@@ -910,39 +957,31 @@ class OpRegistry {
    */
   struct OpImplementations {
     /**
-     * @brief Optional full-output high-precision callback.
+     * @brief Optional full-output high-precision implementation slot.
      *
-     * @note A plugin wrapper stored here retains its dynamic-library lease.
+     * @note The value always contains a monolithic callback, its exact
+     * scheduling metadata, and the revision minted by the same registration.
+     * A plugin wrapper stored here retains its dynamic-library lease.
      */
-    std::optional<MonolithicOpFunc> monolithic_hp;
+    std::optional<OpImplementation> monolithic_hp;
 
     /**
-     * @brief Optional tiled high-precision callback.
+     * @brief Optional tiled high-precision implementation slot.
      *
-     * @note The callback borrows tile views only for one invocation.
+     * @note The value always contains a tiled callback, its exact scheduling
+     * metadata, and the revision minted by the same registration. The callback
+     * borrows tile views only for one invocation.
      */
-    std::optional<TileOpFunc> tiled_hp;
+    std::optional<OpImplementation> tiled_hp;
 
     /**
-     * @brief Optional tiled real-time callback.
+     * @brief Optional tiled real-time implementation slot.
      *
-     * @note Registry snapshots copy the callback and any attached plugin lease.
+     * @note The value always contains a tiled callback, its exact scheduling
+     * metadata, and the revision minted by the same registration. Registry
+     * snapshots copy the callback and any attached plugin lease.
      */
-    std::optional<TileOpFunc> tiled_rt;
-
-    /**
-     * @brief Metadata paired with the high-precision callable slots.
-     *
-     * @note Absence means no HP-specific metadata was registered.
-     */
-    std::optional<OpMetadata> meta_hp;
-
-    /**
-     * @brief Metadata paired with the real-time callable slot.
-     *
-     * @note Absence means no RT-specific metadata was registered.
-     */
-    std::optional<OpMetadata> meta_rt;
+    std::optional<OpImplementation> tiled_rt;
 
     /**
      * @brief Optional backward dirty-ROI propagation callback.
@@ -1030,10 +1069,6 @@ class OpRegistry {
     std::uint64_t tiled_hp = 0;
     /** @brief Revision owning the RT tiled callback slot. */
     std::uint64_t tiled_rt = 0;
-    /** @brief Revision owning the HP metadata slot. */
-    std::uint64_t meta_hp = 0;
-    /** @brief Revision owning the RT metadata slot. */
-    std::uint64_t meta_rt = 0;
     /** @brief Revision owning the dirty-ROI propagation slot. */
     std::uint64_t dirty_propagator = 0;
     /** @brief Revision owning the forward-ROI propagation slot. */
@@ -1580,6 +1615,31 @@ class OpRegistry {
       const;
 
   /**
+   * @brief Selects one coherent revisioned implementation including fallbacks.
+   *
+   * Device-specific candidates retain the existing intent/device/cost ordering.
+   * When no device candidate survives, the method selects the matching HP/RT
+   * scalar slot and its metadata/ownership revision, then the legacy slot.
+   *
+   * @param type Operation type.
+   * @param subtype Operation subtype.
+   * @param available_devices Route-visible devices.
+   * @param intent HP or RT selection policy.
+   * @param candidate_filter Optional task-shape compatibility predicate.
+   * @return Selected callback, metadata, device, and nonzero identity, or
+   * nullopt when no coherent candidate exists.
+   * @throws std::bad_alloc or callback-copy exceptions from snapshot creation.
+   * @throws Any exception raised by candidate_filter.
+   * @note The selected value owns its callback and any plugin DSO lease. A
+   * missing metadata record or ownership identity is not silently synthesized.
+   */
+  std::optional<OpImplementation> select_implementation(
+      const std::string& type, const std::string& subtype,
+      const std::vector<Device>& available_devices, ComputeIntent intent,
+      const std::function<bool(const OpImplementation&)>& candidate_filter = {})
+      const;
+
+  /**
    * @brief Runs a registration callback while capturing touched keys.
    *
    * @param registration Callback that calls one or more OpRegistry register
@@ -1666,10 +1726,6 @@ class OpRegistry {
     TiledHp,
     /** @brief Real-time tiled callback slot. */
     TiledRt,
-    /** @brief High-precision scheduling metadata slot. */
-    MetaHp,
-    /** @brief Real-time scheduling metadata slot. */
-    MetaRt,
     /** @brief Dirty ROI propagator slot. */
     DirtyPropagator,
     /** @brief Forward ROI propagator slot. */

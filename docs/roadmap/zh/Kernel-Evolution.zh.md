@@ -222,8 +222,9 @@ Created -> Admitted -> Queued -> Running -> CommitPending -> Terminal
 
 安全路径可以跳过非 terminal phase，但绝不倒退。只发布一个 `Succeeded`、`Failed` 或
 `Cancelled` outcome。Completion 本身不等于成功：dependency aggregation 与串行化 graph-state
-commit predicate 都必须成功。Cancellation、failure 与 commit 共享一个 terminal arbiter。当不可抢占
-work 仍需排空时，terminal publication 可以先于物理 quiescence。
+commit predicate 都必须成功。Cancellation、Run 内部 failure 与 Graph/RT result-commit
+contender 共享一个 Run terminal arbiter。当不可抢占 work 仍需排空时，terminal publication
+可以先于物理 quiescence。
 
 `ComputeRun` 为 request-local state 提供稳定生命周期，但不拥有 dependency transition 的语义；
 dependency counter、ready detection 和 dependent release 仍由 `ComputeTaskDispatcher` 负责。
@@ -250,21 +251,26 @@ dependency 或 exception 串扰。
 Run destruction 不抛异常，且只会在发布一个 terminal outcome、达到 quiescence、释放全部 lease，
 以及精确释放全部 reservation/grant 后发生。Caller observer 被丢弃不会隐式取消已经 admission 的 work。
 
-### 目标 `GraphRuntime`
+### 截至 Issue #76 的当前 `GraphRuntime`
 
-当前 Issue #75 `GraphRuntime` 拥有 `GraphModel`、graph-scoped runtime state、彼此分离的
+截至 Issue #76，当前 `GraphRuntime` 拥有 `GraphModel`、graph-scoped runtime state、彼此分离的
 graph-state 与 compute-request lane、monotonic `GraphRevision`、revision capture、串行化 commit
-validation/publication、graph event、稳定 graph-instance identity，以及 platform/session metadata。
-Graph-lifetime anchor 仍是目标行为。
+validation/publication、graph event、稳定 graph-instance identity、platform/session metadata，
+以及一个绑定该精确 Graph identity 的 `GraphLifetimeAnchor`。该 anchor 提供 lifecycle admission
+使用的 close coordinator 与 lease root。
 
 它不拥有 Run、admitted-Run index、CPU/device/I/O/plugin worker、process ready store、
 process admission、`ResourceLedger`、`PolicyRegistry`、policy binding 或物理 execution route。
-它只存储复制的 HP 与 RT route id 及其 nonzero generation。Run 可以持有 graph-lifetime lease，
-但不会反转这项所有权。
+Process-owned `ExecutionService` 拥有私有 `RunLifecycleRegistry`；该 registry 拥有
+admitted-Run index 与 admission/Graph-close/process-shutdown lifetime fence。
+`GraphRuntime` 只存储复制的 HP 与 RT route id 及其 nonzero generation。Run 可以持有
+registry-validated Graph lifetime lease，但不会反转任一所有权。
 
 graph-state lane 只在捕获 immutable revision 和执行经过验证的 visible commit 时持有，不覆盖
 长时间 planning/execution。私有 compute-request lane 当前会串行化同一 Graph 的 request，但不
-拥有 executor 或 policy lifetime；目标 registry/lifetime fence 仍是未来行为。
+拥有 executor 或 policy lifetime。Issue #76 registry/lifetime fence 已是当前行为；这里未来工作
+仅限 public cancellation/control surface 与另行批准的后续 execution-domain capability，而不是
+Graph anchor 或 lifecycle registry。
 
 ## 进程执行域
 
@@ -319,16 +325,21 @@ open-row/registered-Run validation 与 publication。Close 会标记 closing、�
 lane，因此 commit-first publication 可以完成，close-first validation 会拒绝 commit，并且不会形成
 registry/lane lock cycle。
 
-`ExecutionService` 独占一个由 composition-root limit 初始化、Host 权威的 `ResourceLedger`。只有
+`ExecutionService` 独占一个由 composition-root limit 初始化、Host/device 权威的
+`ResourceLedger`。只有
 受信任 Host code 能铸造其 move-only、不可伪造的 reservation 与 grant。Policy 或 plugin 可以请求
 或建议 resource，但不能构造、复制、扩大或直接释放 token。
 
-当前 ledger 会验证 CPU slot、ready-store entry/byte、retained/in-flight Host memory 与 scratch
-memory 的事务性 vector。Device queue/memory/in-flight work、compute-I/O operation/byte，以及
-plugin-process/invocation/IPC 仍是未来维度，当前不会用虚假的零值 authority 表示。当前 success、
-failure、rejection、rollback、replacement 与 worker-exception 路径都会恰好一次释放每个
-reservation/grant；当前 cancellation 与 close/shutdown finalization 会保持该契约。Capacity
-exhaustion 与 checked overflow 会在无 partial reservation、overcommit 或 silent clamping 的情况下失败。
+当前 ledger 会验证 CPU slot、ready-store entry/byte、retained/in-flight Host memory 与 Host
+scratch 的事务性 vector。它还为每个已配置非 CPU `DeviceId` 拥有隔离且 immutable 的
+memory/scratch limit。Native allocation plan 会原子提交两个 dimension，在 `allocatedSize`
+校准后归还未使用 byte，并把 actual ownership 拆分给 persistent native Value owner 与
+asynchronous completion scratch。Device queue depth/in-flight command limit、compute-I/O
+operation/byte，以及 plugin-process/invocation/IPC 仍是未来维度，当前不会用虚假的零值 authority
+表示。当前 success、failure、rejection、rollback、replacement、worker-exception、stale
+completion、eviction、cancellation 与 close/shutdown path 都会恰好一次释放每份 authority。
+Capacity exhaustion 与 checked overflow 会在无 partial reservation、overcommit、跨 device
+借用或 silent clamping 的情况下失败。
 
 每个 policy binding 都是比较 seam，而不是物理 executor 或 resource authority。当前 Interactive
 与 Throughput binding 会排列 Host 编写的 immutable candidate descriptor；由 service 拥有的 store
@@ -372,11 +383,11 @@ identity/revision 与 descriptor 相等、live identity/revision 相等，以及
 不能修改 visible Graph/proxy state 或写入 deferred cache artifact。
 
 Issue #73 让 cancellation 成为该当前 predicate 的组成部分。一个私有 request source 与 immutable
-monotonic deadline 会通过与 failure/commit 相同的 Run arbiter 竞争。内建 ready entry 按精确 Run
-identity 清除，dependent re-entry 被拒绝，queued plan/callback completion unit 恰好一次 retire，
-已经进入的 non-preemptible work 则会排空，但不能允许 staged publication。被接受的 commit
-contender、精确 predicate、符合条件的 persistence、visible swap 与 terminal resolution 会共享同一个
-串行 graph-state work item。
+monotonic deadline 会通过与 Run 内部 failure 和 Graph/RT result-commit contender 相同的 Run
+arbiter 竞争。内建 ready entry 按精确 Run identity 清除，dependent re-entry 被拒绝，queued
+plan/callback completion unit 恰好一次 retire，已经进入的 non-preemptible work 则会排空，
+但不能允许 staged publication。被接受的 commit contender、精确 predicate、符合条件的
+persistence、visible swap 与 terminal resolution 会共享同一个串行 graph-state work item。
 
 Issue #74 已扩展该 predicate，要求 supersession generation 仍为 current。Supersession 会选择一个
 更新 generation，
@@ -472,40 +483,390 @@ Issue #62 让 runtime/cache value 纵向切片成为当前行为：共享 YAML c
 
 ## 通用数据与 Region
 
-引入通用模型期间，`ImageBuffer` 继续作为当前 image payload。目标层次会增量建立：
+当前 baseline：`ImageBuffer`、`DataType`、`Device`、`PixelRect`、`ParameterMap`、
+operation ABI v2 以及既有 cache/execution ownership 仍是已经实现的 compatibility contract。
+V-2 实现了有界、dependency-neutral 的 CPU DenseTensor `Value`/`ImageView` 子集与一条内建
+operation。V-3 现已新增 checked BufferHandle ownership、由 lease 控制的 construction、
+process-local allocation/revision identity、受界限约束的 signed layout，以及 CPU image Value
+在正式 HP cache 中的 identity authority。V-4 现已新增 public bounded Region contract、
+logical dirty/cache validity，以及由精确 core dense path 执行的 ImageRect/TensorSlice。V-5 会
+路由 CPU implementation metadata 与 checked resource demand。V-6 现已新增
+dependency-neutral ReadyFence/Value readiness contract，以及一条由确定性 fake device executor
+证明的显式 source-private CPU Value-copy task。V-7 现已在进程 execution domain 中新增固定的
+source-private `DeviceExecutorRegistry`，并让仓库 Metal Perlin operation 经过其自有
+device/queue、invocation-scoped allocator 与持久 pipeline cache。V-8 现已新增经过检查的
+CPU/Metal binding fact、纯显式 access planning、保留 revision 的双向 transfer、进程级
+residency、精确 stale-completion arbitration、pending-Value continuation 与 asynchronous
+Perlin readback。V-9 现已新增仅面向 fixed registry 中可执行设备的隔离 memory/scratch
+account，在 allocation 前准入 native plan，与 allocator 上报的 actual byte 对账，并把精确
+lease 绑定到 persistent Value 与 asynchronous completion。V-10 批准 typed compute-I/O
+completion 并让 persistence authority 保持分离；V-11 通过 `ComputeIoExecutor` 运行首条有界
+cache/codec mechanism。V-12 现在会验证已安装通用模型中的 1/3/4/8/16 通道 FP32/FP64
+image、rank-one 至 rank-five FP32/FP64 latent Value、padded 与 signed/zero stride、精确
+Region merge、显式 CPU/external-device transfer 和有界 compute-I/O retention。V-13 现在会
+安装一条 packed FP4 E2M1、block-scale quantized DenseTensor 垂直路径，包含 version-1 Blocked
+addressing、checked packed access、block-aligned TensorSlice copy、保留表示的 transfer、精确
+memory-cache retention 与 fail-closed image disk persistence。V-14 现在会安装一条
+dependency-neutral provider-defined Value 垂直路径，包含保留 byte 的 Schema/Facet/Layout
+envelope、checked multi-buffer binding、一个注入式 typed registry、纯 C definition-suite ABI v3、
+纯 property/DataSpec/Region evaluation、canonical descriptor/content/layout digest、
+artifact-envelope round-trip，以及 generation-safe replacement/unload。V-15 现在会把这套未改变的
+通用模型绑定到一个可选的仓库自有 OpenEXR single-part deep-scanline provider/codec，并提供显式
+channel identity、typed shape/error rejection、有界 compute-I/O execution、generation-safe lifetime，
+以及依赖干净的默认 OFF package profile。精确行为记录在
+[内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
+[ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
+[插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
+[内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)；execution ownership 记录在
+[策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)与
+[计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)。下述完整模型是已接受目标；
+只有这里明确指出的 V-2 至 V-15 子集是当前 runtime 事实。
+
+[ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+是完整目标契约的权威来源。其核心分离关系是：
 
 ```text
 Value
-├── DenseTensor
-│   └── ImageView
-├── SparseTensor
-├── DeepImage
-├── PathSet / VectorScene
-└── Structured values
+├── DataDescriptor
+│   ├── exactly one versioned RepresentationSchema
+│   └── zero or more orthogonal versioned Facets
+└── one or more authoritative StorageBindings
+    ├── StorageLayout
+    ├── BufferHandle[]
+    ├── ReadyFence
+    └── AccessProvider lease
 ```
 
-第一条受支持纵向切片是 `DenseTensor + ImageView`，基础包括：
+`DataDescriptor` 是逻辑对象。Allocation、stride、packing、device、byte range、mapping 与
+readiness 是物理 binding fact。`Value` 在唯一的 exclusive `ValueBuilder::seal` 后保持逻辑和
+结构不可变；checked view 会保留完整 Value。Seal 会撤销每个普通 builder/caller
+`WriteLease` 和每条 consumer 写路径。Pending producer 只能保留 seal 时原子转交的唯一私有写
+capability，并且只能用于其预先验证的 binding envelope。稳定 core 通过永久
+Schema/Facet/Layout identity、canonical versioned payload、纯 nonblocking query、显式
+operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 
-- `DataDescriptor`：kind、rank、shape、byte stride、element format、plane、channel schema、
-  color/alpha 语义和 quantization；
-- `BufferHandle`：memory domain、device identity、byte range、allocation identity、mutability、
-  release behavior 和 synchronization fence；
-- `Region`：`ImageRect`、`TensorSlice`、object/time range 或 whole value。
+首个 representation 是同构 rank-N DenseTensor。普通图像是
+`DenseTensor + ImageFacet`；channel、color、alpha 与 time 含义都是显式的，绝不从名称推断。
+每个 site 的 variable sample 使用 `VariableSampleField`；OpenEXR Deep 逻辑 value 是
+`VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
+不含 runtime child Value。
 
-FP64、8/16 通道图像、padded row 和 N 维 latent 必须通过验证，不允许静默转为 float32 或猜测
-通道角色。Packed FP4 还需要 bits、packing、quantization block 和 offset-aware region 语义，
-不能建模成每 scalar 一个 byte。
+已实现的 V-2 至 V-15 子集刻意保持更窄的范围：
+
+- `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
+  或 floating element semantics、8/16/32/64-bit native scalar storage 或显式 four-bit FP4
+  E2M1 encoding，以及可选 V-13 block-scale quantization；后者包含 rank-matched positive block
+  shape，以及每个完整 row-major logical block 对应的一项 finite positive scale；
+- `ImageFacet` 显式映射彼此不同的 x/y axis 与可选 channel axis；
+- public `BufferHandle` 是同一个 opaque process-local `AllocationIdentity` 上受检、非空的
+  range；subrange 会保留 allocation lifetime。CPU allocation 可以签发 host read lease，
+  source-private native binding 则保留 external owner，并且只暴露经过检查的 binding fact；
+  两条路径都不暴露 public raw pointer 或 native pointer；
+- move-only `ValueBuilder` 控制唯一 move-only `WriteLease`，要求 byte offset 为零的 positive
+  exact-envelope Strided producer，或 version-1、nibble-aligned、exact-envelope、non-overlapping
+  Blocked producer，在 lease 存活时拒绝 seal，并发布全新 process-local `ValueRevisionId`；
+- final、copyable `Value` 共享 immutable descriptor/layout/handle state；DenseTensor Value
+  通过 sealed handle 构造，并且只保留一个带 tag 的 Strided 或 Blocked layout；Strided alias 可以使用受界限
+  约束的 byte offset 与正、零或负 signed stride，V-13 Blocked alias 则使用 checked bit offset
+  与 block bit stride；
+- retaining checked `DenseTensorView`/`ImageView` 持有 `ReadLease` 并暴露只读 whole-byte
+  address；`PackedDenseTensorView` 则暴露 checked FP4 code 与 scale-dequantized value，不伪造
+  element byte pointer；
+- installed `ReadyFence` 是 Pending、Ready、Failed 或 ProducerCancelled 的 copyable
+  nonblocking observer；其 move-only completer 只发布一个 terminal state，丢弃 unresolved
+  completer 会发布 cancellation；wait 通过共享的 non-inline executor 入队，该 executor 在
+  pending、queued 及 callback 完成前保持存活，并在 callback 进入时释放 queued
+  self-retention；
+- 同步 Value 初始即为 Ready；source-private CPU 与 native pending producer 保留唯一 mutable
+  completion capability，并在每次 terminal state 前撤销它；pending/failed/cancelled Value
+  保留 immutable metadata，但拒绝 BufferHandle 与 checked-view payload access；
+- 经过检查的 `DeviceId`、`MemoryDomain`、`StorageBinding`、producer identity 与纯
+  `AccessPlan`，会显式表示 direct、map、import、transfer 或 unsupported access。
+  `ValueTransferTask` 在全新的 destination binding 上保留逻辑 revision，并且只在 source ready
+  后以显式 queued work 执行 CPU copy、CPU-to-Metal upload 或 Metal-to-CPU readback；
+- 唯一的进程级 `ResidencyManager` 按精确 revision/binding 索引合格 replica。它会原子校验完整
+  Graph/Run/generation/task/producer/binding completion identity、发布 readiness 并插入
+  residency，因此晚到、重复或 identity 不匹配的 completion 不能释放 dependency work，也不能
+  重新获得 stale commit right。Kernel 会在 coordinator submission 前预跟踪每条 lineage，
+  而且只有 accepted current publication 才会在 currentness 可观察前推进该行，从而阻止之后
+  才启动的较旧 Run 让 freshness 倒退；
+- source-private `DeviceExecutorRegistry` composition 会在 `ExecutionService` 下拥有固定的非 CPU
+  executor；在仓库 plugin 已启用的 Apple profile 中，Metal executor 拥有一个可复用 native
+  device/queue 与经过校验的 pipeline cache，通过 invocation allocator 把 callback-scoped
+  texture/buffer 保留到 callback 返回，并在 reserved start 后进入一条选中的 Perlin operation，
+  且不会通过 Graph、policy、metadata 或 public Host state 暴露 native handle。Perlin 会发布
+  pending native Value，并编码 asynchronous texture-to-shared-buffer readback，不等待 command
+  buffer，也不调用同步 `getBytes`；
+- service composition 会校验全部逐 `DeviceId` 候选 limit，然后只为 frozen registry 中匹配的
+  executor 创建 device memory/scratch account。空 registry 或 non-Apple 默认 registry 不暴露
+  Metal account，而缺少候选 budget 的 registered executor 仍无法准入 native allocation；
+- `image_process:invert_dense` 把精确 descriptor-only inference 与 stride-aware
+  unsigned-8 execution 分开，已有 sealed input Value 时直接复用，并发布精确 sealed result
+  revision 与独立 ImageBuffer compatibility snapshot；
+- 私有正式 HP CPU image cache entry 把有效 sealed `NodeOutput::image_value` 作为
+  allocation/revision authority。普通 copy 保留 identity；dirty mutation、replacement 与
+  disk decode 创建新 identity；disk save 读取 Value byte；runtime token 永不成为持久
+  cache/task key。V-13 正式 memory-cache copy 还会保留 packed Value 与精确 TensorSlice
+  validity，而 image-only disk cache 会在 executor admission、filesystem mutation 或 codec
+  call 前拒绝 packed、quantized 或 latent 正式 Value；
+- installed `RegionSet` 支持规范 Empty/Whole、由 ImageRect 或 rank-general TensorSlice atom
+  组成的一个有界 nonempty conjunction、checked normalization/clipping/algebra/containment、
+  显式 budget，以及 typed Exact/ConservativeSuperset/Unknown/Unsupported/TooComplex outcome；
+- dirty source、per-node、edge、monolithic 与 HP validity record 保留规范化 Region；当前 image
+  tile、ImageBuffer helper、Host/IPC v2 inspection 与 operation ABI v2 使用 checked derived
+  PixelRect；
+- 当前选中的精确 core `invert_dense` callback 通过 checked stride 执行 ImageRect 或
+  TensorSlice；TensorSlice 是 HP-only monolithic work，same-key plugin replacement 无法继承该
+  source-private contract。
+
+V-14 新增第二种显式 `ProviderDefined` representation。它的 `DataDescriptorEnvelope` 拥有一个
+Schema 和一组受界限约束且有序的 Facet；它的 `ProviderDefinedLayout` 拥有一个 Layout definition
+以及经过检查的 buffer-role envelope；它的 Value 保留多个已 seal、host-readable 的
+`BufferHandle` 以及一个不可变 provider generation。DenseTensor-only accessor 与当前 transfer
+path 会拒绝这种表示。带 index 的 `ProviderReadLease` 会同时保留选中的 buffer 与 interpretation
+generation。
+
+一个注入式 `DataDefinitionRegistry` 在同一个 publication lock 下拥有单一 generation source、
+provider table，以及严格 typed 的 Schema/Facet/Layout map。它会暂存并校验完整 candidate bundle，
+原子发布新 generation 或 replacement generation，拒绝跨 provider typed-key conflict 且不产生
+局部可见性，并且不在持锁时调用 provider callback。Unload 会拒绝新 lookup；旧 Value、read、
+callback 与 opaque owner 则保留正在退役的 generation，直到最终 provider destroy 与 module
+release。
+
+V-12 增加的是验证，而不是新的 representation 或 provider ABI。它的 dependency-neutral
+矩阵会证明：1/3/4/8/16 通道 active logical FP32/FP64 image element 穿过 padded Value 与 CPU
+ImageBuffer bridge；rank-one 至 rank-five FP32/FP64 latent Value 穿过完整 rank TensorSlice；
+ImageRect/TensorSlice merge 保留选中/未选中的 element；显式 CPU 与注入式 external-device
+transfer 保留完整正向 producer envelope；binding、allocation、revision 与 Pending-to-Ready
+事实保持精确；negative/zero-stride 不可变 view 可读，并且 transfer 会显式拒绝它们。独立
+direct-offset byte oracle 会证明 rank-one 的唯一 stride
+大于 element，其 required storage span 真实带有 padding、active byte 保持精确且 padding
+sentinel 未被改写。CPU-copy 与 external preparation 会复用同一个 core 正向、零 offset、精确
+envelope、non-overlap 权威；external rejection 发生在保留 destination owner、生成 identity、
+创建 fence、调用 provider 与发布 Pending destination 之前，同时不会收紧通用 signed immutable
+publisher。已准入 compute-I/O task 会在有界 budget 下保留并观察相同的 Value metadata 与字节，
+但不会创建 artifact 或 persistence identity。
+
+V-13 新增一条可执行 packed 垂直路径。FP4 E2M1 encoding、floating-point semantics 与
+block-scale quantization 保持为彼此独立的事实。Version-1 `BlockedLayout` 记录 matching block
+shape、nibble-aligned block bit stride、absolute bit offset 与显式 nibble order。Checked
+publication 会证明完整 block、精确 byte bounds 与互不重叠的 block span。Packed TensorSlice
+copy 只接受 full-rank、nonempty、block-aligned interval，会投影 row-major scale、直接复制 code，
+并发布 fresh canonical blocked CPU Value。CPU 与注入式 external-device transfer 会在不同
+binding 中保留 descriptor、quantization、layout、byte envelope（包括 unused nibble bit）、逻辑
+revision 与 Pending-to-Ready fact。正式 memory cache 会保留精确 Value/Region fact；image disk
+persistence 则 fail-closed，不会伪造 widened image byte 或通用 artifact format。
+
+V-14 实现一个受界限约束的具体 `DataSpec`、typed pure property/Region outcome、大小精确的
+C11/C++17 v3 definition-suite ABI，以及带 tag 的 SHA-256 Descriptor/Content/StorageLayout digest。
+纯 callback 不接收 payload；validation 与 canonical-content traversal 只接收保留且经过检查的
+buffer view。Versioned artifact-envelope encoding 可以在没有 provider 时保留未知
+Schema/Facet/Layout byte 与 digest metadata。它不是 graph document、filesystem codec、cache
+manifest/chunk store 或 durable output authority。
+
+V-15 实现首个具体可选 `VariableSampleField + ImageFacet + DeepSampleFacet` codec。其 v3
+provider 会发布四项固定 definition，并使用显式版本化 mapping metadata；诊断用途的 channel
+名绝不隐含 role。Canonical provider-defined Value 包含 row-major count、经过检查的 prefix
+offset，以及每个 unit-sampled channel 各自一条按 identity 排序的 FP32 stream。由于复用 V-14
+的 nonempty semantic-buffer 不变量，全零 image 只保留 count/offset storage；channel mapping 仍
+保存在版本化 metadata 中，不引入 sentinel payload 或零长度 envelope。Source-private
+adapter 会读取与写入完整 single-part deep-scanline 文件，通过注入的 registry 物化结果，保留
+精确 generation 与 Value/read lease，并把所有 foreign failure 转换为 Host 自有 error。每项不可
+拆分的 codec call 都作为一项正数预算的 `ComputeIoExecutor` task 运行，同时关闭 OpenEXR 内部
+thread。
+
+V-15 仍不含 public device registry、device queue/in-flight dimension、更多 packed encoding
+或 quantization formula、未对齐 requantizing slice、access/conversion/inference/execution provider
+suite、通用 graph/cache Value persistence、manifest/chunk、deep-tiled/multipart/mixed-part OpenEXR，
+或通用 named graph Value output。Native
+executor、transfer submission、mutable producer、completion admission 与 residency owner
+仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、现有 image codec 与 Host
+surface 的 compatibility representation；V-15 不会让其 deep Value 经过这套表示。
+
+`ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
+executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意
+channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
+而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
+
+对于当前 V-15 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
+builder write 需要 lease；已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。
+Source-private producer 可以通过其不可复制的 capability，在预先验证的
+binding/Layout/handle envelope 内完成一个 sealed pending CPU 或 native payload。该 capability 的退役
+happen-before Ready、Failed 或 ProducerCancelled 发布。Pending、Failed 与
+ProducerCancelled 不暴露 consumer-readable payload。CPU binding 可以提供 direct host
+visibility；device-local binding 不会提供。Strided、Blocked 与 ProviderDefined Layout 都保留
+有界 buffer envelope。`DeviceBackend`、`DeviceId` 与 `MemoryDomain` 彼此分离，当前 access
+由 `Direct | Map | Import | Transfer | Unsupported` plan 显式表示。V-8 中只有 direct CPU
+access 与显式 CPU/Metal transfer 具有 production execution；其他 plan kind 仍是 typed
+outcome，而不是隐藏工作。
+
+已实现的 `RegionSet` 是基于显式逻辑 domain key 的有界析取范式。MVP 支持 Whole、Empty、
+ImageRect、TensorSlice 与一个 nonempty clause。Region algebra 返回 Exact、带标签的
+ConservativeSuperset、Unknown、Unsupported 或 TooComplex，而不是静默放大。V-14 provider
+子集中的 `DataSpec` 约束 Schema identity/version 与 logical-site bound，并使用 subset、
+disjointness、conditional runtime guard 或
+`CannotEvaluate`；它绝不授权隐式 conversion 或 device access。
+
+Runtime revision、descriptor/content/Layout digest 与 artifact identity 是不同 identity。
+Persistence 分成 graph document、canonical descriptor envelope、artifact/cache manifest 与
+chunk，以及绝不持久化的 runtime binding。Provider 缺失时，未知但有效的 extension byte 会被
+保留而不被解释。
+
+Public migration 会完整收口，而不是永久保留双重边界：
+
+```text
+ImageBuffer     -> Value + ImageFacet + ImageView
+PixelRect       -> RegionSet atom ImageRect
+Device          -> DeviceBackend + DeviceId + MemoryDomain
+OperationOutput -> named Value outputs
+ParameterMap    -> configuration only
+```
+
+只有精确 record 与自有 consumer 已经存在后，operation provider 才从临时 C++ ABI v2 迁移到
+单独版本化的 pure-C provider ABI v3。完成边界会删除 v2，不保留永久 wrapper、alias、
+forwarding header、dual loader 或 v2-to-v3 shim。Policy ABI v1 保持独立。
+
+### Project 4 实现依赖契约
+
+下表冻结架构顺序，而不是 live completion status。每个链接 Issue 仍是可独立验证的实现切片，
+其 Issue 与 Project field 仍是状态权威。
+
+| 切片 | 交付边界 | 阻塞切片 |
+| --- | --- | --- |
+| [#78 / V-1](https://github.com/kevin-zf1123/photospider/issues/78) | 批准通用数据、内存与 Region ADR；只修改文档 | #63、#65 |
+| [#79 / V-2](https://github.com/kevin-zf1123/photospider/issues/79) | 以 CPU DenseTensor 与 ImageView 跑通一条 operation | #78 |
+| [#80 / V-3](https://github.com/kevin-zf1123/photospider/issues/80) | 贯通 BufferHandle ownership、allocation identity 与 cache | #79 |
+| [#81 / V-4](https://github.com/kevin-zf1123/photospider/issues/81) | 让 ImageRect 与 TensorSlice 经过统一 Region | #79、#72 |
+| [#82 / V-5](https://github.com/kevin-zf1123/photospider/issues/82) | 用 operation metadata 驱动 CPU implementation 与 resource routing | #80、#70 |
+| [#83 / V-6](https://github.com/kevin-zf1123/photospider/issues/83) | 以 fake device 证明 fence、asynchronous completion 与显式 transfer | #80、#81、#82、#70 |
+| [#84 / V-7](https://github.com/kevin-zf1123/photospider/issues/84) | 通过 DeviceExecutorRegistry 跑通一条 Metal operation | #83 |
+| [#85 / V-8](https://github.com/kevin-zf1123/photospider/issues/85) | 实现显式 CPU/GPU transfer、residency 与 stale completion | #84、#74 |
+| [#86 / V-9](https://github.com/kevin-zf1123/photospider/issues/86) | 在 ResourceLedger 中核算 device memory 与 scratch | #84、#70 |
+| [#87 / V-10](https://github.com/kevin-zf1123/photospider/issues/87) | 批准 typed compute-I/O completion，并分离 cache、Graph 文档、daemon 与 durable-output authority；只修改文档 | #65 |
+| [#88 / V-11](https://github.com/kevin-zf1123/photospider/issues/88) | 让有界 cache/asset/codec I/O mechanism 经过 `ComputeIoExecutor`，但不迁移 commit policy | #87、#70 |
+| [#89 / V-12](https://github.com/kevin-zf1123/photospider/issues/89) | 验证 multi-channel、FP64、latent 与 stride matrix | #81、#85 |
+| [#90 / V-13](https://github.com/kevin-zf1123/photospider/issues/90) | 跑通一个 packed FP4/quantized DenseTensor slice | #89 |
+| [#117 / V-14](https://github.com/kevin-zf1123/photospider/issues/117) | 证明 dependency-free VariableSampleField definition、multi-buffer Value、pure query/digest 及 generation replacement/unload | #90 |
+| [#118 / V-15](https://github.com/kevin-zf1123/photospider/issues/118) | 增加首个可选 OpenEXR deep-scanline provider/codec，且不泄漏依赖 | #117 |
+
+V-14 是当前单独的依赖中立合成 `VariableSampleField` 切片。“依赖中立”表示该证明既不使用
+OpenEXR，也不使用其他可选 codec。它会直接验证 registration、unknown byte preservation、
+multi-buffer Layout 与 binding、不具备 payload 权限的 Region/DataSpec/query、独立且精确的
+canonical digest、generation replacement、lease 与 unload。它的 ABI v3 仅是 definition suite，
+不会提前实现 access、conversion、inference、execution 或 codec 权限。
+
+V-15 是当前单独的可选 OpenEXR provider/codec 切片。首个 format 是 single-part
+deep-scanline read/write；它跟随 core 与 V-14 proof，而不是替代 V-14。Deep tiled、multipart
+与混合 shallow/deep part 仍是后续工作。Build option 默认为 OFF；该 profile 会从 kernel、
+public ABI 与 dependency-disabled product 中移除 OpenEXR header、link、type、symbol、package
+discovery、target export 与 transitive dependency。只有显式 component consumption 这条 installed
+package 路径会发现 OpenEXR 并导入 provider MODULE。
 
 ## 异构 Executor
+
+当前 V-9 Metal route 组合了 process ownership、registry dispatch、queue/allocator/cache 复用、
+provider-state 移除、asynchronous pending Value、显式 CPU/Metal transfer、进程级 residency 与
+精确 stale-result arbitration。它的唯一 service ledger 现在会在 native allocation 前原子准入
+per-device memory/scratch plan、校准 native actual byte、把 memory 绑定到 persistent Value
+ownership，并把 scratch 绑定到精确 command completion。Queue、lane 与 pipeline-cache
+infrastructure 仍不属于 per-invocation 核算。
 
 GPU executor 不是第二个普通 CPU worker pool。每个物理 device executor 拥有 native queue/stream、
 allocator、in-flight limit、memory/scratch reservation、pipeline cache、transfer queue 和 completion
 fence。CPU worker 不阻塞等待 GPU completion；stale device completion 会释放资源，但不能提交到
 更新的 graph revision。
 
-Compute I/O executor 处理有界 cache/asset read/write 以及 codec 周边数据移动，同时按 operation
-数量和 byte 预算。它不拥有 daemon framing、graph document persistence 或 `OutputStore` identity/
-lease 语义；CPU-heavy codec work 返回 CPU executor。
+当前 V-11 新增唯一 source-private process `ComputeIoExecutor`，其中有一个独立 worker，并在
+lazy payload construction 或副作用之前，按 task 数与 estimated retained bytes 原子准入。
+已接受 work 会保留显式 transaction lifetime token，并暴露 typed completion；failure、
+cancellation、late return 与 shutdown 都会恰好一次 settlement。CPU compute worker 不能同步
+等待该 executor。
+
+首条生产垂直路径通过该 executor 运行 staged HP cache-save codec/filesystem mechanism，同时
+由 graph-state policy 保留 eligibility、path、错误解释与既有 publication 前 commit point。
+当前不可拆分的 image-codec call 整体运行在 I/O worker 上；未来拆分后的 API 必须把独立准入的
+CPU-heavy phase 送回 CPU executor。同步 cache administration/load、daemon framing、Graph
+文档 persistence、`OutputStore` commit policy、用户 path、retry 与 durability claim 仍由
+既有 owner 负责。
+
+### Compute I/O 耐久性与完成目标
+
+当前基线已有上文所述有界 executor 与 staged HP cache-save 垂直路径，但仍没有 crash-durable
+output store。Deferred HP cache write 仍发生在 live Graph publication 前，并可能使 Run
+失败；Graph 文档保存会直接写入 destination；daemon job state 与 acknowledgement 都是
+process-local；私有 IPC `OutputStore` 使用内存 lease/TTL index，提供受保护、no-replace 的
+进程级 delivery。旧 `io/save` callback 也可以在包围它的 staged Run 提交前暴露文件。
+
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+接受以下 typed partial order 目标：
+
+```text
+成功产值 Run：
+  OperationReturned(success)
+    -> producer fence 成功
+    -> ValueReady
+    -> 经过校验的 Graph/RT publication
+    -> RunTerminal(Succeeded)
+
+Run terminal 之前的 ComputeRun failure：
+  operation/readiness/dependency failure
+  或 Graph/RT validation/publication/Run-result commit failure
+  类型化失败 -> RunTerminal(Failed)
+  （不伪造 ValueReady 或 OutputCommitted）
+
+Run cancellation：
+  cancellation 获胜 -> RunTerminal(Cancelled)
+  late/stale completion -> 只清理
+  （不产生新的 ValueReady 或 durable receipt）
+
+经过校验的 empty-plan / zero-work / no-op：
+  no-work validation -> RunTerminal(Succeeded)
+  （不产生新的 OperationReturned、ValueReady 或 durable receipt）
+
+RunTerminal(Succeeded) -> ResultAvailable   （保留结果时）
+
+compute-and-persist success =
+  RunTerminal(Succeeded) AND OutputCommitted
+
+Run 后置 output transaction failure =
+  RunTerminal(unchanged) AND OutputCommitFailed
+  （不产生或撤销 ValueReady；不返回声称达到请求 durability 的回执）
+
+RequestAccepted、OutputCommitFailed、GraphDocumentSaved 与 ResponseObserved
+由拥有相应操作的 owner 分别排序。
+```
+
+只有 dependency-valid Graph/RT publication 或一个已准入的合法 no-op 才会把
+`ComputeRun::Succeeded` 解析为成功。Cache persistence、durable output commit、Graph 文档保存、
+daemon terminal state、result availability 与 caller observation 都保持为独立 outcome。Run
+后置 cache、codec 与 output 工作拥有自身类型化 outcome，不能延迟或改写已发布 Run terminal。
+Run terminal 之后的输出失败报告 `OutputCommitFailed`，而不是
+`RunTerminal(Failed)`，既不产生也不撤销 `ValueReady`。调用方或 daemon 可以报告组合
+request failure，但必须保留 Run terminal 与 output、Graph 文档、cache/codec 和 response
+事实，不能把聚合结果反投射回 Run state。在之后 Run cancellation 之前已经独立提交的
+receipt 继续对该输出事务保持权威。
+
+| 持久化领域 | 目标 authority | 完成与耐久契约 |
+| --- | --- | --- |
+| Graph 文档 | Graph-state save transaction | 带版本、same-directory staging、expected-version validation、atomic replacement 与显式 achieved-durability result |
+| Disk cache | 使用有界 I/O mechanism 的 Graph cache policy | 可丢弃 acceleration；failure 不改写成功 Run/output outcome |
+| 用户输出 | `OutputStore` commit authority | 稳定 `OutputCommitId`；完整 payload/metadata 校验与文件同步；canonical manifest 校验、同步和原子 no-replace 发布；从叶目录到 durability root 的目录屏障；类型化 achieved-durability receipt 或 `OutputCommitFailed`；recovery；且默认 no-overwrite |
+| Daemon transport | Job registry 与 result delivery | 只负责 acceptance、terminal state 与 response observation；不能据此推断 durability |
+| Codec | 注入的 representation adapter | 只负责 conversion 与 error translation；不拥有 path、retry、identity 或 commit authority |
+
+Durable output retry 通过稳定 commit identity 保持幂等，delivery 是 at least once，而不是 exactly
+once。Manifest publication 前的 cancellation 可以中止并清理 staging；manifest commit point 后
+则报告已提交 receipt，而不是假装 output 已被取消。请求 crash durability 时，必须完整校验并
+同步 payload/metadata 文件，完整写入并校验 canonical manifest，在原子 no-replace 发布前同步
+manifest 文件，校验已发布 identity，并为事务创建、rename 或修改的每一级目录按从叶目录到配置
+durability root 的顺序执行屏障。Atomic-visible receipt 可以在其较弱提交点后返回；只有所有更强
+屏障都成功后才能返回 crash-durable receipt。不支持 file synchronization、directory barrier
+或 atomic no-replace publication 时必须显式失败，绝不能静默降级 durability。
+
+所有 persistent path 都必须 rooted 且 normalized，通过 no-follow/identity check 拒绝 escape 与
+symlink substitution，在保留 work 前应用 quota，并把 achieved durability 暴露为 capability/
+result。`ComputeIoExecutor` 只提供有界 mechanism；上述 domain authority 保留 identity、
+ordering、policy 与 receipt ownership。
 
 ## 执行画像
 
@@ -553,6 +914,20 @@ sandbox/capability policy、shared-memory 或 FD transport、quota 和 output de
 10. Terminal publication 不表示 Run 可以回收；必须先让全部 lease/grant 达到 quiescence 并释放。
 11. `(RunId, RunLocalTaskId)` 是 completion identity；policy-binding 或 execution-route generation
     不是 Run identity。
+12. Run success 表示已验证 Graph/RT publication 或合法 no-op；它不表示 cache、output、Graph
+    文档、daemon、delivery 或 response completion。
+13. Cache 是可丢弃 acceleration，绝不是 durable user-output authority；cache persistence
+    failure 不能改写已经成功的 Run 或 output commit。
+14. Durable output commit 使用稳定 identity、经过完整校验与同步的 payload/metadata 和
+    canonical manifest 文件、原子 no-replace manifest-last publication、从叶目录到
+    durability root 的目录屏障与类型化 achieved-durability receipt；recovery 保持幂等，
+    delivery 是 at least once，而不是 exactly once。
+15. Graph 文档保存保持为独立的带版本 transaction；daemon terminal state 或 acknowledgement
+    保持为非耐久 transport observation。
+16. 平台无法达到用户请求的 durability level 时必须显式失败，绝不能静默降级。
+17. 调用方或 daemon 可以把 Run、output、Graph 文档、cache/codec 与 response
+    事实聚合为一个 request outcome，但必须保留每个 authority 自有事实，绝不能
+    把 composite failure 反投射回 Run state。
 
 ## 依赖顺序
 

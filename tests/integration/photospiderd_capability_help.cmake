@@ -7,6 +7,22 @@ if(NOT DEFINED PHOTOSPIDERD OR "${PHOTOSPIDERD}" STREQUAL "")
     "Photospiderd capability help driver requires PHOTOSPIDERD")
 endif()
 
+# The same driver validates build-tree and non-system-prefix install-tree
+# executables. Remove loader overrides so success must come from the target's
+# normal build/install lookup contract rather than a developer shell.
+foreach(LOADER_OVERRIDE
+    LD_LIBRARY_PATH
+    LD_PRELOAD
+    LIBPATH
+    SHLIB_PATH
+    DYLD_LIBRARY_PATH
+    DYLD_FALLBACK_LIBRARY_PATH
+    DYLD_FRAMEWORK_PATH
+    DYLD_FALLBACK_FRAMEWORK_PATH
+    DYLD_INSERT_LIBRARIES)
+  unset(ENV{${LOADER_OVERRIDE}})
+endforeach()
+
 execute_process(
   COMMAND "${PHOTOSPIDERD}" --help
   RESULT_VARIABLE HELP_RESULT

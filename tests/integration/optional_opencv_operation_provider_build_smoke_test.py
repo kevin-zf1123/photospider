@@ -81,6 +81,225 @@ OPTIONAL_PROVIDER_CTEST_NAME = (
 #: @brief Stable build-smoke entry required by every provider-disabled profile.
 #: @note Its own build-smoke label is not inherited by diagnostic cases.
 DEPENDENCY_DISABLED_CTEST_NAME = "DependencyDisabledInstallSmoke"
+#: @brief Stable process-wide Value identity case required by the profile.
+#: @note The fixture loads two independently linked Value-using DSOs.
+VALUE_RUNTIME_CTEST_NAME = (
+    "ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide"
+)
+#: @brief Stable registered-only executor placeholder required by the profile.
+#: @note The production executor still compiles through the nested product.
+COMPUTE_IO_EXECUTOR_NOT_BUILT_CTEST_NAME = (
+    "test_compute_io_executor_NOT_BUILT"
+)
+#: @brief Stable packed-FP4 placeholder required by the V-13 profile closure.
+#: @note The dependency-disabled install smoke builds this target separately;
+#:   the provider-disabled focused target closure intentionally does not.
+PACKED_FP4_NOT_BUILT_CTEST_NAME = (
+    "test_packed_fp4_dense_tensor_NOT_BUILT"
+)
+#: @brief Current exact derived sentinels for the V-13 focused build closure.
+#: @note Production code derives these from the CMake target manifest; this
+#:   tuple is only the independent current-profile oracle in the safety suite.
+PROVIDER_DISABLED_EXPECTED_SENTINELS = (
+    COMPUTE_IO_EXECUTOR_NOT_BUILT_CTEST_NAME,
+    PACKED_FP4_NOT_BUILT_CTEST_NAME,
+)
+#: @brief Stable Value-backed dense-image cases required without the provider.
+#: @note The names independently mirror the dedicated integration target.
+CPU_DENSE_IMAGE_CTEST_NAMES = (
+    (
+        "CpuDenseTensorImageOperation."
+        "ReadyFenceQueuesWaitsAndCancellationIsObserverLocal"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ReadyFenceRetainsFailureAndDroppedCompleterPublishesCancellation"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "PendingWaitRetainsSoleExecutorUntilCallbackCompletion"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TerminalWaitRetainsSoleExecutorUntilCallbackCompletion"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TransferRetainsSoleExecutorUntilDestinationCompletion"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ConcurrentWaitRegistrationAndPublicationDeliverExactlyOnce"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ConcurrentCancellationAndCallbackEntryHaveOneWinner"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ConcurrentTransferDestructionAndCallbackSettleDestination"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "PendingProducerMakesPayloadReadableOnlyAfterReady"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "FailedPendingValueRetainsMetadataAndRejectsPayloadAccess"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ExplicitTransferRunsOnlyAsQueuedFakeDeviceTask"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "CpuToMetalTransferUsesInjectedProviderAndRejectsHostRead"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ExternalTransferFailureIsTypedAndLaterTransferRecovers"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ChainedTransferReadinessQueuesDistinctLaterTaskWithoutBlocking"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DestroyedTransferCancelsDestinationAndQueuedCallbackBecomesNoOp"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TransferPropagatesFailedAndCancelledSourcesWithoutPayloadAccess"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ValueRejectsMalformedFacetStrideAndEnvelope"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "BuilderScopesWriteAuthorityAndReadLeaseLifetime"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "AllocationIdentityValidityDoesNotQueryAllocationLiveness"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ImmutableSignedOffsetViewsShareAllocationAndMintRevisions"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ValueCopiesShareBytesAndViewsRetainLifetime"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DenseTensorViewMovesPreserveSourceAndReplaceDestination"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ImageViewMovesPreserveSourceAndReplaceDestination"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ValueDeepCopiesLvaluePayloadShapeAndStrides"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ValueDeepCopiesRvaluePayloadBeforeSourceOwnerRetires"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "GenericFloatingMatrixPreservesChannelsLatentsStridesAndBoundaries"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "FormalHpCachePreservesAliasesAndResealsDirtyAndReplacementBytes"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "PartialHpValidityRemovesDiskArtifactsAndCannotBeReused"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorDirtyStagingPublishesFreshIdentityAndExactRegionAtCommit"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DiskReloadMintsFreshRuntimeIdentitiesWithoutChangingCachePath"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DiskSaveSerializesSealedValueInsteadOfMutableCompatibilitySnapshot"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DenseInvertInferencePreservesExactLogicalDescriptor"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DenseRunnerConsumesSealedValueAndPublishesExactResultRevision"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ProductRegistryAndExecutorInvertPaddedMultiChannelInput"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ProductExecutorInvertsOnlySelectedPaddedImageRect"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ProductExecutorUsesAllRankFourTensorSliceAxes"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ProductExecutorHandlesEmptyWholeAndRejectsRankMismatch"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorDirtyPlanExecutesRegisteredProductAndStagesExactValidity"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorTargetPlanRejectsPreferredRouteAddedBeforeTaskPopulation"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorAllExternallySatisfiedPlanIgnoresDeviceInventoryMutation"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorDirtySelectedCompleteCacheRejectsDeviceInventoryMutation"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorPartialActivePlanRejectsDeviceInventoryMutation"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorDirtyPlanRecomputesMissingAndPartialIntermediateParents"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorUpstreamPlanRejectsPreferredRouteAddedBeforeTaskPopulation"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorDirtyUpdateMergesSelectedBytesIntoExistingFullOutput"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "FreshTensorPartialOutputBecomesReusableOnlyAfterWholeCommit"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "RunnerRejectsExecuteDescriptorMismatchAsComputeError"
+    ),
+)
 
 
 def ctest_json_test(
@@ -108,23 +327,27 @@ def ctest_json_test(
 
 
 def provider_disabled_ctest_payload(
-    sentinels: tuple[str, ...] = (),
+    sentinels: tuple[str, ...] = PROVIDER_DISABLED_EXPECTED_SENTINELS,
 ) -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
     @param sentinels Registered-but-unbuilt target names with no properties.
-    @return JSON payload containing two profile entries, three disk cases, and
-      two production lifecycle cases plus the requested sentinels.
+    @return JSON payload containing two profile entries, 48 dense-image cases,
+      one Value-runtime case, three disk cases, two production lifecycle cases,
+      and the requested derived sentinels.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
-      60-second timeout. Both groups use the exact `kernel-concurrency` label.
+      60-second timeout. Both groups use the exact `kernel-concurrency` label;
+      every registered-only sentinel has no label or timeout.
     """
 
     names = {
         DEPENDENCY_DISABLED_CTEST_NAME,
         OPTIONAL_PROVIDER_CTEST_NAME,
+        VALUE_RUNTIME_CTEST_NAME,
         *DISK_CACHE_CTEST_NAMES,
         *KERNEL_LIFECYCLE_CTEST_NAMES,
+        *CPU_DENSE_IMAGE_CTEST_NAMES,
         *sentinels,
     }
     return json.dumps(
@@ -132,17 +355,27 @@ def provider_disabled_ctest_payload(
             "tests": [
                 ctest_json_test(
                     name,
-                    labels=["kernel-concurrency"]
-                    if name in DISK_CACHE_CTEST_NAMES
-                    or name in KERNEL_LIFECYCLE_CTEST_NAMES
-                    else None,
+                    labels=(
+                        ["kernel-concurrency"]
+                        if name in DISK_CACHE_CTEST_NAMES
+                        or name in KERNEL_LIFECYCLE_CTEST_NAMES
+                        else (
+                            ["value-runtime"]
+                            if name == VALUE_RUNTIME_CTEST_NAME
+                            else None
+                        )
+                    ),
                     timeout=(
                         20
                         if name in DISK_CACHE_CTEST_NAMES
                         else (
                             60
                             if name in KERNEL_LIFECYCLE_CTEST_NAMES
-                            else None
+                            else (
+                                30
+                                if name == VALUE_RUNTIME_CTEST_NAME
+                                else None
+                            )
                         )
                     ),
                 )
@@ -804,6 +1037,43 @@ class ProviderDisabledProfileTest(unittest.TestCase):
       install, or generated executable is started.
     """
 
+    def test_builds_exact_focused_targets_with_internal_seam_consumer(
+        self,
+    ) -> None:
+        """@brief Pin the provider-disabled nested build target closure.
+
+        @return None after the target tuple contains the sole focused
+          internal-test-product consumer, leaves the executor behavior target
+          registered-only, and contains no full-suite-only target.
+        @throws AssertionError If the long-lived dependency-disabled profile
+          silently loses its kernel contract build, rebuilds the executor
+          behavior target, or widens into the full suite.
+        @note The CMake configure remains authoritative for the direct-link
+          closure; the nested product still compiles the executor
+          implementation while this test protects the Python smoke's exercised
+          surface.
+        """
+
+        self.assertEqual(
+            subject.PROVIDER_DISABLED_BUILD_TARGETS,
+            (
+                "test_optional_opencv_operation_provider",
+                "test_cpu_dense_tensor_image_operation",
+                "test_value_identity_across_dsos",
+                "test_disk_cache_diagnostic_concurrency",
+                "test_kernel_lifecycle_concurrency",
+                "test_kernel_contracts",
+            ),
+        )
+        self.assertNotIn(
+            "test_compute_service_split",
+            subject.PROVIDER_DISABLED_BUILD_TARGETS,
+        )
+        self.assertNotIn(
+            "test_compute_io_executor",
+            subject.PROVIDER_DISABLED_BUILD_TARGETS,
+        )
+
     def test_accepts_exact_cache_and_rejects_provider_mismatch(self) -> None:
         """@brief Require the intended provider-off capability combination.
 
@@ -833,25 +1103,33 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after parsing preserves seven names and concurrency
+        @return None after parsing preserves 58 names and focused-test
           properties.
         @throws AssertionError If parsing or validation rejects the contract.
-        @note Exact labels exclude the build-smoke label from disk test cases.
+        @note Exact labels exclude the build-smoke label from disk and
+          Value-runtime test cases; both derived sentinels remain unlabelled.
         """
 
         expected = {
             DEPENDENCY_DISABLED_CTEST_NAME,
             OPTIONAL_PROVIDER_CTEST_NAME,
+            VALUE_RUNTIME_CTEST_NAME,
+            *PROVIDER_DISABLED_EXPECTED_SENTINELS,
             *DISK_CACHE_CTEST_NAMES,
             *KERNEL_LIFECYCLE_CTEST_NAMES,
+            *CPU_DENSE_IMAGE_CTEST_NAMES,
         }
 
         inventory = subject.parse_ctest_inventory(
             provider_disabled_ctest_payload()
         )
 
+        self.assertEqual(len(CPU_DENSE_IMAGE_CTEST_NAMES), 48)
+        self.assertEqual(len(expected), 58)
         self.assertEqual(set(inventory), expected)
-        subject.validate_provider_disabled_inventory(inventory, set())
+        subject.validate_provider_disabled_inventory(
+            inventory, set(PROVIDER_DISABLED_EXPECTED_SENTINELS)
+        )
 
     def test_derives_registered_only_sentinels_from_target_manifest(
         self,
@@ -1160,6 +1438,54 @@ class ProviderDisabledProfileTest(unittest.TestCase):
                     )
                     self.assertNotIn(invalid_target_name, result.stderr)
 
+    def test_rejects_labelled_derived_sentinels(self) -> None:
+        """@brief Reject a label attached to either derived sentinel.
+
+        @return None after validation reports the injected property drift.
+        @throws AssertionError If the exact provider-disabled contract accepts
+          the sentinel with a CTest label.
+        @note Each mutation starts from the complete valid 58-entry inventory
+          and changes only one sentinel's `LABELS` property.
+        """
+
+        expected_sentinels = set(PROVIDER_DISABLED_EXPECTED_SENTINELS)
+        for sentinel in PROVIDER_DISABLED_EXPECTED_SENTINELS:
+            with self.subTest(sentinel=sentinel):
+                inventory = subject.parse_ctest_inventory(
+                    provider_disabled_ctest_payload()
+                )
+                inventory[sentinel]["LABELS"] = ["build-smoke"]
+                with self.assertRaisesRegex(
+                    RuntimeError, "registered-only CTest property mismatch"
+                ):
+                    subject.validate_provider_disabled_inventory(
+                        inventory, expected_sentinels
+                    )
+
+    def test_rejects_timed_derived_sentinels(self) -> None:
+        """@brief Reject a timeout attached to either derived sentinel.
+
+        @return None after validation reports the injected property drift.
+        @throws AssertionError If the exact provider-disabled contract accepts
+          the sentinel with a CTest timeout.
+        @note Each mutation starts from the complete valid 58-entry inventory
+          and changes only one sentinel's `TIMEOUT` property.
+        """
+
+        expected_sentinels = set(PROVIDER_DISABLED_EXPECTED_SENTINELS)
+        for sentinel in PROVIDER_DISABLED_EXPECTED_SENTINELS:
+            with self.subTest(sentinel=sentinel):
+                inventory = subject.parse_ctest_inventory(
+                    provider_disabled_ctest_payload()
+                )
+                inventory[sentinel]["TIMEOUT"] = 1
+                with self.assertRaisesRegex(
+                    RuntimeError, "registered-only CTest property mismatch"
+                ):
+                    subject.validate_provider_disabled_inventory(
+                        inventory, expected_sentinels
+                    )
+
     def test_rejects_malformed_broad_or_drifted_ctest_inventory(self) -> None:
         """@brief Reject malformed, broad, missing, or drifted inventories.
 
@@ -1183,6 +1509,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
                 )
             )
 
+        expected_sentinels = set(PROVIDER_DISABLED_EXPECTED_SENTINELS)
         old_full_only_inventory = {
             name: {}
             for name in {
@@ -1192,7 +1519,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
             subject.validate_provider_disabled_inventory(
-                old_full_only_inventory, set()
+                old_full_only_inventory, expected_sentinels
             )
 
         valid_inventory = subject.parse_ctest_inventory(
@@ -1208,7 +1535,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         ]
         with self.assertRaisesRegex(RuntimeError, "property mismatch"):
             subject.validate_provider_disabled_inventory(
-                drifted_inventory, set()
+                drifted_inventory, expected_sentinels
             )
 
         drifted_lifecycle_inventory = {
@@ -1220,7 +1547,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         ] = 20
         with self.assertRaisesRegex(RuntimeError, "property mismatch"):
             subject.validate_provider_disabled_inventory(
-                drifted_lifecycle_inventory, set()
+                drifted_lifecycle_inventory, expected_sentinels
             )
 
         broad_inventory = {
@@ -1230,7 +1557,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         broad_inventory["test_scheduler_NOT_BUILT"] = {}
         with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
             subject.validate_provider_disabled_inventory(
-                broad_inventory, set()
+                broad_inventory, expected_sentinels
             )
 
 

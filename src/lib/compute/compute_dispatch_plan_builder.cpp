@@ -40,14 +40,16 @@ ComputeDispatchPlanBuilder::ComputeDispatchPlanBuilder(
 
 /** @copydoc ComputeDispatchPlanBuilder::build_high_precision_plan */
 ComputePlan ComputeDispatchPlanBuilder::build_high_precision_plan(
-    GraphModel& graph, int node_id, bool publish_inspection) const {
+    GraphModel& graph, int node_id,
+    const std::vector<Device>& available_devices, bool publish_inspection,
+    bool allow_reusable_cache) const {
   const std::vector<int> execution_order =
       traversal_.topo_postorder_from(graph, node_id);
   NodeCacheTaskGraphPruner node_cache_pruner;
   const ComputeRequest request{ComputeIntent::GlobalHighPrecision, node_id,
-                               true, std::nullopt};
+                               true, std::nullopt, allow_reusable_cache};
   const std::shared_ptr<const FullTaskGraph> full_graph =
-      get_or_expand_full_task_graph(graph, request.intent);
+      get_or_expand_full_task_graph(graph, request.intent, available_devices);
   ComputePlan compute_plan =
       node_cache_pruner.prune(*full_graph, request, execution_order, graph);
   if (publish_inspection) {

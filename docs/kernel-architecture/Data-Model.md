@@ -167,7 +167,8 @@ Graph state.
 
 | Field | Meaning |
 | --- | --- |
-| `image_buffer` | Image payload as the public `ImageBuffer` contract. |
+| `image_buffer` | Independent current plugin ABI v2, tiled-write, codec, and Host compatibility snapshot. |
+| `image_value` | Immutable sealed or producer-pending Value with explicit allocation/binding/revision identity when valid. Pending state is request-local and cannot enter formal cache or visible commit. |
 | `data` | Named scalar or structured outputs stored as a `plugin::ParameterMap`. |
 | `space` | Spatial transform, scale, and ROI metadata. |
 | `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through `ImageBuffer::step`; padding is excluded and opaque device values retain provider diagnostics. |
@@ -195,12 +196,15 @@ The cache-related node fields are:
 | Field | Status | Meaning |
 | --- | --- | --- |
 | `cached_output_high_precision` | Formal cache | HP cache for full-quality reusable output. |
+| `hp_version` | Formal cache metadata | Monotonic revision of the reusable HP output. |
+| `hp_region` | Formal cache metadata | Normalized logical Region known valid in that HP output. |
 
 Only HP output is formal reusable cache. That means only HP output may feed
-subsequent HP compute, disk cache, long-term storage, and other reusable cache
-behavior. RT output is not stored on `Node`; it lives in `RealtimeProxyGraph`,
-which mirrors node ids and stores low-resolution proxy output, HP-space ROI,
-version, and RT dirty-source generation.
+subsequent HP compute, configured disk-cache persistence, or a separately
+requested output operation; the cache entry itself is not long-term
+user-output authority. RT output is not stored on `Node`; it lives in
+`RealtimeProxyGraph`, which mirrors node ids and stores low-resolution proxy
+output, HP-space Region, version, and RT dirty-source generation.
 
 Dirty RT worker tasks stage proxy output through `RealtimeProxyWriteBuffer`
 before committing to `RealtimeProxyGraph`. Dirty HP worker tasks stage formal
@@ -274,10 +278,282 @@ propagation.
   by runtime, graph, compute, inspection, or cache contracts and is not owned
   by `GraphDefinition`, persistent `Node` fields, or `OutputPort`.
   Static/effective parameters, output-port configuration, and named operation
-  outputs are `ParameterValue` trees. Graph extents, spatial metadata, dirty
-  snapshots, and compute-task geometry use kernel-owned `PixelSize` and
+  outputs are `ParameterValue` trees. Logical dirty work and cache validity use
+  normalized `RegionSet`; current image extents, physical tiles, Host/IPC v2
+  inspection, and operation ABI v2 use checked derived `PixelSize` and
   `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
   or algorithm implementation when a matrix slice or library call requires it.
+
+### Current persistence identity and completion boundaries
+
+The current Graph document serializes authored node topology/configuration
+only. It excludes `NodeOutput`, formal HP cache bytes, RT proxy state,
+allocation/value identities, producer fences, daemon job ids, delivery leases,
+and output-store records. A successful `GraphIOService::save()` captures a
+detached definition and completes the configured YAML adapter's direct
+open/write/flush/close sequence; the document has no persisted version and the
+call returns no atomic-replacement or durability receipt.
+
+Configured disk-cache locations remain backend cache identities, not Graph
+document ids or user-output commit ids. `ImageArtifactCodec` and
+`CacheMetadataCodec` convert image and metadata representations but do not own
+transaction, retry, visibility, or durability policy. The private IPC
+`OutputStore` keeps a separate process-scoped delivery record and artifact
+identity; those values are not fields of `GraphModel`, `NodeOutput`, or the
+Graph document.
+
+`ReadyFence::Ready`, formal HP publication, disk-cache save, Graph-document
+save, daemon result availability, and protected artifact publication are
+therefore different current facts. The accepted target authority and
+completion taxonomy are recorded in
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md);
+they are not additional current fields.
+
+### Implemented V-3 ownership through V-15 extension surfaces
+
+[ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+accepts the complete generic-value replacement. V-2 introduced the bounded CPU
+DenseTensor subset; V-3 now connects its physical ownership and formal HP cache
+identity:
+
+- installed `DenseTensorDescriptor` keeps concrete shape,
+  `ElementSemantics`, `StorageEncoding`, and optional quantization separate;
+- installed `ImageFacet` explicitly assigns distinct x/y and optional channel
+  axes;
+- `BufferHandle` is a checked immutable nonempty range over one explicit
+  storage binding, exposes no raw or native pointer, and creates checked
+  identity-preserving subranges; CPU builders own host bytes, while
+  source-private device publication may retain an opaque native owner and
+  independently record host visibility;
+- `ValueBuilder` owns the only move-only `WriteLease`, refuses seal while a
+  lease is live, and publishes immutable bytes with a fresh `ValueRevisionId`;
+- the vector convenience constructor still deep-copies lvalue and rvalue
+  descriptor/layout/payload allocations before seal;
+- `StridedLayout::byte_offset` anchors logical coordinate zero; immutable
+  Values over sealed handles may use bounded positive, zero, or negative
+  strides;
+- `DenseTensorView` and `ImageView` retain both the Value and a `ReadLease`, use
+  copy-like move semantics, and expose pointers only within that lease; and
+- `image_process:invert_dense` performs descriptor-only inference and
+  stride-aware unsigned-8 execution, reuses a sealed input Value when present,
+  and publishes its exact sealed result revision.
+
+Private `NodeOutput` retains `image_value` beside `image_buffer`. A valid Value
+is the immutable allocation/binding/revision authority; the ImageBuffer is an
+independent CPU compatibility snapshot. A producer-pending Value may live in
+request-local temporary output only: `TaskSubmissionPlan` holds its Run
+unsettled and releases dependants after terminal Ready, while Failed,
+ProducerCancelled, or stale-typed completion releases none. Ordinary HP commit,
+sequential HP compute, connected-preflight shadow cache, dirty HP commit, and
+disk decode normalize legacy CPU buffers before formal publication. Immutable
+cache copies preserve both identities; dirty clones clear the old Value before
+mutation and reseal final bytes; replacement and disk decode mint fresh
+identities. Allocation and revision tokens remain process-local and never enter
+task-graph keys, cache paths, graph/YAML documents, or artifact bytes.
+The shared operation runtime is the one process-wide minting authority for the
+static Host and every Value-using DSO.
+
+V-4 installs `RegionDomainKey`, `ImageRect`, rank-general `TensorSlice`,
+`RegionAtom`, immutable normalized `RegionSet`, bounded algebra, typed
+operation outcomes, and containment. `Node::hp_region` is validity metadata
+published with the one formal HP cache authority. Dirty source history,
+per-node state, monolithic work, and edge mappings retain Region; image-only
+tile rectangles are derived beside their source Region. The core dense invert
+path executes exact ImageRect or TensorSlice selections, while RT rejects
+TensorSlice and operation ABI v2 remains unchanged. Exact one-clause
+difference preserves every equal constrained-domain atom when only one
+compatible atom varies and the overlap removes one of its edges; differences
+that would split an atom or vary multiple domains remain typed `TooComplex`.
+
+V-6 attaches an installed, copyable `ReadyFence` observer to every Value.
+Synchronous publications start Ready. A source-private pending producer keeps
+the only mutable CPU allocation capability, revokes it before Ready, Failed, or
+ProducerCancelled, and leaves descriptor/layout/size/identity metadata
+inspectable while payload access is rejected. The source-private physical
+`ValueTransferTask` allocates a distinct pending CPU destination and copies its
+validated envelope only from executor-queued work after source readiness.
+
+V-8 installs `DeviceBackend`, checked `DeviceId`, `MemoryDomain`,
+`StorageBinding`, producer identity, and exhaustive `AccessPlan` outcomes.
+Planning is nonblocking and records source facts, exact target capability,
+visibility obligations, lease kind, and transfer bytes without touching
+payload. Host access still requires both producer Ready and a host-visible
+binding; otherwise it throws without an implicit wait, map, import, transfer,
+or readback. Explicit CPU/Metal transfers publish distinct bindings while
+preserving one logical `ValueRevisionId`. The process `ResidencyManager` indexes
+only exact Ready replicas and atomically gates destination readiness on complete
+completion identity plus current supersession generation. A fallible
+prepublication step creates the lineage row without advancing it; accepted
+coordinator publication then advances that row before exposing currentness, so
+a late older Run observation cannot regress freshness. Settled replicas may
+outlive their producing Run, but strong native/provider ownership is bounded by
+the manager's 64-entry default: publication pressure releases the
+lowest-revision entry. Generation advance alone does not clear residency, and
+the entry count is not device-byte or scratch admission. After exact Graph
+close has drained every Run and pending native completion, the manager retires
+all generation rows for that nonreused `GraphInstanceId`. The close tail also
+joins the compute-request lane before this retirement: a prepared candidate
+already owns one reserved lane ticket before its fallible lineage pretracking,
+so no caller can recreate a zero-generation row afterward. Calling retirement
+while a transfer remains pending is an invariant failure. This Graph-scoped
+maintenance does not clear settled resident replicas.
+
+V-9 adds byte authority without changing logical Value identity or public
+binding facts. `ResourceLedger` owns an isolated memory/scratch account for
+each configured non-CPU `DeviceId`. Native plans use backend size/alignment
+facts; actual allocations use `allocatedSize`. A persistent device `Value`'s
+type-erased external owner holds the unique memory lease beside its native
+allocation, so Value copies and residency retain—not duplicate—the authority.
+Scratch remains outside the Value and follows the exact asynchronous
+completion owner. A completed HostPinned readback retains its shared Metal
+buffer as CPU-owned output storage after the scratch lease ends.
+
+V-12 verifies this installed model across the dimensions most likely to expose
+image-only assumptions. The dependency-neutral matrix covers 1/3/4/8/16
+channels and FP32/FP64 for padded image-faceted Values, rank-one through
+rank-five FP32/FP64 latent Values, exact ImageRect/TensorSlice merge, and
+bounded negative- and zero-stride immutable views. The rank-one fixture has a
+sole stride wider than its element, an exact padded storage span, and an
+independent byte oracle for active elements and padding sentinels. CPU-copy and
+injected external-device preparation share the builder's positive,
+zero-offset, exact-envelope, non-overlap validation authority. Negative or
+zero strides therefore fail before an external owner, destination identities,
+or a Pending fence can escape, while the general immutable publisher retains
+its signed-view role. Supported transfers preserve the complete positive
+producer envelope, descriptor, facet, layout, and logical revision while
+minting a distinct allocation and exposing Pending-to-Ready binding facts. An
+admitted `ComputeIoExecutor` task retains and observes the same immutable Value
+facts and bytes under explicit task/byte budgets; that observation creates no
+cache, artifact, or persistence identity.
+
+V-13 installs one bounded packed/quantized execution vertical without
+reinterpreting the byte-addressed model. `StorageEncodingKind::Fp4E2M1`
+identifies four-bit E2M1 independently from floating-point semantics, while an
+optional `QuantizationSchema` owns a rank-matched positive block shape and one
+finite positive scale per row-major logical block. The shape must divide into
+complete blocks. A version-1 `BlockedLayout` separately records the matching
+block shape, nibble-aligned block bit strides, absolute bit offset, and explicit
+least- or most-significant-first nibble order. Publication proves exact byte
+bounds and non-overlapping complete block spans. `Value` retains exactly one
+tagged Strided or Blocked layout; `dense_tensor_element_bytes()` and
+`DenseTensorView` reject packed storage, while `PackedDenseTensorView` provides
+checked encoded-code and scale-dequantized access without manufacturing an
+element byte pointer.
+
+The installed packed execution operation accepts only a matching-domain,
+full-rank, nonempty TensorSlice whose endpoints align to every quantization
+block. It directly copies FP4 codes and selected scales into a fresh CPU Value,
+preserves nibble order and bit offset, and emits canonical contiguous block bit
+strides without dequantization or requantization. Explicit CPU and injected
+external-device transfers preserve the complete descriptor, quantization,
+Blocked layout, byte envelope, unused nibble bits, readiness transition, and
+logical revision in a distinct binding. Formal HP memory cache copies retain
+that immutable Value and exact TensorSlice validity. The current image-only
+disk cache instead rejects packed, quantized, or latent formal Values with
+`GraphError{InvalidParameter}` before compute-I/O admission, filesystem
+mutation, or codec invocation; no generic artifact format or persistent digest
+is implied.
+
+V-14 adds one explicit `ProviderDefined` representation beside DenseTensor.
+`DataDescriptorEnvelope` retains exactly one versioned Schema record plus
+bounded ordered Facet records; `ProviderDefinedLayout` retains one versioned
+Layout record plus checked `{buffer_index, logical_role, offset, length}`
+envelopes. Every extension record owns its unknown payload bytes. A
+provider-defined `Value` retains multiple sealed host-readable
+`BufferHandle`s, an immutable exact provider generation, and one fresh
+process-local revision. Generic cross-reference and checked-end validation
+run before provider validation and before publication identities are minted.
+DenseTensor-only accessors reject this representation; indexed
+`ProviderReadLease` keeps both the selected buffer and interpretation
+generation live.
+
+`DataDefinitionRegistry` is one injected, non-singleton authority with one
+generation source, one provider table, and separate typed Schema, Facet, and
+Layout maps under one publication lock. Candidate loading stages and validates
+the complete exact-size v3 definition bundle before one atomic publication;
+typed-key conflicts or malformed records preserve all visible prior state.
+Replacement publishes a fresh complete generation. Unload removes only new
+lookup visibility: old Values, reads, callbacks, and provider-created owners
+retain the retiring generation until final provider destruction, after which
+the candidate module lease releases. No callback runs while the registry lock
+is held.
+
+The v3 provider ABI implemented by this slice is the dependency-neutral
+definition suite only. Its self-contained C11/C++17 header freezes exact record
+sizes, offsets, alignment, calling convention, statuses, two exported
+handshakes, and mandatory validation, pure property, pure Region, pure
+DataSpec, canonical-content, owner, and destroy callbacks. Pure callbacks
+receive descriptor/Layout/buffer metadata with every payload pointer cleared;
+validation and canonical-content traversal are the only semantic callbacks
+that receive payload in V-14. Access, mapping, transfer, conversion, inference,
+execution, native-device, and operation ABI v2 authority are absent.
+
+Borrowed ABI byte views are input-only. Each callback receives one Host-owned
+output sink; diagnostic and BYTES-property records declare scalar lengths, and
+providers synchronously copy complete fields while callback-local source
+storage is still alive. Per-invocation Host state enforces exact channel use,
+4 KiB/64 KiB bounds, and sticky failure without sharing storage across threads
+or generations. For Exact nonempty TensorSlice results, the Host independently
+checks that `selected_site_count` equals the checked product of every half-open
+axis length; overflow or mismatch becomes InvalidDescriptor with zero sites.
+
+The bounded V-14 `DataSpec` evaluates Schema identity/version and logical-site
+ranges into Subset, Disjoint, PartialOverlapWithRuntimeGuard, or
+CannotEvaluate. Property and Region calls preserve their typed unavailable or
+uncertain outcomes, including Empty/Unsupported Region states around exact
+TensorSlice count validation. Descriptor, storage-layout, and provider-selected
+logical content use separately tagged SHA-256 canonical traversals; physical
+buffer order, offsets, and padding do not enter ContentDigest when the provider
+emits the same logical byte stream. To preserve the frozen length-prefixed
+field without staging that stream, the Host first performs a checked
+`uint64_t` measurement traversal, then repeats the same active generation
+under the same immutable Value view and payload read leases while feeding
+SHA-256 incrementally. The two invocations use independent callback-local
+diagnostic state. Chunk boundaries are irrelevant; malformed pointer/count
+pairs, overflow, sticky sink failures, and measured/hash count drift are typed
+provider failures. There is no payload-proportional staging or arbitrary
+64 MiB content ceiling. The versioned artifact envelope preserves
+Schema/Facet/Layout unknown bytes and all three optional digest identities
+without a provider, but it is not a graph document, manifest/chunk store,
+filesystem codec, or cache-policy integration.
+
+V-15 supplies the first optional concrete generation for that unchanged v3
+definition suite. The repository OpenEXR provider publishes one
+`VariableSampleField` Schema, `ImageFacet`, `DeepSampleFacet`, and one
+multi-buffer Layout. Its versioned descriptor payload preserves signed
+half-open data/display windows and an explicit mapping from diagnostic file
+channel names to permanent channel identities, semantic-role identities, and
+Layout buffer roles. Names carry no inferred semantics. Its canonical Value
+stores one little-endian `uint32` sample-count buffer, one checked
+little-endian `uint64` prefix-offset buffer, and one identity-ordered FP32
+sample stream per unit-sampled channel. Every stream agrees on the same
+declared sample count. Because the unchanged V-14 binding contract requires
+every published semantic buffer envelope to have nonzero length, an all-zero
+deep image retains its channel mapping in descriptor/Layout payloads but omits
+the zero-length channel envelopes and BufferHandles. Its nonempty count and
+offset buffers remain the complete canonical content traversal.
+
+The source-private OpenEXR adapter decodes through an injected
+`DataDefinitionRegistry` and `Value::from_provider_defined`; it therefore
+reuses V-14 cross-reference validation, generation retention, indexed read
+leases, Region/DataSpec/properties, and all three generic digests. Encoding
+inspects that generic Value rather than defining a second deep-image object
+model. The first format is strictly complete single-part deep scanline;
+deep-tiled, multipart, shallow or mixed-part files, absent/malformed explicit
+mapping, non-FP32 channels, and non-unit sampling fail with Host-owned typed
+errors.
+
+Additional packed encodings or quantization formulae, unaligned requantizing
+slices, general Map/Import providers, the remaining provider ABI suites,
+generic graph/cache persistence, and general named immutable Value outputs
+remain later no-shim slices. V-14 does not add public resource declarations,
+general heap suballocation, device-queue budgets, or manifests/chunks. V-15
+does not add deep-tiled or multipart support, a graph/compute execution path
+for provider-defined Values, generic graph/cache persistence, or public
+OpenEXR types. `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER` defaults OFF; in that
+profile no OpenEXR header, link, symbol, package lookup, or transitive
+dependency enters the dependency-neutral product.
+`ParameterMap` remains configuration and current named scalar-result storage.
 
 Keeping graph identity and topology in one model makes traversal, compute,
 inspection, and mutation observe the same generation. Issue #62 completes the
@@ -290,6 +566,19 @@ neither document changes the current fields described above.
 
 ## Implementation and Validation Entry Points
 
+- `include/photospider/data/value.hpp`
+- `include/photospider/data/extension.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/data/packed_dense_tensor_view.hpp`
+- `include/photospider/data/region.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/memory/access_plan.hpp`
+- `include/photospider/memory/blocked_layout.hpp`
+- `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/memory/ready_fence.hpp`
+- `include/photospider/memory/strided_layout.hpp`
+- `include/photospider/plugin/data_definition_registry.hpp`
+- `include/photospider/plugin/data_provider_api.h`
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
 - `src/lib/graph/graph_definition.hpp`
@@ -301,7 +590,24 @@ neither document changes the current fields described above.
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/ipc/output_store.*`
+- `src/lib/core/pending_value.hpp`
+- `src/lib/core/value.cpp`
+- `src/lib/core/extension.cpp`
+- `src/lib/core/packed_dense_tensor.cpp`
+- `src/lib/core/value_image_adapter.*`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
+- `src/lib/core/cpu_dense_image_operation.*`
+- `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
+- `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/plugin/data_definition_registry.cpp`
+- `src/lib/adapters/openexr/openexr_deep_contract.hpp`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
+- `plugins/data/openexr_deep_scanline_provider.cpp`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`
@@ -312,3 +618,10 @@ neither document changes the current fields described above.
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_packed_fp4_dense_tensor.cpp`
+- `tests/integration/test_variable_sample_field_extensions.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
+- `tests/integration/openexr_deep_provider_option_off_smoke.py`
+- `tests/unit/test_region_contracts.cpp`
+- `tests/integration/test_value_identity_dso.cpp`

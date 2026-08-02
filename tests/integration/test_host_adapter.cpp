@@ -4347,10 +4347,10 @@ TEST(EmbeddedHostAdapter,
  * @return Nothing; GoogleTest assertions report ROI, plan, execution, commit,
  *         and trace failures.
  * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
- * @note The test submits PixelRect at the Host boundary, observes the same
- *       kernel-native geometry in dirty/planning snapshots, requires a real
- *       NodeExecutor tiled callback, and distinguishes the committed dirty HP
- *       output from the pre-request authoritative cache.
+ * @note The initial full compute intentionally publishes an exact formal HP
+ *       cache. The later non-forced dirty request must still execute its
+ *       explicitly selected Region, use the old output only as the merge base,
+ *       and preserve pixels outside the local update.
  */
 TEST(EmbeddedHostAdapter,
      DirtyComputeCarriesNativeRoiThroughPlanningAndExecution) {
@@ -4438,7 +4438,8 @@ TEST(EmbeddedHostAdapter,
       snapshot.value.dirty_tiles.begin(), snapshot.value.dirty_tiles.end(),
       [](const DirtyTileSnapshot& tile) {
         return tile.node.value == 2 &&
-               tile.domain == DirtyDomain::HighPrecision;
+               tile.domain == DirtyDomain::HighPrecision &&
+               tile.pixel_roi.x == 64 && tile.pixel_roi.y == 0;
       });
   ASSERT_NE(downstream_tile, snapshot.value.dirty_tiles.end());
   EXPECT_EQ(downstream_tile->tile_x, 1);

@@ -18,6 +18,9 @@
 #include "compute/execution_service.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #include "compute/task_graph_planning.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
+#include "compute/dirty_update_executor_test_access.hpp"
+#endif
 #include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -93,10 +96,12 @@ class DirtyNodeSynchronization final {
  * @brief Bounded dirty planning result used by HP and RT executors.
  *
  * The prepared state packages the graph-scoped dirty snapshot, the
- * immutable node/cache-pruned compute plan, the generation-local dirty
- * selection overlay, and the materialized source/downstream task groups that
- * will be submitted to the selected physical execution domain. The dirty plan
- * itself owns the per-node HP or RT ROI entries used by node execution.
+ * immutable complete request-cone compute plan, the generation-local dirty
+ * selection overlay with external-boundary demand cuts, and the materialized
+ * source/downstream task groups that will be submitted to the selected physical
+ * execution domain. Planning-time formal cache observations remain diagnostic
+ * merge-base facts; the dirty plan itself owns the per-node HP or RT ROI
+ * entries used by node execution.
  *
  * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
  * @note The struct is request-local. It must not be stored after execution
@@ -107,7 +112,7 @@ struct PreparedDirtyPlan {
   /** @brief Dirty planner output with per-node execution entries. */
   DirtyPlan dirty_plan;
 
-  /** @brief Node/cache-pruned compute plan used as immutable task shape. */
+  /** @brief Complete request-cone compute plan used as immutable task shape. */
   ComputePlan compute_plan;
 
   /** @brief Dirty active task view over compute_plan for this generation. */
@@ -183,6 +188,21 @@ struct DirtySourceFirstRunRequest {
    * retains the same immutable planning snapshot without queue routing.
    */
   const std::vector<Device>* task_devices = nullptr;
+
+  /**
+   * @brief Operation start constraints aligned with planned task ids.
+   * @note Required for every request. Missing operations use the all-default
+   * value and fail authoritatively in node execution before provider entry.
+   */
+  const std::vector<OperationExecutionConstraints>* task_constraints = nullptr;
+
+  /**
+   * @brief Component-wise maximum operation demand for any task in this Run.
+   * @note The source-first adapter adds its owned callback demand before
+   * admission; operation retained and scratch bytes are not structural context
+   * storage and therefore remain per-task charges.
+   */
+  ReadyTaskResourceDemand task_operation_resource_demand;
 
   /**
    * @brief Other request-owned structural bytes retained across phase service
@@ -324,7 +344,9 @@ class PreparedDirtySourceFirstRun final {
  * @note For process-service routing both phase reservations remain live
  * together until execution/rollback, so lifecycle installation observes the
  * complete dirty-domain resource ownership rather than a later phase-local
- * admission.
+ * admission. Each phase freezes its complete context estimate before
+ * materialization moves already-charged constraint-key allocations into the
+ * unique ready submissions.
  */
 PreparedDirtySourceFirstRun prepare_dirty_source_first(
     const DirtySourceFirstRunRequest& request,
@@ -354,6 +376,9 @@ class DirtyReadyTaskContext final
    * @param selection Optional dirty dependency overlay copied into ownership.
    * @param active_task_ids Exact task ids active in this phase.
    * @param task_devices Selected devices aligned with compute-plan task ids.
+   * @param task_constraints Operation gates aligned with compute-plan task ids.
+   * @param task_operation_resource_demand Uniform component-wise maximum
+   * operation demand for this physical Run.
    * @param run_task Owned callable that executes one dense task id.
    * @param run_task_retained_memory_bytes Audited capture/allocation bytes
    * owned by run_task beyond its inline `std::function` object. This value
@@ -367,22 +392,28 @@ class DirtyReadyTaskContext final
    * @throws std::invalid_argument if run_task is empty.
    * @throws std::bad_alloc from owned state construction.
    */
-  DirtyReadyTaskContext(const ComputePlan& compute_plan,
-                        const DirtyTaskSelectionOverlay* selection,
-                        const std::vector<int>& active_task_ids,
-                        const std::vector<Device>& task_devices,
-                        std::function<void(int)> run_task,
-                        std::uint64_t run_task_retained_memory_bytes,
-                        ComputeRunLease lease, bool release_dependents,
-                        ExecutionTaskPriority priority);
+  DirtyReadyTaskContext(
+      const ComputePlan& compute_plan,
+      const DirtyTaskSelectionOverlay* selection,
+      const std::vector<int>& active_task_ids,
+      const std::vector<Device>& task_devices,
+      const std::vector<OperationExecutionConstraints>& task_constraints,
+      ReadyTaskResourceDemand task_operation_resource_demand,
+      std::function<void(int)> run_task,
+      std::uint64_t run_task_retained_memory_bytes, ComputeRunLease lease,
+      bool release_dependents, ExecutionTaskPriority priority);
 
   /**
    * @brief Estimates complete context-owned structural storage.
    * @return Checked copied plan/selection/dependency/callable/context bytes.
    * @throws GraphError when checked structural arithmetic overflows.
-   * @note The shared Run control is intentionally excluded and added once by
-   * `run_resource_demand()`. Borrowed Graph/cache/staging references and opaque
-   * output payloads are excluded.
+   * @note Every copied task-constraint key is charged by its actual string
+   * capacity plus the null terminator. Phase admission freezes this estimate
+   * before active entries move into their one ready submission, so the same
+   * allocation remains charged exactly once. The shared Run control is
+   * intentionally excluded and added once by `run_resource_demand()`.
+   * Borrowed Graph/cache/staging references and opaque output payloads are
+   * excluded.
    */
   std::uint64_t retained_memory_bytes() const;
 
@@ -407,7 +438,9 @@ class DirtyReadyTaskContext final
    * @throws std::invalid_argument for an inactive or invalid task id.
    * @throws std::bad_alloc when output, executable, or lease storage allocates.
    * @note Readiness is caller-established; this method performs membership and
-   * identity validation only.
+   * identity validation only. Each active task may be materialized once; its
+   * exact-identity constraint storage moves from this already-admitted context
+   * into the submission without creating an unaccounted string copy.
    */
   std::vector<ReadyTaskSubmission> make_submissions(
       const std::vector<int>& task_ids, bool initial_ready);
@@ -443,6 +476,16 @@ class DirtyReadyTaskContext final
 
   /** @brief Selected devices aligned with dense compute-plan task ids. */
   std::vector<Device> task_devices_;
+
+  /**
+   * @brief Operation gates aligned with dense compute-plan task ids.
+   * @note Each active entry moves into its one service submission only after
+   * the context-owned retained-memory estimate is frozen.
+   */
+  std::vector<OperationExecutionConstraints> task_constraints_;
+
+  /** @brief Uniform operation retained/scratch demand for every task. */
+  ReadyTaskResourceDemand task_operation_resource_demand_;
 
   /** @brief Fast active membership guard for composite identity validation. */
   std::unordered_set<int> active_task_id_set_;
@@ -481,7 +524,8 @@ void remember_dirty_snapshot(GraphModel& graph,
  * @brief Stores the latest compute plan and bounded summary history.
  *
  * @param graph Graph whose inspection state receives the compute plan.
- * @param compute_plan Node/cache-pruned plan for the current request.
+ * @param compute_plan Request plan being published. Ordinary full HP plans may
+ * be cache-pruned; dirty plans retain the complete request cone.
  * @param selection Optional dirty overlay used to summarize active work.
  * @throws std::bad_alloc if summary history storage cannot grow.
  * @note Full plans are retained only as the latest inspection entry; repeated
@@ -492,24 +536,30 @@ void remember_compute_plan(
     const DirtyTaskSelectionOverlay* selection = nullptr);
 
 /**
- * @brief Prunes a full task graph to the current request and cache state.
+ * @brief Scopes a full task graph to one request and its cache policy.
  *
  * @param graph Graph that supplies topology, node metadata, and cache state.
  * @param request Intent, target node, and dirty ROI for the request.
  * @param execution_order Topological order selected by dirty planning.
- * @return Node/cache-pruned compute plan before dirty snapshot selection.
+ * @param available_devices Canonical route inventory used for coherent
+ * operation selection and task-shape expansion.
+ * @return Request-scoped plan. Ordinary full HP may be pruned at reusable-cache
+ * demand boundaries; deferred dirty selection retains the complete request
+ * cone.
  * @throws GraphError from task graph expansion or pruning.
  * @note The returned plan is still domain-specific and contains no mixed HP/RT
  * task pool.
  */
 ComputePlan prune_node_cache_task_graph(
     GraphModel& graph, const ComputeRequest& request,
-    const std::vector<int>& execution_order);
+    const std::vector<int>& execution_order,
+    const std::vector<Device>& available_devices = {Device::CPU});
 
 /**
- * @brief Applies dirty snapshot pruning to a node/cache-pruned plan.
+ * @brief Applies dirty snapshot selection to a request-scoped plan.
  *
- * @param node_cache_plan Plan already scoped to target and cache state.
+ * @param node_cache_plan Plan already scoped to the target. Dirty execution
+ * supplies a retained complete request cone.
  * @param snapshot Dirty snapshot for the same compute domain.
  * @param graph Graph used to derive per-tile input ROI dependencies.
  * @return Dirty-pruned plan with selected tasks annotated.
@@ -632,32 +682,84 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
                              const DirtyTaskSelectionOverlay& selection);
 
 /**
+ * @brief Validates exact Region routes at the task-population boundary.
+ *
+ * @param graph Request-local graph whose current operation keys are checked.
+ * @param route_snapshot Callback-free routes frozen by Region planning.
+ * @param compute_plan Task-population result selected under the current
+ * registry generation and device inventory.
+ * @param selection Active dirty task overlay after cache and external
+ * satisfaction pruning.
+ * @param request Intent and target associated with the same dirty request.
+ * @return Nothing when no route-sensitive Region snapshot exists, no task is
+ * active after pruning, or every active node still matches.
+ * @throws GraphError with `GraphErrc::NoOperation` when intent, device
+ * inventory, operation key, route presence, identity, callback shape, or
+ * metadata differs.
+ * @throws GraphError with `GraphErrc::ComputeError` when selection contains an
+ * invalid task id.
+ * @throws std::bad_alloc when temporary active-node or operation-key storage
+ * cannot allocate.
+ * @note An empty active selection returns before intent, device-inventory,
+ * task-id, or node-route comparison because no planned operation can execute.
+ * Otherwise inactive and externally satisfied nodes remain ignored while every
+ * active node is checked. Validation runs before ROI application, task
+ * materialization, callable resolution, resource estimation, gate/grant
+ * construction, reservation, or provider entry.
+ */
+void validate_dirty_region_operation_routes(
+    const GraphModel& graph,
+    const DirtyRegionOperationRouteSnapshot& route_snapshot,
+    const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay& selection,
+    const ComputeRequest& request);
+
+/**
  * @brief Prepares common dirty execution state after planner output exists.
  *
  * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
- * @param graph Request-local graph used for task shape, cache pruning, and
- * dirty selection. It may be a stabilized shadow graph.
+ * @param graph Request-local graph used for task shape, planning-time cache
+ * observation, and dirty selection. It may be a stabilized shadow graph.
  * @param dirty_plan Dirty planner output for one intent domain.
  * @param request Compute request matching the same dirty domain.
+ * @param available_devices Canonical route inventory frozen for planning and
+ * later exact-identity resolution.
  * @param externally_satisfied_node_ids Optional nodes already executed by
  * parameter stabilization and excluded from phase-two task selection.
  * @return Prepared plan with node groups ready for task construction.
- * @throws GraphError from task graph pruning or materialization.
- * @note The helper retains diagnostics without publishing them. The installed
- * execution path calls publish_prepared_dirty_inspection() only after its
- * first cancellation observation, so candidate rollback leaves authoritative
- * inspection state unchanged.
+ * @throws GraphError from task graph pruning, exact Region route validation,
+ * or materialization. A changed route is reported as
+ * `GraphErrc::NoOperation`.
+ * @note The helper retains diagnostics without publishing them. It defers
+ * reusable-cache demand cutting so the complete callback-free request cone is
+ * retained, then applies dirty-candidate and external-boundary demand
+ * selection. Exact cache may seed a dirty write buffer but cannot satisfy a
+ * task selected by the snapshot. The installed execution path calls
+ * publish_prepared_dirty_inspection() only after its first cancellation
+ * observation, so candidate rollback leaves authoritative inspection state
+ * unchanged. A no-work selection returns successfully from route validation
+ * before comparing frozen execution context. Any active work still requires
+ * full context and route validation before ROI mutation, work-set
+ * materialization, callable resolution, and every admission/resource boundary.
  */
 template <typename DirtyPlan>
 PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
     GraphModel& graph, DirtyPlan&& dirty_plan, const ComputeRequest& request,
+    const std::vector<Device>& available_devices = {Device::CPU},
     const std::unordered_set<int>* externally_satisfied_node_ids = nullptr) {
-  const ComputePlan node_cache_plan =
-      prune_node_cache_task_graph(graph, request, dirty_plan.execution_order);
+  ComputeRequest dirty_selection_request = request;
+  dirty_selection_request.defer_reusable_cache_pruning = true;
+  const ComputePlan node_cache_plan = prune_node_cache_task_graph(
+      graph, dirty_selection_request, dirty_plan.execution_order,
+      available_devices);
+#if defined(PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
+  testing::notify_dirty_node_cache_plan_test_hook(node_cache_plan, graph);
+#endif
   DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
   DirtyTaskSelectionOverlay selection =
       dirty_snapshot_pruner.select(node_cache_plan, dirty_plan.snapshot, graph,
                                    externally_satisfied_node_ids);
+  validate_dirty_region_operation_routes(graph, dirty_plan.operation_routes,
+                                         node_cache_plan, selection, request);
   apply_planned_work_rois(dirty_plan.entries, selection);
 
   DirtyUpdateWorkSet work_set = dirty_snapshot_pruner.materialize(selection);
@@ -817,7 +919,7 @@ class DirtyHandleExecutionTaskExecutor : public ExecutionTaskExecutor {
   }
 
  private:
-  /** @brief Immutable node/cache-pruned compute plan whose tasks run. */
+  /** @brief Immutable request-cone compute plan whose selected tasks run. */
   const ComputePlan& compute_plan_;
 
   /** @brief Task-level dependency counters for this active phase. */

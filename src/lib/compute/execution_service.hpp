@@ -9,8 +9,10 @@
 #include <vector>
 
 #include "compute/compute_run.hpp"
+#include "compute/compute_supersession.hpp"
 #include "compute/execution_lifecycle_telemetry.hpp"
 #include "compute/run_lifecycle_registry.hpp"
+#include "execution/device_executor_registry.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "runtime/resource_ledger.hpp"
 
@@ -27,6 +29,7 @@ struct PolicyLifecycleObserver;
 }  // namespace policy
 
 namespace execution {
+class ComputeIoExecutor;
 enum class PhysicalExecutionLane : std::uint8_t;
 }  // namespace execution
 
@@ -45,13 +48,46 @@ class ExecutionServiceTestAccess;
 namespace ps::compute {
 
 /**
- * @brief Private composition-root limits for one CPU execution domain.
+ * @brief Immutable process-domain concurrency constraints for one operation.
  *
- * This source-tree type carries every ledger dimension explicitly and converts
- * to the authority-neutral `ResourceVector` only when constructing the private
- * service.
+ * @throws std::bad_alloc when copied exclusive-key storage cannot allocate.
+ * @note A completely default value represents generic service work with no
+ * operation-specific gate. Product operation submissions carry a nonzero
+ * registry identity. Equal nonempty keys serialize across identities and Runs
+ * inside the injected execution domain.
+ */
+struct OperationExecutionConstraints final {
+  /** @brief Maximum accepted bytes in a nonempty exclusive key. */
+  static constexpr std::size_t kExclusiveKeyMaxBytes = 128U;
+
+  /** @brief Nonzero registry revision identifying the exact implementation. */
+  std::uint64_t implementation_identity = 0U;
+
+  /** @brief Whether callbacks of this exact identity may overlap. */
+  bool reentrant = true;
+
+  /**
+   * @brief Maximum overlapping callbacks for this exact identity.
+   * @note Zero means no implementation-specific cap.
+   */
+  std::uint32_t maximum_parallelism = 0U;
+
+  /**
+   * @brief Optional execution-domain mutual-exclusion key.
+   * @note Equal nonempty keys cannot overlap across Graphs or Runs.
+   */
+  std::string exclusive_key;
+};
+
+/**
+ * @brief Private composition-root limits for one execution domain.
  *
- * @throws Nothing for aggregate construction and conversion.
+ * This source-tree type carries every Host ledger dimension explicitly plus
+ * independent concrete-device byte accounts and independent compute-I/O task
+ * and planned-byte limits. `resource_vector()` converts only the Host
+ * dimensions when constructing the private service.
+ *
+ * @throws std::bad_alloc when copied device-limit storage cannot allocate.
  * @note This is not an installed policy API or execution extension surface.
  */
 struct ExecutionResourceLimits final {
@@ -71,6 +107,22 @@ struct ExecutionResourceLimits final {
   std::uint64_t ready_bytes = 0U;
 
   /**
+   * @brief Concurrent tasks admitted by the independent compute-I/O executor.
+   *
+   * @note This budget is not a Host ledger, ready-store, or device-account
+   * dimension. Zero is invalid at `ExecutionService` construction.
+   */
+  std::uint64_t compute_io_task_limit = 0U;
+
+  /**
+   * @brief Summed planned bytes admitted by the compute-I/O executor.
+   *
+   * @note This independent capacity is charged atomically with task count.
+   * Zero is invalid at `ExecutionService` construction.
+   */
+  std::uint64_t compute_io_planned_bytes_limit = 0U;
+
+  /**
    * @brief Capacity excluded from Throughput Run admission.
    *
    * Throughput Runs must leave this component-wise subset available.
@@ -82,6 +134,16 @@ struct ExecutionResourceLimits final {
    * Zero preserves the full ledger limit for every service class.
    */
   ResourceVector interactive_headroom;
+
+  /**
+   * @brief Candidate memory/scratch limits for fixed non-CPU executors.
+   *
+   * @note Each complete `DeviceId` may occur once. Service construction
+   * validates the complete list, then retains accounts only for executable
+   * devices in the injected fixed registry. These byte accounts neither
+   * consume nor borrow Host ledger capacity, and no account is added lazily.
+   */
+  std::vector<DeviceResourceLimit> device_limits;
 
   /**
    * @brief Converts the complete private limit set to ledger dimensions.
@@ -188,6 +250,7 @@ struct CpuRunResourceDemand final {
 class ExecutionService;
 struct PreparedExecutionRunState;
 struct PreparedExecutionSharedReservationState;
+struct OperationExecutionLeaseState;
 
 /**
  * @brief Move-only pre-publication ownership for one physical Run batch.
@@ -343,6 +406,70 @@ class PreparedExecutionSharedReservation final {
 };
 
 /**
+ * @brief Move-only ownership for one directly executing operation callback.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note The lease owns one CPU/retained/scratch root reservation plus the same
+ * exact-identity/exclusive-key gate used by service workers. Sequential callers
+ * keep it alive only across the provider callback and release it on every
+ * normal, exceptional, or cancellation unwind. Its retained constraint-key
+ * copy is charged by actual string capacity plus the null terminator.
+ */
+class OperationExecutionLease final {
+ public:
+  /** @brief Creates an inactive moved-from lease. */
+  OperationExecutionLease() noexcept;
+
+  /**
+   * @brief Transfers complete resource and gate ownership.
+   * @param other Lease made inactive.
+   * @throws Nothing.
+   */
+  OperationExecutionLease(OperationExecutionLease&& other) noexcept;
+
+  /**
+   * @brief Replaces only inactive ownership by transfer.
+   * @param other Lease made inactive.
+   * @return Reference to this lease.
+   * @throws Nothing; replacing an active lease terminates.
+   */
+  OperationExecutionLease& operator=(OperationExecutionLease&& other) noexcept;
+
+  /**
+   * @brief Releases resource and operation-gate ownership exactly once.
+   * @throws Nothing; trusted cleanup failure terminates.
+   */
+  ~OperationExecutionLease() noexcept;
+
+  /** @brief Prevents duplicating direct execution ownership. */
+  OperationExecutionLease(const OperationExecutionLease&) = delete;
+
+  /** @brief Prevents assigning duplicate direct execution ownership. */
+  OperationExecutionLease& operator=(const OperationExecutionLease&) = delete;
+
+  /**
+   * @brief Reports whether this lease owns one direct operation start.
+   * @return True before movement or destruction.
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return state_ != nullptr; }
+
+ private:
+  friend class ExecutionService;
+
+  /**
+   * @brief Adopts complete service-private direct execution state.
+   * @param state Resource reservation, gate declaration, and Run lease.
+   * @throws Nothing.
+   */
+  explicit OperationExecutionLease(
+      std::unique_ptr<OperationExecutionLeaseState> state) noexcept;
+
+  /** @brief Complete exact-once direct execution ownership. */
+  std::unique_ptr<OperationExecutionLeaseState> state_;
+};
+
+/**
  * @brief Immutable execution metadata copied into one ready submission.
  *
  * The snapshot carries request identity and policy inputs needed for routing
@@ -414,6 +541,17 @@ class ReadyTaskMetadata final {
   const ComputeRunQos& qos() const noexcept { return qos_; }
 
   /**
+   * @brief Returns the canonical request lineage captured by the Run.
+   * @return Borrowed target/request-intent key and graph-wide generation.
+   * @throws Nothing.
+   * @note Realtime sibling Runs retain the same value even though their child
+   * execution intents differ.
+   */
+  const SupersessionIdentity& supersession() const noexcept {
+    return supersession_;
+  }
+
+  /**
    * @brief Returns the planned node used for execution trace attribution.
    * @return Graph-local planned node id.
    * @throws Nothing.
@@ -480,6 +618,9 @@ class ReadyTaskMetadata final {
   /** @brief Copied policy inputs that mint no resource authority. */
   ComputeRunQos qos_;
 
+  /** @brief Canonical request lineage used for stale-completion rejection. */
+  SupersessionIdentity supersession_;
+
   /** @brief Planned node id used only for execution-trace publication. */
   int trace_node_id_ = -1;
 
@@ -533,6 +674,8 @@ class ReadyTaskSubmission final {
    * @param resource_demand Trusted immutable retained, scratch, ready-byte,
    * and positive work declaration.
    * @param device Device selected with the retained operation implementation.
+   * @param operation_constraints Exact-identity concurrency and exclusion
+   * constraints selected with the operation metadata.
    * @throws std::invalid_argument when executable is empty or the identity Run
    * differs from the lease Run.
    * @throws std::bad_alloc when metadata or executable storage allocates.
@@ -544,7 +687,8 @@ class ReadyTaskSubmission final {
       bool is_initial_ready, Executable executable,
       ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
       ReadyTaskResourceDemand resource_demand = default_resource_demand(),
-      Device device = Device::CPU);
+      Device device = Device::CPU,
+      OperationExecutionConstraints operation_constraints = {});
 
   /**
    * @brief Returns the empty adapter-owned demand.
@@ -623,6 +767,15 @@ class ReadyTaskSubmission final {
   }
 
   /**
+   * @brief Returns the exact operation-specific start constraints.
+   * @return Borrowed immutable constraints owned by this submission.
+   * @throws Nothing.
+   */
+  const OperationExecutionConstraints& operation_constraints() const noexcept {
+    return operation_constraints_;
+  }
+
+  /**
    * @brief Executes this accepted ready task through its matching lease.
    * @param task_runtime Active service runtime receiving completion and newly
    * ready submissions.
@@ -659,6 +812,9 @@ class ReadyTaskSubmission final {
 
   /** @brief Immutable host-authored resources checked at Run admission. */
   ReadyTaskResourceDemand resource_demand_;
+
+  /** @brief Exact-identity process-domain start constraints. */
+  OperationExecutionConstraints operation_constraints_;
 };
 
 /**
@@ -696,11 +852,15 @@ class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
 /**
  * @brief Owns one fixed Host execution domain for concurrent Runs.
  *
- * The service owns a fixed CPU worker pool plus one private Metal worker lane
- * and accepts only `ReadyTaskSubmission`. Each active Run has isolated
+ * The service owns a fixed CPU worker pool, one private Metal worker lane, one
+ * fixed process-owned device executor registry, and one independently bounded
+ * compute-I/O worker. It accepts only `ReadyTaskSubmission` for compute lanes;
+ * cache/codec owners explicitly submit lazy callbacks to the private I/O
+ * executor. Each active Run has isolated
  * completion, exception, trace-target, and settlement state while independent
  * Runs may overlap. The service also exclusively owns the host-authoritative
- * resource ledger and policy-aware entry/byte-bounded ready store. Two private
+ * resource ledger and policy-aware entry/byte-bounded ready store. Compute-I/O
+ * task/byte accounting is separate from those authorities. Two private
  * policy strategies
  * rank explicit interactive/throughput QoS with checked work/byte service,
  * Graph/Run fairness, dispatch aging, admission headroom, and bounded batch
@@ -708,9 +868,8 @@ class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
  * only that exact candidate/version for its current selection cycle, evaluates
  * independent work, and uses notification-driven bounded waiting when every
  * compatible candidate is blocked. Policies own no physical or resource
- * authority. The service owns
- * no planning, dependency, Graph/cache, dirty propagation, visible commit, or
- * final lifecycle-registry authority.
+ * authority. The service owns no planning, dependency, Graph/cache policy,
+ * dirty propagation, visible commit, or final lifecycle-registry authority.
  *
  * @throws std::bad_alloc or std::system_error from explicit execution setup.
  * @note This private source-tree service is explicitly composed and injected;
@@ -720,11 +879,14 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
  public:
   /**
    * @brief Returns bounded product defaults supplied by the composition root.
-   * @return Ledger limits plus protected interactive admission headroom.
-   * @throws Nothing.
-   * @note Tests and alternate products may inject smaller isolated limits.
+   * @return Host limits, compute-I/O limits, candidate Metal limits, and
+   * interactive headroom.
+   * @throws std::bad_alloc when default device-limit storage cannot allocate.
+   * @note Service construction retains the Metal account only when the frozen
+   * registry owns an executable Metal device. Tests and alternate products
+   * may inject smaller isolated limits.
    */
-  static ExecutionResourceLimits default_resource_limits() noexcept;
+  static ExecutionResourceLimits default_resource_limits();
 
   /**
    * @brief Creates an unconfigured execution domain with no worker threads.
@@ -736,12 +898,34 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Creates an unconfigured domain with explicit immutable limits.
-   * @param resource_limits Complete private Host-composed limits.
-   * @throws std::invalid_argument if interactive headroom exceeds a limit.
+   * @param resource_limits Complete Host limits and device-account candidates.
+   * @throws std::invalid_argument if interactive headroom exceeds a limit or
+   * either compute-I/O limit is zero.
+   * @throws std::invalid_argument for CPU or duplicate device candidates.
    * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
-   * @note The composition root must freeze workers before first Run admission.
+   * @note The default fixed registry determines which validated device
+   * candidates become ledger accounts. The composition root must freeze
+   * workers before first Run admission.
    */
   explicit ExecutionService(ExecutionResourceLimits resource_limits);
+
+  /**
+   * @brief Creates an unconfigured domain with an injected fixed device
+   * registry.
+   * @param resource_limits Complete Host limits and device-account candidates.
+   * @param device_executors Complete registry moved into process ownership.
+   * @throws std::invalid_argument if interactive headroom exceeds a limit or
+   * either compute-I/O limit is zero.
+   * @throws std::invalid_argument for CPU or duplicate device candidates.
+   * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
+   * @note Tests and alternate composition roots finish registration before
+   * construction. Only candidates matching executable ordinal-zero registry
+   * devices become accounts; an executor without a candidate budget remains
+   * unable to admit native allocation. The service exposes no runtime mutation
+   * surface and must be configured before first Run admission.
+   */
+  ExecutionService(ExecutionResourceLimits resource_limits,
+                   execution::DeviceExecutorRegistry device_executors);
 
   /**
    * @brief Creates and configures one fixed execution domain.
@@ -756,10 +940,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Creates a configured domain with explicit immutable limits.
    * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
-   * @param resource_limits Complete private Host-composed limits.
+   * @param resource_limits Complete private Host/device-composed limits.
    * @throws std::invalid_argument if the worker request exceeds eight, the
-   * configured CPU limit cannot permit the resolved fixed pool, or interactive
-   * headroom exceeds a ledger limit.
+   * configured CPU limit cannot permit the resolved fixed pool, interactive
+   * headroom exceeds a ledger limit, or either compute-I/O limit is zero.
    * @throws std::bad_alloc or std::system_error if setup fails.
    */
   ExecutionService(unsigned int worker_count,
@@ -820,10 +1004,12 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Copies service execution diagnostics.
-   * @return Text containing fixed CPU/GPU lanes, active Runs, and queued work.
+   * @return Text containing fixed CPU/GPU/I/O lanes, active Runs, ready work,
+   * and independent compute-I/O task/byte usage.
    * @throws std::bad_alloc if formatting storage cannot allocate.
    * @throws std::system_error if private state locking fails.
-   * @note The snapshot grants no worker, queue, Run, or lifecycle authority.
+   * @note The snapshot grants no worker, queue, budget, Run, or lifecycle
+   * authority.
    */
   std::string get_stats() const;
 
@@ -926,6 +1112,89 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   ResourceLedger::Snapshot resource_snapshot() const;
 
   /**
+   * @brief Returns the process-domain bounded compute-I/O executor.
+   * @return Stable service-owned executor reference.
+   * @throws Nothing.
+   * @note The caller retains cache/codec policy and must provide an explicit
+   * lifetime token plus planned-byte estimate for every lazy submission.
+   * Returned authority is source-private and must not escape service lifetime.
+   */
+  execution::ComputeIoExecutor& compute_io_executor() noexcept;
+
+  /**
+   * @brief Returns the read-only process-domain compute-I/O executor.
+   * @return Stable service-owned executor reference.
+   * @throws Nothing.
+   * @note Observation grants no Graph, cache, path, retry, or publication
+   * policy. Returned authority is source-private.
+   */
+  const execution::ComputeIoExecutor& compute_io_executor() const noexcept;
+
+  /**
+   * @brief Copies one configured concrete-device resource account.
+   * @param device Exact process-local non-CPU device identity.
+   * @return Immutable limits/reserved/available snapshot, or nullopt when the
+   * service has no matching device account.
+   * @throws std::system_error from ledger snapshot locking.
+   * @note This diagnostic carries no native handle or release authority.
+   */
+  std::optional<ResourceLedger::DeviceSnapshot> device_resource_snapshot(
+      DeviceId device) const;
+
+  /**
+   * @brief Tests whether the fixed process registry owns one device executor.
+   * @param device Device label to inspect.
+   * @return True only for a registered non-CPU executor.
+   * @throws Nothing.
+   * @note This observational query grants no native handle or execution
+   * authority.
+   */
+  bool has_device_executor(Device device) const noexcept;
+
+  /**
+   * @brief Copies diagnostics from one registered device executor.
+   * @param device Required registered non-CPU device.
+   * @return Thread-safe value snapshot containing no native handles.
+   * @throws std::invalid_argument when the device has no registered executor.
+   * @throws std::system_error from concrete executor synchronization.
+   * @note Counters are observational and do not mint `ResourceLedger`
+   * capacity. Submitted calls waiting for serialized callback admission remain
+   * visible while another invocation is active.
+   */
+  execution::DeviceExecutorDiagnostics device_executor_diagnostics(
+      Device device) const;
+
+  /**
+   * @brief Preallocates native freshness state before Graph publication.
+   * @param graph_instance_id Exact live Graph identity.
+   * @param identity Prepared canonical request lineage; its generation is not
+   * made current by this method.
+   * @return Nothing.
+   * @throws ResidencyManager validation, allocation, or synchronization errors.
+   * @note Kernel calls this after coordinator preparation owns request-lane
+   * admission and before submitting publication. Rollback or born-stale
+   * settlement may leave a zero-generation placeholder but cannot stale
+   * current work. Graph close joins that lane before retiring placeholders.
+   */
+  void prepare_supersession_lineage(GraphInstanceId graph_instance_id,
+                                    const SupersessionIdentity& identity);
+
+  /**
+   * @brief Invalidates tracked older native completions before current publish.
+   * @param graph_instance_id Exact live Graph identity.
+   * @param identity Newly accepted canonical request lineage and generation.
+   * @return Nothing.
+   * @throws Nothing; synchronization or invariant failure terminates because
+   * Graph and residency currentness must not split.
+   * @note Kernel invokes this from the request coordinator's locked
+   * current-publication callback. The path performs no allocation and must not
+   * re-enter Graph/coordinator state.
+   */
+  void observe_current_supersession(
+      GraphInstanceId graph_instance_id,
+      const SupersessionIdentity& identity) noexcept;
+
+  /**
    * @brief Registers one fully initialized GraphRuntime lifecycle anchor.
    * @param anchor Exact runtime identity/lifetime/close record.
    * @return Nothing after GraphRegistered publication.
@@ -1016,19 +1285,41 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       GraphInstanceId graph_instance_id, ComputeRunCancellationReason reason);
 
   /**
-   * @brief Waits for one Closing Graph row to empty and removes it.
+   * @brief Drains one Closing Graph and removes its Run lifecycle row.
    * @param graph_instance_id Exact runtime identity.
    * @return Nothing after GraphRowRemoved publication.
    * @throws RunLifecycleRegistry settlement errors unchanged.
+   * @note Kernel must still drain and join the Graph compute-request lane
+   * before retiring residency lineages. A prepared candidate owns request-lane
+   * admission before it pretracks residency, so retiring here would permit a
+   * late zero-generation row to survive irreversible Graph close.
    */
   void finish_graph_close_lifecycle(GraphInstanceId graph_instance_id);
 
   /**
-   * @brief Settles and removes one Graph lifecycle row before lane teardown.
+   * @brief Retires residency lineages after the exact Graph request lane
+   * drains.
+   * @param graph_instance_id Exact irreversibly closing runtime identity.
+   * @return Number of canonical generation rows removed.
+   * @throws Nothing; an unexpected validation, pending-transfer, allocation,
+   * or synchronization failure terminates after irreversible lifecycle close.
+   * @note Kernel calls this only after `GraphRuntime::close_compute_requests()`
+   * joins every prepared, published, and active candidate, and before closing
+   * graph-state. Ready resident replicas remain bounded process-domain values.
+   * No producer may admit, pretrack, or observe this Graph identity afterward.
+   */
+  std::size_t retire_graph_supersession_lineages(
+      GraphInstanceId graph_instance_id) noexcept;
+
+  /**
+   * @brief Settles one Graph and retires its lifecycle maintenance.
    * @param graph_instance_id Exact runtime identity.
    * @param reason GraphClose or ProcessShutdown.
-   * @return Nothing after row removal.
+   * @return Nothing after row removal and residency-lineage retirement.
    * @throws RunLifecycleRegistry close errors unchanged.
+   * @note This convenience path is for lifecycle-only service callers that
+   * own no Graph request coordinator. Kernel uses the split begin, finish,
+   * request-lane drain, and lineage-retirement sequence instead.
    */
   void close_graph_lifecycle(GraphInstanceId graph_instance_id,
                              ComputeRunCancellationReason reason);
@@ -1056,16 +1347,18 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Completes idempotent process execution-domain shutdown.
-   * @return Nothing after registry/resource/route/worker/binding retirement
-   * and final ServiceStopped publication.
+   * @return Nothing after registry, compute-I/O, resource, route, worker, and
+   * binding retirement plus final ServiceStopped publication.
    * @throws std::logic_error from a same-service worker/policy callback before
    * mutation or when authoritative resource state is unexpectedly nonzero.
    * @throws std::system_error from control-thread synchronization.
    * @note Concurrent/repeated non-worker callers join or observe the same
    * generation. Once worker ownership transfers to local shutdown state, an
-   * armed guard joins and accounts every remaining thread before any unwind;
-   * no recoverable validation may destroy a joinable std::thread. This
-   * operation never reopens admission.
+   * armed guard joins and accounts every remaining thread before any unwind.
+   * The independent I/O worker first stops admission, drains accepted
+   * provider callbacks, joins, and verifies both private budgets are zero; no
+   * recoverable validation may destroy a joinable std::thread. This operation
+   * never reopens admission.
    */
   void shutdown();
 
@@ -1148,6 +1441,35 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       const ComputeRunLease& run_lease, std::uint64_t retained_memory_bytes);
 
   /**
+   * @brief Acquires resources and operation gates for one direct CPU callback.
+   * @param run_lease Matching installed Run lease used for cancellation and
+   * resource-settlement observation.
+   * @param constraints Exact implementation identity and concurrency metadata.
+   * @param demand Additional retained/scratch bytes declared by that operation.
+   * @return Move-only ownership held only while the provider callback executes.
+   * @throws std::invalid_argument for malformed constraints or zero work units.
+   * @throws std::logic_error during service shutdown.
+   * @throws GraphError when cancellation wins while waiting or the
+   * policy/ledger cannot admit the direct callback vector.
+   * @throws std::bad_alloc or std::system_error from gate/resource staging.
+   * @note Waiting for identity/key availability holds no resource reservation.
+   * The method first copies constraints into the returned lease state. Every
+   * gate query, wait predicate, start, and eventual finish uses that stable
+   * state-owned copy; the caller may therefore mutate or destroy its input
+   * after this call returns without changing active gate identity. The copied
+   * key is charged by actual retained capacity plus its null terminator through
+   * checked arithmetic before gate acquisition. Resource admission is
+   * attempted only after the gate becomes startable; a failed reservation
+   * releases staged gate ownership before returning. Direct sequential entry
+   * uses ledger capacity without requiring physical workers to be configured
+   * or started.
+   */
+  OperationExecutionLease acquire_operation_execution(
+      const ComputeRunLease& run_lease,
+      const OperationExecutionConstraints& constraints,
+      ReadyTaskResourceDemand demand);
+
+  /**
    * @brief Publishes and synchronously settles one prepared physical Run.
    * @param prepared Active matching preparation created by this service.
    * @return Nothing after every callback and exact reservation settle.
@@ -1203,6 +1525,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /** @copydoc ReadyTaskSubmissionRuntime::submit_ready_submission */
   void submit_ready_submission(ReadyTaskSubmission submission) override;
 
+  /** @copydoc ExecutionTaskRuntime::make_ready_fence_executor */
+  std::shared_ptr<ReadyFenceExecutor> make_ready_fence_executor() override;
+
   /**
    * @brief Reports the route-less compatibility capability.
    * @return One-element CPU device list; route-aware callers use the overload.
@@ -1211,18 +1536,16 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   std::vector<Device> available_devices() const override;
 
   /**
-   * @brief Reports devices exposed by one exact private route and Host.
-   * @param host Borrowed process capability observer.
+   * @brief Reports devices exposed by one exact private route and registry.
    * @param execution_type Exact `cpu`, `gpu_pipeline`, or `serial_debug` id.
-   * @return `gpu_pipeline` returns Metal then CPU when Metal is available;
-   * CPU and serial-debug return CPU only.
+   * @return `gpu_pipeline` returns Metal then CPU when a Metal executor is
+   * registered; CPU and serial-debug return CPU only.
    * @throws GraphError with `GraphErrc::NotFound` for an unknown route.
    * @throws std::bad_alloc when result storage cannot allocate.
    * @note The copied labels contain no native handle. This is the canonical
    * inventory for full, preflight, and dirty operation selection.
    */
   std::vector<Device> available_devices(
-      const ExecutionHostContext& host,
       const std::string& execution_type) const;
 
   /**
@@ -1313,12 +1636,19 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   friend class ::ps::testing::ExecutionServiceTestAccess;
   friend struct PreparedExecutionRunState;
   friend struct PreparedExecutionSharedReservationState;
+  friend struct OperationExecutionLeaseState;
 
   /** @brief Per-Run completion, failure, trace, and settlement state. */
   struct RunState;
 
   /** @brief One owned ready queue entry paired with matching Run state. */
   struct QueueEntry;
+
+  /** @brief Synchronizes original callback retirement with fence readiness. */
+  struct FenceContinuationGate;
+
+  /** @brief Execution-domain exact-identity and exclusive-key start gate. */
+  class OperationStartGate;
 
   /** @brief Authority-free strategy for one explicit QoS service class. */
   class BuiltinPolicy;
@@ -1371,6 +1701,18 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   using WorkerEntryRetirementObserver = void (*)(void* context,
                                                  ComputeRunId run_id) noexcept;
+
+  /**
+   * @brief Tests one constraint against the current test-product gate.
+   * @param constraints Candidate identity, cap, and key declaration.
+   * @return True when the operation gate would currently admit the candidate.
+   * @throws std::system_error when service synchronization fails.
+   * @note This source-private diagnostic is defined only by the non-installed
+   * internal test product. It acquires the real pool mutex but commits no gate
+   * or resource authority and adds no object state or installed API.
+   */
+  bool direct_operation_gate_can_start_for_testing(
+      const OperationExecutionConstraints& constraints);
 
   /**
    * @brief Calculates mandatory bytes for one service-owned submission.
@@ -1444,6 +1786,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * its exact candidate/version only for this worker cycle, and recomputes all
    * selection inputs. An all-blocked lane waits on the worker-notification
    * epoch with a bounded low-frequency fallback; spurious wakes do not retry.
+   * A committed non-CPU start enters the matching fixed device executor before
+   * invoking the same submission callback and completion path. CPU-lane
+   * workers install a thread-local guard that rejects blocking compute-I/O
+   * completion waits before any condition-variable wait begins.
    */
   void worker_loop(int worker_id,
                    execution::PhysicalExecutionLane lane) noexcept;
@@ -1475,6 +1821,73 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   void enqueue_submission(const std::shared_ptr<RunState>& run,
                           ReadyTaskSubmission submission);
+
+  /**
+   * @brief Delivers one fence callback before or after original-task
+   * retirement.
+   * @param gate Shared exact-once retirement/readiness rendezvous.
+   * @param run Matching active Run retained through delivery.
+   * @param lease Matching lease moved into the continuation submission.
+   * @param identity Exact Run/local task identity being resumed.
+   * @param trace_node_id Planned node used for continuation diagnostics.
+   * @param task Fence callback moved into eventual ready-store ownership.
+   * @return Nothing.
+   * @throws Nothing; duplicate, allocation, admission, or shutdown failure is
+   * published to the matching Run.
+   * @note A callback arriving before the original worker retires is parked in
+   * the gate. It enters the ordinary bounded ready store only after the
+   * original execution grant is released, so one logical task never requires
+   * two simultaneous per-task grants.
+   */
+  void deliver_fence_continuation(
+      const std::shared_ptr<FenceContinuationGate>& gate,
+      const std::shared_ptr<RunState>& run, ComputeRunLease lease,
+      ComputeRunTaskIdentity identity, int trace_node_id,
+      ReadyFenceExecutor::Task task) noexcept;
+
+  /**
+   * @brief Releases the original callback side of one fence rendezvous.
+   * @param gate Optional gate created during the just-retired callback.
+   * @return Nothing.
+   * @throws Nothing; delayed admission failure is published to the exact Run.
+   * @note Called only after ready/execution grants, operation gate, physical
+   * route, QueueEntry, and in-flight ownership have retired.
+   */
+  void release_fence_continuation(
+      const std::shared_ptr<FenceContinuationGate>& gate) noexcept;
+
+  /**
+   * @brief Moves one released fence callback into ordinary ready ownership.
+   * @param gate Gate retaining exact Run, lease, task, and trace identity.
+   * @param task Nonempty callback released by the gate.
+   * @return Nothing.
+   * @throws Nothing; construction/admission failures fail the exact Run.
+   * @note The caller holds no gate, pool, Run, ledger, or ready-store lock.
+   */
+  void enqueue_fence_continuation(
+      const std::shared_ptr<FenceContinuationGate>& gate,
+      ReadyFenceExecutor::Task task) noexcept;
+
+  /**
+   * @brief Adds one asynchronous fence-executor settlement obligation.
+   * @param run Matching active Run retained by the executor.
+   * @return Nothing.
+   * @throws std::invalid_argument for a null Run.
+   * @throws std::overflow_error when the exact counter is exhausted.
+   * @throws std::system_error when Run synchronization fails.
+   * @note Registration occurs before ReadyFence can retain the executor.
+   */
+  void retain_fence_continuation(const std::shared_ptr<RunState>& run);
+
+  /**
+   * @brief Retires one asynchronous fence-executor settlement obligation.
+   * @param run Matching Run retained through executor destruction.
+   * @return Nothing.
+   * @throws Nothing; synchronization failure or underflow terminates.
+   * @note ReadyFence keeps the executor alive through queued callback exit, so
+   * zero proves no late callback can borrow this service/runtime.
+   */
+  void retire_fence_continuation(const std::shared_ptr<RunState>& run) noexcept;
 
   /**
    * @brief Grants and owns one uniformly estimated ready queue entry.
@@ -1659,6 +2072,13 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /** @brief Current service-worker Run context, null outside callbacks. */
   static thread_local RunState* tls_run_state_;
+
+  /** @brief Current started QueueEntry, null outside its provider callback. */
+  static thread_local QueueEntry* tls_queue_entry_;
+
+  /** @brief Lazy rendezvous shared with this callback's fence executor. */
+  static thread_local std::shared_ptr<FenceContinuationGate>
+      tls_fence_continuation_gate_;
 
   /** @brief Exact service whose worker callback entered this thread. */
   static thread_local ExecutionService* tls_service_;

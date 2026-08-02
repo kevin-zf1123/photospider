@@ -205,7 +205,8 @@ TEST(GraphDocumentAdapter,
   graph.mutate_node_runtime_state(9, [](GraphModel::NodeRuntimeState& state) {
     state.runtime_parameters["transient"] = "runtime-only";
     state.hp_version = 27;
-    state.hp_roi = PixelRect{1, 2, 3, 4};
+    state.hp_region =
+        RegionSet::from_image_rect({image_region_domain(), 1, 4, 2, 6});
   });
   graph.timing_results.total_ms = 42.0;
 
@@ -234,7 +235,7 @@ TEST(GraphDocumentAdapter,
   EXPECT_EQ(graph.node(9).name, "source-nine");
   EXPECT_TRUE(graph.node(9).runtime_parameters.empty());
   EXPECT_EQ(graph.node(9).hp_version, 0);
-  EXPECT_FALSE(graph.node(9).hp_roi.has_value());
+  EXPECT_FALSE(graph.node(9).hp_region.has_value());
   EXPECT_DOUBLE_EQ(graph.timing_results.total_ms, 0.0);
 
   GraphModel restored;
@@ -243,7 +244,7 @@ TEST(GraphDocumentAdapter,
   const Node& restored_source = restored.node(9);
   EXPECT_TRUE(restored_source.runtime_parameters.empty());
   EXPECT_EQ(restored_source.hp_version, 0);
-  EXPECT_FALSE(restored_source.hp_roi.has_value());
+  EXPECT_FALSE(restored_source.hp_region.has_value());
   EXPECT_DOUBLE_EQ(restored.timing_results.total_ms, 0.0);
   ASSERT_TRUE(restored_source.outputs.front().output_parameters.has_value());
   EXPECT_EQ(restored_source.outputs.front()

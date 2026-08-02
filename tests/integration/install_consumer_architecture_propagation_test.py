@@ -564,18 +564,45 @@ class CommandRecorder:
         @param command Executable and argv produced by the smoke driver.
         @param cwd Working directory selected by the smoke driver.
         @return Zero, matching a successful required subprocess.
-        @throws OSError If synthetic consumer artifacts cannot be written.
+        @throws OSError If a synthetic cache, executable, or manifest cannot be
+          written.
         @throws subprocess.CalledProcessError If this build or consumer target
           is a configured deterministic failure point.
-        @note ``cwd`` is intentionally not inspected. A mapped consumer build
-          creates every ordered fake executable plus both CMake-owned manifests;
-          no command is executed.
+        @note ``cwd`` is intentionally not inspected. A consumer configure
+          creates a cache-shaped record of its source, build, and ``-D``
+          arguments so post-configure validators observe the same boundary as
+          a real CMake call. A mapped consumer build creates every ordered fake
+          executable plus both CMake-owned manifests; no command is executed.
         """
 
         del cwd
         recorded = list(command)
         self.commands.append(recorded)
         self.command_events.append(recorded)
+        if (
+            len(recorded) >= 4
+            and recorded[1] == "-S"
+            and "-B" in recorded
+        ):
+            build_argument_index = recorded.index("-B") + 1
+            if build_argument_index < len(recorded):
+                build = pathlib.Path(
+                    recorded[build_argument_index]
+                ).resolve()
+                cache_values = {
+                    "CMAKE_HOME_DIRECTORY": str(
+                        pathlib.Path(recorded[2]).resolve()
+                    ),
+                    "CMAKE_CACHEFILE_DIR": str(build),
+                }
+                for argument in recorded:
+                    if not argument.startswith("-D") or "=" not in argument:
+                        continue
+                    assignment, value = argument[2:].split("=", 1)
+                    key = assignment.split(":", 1)[0]
+                    if key:
+                        cache_values[key] = value
+                write_cmake_cache(build, cache_values)
         if len(recorded) >= 3 and recorded[1] == "--build":
             build = pathlib.Path(recorded[2]).resolve()
             targets = self._consumer_targets_by_build.get(build)
@@ -677,6 +704,64 @@ class CommandRecorder:
         return target_names
 
 
+class DependencyDisabledResidueClassifierTest(unittest.TestCase):
+    """@brief Lock bounded optional deep-codec token classification.
+
+    @throws AssertionError If authoritative OpenEXR/Imf/V-15 spellings become
+      invisible or broad unrelated substrings begin to fail the package gate.
+    @note This is an in-process safety regression for the real installed/link
+      scanner; it launches no configure, compiler, install, or consumer.
+    """
+
+    def test_detects_authoritative_markers_case_insensitively(self) -> None:
+        """@brief Detect package, namespace, mangled, and V-15 mode tokens.
+
+        @return None after every controlled sample yields its expected label.
+        @throws AssertionError If case folding or version suffixes drift.
+        @note Samples are bounded fragments, not copied tool output.
+        """
+
+        samples = (
+            ("/usr/lib/libOpenEXRCore-3_2.dylib", "OpenEXR"),
+            ("Imf_3_2::Header", "Imf"),
+            ("_ZN3Imf6HeaderD1Ev", "Imf"),
+            ("-lIlmThread_3_2", "OpenEXR-transitive-library"),
+            ("deep-scanline", "deep-codec-mode"),
+            ("DEEP_TILED", "deep-codec-mode"),
+            ("multipart", "multipart-codec-mode"),
+            ("mixed shallow/deep", "mixed-part-codec-mode"),
+        )
+        for text, expected in samples:
+            with self.subTest(text=text):
+                self.assertIn(
+                    expected,
+                    dependency_disabled.forbidden_deep_codec_markers(text),
+                )
+
+    def test_avoids_ungrounded_broad_substrings(self) -> None:
+        """@brief Keep unrelated EXR/deep/half and word fragments legal.
+
+        @return None after every non-dependency sample remains unclassified.
+        @throws AssertionError If a future matcher becomes overbroad.
+        @note Qualified ``Imf`` remains forbidden; only unrelated containing
+          words are accepted here.
+        """
+
+        samples = (
+            "exr estimate",
+            "deep graph traversal",
+            "half open interval",
+            "multipartite relation",
+            "openexrenderer",
+            "simple_imf_cache",
+        )
+        for text in samples:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    dependency_disabled.forbidden_deep_codec_markers(text), []
+                )
+
+
 class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
     """@brief Validate dynamic consumer discovery and fail-closed execution.
 
@@ -720,6 +805,7 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
         cache = base_producer_cache(repo, producer)
         cache.update(
             {
+                "BUILD_TESTING": "ON",
                 "PHOTOSPIDER_ENABLE_OPENCV": "OFF",
                 "PHOTOSPIDER_ENABLE_YAML": "OFF",
                 "PHOTOSPIDER_BUILD_GRAPH_CLI": "OFF",
@@ -727,6 +813,7 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "OFF",
                 "CMAKE_DISABLE_FIND_PACKAGE_OpenCV": "ON",
                 "CMAKE_DISABLE_FIND_PACKAGE_yaml-cpp": "ON",
+                "CMAKE_DISABLE_FIND_PACKAGE_OpenEXR": "ON",
             }
         )
         write_cmake_cache(producer, cache)
@@ -750,6 +837,11 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 dependency_disabled,
                 "run_expect_failure",
                 side_effect=recorder.expect_failure,
+            ),
+            mock.patch.object(
+                dependency_disabled,
+                "validate_no_optional_deep_codec_residue",
+                return_value=None,
             ),
             mock.patch("platform.system", return_value="Darwin"),
         ):
@@ -805,9 +897,9 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
           start.
         @throws AssertionError If generated project structure drifts, either
           name reaches serialization, or the explicit diagnostic is absent.
-        @note The fixture replaces package discovery with an imported interface
-          target and selects ``project(... NONE)``. The target-list validator
-          and serialization code remain the exact production writer output.
+        @note The fixture replaces package discovery with imported interface
+          targets and selects ``project(... NONE)``. The target/source-list
+          validator and serialization code remain the production writer output.
         """
 
         with tempfile.TemporaryDirectory(
@@ -829,18 +921,26 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                     cmake_text = cmake_lists.read_text(encoding="utf-8")
                     replacements = (
                         (
-                            "project(dependency_disabled_consumer LANGUAGES CXX)",
+                            "project(dependency_disabled_consumer "
+                            "LANGUAGES C CXX)",
                             "project(dependency_disabled_consumer NONE)",
                         ),
                         (
-                            "find_package(Photospider CONFIG REQUIRED "
-                            "COMPONENTS embedded)",
+                            "find_package(Photospider CONFIG REQUIRED\n"
+                            "  COMPONENTS embedded operation_sdk "
+                            "data_provider_sdk)",
                             "add_library(Photospider::photospider "
+                            "INTERFACE IMPORTED)\n"
+                            "add_library(Photospider::operation_sdk "
+                            "INTERFACE IMPORTED)\n"
+                            "add_library(Photospider::data_provider_sdk "
+                            "INTERFACE IMPORTED)\n"
+                            "add_library(Photospider::operation_runtime "
                             "INTERFACE IMPORTED)",
                         ),
                         (
-                            "  dependency_disabled_consumer)\n",
-                            f"  {reserved_target})\n",
+                            "  dependency_disabled_consumer\n",
+                            f"  {reserved_target}\n",
                         ),
                     )
                     for original, replacement in replacements:
@@ -885,18 +985,19 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
     ) -> None:
         """@brief Round-trip both target-file expressions through CMake.
 
-        @return None after the production serialization loop emits target,
+        @return None after the production serialization loop emits each target,
           ``$<TARGET_FILE_NAME>``, and ``$<TARGET_FILE>`` as three exact TSV
-          fields for a POSIX-Python ``.exe`` imported target fixture.
+          fields for POSIX-Python ``.exe`` imported target fixtures.
         @throws OSError If fixture files cannot be written or CMake cannot
           start.
         @throws subprocess.CalledProcessError If CMake rejects the valid
           compiler-free generated project.
         @throws AssertionError If the writer omits, reorders, or changes either
           configuration-specific target-file expression.
-        @note The fixture replaces only target construction and package lookup
-          with an imported executable. The production target list, validation,
-          declaration, and manifest serialization remain unchanged.
+        @note The fixture replaces provider setup, target construction, and
+          target-specific links with imported executables. The ordered
+          target/source lists, validation, declaration, and manifest writer
+          remain unchanged.
         """
 
         with tempfile.TemporaryDirectory(
@@ -911,13 +1012,13 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
             target_variable = (
                 "${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_TARGET}"
             )
+            source_variable = (
+                "${PHOTOSPIDER_DEPENDENCY_DISABLED_CONSUMER_SOURCE}"
+            )
             target_creation = (
                 "  add_executable(\n"
                 f'    "{target_variable}"\n'
-                f'    "{target_variable}.cpp")\n'
-                "  target_link_libraries(\n"
-                f'    "{target_variable}"\n'
-                "    PRIVATE Photospider::photospider)"
+                f'    "{source_variable}")'
             )
             imported_target_creation = (
                 "  add_executable(\n"
@@ -927,17 +1028,53 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 "    IMPORTED_LOCATION\n"
                 f'      "${{CMAKE_BINARY_DIR}}/{target_variable}.exe")'
             )
+            provider_setup = (
+                "find_package(Photospider CONFIG REQUIRED\n"
+                "  COMPONENTS embedded operation_sdk data_provider_sdk)\n"
+                "get_target_property(_data_provider_links\n"
+                "  Photospider::data_provider_sdk INTERFACE_LINK_LIBRARIES)\n"
+                "if(_data_provider_links)\n"
+                "  message(FATAL_ERROR \"data_provider_sdk leaked a link "
+                "dependency\")\n"
+                "endif()\n"
+                "add_library(installed_c11_data_provider STATIC\n"
+                "  data_provider_c11.c)\n"
+                "set_target_properties(installed_c11_data_provider PROPERTIES\n"
+                "  C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)\n"
+                "target_link_libraries(installed_c11_data_provider\n"
+                "  PRIVATE Photospider::data_provider_sdk)\n"
+                "add_library(installed_cpp17_data_provider STATIC\n"
+                "  data_provider_cpp17.cpp)\n"
+                "set_target_properties(installed_cpp17_data_provider PROPERTIES\n"
+                "  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)\n"
+                "target_link_libraries(installed_cpp17_data_provider\n"
+                "  PRIVATE Photospider::data_provider_sdk)"
+            )
+            target_specific_links = (
+                "target_link_libraries(dependency_disabled_consumer\n"
+                "  PRIVATE Photospider::photospider\n"
+                "          Photospider::operation_sdk)\n"
+                "target_link_libraries(installed_c11_data_provider_consumer\n"
+                "  PRIVATE installed_c11_data_provider\n"
+                "          Photospider::operation_sdk)\n"
+                "target_link_libraries(installed_cpp17_data_provider_consumer\n"
+                "  PRIVATE installed_cpp17_data_provider\n"
+                "          Photospider::operation_sdk)"
+            )
             replacements = (
                 (
-                    "project(dependency_disabled_consumer LANGUAGES CXX)",
+                    "project(dependency_disabled_consumer LANGUAGES C CXX)",
                     "project(dependency_disabled_consumer NONE)",
                 ),
                 (
-                    "find_package(Photospider CONFIG REQUIRED "
-                    "COMPONENTS embedded)",
-                    "# Package lookup omitted by compiler-free writer fixture.",
+                    provider_setup,
+                    "# Provider setup omitted by compiler-free writer fixture.",
                 ),
                 (target_creation, imported_target_creation),
+                (
+                    target_specific_links,
+                    "# Target links omitted by compiler-free writer fixture.",
+                ),
             )
             for original, replacement in replacements:
                 self.assertIn(original, cmake_text)
@@ -970,17 +1107,23 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 allow_tab=True,
                 description="compiler-free target-file inventory fixture",
             )
-            self.assertEqual(len(records), 1)
-            target_name, configured_filename, configured_path = (
-                records[0].split("\t")
+            expected_targets = (
+                "dependency_disabled_consumer",
+                "installed_c11_data_provider_consumer",
+                "installed_cpp17_data_provider_consumer",
             )
-            self.assertEqual(target_name, "dependency_disabled_consumer")
-            self.assertEqual(
-                configured_filename, "dependency_disabled_consumer.exe"
-            )
-            self.assertEqual(
-                pathlib.Path(configured_path).name, configured_filename
-            )
+            self.assertEqual(len(records), len(expected_targets))
+            for record, expected_target in zip(records, expected_targets):
+                target_name, configured_filename, configured_path = (
+                    record.split("\t")
+                )
+                self.assertEqual(target_name, expected_target)
+                self.assertEqual(
+                    configured_filename, f"{expected_target}.exe"
+                )
+                self.assertEqual(
+                    pathlib.Path(configured_path).name, configured_filename
+                )
 
     def test_rejects_reserved_dot_names_in_both_manifests(self) -> None:
         """@brief Reject ``.`` and ``..`` in each independent target field.
@@ -2452,8 +2595,8 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
         self.assertEqual(set(observation), ARCHIVE_SYMBOL_OBSERVATION_KEYS)
         self.assertEqual(observation["tool_source"], "xcrun llvm-nm")
         self.assertTrue(observation["covers_product_seams"])
-        self.assertEqual(observation["required_anchor_count"], 6)
-        self.assertEqual(observation["required_anchor_total"], 6)
+        self.assertEqual(observation["required_anchor_count"], 9)
+        self.assertEqual(observation["required_anchor_total"], 9)
         self.assertEqual(observation["prohibited_symbol_count"], 1)
         self.assertEqual(
             observation["prohibited_symbols"], {forbidden_symbol: 1}
@@ -2682,8 +2825,8 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
                 {
                     "tool_source": "PATH llvm-nm",
                     "reason": "inspection missed required anchors",
-                    "missing_anchor_count": 6,
-                    "required_anchor_total": 6,
+                    "missing_anchor_count": 9,
+                    "required_anchor_total": 9,
                 },
                 {
                     "tool_source": "PATH nm",
@@ -2808,8 +2951,8 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
                 {
                     "tool_source": "PATH nm",
                     "reason": "inspection missed required anchors",
-                    "missing_anchor_count": 6,
-                    "required_anchor_total": 6,
+                    "missing_anchor_count": 9,
+                    "required_anchor_total": 9,
                 },
             ],
         )
@@ -2918,6 +3061,7 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
             cache = base_producer_cache(repo, producer)
             cache.update(
                 {
+                    "BUILD_TESTING": "ON",
                     "PHOTOSPIDER_ENABLE_OPENCV": "OFF",
                     "PHOTOSPIDER_ENABLE_YAML": "OFF",
                     "PHOTOSPIDER_BUILD_GRAPH_CLI": "OFF",
@@ -2925,6 +3069,7 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
                     "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "OFF",
                     "CMAKE_DISABLE_FIND_PACKAGE_OpenCV": "ON",
                     "CMAKE_DISABLE_FIND_PACKAGE_yaml-cpp": "ON",
+                    "CMAKE_DISABLE_FIND_PACKAGE_OpenEXR": "ON",
                 }
             )
             write_cmake_cache(producer, cache)
@@ -2957,6 +3102,11 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
                     "run_expect_failure",
                     side_effect=recorder.expect_failure,
                 ),
+                mock.patch.object(
+                    dependency_disabled,
+                    "validate_no_optional_deep_codec_residue",
+                    return_value=None,
+                ),
                 mock.patch(
                     "platform.system", return_value="Darwin"
                 ),
@@ -2966,6 +3116,10 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
             self.assert_propagated(
                 recorder.configure_commands(), expected_count=6
             )
+            for command in recorder.configure_commands():
+                self.assertIn(
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON", command
+                )
 
     def test_ipc_disabled_driver_propagates_to_all_children(self) -> None:
         """@brief Cover optional, required-missing, and embedded consumers.

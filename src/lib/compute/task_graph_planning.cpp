@@ -13,17 +13,74 @@
 
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
-#include "compute/domain_op_metadata.hpp"
 #include "compute/node_executor.hpp"
 #include "compute/task_population_strategy.hpp"
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
+
+namespace {
+
+/**
+ * @brief Compares complete private operation metadata without allocation.
+ *
+ * @param lhs First metadata snapshot.
+ * @param rhs Second metadata snapshot.
+ * @return True only when every current field matches.
+ * @throws Nothing.
+ * @note Keep this comparison synchronized with `OpMetadata`.
+ */
+bool operation_metadata_equal(const OpMetadata& lhs,
+                              const OpMetadata& rhs) noexcept {
+  return lhs.tile_preference == rhs.tile_preference &&
+         lhs.device_preference == rhs.device_preference &&
+         lhs.cost_score == rhs.cost_score &&
+         lhs.access_pattern == rhs.access_pattern &&
+         lhs.data_dependent == rhs.data_dependent &&
+         lhs.reentrant == rhs.reentrant &&
+         lhs.maximum_parallelism == rhs.maximum_parallelism &&
+         lhs.retained_memory_bytes == rhs.retained_memory_bytes &&
+         lhs.scratch_bytes == rhs.scratch_bytes &&
+         lhs.exclusive_key == rhs.exclusive_key;
+}
+
+}  // namespace
+
+/** @copydoc make_planned_operation_route */
+PlannedOperationRoute make_planned_operation_route(
+    const OpImplementation& implementation) {
+  return PlannedOperationRoute{
+      implementation.implementation_identity,
+      implementation.metadata.device_preference,
+      implementation.metadata,
+      implementation.is_tiled(),
+  };
+}
+
+/** @copydoc planned_operation_routes_equal */
+bool planned_operation_routes_equal(const PlannedOperationRoute& lhs,
+                                    const PlannedOperationRoute& rhs) noexcept {
+  return lhs.implementation_identity == rhs.implementation_identity &&
+         lhs.device == rhs.device && lhs.tiled == rhs.tiled &&
+         operation_metadata_equal(lhs.metadata, rhs.metadata);
+}
+
+/** @copydoc planned_operation_route_matches */
+bool planned_operation_route_matches(
+    const PlannedOperationRoute& route,
+    const OpImplementation& implementation) noexcept {
+  return route.implementation_identity ==
+             implementation.implementation_identity &&
+         route.device == implementation.metadata.device_preference &&
+         route.tiled == implementation.is_tiled() &&
+         operation_metadata_equal(route.metadata, implementation.metadata);
+}
+
 namespace {
 
 /** @brief Task-shape config token used by FullTaskGraph cache keys. */
-constexpr const char* kTaskShapeConfigVersion = "task-shape-v2";
+constexpr const char* kTaskShapeConfigVersion = "task-shape-v3";
 
 /** @brief Maximum attempts to observe one stable operation-registry shape. */
 constexpr int kMaxRegistryStableExpansionAttempts = 8;
@@ -34,17 +91,43 @@ constexpr int kMaxRegistryStableExpansionAttempts = 8;
  * @param graph Graph supplying the topology generation.
  * @param intent HP or RT planning domain.
  * @param registry_generation Captured operation-registry task-shape revision.
+ * @param available_devices Canonical route-visible device inventory.
  * @return Stable key for these planning inputs and the shape configuration.
  * @throws std::bad_alloc if string construction allocates.
  * @note Callers must verify that `registry_generation` remains current before
  *       returning a cached or newly expanded graph.
  */
-std::string make_full_task_graph_cache_key(const GraphModel& graph,
-                                           ComputeIntent intent,
-                                           std::uint64_t registry_generation) {
-  return std::to_string(graph.topology_generation()) + ":" +
-         std::to_string(static_cast<int>(intent)) + ":" +
-         std::to_string(registry_generation) + ":" + kTaskShapeConfigVersion;
+std::string make_full_task_graph_cache_key(
+    const GraphModel& graph, ComputeIntent intent,
+    std::uint64_t registry_generation,
+    const std::vector<Device>& available_devices) {
+  std::string key = std::to_string(graph.topology_generation()) + ":" +
+                    std::to_string(static_cast<int>(intent)) + ":" +
+                    std::to_string(registry_generation) + ":" +
+                    kTaskShapeConfigVersion + ":devices";
+  for (Device device : available_devices) {
+    key += ":" + std::to_string(static_cast<int>(device));
+  }
+  return key;
+}
+
+/**
+ * @brief Sorts and deduplicates one route-visible device inventory.
+ *
+ * @param available_devices Caller-provided device labels.
+ * @return Canonical inventory ordered by the underlying enum value.
+ * @throws std::bad_alloc if copied result storage cannot allocate.
+ * @note An empty inventory remains empty and therefore selects no operation;
+ * the helper never fabricates CPU availability.
+ */
+std::vector<Device> canonicalize_available_devices(
+    const std::vector<Device>& available_devices) {
+  std::vector<Device> result = available_devices;
+  std::sort(result.begin(), result.end(), [](Device lhs, Device rhs) {
+    return static_cast<int>(lhs) < static_cast<int>(rhs);
+  });
+  result.erase(std::unique(result.begin(), result.end()), result.end());
+  return result;
 }
 
 /**
@@ -456,28 +539,53 @@ std::vector<PixelSize> resolve_planned_input_extents(
 }
 
 /**
+ * @brief Indexes exact callback-free routes by planned node id.
+ *
+ * @param planned_work Stable per-node work records owned by the current plan.
+ * @return Node-id lookup borrowing each present PlannedOperationRoute.
+ * @throws std::bad_alloc when hash-table allocation fails.
+ * @note Empty graphless compatibility routes are omitted. Returned pointers
+ * remain valid only while planned_work is alive and structurally unchanged.
+ */
+std::unordered_map<int, const PlannedOperationRoute*>
+index_planned_operation_routes(
+    const std::vector<PlannedNodeWork>& planned_work) {
+  std::unordered_map<int, const PlannedOperationRoute*> routes;
+  routes.reserve(planned_work.size());
+  for (const PlannedNodeWork& work : planned_work) {
+    if (work.operation_route.has_value()) {
+      routes.emplace(work.node_id, &*work.operation_route);
+    }
+  }
+  return routes;
+}
+
+/**
  * @brief Infers the input ROI consumed by one downstream tile task.
  *
  * @param dependency Node-level edge whose upstream node provides the input.
  * @param to_task Downstream tile task being planned.
+ * @param downstream_route Exact callback-free route selected while the
+ * downstream task shape was populated, or nullptr for graphless fallback.
  * @param graph Optional graph used to match NodeExecutor ROI behavior.
  * @param resolver Shared extent resolver for graph-backed inference.
  * @param extent_cache Request-local extent cache.
  * @return Upstream ROI required by to_task, or an empty rectangle when unknown.
  * @throws GraphError or propagator exceptions from graph-backed ROI mapping.
  * @note When graph is present this calls NodeExecutor::input_roi_for_tile() so
- *       halo and RandomAccess operators match the execution path. A non-empty
- *       snapshot `dependency.from_roi` is then unioned as a conservative lower
- *       bound, so dirty forced-halo execution cannot read producer tiles it did
- *       not wait for. Effective
- *       upstream parameter values are resolved only for RandomAccess because
- *       aligned and halo geometry does not consume them; this lets a first
- *       request plan its still-uncached parameter producer. Without graph, the
- *       function falls back to dependency ROI metadata or aligned output ROI.
+ *       halo and RandomAccess operators match the exact planned execution
+ *       route. A non-empty snapshot `dependency.from_roi` is then unioned as a
+ *       conservative lower bound, so dirty forced-halo execution cannot read
+ *       producer tiles it did not wait for. Effective upstream parameter
+ *       values are resolved only for RandomAccess because aligned and halo
+ *       geometry does not consume them; this lets a first request plan its
+ *       still-uncached parameter producer. Without graph, the function falls
+ *       back to dependency ROI metadata or aligned output ROI.
  */
 PixelRect required_upstream_roi_for_task(
     const PlannedDependency& dependency, const PlannedTask& to_task,
-    const GraphModel* graph, GraphExtentResolver& resolver,
+    const PlannedOperationRoute* downstream_route, const GraphModel* graph,
+    GraphExtentResolver& resolver,
     std::unordered_map<int, PixelSize>& extent_cache) {
   if (graph && graph->has_node(dependency.from_node_id) &&
       graph->has_node(dependency.to_node_id) && has_roi(to_task.output_roi)) {
@@ -502,14 +610,11 @@ PixelRect required_upstream_roi_for_task(
       const std::vector<PixelSize> input_extents =
           resolve_planned_input_extents(*graph, downstream_node, resolver,
                                         extent_cache);
-      std::optional<OpMetadata> metadata = metadata_for_domain(
-          downstream_node.type, downstream_node.subtype, to_task.domain);
-      if (metadata) {
-        config.metadata = *metadata;
-      }
+      config.metadata =
+          downstream_route ? downstream_route->metadata : OpMetadata{};
       std::optional<plugin::ParameterMap> effective_parameters;
-      if (metadata && metadata->access_pattern ==
-                          OpMetadata::InputAccessPattern::RandomAccess) {
+      if (config.metadata->access_pattern ==
+          OpMetadata::InputAccessPattern::RandomAccess) {
         effective_parameters =
             resolve_effective_parameter_snapshot(downstream_node, *graph);
       }
@@ -601,21 +706,23 @@ bool can_use_spatial_tile_dependency(
  * @brief Detects image edges whose request-time ROI cannot be known at plan
  * construction.
  * @param dependency Candidate image dependency to a tiled consumer.
- * @param to_task Downstream task whose intent selects domain metadata.
+ * @param downstream_route Exact route selected for the downstream task shape,
+ * or nullptr when no executable route was planned.
  * @param graph Optional graph containing parameter-input topology.
  * @return True when the downstream random-access operator has at least one
  * connected parameter input whose same-request value may differ from the
  * committed snapshot.
- * @throws std::bad_alloc or registry exceptions from metadata lookup.
+ * @throws Nothing directly.
  * @note Full task graphs are cached across requests. Conservatively retaining
  * every upstream image tile for this shape prevents an old narrow parameter
  * value from releasing the consumer before newly required outer tiles finish.
+ * Metadata is never reselected independently of the planned callback.
  */
 bool requires_conservative_parameterized_image_dependency(
-    const PlannedDependency& dependency, const PlannedTask& to_task,
-    const GraphModel* graph) {
+    const PlannedDependency& dependency,
+    const PlannedOperationRoute* downstream_route, const GraphModel* graph) {
   if (!graph || dependency.input_kind != "image" ||
-      !graph->has_node(dependency.to_node_id)) {
+      !graph->has_node(dependency.to_node_id) || !downstream_route) {
     return false;
   }
   const Node& downstream = graph->node(dependency.to_node_id);
@@ -625,10 +732,8 @@ bool requires_conservative_parameterized_image_dependency(
   if (!has_connected_parameter) {
     return false;
   }
-  const auto metadata =
-      metadata_for_domain(downstream.type, downstream.subtype, to_task.domain);
-  return metadata && metadata->access_pattern ==
-                         OpMetadata::InputAccessPattern::RandomAccess;
+  return downstream_route->metadata.access_pattern ==
+         OpMetadata::InputAccessPattern::RandomAccess;
 }
 
 /**
@@ -653,6 +758,7 @@ void append_node_dependency_tasks(
  *
  * @param tasks Dense task graph tasks to inspect.
  * @param dependencies Node-level dependencies to lower to task ids.
+ * @param planned_work Per-node work containing exact selected routes.
  * @param graph Optional graph used for execution-accurate tile input ROI.
  * @return Dependency task ids aligned with tasks by dense task id.
  * @throws GraphError, std::out_of_range, or standard allocation exceptions.
@@ -665,9 +771,10 @@ void append_node_dependency_tasks(
 std::vector<std::vector<int>> build_task_dependency_ids(
     const std::vector<PlannedTask>& tasks,
     const std::vector<PlannedDependency>& dependencies,
-    const GraphModel* graph) {
+    const std::vector<PlannedNodeWork>& planned_work, const GraphModel* graph) {
   std::vector<std::vector<int>> dependency_ids(tasks.size());
   const auto task_index_by_node = build_task_dependency_index(tasks);
+  const auto route_by_node = index_planned_operation_routes(planned_work);
   GraphExtentResolver extent_resolver;
   std::unordered_map<int, PixelSize> extent_cache;
 
@@ -680,6 +787,9 @@ std::vector<std::vector<int>> build_task_dependency_ids(
     }
     const NodeTaskDependencyIndex& upstream_index = from_it->second;
     const NodeTaskDependencyIndex& downstream_index = to_it->second;
+    const auto route_it = route_by_node.find(dependency.to_node_id);
+    const PlannedOperationRoute* downstream_route =
+        route_it == route_by_node.end() ? nullptr : route_it->second;
     for (int to_task_id : downstream_index.task_ids) {
       if (to_task_id < 0 || to_task_id >= static_cast<int>(tasks.size())) {
         continue;
@@ -694,9 +804,10 @@ std::vector<std::vector<int>> build_task_dependency_ids(
       if (can_use_spatial_tile_dependency(dependency, upstream_index,
                                           to_task) &&
           !requires_conservative_parameterized_image_dependency(
-              dependency, to_task, graph)) {
+              dependency, downstream_route, graph)) {
         const PixelRect required_roi = required_upstream_roi_for_task(
-            dependency, to_task, graph, extent_resolver, extent_cache);
+            dependency, to_task, downstream_route, graph, extent_resolver,
+            extent_cache);
         append_covering_upstream_tiles(ids, upstream_index, required_roi,
                                        tasks);
         continue;
@@ -721,7 +832,8 @@ void populate_task_dependencies(ComputePlan& result, const GraphModel* graph) {
   result.task_graph.initial_task_ids.clear();
   std::unordered_set<int> dependent_task_ids;
   std::vector<std::vector<int>> dependency_ids = build_task_dependency_ids(
-      result.task_graph.tasks, result.task_graph.dependencies, graph);
+      result.task_graph.tasks, result.task_graph.dependencies,
+      result.planned_work, graph);
   for (auto& task : result.task_graph.tasks) {
     if (task.task_id < 0 ||
         task.task_id >= static_cast<int>(dependency_ids.size())) {
@@ -800,16 +912,17 @@ void clear_dirty_work_metadata(ComputePlan& result) {
  * @note This helper is the shared spine for full graph expansion, node/cache
  * pruning, and dirty snapshot inspection.
  */
-ComputePlan build_plan_from_nodes(const ComputeRequest& request,
-                                  const std::vector<int>& planned_nodes,
-                                  const DirtyRegionSnapshot* snapshot,
-                                  const GraphModel* graph) {
+ComputePlan build_plan_from_nodes(
+    const ComputeRequest& request, const std::vector<int>& planned_nodes,
+    const DirtyRegionSnapshot* snapshot, const GraphModel* graph,
+    const std::vector<Device>& available_devices) {
   ComputePlan result;
   result.intent = request.intent;
   result.target_node_id = request.target_node_id;
   result.parallel = request.parallel;
   result.execution_order = planned_nodes;
   result.planned_nodes = planned_nodes;
+  result.available_devices = available_devices;
 
   const DirtyDomain domain = domain_for_intent(request.intent);
   result.planned_work.reserve(result.planned_nodes.size());
@@ -825,7 +938,7 @@ ComputePlan build_plan_from_nodes(const ComputeRequest& request,
   populate_dependencies_from_snapshot(result, snapshot, domain);
   populate_node_dependency_lists(result);
   TaskPopulationStrategy task_population;
-  task_population.populate(result, snapshot, domain, graph);
+  task_population.populate(result, snapshot, domain, graph, available_devices);
   populate_task_dependencies(result, graph);
   return result;
 }
@@ -874,7 +987,7 @@ DirtyNodeSelection& ensure_node_selection(DirtyTaskSelectionOverlay& overlay,
 /**
  * @brief Looks up planned node work by node id for overlay ROI selection.
  *
- * @param plan Immutable node/cache-pruned plan being viewed.
+ * @param plan Immutable retained request-cone plan being viewed.
  * @return Map from node id to PlannedNodeWork pointer.
  * @throws std::bad_alloc if lookup storage grows.
  * @note Pointers remain valid for the lifetime of plan.
@@ -892,7 +1005,7 @@ std::unordered_map<int, const PlannedNodeWork*> planned_work_by_node(
 /**
  * @brief Applies dirty ROI metadata to an overlay instead of a plan copy.
  *
- * @param plan Immutable node/cache-pruned plan whose nodes are eligible.
+ * @param plan Immutable retained request-cone plan whose nodes are eligible.
  * @param snapshot Dirty snapshot for the current generation.
  * @param domain HP or RT domain being selected.
  * @param overlay Overlay receiving per-node ROI metadata.
@@ -956,7 +1069,7 @@ void populate_overlay_node_regions(const ComputePlan& plan,
 /**
  * @brief Merges snapshot dependency ROI mappings without copying a plan.
  *
- * @param plan Immutable node/cache-pruned plan whose dependencies are used.
+ * @param plan Immutable retained request-cone plan whose dependencies are used.
  * @param snapshot Dirty snapshot supplying ROI edge mappings.
  * @param domain HP or RT dependency domain.
  * @return Dependency records used by the generation-local overlay.
@@ -1000,7 +1113,8 @@ std::vector<PlannedDependency> merged_overlay_dependencies(
 std::vector<std::vector<int>> build_dependency_ids_for_view(
     const ComputePlan& plan, const std::vector<PlannedDependency>& dependencies,
     const GraphModel* graph) {
-  return build_task_dependency_ids(plan.task_graph.tasks, dependencies, graph);
+  return build_task_dependency_ids(plan.task_graph.tasks, dependencies,
+                                   plan.planned_work, graph);
 }
 
 /**
@@ -1038,22 +1152,91 @@ std::vector<int> initial_ready_task_ids_for_view(
   return ready;
 }
 
+/**
+ * @brief Retains demand reachable before request-satisfied node boundaries.
+ *
+ * @param node_universe Node identities and inactive connectors belonging to the
+ * current request view.
+ * @param dependencies Directed upstream-to-downstream dependency records.
+ * @param satisfied_nodes Universe nodes whose outputs already satisfy the
+ * request and therefore need no executable work.
+ * @return Universe nodes required by at least one unsatisfied sink without
+ * traversing through a satisfied boundary.
+ * @throws std::bad_alloc if adjacency, sink, or result storage cannot grow.
+ * @note A sink has no downstream dependency inside node_universe. Starting
+ * from every sink preserves disconnected request components. If malformed
+ * cyclic input has no sink, every universe node is used as a conservative root;
+ * validated production GraphModel topology never requires that fallback.
+ */
+std::unordered_set<int> required_nodes_before_satisfied_boundaries(
+    const std::unordered_set<int>& node_universe,
+    const std::vector<PlannedDependency>& dependencies,
+    const std::unordered_set<int>& satisfied_nodes) {
+  std::unordered_map<int, std::vector<int>> upstream_by_node;
+  std::unordered_set<int> nodes_with_universe_dependents;
+  upstream_by_node.reserve(node_universe.size());
+  nodes_with_universe_dependents.reserve(node_universe.size());
+  for (const PlannedDependency& dependency : dependencies) {
+    if (!node_universe.count(dependency.from_node_id) ||
+        !node_universe.count(dependency.to_node_id)) {
+      continue;
+    }
+    upstream_by_node[dependency.to_node_id].push_back(dependency.from_node_id);
+    nodes_with_universe_dependents.insert(dependency.from_node_id);
+  }
+
+  std::vector<int> pending;
+  pending.reserve(node_universe.size());
+  for (int node_id : node_universe) {
+    if (!nodes_with_universe_dependents.count(node_id)) {
+      pending.push_back(node_id);
+    }
+  }
+  if (pending.empty() && !node_universe.empty()) {
+    pending.insert(pending.end(), node_universe.begin(), node_universe.end());
+  }
+
+  std::unordered_set<int> required;
+  required.reserve(node_universe.size());
+  while (!pending.empty()) {
+    const int node_id = pending.back();
+    pending.pop_back();
+    if (satisfied_nodes.count(node_id) || !required.insert(node_id).second) {
+      continue;
+    }
+    const auto upstream_it = upstream_by_node.find(node_id);
+    if (upstream_it == upstream_by_node.end()) {
+      continue;
+    }
+    pending.insert(pending.end(), upstream_it->second.begin(),
+                   upstream_it->second.end());
+  }
+  return required;
+}
+
 }  // namespace
 
-std::string full_task_graph_cache_key(const GraphModel& graph,
-                                      ComputeIntent intent) {
+std::string full_task_graph_cache_key(
+    const GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices) {
+  const std::vector<Device> canonical_devices =
+      canonicalize_available_devices(available_devices);
   return make_full_task_graph_cache_key(
-      graph, intent, OpRegistry::instance().task_shape_generation());
+      graph, intent, OpRegistry::instance().task_shape_generation(),
+      canonical_devices);
 }
 
 std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
-    GraphModel& graph, ComputeIntent intent) {
+    GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices) {
   auto& registry = OpRegistry::instance();
+  const std::vector<Device> canonical_devices =
+      canonicalize_available_devices(available_devices);
   for (int attempt = 0; attempt < kMaxRegistryStableExpansionAttempts;
        ++attempt) {
     const std::uint64_t registry_generation = registry.task_shape_generation();
-    const std::string key =
-        make_full_task_graph_cache_key(graph, intent, registry_generation);
+    const std::string key = make_full_task_graph_cache_key(
+        graph, intent, registry_generation, canonical_devices);
     if (auto cached = graph.cached_full_task_graph(key)) {
       if (registry.task_shape_generation() == registry_generation) {
         return cached;
@@ -1061,8 +1244,8 @@ std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
       continue;
     }
     FullTaskGraphExpander expander;
-    auto expanded =
-        std::make_shared<FullTaskGraph>(expander.expand(graph, intent));
+    auto expanded = std::make_shared<FullTaskGraph>(
+        expander.expand(graph, intent, canonical_devices));
     if (registry.task_shape_generation() != registry_generation) {
       continue;
     }
@@ -1085,8 +1268,8 @@ ComputePlanSummary summarize_compute_plan(
   summary.target_node_id = compute_plan.target_node_id;
   summary.parallel = compute_plan.parallel;
   summary.topology_generation = graph.topology_generation();
-  summary.full_graph_cache_key =
-      full_task_graph_cache_key(graph, compute_plan.intent);
+  summary.full_graph_cache_key = full_task_graph_cache_key(
+      graph, compute_plan.intent, compute_plan.available_devices);
   summary.planned_node_count = compute_plan.planned_nodes.size();
   summary.task_count = compute_plan.task_graph.tasks.size();
   summary.dependency_count = compute_plan.task_graph.dependencies.size();
@@ -1168,12 +1351,15 @@ void populate_full_task_graph_indexes(FullTaskGraph& expanded) {
   }
 }
 
-FullTaskGraph FullTaskGraphExpander::expand(const GraphModel& graph,
-                                            ComputeIntent intent) const {
+FullTaskGraph FullTaskGraphExpander::expand(
+    const GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices) const {
+  const std::vector<Device> canonical_devices =
+      canonicalize_available_devices(available_devices);
   ComputeRequest request;
   request.intent = intent;
-  const ComputePlan full_plan =
-      build_plan_from_nodes(request, graph.node_ids(), nullptr, &graph);
+  const ComputePlan full_plan = build_plan_from_nodes(
+      request, graph.node_ids(), nullptr, &graph, canonical_devices);
 
   FullTaskGraph expanded;
   expanded.intent = intent;
@@ -1181,6 +1367,7 @@ FullTaskGraph FullTaskGraphExpander::expand(const GraphModel& graph,
   expanded.expanded_node_ids = full_plan.planned_nodes;
   expanded.expanded_work = full_plan.planned_work;
   expanded.task_graph = full_plan.task_graph;
+  expanded.available_devices = canonical_devices;
   populate_full_task_graph_indexes(expanded);
   return expanded;
 }
@@ -1192,12 +1379,17 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
   result.intent = request.intent;
   result.target_node_id = request.target_node_id;
   result.parallel = request.parallel;
-  result.execution_order = execution_order;
-  result.planned_nodes = execution_order;
+  result.available_devices = full_graph.available_devices;
 
-  std::unordered_set<int> selected_nodes(execution_order.begin(),
-                                         execution_order.end());
+  const std::unordered_set<int> requested_nodes(execution_order.begin(),
+                                                execution_order.end());
+  std::unordered_set<int> cache_satisfied_nodes;
+  cache_satisfied_nodes.reserve(execution_order.size());
   result.planned_work.reserve(execution_order.size());
+  const bool allow_formal_hp_cache =
+      request.allow_reusable_cache &&
+      full_graph.domain == DirtyDomain::HighPrecision &&
+      request.intent == ComputeIntent::GlobalHighPrecision;
   for (int node_id : execution_order) {
     if (!graph.has_node(node_id)) {
       throw GraphError(GraphErrc::NotFound, "Cannot prune task graph: node " +
@@ -1217,11 +1409,29 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
     work.dependent_node_ids.clear();
     work.dirty_rois.clear();
     work.reusable_cache_available =
+        allow_formal_hp_cache &&
         ComputeCachePolicy::has_reusable_output(graph.node(node_id));
+    if (work.reusable_cache_available) {
+      cache_satisfied_nodes.insert(node_id);
+    }
     result.planned_work.push_back(std::move(work));
   }
 
+  const std::unordered_set<int> executable_nodes =
+      request.defer_reusable_cache_pruning
+          ? requested_nodes
+          : required_nodes_before_satisfied_boundaries(
+                requested_nodes, full_graph.task_graph.dependencies,
+                cache_satisfied_nodes);
+  result.execution_order.reserve(execution_order.size());
   for (int node_id : execution_order) {
+    if (executable_nodes.count(node_id)) {
+      result.execution_order.push_back(node_id);
+    }
+  }
+  result.planned_nodes = result.execution_order;
+
+  for (int node_id : result.execution_order) {
     auto task_ids_it = full_graph.task_ids_by_node.find(node_id);
     if (task_ids_it == full_graph.task_ids_by_node.end()) {
       continue;
@@ -1239,7 +1449,7 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
     }
   }
 
-  for (int to_node_id : execution_order) {
+  for (int to_node_id : result.execution_order) {
     auto dependency_indices_it =
         full_graph.dependency_indices_by_to_node.find(to_node_id);
     if (dependency_indices_it ==
@@ -1252,7 +1462,7 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
       }
       const PlannedDependency& dependency =
           full_graph.task_graph.dependencies[dependency_index];
-      if (!selected_nodes.count(dependency.from_node_id)) {
+      if (!executable_nodes.count(dependency.from_node_id)) {
         continue;
       }
       result.task_graph.dependencies.push_back(dependency);
@@ -1318,6 +1528,9 @@ DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
 
   std::unordered_set<int> source_nodes(snapshot.dirty_source_nodes.begin(),
                                        snapshot.dirty_source_nodes.end());
+  std::vector<bool> dirty_candidate_flags(task_count, false);
+  std::unordered_set<int> dirty_candidate_nodes;
+  dirty_candidate_nodes.reserve(node_cache_plan.planned_nodes.size());
   for (const auto& task : node_cache_plan.task_graph.tasks) {
     if (task.task_id < 0 || task.task_id >= static_cast<int>(task_count)) {
       continue;
@@ -1331,8 +1544,36 @@ DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
     if (!selected_task.dirty_selected) {
       continue;
     }
-    if (externally_satisfied_node_ids &&
-        externally_satisfied_node_ids->count(task.node_id)) {
+    dirty_candidate_flags[task.task_id] = true;
+    dirty_candidate_nodes.insert(task.node_id);
+  }
+
+  std::unordered_set<int> satisfied_nodes;
+  if (externally_satisfied_node_ids != nullptr) {
+    satisfied_nodes.insert(externally_satisfied_node_ids->begin(),
+                           externally_satisfied_node_ids->end());
+  }
+  std::unordered_set<int> demand_node_universe(
+      node_cache_plan.planned_nodes.begin(),
+      node_cache_plan.planned_nodes.end());
+  demand_node_universe.reserve(node_cache_plan.planned_nodes.size() +
+                               satisfied_nodes.size() +
+                               dirty_candidate_nodes.size());
+  demand_node_universe.insert(satisfied_nodes.begin(), satisfied_nodes.end());
+  demand_node_universe.insert(dirty_candidate_nodes.begin(),
+                              dirty_candidate_nodes.end());
+  for (const PlannedDependency& dependency : selection.dependencies) {
+    demand_node_universe.insert(dependency.from_node_id);
+    demand_node_universe.insert(dependency.to_node_id);
+  }
+  const std::unordered_set<int> active_nodes =
+      required_nodes_before_satisfied_boundaries(
+          demand_node_universe, selection.dependencies, satisfied_nodes);
+
+  for (const auto& task : node_cache_plan.task_graph.tasks) {
+    if (task.task_id < 0 || task.task_id >= static_cast<int>(task_count) ||
+        !dirty_candidate_flags[task.task_id] ||
+        !active_nodes.count(task.node_id)) {
       continue;
     }
     selection.active_task_flags[task.task_id] = true;

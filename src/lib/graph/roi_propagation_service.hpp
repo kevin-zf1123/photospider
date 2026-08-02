@@ -3,9 +3,13 @@
 #include <cstddef>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/core/compute_intent.hpp"
+#include "photospider/core/device.hpp"
+#include "photospider/data/region.hpp"
 
 namespace ps {
 
@@ -69,10 +73,133 @@ struct UpstreamRoiProjection {
  *
  * @note The service does not own graph topology, dirty snapshots, execution
  * queues, or compute task state. Callers provide graph state and request-local
- * size caches when needed.
+ * size caches when needed. Each instance owns the route-visible device
+ * inventory and compute intent whose implementation selection governs exact
+ * TensorSlice eligibility.
  */
 class RoiPropagationService {
  public:
+  /**
+   * @brief Binds Region propagation to one execution-selection context.
+   *
+   * @param available_devices Route-visible devices in runtime inventory order.
+   * @param intent HP or RT selection policy used by the owning request.
+   * @throws std::bad_alloc when copying the device inventory cannot allocate.
+   * @note Default construction preserves the legacy CPU-only HP context used
+   *       by Kernel control surfaces and standalone propagation tests. Dirty
+   *       executors inject their request's actual route inventory and intent.
+   */
+  explicit RoiPropagationService(
+      std::vector<Device> available_devices = {Device::CPU},
+      ComputeIntent intent = ComputeIntent::GlobalHighPrecision);
+
+  /**
+   * @brief Selects one coherent implementation in this service's route
+   * context.
+   *
+   * @param node Node whose operation key is selected.
+   * @return Owned callback, metadata, identity, and device snapshot, or
+   * nullopt when no implementation can run on the bound inventory.
+   * @throws std::bad_alloc or callback-copy exceptions from registry snapshot
+   * selection.
+   * @note The returned value may retain a plugin DSO lease. Region planning
+   * must immediately copy only its callback-free route fields and release this
+   * temporary before returning a plan.
+   */
+  std::optional<OpImplementation> select_route_implementation(
+      const Node& node) const;
+
+  /**
+   * @brief Returns the route-visible device inventory bound at construction.
+   *
+   * @return Borrowed immutable inventory valid for this service's lifetime.
+   * @throws Nothing.
+   * @note The inventory preserves caller order; consumers comparing route
+   * contexts should canonicalize it as a set.
+   */
+  const std::vector<Device>& available_devices() const noexcept {
+    return available_devices_;
+  }
+
+  /**
+   * @brief Returns the registry selection intent bound at construction.
+   *
+   * @return GlobalHighPrecision or RealTimeUpdate selection policy.
+   * @throws Nothing.
+   */
+  ComputeIntent intent() const noexcept { return intent_; }
+
+  /**
+   * @brief Reports whether the route-selected operation has exact tensor work.
+   *
+   * @param node Node whose current operation implementation is selected.
+   * @return True only when the selected revisioned implementation is the exact
+   *         source-private core dense monolithic callback.
+   * @throws std::bad_alloc or callback-copy exceptions from registry snapshot
+   *         selection.
+   * @note Selection uses this instance's complete device inventory and intent.
+   *       The actual route candidate is selected before core identity testing;
+   *       the identity predicate never filters candidates and thereby falls
+   *       back to a different scalar implementation.
+   */
+  bool supports_tensor_region_execution(const Node& node) const;
+
+  /**
+   * @brief Projects one logical Region forward through graph image edges.
+   *
+   * @param graph Graph whose topology and current operation contracts apply.
+   * @param start_node_id Node where affected work originates.
+   * @param start_region Exact normalized Region in the start node domain.
+   * @param target_node_id Downstream node whose affected Region is requested.
+   * @return Exact ImageRect/TensorSlice result or a typed failure.
+   * @throws GraphError or callback exceptions from exact ImageRect propagation.
+   * @throws std::bad_alloc when traversal or result storage cannot allocate.
+   * @note Current v2 callbacks are invoked only for one exact ImageRect through
+   *       the checked private adapter. TensorSlice traverses only the explicit
+   *       source-private core dense identity contract.
+   */
+  RegionOperationResult project_region_forward(const GraphModel& graph,
+                                               int start_node_id,
+                                               const RegionSet& start_region,
+                                               int target_node_id) const;
+
+  /**
+   * @brief Projects one logical Region backward through graph image edges.
+   *
+   * @param graph Graph whose topology and current operation contracts apply.
+   * @param target_node_id Downstream node where demand originates.
+   * @param target_region Exact normalized Region in the target node domain.
+   * @param source_node_id Upstream node whose required Region is requested.
+   * @return Exact ImageRect/TensorSlice result or a typed failure.
+   * @throws GraphError or callback exceptions from exact ImageRect propagation.
+   * @throws std::bad_alloc when traversal or result storage cannot allocate.
+   * @note A missing TensorSlice transform returns Unsupported and never invokes
+   *       a rectangular callback or widens to Whole.
+   */
+  RegionOperationResult project_region_backward(const GraphModel& graph,
+                                                int target_node_id,
+                                                const RegionSet& target_region,
+                                                int source_node_id) const;
+
+  /**
+   * @brief Computes one node's immediate logical upstream demand.
+   *
+   * @param node Destination node whose transform is applied.
+   * @param downstream_region Exact normalized output Region.
+   * @param graph Graph supplying topology, extents, and cached metadata.
+   * @param size_cache Request-local image extent cache.
+   * @return Exact logical upstream demand or a typed unsupported outcome.
+   * @throws GraphError or callback exceptions for the ImageRect path.
+   * @throws std::bad_alloc when result storage cannot allocate.
+   * @note TensorSlice is preserved only by the explicit core dense identity
+   *       operation; other current operations have only rectangular v2
+   *       propagation semantics.
+   */
+  RegionOperationResult compute_upstream_region(
+      const Node& node, const RegionSet& downstream_region,
+      const GraphModel& graph,
+      std::unordered_map<int, PixelSize>& size_cache) const;
+
   /**
    * @brief Computes shared and input-selected upstream ROI contributions.
    * @param node Node whose input demand is being computed.
@@ -153,6 +280,11 @@ class RoiPropagationService {
                                                 int source_node_id) const;
 
  private:
+  /** @brief Owned route-visible devices for implementation selection. */
+  std::vector<Device> available_devices_;
+  /** @brief Request compute intent controlling registry candidate ordering. */
+  ComputeIntent intent_;
+  /** @brief Stateless graph extent resolver for rectangular propagation. */
   GraphExtentResolver extent_resolver_;
 };
 

@@ -36,6 +36,28 @@ static_assert(std::is_nothrow_move_constructible<ResourceLedger::Grant>::value,
               "grant moves must preserve exact release");
 static_assert(std::is_nothrow_move_assignable<ResourceLedger::Grant>::value,
               "grant assignment must preserve exact release");
+static_assert(
+    !std::is_copy_constructible<ResourceLedger::DeviceReservation>::value,
+    "device plans must not duplicate resource authority");
+static_assert(
+    !std::is_copy_assignable<ResourceLedger::DeviceReservation>::value,
+    "device plans must not copy-assign resource authority");
+static_assert(std::is_nothrow_move_constructible<
+                  ResourceLedger::DeviceReservation>::value,
+              "device plan moves must preserve rollback safety");
+static_assert(
+    std::is_nothrow_move_assignable<ResourceLedger::DeviceReservation>::value,
+    "device plan assignment must preserve rollback safety");
+static_assert(!std::is_copy_constructible<ResourceLedger::DeviceLease>::value,
+              "device leases must not duplicate committed authority");
+static_assert(!std::is_copy_assignable<ResourceLedger::DeviceLease>::value,
+              "device leases must not copy-assign committed authority");
+static_assert(
+    std::is_nothrow_move_constructible<ResourceLedger::DeviceLease>::value,
+    "device lease moves must preserve exact release");
+static_assert(
+    std::is_nothrow_move_assignable<ResourceLedger::DeviceLease>::value,
+    "device lease assignment must preserve exact release");
 
 /**
  * @brief Deterministically releases a fixed set of admission contenders.
@@ -256,6 +278,319 @@ TEST(ResourceVectorArithmetic, RejectsAdditionAndMultiplicationOverflow) {
       checked_multiply_resources(ResourceVector{1U, 2U, 3U, 4U, 5U}, 2U);
   ASSERT_TRUE(exact.has_value());
   EXPECT_EQ(*exact, (ResourceVector{2U, 4U, 6U, 8U, 10U}));
+}
+
+/**
+ * @brief Proves device arithmetic checks both independent byte dimensions.
+ * @throws Nothing when overflow rejects the entire sum without clamping.
+ */
+TEST(DeviceResourceVectorArithmetic, RejectsOverflowWithoutPartialSum) {
+  const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+  EXPECT_FALSE(checked_add_device_resources(DeviceResourceVector{maximum, 1U},
+                                            DeviceResourceVector{1U, 1U})
+                   .has_value());
+  EXPECT_FALSE(checked_add_device_resources(DeviceResourceVector{1U, maximum},
+                                            DeviceResourceVector{1U, 1U})
+                   .has_value());
+  const auto exact = checked_add_device_resources(
+      DeviceResourceVector{3U, 5U}, DeviceResourceVector{7U, 11U});
+  ASSERT_TRUE(exact.has_value());
+  EXPECT_EQ(*exact, (DeviceResourceVector{10U, 16U}));
+  EXPECT_TRUE(device_resources_fit(DeviceResourceVector{9U, 15U}, *exact));
+  EXPECT_FALSE(device_resources_fit(DeviceResourceVector{11U, 15U}, *exact));
+}
+
+/**
+ * @brief Rejects CPU and duplicate device composition accounts.
+ * @throws Nothing when invalid configuration is reported synchronously.
+ */
+TEST(DeviceResourceLedgerConfiguration, RejectsCpuAndDuplicateAccounts) {
+  const DeviceId metal(DeviceBackend::Metal);
+  EXPECT_THROW(
+      ResourceLedger(
+          ResourceVector{},
+          std::vector<DeviceResourceLimit>{
+              DeviceResourceLimit{DeviceId(DeviceBackend::CPU), {1U, 1U}}}),
+      std::invalid_argument);
+  EXPECT_THROW(ResourceLedger(ResourceVector{},
+                              std::vector<DeviceResourceLimit>{
+                                  DeviceResourceLimit{metal, {1U, 1U}},
+                                  DeviceResourceLimit{metal, {2U, 2U}}}),
+               std::invalid_argument);
+}
+
+/**
+ * @brief Proves one device plan commits both dimensions or neither.
+ * @throws Nothing when rejected plans preserve the prior account snapshot.
+ */
+TEST(DeviceResourceLedgerAdmission, PlanIsAtomicAcrossBothDimensions) {
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{DeviceResourceLimit{metal, {10U, 20U}}});
+  auto baseline =
+      ledger.try_reserve_device(metal, DeviceResourceVector{4U, 7U});
+  ASSERT_TRUE(baseline.has_value());
+  const auto before = ledger.device_snapshot(metal);
+  ASSERT_TRUE(before.has_value());
+
+  EXPECT_FALSE(ledger.try_reserve_device(metal, DeviceResourceVector{1U, 14U})
+                   .has_value());
+  const auto after = ledger.device_snapshot(metal);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_EQ(after->reserved, before->reserved);
+  EXPECT_EQ(after->available, before->available);
+  EXPECT_FALSE(ledger
+                   .try_reserve_device(DeviceId(DeviceBackend::CUDA),
+                                       DeviceResourceVector{})
+                   .has_value());
+}
+
+/**
+ * @brief Accepts zero and exact-boundary plans while rejecting one byte over.
+ * @throws Nothing when all owner transitions preserve exact snapshots.
+ */
+TEST(DeviceResourceLedgerAdmission, ZeroAndBoundaryPlansRemainExact) {
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{DeviceResourceLimit{metal, {5U, 7U}}});
+  auto zero = ledger.try_reserve_device(metal, DeviceResourceVector{});
+  ASSERT_TRUE(zero.has_value());
+  EXPECT_TRUE(zero->active());
+  auto zero_leases = zero->commit_actual(DeviceResourceVector{});
+  EXPECT_FALSE(zero->active());
+  EXPECT_FALSE(zero_leases.persistent_memory.active());
+  EXPECT_FALSE(zero_leases.scratch.active());
+
+  auto boundary =
+      ledger.try_reserve_device(metal, DeviceResourceVector{5U, 7U});
+  ASSERT_TRUE(boundary.has_value());
+  EXPECT_FALSE(ledger.try_reserve_device(metal, DeviceResourceVector{1U, 0U})
+                   .has_value());
+  const auto snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{5U, 7U}));
+  EXPECT_EQ(snapshot->available, DeviceResourceVector{});
+  boundary.reset();
+  EXPECT_EQ(ledger.device_snapshot(metal)->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves concrete device accounts cannot borrow from one another.
+ * @throws Nothing when each independent snapshot retains exact ownership.
+ */
+TEST(DeviceResourceLedgerAdmission, ConcreteDevicesRemainIsolated) {
+  const DeviceId metal_zero(DeviceBackend::Metal, 0U);
+  const DeviceId metal_one(DeviceBackend::Metal, 1U);
+  ResourceLedger ledger(ResourceVector{},
+                        std::vector<DeviceResourceLimit>{
+                            DeviceResourceLimit{metal_zero, {8U, 8U}},
+                            DeviceResourceLimit{metal_one, {3U, 3U}}});
+
+  auto first =
+      ledger.try_reserve_device(metal_zero, DeviceResourceVector{8U, 8U});
+  auto second =
+      ledger.try_reserve_device(metal_one, DeviceResourceVector{3U, 3U});
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  EXPECT_FALSE(
+      ledger.try_reserve_device(metal_zero, DeviceResourceVector{1U, 0U})
+          .has_value());
+  EXPECT_FALSE(
+      ledger.try_reserve_device(metal_one, DeviceResourceVector{0U, 1U})
+          .has_value());
+
+  const auto snapshots = ledger.device_snapshots();
+  ASSERT_EQ(snapshots.size(), 2U);
+  EXPECT_EQ(snapshots[0].device, metal_zero);
+  EXPECT_EQ(snapshots[0].reserved, (DeviceResourceVector{8U, 8U}));
+  EXPECT_EQ(snapshots[1].device, metal_one);
+  EXPECT_EQ(snapshots[1].reserved, (DeviceResourceVector{3U, 3U}));
+}
+
+/**
+ * @brief Reconciles actual bytes and releases memory and scratch separately.
+ * @throws Nothing when unused plan and exact lease ownership remain visible.
+ */
+TEST(DeviceResourceLedgerLease, CommitShrinksPlanAndSplitsLifetimes) {
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(ResourceVector{},
+                        std::vector<DeviceResourceLimit>{
+                            DeviceResourceLimit{metal, {100U, 200U}}});
+  auto reservation =
+      ledger.try_reserve_device(metal, DeviceResourceVector{80U, 160U});
+  ASSERT_TRUE(reservation.has_value());
+  auto leases = reservation->commit_actual(DeviceResourceVector{60U, 120U});
+  EXPECT_FALSE(reservation->active());
+  EXPECT_TRUE(leases.persistent_memory.active());
+  EXPECT_TRUE(leases.scratch.active());
+  EXPECT_EQ(leases.persistent_memory.resources(),
+            (DeviceResourceVector{60U, 0U}));
+  EXPECT_EQ(leases.scratch.resources(), (DeviceResourceVector{0U, 120U}));
+
+  auto snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{60U, 120U}));
+  EXPECT_EQ(snapshot->available, (DeviceResourceVector{40U, 80U}));
+
+  std::optional<ResourceLedger::DeviceLease> scratch(std::move(leases.scratch));
+  scratch.reset();
+  snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{60U, 0U}));
+  EXPECT_TRUE(leases.persistent_memory.active());
+
+  std::optional<ResourceLedger::DeviceLease> persistent(
+      std::move(leases.persistent_memory));
+  persistent.reset();
+  snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves an oversized native actual leaves the full plan rollback-safe.
+ * @throws Nothing when the typed error retains complete diagnostic vectors.
+ */
+TEST(DeviceResourceLedgerLease, OversizedActualFailsWithoutPartialLease) {
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(ResourceVector{},
+                        std::vector<DeviceResourceLimit>{
+                            DeviceResourceLimit{metal, {100U, 200U}}});
+  auto reservation =
+      ledger.try_reserve_device(metal, DeviceResourceVector{70U, 140U});
+  ASSERT_TRUE(reservation.has_value());
+
+  try {
+    static_cast<void>(
+        reservation->commit_actual(DeviceResourceVector{71U, 100U}));
+    FAIL() << "oversized native actual must fail";
+  } catch (const DeviceResourceError& error) {
+    EXPECT_EQ(error.code(), DeviceResourceErrorCode::ActualExceedsReservation);
+    EXPECT_EQ(error.device(), metal);
+    EXPECT_EQ(error.planned(), (DeviceResourceVector{70U, 140U}));
+    EXPECT_EQ(error.actual(), (DeviceResourceVector{71U, 100U}));
+  }
+  EXPECT_TRUE(reservation->active());
+  const auto committed = ledger.device_snapshot(metal);
+  ASSERT_TRUE(committed.has_value());
+  EXPECT_EQ(committed->reserved, (DeviceResourceVector{70U, 140U}));
+
+  reservation.reset();
+  const auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves scratch capacity remains charged until a delayed owner exits.
+ * @throws std::system_error when thread construction or joining fails.
+ */
+TEST(DeviceResourceLedgerLease, DelayedThreadOwnerControlsScratchRelease) {
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{DeviceResourceLimit{metal, {64U, 64U}}});
+  auto reservation =
+      ledger.try_reserve_device(metal, DeviceResourceVector{0U, 64U});
+  ASSERT_TRUE(reservation.has_value());
+  auto leases = reservation->commit_actual(DeviceResourceVector{0U, 64U});
+
+  ConcurrentAdmissionGate gate(1U);
+  std::thread completion(
+      [&gate, scratch = std::move(leases.scratch)]() mutable {
+        gate.arrive_and_wait();
+        EXPECT_TRUE(scratch.active());
+      });
+  gate.open();
+  const auto in_flight = ledger.device_snapshot(metal);
+  ASSERT_TRUE(in_flight.has_value());
+  EXPECT_EQ(in_flight->reserved, (DeviceResourceVector{0U, 64U}));
+  completion.join();
+  const auto complete = ledger.device_snapshot(metal);
+  ASSERT_TRUE(complete.has_value());
+  EXPECT_EQ(complete->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves reservation and lease moves transfer one release obligation.
+ * @throws Nothing when moved-from owners remain inert.
+ */
+TEST(DeviceResourceLedgerLease, MovesReleaseEachCommittedVectorExactlyOnce) {
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{DeviceResourceLimit{metal, {10U, 20U}}});
+  auto original =
+      ledger.try_reserve_device(metal, DeviceResourceVector{10U, 20U});
+  ASSERT_TRUE(original.has_value());
+  ResourceLedger::DeviceReservation moved(std::move(*original));
+  EXPECT_FALSE(original->active());
+  ASSERT_TRUE(moved.active());
+  auto leases = moved.commit_actual(DeviceResourceVector{8U, 16U});
+  EXPECT_FALSE(moved.active());
+
+  std::optional<ResourceLedger::DeviceLease> memory(
+      std::move(leases.persistent_memory));
+  std::optional<ResourceLedger::DeviceLease> scratch(std::move(leases.scratch));
+  EXPECT_FALSE(leases.persistent_memory.active());
+  EXPECT_FALSE(leases.scratch.active());
+  scratch.reset();
+  auto snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{8U, 0U}));
+  memory.reset();
+  snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves concurrent plans never overcommit one complete device account.
+ * @throws std::system_error if deterministic synchronization fails.
+ */
+TEST(DeviceResourceLedgerAdmission, ConcurrentPlansNeverOvercommitAndRecover) {
+  constexpr std::size_t kParticipants = 16U;
+  const DeviceId metal(DeviceBackend::Metal);
+  const DeviceResourceVector unit{2U, 3U};
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{DeviceResourceLimit{metal, {7U, 10U}}});
+  ConcurrentAdmissionGate gate(kParticipants);
+  std::vector<std::optional<ResourceLedger::DeviceReservation>> results(
+      kParticipants);
+  std::vector<std::thread> threads;
+  threads.reserve(kParticipants);
+
+  for (std::size_t index = 0U; index < kParticipants; ++index) {
+    threads.emplace_back([&ledger, &gate, &results, index, metal, unit] {
+      gate.arrive_and_wait();
+      results[index] = ledger.try_reserve_device(metal, unit);
+    });
+  }
+  gate.open();
+  for (std::thread& thread : threads) {
+    thread.join();
+  }
+
+  std::size_t admitted = 0U;
+  for (const auto& result : results) {
+    if (result.has_value()) {
+      ++admitted;
+    }
+  }
+  EXPECT_EQ(admitted, 3U);
+  const auto saturated = ledger.device_snapshot(metal);
+  ASSERT_TRUE(saturated.has_value());
+  EXPECT_EQ(saturated->reserved, (DeviceResourceVector{6U, 9U}));
+  EXPECT_FALSE(ledger.try_reserve_device(metal, DeviceResourceVector{2U, 0U})
+                   .has_value());
+
+  results.clear();
+  const auto recovered = ledger.device_snapshot(metal);
+  ASSERT_TRUE(recovered.has_value());
+  EXPECT_EQ(recovered->reserved, DeviceResourceVector{});
 }
 
 /**

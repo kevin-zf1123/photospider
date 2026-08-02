@@ -15,6 +15,7 @@
 #include "graph/graph_revision.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/device.hpp"
+#include "photospider/memory/ready_fence.hpp"
 #include "runtime/resource_ledger.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -1247,6 +1248,23 @@ class ComputeRunLease {
                     bool callback_owns_completion = false);
 
   /**
+   * @brief Routes one terminal pending-Value continuation to its exact task.
+   * @param identity Composite identity previously left AwaitingValue.
+   * @param task_runtime Active runtime owning the added completion unit.
+   * @param snapshot Terminal producer-completion observation.
+   * @return Nothing.
+   * @throws std::invalid_argument for a mismatched task or lease.
+   * @throws ReadyFenceAccessError, GraphError, or runtime exceptions from
+   * terminal materialization, dependency release, or completion retirement.
+   * @note This route retires the dynamically added completion unit on every
+   * normal, terminal-skip, and exceptional path. Active failures are published
+   * to the exact ComputeRun before unchanged rethrow.
+   */
+  void complete_deferred_value(const ComputeRunTaskIdentity& identity,
+                               ExecutionTaskRuntime& task_runtime,
+                               ReadyFenceSnapshot snapshot);
+
+  /**
    * @brief Runs the full-HP execution bootstrap through this lease.
    *
    * @param task_runtime Active execution batch receiving initial owned
@@ -1576,15 +1594,19 @@ class ComputeRun {
    * copied into the Run-owned plan.
    * @param publish_plan_inspection Whether plan construction immediately
    * updates GraphModel diagnostics.
+   * @param allow_reusable_cache Whether exact complete formal HP cache may
+   * satisfy nodes before task population.
    * @return Mutable Run-owned plan retained by the shared control block.
    * @throws std::logic_error when a plan already exists or the Run is terminal.
    * @throws GraphError or standard exceptions from plan construction.
    * @note Full-HP task callbacks reach this plan only through a matching lease.
+   * Force-recache callers disable reusable cache while retaining current Graph
+   * output until installed execution owns visible mutation.
    */
   TaskSubmissionPlan& emplace_submission_plan(
       GraphModel& graph, GraphTraversalService& traversal, int node_id,
       std::vector<Device> available_devices,
-      bool publish_plan_inspection = true);
+      bool publish_plan_inspection = true, bool allow_reusable_cache = true);
 
   /**
    * @brief Returns the Run-owned submission plan when installed.

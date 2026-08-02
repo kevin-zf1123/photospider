@@ -41,6 +41,7 @@
 #include "compute/run_group.hpp"
 #include "compute/task_graph_planning.hpp"
 #include "core/param_utils.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -146,14 +147,15 @@ ComputeIntent planning_intent_for_request(
  * execution for this service call.
  * @return Narrow compute::ComputeRequest used by task graph planning.
  * @throws Nothing directly.
- * @note Planning uses only semantic target/domain data and the selected
- * execution mode; cache and telemetry options are consumed later by execution.
+ * @note Planning consumes force-recache only as permission to bypass reusable
+ * cache pruning. Visible cache clearing and all other cache/telemetry options
+ * remain execution-owned.
  */
 compute::ComputeRequest make_planning_request(
     const ComputeService::Request& request, bool use_parallel_executor) {
-  return compute::ComputeRequest{planning_intent_for_request(request),
-                                 request.node_id, use_parallel_executor,
-                                 request.dirty_roi};
+  return compute::ComputeRequest{
+      planning_intent_for_request(request), request.node_id,
+      use_parallel_executor, request.dirty_roi, !request.cache.force_recache};
 }
 
 /**
@@ -837,8 +839,9 @@ struct PreparedIntentUpdateState final {
  * HP memory cache, optionally loads disk cache, detects cycles, resolves
  * parameter and image inputs on a request-local Node snapshot, dispatches that
  * snapshot to the selected HP operator through NodeExecutor, commits the HP
- * cache, records timing/events, and saves disk cache when configured. Effective
- * runtime parameters are never written into the graph-owned Node.
+ * cache with exact full-validity Region metadata, records timing/events, and
+ * saves disk cache when configured. Effective runtime parameters are never
+ * written into the graph-owned Node.
  *
  * @param graph Graph whose nodes and caches are read and mutated.
  * @param node_id Node id to compute.
@@ -855,7 +858,11 @@ struct PreparedIntentUpdateState final {
  * hint retains its existing Graph state behavior, while runtime parameters and
  * other operation-facing state remain request-local. Observations surround
  * recursive dependency, disk-cache, provider/tile, cache-commit, and return
- * boundaries; a monolithic provider already entered is non-preemptible.
+ * boundaries; a monolithic provider already entered is non-preemptible. The
+ * direct operation lease is scoped only around NodeExecutor provider entry:
+ * provider exceptions release it during stack unwinding, while result
+ * normalization, Graph cache publication, disk persistence, and any failures
+ * from those Host stages occur after release.
  */
 NodeOutput& ComputeService::compute_internal(
     GraphModel& graph, int node_id, const RecursiveComputeContext& context) {
@@ -918,11 +925,33 @@ NodeOutput& ComputeService::compute_internal(
     tiled_config.on_tile = [&run_lease = context.run_lease](const PixelRect&) {
       observe_open_run_or_throw(run_lease);
     };
-    NodeOutput computed_output = compute::NodeExecutor::execute(
-        graph, execution_node, resolved_operation->second, monolithic_inputs,
-        tiled_config);
+    const OpImplementation& implementation = resolved_operation->second;
+    const compute::OperationExecutionConstraints operation_constraints{
+        implementation.implementation_identity,
+        implementation.metadata.reentrant,
+        implementation.metadata.maximum_parallelism,
+        implementation.metadata.exclusive_key,
+    };
+    const compute::ReadyTaskResourceDemand operation_demand{
+        implementation.metadata.retained_memory_bytes,
+        implementation.metadata.scratch_bytes,
+        0U,
+        1U,
+    };
+    NodeOutput computed_output = [&]() -> NodeOutput {
+      compute::OperationExecutionLease operation_lease =
+          execution_service_.acquire_operation_execution(
+              context.run_lease, operation_constraints, operation_demand);
+      return compute::NodeExecutor::execute(graph, execution_node,
+                                            implementation.func,
+                                            monolithic_inputs, tiled_config);
+    }();
     observe_open_run_or_throw(context.run_lease);
+    value_image_adapter::normalize_node_output_image_value(&computed_output);
+    RegionSet computed_region =
+        value_image_adapter::full_node_output_region(computed_output);
     target_node.cached_output_high_precision = std::move(computed_output);
+    target_node.hp_region = std::move(computed_region);
 
     current_event.execution_end_time =
         std::chrono::high_resolution_clock::now();
@@ -1263,8 +1292,8 @@ ComputeService::prepare_intent_update(
     std::vector<Device> preflight_devices;
     const std::vector<Device>* preflight_devices_override = nullptr;
     if (uses_process_service) {
-      preflight_devices = execution_service_.available_devices(
-          *strategy.runtime, state->hp_execution_type);
+      preflight_devices =
+          execution_service_.available_devices(state->hp_execution_type);
       preflight_devices_override = &preflight_devices;
     }
     state->connected_preflight = compute::prepare_connected_dirty_parameters(
@@ -1272,7 +1301,8 @@ ComputeService::prepare_intent_update(
         topology_generation, nullptr,
         uses_process_service ? &execution_service_ : nullptr,
         uses_process_service ? strategy.runtime : nullptr, hp_run,
-        &state->hp_lease, state->hp_execution_type, preflight_devices_override);
+        &state->hp_lease, state->hp_execution_type, preflight_devices_override,
+        uses_process_service ? nullptr : &execution_service_);
   }
 
   state->proxy_graph = &realtime_proxy_graph_for(graph, strategy, request);
@@ -1368,21 +1398,24 @@ NodeOutput& ComputeService::execute_prepared_intent_update(
         make_dirty_update_request(
             silent_request, true, prepared->sibling_commit_gate,
             prepared->stabilized_parameters, prepared->node_synchronization),
-        prepared->hp_run, physical_service, &prepared->hp_lease);
+        prepared->hp_run, physical_service, &prepared->hp_lease,
+        physical_service == nullptr ? &execution_service_ : nullptr);
     compute::RealTimeDirtyExecutor rt_executor(traversal_, events_);
     prepared->rt_prepared = rt_executor.prepare(
         *prepared->graph, *prepared->proxy_graph, prepared->strategy.runtime,
         make_dirty_update_request(prepared->request, false, nullptr,
                                   prepared->stabilized_parameters,
                                   prepared->node_synchronization),
-        prepared->rt_run, physical_service, &*prepared->rt_lease);
+        prepared->rt_run, physical_service, &*prepared->rt_lease,
+        physical_service == nullptr ? &execution_service_ : nullptr);
   } else {
     compute::HighPrecisionDirtyExecutor hp_executor(traversal_, events_);
     prepared->hp_prepared = hp_executor.prepare(
         *prepared->graph, *prepared->proxy_graph, prepared->strategy.runtime,
         make_dirty_update_request(prepared->request, false, nullptr,
                                   prepared->stabilized_parameters),
-        prepared->hp_run, physical_service, &prepared->hp_lease);
+        prepared->hp_run, physical_service, &prepared->hp_lease,
+        physical_service == nullptr ? &execution_service_ : nullptr);
   }
   if (!prepared->hp_prepared.active() ||
       (intent == ComputeIntent::RealTimeUpdate &&
@@ -1578,18 +1611,32 @@ ComputeService::prepare_sequential_compute(
   observe_open_run_or_throw(run_lease);
   execution_order = compute_plan.planned_nodes;
 
-  std::unordered_map<int, OpRegistry::OpVariant> resolved_operations;
+  std::unordered_map<int, OpImplementation> resolved_operations;
   resolved_operations.reserve(execution_order.size());
   std::unordered_map<int, bool> visiting;
   visiting.reserve(execution_order.size());
   for (int node_id : execution_order) {
     const Node& node = graph.node(node_id);
-    std::optional<OpRegistry::OpVariant> operation =
-        OpRegistry::instance().resolve_for_intent(
-            node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
+    std::optional<OpImplementation> operation =
+        OpRegistry::instance().select_implementation(
+            node.type, node.subtype, {Device::CPU},
+            ComputeIntent::GlobalHighPrecision);
     if (!operation.has_value()) {
       throw GraphError(GraphErrc::NoOperation,
                        "No op for " + node.type + ":" + node.subtype);
+    }
+    const auto planned_work = std::find_if(
+        compute_plan.planned_work.begin(), compute_plan.planned_work.end(),
+        [node_id](const compute::PlannedNodeWork& work) {
+          return work.node_id == node_id;
+        });
+    if (planned_work == compute_plan.planned_work.end() ||
+        !planned_work->operation_route.has_value() ||
+        planned_work->operation_route->implementation_identity !=
+            operation->implementation_identity) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Operation registry changed after planning for " +
+                           node.type + ":" + node.subtype);
     }
     resolved_operations.emplace(node_id, std::move(*operation));
     visiting.emplace(node_id, false);
@@ -1616,12 +1663,13 @@ ComputeService::prepare_sequential_compute(
  * fails, recursive compute fails, target output is unavailable, or accepted
  * cancellation is observed.
  * @note The method records the same node/cache-pruned plan shape used by the
- * parallel path before delegating to the recursive executor. The direct
- * recursive algorithm has no dispatcher-owned temporary output object; after
- * this method returns, the request wrapper advances the Run to CommitPending
- * before invoking the product commit policy. Observations bracket planning,
- * recursive/provider work, telemetry, and return; a monolithic provider
- * already entered remains non-preemptible.
+ * parallel path before delegating to the recursive executor. Force-recache
+ * clears each planned output and matching Region while retaining its monotonic
+ * HP version. The direct recursive algorithm has no dispatcher-owned temporary
+ * output object; after this method returns, the request wrapper advances the
+ * Run to CommitPending before invoking the product commit policy. Observations
+ * bracket planning, recursive/provider work, telemetry, and return; a
+ * monolithic provider already entered remains non-preemptible.
  */
 NodeOutput& ComputeService::compute_sequential_impl(
     GraphModel& graph, const Request& request,
@@ -1642,7 +1690,9 @@ NodeOutput& ComputeService::compute_sequential_impl(
     graph.clear_full_task_graph_cache();
     std::lock_guard<std::mutex> lock(graph.graph_mutex_);
     for (int node_id : prepared.execution_order) {
-      graph.mutable_node(node_id).cached_output_high_precision.reset();
+      Node& node = graph.mutable_node(node_id);
+      node.cached_output_high_precision.reset();
+      node.hp_region.reset();
     }
   }
   remember_facade_compute_plan(graph, prepared.compute_plan);

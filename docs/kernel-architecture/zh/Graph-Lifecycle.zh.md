@@ -9,8 +9,10 @@ unavailable persistence adapter 都是当前行为。
 `Kernel` 拥有一张由 mutex 保护的 map，从 graph name 指向共享的 `GraphRuntime` lifetime
 root。每个 runtime 拥有一个 `GraphModel`、一个 graph-state executor、一条私有
 compute-request executor、一个 latest-wins request coordinator、复制的 HP/RT
-execution-route binding、event/execution-trace state 与 platform runtime resource。Map
-lookup 会在短临界区内复制一个 shared runtime owner；释放 map lock 后才执行 graph-state、
+execution-route binding、event/execution-trace state 与一个稳定 Graph lifetime anchor。
+Native platform device、command queue、allocator、pipeline cache 与 executor resource
+改由进程 `ExecutionService` 中的固定 `DeviceExecutorRegistry` 持有，不属于 Graph lifetime。
+Map lookup 会在短临界区内复制一个 shared runtime owner；释放 map lock 后才执行 graph-state、
 compute、IO、inspection 与 lane work。因此，并发 close 可以移除 name，但不会销毁已由准入内部
 调用保留的 runtime。
 
@@ -138,6 +140,16 @@ atomic replacement。Destination 成功 open 前发生的失败会保留 existin
 write、flush、close 或之后的资源失败可能留下已创建、已截断或只写入部分内容的 destination。
 因此，destination rollback 不属于 graph-owner transaction。
 
+当前 save 成功只表示 detached capture、YAML emission 与直接 open/write/flush/close 序列
+成功返回。当前格式没有 document version 或 expected-version predicate；调用不会返回
+save receipt 或实际 durability level，不调用 file/directory `fsync`，也不声称 atomic
+replacement 或 crash durability。Graph 文档保存与 `ComputeRun`、disk cache、daemon job
+state 和受保护 IPC 输出交付彼此独立。
+
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+接受未来带版本的同目录 staging/atomic-replacement 契约和显式 durability capability。
+该目标不会强化上文当前行为。
+
 ## Node Replacement 与结构编辑
 
 `Host::set_node_yaml()` 会让 session 进入防并发 close 的 admission。Required node lookup、
@@ -200,8 +212,8 @@ fallback。
 这些依赖不是 graph state：reload、clear 与 close 不会替换它们。`Kernel::~Kernel()` 会在普通
 member teardown 到达 cache、traversal、diagnostic、IO 或 ROI collaborator 前显式清空自有 runtime
 map。每个 `GraphRuntime` 因此会在 graph-state 可用时停止并排空 compute-request
-work，再在释放 Graph-local route value 与 platform state 前排空 graph-state；整个过程中，这些借用的 Kernel
-service 与全部注入 owner 仍然存活，只有之后的 service destruction 才会释放它们。
+work，再在释放 Graph-local route value 与其他 session 级状态前排空 graph-state；整个过程中，
+这些借用的 Kernel service 与全部注入 owner 仍然存活，只有之后的 service destruction 才会释放它们。
 Owning Host 必须在 Kernel destruction 前停止外部 Kernel-call admission，因为 private
 graph map 不是 concurrent-destruction API。Codec/document `GraphError` 保留各自文档化的
 category，`std::bad_alloc` 原样传播。
@@ -267,12 +279,17 @@ registry unregistration。永不返回的 non-preemptible provider 因此可以�
 
 Graph index 与 candidate count 清空后，close 会执行以下精确且不可逆的尾序：
 
-1. 移除空 lifecycle-registry row；
+1. 在每个已 admission Run 与 native completion 都结算后，移除空 lifecycle-registry row；
 2. 停止 coordinator 与 compute-request admission，唤醒因容量阻塞的 producer，retire parked
-   ticket，排空已接受 callback，并在 graph-state finalization 仍可用时 join request worker；
-3. 停止、排空并 join graph-state lane；
-4. 把 runtime 标记为 retired，并释放 route ownership；
-5. 再次获取 graph-registry mutex，验证该 name 仍指向所保留 runtime，擦除 map entry，并在释放
+   ticket，排空已接受 callback，并在 graph-state finalization 仍可用时 join request worker。
+   `PreparedCandidate` 会在 Kernel 预跟踪其 residency lineage 之前拥有一个已 admission 的
+   reserved ticket，因此这次 drain 也会结算暂停在该区间的 caller；
+3. 只有在 request worker join 后，才退役该精确 `GraphInstanceId` 的全部 residency
+   generation row；仍有 pending transfer 属于 fail-stop，而已结算 Ready replica 继续由
+   process-domain capacity 管理；
+4. 停止、排空并 join graph-state lane；
+5. 把 runtime 标记为 retired，并释放 route ownership；
+6. 再次获取 graph-registry mutex，验证该 name 仍指向所保留 runtime，擦除 map entry，并在释放
    mutex 前发布 close-generation success。随后其余 shared runtime owner 可安全 retire，不会留下
    任何由 map 派生的 dangling pointer。
 
@@ -370,6 +387,10 @@ adapter-owned contract 后方，因此 runtime、graph、compute、inspection �
 保持 YAML 中立。Issue #63 已完成 dependency-disabled product profile：不发现 yaml-cpp 时，
 empty 与 in-memory session 仍可使用；显式 graph-document 或 cache-metadata representation
 operation 会使用 unavailable adapter，并返回 `GraphErrc::Io`。
+
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+在保持当前 direct-writer 限制可见的同时，为目标 Graph 文档事务分配独立 version、
+原子 publication 与 durability receipt。当前 save 与该目标都不会成为 `ComputeRun` 阶段。
 
 已接受的
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)

@@ -11,7 +11,7 @@
 | 层级 | 权威位置 | 时间含义 |
 | --- | --- | --- |
 | 当前事实 | `docs/kernel-architecture/` | 当前源码树中的行为与所有权。 |
-| 架构决策 | `docs/adr/` | 持久决策及其决策时背景。 |
+| 架构决策 | [`docs/adr/`](../../adr/zh/README.zh.md) | 持久决策及其决策时背景。 |
 | 演进目标 | `docs/roadmap/` | 稳定的已接受方向，不表示当前行为。 |
 | 实施状态 | 链接的 GitHub Project 和 Issue | 一个交付切片的实时状态、依赖与验证结果。 |
 
@@ -48,6 +48,7 @@ object。未来概念只有在代码和长期验证使其成为当前软件行�
 | 行为 | 调用方在图生命周期、计算、缓存和脏区工作中能观察到什么？ | [图生命周期](Graph-Lifecycle.zh.md)、[计算流程](Compute-Flow.zh.md)、[缓存模型](Cache-Model.zh.md)和[脏区传播](Dirty-Region-Propagation.zh.md) |
 | 实现 | 当前哪些模块拥有这些行为，调用或派发路径是什么？ | [概览](Overview.zh.md)、[计算边界](Compute-Boundaries.zh.md)和[策略与执行架构](Policy-and-Execution-Architecture.zh.md) |
 | 边界 | Consumer 可以依赖哪些值、所有权规则、不变量、限制与故障表面？ | [ImageBuffer 内存契约](ImageBuffer-Memory-Contract.zh.md)、[插件 ABI](Plugin-ABI.zh.md)和[计算边界](Compute-Boundaries.zh.md) |
+| 持久化与完成 | 当前哪些“就绪”“成功”“保存”和交付状态彼此独立，哪些 durability 尚未实现？ | [图生命周期](Graph-Lifecycle.zh.md)、[计算流程](Compute-Flow.zh.md)、[缓存模型](Cache-Model.zh.md)和[术语](Terminology.zh.md) |
 | 原理 | 为什么当前机制如此拆分，哪些持久决策约束它？ | 当前文档中的原理章节和 governing [ADR](../../adr/zh/) |
 
 首次阅读时，应先看[术语](Terminology.zh.md)，再看[概览](Overview.zh.md)，随后按正在修改的

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/region.hpp"
 
 namespace ps::compute {
 
@@ -82,6 +83,24 @@ struct DirtySourceRoiRecord {
 };
 
 /**
+ * @brief Logical Region emitted by one dirty source lifecycle event.
+ *
+ * @throws std::bad_alloc when Region storage cannot allocate.
+ * @note This is the authoritative V-4 source fact. DirtySourceRoiRecord remains
+ *       only as an IPC v2/image-inspection edge projection.
+ */
+struct DirtySourceRegionRecord {
+  /** @brief Graph node id that emitted the dirty Region. */
+  int node_id = -1;
+  /** @brief Dirty compute domain associated with the event. */
+  DirtyDomain domain = DirtyDomain::HighPrecision;
+  /** @brief Exact normalized node-local logical Region. */
+  RegionSet source_region = RegionSet::empty();
+  /** @brief Dirty generation in which the Region was recorded. */
+  uint64_t generation = 0;
+};
+
+/**
  * @brief Per-source lifecycle and ROI history for one dirty generation.
  *
  * @note This state is written by node lifecycle events only. Propagated actual
@@ -98,6 +117,12 @@ struct DirtySourceNodeState {
   uint64_t generation = 0;
   /** @brief Source ROIs accumulated for the generation. */
   std::vector<PixelRect> source_rois;
+  /**
+   * @brief Authoritative logical source Regions accumulated for the generation.
+   * @note Current source_rois entries are derived only for ImageRect IPC v2
+   *       inspection.
+   */
+  std::vector<RegionSet> source_regions;
 };
 
 /**
@@ -121,6 +146,12 @@ struct DirtyTileKey {
   int tile_size = 0;
   /** @brief Pixel ROI covered by this tile key. */
   PixelRect pixel_roi;
+  /**
+   * @brief Authoritative logical ImageRect Region covered by this tile.
+   * @note Current tile enumeration is image-only; TensorSlice uses monolithic
+   *       Region work and never fabricates tile coordinates.
+   */
+  RegionSet region = RegionSet::empty();
 };
 
 /**
@@ -138,6 +169,12 @@ struct DirtyMonolithicRegion {
   PixelRect pixel_roi;
   /** @brief True when the node output is dirty as a whole unit. */
   bool whole_output = true;
+  /**
+   * @brief Authoritative logical work Region.
+   * @note pixel_roi is a derived current image edge projection and remains
+   *       empty for TensorSlice.
+   */
+  RegionSet region = RegionSet::empty();
 };
 
 /**
@@ -159,6 +196,10 @@ struct DirtyEdgeMapping {
   PixelRect to_roi;
   /** @brief Direction of the recorded propagation. */
   DirtyEdgeDirection direction = DirtyEdgeDirection::BackwardDemand;
+  /** @brief Authoritative logical Region on from_node_id side. */
+  RegionSet from_region = RegionSet::empty();
+  /** @brief Authoritative logical Region on to_node_id side. */
+  RegionSet to_region = RegionSet::empty();
 };
 
 /**
@@ -181,6 +222,9 @@ struct DirtyRegionSnapshot {
   std::unordered_map<int, DirtySourceNodeState> dirty_source_state;
   /** @brief Source ROI records keyed by dirty source node id. */
   std::unordered_map<int, std::vector<DirtySourceRoiRecord>> source_roi_records;
+  /** @brief Logical source Region records keyed by dirty source node id. */
+  std::unordered_map<int, std::vector<DirtySourceRegionRecord>>
+      source_region_records;
   /** @brief Count of dirty source nodes currently in Updating state. */
   size_t dirty_updating_count = 0;
   /** @brief Domain-local dirty tile keys derived for active dirty work. */
@@ -189,8 +233,12 @@ struct DirtyRegionSnapshot {
   std::vector<DirtyMonolithicRegion> dirty_monolithic_nodes;
   /** @brief Dirty ROIs keyed by node id after domain-specific normalization. */
   std::unordered_map<int, std::vector<PixelRect>> per_node_dirty_rois;
+  /** @brief Authoritative normalized dirty Regions keyed by node id. */
+  std::unordered_map<int, std::vector<RegionSet>> per_node_dirty_regions;
   /** @brief Actual dirty ROIs exposed to inspection and materialization. */
   std::unordered_map<int, std::vector<PixelRect>> actual_dirty_rois;
+  /** @brief Authoritative actual dirty Regions keyed by node id. */
+  std::unordered_map<int, std::vector<RegionSet>> actual_dirty_regions;
   /** @brief Edge-level ROI mappings produced by dirty propagation. */
   std::vector<DirtyEdgeMapping> edge_mappings;
 

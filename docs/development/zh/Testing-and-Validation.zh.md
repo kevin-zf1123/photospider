@@ -47,28 +47,47 @@ consumer build 目录。它在内存中检查观察到的 producer/install/consu
 并在运行后丢弃；仓库不会为该测试保留逐次运行报告。
 
 `BUILD_TESTING` 只控制内部 test product 是否可用，不控制已安装 `photospider` archive 如何编译
-Issue #72/#75/#76 observation seam。Product source inventory 被拆为只编译一次的 common
-object，以及 `execution_service.cpp`、`graph_cache_service.cpp`、
-`graph_state_executor.cpp`、`kernel.cpp` 与 `kernel_compute.cpp` 的 production object。真实
-archive 始终使用这五个 translation unit 的
+Issue #72/#75/#76/#82 observation seam。Product source inventory 被拆为只编译一次的 common
+object，以及 `compute_task_submission.cpp`、`dirty_update_executor.cpp`、
+`execution_service.cpp`、`resource_demand_estimator.cpp`、
+`graph_cache_service.cpp`、`graph_state_executor.cpp`、`kernel.cpp` 与
+`kernel_compute.cpp` 的 production object。真实 archive 始终使用这八个 translation unit 的
 production 形式，其中不存在
+`PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING`、
 `PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`、
 `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`、
 `PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`、
 `PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING` 或
-`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` 的 close/compute declaration、global、branch 或
+`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` 的 observer/probe definition、global、branch 或
 symbol。Focused
 test 会链接不安装的 `photospider_internal_test_product`；它复用同一批 common object，只以
-deterministic seam 重新编译这五个 translation unit。没有 target 同时链接两个完整 archive，test
+deterministic seam 重新编译这八个 translation unit。没有 target 同时链接两个完整 archive，test
 product 也不会进入 install 或 export set。Issue #75 probe declaration 是 source-tree-private 的
 free function，因此该宏不会改变 production `ExecutionService` class definition 或 object layout。
+Issue #82 dirty post-plan observer 同样是 source-tree-private free function，并由仅存在于 test
+product 的 thread-local state 支撑；它不会改变任何 production class definition 或 object layout。
+Sequential lease admission observer、retained-operation-string charge observer 与精确
+direct resource estimator 遵守同一边界：它们是 source-tree-private free function，只依赖
+test-product-only atomic state 或不授予 authority 的计算。Direct gate predicate diagnostic
+是只由 test product 定义的 private test-access method。其 declaration 会在 common object 与
+seam object 共用的 source-private class definition 中保持 token-identical，但它不新增 object
+state 或 installed surface，也不授予 authority。Production operation gate 与 estimator
+不含 observer state 或 notification branch，任何 diagnostic 或 estimator 也不会授予 resource
+或 gate ownership。
+`test_compute_run`、`test_compute_service_split`、`test_host_adapter`、
+`test_kernel_contracts` 与 `test_policy_execution` 构成该内部 archive 的完整 direct-consumer
+集合。
 
 `StaticProductConsumerSmoke` 会对 `BUILD_TESTING=ON` 与 `BUILD_TESTING=OFF` 两种 producer
-configuration 强制执行这条边界。真实 product 安装后，Darwin 会先调用并验证
+configuration 强制执行这条边界。真实 product 安装到非系统临时 prefix 后，smoke 会复用
+daemon capability driver，移除 LD/DYLD loader override，并执行 installed
+`photospiderd --help`；这样，缺失可重定位 operation runtime 时不会因只检查文件存在而通过。
+随后 Darwin 会先调用并验证
 `xcrun --find llvm-nm`，然后依次回退到 PATH `llvm-nm` 与 PATH `nm`；非 Darwin 平台绝不会
 调用 `xcrun`，只按上述顺序使用两个 PATH candidate。Canonical path 相同的 executable 只运行
-一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露五个 production seam object 的
-全部 defined anchor 时才可用；否则 smoke 会记录不含路径的 failure reason 并尝试下一项。没有
+一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露覆盖八个 production seam
+object 的全部九个 required anchor 时才可用；否则 smoke 会记录不含路径的 failure reason
+并尝试下一项。没有
 candidate 或全部 candidate 都不可用时必须 fail closed。第一个可用的完整 symbol table 是权威
 结果，并用于拒绝任何 hook function/helper/global fragment；raw table 只在内存中参与该判定，
 因此第一个可用表只要包含 forbidden symbol 就会直接使 verdict 失败，不能通过尝试后续 candidate
@@ -80,6 +99,14 @@ check label、command status 与该 sanitized scan observation 的白名单投�
 observations。Smoke 也会拒绝已安装的 test product archive、已导出的 test target 或已导出的内部
 seam definition。该测试继续属于带 label 的 `build-smoke`；普通完整 CTest selection 不会让
 package construction 混入 runtime-test ownership。
+
+`PhotospiderdInstallLayoutSmoke` 会另行配置三个隔离、dependency-disabled 的 producer tree。
+它只构建 `photospiderd` target closure，随后安装已配置 package，分别覆盖嵌套相对目录
+`libexec/photospider` 与 `lib64`、absolute libdir，以及配合相对 libdir 的 absolute
+bindir。每个 case 都使用自身配置的 prefix，通过共享 capability driver 移除 loader override，
+并执行 installed daemon。默认相对 `bin`/`lib` case 仍由 `StaticProductConsumerSmoke`
+覆盖。全部 matrix build/install directory 与 absolute destination 都必须严格位于 CTest work
+root 之下，并在成功或失败后清理。
 
 配置后的 producer 还会把 `PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` 序列化为
 build-tree inventory，其中使用安装相对路径 `include/photospider/...`。写入任何 record 前，
@@ -130,6 +157,10 @@ optional component 会保持 not-found，而不会使 package 无效。
 生成的源码会探测精确 policy ABI constant 与 layout。外部 embedded consumer 随后会加载该已安装
 policy DSO 与一个已安装 operation DSO，配置 policy/execution default，验证其 public snapshot，
 并通过两种 extension 完成 compute。任何生成的 consumer 都不会获得 source-tree include 目录。
+operation-SDK-only factory 还会使用 installed `ValueBuilder`、`WriteLease`、
+`BufferHandle`、`ReadLease`、runtime identity 与 ImageView 发布并读取 immutable CPU
+DenseTensor Value。这证明 V-3 header 与 implementation symbol 在不发现 OpenCV、yaml-cpp
+或 Threads 时仍完整。
 
 长期 `IpcDisabledInstallSmoke` 会用
 `PHOTOSPIDER_BUILD_IPC=OFF` 与 `BUILD_TESTING=OFF` 配置另一个 clean producer；它验证不会
@@ -140,21 +171,73 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 解析既有 backend dependency。
 
 长期 `DependencyDisabledInstallSmoke` 会配置一个 OpenCV 与 YAML capability 均禁用的 clean
-producer，禁用这两个 package discovery，关闭 IPC/testing，并构建真实 `photospider_kernel`
-aggregate 与 `photospider` product。它会验证派生的 provider/plugin/CLI 默认值，以及三类无效
-显式组合的精确诊断。Clean install 后，它会拒绝 OpenCV header、target、export reference 与
-yaml-cpp link 泄漏；optional `operation_opencv` 保持 unavailable，required component 则失败。
-外部 consumer 会在两个 discovery 均禁用时配置，链接并运行
-`Photospider::photospider`，分配中立 image，加载并关闭 empty Host session，并观察显式 YAML
-operation 返回 `GraphErrc::Io`。CI 只有在校验 producer cache identity、configuration 与完整
-capability profile 后才可复用该 producer。
+producer，禁用 OpenCV、yaml-cpp 与 OpenEXR 三个 package discovery，关闭 IPC，只启用
+dependency-neutral test surface，
+并构建真实 `photospider_kernel` aggregate、`photospider` product 与
+`test_cpu_dense_tensor_image_operation`、`test_packed_fp4_dense_tensor` 与
+`test_variable_sample_field_extensions`、`test_value_identity_across_dsos` binary。安装前，
+它会在该真实 disabled producer 中运行全部 48 个 dense-image case、全部 4 个 packed FP4 case、
+全部 17 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
+`register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
+ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
+默认值，以及三类无效显式组合的精确诊断。
+Clean install 后，它会拒绝 OpenCV header、target、export reference 与 yaml-cpp link 泄漏；
+optional `operation_opencv` 保持 unavailable，required component 则失败。它还会对全部 installed
+public header、library/archive、package config、CMake export、生成的 consumer link script，以及
+consumer executable 的 dependency/symbol surface 执行大小写不敏感且区分 surface 的可选 provider
+扫描。Mach-O 使用 `otool` 与 `nm`；ELF 使用 `readelf` 与 `nm`。有界 marker 覆盖
+`OpenEXR`、`Imf` namespace/library family 与具名 transitive library，以及为 V-15 保留的
+deep-scanline、deep-tiled、deep-codec、multipart 和 mixed-part 词汇。禁止使用宽泛的 `exr`、
+`deep` 与无限定 `half` 子串扫描，因为它们会制造没有依据的 false positive。外部 consumer 会在
+三个 discovery 均禁用时配置，链接并运行 `Photospider::photospider`，分配中立 image，并通过
+installed package 使用 `ValueBuilder`、write/read lease、runtime identity、ImageView，以及
+public FP4/quantization/Blocked/PackedDenseTensorView contract，
+加载并关闭 empty Host session，并观察显式 YAML operation 返回 `GraphErrc::Io`。CI 只有在校验
+producer cache identity、configuration、完整 capability profile 与已构建 dense integration
+target 后才可复用该 producer。
+同一个 external project 还会请求 `data_provider_sdk`，验证其 interface 不含 link dependency，
+并根据安装后的 header 分别构建采用精确名称的 C11 与 C++17 v3 definition producer，再将二者
+分别通过 `Photospider::operation_sdk` 链接进独立的 C++ Host consumer。每个 consumer 都会从
+active snapshot 派生一份 Schema/Facet/Layout 三字段 manifest，发布 compact 与 repacked 两种
+形式的有界三 buffer provider-defined Value，编译 output-sink/diagnostic/property layout
+assertion，并执行纯 property、DataSpec 与 Region callback。每个 producer 都会从
+callback-local storage 发出非空 BYTES property，使 installed Host 证明同步 copy-out，而不是
+延迟 pointer access。
+它会在 provider 可见和缺席时往返保留未知 descriptor/Layout byte 与完整或 metadata-only artifact
+envelope，绝不为缺失的 ContentDigest 伪造值；同时检查 typed Descriptor、Content 与
+StorageLayout digest，包括与 layout 无关的 content identity。Indexed read 与 provider-owner
+lease 会在 unload 后继续保留精确 generation/module；active resolution 随后报告 MissingProvider，
+retained Value traversal 仍保持有效，最终 owner/provider destroy 先于 module release。
+任一 producer 或 consumer 都不会引入 source-tree include 或可选 provider dependency。
+
+`OpenExrDeepProviderOptionOffSmoke` 负责更窄的 V-15 option 边界。它会在禁用 OpenCV、
+yaml-cpp、OpenEXR discovery、graph CLI、IPC 与仓库 operation provider 的同时，用
+`BUILD_TESTING=ON` 配置一个全新的 provider-OFF producer。Configure 会结合展开后的顶层 CMake
+trace 与最终 cache，要求实际执行的 OpenEXR package lookup 和 discovery key 都为零。Driver
+先完成 producer 的完整 build，再构建精确的 `test_variable_sample_field_extensions` target，随后
+运行非空的 `^VariableSampleFieldExtensions\.` CTest selection，并排除 `build-smoke` 作为显式
+递归保护。当前 selection 包含全部 17 个 V-14 case。
+
+安装后，该 smoke 会盘点中立 public header、package Config/Targets 文件、build-tree native
+product 与 installed native product。它依次采用 producer 传入的 `CMAKE_NM`、child toolchain 的
+`CMAKE_NM` 或经过验证的平台 fallback；缺少 symbol inspector 时会 fail closed。Defined 与
+undefined symbol surface 分别检查。Dynamic dependency 在 Darwin 使用 `otool`，在 ELF 使用
+`readelf`，在 Windows 使用 `dumpbin /dependents` 或 `objdump -p`；Windows 不得以空 dependency
+surface 通过。随后，一个中立 installed-package consumer 会执行真实的 verbose compile 与
+executable link；在 executable 运行前，smoke 会扫描其 verbose output、
+`compile_commands.json`、link script、response file、求值后的 imported-target property、native
+symbol 与 dependency。Default 和 optional-component probe 必须继续可用；required absent
+component 必须先以 Photospider 自有诊断失败，不得发现 OpenEXR。
+`OpenExrDeepProviderInstallConsumerSmoke` 是启用态 companion：它安装显式 component，加载真实
+module，解析两个 v3 export，校验 API table，调用 provider destruction，然后卸载 module。
 
 生成的 clean consumer project 会维护一份有序的 CMake executable target list。同一份 list
 负责创建 target、写出 configure-time 精确 target declaration，并通过 `file(GENERATE)` 提供
 configuration-specific 的三字段
 `target<TAB>$<TARGET_FILE_NAME:target><TAB>$<TARGET_FILE:target>` manifest。当前 profile
-只声明 `dependency_disabled_consumer`；新增另一个长期 consumer 时，只需扩展该 CMake list 与
-对应源码，无需在 Python 中增加 target name 或 discovery branch。CMake 3.16 的 target generator
+声明 `dependency_disabled_consumer`、`installed_c11_data_provider_consumer` 与
+`installed_cpp17_data_provider_consumer`；新增另一个长期 consumer 时，只需扩展该 CMake list 与
+配对源码列表，无需在 Python 中增加 target name 或 discovery branch。CMake 3.16 的 target generator
 expression 是 native 拼写的权威来源，因为它描述所选 generator、target platform 与
 configuration；Python 的 `os.name` 与 `sys.platform` 描述的是 interpreter host，不能据此推断
 executable suffix。尤其是，在 Cygwin 或 MSYS2 下运行的 POSIX Python 完全可能合法收到以
@@ -196,7 +279,10 @@ regression 留在完整 CTest 分片。
 `DependencyDisabledInstallSmoke`、
 `ImageArtifactCodecDependencyDisabledBuild`、
 `IpcDisabledInstallSmoke`、
+`OpenExrDeepProviderInstallConsumerSmoke`、
+`OpenExrDeepProviderOptionOffSmoke`、
 `OpenCvOperationProviderDisabledBuild`、
+`PhotospiderdInstallLayoutSmoke`、
 `PublicHeaderSelfContainment` 和
 `StaticProductConsumerSmoke`。`PublicHeaderSelfContainment` 属于该分类，因为它的 CTest command
 会构建专用 self-containment target；普通 GoogleTest binary、daemon/CLI process test 与
@@ -230,7 +316,7 @@ tree，并要求三个
 `StaticProductConsumerSmoke` 只在 IPC enabled 时必须精确注册一次，在 IPC disabled 时必须缺席。
 每个预期 entry 还必须保持 enabled、带正确 label，并以精确的 `python -B` driver path 开头。被
 注释或处于 inactive CMake 分支中的源码不会生成 CTest entry，因此无法通过这项生成后 inventory
-检查。该查询不会执行任何真实 smoke，也不会改变现有六项 build-smoke 分类。
+检查。该查询不会执行任何真实 smoke，也不会改变现有九项 build-smoke 分类。
 
 CTest 会保留每个带标签测试的注册，供本机直接运行。CI 的 `full-ctest` 分片会排除该精确标签；
 配置规划只会把 `ctest --show-only=json-v1` 解析为允许空集合的预检，因为默认
@@ -255,11 +341,14 @@ Docker-capable runner，因此读取同一份构建后 NUL 分隔名称并顺序
 
 Primary repository 中的 CTest 与 CI entry 只用于长期软件行为：正确性、性能、稳定性、多线程
 执行、错误处理、编译边界、package consumption 和运行时 API 边界。
-`PhotospiderdCapabilityHelp`、`StaticProductConsumerSmoke`、
-`GraphCliOptionBadAlloc`、GoogleTest discovery 与 `PublicHeaderSelfContainment` 满足这一规则，
+`PhotospiderdCapabilityHelp`、`PhotospiderdInstallLayoutSmoke`、
+`StaticProductConsumerSmoke`、`GraphCliOptionBadAlloc`、GoogleTest discovery
+与 `PublicHeaderSelfContainment` 满足这一规则，
 因为它们会执行或编译维护中的产品。Daemon help 测试通过 CMake script driver 运行当前
 configuration 对应的真实 `photospiderd --help`，分别捕获 stdout 与 stderr，先要求进程结果是
 数值零，再匹配稳定 capability sentence；启动失败与非零退出会得到不同诊断。
+该 driver 会移除 loader override variable，并在 package 安装后复用，因此 build-tree 与
+install-tree resolution 都会验证自身声明的 lookup path。
 `IpcDisabledInstallSmoke`、`DependencyDisabledInstallSmoke`、focused
 `test_ipc_protocol`/`test_ipc_host` case 与 real-process `test_ipc_daemon` case 同样符合该规则：
 它们验证 package、framing、typed client、完整 IPC Host
@@ -460,10 +549,12 @@ same-key ticket adoption、跨 target/intent/Graph isolation、close retirement�
 36,000 次 publication storm，以及 `RunGroup` cancellation/aggregate 规则。Group case 会区分
 request-level accepted reason 与真正赢得开放 child arbiter 的 reason：两个 child 都成功后的迟到
 Superseded 或 ExplicitRequest 不能替换 aggregate success；真正赢得取消时，第一个 reason 会在
-failure priority 之下保持稳定。CMake 会通过 CTest 发现全部 15 个 case，每个 case 的 timeout 为
+failure priority 之下保持稳定。CMake 会通过 CTest 发现全部 16 个 case，每个 case 的 timeout 为
 60 秒。Stress case 会断言一个 ticket、一个 logical active owner、至多一个 pending owner、被替换
 owner 的精确 settlement，并且只有最终 current generation 保持 commit eligibility；它们不创建
-background runner，也不依赖 timing sleep。
+background runner，也不依赖 timing sleep。Current-observer case 会证明 accepted 较新
+generation 在物理执行前推进 external freshness，而一个 prepared 但 born-stale 的旧
+generation 不会发出 observer notification。
 
 `test_kernel_contracts` 负责产品边界。它证明缺失 intent 与显式 HP 共用一个 key、最新 work 失败
 不会恢复更旧的 prepared commit、已经提交的旧 output 保持可见，以及 RT publication 前后发生的
@@ -504,9 +595,10 @@ grant release。
 
 `test_physical_execution_routes` 负责 allocation-free route/lane state：CPU/Metal overlap、Metal
 single-flight、serial worker-zero single-flight、shutdown rejection 与 committed-work drainage。
-`test_policy_execution` 使用 deterministic fake-Metal Host，证明规范的逐 route device inventory、
-Run 发布前拒绝、彼此独立的固定 CPU/GPU worker、Metal exception publication/recovery、route
-reuse、cancellation，以及不会产生 candidate/version ABA 或 grant leak 的 reserved-start rollback。
+`test_policy_execution` 使用注入的 deterministic fake Metal executor，证明规范的 registry-derived
+逐 route device inventory、Run 发布前拒绝、彼此独立的固定 CPU/GPU worker、精确 executor
+entry、Metal exception publication/recovery、route reuse、cancellation，以及不会产生
+candidate/version ABA 或 grant leak 的 reserved-start rollback。
 它还证明：grant-blocked high-priority Run A 不能饿死较低优先级的独立 Run B；A 的 ready entry
 随后恰好执行一次；仅一个 candidate 被阻塞时 policy-selection retry 有界，且 cancellation 会
 唤醒 worker。
@@ -519,6 +611,46 @@ symbol。该声明只限定于这项 probe；既有 initial-submission storage o
 `test_compute_run` 中的
 `Issue75DeviceRouting.*` 证明 full HP、dirty HP/RT 与 connected preflight 会冻结选中的 Metal
 implementation/device，并在 Metal 不存在时使用 CPU fallback。
+`test_device_executor_registry` 不依赖 platform SDK，负责 fixed-slot validation、精确 dispatch、
+借用 TLS context restoration、provider-exception identity 与复制的 diagnostics；其中多调用
+case 证明 submission 与 serialized-entry 计数在成功及抛异常 callback 后都会单调推进。可移植
+callback tests 证明：直接同 executor 递归会在 nested provider 或任一 diagnostics counter 推进
+之前以稳定的 `std::logic_error` 被拒绝；外层 context 保持 current；后续 invocation 可以恢复；
+不同 executor 则可以嵌套并恢复外层 context。在 Apple 上且仓库 operation plugin 已启用时，
+`test_metal_device_executor` 会由两个受控线程直接驱动工厂创建的真实 registry。第一个 callback
+保持活跃时，复制出的 diagnostics 必须稳定显示两次
+submission、但只有一次 serialized entry；测试只在观察到该排队状态后才释放第一个 callback。
+若 admission wait 被旁路，diagnostics 会直接显示两次 entry，测试无需 sleep、重叠观察窗口或
+scheduler timing 假设即可确定失败。该测试还会先分配真实 texture 与 shared buffer 再抛出异常，
+然后证明精确 provider exception identity、同线程 TLS 恢复、存活 allocation 为零、
+queue/pipeline diagnostics 稳定、计数单调推进，并且同一个 executor 可以在后续非嵌套调用中
+成功进入。另一个 threadsafe death-test child 会安装五秒 alarm，通过真实 registry 尝试同步的
+同 executor callback 递归，并且只有在证明精确错误文本、nested counter/resource diagnostics
+不变、外层 TLS context 保持、返回后 TLS 清空以及后续 invocation 成功后才退出。alarm 会把
+此前的自死锁转化为有界测试失败，而不使用 detached thread 或制造生命周期竞态。验证该
+watchdog path 后，测试会执行一次真实 CPU-to-Metal upload，并证明精确保留 revision 的 device
+replica 进入 residency。V-9 还会证明 upload scratch 仅在 completion 后归还、persistent
+memory 会跨 callback return 与 residency 保留、capacity-one eviction 会归还旧 lease，并且
+最终 manager destruction 会归还最后一个 lease。极小的 Perlin device budget 会在首个
+texture/buffer allocation 前拒绝完整 native heap-query plan。预算充足的路径随后让真实仓库
+Perlin operation 通过同一个 `ExecutionService` 连续运行两次，并证明 queue 可用、两次
+operation submission 与 executor entry、八个 invocation allocation 已退役、一条 pipeline 被
+复用、asynchronous pending-Value readback 生成 CPU-owned output、使用专用 Metal worker id，
+并且已结算的 Host 与 device reservation 都为零。Upload 与 download 都会在 command commit 前
+审计 native `allocatedSize`。
+
+V-8 与 V-9 在 `test_device_residency` 中的可移植 case 会固定 direct host-read 与 transfer
+planning、精确 current completion publication、destination Ready 前的 late stale rejection、
+pretracked current publication 对晚启动旧 Run admission 的拒绝、failed/discarded
+nonpublication、不会消耗正确 admission 的 proper-subset identity rejection、
+concurrent exact callback 与 duplicate-completion rejection。附加真实 memory-only lease 的
+fake native owner 还会证明：creator/Run-equivalent release 不会提前归还 byte、residency eviction
+只释放自己的 strong owner、外部 Value 副本会延长生命周期，而且 stale、rejected、cancelled
+或复用 identity 不会 double-release，也不会消费另一个 allocation 的 authority。
+`test_compute_run` 新增确定性 case，
+覆盖 early fence callback 在原 grant 退役前保持 parked、executor lifetime 延长 Run settlement、
+pending Value dependency deferral、无需等待 producer 即可退役 continuation 的 cancellation，以及
+绝不释放 dependent work 的 typed stale failure。这些 case 使用 gate 和 future，不含 timing sleep。
 
 `test_cli_policy_execution_config` 固定事务型 policy/execution config parsing 与精确 Host
 application。`test_host_adapter` 会加载真实 operation ABI-v2 与纯 C policy ABI-v1 fixture，配置两种
@@ -537,12 +669,17 @@ Installed Host、CLI 与 IPC protocol-v2 surface 仍不暴露 cancellation comma
 ```bash
 cmake --build build \
   --target test_policy_registry test_policy_execution \
-  test_physical_execution_routes test_compute_run test_resource_admission \
+  test_physical_execution_routes test_device_executor_registry \
+  test_device_residency test_compute_run test_resource_ledger \
+  test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
 ./build/tests/test_policy_execution
 ./build/tests/test_physical_execution_routes
+./build/tests/test_device_executor_registry
+./build/tests/test_device_residency
+./build/tests/test_resource_ledger
 ./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
@@ -555,6 +692,8 @@ cmake --build build \
   --gtest_filter='IpcDaemonExecution.*:IpcDaemonPolicy.*'
 ctest --test-dir build --output-on-failure \
   -R '^(GraphCliPluginComputeSmoke|StaticProductConsumerSmoke)$'
+# Apple 且 PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS=ON：
+./build/tests/test_metal_device_executor
 ```
 
 以下 focused companion regression 负责其余边界：
@@ -562,9 +701,12 @@ ctest --test-dir build --output-on-failure \
 - `test_kernel_contracts` 驱动真实 `GraphIOService` stream 进入 post-write、post-flush 与
   post-close failure state。每个 phase 都必须返回 `GraphErrc::Io`；已创建的 destination 证明
   文档所述 non-atomic post-open 行为。
-- `test_resource_ledger` 证明 checked vector arithmetic、当前五个维度各自的 saturation 与 exact
-  recovery、atomic mixed-vector 与 pair admission、bounded child grant、deferred parent release、
-  move-only token contract，以及并发无 overcommit 行为。
+- `test_resource_ledger` 证明 checked Host/device vector arithmetic、当前五个 Host dimension
+  各自的 saturation 与 exact recovery、CPU/重复 device configuration rejection、zero 与
+  exact-boundary device plan、atomic memory-plus-scratch rejection、per-device isolation、
+  same-device contention、plan-to-actual shrink、typed underplanning failure、拆分的
+  memory/scratch lifetime、move-only authority、延迟 asynchronous release、bounded Host child
+  grant、deferred Host parent release，以及并发无 overcommit 行为。
 - `test_resource_admission` 证明精确私有 route vocabulary、worker-limit rollback、每个 Host 一个固定
   pool 且不同 Host composition 彼此独立，以及 validation-first session route replacement 会在无效
   candidate 后保留先前复制的 route。
@@ -614,6 +756,126 @@ cmake --build build --target test_graph_document_errors test_host_adapter \
 它的“无效 target”场景会先加载维护中的 propagation fixture，再要求 target 被拒绝，
 因此不会依赖失败 load 发布状态。每个场景都使用相互隔离的临时 session 与 history
 存储，并在脚本退出时删除。
+
+## Direct CPU operation authority 验证
+
+Issue #82 将 scalar callback/metadata identity 与 direct dirty admission 保留在长期行为测试中。
+`test_op_registry_m31` 会按两种顺序注册 monolithic HP 与 tiled HP sibling，调用两种 callback，
+并要求每个选中 implementation 保留自身 identity 与完整 scheduling metadata。因此，后注册的
+sibling 不能静默改写与先前 callback 配对使用的 metadata。
+
+Task planning 与 runner case 会先注册 SpatialAligned monolithic sibling，再注册 device-tiled
+RandomAccess sibling。它们要求 dependency ROI lowering、tile size、选中 callback 与 provider
+input view 都消费同一个带 revision 的 route，不得退回通用 key-level metadata 查询。手工
+`test_propagation` 工具同样会为请求的 HP 或 RT diagnostic route 过滤并保留精确 tiled
+implementation。
+
+`test_cpu_dense_tensor_image_operation` 还会为 TensorSlice 的 target-only 与
+target-plus-upstream plan 冻结精确 core CPU route，再在 task population 前追加优先级更高的
+same-key non-core GPU implementation。两个 case 都要求 dirty preparation 返回
+`NoOperation`、provider entry 为零、lifecycle/gate/grant/reservation/ledger 残留为零，并恢复
+core registry route。Guard-bypass 对照会继续通过真实 `HighPrecisionDirtyNodeExecutor` direct
+provider lease 并进入 fake GPU provider，因此该回归不能只因测试停在 planning 而通过。
+
+相邻的三项 route-context case 会在 TensorSlice planning 后改变 task-population device
+inventory。只有 externally satisfied case 会作为 zero-work 完成 preparation，不比较此时已无关
+的 frozen intent、device inventory 或 node route。Exact-cache case 会通过真实 Graph boundary
+安装 complete 旧 HP output，但由于 TensorSlice 已被 dirty-selected，它仍保持 active；与
+partial-active 对照一样，它必须在 fake GPU provider entry 或 execution authority 之前返回
+`NoOperation`。测试不会自行删除 execution-order node。
+
+`test_compute_service_split` 会独立验证外层 service boundary。真实 complete target cache 会一直
+保持 exact 到 selection，但明确标脏的 target 与其 provider cone 仍会执行。相邻两项 case 从相同
+exact planning observation 开始，再通过 internal test-product observer 删除 output 或缩减其
+formal Region；三种状态都会保留并执行同一个 dirty provider cone。Complete 旧 cache 下的
+post-plan registry replacement 仍必须作为 active route drift 失败，且两个 provider 均不能进入。
+若用反向 mutant 让 exact cache 满足 dirty candidate，则 exact 对照与 Host ROI fixture 都会因
+work 为空、旧 pixel 不变而失败。
+
+相邻的 real-provider case 使用 sparse dirty chain
+`A(dirty) -> B(externally satisfied, inactive) -> C(dirty)`。第一项要求只执行 C；带 shared
+`A -> D(dirty)` 的对照要求执行 A、C 与 D，而 B 保持 inactive。反向 candidate-only-universe
+mutant 会在第一项中错误执行 A 并失败，从而证明 demand traversal 必须保留 inactive connector 与
+satisfied boundary。其他 planning case 继续应用普通 full-request cache cut、遵守
+force-recache，并保持 RT work 可执行。
+
+`test_host_adapter` 会先发布 exact complete HP output，再通过 public Host boundary 提交非 forced
+dirty ROI。它必须执行 16 个 downstream tile 与一个 monolithic source task，把选中 pixel 从 3
+更新为 11，把未选中的 pixel 保持为 3，并通过 Host snapshot 暴露局部 backward mapping 与
+native PixelRect/tile geometry。恢复错误的 dirty-cache satisfaction 后，该 fixture 会报告零个
+active task，且选中 pixel 保持旧值。
+
+`test_compute_run` 会为 full-plan、dirty HP、dirty RT 与 connected-preflight 产品路径注册
+heap-backed exclusive key。共享 string-payload estimator 证明实际 capacity 加一个终止符，
+并证明 overflow rollback 具有 strong guarantee。Internal test product 还会报告每个实际
+retained owner、该 owner 所复制 `std::string` 的 `capacity()`，以及该次计费前后的 checked
+estimator total。Full-plan、dirty HP、dirty RT 与 connected-preflight case 会要求每个上报
+delta 都等于实际 capacity 加一个终止符，并要求精确的 owner 数量。该比较独立于完整 admitted
+vector；同一批 case 会另外要求相同 plan 在精确 retained capacity 下成功，并要求少一个 byte
+在 provider entry 前拒绝且 ledger snapshot 为零。它们覆盖已计费的 plan/context constraint
+allocation 移入唯一 submission 的 ownership transfer，不使用 migration-residue source scan。
+
+Direct-lease gate 回归会取得一个 heap-backed key，在 acquisition 返回后原地修改 caller
+仍存活的 allocation，并通过不授予 authority 的 test-product diagnostic 查询真实 gate
+predicate。在 lease 退出前，原始 key 必须仍受阻，而不同 key 必须可启动；这证明
+wait/start/finish 借用 lease-state 副本，而不是 caller。测试会在 cleanup 前恢复 caller
+buffer，使错误实现也能确定性地完成 unwind。
+
+`test_compute_service_split` 证明 nonparallel dirty HP、dirty RT 与 connected-parameter
+preflight 会进入 physical worker 所使用的同一个 process-owned operation gate 与 resource
+ledger。Cross-Graph case 覆盖 nonreentrancy、精确 implementation cap、相同/不同 exclusive key、
+provider 进入前的 retained-memory 与 scratch rejection、cancellation/exception cleanup，以及
+settlement 后成功重试。确定性 post-plan case 会在 active-operation revalidation 前替换 HP
+implementation 或卸载 RT plugin。此时 standalone Run 或 realtime RunGroup 的逻辑生命周期会被
+有意观测为可见；case 要求在 provider entry 与 operation/resource/physical admission 前以 typed
+failure 停止，随后要求逻辑生命周期完成 settlement，不留下 callback、grant、root reservation、
+gate 或 ledger 残留，并证明重试能够恢复。Externally satisfied sibling 会被有意忽略，因此
+inactive registry 变化不能使原本有效的 active dirty target 失效。
+
+另一项 cross-Graph case 会让两种 reentrant HP implementation 与两种 reentrant RT
+implementation 使用不同 identity、无 identity cap 以及同一个 heap-backed key。第一个
+provider 会在 dirty helper 已经返回 direct lease、helper-local constraints 已退出后保持阻塞。
+HP 与 RT 的第二个 provider 都必须等到 lease 释放后才能进入，从而证明真实 helper 路径把 key
+保留在 direct-lease state，而不是 helper stack。
+
+同一个 binary 还负责两项正交的 sequential provider 边界回归。两个 Graph 都选择同一个已注册
+callback identity，并通过 node role 参数区分 sequential 与 peer 行为。Metadata 声明
+`maximum_parallelism=1`、一个 nonempty exclusive key，以及非零 retained/scratch demand。
+在 physical route case 中，仅存在于 test product 的 observer 会报告精确的 operation-gate
+denial。测试等待 admission rendezvous 或 provider 错误进入二选一事件，随后要求前者发生并排除
+provider overlap。Provider 返回后，注入的 `FakeImageArtifactCodec` 会阻塞磁盘缓存持久化，
+随后抛出 `GraphErrc::Io`；route-backed provider 必须在这段 Host 后处理仍被阻塞时进入、退出并
+完成 settlement，resource snapshot 中不得留下 sequential grant。
+
+Resource-capacity case 使用同一个 callback identity、cap 与 key，但采用第二个 direct
+contender。仅存在于 test product 且不授予 authority 的 diagnostic 会复用 production
+direct-lease envelope 计算，并把隔离 `ExecutionService` 的 CPU、retained-memory 与 scratch
+上限精确设为一个 direct callback vector。它还会把 heap-backed key 与独立的 fixed-envelope
+加 copied-capacity-plus-terminator 计算比较。精确 capacity 会成功；少一个 byte 的上限，以及
+只容得下 capacity、容不下 terminator 的声明，都会在取得 gate/resource ownership 前拒绝并留下
+零 snapshot。Contender 随后会在 provider 活跃时抵达被拒绝的 admission，并在 codec 释放前进入
+和退出。把这项 capacity 检查保持为正交场景是有意设计：physical Run 会在 operation-gate
+startability 前预留完整 root，因此该 root 不是一个 direct-lease vector。两项回归都不会新增
+production 或 installable test hook。
+
+Post-plan、admission-wait 与 retained-string observer、gate predicate diagnostic 以及
+direct-resource diagnostic 只存在于不安装的 internal test product 中。
+`StaticProductConsumerSmoke` 要求覆盖八个 seam object 的九个 production anchor，并拒绝
+installed archive 中出现任何匹配的 state、setter、clearer、notification、helper 或
+diagnostic symbol。
+
+聚焦验证命令为：
+
+```bash
+cmake --build build --target test_op_registry_m31 test_compute_run \
+  test_compute_service_split -j
+./build/tests/test_op_registry_m31 \
+  --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
+./build/tests/test_compute_run \
+  --gtest_filter='OperationExecutionGate.DirectLeaseGateIgnoresCallerConstraintMutationAfterAcquisition:RetainedMemoryEstimator.StringPayloadChargesActualCapacityAndTerminatorAtomically:ExecutionServiceProductResources.FullPlanRejectsOneByteShortAndExecutesAtExactLimit:ExecutionServiceProductResources.DirtyHpAndRtUseExactSmallLargeSynchronizationInterval:ExecutionServiceProductResources.ConnectedPreflightUsesOneSharedUmbrellaAtExactThreshold'
+./build/tests/test_compute_service_split \
+  --gtest_filter='ComputeServiceSequentialAdmission.*:ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
+```
 
 ## Graph close 与 process shutdown 验证
 
@@ -708,6 +970,143 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
+## CPU DenseTensor、Packed FP4、Provider Extension、Region、ReadyFence 与 Transfer 验证
+
+`test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-12 边界的 provider-independent
+integration binary。它的 48 个长期用例验证：
+
+- copyable ReadyFence poll、queued non-inline wait、observer-local waiter cancellation、
+  exactly-once Ready/Failed/ProducerCancelled settlement、typed failure retention 与
+  dropped-completer cancellation，以及 pending 与 already-terminal wait 使用唯一 executor
+  时，executor 会存活到 callback 完成；
+- 使用确定性 C++17 mutex/condition-variable，在没有 sleep 或 timer 的情况下，验证 wait
+  registration 与 terminal publication、cancellation 与 callback entry，以及 transfer-owner
+  destruction 与 callback entry 的真实竞争、唯一 terminal settlement 与 callback 至多交付一次；
+- pending Value metadata/identity observation、对 BufferHandle 与 checked-view payload
+  access 的 typed rejection，以及 private producer 在 readable Ready publication 前撤权；
+- 显式 fake-executor transfer enqueue、独立 allocation binding 与保留的逻辑 revision、
+  byte-identical completion、唯一 executor 会存活到 destination 完成、无需阻塞 worker 的 chained
+  readiness、保持不可读的 source failure/cancellation propagation，以及 transfer ownership
+  被丢弃时只取消 destination；
+- 显式注入的 CPU-to-Metal transfer、经过检查的 device-local binding、revision preservation、
+  对“host-visible 但没有 host pointer”目标的拒绝、没有隐式 host read/readback、typed provider
+  failure，以及同一 executor 上后续 transfer 成功恢复；
+- malformed facet、stride、byte offset 与 exact-envelope rejection，包括受检的单轴/跨轴
+  writable collision 与 overflow case，以及可接受的 padded、transposed 和 singleton-axis
+  layout；
+- exclusive builder write authority、seal revocation、retaining read-lease lifetime、
+  BufferHandle subrange、process-local identity，以及非零 `AllocationIdentity` 不表示
+  allocation liveness；
+- 在 shared allocation 上受界限约束的正、零与负 immutable stride，以及彼此不同的 Value
+  revision；
+- immutable Value copy sharing、copy-like DenseTensorView/ImageView move，以及 lvalue/rvalue
+  descriptor、layout 与 payload input 的 allocation 隔离；
+- 正式 HP cache alias 保留、dirty reseal、replacement identity、disk reload identity 更新、
+  cache path 不变、disk-save Value authority，以及 whole-read 与 regionless disk 边界对
+  exact-partial HP state 的拒绝与清理；
+- 精确 descriptor-only invert inference、直接复用 sealed input 与精确 result-revision
+  publication；
+- V-12 浮点矩阵覆盖 1/3/4/8/16 通道 FP32/FP64 图像与 rank-one 至 rank-five
+  FP32/FP64 latent，包括具有真实 padding 的 rank-one stride、独立 active-byte/padding-sentinel
+  oracle、ImageRect/TensorSlice merge、CPU/external/I-O 边界的精确保留，以及在 Pending
+  publication、owner retention 或 provider callback 前拒绝 negative/zero-stride external
+  transfer；
+- padded multi-channel full 与 ImageRect execution、rank-four TensorSlice、Empty/Whole
+  selection、dirty-plan-to-product staging、missing 或 partial intermediate parent
+  recomputation、把 selected byte merge 到 existing complete output，以及仅在 Whole commit
+  后提升为 reusable authority、callback-free target/upstream Region-route transfer 与
+  pre-task-population mutation rejection、device-inventory drift 下由 production pruning
+  得到的 externally satisfied no-work acceptance、exact-cache dirty 与 partial-active
+  drift rejection；execute 返回 descriptor 与 inference 不一致的合法 Value 时，仍以
+  `GraphErrc::ComputeError` 拒绝。
+
+`test_region_contracts` 拥有 31 个长期 Region case，覆盖规范 Empty/Whole、key、interval、
+normalization、rank-general TensorSlice、overflow-safe clipping/algebra、可表示的单轴与
+Tensor-axis union、不可表示 multi-axis union rejection、显式 budget、typed failure、
+checked ImageRect/PixelRect conversion、Region propagation、route 选中的 same-key device
+replacement rejection、HP/RT intent-sensitive implementation selection、Tensor planning/task
+selection/edge mapping 与 Region dirty lifecycle。
+
+`test_packed_fp4_dense_tensor` 拥有 4 个 dependency-neutral V-13 integration case。它们验证
+两种 nibble order 与 nonzero bit offset、精确 encoded/scale-dequantized E2M1 access、严格
+descriptor/quantization/layout/envelope rejection、block-aligned TensorSlice 对 scale/code 的
+投影与 fresh identity、byte-view 与 ImageBuffer fail-closed 行为、保留表示的 CPU 与注入式
+fake-device transfer、精确正式 memory-cache retention，以及在 executor、filesystem 或 codec
+副作用前发生的 typed image disk-cache rejection。Malformed matrix 包括错误 quantization
+rank/count、zero 或 non-divisible block、nonfinite/nonpositive scale、错误 layout version/
+alignment/overlap/size、quantized Strided publication 与 oversized blocked transfer alias。
+
+`test_variable_sample_field_extensions` 拥有 17 个只使用标准库的 V-14 integration case。
+一个合成纯 C definition suite 会发布带版本的 VariableSampleField Schema、Facet 和 Layout record，
+并使用三个 physical buffer。这些用例会验证 typed namespace、candidate conflict 与 malformed
+record rollback；在 revision minting 前拒绝通用 cross-reference 错误；provider semantic rejection；
+在没有 provider 时保留未知 byte 的 artifact-envelope round-trip；property/DataSpec/Region callback
+中的每个 payload pointer 均被清除；独立且精确的 SHA-256 descriptor/content/layout vector；
+physical repacking 与 padding 不改变 content identity；固定内存生成式 stream 超过 64 MiB 时的
+增量 ContentDigest 及其独立计算的精确 vector；不同 provider callback chunk 边界保持相同
+identity；sticky malformed/null 与 `uint64_t` overflow sink failure；measured/hash
+count-drift 拒绝及后续正常计算恢复；旧 Value/read/owner 跨 replacement 和 unload 的
+lifetime；最终 provider-before-module destroy 顺序；callback-local diagnostic 与
+非空 property copy-out、oversized-output boundary；rank-general Exact TensorSlice 的 checked
+site count，包括错误非零 count、错误零 count 与 `uint64_t` product overflow；以及 concurrent
+replacement 不存在 mixed-generation resolution。并发 reader 会从各自 output state 抽样
+callback-local property；保留的旧 Value 则在 replacement 后查询同一 property，以覆盖
+thread/generation lifetime boundary。新增的 4 个 callback-tail case 还要求 owner destruction
+在成功的外层 callback 返回后、worker 退出前完成 drain，在失败的 provider callback 之后完成
+drain，并在 foreign-generation destroy request 之后延迟处理；同时要求 cascading cleanup 在
+module release 前保持 FIFO owner-destroy 顺序。
+
+Callback-view case 是 input 生命周期结构化回归。它通过同一个 Value 进入 validation、property、
+DataSpec、Region 与 content callback，并要求每个 Schema/Layout record、可选 Facet array、buffer
+array、Layout-envelope array、metadata payload 与显式 content pointer 在对应 callback 期间持续
+有效。生产 adapter 把 move-safe owning storage 与借用的 `ps_data_value_view_v3` 分离，只在最终
+callback caller 地址即时 materialize view。Scoped no-elide 运行必须以
+`-fno-elide-constructors` 编译 `photospider_operation_runtime` 本身，而不能只编译 test source，
+随后运行该 case。这是一项手工 compiler-mode 证明，不是新增 CTest entry 或 CI phase-completion
+检查：
+
+```bash
+cmake -S . -B build-v14-no-elide \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DBUILD_TESTING=ON \
+  -DPHOTOSPIDER_BUILD_IPC=OFF \
+  -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
+  -DPHOTOSPIDER_ENABLE_YAML=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON \
+  -DCMAKE_CXX_FLAGS=-fno-elide-constructors
+cmake --build build-v14-no-elide \
+  --target test_variable_sample_field_extensions -j 2
+ctest --test-dir build-v14-no-elide --output-on-failure \
+  -R '^VariableSampleFieldExtensions\.EveryCallbackReceivesOneStableMaterializedValueView$'
+```
+
+Active output byte 必须等于 `255 - input`；input/output row padding 不被当作 image element。
+
+聚焦验证命令为：
+
+```bash
+cmake --build build --target test_region_contracts \
+  test_cpu_dense_tensor_image_operation \
+  test_packed_fp4_dense_tensor \
+  test_variable_sample_field_extensions \
+  public_header_self_containment -j 2
+ctest --test-dir build --output-on-failure \
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions)\.'
+```
+
+`DependencyDisabledInstallSmoke` 会在真实禁用 OpenCV/YAML/OpenEXR discovery 的 product 中构建并
+运行全部 48 个 dense 用例、全部 4 个 packed FP4 用例与 17 个 V-14 extension 用例，再证明
+installed consumer；
+`StaticProductConsumerSmoke` 会证明 operation-SDK-only
+installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
+DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
+都会在没有 optional dependency 时构造并计算 Region，并观察同步 Ready Value fence。下述
+provider-disabled nested build 也会编译并运行全部 48 个 dense case 与该双 DSO case，因此真实
+core operation、fence/transfer proof 与 identity authority 都不依赖 optional OpenCV operation
+provider 或 native device SDK。
+
 ## 可选 OpenCV Operation Provider 验证
 
 `test_optional_opencv_operation_provider` 是针对两种 provider 配置构建并注册到 CTest 的
@@ -728,9 +1127,12 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 `OpenCvOperationProviderDisabledBuild` 会使用
 `BUILD_TESTING=ON` 与 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`
 配置一个临时嵌套 build，同时保留 OpenCV、YAML、graph CLI 与 operation-plugin 的默认启用值。
-因此 provider-aware broad suite gate 为关闭。Driver 会校验精确 CMake cache 画像，构建
-provider-independent focused provider binary 及其 stdlib-only fixture，并额外构建专用 disk-cache
-diagnostic 与 kernel-lifecycle concurrency binary，再查询机器可读的 CTest inventory。
+因此 provider-aware broad suite gate 为关闭。Driver 会校验精确 CMake cache 画像，构建上述
+provider-independent focused provider binary 及其 stdlib-only fixture、CPU
+DenseTensor/ImageView integration binary、专用 disk-cache 与 kernel-lifecycle concurrency
+binary，以及 provider-independent `test_kernel_contracts` internal-seam consumer，再查询机器
+可读的 CTest inventory。`test_kernel_contracts` 的构建用于覆盖 focused-only direct-consumer
+closure，但不会在该嵌套 inventory 中被 discover。
 
 配置期间，CMake 会在交叉核验 GoogleTest registration metadata 后，序列化每个 active
 `gtest_discover_tests` target 及其配置专属 `$<TARGET_FILE:...>` 路径。生成的 TSV 只允许一个
@@ -747,15 +1149,28 @@ Focused build 完成后，driver 会从 executable 不是 regular file 的已注
 dependency），无需硬编码 target 数量或未来 target 名，也不会从 CTest 实际观察到的 sentinel
 反推 expectation。精确 CTest
 inventory 等于该推导集合与以下条目的并集：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、三个
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 48 个
+`CpuDenseTensorImageOperation.*` case、
+`ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
 `DiskCacheDiagnosticConcurrency.*` case，以及两个 `KernelLifecycleConcurrency.*` case。推导出的
-sentinel 不得带 label 或 timeout；disk-cache case 必须仅保留 `kernel-concurrency` label 与 20 秒
-timeout，lifecycle case 则保留同一 label 与 60 秒 timeout。缺失或额外 entry 都会失败，因此不得
-残留任何依赖 provider 的 broad test。Driver 随后通过 CTest 运行 optional-provider case 与全部
-concurrency case。禁用 profile 要求依赖中立 analyzer/math operation 仍被 seed、OpenCV-backed
-operation key 不存在，并要求 replacement provider 能发布、执行且完整退役其 resize key。该临时
-build 是长期 product configuration 检查；它把命令与结果写入 CTest，不保留逐次运行报告。当前
-阶段禁用的是 operation provider，不是彼此独立的 OpenCV codec、normalization、adapter 或
+sentinel 不得带 label 或 timeout。
+
+在当前 V-14 checkpoint 中，CMake 在该 profile 下精确注册八个 active GoogleTest target。
+包含六个 target 的 focused build 会具现其中五个已注册 executable；第六个 target
+`test_kernel_contracts` 只参与构建，且特意不被 discover。CTest discover 出 55 个可运行
+focused case；三个动态推导出的 sentinel 精确为
+`test_compute_io_executor_NOT_BUILT`、`test_packed_fp4_dense_tensor_NOT_BUILT` 与
+`test_variable_sample_field_extensions_NOT_BUILT`。再加上 `DependencyDisabledInstallSmoke`，精确
+CTest inventory 因而包含 59 项。这是 dynamic manifest 与真实 build closure 的已验证结果，不是
+production driver 维护的 target 数量或 sentinel 名单。推导出的 sentinel 不带 label 或 timeout；
+disk-cache case 只保留 `kernel-concurrency` label 与 20 秒 timeout，lifecycle case 保留同一 label
+与 60 秒 timeout；dense-image 与 Value-runtime case 保留 30 秒 timeout，且只有后者携带
+`value-runtime` label。缺失或额外 entry 都会失败，因此不得残留依赖 provider 的 broad test。
+Driver 随后通过 CTest 运行全部已构建 focused case。禁用 profile 要求 dependency-neutral
+analyzer/math/dense-invert operation 仍被 seed、OpenCV-backed operation key 不存在，并要求
+replacement provider 能发布、执行且完整退役其 resize key。该临时 build 是长期 product
+configuration 检查；它把命令与结果写入 CTest，不保留逐次运行报告。当前阶段禁用的是
+operation provider，不是彼此独立的 OpenCV codec、normalization、adapter 或
 embedded-product 依赖。
 
 OpenCV-provider 与注入式 codec 两个嵌套 build driver 都从
@@ -864,7 +1279,9 @@ operation-concurrency 变更时，应重新运行准确命令，并解释新输�
 
 低置信度测试仍应在验证中可见，而不是被静默排除。如果测试不足以可靠地作为开发门禁，应明确记录该状态，并创建后续工作升级或替换它。
 
-里程碑测试和 `test_propagation_contracts` 已注册到 CTest，因此它们可见；但在后续 pass 将它们重写为更窄、更清晰 fixture 和断言的回归测试前，它们仍是低置信度遗留测试。
+里程碑测试、`test_propagation_contracts` 与长期 `test_region_contracts` 行为 suite 已注册到
+CTest，因此它们可见；但在后续 pass 将前两类重写为更窄、更清晰 fixture 和断言的回归测试前，
+它们仍是低置信度遗留测试。
 
 `test_propagation` 不同：它是脚本式 REPL/tool 目标，不是 GoogleTest 二进制。CMake 保持它可构建，供手工脚本和临时验证使用，但 CTest 不会发现或运行它。不要声称 CTest 覆盖了 `test_propagation`；需要时应单独运行准确的手工命令。
 
@@ -876,7 +1293,8 @@ conversion 与 ROI copy。默认 CTest inventory 也包含 `DependencyDisabledIn
 
 若在其他默认 test profile 选项不变时只禁用
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER`，CMake 不会创建或发现 broad suite。它会为注入式
-codec smoke 保留可构建的 provider-independent `test_kernel_contracts` target，并且只注册
+codec smoke 与两个 dependency-disabled nested build 保留可构建的 provider-independent
+`test_kernel_contracts` target，并且只注册
 focused optional-provider GoogleTest、三个专用 disk-cache diagnostic concurrency case 与
 `DependencyDisabledInstallSmoke`。
 

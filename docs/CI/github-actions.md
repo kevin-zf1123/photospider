@@ -88,20 +88,28 @@ The current labelled inventory is:
 - `DependencyDisabledInstallSmoke`
 - `ImageArtifactCodecDependencyDisabledBuild`
 - `IpcDisabledInstallSmoke`
+- `OpenExrDeepProviderOptionOffSmoke`
 - `OpenCvOperationProviderDisabledBuild`
+- `PhotospiderdInstallLayoutSmoke`
 - `PublicHeaderSelfContainment`
 - `StaticProductConsumerSmoke`
 
-The four dependency/configuration drivers and the static-product consumer
-create or validate isolated nested build profiles; public-header
-self-containment invokes its dedicated compile target. These are durable
-product, package, configuration, and compile boundaries, not migration or
-source-layout checks. `OpenCvOperationProviderBuildSmokeSafety` remains an
+The five default dependency/configuration drivers, daemon install-layout
+driver, and static-product consumer create or validate isolated nested build
+profiles;
+public-header self-containment invokes its dedicated compile target. These are
+durable product, package, configuration, and compile boundaries, not migration
+or source-layout checks. `OpenCvOperationProviderBuildSmokeSafety` remains an
 ordinary full-CTest safety regression for the OpenCV nested-build driver: its
 Python unittest exercises cleanup guards and cache-layout helpers in-process.
 It also configures one compiler-free `project(... NONE)` fixture through the
 production manifest generator; it never starts a child build, install, compile
 target, or generated executable.
+
+This default profile therefore contains eight labelled `build-smoke` entries.
+When `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON`, the conditional
+`OpenExrDeepProviderInstallConsumerSmoke` entry is added as the ninth entry;
+it is not part of the default inventory.
 
 Two nested-profile inventories remain exact without workflow-maintained counts.
 The static-product producer exports its configured CMake public-header install

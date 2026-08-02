@@ -23,12 +23,14 @@ CLI / TUI
 `Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, a
 per-graph visible-state `GraphStateExecutor`, a separate bounded serial
 compute-request lane, one per-live-Graph `ComputeRequestCoordinator`, event
-service, platform context, and one copied execution-route binding per intent. Each binding contains only an
-exact route id and nonzero generation. The embedded composition root creates
-one private fixed `ExecutionService` before Kernel. The service exclusively
-owns the Host-authoritative resource ledger, policy bindings, bounded ready
-store, reserved-start transactions, physical routes, and completion callbacks;
-Kernel injects that owner into each request-local `ComputeService`.
+service, a Graph lifetime anchor, and one copied execution-route binding per
+intent. Each binding contains only an exact route id and nonzero generation.
+`GraphRuntime` owns no native platform context. The embedded composition root
+creates one private fixed `ExecutionService` before Kernel. The service
+exclusively owns the Host/device-authoritative resource ledger, policy bindings,
+bounded ready store, reserved-start transactions, physical routes, and
+completion callbacks; Kernel injects that owner into each request-local
+`ComputeService`.
 
 `ps::Host` is the public frontend-facing interface. The embedded Host adapter
 copies public request/result values and uses the internal `InteractionService`
@@ -69,14 +71,29 @@ a production realtime control surface.
 Fixed service threads are infrastructure rather than per-Run reservations.
 Execution configuration resolves `0` to a bounded automatic value or preserves
 an explicit `1..8`, freezes the CPU service count, starts one fixed CPU pool,
-and starts one private Metal worker lane. The Metal lane is idle when the Host
-does not expose Metal and is not a separately configurable worker grant.
-Later zero/equal requests are idempotent; a conflicting positive request is
-rejected. Before publishing work, each Run atomically reserves its complete
-CPU, retained-memory, scratch, ready-entry, and ready-byte vector from the
-service-owned Host ledger. Graph load copies route ids and generations but
+and starts one private Metal worker lane as fixed infrastructure. Device
+availability comes only from the fixed `DeviceExecutorRegistry`: the enabled
+Apple operation-plugin profile installs one Metal executor, while unsupported
+and dependency-disabled profiles keep the registry Metal-empty and expose only
+CPU through `gpu_pipeline`. The Metal lane is not a separately configurable
+worker grant. Later zero/equal requests are idempotent; a conflicting positive
+request is rejected. Before publishing work, each Run atomically reserves its
+complete CPU, retained-memory, scratch, ready-entry, and ready-byte vector from
+the service-owned Host ledger. Graph load copies route ids and generations but
 owns no worker grant. This contract does not claim all threads used by compute,
 operations, or a private GPU backend.
+
+Device allocation has a separate lifetime from Run admission. One complete
+non-CPU `DeviceId` account atomically reserves persistent-memory and scratch
+plans under the same ledger root mutex. The Metal Perlin path plans its output
+texture, permutation/scale buffers, and readback buffer before its first native
+allocation; CPU-to-Metal upload plans its destination texture and staging
+buffer before either allocation. Native heap size/alignment supplies the plan,
+`allocatedSize` supplies actual bytes, and command commit occurs only after
+actual reconciliation. Persistent memory then follows the native Value owner
+through residency, while scratch remains charged until the exact native
+completion owner retires. Provider/Run return cannot release either owner
+early, and queue/pipeline infrastructure is not charged as invocation scratch.
 
 Benchmark configuration does not reconfigure that process pool. For each
 benchmark Run, `execution.threads` resolves to an optional positive
@@ -191,9 +208,10 @@ The kernel recognizes two formal compute intents:
 The intent model is formal. `ComputeService` remains the compute facade and
 planning boundary. Private route metadata selects the physical path. The `cpu`
 and `serial_debug` routes expose CPU only. `gpu_pipeline` exposes Metal then CPU
-when the Host reports Metal, and CPU only otherwise. CPU, serial-debug, GPU,
-connected-parameter preflight, full, and dirty phases all use the fixed
-injected service; GraphRuntime stores only copied route ids and generations.
+when the fixed service registry owns a Metal executor, and CPU only otherwise.
+CPU, serial-debug, GPU, connected-parameter preflight, full, and dirty phases
+all use the fixed injected service; GraphRuntime stores only copied route ids
+and generations and owns no native device resource.
 
 HP/RT dual path semantics belong to realtime intent, not to the parallel
 execution mode. In realtime mode, HP computes the full-size authoritative node
@@ -233,11 +251,15 @@ then pruning it with `NodeCacheTaskGraphPruner` from `topo_postorder_from`.
 `ComputeDispatchPlanBuilder` records that cache-pruned plan for inspection.
 The request `ComputeRun` owns the `TaskSubmissionPlan` that materializes the
 plan's `ComputeTaskGraph` into dependency counters, ready values, operation
-variants, selected devices, and temporary result slots. The dispatcher creates immutable, lease-backed `ReadyTaskSubmission` values
-and submits one initial ready batch to the injected `ExecutionService`;
-dependent completion creates further submissions through the same active Run
-and bounded store. Tiled operations may spawn micro-tasks and retire the
-selected private route's logical completion count.
+variants, selected devices, and temporary result slots. It preallocates one
+independently charged operation-constraint record for every logical task,
+including every tiled micro-task, and moves the matching record exactly once
+when materializing that task's submission. The dispatcher creates immutable,
+lease-backed `ReadyTaskSubmission` values and submits one initial ready batch
+to the injected `ExecutionService`; dependent completion creates further
+submissions through the same active Run and bounded store. Tiled operations
+may spawn micro-tasks and retire the selected private route's logical
+completion count.
 
 Before a Run is published, the service atomically reserves its complete
 checked CPU, retained-memory, scratch, ready-entry, and ready-byte vector.
@@ -246,10 +268,12 @@ fixed workers, logical tasks, and the Run's optional positive maximum
 parallelism; ready entries and bytes still cover every logical task.
 Initial and dependent entries hold child ready grants; reserved start exchanges
 that authority for CPU/memory/scratch before entering the submission's fixed
-CPU or Metal lane. The service rejects a device outside the configured
-route/Host inventory before Run publication. Failure, queue purge, and
-successful settlement release exact capacity. The fixed lanes never resize
-per Run, and CPU/Metal callbacks share the Run's admitted parallelism ceiling.
+CPU or Metal lane. A Metal-lane start then enters the matching fixed registry
+executor and borrows its queue, invocation allocator, and pipeline cache
+through callback return. The service rejects a device outside the configured
+route/registry inventory before Run publication. Failure, queue purge, and
+successful settlement release exact capacity. The fixed lanes never resize per
+Run, and CPU/Metal callbacks share the Run's admitted parallelism ceiling.
 Execution inspection and replacement share the per-graph
 compute-request lane with compute, so copied route generations remain coherent.
 Replacement validates one closed-vocabulary route and publishes a new nonzero
@@ -378,6 +402,44 @@ Host/CLI/IPC cancellation are not claimed.
 Commit policy remains conceptually separate from `ComputeIntent`, because
 HP/RT intent semantics define neither visibility nor cancellation authority.
 
+## Current Completion and Result Layers
+
+Current compute I/O has several separately observable completion layers:
+
+1. an operation provider can return before a pending `Value` becomes ready;
+2. a `ComputeRun` becomes terminal only after dependency completion, staged
+   output validation, and its applicable Graph/RT publication gate;
+3. a synchronous Host call returns or an asynchronous Host future resolves
+   only after public result translation;
+4. protocol-v2 `compute.submit` reports request acceptance, while daemon job
+   terminal state is a later, process-local observation;
+5. an image daemon job reports success only after Host compute and protected
+   `OutputStore` publication, but that store is process-scoped and lease/TTL
+   retained rather than crash durable;
+6. configured disk-cache writes, Graph-document save, and operation-owned
+   external side effects are separate persistence observations.
+
+A successful `ComputeRun` therefore means that the validated Graph/RT result
+was published, or that an admitted no-op reached its valid terminal path. It
+does not promise disk-cache persistence, Graph-document save, daemon
+acknowledgement, result delivery, or durable user-output commit. The legacy
+`io/save` operation can expose a file side effect before its enclosing staged
+Run commits; that callback-owned behavior is not a Run commit protocol.
+
+The current product transaction still performs eligible deferred HP cache
+writes before the no-throw live Graph swap. After the existing live predicates
+succeed, graph-state policy submits each staged cache-save codec/filesystem
+callback to the process-owned, task/estimated-byte-bounded
+`ComputeIoExecutor`, retains the prepared transaction as the task lifetime
+token, and waits for typed completion. That wait never occurs on an
+`ExecutionService` CPU worker. A cache admission, codec, or filesystem failure
+can therefore still fail the current Run with no visible Graph publication.
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+accepts a target that moves optional cache persistence behind an independent
+outcome and introduces a separate, receipt-bearing durable output commit. The
+executor mechanism is current; the target post-publication ordering and
+durable output commit are not.
+
 ## GlobalHighPrecision
 
 `GlobalHighPrecision` is the full-quality path. Without a dirty ROI it performs
@@ -446,15 +508,17 @@ released after both sibling futures have drained, including failure cleanup.
 Realtime planning is intentionally per path, not a single mixed-domain planner
 call. `IntentUpdateCoordinator` dispatches sibling HP and RT update callbacks
 and records RT-first/concurrent stages for Dirty RT requests. Each path uses a
-single-domain request plan and a same-domain dirty snapshot: the HP callback
-uses a `GlobalHighPrecision` node/cache-pruned plan with an HP dirty snapshot,
-and the RT callback uses a `RealTimeUpdate` node/cache-pruned plan with an RT
-dirty snapshot. HP dirty node execution writes into
+single-domain retained request-cone plan and a same-domain dirty snapshot: the
+HP callback uses a `GlobalHighPrecision` request-cone plan with an HP dirty
+snapshot, and the RT callback uses a `RealTimeUpdate` request-cone plan with an
+RT dirty snapshot. HP dirty node execution writes into
 `HighPrecisionDirtyWriteBuffer`; RT dirty node execution writes into
 `RealtimeProxyWriteBuffer` and commits only to `RealtimeProxyGraph`. The dirty
 snapshot clips or activates the update work set from the path's task graph.
-This keeps full task expansion, node/cache pruning, dirty snapshot pruning, and
-output commit as separate contracts for each compute domain.
+Exact old HP output may seed local staging but never suppresses work selected
+by that snapshot. This keeps full task expansion, callback-free cone retention,
+dirty/external-boundary selection, and output commit as separate contracts for
+each compute domain.
 
 The passed dirty ROI is converted into graph-scoped planner state for the
 current request. Public `ps::Host` begin/update/end methods translate through the
@@ -542,6 +606,14 @@ exhaustion likewise returns `ComputeError` before any initial ready entry is
 published. A present zero public `maximum_parallelism` is invalid and is
 rejected at Host or IPC decoding before graph execution.
 
+Current deferred disk-cache persistence is part of the product commit-policy
+work item before live Graph publication, so a codec/filesystem error can fail
+the Run without publishing staged Graph output. If protected artifact
+publication fails, an image daemon job fails even though its underlying Host
+compute may already have returned successfully. Graph-document save remains a
+separate graph-state operation with its own status and never rewrites a Run
+terminal state.
+
 ## Boundaries and Rationale
 
 - One request plan supplies both sequential and parallel execution semantics;
@@ -583,6 +655,9 @@ revision/generation-safe staging, RT-first independent commit gate,
 cooperative Run cancellation, deterministic `RunGroup` settlement, and
 latest-wins supersession, admitted-Run registry, Graph lifetime leases, and
 close/shutdown lifecycle ownership. The
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+separates current completion observations from the accepted persistence target.
+The
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 retains the durable ownership direction without changing these current facts.
 
@@ -592,6 +667,10 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
 - `src/lib/ipc/request_router.cpp`
+- `src/lib/ipc/output_store.*`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/execution/compute_io_executor.*`
+- `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
@@ -605,6 +684,7 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_host_adapter.cpp`

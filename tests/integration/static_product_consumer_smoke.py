@@ -30,6 +30,7 @@ STATIC_PRODUCT_ARCHIVE_NAMES = {
 }
 INTERNAL_TEST_PRODUCT_STEM = "photospider_internal_test_product"
 INTERNAL_PRODUCT_TEST_DEFINITIONS = (
+    "PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING",
     "PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING",
     "PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING",
     "PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING",
@@ -37,11 +38,25 @@ INTERNAL_PRODUCT_TEST_DEFINITIONS = (
     "PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING",
 )
 FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
+    "g_dirty_post_plan_test_hook",
+    "set_dirty_post_plan_test_hook",
+    "notify_dirty_post_plan_test_hook",
     "reserved_start_probe_state",
     "record_reserved_start_attempt_for_testing",
     "arm_reserved_start_rollback_probe_for_testing",
     "reserved_start_rollback_probe_snapshot_for_testing",
     "disarm_reserved_start_rollback_probe_for_testing",
+    "operation_admission_wait_probe_state",
+    "notify_operation_admission_wait_for_testing",
+    "set_operation_admission_wait_observer_for_testing",
+    "clear_operation_admission_wait_observer_for_testing",
+    "direct_operation_gate_can_start_for_testing",
+    "retained_operation_string_charge_probe_state",
+    "notify_retained_operation_string_charge_for_testing",
+    "set_retained_operation_string_charge_observer_for_testing",
+    "clear_retained_operation_string_charge_observer_for_testing",
+    "estimate_direct_operation_resources_for_testing",
+    "direct_operation_fixed_retained_memory_bytes_for_testing",
     "g_graph_cache_service_test_hook",
     "set_graph_cache_service_test_hook",
     "notify_graph_cache_service_test_hook",
@@ -60,7 +75,10 @@ FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
     "notify_kernel_compute_commit_test_hook",
 )
 REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS = (
+    "TaskSubmissionPlan21retained_memory_bytes",
+    "HighPrecisionDirtyExecutor16execute_prepared",
     "ExecutionService17available_devices",
+    "compute_plan_dynamic_retained_memory_bytes",
     "GraphCacheService17clear_drive_cache",
     "GraphStateExecutor15close_and_drain",
     "Kernel11close_graph",
@@ -1102,6 +1120,16 @@ def write_consumer_projects(
                 '                 "<operation-plugin> <session-root> <yaml>\\n";',
                 "    return 64;",
                 "  }",
+                "  const ps::RegionSet region = ps::RegionSet::from_image_rect(",
+                "      {ps::image_region_domain(), 0, 8, 0, 6});",
+                "  const auto clipped = ps::clip_region_to_image_bounds(",
+                "      region, {ps::image_region_domain(), 2, 7, 1, 5});",
+                "  if (clipped.status() != ps::RegionOperationStatus::Exact ||",
+                "      !clipped.region().has_value() ||",
+                "      ps::region_contains(region, *clipped.region()) !=",
+                "          ps::RegionContainmentStatus::Contains) {",
+                "    return 65;",
+                "  }",
                 "  auto host = ps::create_embedded_host();",
                 "  if (!host) {",
                 "    return 1;",
@@ -1691,10 +1719,11 @@ def installed_cpp_policy_plugin_source() -> str:
 def installed_operation_plugin_source() -> str:
     """@brief Build an operation DSO that needs only ``operation_sdk``.
 
-    @return C++17 source registering one factory-backed monolithic operation.
+    @return C++17 source registering one metadata-routed factory operation.
     @throws None The source is one immutable in-memory string.
-    @note Calling the image factory from the DSO forces the SDK's transitive
-      runtime archive to satisfy the symbol at link time.
+    @note Calling the image factory forces transitive runtime linkage, while
+      explicitly populating every V-5 CPU field proves the installed
+      provisional metadata layout is consumable.
     """
 
     return dedent(
@@ -1747,6 +1776,12 @@ def installed_operation_plugin_source() -> str:
           if (registrar == nullptr) {
             throw std::invalid_argument("installed operation registrar is null");
           }
+          ps::plugin::OperationMetadata metadata;
+          metadata.reentrant = false;
+          metadata.maximum_parallelism = 3U;
+          metadata.retained_memory_bytes = 4096U;
+          metadata.scratch_bytes = 2048U;
+          metadata.exclusive_key = "installed-sdk";
           registrar->register_op_hp_monolithic(
               "installed", "factory",
               [](const ps::plugin::NodeView&,
@@ -1755,7 +1790,8 @@ def installed_operation_plugin_source() -> str:
                 output.image_buffer = ps::make_aligned_cpu_image_buffer(
                     2, 2, 1, ps::DataType::UINT8);
                 return output;
-              });
+              },
+              std::move(metadata));
         }
         """
     ).lstrip()
@@ -1892,17 +1928,81 @@ def write_extension_consumer_projects(
     (operation_source_dir / "main.cpp").write_text(
         dedent(
             """
+            #include <algorithm>
+            #include <cstddef>
+            #include <utility>
+            #include <vector>
+
             #include <photospider/core/image_buffer.hpp>
+            #include <photospider/data/image_view.hpp>
+            #include <photospider/data/region.hpp>
+            #include <photospider/data/value.hpp>
+            #include <photospider/memory/buffer_handle.hpp>
+            #include <photospider/memory/ready_fence.hpp>
 
             /**
-             * @brief Calls the SDK-transitive image factory from an executable.
-             * @return Zero only when allocated storage and dimensions are valid.
-             * @throws Nothing; allocation failure terminates the smoke process.
+             * @brief Calls SDK-transitive image and V-6 memory/Value symbols.
+             * @return Zero only when builder writes, sealed lease reads,
+             *         runtime identities, readiness, and image dimensions are
+             *         valid.
+             * @throws std::bad_alloc or validation exceptions terminate the smoke
+             *         process because the executable intentionally has no recovery
+             *         path.
+             * @note The consumer requests only operation_sdk, so successful
+             *       construction also proves all implementation symbols link
+             *       without backend package discovery.
              */
             int main() {
               const auto image = ps::make_aligned_cpu_image_buffer(
                   3, 2, 1, ps::DataType::UINT8);
-              return image.data && image.width == 3 && image.height == 2 ? 0 : 1;
+              ps::DenseTensorDescriptor descriptor{
+                  {2U, 3U, 1U},
+                  ps::ElementSemantics::UnsignedInteger,
+                  ps::StorageEncoding{8U}};
+              ps::ImageFacet facet;
+              facet.x_axis = 1U;
+              facet.y_axis = 0U;
+              facet.channel_axis = 2U;
+              ps::StridedLayout layout{{3, 1, 1}};
+              std::vector<std::byte> storage{
+                  std::byte{1}, std::byte{2}, std::byte{3},
+                  std::byte{4}, std::byte{5}, std::byte{6}};
+              auto builder = ps::ValueBuilder::allocate_cpu_dense_tensor(
+                  std::move(descriptor), facet, std::move(layout),
+                  storage.size());
+              {
+                auto write = builder.acquire_write();
+                std::copy(storage.begin(), storage.end(), write.data());
+              }
+              const ps::Value value = builder.seal();
+              const auto read = value.buffer_handle().acquire_read();
+              const ps::ImageView view(value);
+              const ps::RegionSet region = ps::RegionSet::from_tensor_slice(
+                  {ps::dense_tensor_region_domain(),
+                   {{0U, 2U}, {0U, 3U}, {0U, 1U}}});
+              const auto clipped = ps::clip_region_to_tensor_shape(
+                  region, ps::dense_tensor_region_domain(), {1U, 3U, 1U});
+              const bool valid_region =
+                  clipped.status() == ps::RegionOperationStatus::Exact &&
+                  clipped.region().has_value() &&
+                  ps::region_contains(region, *clipped.region()) ==
+                      ps::RegionContainmentStatus::Contains;
+              const bool valid_value =
+                  read.valid() && read.size() == storage.size() &&
+                  read.allocation_identity() ==
+                      value.allocation_identity() &&
+                  value.revision_id().valid() &&
+                  value.ready_fence().poll().state() ==
+                      ps::ReadyFenceState::Ready &&
+                  view.width() == 3U &&
+                  view.height() == 2U &&
+                  view.channels() == 1U &&
+                  std::to_integer<unsigned int>(
+                      *view.channel_data(2U, 1U, 0U)) == 6U;
+              return image.data && image.width == 3 && image.height == 2 &&
+                             valid_value && valid_region
+                         ? 0
+                         : 1;
             }
             """
         ).lstrip(),
@@ -2123,7 +2223,7 @@ def inspect_product_archive_symbols(
     @note Darwin tries validated Xcode ``xcrun`` llvm-nm, PATH llvm-nm, then
       PATH nm; other platforms never invoke xcrun. A candidate becomes
       authoritative only after a zero exit, nonempty symbol table, and defined
-      anchors from all five seam objects. Raw lines remain only in this stack
+      anchors from all eight seam objects. Raw lines remain only in this stack
       frame: once authoritative, controlled fragment counts are retained and no
       later tool may hide a forbidden symbol.
     """
@@ -2919,6 +3019,7 @@ def behavior_diagnostic_summary(
         "producer_configure",
         "build_photospider",
         "install",
+        "installed_daemon_help",
         "embedded_consumer_configure",
         "embedded_consumer_build",
         "ipc_consumer_configure",
@@ -3050,6 +3151,10 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         ),
         "photospider target build succeeded": commands["build_photospider"] == 0,
         "install command succeeded": commands["install"] == 0,
+        "installed photospiderd help runs from isolated prefix": commands[
+            "installed_daemon_help"
+        ]
+        == 0,
         "installed static archive exists": install["archive_exists"],
         "installed product archive omits internal test symbols": install[
             "production_archive_omits_internal_test_symbols"
@@ -3247,7 +3352,9 @@ def main() -> int:
       test work directory, or if the work path itself is destructive.
     @note The CTest-facing result covers package behavior only. Commands and
       assertions write directly to the streams captured by CTest; the work
-      directory contains only normal producer/consumer build inputs and outputs.
+      directory contains only normal producer/consumer build inputs and
+      outputs. Installed daemon help runs from the non-system prefix through
+      the loader-scrubbing shared capability driver.
       On Darwin, every child configure inherits the producer's meaningful
       ``CMAKE_OSX_ARCHITECTURES`` value as one argv element; other platforms
       receive no macOS-specific option.
@@ -3287,6 +3394,7 @@ def main() -> int:
     work.mkdir(parents=True, exist_ok=True)
 
     prefix = work / "install-prefix"
+    platform_system = platform.system()
     embedded_consumer_src = work / "embedded-consumer-src"
     embedded_consumer_build = work / "embedded-consumer-build"
     ipc_consumer_src = work / "ipc-consumer-src"
@@ -3374,6 +3482,27 @@ def main() -> int:
     if args.config:
         install_command.extend(["--config", args.config])
     install_code = run_command(install_command, repo)
+    install_bindir = cmake_cache_value(build, "CMAKE_INSTALL_BINDIR") or "bin"
+    installed_bindir = Path(install_bindir)
+    if not installed_bindir.is_absolute():
+        installed_bindir = prefix / installed_bindir
+    installed_daemon = installed_bindir / (
+        "photospiderd.exe" if platform_system == "Windows" else "photospiderd"
+    )
+    installed_daemon_help_code = run_command(
+        [
+            args.cmake_executable,
+            f"-DPHOTOSPIDERD={installed_daemon}",
+            "-P",
+            str(
+                repo
+                / "tests"
+                / "integration"
+                / "photospiderd_capability_help.cmake"
+            ),
+        ],
+        prefix,
+    )
 
     embedded_configure_command = [
         args.cmake_executable,
@@ -3713,7 +3842,6 @@ def main() -> int:
             flush=True,
         )
 
-    platform_system = platform.system()
     producer_build_testing = cmake_cache_value(build, "BUILD_TESTING")
     install_tree = inspect_install_tree(
         repo,
@@ -3727,6 +3855,7 @@ def main() -> int:
             "producer_configure": producer_configure_code,
             "build_photospider": build_product_code,
             "install": install_code,
+            "installed_daemon_help": installed_daemon_help_code,
             "embedded_consumer_configure": embedded_configure_code,
             "embedded_consumer_build": embedded_build_code,
             "ipc_consumer_configure": ipc_configure_code,
@@ -3754,6 +3883,7 @@ def main() -> int:
         "install_tree": install_tree,
         "paths": {
             "cmake_executable": args.cmake_executable,
+            "install_bindir": install_bindir,
             "install_libdir": install_libdir,
             "package_cmake_dir": package_cmake_dir,
             "consumer_osx_architectures": osx_architectures,

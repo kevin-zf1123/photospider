@@ -10,6 +10,10 @@
 
 namespace ps {
 
+namespace execution {
+class ComputeIoExecutor;
+}  // namespace execution
+
 /**
  * @class GraphCacheService
  * @brief Coordinates graph memory-cache cleanup and HP disk-cache persistence.
@@ -22,10 +26,16 @@ namespace ps {
  * @note Disk-cache load wrappers keep their historical bool return contract:
  * true means a reusable output is available, false means the caller should
  * compute normally. Detailed miss/error diagnostics are recorded through
- * GraphModel's locked disk-cache diagnostic API. Image bytes and detached
- * named values cross injected `ImageArtifactCodec` and `CacheMetadataCodec`
- * boundaries; this service contains no OpenCV/YAML calls or provider-library
- * types.
+ * GraphModel's locked disk-cache diagnostic API. Compatible image bytes and
+ * detached named values cross injected `ImageArtifactCodec` and
+ * `CacheMetadataCodec` boundaries; packed, quantized, or latent formal Values
+ * fail with a typed invalid-parameter error before executor admission,
+ * filesystem mutation, or codec invocation. This service contains no
+ * OpenCV/YAML calls or provider-library types. Staged HP commit may submit the
+ * const cache-save mechanism to the
+ * process compute-I/O executor while the graph-state policy owner retains path,
+ * failure, timing, and publication decisions; synchronous administration and
+ * load paths remain unchanged.
  */
 class GraphCacheService {
  public:
@@ -137,27 +147,73 @@ class GraphCacheService {
    * @param cache_precision Precision label used for image serialization.
    * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note The method is a no-op for disabled saving, missing cache roots,
-   * unsupported cache entries, empty locations, or nodes without HP output.
-   * Image serialization accepts only CPU buffers with owned data. Opaque
-   * non-CPU images are skipped without unsafe mapping, while named
-   * ParameterValue outputs cross the metadata codec; a future device adapter
-   * may add explicit download.
+   * unsupported cache-entry types, empty locations, or nodes without HP
+   * output. A configured image entry with a packed, quantized, or latent formal
+   * Value instead throws `GraphError{InvalidParameter}` before filesystem or
+   * codec effects.
+   * Partial hp_region validity is never serialized; any older configured
+   * artifact for that node is removed so a later load cannot relabel stale
+   * bytes as complete.
+   * A valid sealed CPU image Value is the serialization authority and is copied
+   * into a temporary codec-compatible ImageBuffer; otherwise the legacy
+   * ImageBuffer is used. Opaque non-CPU images are skipped without unsafe
+   * mapping, while named ParameterValue outputs cross the metadata codec; a
+   * future device adapter may add explicit download. The current Value must be
+   * image-faceted, Strided, unquantized, host-readable, and whole-byte
+   * compatible before the save mechanism proceeds. Runtime allocation and
+   * Value revision identities are never persisted.
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
                                 const std::string& cache_precision) const;
+
+  /**
+   * @brief Saves one eligible HP cache through the bounded process I/O worker.
+   *
+   * The caller remains on its graph-state transaction lane. This method first
+   * performs read-only policy checks and checked planned-byte estimation, then
+   * lazily constructs one callback only after executor task/byte admission. It
+   * waits for typed terminal completion, applies worker duration to the Graph
+   * timing counter, and propagates codec/filesystem failure before returning.
+   *
+   * @param executor Process-owned independent compute-I/O authority.
+   * @param lifetime_token Non-null prepared-Graph or Run owner retained until
+   * callback settlement.
+   * @param graph Transaction-owned Graph providing cache policy and paths.
+   * @param node Stable node inside `graph` whose formal HP output is saved.
+   * @param cache_precision Precision label forwarded to the selected codec.
+   * @throws GraphError with `InvalidParameter` when image disk persistence
+   * rejects a packed, quantized, latent, or otherwise incompatible Value
+   * before executor admission.
+   * @throws GraphError with `ComputeError` for typed admission rejection or
+   * cancellation.
+   * @throws Codec, filesystem, graph, allocation, or synchronization
+   * exceptions from estimation, construction, execution, or waiting.
+   * @note The I/O callback receives only const Graph/Node access and therefore
+   * cannot mutate Graph state. This preserves the current pre-publication
+   * cache failure ordering; it grants no Graph-document, daemon, OutputStore,
+   * retry, receipt, or durability authority.
+   */
+  void save_cache_if_configured_via_executor(
+      execution::ComputeIoExecutor& executor,
+      const std::shared_ptr<const void>& lifetime_token, GraphModel& graph,
+      const Node& node, const std::string& cache_precision) const;
 
   /**
    * @brief Attempts to satisfy a node from disk cache into its HP memory cache.
    *
    * @param graph Graph whose cache root, timing, and diagnostics are updated.
    * @param node Node receiving the loaded HP output on cache hit.
-   * @return true when HP output is already present or disk cache was loaded;
-   * false on cache miss, skipped load, or read/parse error.
-   * @throws std::bad_alloc from diagnostic/output storage. Disk read and parse
-   * failures are recorded through GraphModel's locked disk-cache diagnostic API
-   * and reported as false.
+   * @return true when complete HP output is already present or disk cache was
+   * loaded; false for partial memory validity, cache miss, skipped load, or
+   * read/parse error.
+   * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
+   * parse, and CPU Value normalization failures are recorded through
+   * GraphModel's locked disk-cache diagnostic API and reported as false.
    * @note This preserves the legacy try-load bool contract while making disk
-   * errors distinguishable from misses through graph diagnostics.
+   * errors distinguishable from misses through graph diagnostics. Successful
+   * CPU image decode mints fresh process-local allocation/revision identities.
+   * A hit publishes the output, incremented HP content version, and derived
+   * full-validity Region together on the supplied Node.
    */
   bool try_load_from_disk_cache(GraphModel& graph, Node& node) const;
 
@@ -169,11 +225,13 @@ class GraphCacheService {
    * @param out Receives the loaded output on cache hit.
    * @return true on disk cache hit; false on cache miss, skipped load, or
    * read/parse error.
-   * @throws std::bad_alloc from diagnostic/output storage. Disk read and parse
-   * failures are recorded through GraphModel's locked disk-cache diagnostic API
-   * and reported as false.
+   * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
+   * parse, and CPU Value normalization failures are recorded through
+   * GraphModel's locked disk-cache diagnostic API and reported as false.
    * @note Used by execution worker paths that stage outputs outside the
-   * formal HP cache before committing.
+   * formal HP cache before committing. Existing complete or partial formal
+   * memory state prevents disk load so regionless artifacts cannot override
+   * current runtime validity.
    */
   bool try_load_from_disk_cache_into(GraphModel& graph, const Node& node,
                                      NodeOutput& out) const;

@@ -64,8 +64,12 @@ struct NodeTaskRunnerContext {
   /** @brief Per-node temporary outputs published before serialized commit. */
   std::vector<std::optional<NodeOutput>>& temp_results;
 
-  /** @brief Operation variants resolved once for the planned HP intent. */
-  const std::vector<std::optional<OpRegistry::OpVariant>>& resolved_ops;
+  /**
+   * @brief Exact implementation snapshots resolved for the planned HP intent.
+   * @note Each present value keeps the callback and scheduling metadata
+   * selected under the same nonzero implementation identity.
+   */
+  const std::vector<std::optional<OpImplementation>>& resolved_ops;
 
   /** @brief Immutable task graph whose PlannedTask entries workers execute. */
   const ComputeTaskGraph& task_graph;
@@ -159,20 +163,73 @@ class NodeTaskRunner {
   std::uint64_t retained_memory_bytes() const;
 
  private:
-  /** @brief Returns whether disk cache reads are allowed for this dispatch. */
+  /**
+   * @brief Returns whether disk cache reads are allowed for this dispatch.
+   *
+   * @return True when neither disk-cache disablement nor force-recache is
+   * active.
+   * @throws Nothing.
+   * @note This request flag gate does not inspect node validity.
+   */
   bool allow_disk_cache() const;
 
-  /** @brief Resolves an upstream output from temp slots or committed HP cache.
+  /**
+   * @brief Resolves a complete upstream output for a whole-output dependency.
+   *
+   * @param up_id Connected upstream node id, or a negative disconnected
+   * sentinel.
+   * @return Current-request temporary output when present, otherwise complete
+   * reusable formal HP output; nullptr for disconnected, missing, absent, or
+   * partial persistent output.
+   * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+   * std::bad_alloc when committed output validity cannot be checked.
+   * @note Dependency release makes a temporary producer result complete before
+   * a downstream task reads it. Persistent output is always filtered through
+   * ComputeCachePolicy so exact partial Region state cannot reach a whole read.
    */
   const NodeOutput* upstream_output(int up_id) const;
 
-  /** @brief Checks whether a node already has memory or temp output. */
-  bool has_memory_or_temp_output(const Node& node, int node_idx) const;
+  /**
+   * @brief Checks for complete request-local or reusable persistent output.
+   *
+   * @param node Planned graph node whose formal HP validity is inspected.
+   * @param node_idx Dense index of the current-request temporary result slot.
+   * @return True when the temporary slot is populated or formal HP output has
+   * exact complete Region coverage.
+   * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+   * std::bad_alloc when committed output validity cannot be checked.
+   * @note A partial formal output deliberately returns false so disk lookup or
+   * recomputation can satisfy the planned whole-output request.
+   */
+  bool has_reusable_memory_or_temp_output(const Node& node, int node_idx) const;
 
-  /** @brief Computes or cache-loads one planned node. */
+  /**
+   * @brief Satisfies one planned whole-output node from valid cache or compute.
+   *
+   * @param node_idx Dense temporary-result and operation index.
+   * @param node_id Graph node id corresponding to node_idx.
+   * @return Nothing after a reusable temporary result is available.
+   * @throws GraphError, std::bad_alloc, or provider/cache exceptions from disk
+   * load, validity checking, parameter resolution, or uncached execution.
+   * @note Partial persistent HP output is not a memory hit. The runner may try
+   * disk cache and then executes the operation when no current-request or
+   * exact complete reusable result exists.
+   */
   void compute_node(int node_idx, int node_id);
 
-  /** @brief Computes one tile task into the node's temporary output buffer. */
+  /**
+   * @brief Computes one tile task into request-local output staging.
+   *
+   * @param task Immutable tile task with node identity, ROI, and tile size.
+   * @return Nothing after execution or a complete cache-based skip.
+   * @throws GraphError when task identity/operation/dependencies are invalid.
+   * @throws std::logic_error, std::invalid_argument, std::overflow_error,
+   * std::bad_alloc, or provider/cache exceptions from validity checking,
+   * allocation, disk loading, or tile execution.
+   * @note Existing formal HP output suppresses all sibling tile work only when
+   * ComputeCachePolicy proves exact complete Region coverage. A partial formal
+   * output remains visible state but is recomputed for this Whole plan.
+   */
   void compute_tile_task(const PlannedTask& task);
 
   /**
@@ -241,9 +298,10 @@ class NodeTaskRunner {
   /**
    * @brief Builds tile execution configuration for tile-capable operations.
    * @param target_node Node whose metadata and trace identity are captured.
-   * @param op Resolved operation used to decide whether tiling is active.
+   * @param implementation Exact implementation whose callback and scheduling
+   * metadata were selected together.
    * @return Default configuration for monolithic operations, otherwise
-   * metadata-derived tile sizing plus a per-tile observation callback.
+   * exact-metadata-derived tile sizing plus a per-tile observation callback.
    * @throws std::bad_alloc if copied callback or metadata storage allocates.
    * @throws GraphError or execution trace exceptions when the installed
    * callback later observes cancellation or logs tile execution.
@@ -251,8 +309,8 @@ class NodeTaskRunner {
    * provider enters each tile; it borrows this runner through synchronous
    * dispatcher settlement.
    */
-  TiledExecutionConfig tiled_config_for(const Node& target_node,
-                                        const OpRegistry::OpVariant& op) const;
+  TiledExecutionConfig tiled_config_for(
+      const Node& target_node, const OpImplementation& implementation) const;
 
   /** @brief Creates a benchmark event initialized to execution start. */
   BenchmarkEvent start_event(const Node& target_node) const;
@@ -295,9 +353,12 @@ class NodeTaskRunner {
   /** @brief Per-plan output slots produced by worker tasks before commit. */
   std::vector<std::optional<NodeOutput>>& temp_results_;
 
-  /** @brief Resolved high-precision operations aligned with execution_order_.
+  /**
+   * @brief Exact HP implementation snapshots aligned with execution_order_.
+   * @note The runner never re-queries metadata by operation key after route
+   * selection.
    */
-  const std::vector<std::optional<OpRegistry::OpVariant>>& resolved_ops_;
+  const std::vector<std::optional<OpImplementation>>& resolved_ops_;
 
   /** @brief Immutable task graph containing task ids and ROIs. */
   const ComputeTaskGraph& task_graph_;

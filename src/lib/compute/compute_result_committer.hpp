@@ -18,7 +18,8 @@ namespace ps::compute {
  *
  * ComputeResultCommitter owns the post-dispatch mutation phase that workers
  * deliberately avoid: timing total calculation, GraphModel high-precision
- * cache updates, HP version increments, and configured disk cache writes.
+ * cache updates, CPU image Value normalization, exact full-validity Region
+ * derivation, HP version increments, and configured disk cache writes.
  *
  * @note commit() holds the graph mutex while moving temp outputs into node
  * runtime state so GraphModel remains the sole owner of committed HP cache
@@ -57,9 +58,13 @@ class ComputeResultCommitter {
    * @param graph Graph whose high-precision node caches are updated.
    * @param execution_order Dense planned node id order.
    * @param temp_results Temporary outputs aligned with execution_order.
-   * @throws Exceptions from GraphModel mutation or GraphCacheService writes.
+   * @throws Exceptions from CPU image Value normalization, GraphModel mutation,
+   * or GraphCacheService writes.
    * @note temp_results values are moved. After commit(), populated slots no
-   * longer own valid output values.
+   * longer own valid output values. CPU normalization completes before the
+   * graph mutex is acquired, so Value/Region allocation does not occur during
+   * publication. Output, version, and Region are then moved into the same
+   * GraphModel runtime-state mutation.
    */
   void commit(GraphModel& graph, const std::vector<int>& execution_order,
               std::vector<std::optional<NodeOutput>>& temp_results) const;
@@ -83,7 +88,8 @@ class ComputeResultCommitter {
  * @param order Planned node ids whose HP cache entries should be reset.
  * @throws Exceptions from GraphModel runtime-state mutation.
  * @note Missing node ids are skipped so stale diagnostic plan ids do not cause
- * recache requests to fail before execution starts.
+ * recache requests to fail before execution starts. Matching Region validity
+ * is cleared with the output; the monotonic HP content version is retained.
  */
 void clear_planned_high_precision_caches(GraphModel& graph,
                                          std::mutex& graph_mutex,

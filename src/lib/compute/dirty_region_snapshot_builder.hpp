@@ -11,8 +11,8 @@ namespace ps::compute {
 /**
  * @brief Source lifecycle transition requested by a dirty control event.
  *
- * @note source_roi is null only for transitions that do not append a new ROI,
- * such as end/settled events. The pointed ROI must outlive the
+ * @note Begin/update carries exactly one of source_roi or source_region.
+ * End/settled carries neither. Any pointed value must outlive the
  * apply_source_lifecycle_event call.
  */
 struct DirtySourceLifecycleUpdate {
@@ -27,6 +27,13 @@ struct DirtySourceLifecycleUpdate {
 
   /** @brief New lifecycle state for the source node. */
   DirtySourceLifecycleState lifecycle = DirtySourceLifecycleState::Idle;
+
+  /**
+   * @brief Optional authoritative Region for a V-4 lifecycle event.
+   * @note When null and source_roi is non-null, the builder performs one
+   *       checked ImageRect conversion at the current edge.
+   */
+  const RegionSet* source_region = nullptr;
 };
 
 /**
@@ -96,7 +103,8 @@ class DirtyRegionSnapshotBuilder {
    * @param graph Graph used to validate source membership.
    * @param snapshot Snapshot whose source membership and lifecycle are updated.
    * @param update Source lifecycle transition to apply.
-   * @throws GraphError when node_id is missing or source_roi is empty.
+   * @throws GraphError when node_id is missing, a supplied source fact is
+   * empty, or both ROI and Region are supplied.
    * @note dirty_updating_count is recomputed from source lifecycle states after
    * the transition. Existing source membership is intentionally preserved until
    * the dirty generation settles.
@@ -106,7 +114,7 @@ class DirtyRegionSnapshotBuilder {
       const DirtySourceLifecycleUpdate& update) const;
 
   /**
-   * @brief Rebuilds derived dirty regions from stable source ROI records.
+   * @brief Rebuilds derived dirty work from stable source Region records.
    *
    * @param graph Graph used for extent lookup and monolithic boundary checks.
    * @param snapshot Snapshot whose derived dirty regions are replaced.
@@ -115,9 +123,10 @@ class DirtyRegionSnapshotBuilder {
    * @throws std::bad_alloc if cache, snapshot, implementation, or callback
    *         snapshot storage cannot be copied or grown.
    * @throws Any exception raised while copying a registered callback target.
-   * @note Source membership, lifecycle state, and source ROI records are
-   * preserved. Only actual ROIs, tile keys, monolithic records, and edge
-   * mappings are cleared and rebuilt.
+   * @note Source membership, lifecycle state, and source facts are preserved.
+   * Region records are authoritative; legacy ROI-only snapshots are accepted
+   * as an image fallback. Only actual work, tile keys, monolithic records, and
+   * edge mappings are cleared and rebuilt.
    */
   void refresh_actual_dirty_regions(const GraphModel& graph,
                                     DirtyRegionSnapshot& snapshot,

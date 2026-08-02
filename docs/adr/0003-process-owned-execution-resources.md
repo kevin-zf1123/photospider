@@ -10,8 +10,9 @@ source/downstream phases, enters it only as ready, lease-backed submissions.
 Independent Runs from multiple Graphs may overlap on that pool. `GraphRuntime`
 stores only copied HP/RT route ids and nonzero generations; it owns no physical
 worker, queue, policy context, or plugin DSO lifetime. The service exclusively
-owns a Host-authoritative ledger and an entry/byte-bounded ready store;
-complete CPU/retained/scratch/ready Run vectors share that authority. One
+owns a Host-and-per-device authoritative ledger and an entry/byte-bounded ready
+store; complete CPU/retained/scratch/ready Run vectors share the Host vector.
+One
 Interactive and one Throughput policy binding order work behind Host-authored
 class, frontier, fairness, and fallback rules. Issue #72 keeps strong Graph
 identity, authoritative revision, request-owned staging, and revision-safe
@@ -26,9 +27,26 @@ scheduler SDK/ABI and adds pure-C policy ABI v1, atomic binding replacement,
 generation-local sticky faults, reserved start, and closed private execution
 routes, including one fixed CPU pool and one private Metal lane. Issue #76
 implements the lifecycle registry, monotonic Graph close, explicit process
-execution shutdown, exact settlement, and source-private telemetry. Public
-Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes
-this ADR only as the detailed
+execution shutdown, exact settlement, and source-private telemetry. Issue #84
+removes per-Graph native Metal ownership and installs a fixed
+`DeviceExecutorRegistry` in `ExecutionService`; its Metal executor owns one
+device, command queue, invocation allocator, and persistent pipeline cache and
+enters the selected operation only after reserved start. Issue #85 adds
+explicit revision-preserving CPU/Metal transfer, exact completion identity,
+one shared process-owned `ResidencyManager`, and Run-bound pending-Value
+continuations without creating another ready store or capacity authority.
+Issue #86 adds isolated configured non-CPU `DeviceId` memory/scratch accounts,
+native plan/actual reconciliation, and owner-bound persistent/completion
+leases to that sole service ledger.
+Issue #88 adds one source-private `ComputeIoExecutor` to the same process
+service. Its independent worker atomically admits tasks by count and estimated
+retained bytes, retains an explicit transaction lifetime token, returns typed
+completion, settles cancellation and shutdown exactly once, and rejects
+synchronous completion waits from CPU compute workers. The first migrated
+vertical is staged HP cache save: graph-state policy still chooses the cache
+operation and waits before the existing visible publication point.
+Public Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes this ADR only
+as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
 and its historical context remain in force.
 
@@ -39,17 +57,20 @@ The route vocabulary is closed to `cpu`, `serial_debug`, and
 `gpu_pipeline`; their physical workers, queues, device routing, completion, and
 exceptions remain private to Host execution modules. Policy binding is
 process/service state and never Graph state. The service freezes one CPU worker
-count from composition-root configuration, owns one fixed Metal worker lane,
-and keeps isolated
+count from composition-root configuration, owns one fixed Metal worker lane
+and one immutable device-executor registry with a shared residency manager, and keeps isolated
 completion/failure/trace state per Run, and permits independent HP and RT Runs
 from multiple Graphs to overlap.
 
 The canonical device inventory is route aware. `cpu` and `serial_debug` expose
-CPU only. `gpu_pipeline` exposes Metal then CPU when the Host reports Metal,
-otherwise CPU only. Full, dirty HP/RT, and connected-preflight planning freeze
-the selected implementation and device before admission. CPU and Metal work
-use distinct fixed lanes but the same ready store, Run parallelism ceiling,
-ledger grants, cancellation, completion, exception, reuse, and drainage state.
+CPU only. `gpu_pipeline` exposes Metal then CPU when the fixed registry contains
+a usable Metal executor, otherwise CPU only. Full, dirty HP/RT, and
+connected-preflight planning freeze the selected implementation and device
+before admission. CPU and Metal work use distinct fixed lanes but the same
+ready store, Run parallelism ceiling, ledger grants, cancellation, completion,
+exception, reuse, and drainage state. After reserved start, non-CPU work enters
+the matching registry executor synchronously; no Graph or policy object
+receives a native handle.
 
 Current software uses each Host ledger's default 32-slot CPU dimension for Run
 execution grants. Fixed service workers and route machinery are
@@ -90,7 +111,7 @@ Interactive and one Throughput binding rank already admitted ready work through
 the same Host-authored frontier and validation path. They do not own threads,
 the physical ready store, resource tokens, budget, Graph state, native device
 handles, completion routes, or lifecycle authority. The service owns binding
-state and the store, while a Host-owned `ResourceLedger` validates all
+state and the store, while a service-owned `ResourceLedger` validates all
 reservations and releases them exactly once. `PolicyRegistry` owns immutable
 built-in and DSO policy type records; DSO callbacks use the self-contained C11
 policy ABI v1 and receive only scalar candidate snapshots.
@@ -103,9 +124,35 @@ Physical execution is divided into resource executors:
 - a plugin invocation adapter backed by a separate
   `PluginRuntimeSupervisor` for process, IPC, security, and failure isolation.
 
-The current #75 slice realizes the CPU executor and one service-owned Metal
-lane. It does not expose a device-executor API or add a second device-capacity
-ledger; later resource executors remain target architecture.
+The current #84 through #86 slices realize the CPU executor, one service-owned
+Metal lane, a source-private fixed device-executor registry, explicit
+CPU/Metal transfer, exact process-owned residency, and authoritative
+per-`DeviceId` memory/scratch accounting. In the enabled
+repository Metal-plugin profile, the Apple entry owns and reuses its native
+device/queue and validated pipeline cache, while each entry receives an
+invocation-scoped native allocator. Before native allocation, Perlin and
+CPU-to-Metal upload atomically reserve complete device plans derived from
+Metal heap size/alignment queries. Native `allocatedSize` facts reconcile the
+plans before command commit: unused bytes return immediately, persistent
+memory leases move into the native `Value` owner, and scratch leases move into
+the exact command-completion owner. Perlin publishes a pending native Value,
+encodes texture-to-buffer readback, and returns without a command-buffer wait.
+Completion freshness, applicable producer Ready publication, destination Ready
+publication, and resident insertion are one manager-locked transaction.
+Kernel first pretracks the lineage without advancing it before fallible
+coordinator submission. An accepted current publication then performs a
+no-allocation manager advance while the coordinator still excludes currentness
+observation; rejected and born-stale candidates do not. This prevents a late
+older Run start from regressing the manager generation. Because a prepared
+candidate owns compute-request-lane admission before the fallible pretrack,
+Graph close joins that lane before retiring the exact Graph's generation rows;
+no permanent closed-identity tombstone is required.
+Pending-Value continuation reuses the existing Run and ready store. This adds
+no public device-executor API, no Graph/cache authority, and no second
+device-capacity ledger. The service-owned `ResourceLedger` remains the sole
+authority: Host dimensions retain their meanings while each configured
+non-CPU `DeviceId` has isolated immutable memory/scratch limits and copied
+limits/reserved/available diagnostics.
 
 The worker-owning scheduler plugin ABI, SDK target, `IScheduler` hierarchy, and
 per-Graph physical owners have been removed as a complete breaking migration.
@@ -189,3 +236,37 @@ boundary while superseding the implicit details. It is authoritative for Run
 identity and leases, monotonic terminal state, completion routing, target
 `GraphRuntime` non-ownership, ledger token authority, commit races, graph/process
 shutdown scope, and the issue #66–#76 dependency contract.
+
+## Relationship to ADR 0008
+
+[ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+extends, rather than reverses, this decision. The injected process execution
+domain owns the target Schema, Facet, Layout, access, conversion, query,
+inference, digest, and execution-provider registries; immutable published
+generations and their leases follow the same prepare, publish, retire, and
+unload discipline as other process-owned execution resources. A `Value`,
+`StorageBinding`, `ReadyFence`, or residency replica does not own workers,
+admission, ready queues, policy authority, or ResourceLedger tokens.
+
+ADR 0008 is authoritative for generic-value and provider-generation contracts.
+ADR 0007 remains authoritative for Run identity, execution admission,
+ready-work release, resource grants, cancellation, commit arbitration, Graph
+close, and process shutdown. Implementing generic values must not restore
+Graph-owned physical executors or create a second execution-resource authority.
+
+## Relationship to ADR 0009
+
+[ADR 0009](0009-compute-io-durability-and-completion-semantics.md) fixes the
+boundary for the I/O continuation anticipated by this decision. Issue #88 now
+provides the process-owned `ComputeIoExecutor` mechanism, with admission
+limited by task count and estimated retained bytes. Its first production route
+executes the staged HP cache-save codec/filesystem callback while retaining the
+prepared transaction lifetime. It does not own cache eligibility or paths,
+Graph-document transactions, daemon transport, output commit identity,
+retry/overwrite policy, or durability. Synchronous cache administration and
+load remain on their existing owners.
+
+`ComputeRun` success, cache persistence, Graph-document save, daemon result
+availability, and durable output commit remain distinct outcomes. Adding I/O
+workers must not broaden the process execution service into a persistence
+authority or create a second visible-commit owner.

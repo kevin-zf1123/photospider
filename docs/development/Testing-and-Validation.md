@@ -65,37 +65,57 @@ All generated files remain in its transient work directory and are discarded
 after the run; the repository does not retain per-run reports for this test.
 
 `BUILD_TESTING` controls availability of internal test products, not how the
-installed `photospider` archive compiles the Issue #72/#75/#76 observation
+installed `photospider` archive compiles the Issue #72/#75/#76/#82 observation
 seams. The product source inventory is divided into common objects, compiled
-once, and production objects for `execution_service.cpp`,
-`graph_cache_service.cpp`, `graph_state_executor.cpp`, `kernel.cpp`, and
-`kernel_compute.cpp`. The real archive always uses the production form of those
-five translation units, with no
+once, and production objects for `compute_task_submission.cpp`,
+`dirty_update_executor.cpp`, `execution_service.cpp`,
+`resource_demand_estimator.cpp`, `graph_cache_service.cpp`,
+`graph_state_executor.cpp`, `kernel.cpp`, and `kernel_compute.cpp`. The real
+archive always uses the production form of those eight translation units, with
+no `PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING`,
 `PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`, or
 `PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING` or
-`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` close/compute declarations,
+`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` observer/probe definitions,
 globals, branches, or symbols. Focused tests link a non-installed
 `photospider_internal_test_product` that reuses the same common objects and
-recompiles only those five translation units with the deterministic seams.
+recompiles only those eight translation units with the deterministic seams.
 No target links both complete archives, and the test product is absent from
 install and export sets. The Issue #75 probe declarations are source-tree-
 private free functions, so the macro does not change the production
-`ExecutionService` class definition or object layout.
+`ExecutionService` class definition or object layout. The Issue #82 dirty
+post-plan observer is likewise a source-tree-private free function backed by
+test-product-only thread-local state; it changes no production class
+definition or object layout. The sequential-lease admission observer,
+retained-operation-string charge observer, and exact direct-resource estimator
+follow the same boundary: they are source-private free functions backed by
+test-product-only atomic state or authority-free calculation. The direct gate
+predicate diagnostic is a private test-access method defined only by the test
+product. Its declaration remains token-identical in the source-private class
+definition shared by common and seam objects, but adds no object state or
+installed surface and grants no authority. The production operation gate and
+estimators contain no observer state or notification branch, and no diagnostic
+or estimator mints resource or gate ownership. `test_compute_run`,
+`test_compute_service_split`,
+`test_host_adapter`, `test_kernel_contracts`, and `test_policy_execution` are
+the complete direct-consumer set of this internal archive.
 
 `StaticProductConsumerSmoke` enforces that boundary for both
 `BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
-real product is installed, Darwin first invokes and validates
+real product is installed to a non-system temporary prefix, the smoke reuses
+the daemon capability driver to remove LD/DYLD loader overrides and execute
+installed `photospiderd --help`; a missing relocatable operation runtime
+therefore fails instead of passing on file existence. Darwin then invokes and validates
 `xcrun --find llvm-nm`, then falls back to PATH `llvm-nm` and PATH `nm`;
 non-Darwin platforms never invoke `xcrun` and use the two PATH candidates in
 that order. Canonically identical executable paths run once. A candidate is
-usable only when it starts, exits successfully, emits symbols, and exposes
-defined anchors from all five production seam objects. Otherwise the smoke
-records a path-free failure reason and tries the next candidate; no candidate
-or all unusable candidates fail closed. The first usable full symbol table is
-authoritative and rejects every hook function/helper/global fragment. The
-raw table is used only in memory for that decision; a forbidden symbol in the
+usable only when it starts, exits successfully, emits symbols, and exposes the
+nine required anchors spanning all eight production seam objects. Otherwise
+the smoke records a path-free failure reason and tries the next candidate; no
+candidate or all unusable candidates fail closed. The first usable full symbol
+table is authoritative and rejects every hook function/helper/global fragment.
+The raw table is used only in memory for that decision; a forbidden symbol in the
 first usable table fails the verdict without trying a later candidate. The
 retained scan observation has a closed, path-free schema: stable `tool_source`,
 ordered structured attempt reasons, status and aggregate line/anchor/prohibited
@@ -108,6 +128,17 @@ transient observations. The smoke also rejects an installed test product
 archive, exported test target, or exported internal seam definition. This
 remains a labelled `build-smoke`; ordinary complete CTest selection does not
 make package construction part of runtime-test ownership.
+
+`PhotospiderdInstallLayoutSmoke` separately configures three isolated
+dependency-disabled producer trees. It builds only the `photospiderd` target
+closure, then installs the configured package with nested relative
+`libexec/photospider` and `lib64` directories, an absolute libdir, or an
+absolute bindir paired with a relative libdir. Every case uses its configured
+prefix, removes loader overrides through the shared capability driver, and
+executes the installed daemon. The default relative `bin`/`lib` case remains
+part of `StaticProductConsumerSmoke`. All matrix build/install directories and
+absolute destinations are strict descendants of the CTest work root and are
+removed after either success or failure.
 
 The configured producer also serializes
 `PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` into a build-tree
@@ -176,7 +207,11 @@ The generated source probes the exact policy ABI constants and layouts. The
 external embedded consumer then loads that installed policy DSO and an
 installed operation DSO, configures policy and execution defaults, validates
 their public snapshots, and computes through both extensions. No generated
-consumer receives a source-tree include directory.
+consumer receives a source-tree include directory. The operation-SDK-only
+factory also uses installed `ValueBuilder`, `WriteLease`, `BufferHandle`,
+`ReadLease`, runtime identities, and ImageView to publish and read an immutable
+CPU DenseTensor Value. This proves that the V-3 headers and implementation
+symbols are complete without OpenCV, yaml-cpp, or Threads discovery.
 
 The durable
 `IpcDisabledInstallSmoke` configures a separate clean producer with
@@ -189,27 +224,97 @@ remain not-found without failing discovery; omitting components or requesting
 `embedded` retains the existing backend dependency resolution.
 
 The durable `DependencyDisabledInstallSmoke` configures a clean producer with
-OpenCV and YAML capabilities disabled, disables both package discoveries,
-turns off IPC/testing, and builds the real `photospider_kernel` aggregate and
-`photospider` product. It verifies the derived provider/plugin/CLI defaults and
-the precise diagnostics for three invalid explicit combinations. After a clean
-install it rejects OpenCV headers, targets, export references, and yaml-cpp
-link leakage; optional `operation_opencv` remains unavailable while the
-required component fails. An external consumer configures with both discoveries
-disabled, links/runs `Photospider::photospider`, allocates a neutral image,
-loads and closes an empty Host session, and observes `GraphErrc::Io` from an
-explicit YAML operation. CI may reuse a producer only after its cache identity,
-configuration, and complete capability profile are validated.
+OpenCV and YAML capabilities disabled, disables OpenCV, yaml-cpp, and OpenEXR
+package discovery, turns off IPC, enables only the dependency-neutral test
+surface, and builds the
+real `photospider_kernel` aggregate, `photospider` product,
+`test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`,
+`test_variable_sample_field_extensions`, and `test_value_identity_across_dsos`
+binaries. Before installation it runs all 48 dense-image cases, all four packed
+FP4 cases, all seventeen provider-defined VariableSampleField cases, and the
+dual-DSO identity case in that actual disabled producer, including the
+`register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
+ownership, lease, signed-view, and cache-identity regressions. It verifies the
+derived provider/plugin/CLI defaults and the precise diagnostics for three
+invalid explicit combinations.
+After a clean install it rejects OpenCV headers, targets, export references,
+and yaml-cpp link leakage; optional `operation_opencv` remains unavailable
+while the required component fails. It also performs a case-insensitive,
+surface-aware optional-provider scan over every installed public header,
+library/archive, package config, CMake export, generated consumer link script,
+and consumer executable dependency/symbol surface. Mach-O uses `otool` and
+`nm`; ELF uses `readelf` and `nm`. The bounded markers cover `OpenEXR`, the
+`Imf` namespace/library family and named transitive libraries, plus the
+deep-scanline, deep-tiled, deep-codec, multipart, and mixed-part vocabulary
+reserved for V-15. Broad `exr`, `deep`, and unqualified `half` substring scans
+are forbidden because they create unsupported false positives. An external
+consumer configures with all three package discoveries disabled,
+links/runs `Photospider::photospider`, allocates a neutral
+image, uses `ValueBuilder`, write/read leases, runtime identities, ImageView,
+and the public FP4/quantization/Blocked/PackedDenseTensorView contracts through
+the installed package, loads and closes an empty Host
+session, and observes `GraphErrc::Io` from an explicit YAML operation. CI may
+reuse a producer only after its cache identity, configuration, complete
+capability profile, and already-built dense integration target are validated.
+The same external project requests `data_provider_sdk`, verifies that its
+interface has no link dependency, builds separate exact-name C11 and C++17 v3
+definition producers from the installed header, and links each into a separate
+C++ Host consumer through `Photospider::operation_sdk`. Each consumer derives a
+three-field Schema/Facet/Layout manifest from the active snapshots, publishes
+bounded three-buffer provider-defined Values in compact and repacked forms,
+compiles output-sink/diagnostic/property layout assertions, and exercises pure
+property, DataSpec, and Region callbacks. Each producer emits a nonempty BYTES
+property from callback-local storage so the installed Host proves synchronous
+copy-out rather than delayed pointer access. It round-trips
+unknown descriptor/Layout bytes and complete or metadata-only artifact
+envelopes with the provider visible and absent, never invents an absent
+ContentDigest, and checks typed Descriptor, Content, and StorageLayout digests,
+including layout-independent content identity. Indexed read and provider-owner
+leases keep the exact generation/module alive across unload; active resolution
+then reports MissingProvider, retained Value traversal remains valid, and final
+owner/provider destruction precedes module release. No source-tree include or
+optional provider dependency enters either producer or consumer.
+
+`OpenExrDeepProviderOptionOffSmoke` owns the narrower V-15 option boundary. It
+configures a fresh provider-OFF producer with `BUILD_TESTING=ON` while OpenCV,
+yaml-cpp, OpenEXR discovery, graph CLI, IPC, and repository operation providers
+are disabled. The configure uses an expanded top-level CMake trace plus the
+completed cache to require zero executed OpenEXR package lookups and zero
+discovery keys. The driver performs the complete producer build, then builds
+the exact `test_variable_sample_field_extensions` target and runs a nonempty
+`^VariableSampleFieldExtensions\.` CTest selection with `build-smoke` excluded
+as an explicit recursion guard. The current selection contains all seventeen
+V-14 cases.
+
+After installation, that smoke inventories the neutral public header, package
+Config/Targets files, build-tree native products, and installed native
+products. It uses the producer's supplied `CMAKE_NM`, the child toolchain's
+`CMAKE_NM`, or a validated platform fallback; absence of a symbol inspector
+fails closed. Defined and undefined symbol surfaces are inspected separately.
+Dynamic dependencies use `otool` on Darwin, `readelf` on ELF, and
+`dumpbin /dependents` or `objdump -p` on Windows; Windows cannot pass through an
+empty dependency surface. A neutral installed-package consumer then performs a
+real verbose compile and executable link. Its verbose output,
+`compile_commands.json`, link scripts, response files, evaluated imported-
+target properties, native symbols, and dependencies are scanned before the
+executable runs. The default and optional-component probes must remain usable,
+while a required absent component must fail with the Photospider-owned
+diagnostic before OpenEXR discovery. `OpenExrDeepProviderInstallConsumerSmoke`
+is the enabled companion: it installs the explicit component, loads the actual
+module, resolves both v3 exports, validates the API table, invokes provider
+destruction, and unloads the module.
 
 The generated clean consumer project maintains one ordered CMake executable
 target list. That same list creates the targets, writes a configure-time exact
 target declaration, and supplies a configuration-specific three-field
 `target<TAB>$<TARGET_FILE_NAME:target><TAB>$<TARGET_FILE:target>` manifest
-through `file(GENERATE)`. The current profile declares only
-`dependency_disabled_consumer`; adding another maintained consumer extends that
-CMake list and its source without adding a Python target name or discovery
-branch. CMake 3.16's target generator expressions are the native spelling
-authority because they describe the selected generator, target platform, and
+through `file(GENERATE)`. The current profile declares
+`dependency_disabled_consumer`, `installed_c11_data_provider_consumer`, and
+`installed_cpp17_data_provider_consumer`; adding another maintained consumer
+extends that CMake list and its paired source list without adding a Python
+target name or discovery branch. CMake 3.16's target generator expressions are
+the native spelling authority because they describe the selected generator,
+target platform, and
 configuration. Python's `os.name` and `sys.platform` describe the interpreter
 host instead, so they must not infer the executable suffix. In particular, a
 POSIX Python running under Cygwin or MSYS2 may legitimately receive a CMake
@@ -262,7 +367,10 @@ The maintained labelled inventory is
 `DependencyDisabledInstallSmoke`,
 `ImageArtifactCodecDependencyDisabledBuild`,
 `IpcDisabledInstallSmoke`,
+`OpenExrDeepProviderInstallConsumerSmoke`,
+`OpenExrDeepProviderOptionOffSmoke`,
 `OpenCvOperationProviderDisabledBuild`,
+`PhotospiderdInstallLayoutSmoke`,
 `PublicHeaderSelfContainment`, and
 `StaticProductConsumerSmoke`. `PublicHeaderSelfContainment` belongs because its
 CTest command builds the dedicated self-containment target; ordinary
@@ -305,7 +413,7 @@ IPC is enabled and absent otherwise, then requires every expected entry to
 remain enabled and labelled and to start with the exact `python -B` driver
 path. Commented or inactive CMake source cannot satisfy this
 generated-inventory check because it produces no CTest entry. The inventory
-query executes none of the real smokes and does not change the six-test
+query executes none of the real smokes and does not change the nine-test
 build-smoke classification.
 
 CTest keeps every labelled test registered for direct local use. CI's
@@ -342,13 +450,16 @@ symlink targets.
 Primary-repository CTest and CI entries are reserved for long-lived software
 behavior: correctness, performance, stability, multithreaded execution, error
 handling, compile boundaries, package consumption, and runtime API boundaries.
-`PhotospiderdCapabilityHelp`, `StaticProductConsumerSmoke`,
-`GraphCliOptionBadAlloc`, GoogleTest discovery, and
-`PublicHeaderSelfContainment` satisfy that rule because they execute or compile
-the maintained product. The daemon help test uses a CMake script driver to run
+`PhotospiderdCapabilityHelp`, `PhotospiderdInstallLayoutSmoke`,
+`StaticProductConsumerSmoke`, `GraphCliOptionBadAlloc`, GoogleTest discovery,
+and `PublicHeaderSelfContainment` satisfy that rule because they execute or
+compile the maintained product. The daemon help test uses a CMake script driver to run
 the real configuration-specific `photospiderd --help`, captures stdout and
 stderr, requires a numeric zero process result before matching the stable
 capability sentence, and diagnoses launch failure separately from nonzero exit.
+The driver removes loader override variables and is reused after package
+installation, so build-tree and install-tree resolution exercise their own
+declared lookup paths.
 `IpcDisabledInstallSmoke`, `DependencyDisabledInstallSmoke`, focused
 `test_ipc_protocol`/`test_ipc_host` cases, and real-process `test_ipc_daemon`
 cases follow the same rule: they exercise
@@ -602,11 +713,13 @@ rules. The group cases distinguish a request-level accepted reason from a
 reason that actually wins an open child arbiter: late Superseded or
 ExplicitRequest after two child successes cannot replace aggregate success,
 while a winning cancellation retains the first reason below failure priority.
-CMake discovers all 15 cases through CTest with a 60-second per-case timeout.
+CMake discovers all 16 cases through CTest with a 60-second per-case timeout.
 The stress cases assert one ticket, one logical active owner, at most one
 pending owner, exact displaced settlement, and only the final current
 generation remaining commit-eligible; they do not create a background runner
-or rely on timing sleeps.
+or rely on timing sleeps. The current-observer case proves an accepted newer
+generation advances external freshness before physical execution while a
+prepared older generation that is born stale emits no observer notification.
 
 `test_kernel_contracts` owns the product boundary. It proves missing intent and
 explicit HP share one key, failed newest work does not resurrect an older
@@ -654,10 +767,11 @@ through reserved start.
 `test_physical_execution_routes` owns allocation-free route/lane state:
 CPU/Metal overlap, Metal single-flight, serial worker-zero single-flight,
 shutdown rejection, and committed-work drainage. `test_policy_execution`
-uses a deterministic fake-Metal Host to prove the canonical per-route device
-inventory, rejection before Run publication, distinct fixed CPU/GPU workers,
-Metal exception publication/recovery, route reuse, cancellation, and reserved-
-start rollback without candidate/version ABA or leaked grants. It also proves
+uses an injected deterministic fake Metal executor to prove the canonical
+registry-derived per-route device inventory, rejection before Run publication,
+distinct fixed CPU/GPU workers, exact executor entry, Metal exception
+publication/recovery, route reuse, cancellation, and reserved-start rollback
+without candidate/version ABA or leaked grants. It also proves
 that a grant-blocked high-priority Run A cannot starve lower-priority independent
 Run B, that A's ready entry later executes exactly once, and that a sole blocked
 candidate has bounded policy-selection retries and wakes on cancellation.
@@ -672,6 +786,61 @@ not removed or committed for migration in this phase. `Issue75DeviceRouting.*` i
 `test_compute_run`
 proves that full HP, dirty HP/RT, and connected preflight freeze the chosen
 Metal implementation/device and use CPU fallback when Metal is absent.
+`test_device_executor_registry` owns fixed-slot validation, exact dispatch,
+borrowed TLS context restoration, provider-exception identity, and copied
+diagnostics without a platform SDK. Its multi-call case proves submission and
+serialized-entry counters advance monotonically across successful and throwing
+callbacks. Portable callback tests prove that direct same-executor recursion is
+rejected with the stable `std::logic_error` before the nested provider or
+either diagnostic counter advances, that the outer context remains current,
+that a later invocation recovers, and that a distinct executor may nest while
+restoring the outer context. On Apple with the repository operation plugin
+enabled, `test_metal_device_executor` directly drives the factory-created real
+registry from two controlled threads. While the first callback remains active,
+a copied diagnostic must expose two submissions but only one serialized entry;
+it releases the first callback only after observing that stable queued state. A
+bypassed admission wait instead exposes two entries and fails deterministically
+without a sleep, overlap window, or scheduler-timing assumption. The test also
+allocates a real texture and shared buffer before throwing, then proves exact
+provider-exception identity, same-thread TLS restoration, zero live
+allocations, stable queue/pipeline diagnostics, monotonic counters, and
+successful later non-nested entry through the same executor. A separate
+threadsafe death-test child installs a five-second alarm, attempts synchronous
+same-executor callback recursion through the real registry, and exits only
+after proving the exact error text, unchanged nested counters/resource
+diagnostics, preserved outer TLS context, cleared post-return TLS, and a
+successful later invocation. The alarm turns the former self-deadlock into a
+bounded test failure without detached threads or lifetime races. After proving
+that watchdog path, the test performs one real CPU-to-Metal upload and proves
+an exact revision-preserving device replica enters residency. V-9 additionally
+proves upload scratch returns only after completion, persistent memory remains
+through callback return and residency, capacity-one eviction returns the old
+lease, and final manager destruction returns the last lease. A tiny Perlin
+device budget rejects the complete native heap-query plan before its first
+texture/buffer allocation. The sufficient-budget path runs the real repository
+Perlin operation twice through one `ExecutionService` and proves queue
+availability, two operation submissions and executor entries, eight retired
+invocation allocations, one reused pipeline, asynchronous pending-Value
+readback to CPU-owned outputs, the dedicated Metal worker id, and zero settled
+Host and device reservations. Native `allocatedSize` is audited before command
+commit in both upload and download.
+
+V-8 and V-9 portable cases in `test_device_residency` lock direct
+host-read versus transfer planning, exact current completion publication, late
+stale rejection before destination Ready, pretracked current publication
+rejecting a late older Run admission, failed/discarded nonpublication,
+proper-subset identity rejection without consuming a rightful admission,
+concurrent exact callbacks, and duplicate-completion rejection. Real
+memory-only leases attached to fake native owners further prove creator/Run-
+equivalent release does not return bytes early, residency eviction releases
+only its own strong owner, an external Value copy extends lifetime, and stale,
+rejected, cancelled, or reused identities neither double-release nor consume
+another allocation's authority.
+`test_compute_run` adds deterministic cases for an early fence callback parked
+until original grant retirement, executor lifetime extending Run settlement,
+pending Value dependency deferral, cancellation that retires a continuation
+without waiting for its producer, and typed stale failure that never releases
+dependent work. These cases use gates and futures and contain no timing sleep.
 
 `test_cli_policy_execution_config` locks transactional policy/execution config
 parsing and exact Host application. `test_host_adapter` loads real operation
@@ -695,12 +864,17 @@ Run the focused policy/execution boundary with:
 ```bash
 cmake --build build \
   --target test_policy_registry test_policy_execution \
-  test_physical_execution_routes test_compute_run test_resource_admission \
+  test_physical_execution_routes test_device_executor_registry \
+  test_device_residency test_compute_run test_resource_ledger \
+  test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
 ./build/tests/test_policy_execution
 ./build/tests/test_physical_execution_routes
+./build/tests/test_device_executor_registry
+./build/tests/test_device_residency
+./build/tests/test_resource_ledger
 ./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
@@ -713,6 +887,8 @@ cmake --build build \
   --gtest_filter='IpcDaemonExecution.*:IpcDaemonPolicy.*'
 ctest --test-dir build --output-on-failure \
   -R '^(GraphCliPluginComputeSmoke|StaticProductConsumerSmoke)$'
+# Apple with PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS=ON:
+./build/tests/test_metal_device_executor
 ```
 
 Focused companion regressions own the remaining boundaries:
@@ -721,10 +897,14 @@ Focused companion regressions own the remaining boundaries:
   post-write, post-flush, and post-close failure states. Each phase must return
   `GraphErrc::Io`, and the created destination demonstrates the documented
   non-atomic post-open behavior.
-- `test_resource_ledger` proves checked vector arithmetic, independent
-  saturation and exact recovery for all five current dimensions, atomic
-  mixed-vector and pair admission, bounded child grants, deferred parent
-  release, move-only token contracts, and concurrent no-overcommit behavior.
+- `test_resource_ledger` proves checked Host and device-vector arithmetic,
+  independent saturation and exact recovery for all five Host dimensions,
+  CPU/duplicate device configuration rejection, zero and exact-boundary
+  device plans, atomic memory-plus-scratch rejection, per-device isolation,
+  same-device contention, plan-to-actual shrink, typed underplanning failure,
+  split memory/scratch lifetimes, move-only authority, delayed asynchronous
+  release, bounded Host child grants, deferred Host parent release, and
+  concurrent no-overcommit behavior.
 - `test_resource_admission` proves the exact private-route vocabulary,
   worker-limit rollback, one fixed pool per Host with independent Host
   compositions, and validation-first session route replacement that preserves
@@ -783,6 +963,161 @@ inventory, and no current Graph. Its invalid-target case first loads the
 maintained propagation fixture before requiring target rejection, so it does
 not depend on a failed load publishing state. Each case uses isolated temporary
 session and history storage that is removed when the script exits.
+
+## Direct CPU Operation Authority Validation
+
+Issue #82 keeps scalar callback/metadata identity and direct dirty admission in
+maintained behavior tests. `test_op_registry_m31` registers monolithic HP and
+tiled HP siblings in both orders, invokes both callbacks, and requires each
+selected implementation to retain its own identity and complete scheduling
+metadata. A later sibling registration therefore cannot silently rewrite the
+metadata used with an earlier callback.
+
+The task-planning and runner cases register a SpatialAligned monolithic sibling
+before a device-tiled RandomAccess sibling. They require dependency ROI
+lowering, tile size, selected callback, and provider input views to consume the
+same revisioned route rather than a generic key-level metadata lookup. The
+manual `test_propagation` tool likewise filters and retains the exact tiled
+implementation for the requested HP or RT diagnostic route.
+
+`test_cpu_dense_tensor_image_operation` also freezes the exact core CPU route
+for TensorSlice target-only and target-plus-upstream plans, then appends a
+preferred same-key non-core GPU implementation before task population. Both
+cases require `NoOperation` at dirty preparation, zero provider entries, zero
+lifecycle/gate/grant/reservation/ledger residue, and restoration of the core
+registry route. A guard-bypass control continues through the real
+`HighPrecisionDirtyNodeExecutor` direct provider lease and reaches the fake GPU
+provider, so the regression cannot pass merely because the test stops at
+planning.
+
+Three adjacent route-context cases mutate the task-population device inventory
+after TensorSlice planning. Only the externally satisfied case prepares as
+zero-work without comparing the now-irrelevant frozen intent, device inventory,
+or node routes. The exact-cache case installs complete old HP output through
+the real Graph boundary but remains active because the TensorSlice is
+dirty-selected; like the partial-active control, it must return `NoOperation`
+before fake GPU provider entry or execution authority. No test erases an
+execution-order node.
+
+`test_compute_service_split` separately proves the outer service boundary. A
+real complete target cache remains exact through selection, yet the explicitly
+dirty target and its provider cone execute. Two adjacent cases begin with the
+same exact planning observation, then remove the output or reduce its formal
+Region through an internal test-product observer; all three states retain and
+execute the same dirty provider cone. A post-plan registry replacement with
+complete old cache must still fail as active route drift before either provider
+enters. A reverse mutant that lets exact cache satisfy dirty candidates makes
+the exact control and Host ROI fixture fail with empty work and unchanged old
+pixels.
+
+Adjacent real-provider cases use a sparse dirty chain
+`A(dirty) -> B(externally satisfied, inactive) -> C(dirty)`. The first requires
+only C to execute; a shared `A -> D(dirty)` control requires A, C, and D while B
+remains inactive. A reverse candidate-only-universe mutant executes A in the
+first case and fails, proving demand traversal must retain inactive connectors
+and satisfied boundaries. Other planning cases continue to apply ordinary
+full-request cache cuts, honor force-recache, and keep RT work executable.
+
+`test_host_adapter` first publishes exact complete HP output, then submits a
+non-forced dirty ROI through the public Host boundary. It must execute 16
+downstream tiles plus one monolithic source task, update the selected pixel from
+3 to 11, preserve an unselected pixel at 3, and expose the local backward
+mapping and native PixelRect/tile geometry through Host snapshots. With the
+incorrect dirty-cache satisfaction restored, this fixture reports zero active
+tasks and leaves the selected pixel unchanged.
+
+`test_compute_run` registers heap-backed exclusive keys for full-plan, dirty HP,
+dirty RT, and connected-preflight product paths. The shared string-payload
+estimator proves actual capacity plus one terminator and strong overflow
+rollback. The internal test product also reports each actual retained owner,
+that owner's copied `std::string::capacity()`, and the checked estimator total
+immediately before and after its charge. Full-plan, dirty HP, dirty RT, and
+connected-preflight cases require every reported delta to equal that actual
+capacity plus one terminator and require the exact expected owner counts. This
+comparison is independent of the complete admitted vector: the same cases
+separately require an identical plan at exact retained capacity and reject one
+byte less before provider entry with a zero ledger snapshot. They cover the
+allocation transfer from a charged plan/context constraint into its unique
+submission without using a migration-residue source scan.
+
+The direct-lease gate regression acquires one heap-backed key, mutates the
+caller's still-live allocation in place after acquisition returns, and queries
+the real gate predicate through an authority-free test-product diagnostic. The
+original key must remain blocked and a different key startable until the lease
+retires, proving wait/start/finish borrow the lease-state copy rather than the
+caller. The test restores the caller buffer before cleanup so an incorrect
+implementation can still unwind deterministically.
+
+`test_compute_service_split` proves that nonparallel dirty HP, dirty RT, and
+connected-parameter preflight enter the same process-owned operation gate and
+resource ledger used by physical workers. Cross-Graph cases cover
+nonreentrancy, exact implementation caps, same/different exclusive keys,
+retained-memory and scratch rejection before provider entry, cancellation and
+exception cleanup, and successful retry after settlement. Deterministic
+post-plan cases replace an HP implementation or unload an RT plugin before
+active-operation revalidation. At that observation point the standalone Run or
+realtime RunGroup logical lifecycle is intentionally visible. The cases require
+typed failure before provider entry and before operation/resource/physical
+admission, then require that the logical lifecycle settles with no callback,
+grant, root-reservation, gate, or ledger residue and that a retry recovers. An
+externally satisfied sibling is intentionally ignored so inactive registry
+change cannot invalidate an otherwise valid active dirty target.
+
+A separate cross-Graph case gives two reentrant HP implementations and two
+reentrant RT implementations distinct identities, no identity cap, and one
+equal heap-backed key. The first provider blocks after the dirty helper has
+returned its direct lease and retired its helper-local constraints. The second
+provider must remain outside until lease release for both HP and RT, proving
+the real helper paths retain the key in direct-lease state rather than on the
+helper stack.
+
+The same binary owns two orthogonal sequential provider-boundary regressions.
+Both Graphs select one registered callback identity; a node role parameter
+distinguishes sequential and peer behavior. The metadata declares
+`maximum_parallelism=1`, one nonempty exclusive key, and nonzero
+retained/scratch demand. In the physical route case, a test-product-only
+observer reports the exact operation-gate denial. The test waits for either
+that admission rendezvous or an erroneous provider entry, then requires the
+rendezvous and excludes provider overlap. After provider return, an injected
+`FakeImageArtifactCodec` blocks disk-cache persistence and then throws
+`GraphErrc::Io`; the route-backed provider must enter, exit, and settle while
+that Host post-processing remains blocked, leaving no sequential grant in the
+resource snapshot.
+
+The resource-capacity case uses the same callback identity, cap, and key but a
+second direct contender. A test-product-only authority-free diagnostic reuses
+the production direct-lease envelope calculation, and the isolated
+`ExecutionService` CPU, retained-memory, and scratch ceilings are set to
+exactly one direct callback vector. Its heap-backed key is also compared with an
+independent fixed-envelope plus copied-capacity-plus-terminator calculation.
+Exact capacity admits; a one-byte-short limit and a declaration that leaves
+room for capacity but not its terminator reject before gate/resource ownership
+and leave a zero snapshot. The contender then reaches denied admission while
+the provider is active and enters/exits before the codec is released. Keeping
+this capacity check orthogonal is intentional: a physical Run reserves its
+complete root before operation-gate startability, so its root is not a single
+direct-lease vector. Neither regression adds a production or installable test
+hook.
+
+The post-plan, admission-wait, and retained-string observers, the gate
+predicate diagnostic, and the direct-resource diagnostics exist only in the
+non-installed internal test product. `StaticProductConsumerSmoke` requires the
+nine production anchors spanning all eight seam objects and rejects every
+matching state, setter, clearer, notification, helper, and diagnostic symbol
+from the installed archive.
+
+Run the focused boundary with:
+
+```bash
+cmake --build build --target test_op_registry_m31 test_compute_run \
+  test_compute_service_split -j
+./build/tests/test_op_registry_m31 \
+  --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
+./build/tests/test_compute_run \
+  --gtest_filter='OperationExecutionGate.DirectLeaseGateIgnoresCallerConstraintMutationAfterAcquisition:RetainedMemoryEstimator.StringPayloadChargesActualCapacityAndTerminatorAtomically:ExecutionServiceProductResources.FullPlanRejectsOneByteShortAndExecutesAtExactLimit:ExecutionServiceProductResources.DirtyHpAndRtUseExactSmallLargeSynchronizationInterval:ExecutionServiceProductResources.ConnectedPreflightUsesOneSharedUmbrellaAtExactThreshold'
+./build/tests/test_compute_service_split \
+  --gtest_filter='ComputeServiceSequentialAdmission.*:ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
+```
 
 ## Graph Close and Process Shutdown Validation
 
@@ -894,6 +1229,169 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
+## CPU DenseTensor, Packed FP4, Provider Extensions, Region, ReadyFence, and Transfer Validation
+
+`test_cpu_dense_tensor_image_operation` is a provider-independent integration
+binary for the implemented V-2 through V-12 boundary. Its 48 durable cases
+verify:
+
+- copyable ReadyFence polling, queued non-inline waits, observer-local waiter
+  cancellation, exactly-once Ready/Failed/ProducerCancelled settlement, typed
+  failure retention, dropped-completer cancellation, and sole-executor
+  retention for pending and already-terminal waits through callback completion;
+- deterministic C++17 mutex/condition-variable races between wait registration
+  and terminal publication, cancellation and callback entry, and transfer-owner
+  destruction and callback entry, with unique terminal settlement and
+  at-most-once callback delivery without sleeps or timers;
+- pending Value metadata/identity observation, typed rejection of BufferHandle
+  and checked-view payload access, and private producer revocation before
+  readable Ready publication;
+- explicit fake-executor transfer enqueue, distinct allocation binding with a
+  preserved logical revision, sole-executor retention through destination completion,
+  byte-identical completion, chained readiness without worker blocking,
+  unreadable source failure/cancellation propagation, and destination-only
+  cancellation when transfer ownership drops;
+- explicit injected CPU-to-Metal transfer, checked device-local binding,
+  revision preservation, rejection of a claimed host-visible target without a
+  host pointer, no implicit host read or readback, typed provider failure, and
+  successful later transfer through the same executor;
+- malformed facet, stride, byte-offset, and exact-envelope rejection, including
+  checked single-axis/cross-axis writable collision and overflow cases plus
+  accepted padded, transposed, and singleton-axis layouts;
+- exclusive builder write authority, seal revocation, retaining read-lease
+  lifetime, BufferHandle subranges, process-local identities, and the
+  non-liveness meaning of a nonzero `AllocationIdentity`;
+- bounded positive, zero, and negative immutable strides over shared
+  allocations, with distinct Value revisions;
+- immutable Value copy sharing, copy-like DenseTensorView/ImageView moves, and
+  allocation-isolated lvalue/rvalue descriptor, layout, and payload inputs;
+- formal HP cache alias preservation, dirty reseal, replacement identity, disk
+  reload identity renewal, unchanged cache paths, disk-save Value authority,
+  and rejection/purging of exact-partial HP state at whole-read and regionless
+  disk boundaries;
+- exact descriptor-only invert inference, direct sealed-input reuse, and exact
+  result-revision publication;
+- the V-12 floating matrix across 1/3/4/8/16-channel FP32/FP64 images and
+  rank-one through rank-five FP32/FP64 latents, including a real rank-one
+  padded stride with an independent active-byte/padding-sentinel oracle,
+  ImageRect/TensorSlice merge, exact CPU/external/I-O boundary preservation,
+  and negative/zero-stride external rejection before Pending publication,
+  owner retention, or provider callback; and
+- padded multi-channel full and ImageRect execution, rank-four TensorSlice,
+  Empty/Whole selection, dirty-plan-to-product staging, recomputation of
+  missing or partial intermediate parents, selected-byte merge into an
+  existing complete output, and promotion to reusable authority only after a
+  Whole commit, callback-free target/upstream Region-route transfer and
+  pre-task-population mutation rejection, externally satisfied no-work
+  acceptance under device-inventory drift, exact-cache dirty and partial-active
+  drift rejection, plus `GraphErrc::ComputeError` when execute returns a valid
+  Value whose descriptor disagrees with inference.
+
+`test_region_contracts` owns 31 durable Region cases for canonical
+Empty/Whole, keys, intervals, normalization, rank-general TensorSlice,
+overflow-safe clipping/algebra, representable one-axis and Tensor-axis unions,
+nonrepresentable multi-axis union rejection, explicit budgets, typed failures,
+checked ImageRect/PixelRect conversion, Region propagation, route-selected
+same-key device replacement rejection, HP/RT intent-sensitive implementation
+selection, Tensor planning/task selection/edge mapping, and Region dirty
+lifecycle.
+
+`test_packed_fp4_dense_tensor` owns four dependency-neutral V-13 integration
+cases. They verify both nibble orders and a nonzero bit offset, exact encoded
+and scale-dequantized E2M1 access, strict descriptor/quantization/layout/
+envelope rejection, block-aligned TensorSlice scale/code projection with fresh
+identities, byte-view and ImageBuffer fail-closed behavior, representation-
+preserving CPU and injected fake-device transfer, exact formal memory-cache
+retention, and typed image disk-cache rejection before executor, filesystem,
+or codec effects. The malformed matrix includes wrong quantization rank/count,
+zero or non-divisible blocks, nonfinite/nonpositive scales, bad layout version/
+alignment/overlap/size, quantized Strided publication, and oversized blocked
+transfer aliases.
+
+`test_variable_sample_field_extensions` owns seventeen standard-library-only V-14
+integration cases. A synthetic pure-C definition suite publishes versioned
+VariableSampleField Schema, Facet, and Layout records with three physical
+buffers. The cases verify typed namespaces, candidate conflicts and malformed
+record rollback; generic cross-reference rejection before revision minting;
+provider semantic rejection; unknown-byte artifact-envelope round-trip without
+the provider; property/DataSpec/Region callbacks with every payload pointer
+cleared; independent exact SHA-256 descriptor/content/layout vectors; content
+identity across physical repacking and padding; incremental ContentDigest for
+a fixed-memory generated stream larger than 64 MiB against an independently
+calculated exact vector; identity across different provider callback chunk
+boundaries; sticky malformed/null and `uint64_t`-overflow sink failures;
+measured/hash count-drift rejection and subsequent recovery; old
+Value/read/owner lifetime across replacement and unload; final
+provider-before-module destroy order;
+callback-local diagnostic and nonempty property copy-out with an oversized-
+output boundary; checked rank-general Exact TensorSlice site counts, including
+wrong nonzero, wrong zero, and `uint64_t` product overflow; and concurrent
+replacement without mixed-generation resolution. Concurrent readers sample
+callback-local properties from their own output states, and retained old Values
+query the same property after replacement to cover thread/generation lifetime
+boundaries. Four callback-tail cases additionally require owner destruction to
+drain after a successful outer callback but before its worker exits, after a
+failing provider callback, and after a foreign-generation destroy request;
+they also preserve FIFO owner-destroy order across a cascading cleanup before
+module release.
+
+The callback-view case is the structural input-lifetime regression. It enters
+validation, property, DataSpec, Region, and content callbacks through one
+Value and requires every Schema/Layout record, optional Facet array, buffer
+array, Layout-envelope array, metadata payload, and explicit content pointer to
+remain valid for its callback. The production adapter keeps move-safe owning
+storage separate from the borrowed `ps_data_value_view_v3` and materializes the
+view only at the final callback caller address. A scoped no-elide run must
+compile `photospider_operation_runtime` itself—not only the test source—with
+`-fno-elide-constructors`, then run that case. This is a manual compiler-mode
+proof, not another CTest entry or CI phase-completion check:
+
+```bash
+cmake -S . -B build-v14-no-elide \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DBUILD_TESTING=ON \
+  -DPHOTOSPIDER_BUILD_IPC=OFF \
+  -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
+  -DPHOTOSPIDER_ENABLE_YAML=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON \
+  -DCMAKE_CXX_FLAGS=-fno-elide-constructors
+cmake --build build-v14-no-elide \
+  --target test_variable_sample_field_extensions -j 2
+ctest --test-dir build-v14-no-elide --output-on-failure \
+  -R '^VariableSampleFieldExtensions\.EveryCallbackReceivesOneStableMaterializedValueView$'
+```
+
+Active output bytes must equal `255 - input`; input and output row padding is
+not treated as image elements.
+
+Run the focused validation with:
+
+```bash
+cmake --build build --target test_region_contracts \
+  test_cpu_dense_tensor_image_operation \
+  test_packed_fp4_dense_tensor \
+  test_variable_sample_field_extensions \
+  public_header_self_containment -j 2
+ctest --test-dir build --output-on-failure \
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor|VariableSampleFieldExtensions)\.'
+```
+
+`DependencyDisabledInstallSmoke` builds and runs all 48 dense cases plus all
+four packed FP4 and seventeen V-14 extension cases in an actual
+OpenCV/YAML/OpenEXR-discovery-disabled
+product before proving the installed consumers.
+`StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
+`DependencyDisabledInstallSmoke` also loads two independently linked
+Value-using DSOs and proves that they mint from one shared runtime authority.
+Both installed consumers construct and evaluate Region and observe a
+synchronous Ready Value fence without optional dependencies. The
+provider-disabled nested build below also compiles and runs all 48 dense cases
+plus that dual-DSO case, so the real core operation, fence/transfer proof, and
+identity authority do not depend on the optional OpenCV operation provider or
+a native device SDK.
+
 ## Optional OpenCV Operation Provider Validation
 
 `test_optional_opencv_operation_provider` is a CTest-registered integration
@@ -922,10 +1420,13 @@ the public ABI.
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, while OpenCV, YAML, graph
 CLI, and operation-plugin defaults remain enabled. The provider-aware broad
 suite gate is therefore off. The driver validates the exact CMake cache
-profile, builds the provider-independent focused provider binary and its
-stdlib-only fixture, plus the dedicated disk-cache diagnostic and kernel-
-lifecycle concurrency binaries, then queries the machine-readable CTest
-inventory.
+profile, builds the provider-independent focused provider binary, its
+stdlib-only fixture, the CPU DenseTensor/ImageView integration binary, and the
+dedicated disk-cache and kernel-lifecycle concurrency binaries, plus the
+provider-independent `test_kernel_contracts` internal-seam consumer, then
+queries the machine-readable CTest inventory. `test_kernel_contracts` is built
+to exercise the focused-only direct-consumer closure but is deliberately not
+discovered in this nested inventory.
 
 During configuration, CMake serializes every active `gtest_discover_tests`
 target and its configuration-specific `$<TARGET_FILE:...>` path after
@@ -948,20 +1449,35 @@ dependencies, without hard-coding a target count or future target name and
 without deriving expectations from CTest's observed sentinels. The exact CTest
 inventory is the union of that derived set and
 `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, the three
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 48
+`CpuDenseTensorImageOperation.*` cases,
+`ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
-`KernelLifecycleConcurrency.*` cases. Derived sentinels must carry no label or
-timeout; disk-cache cases retain only the `kernel-concurrency` label and their
-20-second timeout, while lifecycle cases retain that label and their 60-second
-timeout. Missing or extra entries fail, so no provider-dependent broad test may
-remain registered. The driver runs the optional-provider and all concurrency
-cases through CTest. The disabled profile requires dependency-neutral
-analyzer/math operations to remain seeded, OpenCV-backed operation keys to be
-absent, and the replacement provider to publish, execute, and fully retire its
-resize key. The transient build is a long-lived product configuration check;
-it emits commands/results to CTest and retains no per-run report. This stage
-disables the operation provider, not the separate OpenCV codec, normalization,
-adapter, or embedded-product dependencies.
+`KernelLifecycleConcurrency.*` cases.
+
+At the current V-14 checkpoint, CMake registers exactly eight active GoogleTest
+targets in this profile. The six-target focused build materializes five of
+those registered executables; its sixth target, `test_kernel_contracts`, is
+build-only and deliberately undiscovered. CTest discovers 55 runnable focused
+cases. The three derived sentinels are exactly
+`test_compute_io_executor_NOT_BUILT`,
+`test_packed_fp4_dense_tensor_NOT_BUILT`, and
+`test_variable_sample_field_extensions_NOT_BUILT`; together with
+`DependencyDisabledInstallSmoke`, the exact CTest inventory therefore contains
+59 entries. This is a verified result of the dynamic manifest and build closure,
+not a target count or sentinel list maintained by the production driver.
+Derived sentinels carry no label or timeout. Disk-cache cases retain only the
+`kernel-concurrency` label and a 20-second timeout; lifecycle cases retain that
+label and a 60-second timeout; dense-image and Value-runtime cases retain their
+30-second timeout, with only the latter carrying `value-runtime`. Missing or
+extra entries fail, so no provider-dependent broad test may remain registered.
+The driver runs every built focused case through CTest. The disabled profile
+requires dependency-neutral analyzer/math/dense-invert operations to remain
+seeded, OpenCV-backed operation keys to be absent, and the replacement provider
+to publish, execute, and fully retire its resize key. The transient build is a
+long-lived product configuration check; it emits commands/results to CTest and
+retains no per-run report. This stage disables the operation provider, not the
+separate OpenCV codec, normalization, adapter, or embedded-product dependencies.
 
 The OpenCV-provider and injected-codec nested-build drivers import the same
 destructive work-tree helper from `cmake_build_smoke_support.py`. Before
@@ -1105,7 +1621,8 @@ Low-confidence tests should still be visible in validation rather than silently
 excluded. If a test is not reliable enough to gate development, document that
 status explicitly and create follow-up work to upgrade or replace it.
 
-Milestone tests and `test_propagation_contracts` are registered with CTest so
+Milestone tests, `test_propagation_contracts`, and the long-lived
+`test_region_contracts` behavior suite are registered with CTest so
 they are visible, but they remain low-confidence legacy tests until a follow-up
 pass rewrites them as narrower regression tests with clearer fixtures and
 assertions.
@@ -1127,9 +1644,9 @@ also includes `DependencyDisabledInstallSmoke`.
 When only `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` is disabled from that
 otherwise default test profile, CMake does not create or discover the broad
 suite. It keeps the provider-independent `test_kernel_contracts` target
-buildable for the injected-codec smoke and registers exactly the focused
-optional-provider GoogleTest, the three dedicated disk-cache diagnostic
-concurrency cases, and `DependencyDisabledInstallSmoke`.
+buildable for both dependency-disabled nested builds and registers exactly the
+focused optional-provider GoogleTest, the three dedicated disk-cache
+diagnostic concurrency cases, and `DependencyDisabledInstallSmoke`.
 
 The default CTest inventory intentionally contains no phase-completion scan,
 migration-residue check, stale-term search, Doxygen audit, or issue-specific

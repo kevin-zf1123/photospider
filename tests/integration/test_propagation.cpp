@@ -73,26 +73,72 @@ bool drain_compute_event_pages(ps::InteractionService& svc,
 }
 
 /**
- * @brief Resolves the tile edge length implied by a node operation metadata.
+ * @brief Selects the exact tiled implementation used by one diagnostic route.
  *
- * @param node Graph node whose type/subtype metadata should be inspected.
- * @return Tile edge length in pixels; defaults to TILE_SIZE_MICRO when the op
- * metadata is missing or monolithic.
- * @throws Nothing directly; registry lookup returns optional metadata.
- * @note This helper is only used by the propagation test REPL output and does
- * not mutate graph state.
+ * @param node Graph node whose registered implementations are inspected.
+ * @param intent HP or RT route whose tiled callback is required.
+ * @return Owned callback, metadata, and identity snapshot, or nullopt when no
+ * tiled implementation is selectable for CPU.
+ * @throws std::bad_alloc or callback-copy exceptions from registry selection.
+ * @note The filter prevents a preferred monolithic sibling from hiding the
+ * tiled implementation whose geometry this manual tool reports.
  */
-int get_tile_size(const ps::Node& node) {
-  auto meta_opt =
-      ps::OpRegistry::instance().get_metadata(node.type, node.subtype);
-  if (meta_opt) {
-    if (meta_opt->tile_preference == ps::TileSizePreference::MICRO)
+std::optional<ps::OpImplementation> select_tiled_implementation(
+    const ps::Node& node, ps::ComputeIntent intent) {
+  return ps::OpRegistry::instance().select_implementation(
+      node.type, node.subtype, {ps::Device::CPU}, intent,
+      [](const ps::OpImplementation& candidate) {
+        return candidate.is_tiled();
+      });
+}
+
+/**
+ * @brief Resolves a report tile edge from one exact implementation snapshot.
+ *
+ * @param implementation Selected tiled implementation, or nullopt when absent.
+ * @return Tile edge length in pixels; defaults to TILE_SIZE_MICRO when the
+ * snapshot is absent or has no explicit preference.
+ * @throws Nothing.
+ * @note The helper never performs an independent metadata lookup.
+ */
+int get_tile_size(
+    const std::optional<ps::OpImplementation>& implementation) noexcept {
+  if (implementation) {
+    if (implementation->metadata.tile_preference ==
+        ps::TileSizePreference::MICRO) {
       return TILE_SIZE_MICRO;
-    if (meta_opt->tile_preference == ps::TileSizePreference::MACRO)
+    }
+    if (implementation->metadata.tile_preference ==
+        ps::TileSizePreference::MACRO) {
       return TILE_SIZE_MACRO;
+    }
   }
-  // 对于 monolithic 或未定义的，我们假设一个基础粒度用于报告
+  // 对于未定义粒度，我们假设一个基础粒度用于报告。
   return TILE_SIZE_MICRO;
+}
+
+/**
+ * @brief Formats the tile preference from one exact implementation snapshot.
+ *
+ * @param implementation Selected tiled implementation, or nullopt when absent.
+ * @return Stable MICRO, MACRO, or UNDEFINED diagnostic label.
+ * @throws Nothing.
+ * @note The returned string literal has static storage duration.
+ */
+const char* tile_preference_name(
+    const std::optional<ps::OpImplementation>& implementation) noexcept {
+  if (!implementation) {
+    return "UNDEFINED";
+  }
+  if (implementation->metadata.tile_preference ==
+      ps::TileSizePreference::MICRO) {
+    return "MICRO";
+  }
+  if (implementation->metadata.tile_preference ==
+      ps::TileSizePreference::MACRO) {
+    return "MACRO";
+  }
+  return "UNDEFINED";
 }
 
 /**
@@ -149,7 +195,6 @@ void handle_tiles(ps::Kernel& kernel, ps::InteractionService& svc,
 
   for (int id : node_ids_to_query) {
     const auto& node = model.node(id);
-    std::string pref_str = "UNDEFINED";
     int width = 0, height = 0;
 
     const auto* out = node.cached_output_high_precision.has_value()
@@ -164,16 +209,10 @@ void handle_tiles(ps::Kernel& kernel, ps::InteractionService& svc,
       continue;
     }
 
-    auto meta_opt =
-        ps::OpRegistry::instance().get_metadata(node.type, node.subtype);
-    if (meta_opt) {
-      if (meta_opt->tile_preference == ps::TileSizePreference::MICRO)
-        pref_str = "MICRO";
-      if (meta_opt->tile_preference == ps::TileSizePreference::MACRO)
-        pref_str = "MACRO";
-    }
-
-    int tile_size = get_tile_size(node);
+    const auto implementation = select_tiled_implementation(
+        node, ps::ComputeIntent::GlobalHighPrecision);
+    const char* pref_str = tile_preference_name(implementation);
+    int tile_size = get_tile_size(implementation);
     int h_tiles = (width + tile_size - 1) / tile_size;
     int v_tiles = (height + tile_size - 1) / tile_size;
 
@@ -219,7 +258,9 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
   }
 
   const auto& start_node = model.node(start_node_id);
-  int tile_size = get_tile_size(start_node);
+  const auto implementation = select_tiled_implementation(
+      start_node, ps::ComputeIntent::RealTimeUpdate);
+  int tile_size = get_tile_size(implementation);
   ps::PixelRect initial_roi{tile_x * tile_size, tile_y * tile_size, tile_size,
                             tile_size};
   std::cout << "Triggering dirty region at Node " << start_node_id << " tile ("

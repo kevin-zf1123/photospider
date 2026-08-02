@@ -9,7 +9,6 @@
 #include <fstream>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <new>
 #include <sstream>
 #include <string>
@@ -32,7 +31,7 @@
 #include "photospider/plugin/plugin_api.hpp"
 #include "runtime/graph_event_service.hpp"
 
-#if defined(__APPLE__)
+#if defined(PHOTOSPIDER_INTERNAL_METAL_PERLIN_TESTING)
 #include "metal/perlin_noise_metal.hpp"
 #endif
 
@@ -1000,17 +999,17 @@ TEST(ThresholdBadAllocBoundary,
 }
 
 /**
- * @brief Proves the portable serialized Metal seam preserves bad_alloc type.
+ * @brief Proves the production Metal exception seam preserves bad_alloc type.
  *
  * @throws Nothing when the expected exception is observed.
  * @note This test runs on non-Apple CI while exercising the helper used by the
- * Apple-only Perlin implementation.
+ * Apple-only Perlin implementation. Invocation serialization remains owned by
+ * the process Metal executor.
  */
 TEST(MetalBadAllocBoundary, PortableExceptionSeamPreservesIdentity) {
-  const char* stage = "before_lock";
-  std::mutex mutex;
-  EXPECT_THROW((void)ops::detail::run_serialized_metal_exception_boundary(
-                   "perlin_noise_metal", stage, mutex,
+  const char* stage = "start";
+  EXPECT_THROW((void)ops::detail::run_metal_exception_boundary(
+                   "perlin_noise_metal", stage,
                    [&]() -> NodeOutput {
                      stage = "portable_bad_alloc";
                      throw std::bad_alloc{};
@@ -1022,15 +1021,14 @@ TEST(MetalBadAllocBoundary, PortableExceptionSeamPreservesIdentity) {
  * @brief Proves other portable Metal failures receive stage context.
  *
  * @throws Nothing when the expected runtime_error is observed.
- * @note The serialized helper is the same lock-plus-boundary path used by the
- * Apple implementation; the assertion checks operation and active stage.
+ * @note The assertion exercises the same contextual exception helper as the
+ * Apple operation while leaving serialization to its process executor.
  */
 TEST(MetalBadAllocBoundary, PortableExceptionSeamContextsStandardFailure) {
-  const char* stage = "before_lock";
-  std::mutex mutex;
+  const char* stage = "start";
   try {
-    (void)ops::detail::run_serialized_metal_exception_boundary(
-        "perlin_noise_metal", stage, mutex, [&]() -> NodeOutput {
+    (void)ops::detail::run_metal_exception_boundary(
+        "perlin_noise_metal", stage, [&]() -> NodeOutput {
           stage = "portable_standard_failure";
           throw std::logic_error("probe failure");
         });
@@ -1043,15 +1041,15 @@ TEST(MetalBadAllocBoundary, PortableExceptionSeamContextsStandardFailure) {
   }
 }
 
-#if defined(__APPLE__)
+#if defined(PHOTOSPIDER_INTERNAL_METAL_PERLIN_TESTING)
 /**
  * @brief Proves the real Perlin entry preserves injected allocation failure.
  *
  * @throws Nothing when the expected exception is observed.
  * @note The public node snapshot is prepared before arming the probe, so the
  * first failed allocation belongs to the real Metal operation rather than
- * test-only parameter construction. Injection still happens before device
- * initialization for determinism.
+ * test-only parameter construction. Injection happens before executor-context
+ * access, so the failure is deterministic and requires no native allocation.
  */
 TEST(MetalBadAllocBoundary, RealPerlinEntryPreservesInjectedBadAlloc) {
   plugin::ParameterMap parameters;
@@ -1073,9 +1071,10 @@ TEST(MetalBadAllocBoundary, RealPerlinEntryPreservesInjectedBadAlloc) {
  *
  * @throws Nothing when runtime_error contains the operation and validation
  * stage.
- * @note Invalid dimensions fail after the real serialized lock is acquired but
- * before device initialization, making the Apple-path regression deterministic.
- * The call uses only the public operation callback values used by real plugins.
+ * @note Invalid dimensions fail inside the production operation exception
+ * boundary before executor-context access, making the Apple-path regression
+ * deterministic. The call uses only the public operation callback values used
+ * by real plugins.
  */
 TEST(MetalBadAllocBoundary, RealPerlinEntryContextsStandardFailure) {
   plugin::ParameterMap parameters;

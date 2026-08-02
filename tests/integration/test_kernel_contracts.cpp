@@ -33,6 +33,8 @@
 #include "compute/realtime_proxy_graph.hpp"
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"
+#include "execution/compute_io_executor.hpp"
 #include "graph/graph_cache_service.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 #include "graph/graph_cache_service_test_access.hpp"  // NOLINT(build/include_subdir)
@@ -85,6 +87,52 @@ std::atomic<int> g_parameter_value_source_calls{0};
 
 /** @brief Counts effective-parameter consumer invocations. */
 std::atomic<int> g_parameter_value_consumer_calls{0};
+
+/**
+ * @brief Allocation-free Host context for one real CPU progress callback.
+ *
+ * @throws Nothing for construction and all worker observations.
+ * @note The test asserts callback completion directly; trace values are
+ * intentionally discarded so they cannot become an alternate progress signal.
+ */
+class CpuProgressHost final : public ExecutionHostContext {
+ public:
+  /**
+   * @brief Accepts worker attribution without retaining it.
+   * @param worker_id Fixed service worker id.
+   * @param epoch Active Run epoch.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+    (void)worker_id;
+    (void)epoch;
+  }
+
+  /**
+   * @brief Balances worker attribution without retained state.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void clear_task_context() noexcept override {}
+
+  /**
+   * @brief Discards execution trace observations.
+   * @param action Worker trace action.
+   * @param node_id Planned node id.
+   * @param worker_id Fixed worker id.
+   * @param epoch Active Run epoch.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void log_event(ExecutionTraceAction action, int node_id, int worker_id,
+                 std::uint64_t epoch) noexcept override {
+    (void)action;
+    (void)node_id;
+    (void)worker_id;
+    (void)epoch;
+  }
+};
 
 /**
  * @brief Builds one standalone Run submission for a loaded Kernel runtime.
@@ -1739,6 +1787,8 @@ class KernelCodecTeardownScenario final {
                 state.cached_output_high_precision = NodeOutput{};
                 state.cached_output_high_precision->image_buffer =
                     make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+                state.hp_region = value_image_adapter::full_node_output_region(
+                    *state.cached_output_high_precision);
               });
         })
         .get();
@@ -2526,6 +2576,8 @@ TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
   expected.emplace("answer", plugin::ParameterValue(42));
   expected.emplace("nested", plugin::ParameterValue(std::move(nested)));
   saved.cached_output_high_precision->data = expected;
+  saved.hp_region = value_image_adapter::full_node_output_region(
+      *saved.cached_output_high_precision);
 
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
@@ -2540,6 +2592,9 @@ TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
   ASSERT_TRUE(cache.try_load_from_disk_cache(graph, loaded));
   ASSERT_TRUE(loaded.cached_output_high_precision.has_value());
   EXPECT_EQ(loaded.cached_output_high_precision->data, expected);
+  EXPECT_EQ(loaded.hp_version, 1);
+  ASSERT_TRUE(loaded.hp_region.has_value());
+  EXPECT_TRUE(loaded.hp_region->is_whole());
 
   std::filesystem::remove_all(root);
 }
@@ -2619,6 +2674,8 @@ TEST(CacheSemantics,
   saved.cached_output_high_precision = NodeOutput{};
   saved.cached_output_high_precision->data.emplace(
       "written", plugin::ParameterValue("value"));
+  saved.hp_region = value_image_adapter::full_node_output_region(
+      *saved.cached_output_high_precision);
   const plugin::ParameterMap read_values{
       {"loaded", plugin::ParameterValue(73)}};
 
@@ -2855,6 +2912,8 @@ TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
   node.cached_output_high_precision = NodeOutput{};
   node.cached_output_high_precision->image_buffer =
       make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+  node.hp_region = value_image_adapter::full_node_output_region(
+      *node.cached_output_high_precision);
   const std::filesystem::path expected_path =
       root / std::to_string(node.id) / node.caches.front().location;
 
@@ -2880,6 +2939,338 @@ TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
 
   EXPECT_TRUE(weak_codec.expired());
   std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves blocked real cache codec work does not occupy the CPU worker.
+ *
+ * @return Nothing; GoogleTest reports codec-entry, callback-progress, or
+ * settlement failures.
+ * @throws Graph, filesystem, allocation, future, or service exceptions from
+ * the production-shaped Kernel and direct CPU Run.
+ * @note The Kernel and the independent CPU callback share one explicitly
+ * one-worker `ExecutionService`. Progress is the actual callback's promise and
+ * completed `execute_run()`, observed before the codec release promise.
+ */
+TEST(CacheSemantics, BlockedExecutorCodecLeavesSingleCpuWorkerAvailable) {
+  const std::string graph_name = "bounded_compute_io_cpu_progress";
+  const std::filesystem::path root =
+      clean_temp_path("photospider-bounded-compute-io-cpu-progress-root");
+  const std::filesystem::path yaml_path =
+      temp_path("photospider-bounded-compute-io-cpu-progress.yaml");
+  write_text(yaml_path, R"YAML(
+- id: 1
+  name: cached_source
+  type: kernel_contract_test
+  subtype: source
+  parameters:
+    width: 2
+    height: 1
+)YAML");
+
+  std::promise<void> codec_entered;
+  std::future<void> codec_entered_future = codec_entered.get_future();
+  std::promise<void> release_codec;
+  const std::shared_future<void> codec_release =
+      release_codec.get_future().share();
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      testing::FakeImageArtifactCodec::DecodeCallback{},
+      [&codec_entered, codec_release](const std::filesystem::path&,
+                                      const ImageBuffer&,
+                                      ImageArtifactPrecision) {
+        codec_entered.set_value();
+        codec_release.wait();
+      });
+  auto execution_service = std::make_shared<compute::ExecutionService>(1U);
+  const auto document_adapter = testing::make_yaml_graph_document_adapter();
+  Kernel kernel(image_codec, testing::make_yaml_cache_metadata_codec(),
+                document_adapter, document_adapter, execution_service);
+  const std::optional<std::string> loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_EQ(execution_service->worker_count(), 1U);
+
+  testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name,
+      [](GraphModel& graph) {
+        graph.mutate_node_runtime_state(
+            1, [](GraphModel::NodeRuntimeState& state) {
+              state.caches.push_back({"image", "output.png"});
+              state.cached_output_high_precision = NodeOutput{};
+              state.cached_output_high_precision->image_buffer =
+                  make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+              state.hp_region = value_image_adapter::full_node_output_region(
+                  *state.cached_output_high_precision);
+            });
+      })
+      .get();
+
+  std::future<void> cache_work = testing::KernelTestAccess::submit_cache_save(
+      kernel, graph_name, 1, "int16");
+  const bool codec_blocked =
+      codec_entered_future.wait_for(std::chrono::seconds(2)) ==
+      std::future_status::ready;
+
+  const std::shared_ptr<GraphRuntime> runtime =
+      testing::KernelTestAccess::runtime_owner(kernel, graph_name);
+  const std::shared_ptr<const void> io_lifetime(runtime);
+  const execution::ComputeIoSubmission guarded_io =
+      execution_service->compute_io_executor().try_submit(
+          1U, io_lifetime,
+          []() -> execution::ComputeIoExecutor::Task { return []() {}; });
+  compute::ComputeRun cpu_run(
+      make_kernel_shutdown_submission(runtime->model().instance_id()));
+  CpuProgressHost host;
+  std::atomic_bool cpu_wait_rejected{false};
+  std::promise<void> cpu_callback_entered;
+  std::future<void> cpu_callback_entered_future =
+      cpu_callback_entered.get_future();
+  std::future<void> cpu_work = std::async(
+      std::launch::async,
+      [execution_service, &cpu_run, &host, &cpu_wait_rejected,
+       guarded_completion = guarded_io.completion(), &cpu_callback_entered]() {
+        compute::ComputeRunLease lease = cpu_run.acquire_lease();
+        const compute::ComputeRunTaskIdentity identity =
+            lease.task_identity(0U);
+        std::vector<compute::ReadyTaskSubmission> ready;
+        ready.emplace_back(
+            std::move(lease), identity, 1, true,
+            [&cpu_callback_entered, &cpu_wait_rejected, guarded_completion](
+                compute::ComputeRunLease& retained_lease,
+                const compute::ComputeRunTaskIdentity& retained_identity,
+                ExecutionTaskRuntime& task_runtime) {
+              if (retained_lease.descriptor().id() !=
+                  retained_identity.run_id()) {
+                throw std::logic_error(
+                    "CPU progress task observed a mismatched Run identity.");
+              }
+              try {
+                (void)guarded_completion.wait();
+              } catch (const std::logic_error&) {
+                cpu_wait_rejected.store(true, std::memory_order_release);
+              }
+              cpu_callback_entered.set_value();
+              task_runtime.dec_tasks_to_complete();
+            });
+        execution_service->execute_run(host, "cpu", std::move(ready), 1);
+      });
+
+  const bool cpu_callback_progressed =
+      cpu_callback_entered_future.wait_for(std::chrono::seconds(2)) ==
+      std::future_status::ready;
+  const bool cpu_run_finished =
+      cpu_work.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  const bool cache_still_blocked =
+      cache_work.wait_for(std::chrono::milliseconds(0)) ==
+      std::future_status::timeout;
+
+  bool release_succeeded = true;
+  try {
+    release_codec.set_value();
+  } catch (...) {
+    release_succeeded = false;
+  }
+  const bool cache_finished =
+      cache_work.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  const bool cpu_finished_after_release =
+      cpu_work.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+
+  EXPECT_TRUE(codec_blocked);
+  EXPECT_TRUE(guarded_io.accepted());
+  EXPECT_TRUE(cpu_callback_progressed);
+  EXPECT_TRUE(cpu_run_finished);
+  EXPECT_TRUE(cpu_wait_rejected.load(std::memory_order_acquire));
+  EXPECT_TRUE(cache_still_blocked);
+  EXPECT_TRUE(release_succeeded);
+  EXPECT_TRUE(cache_finished);
+  EXPECT_TRUE(cpu_finished_after_release);
+  if (cache_finished) {
+    EXPECT_NO_THROW(cache_work.get());
+  }
+  if (cpu_finished_after_release) {
+    EXPECT_NO_THROW(cpu_work.get());
+  }
+  if (guarded_io.accepted()) {
+    EXPECT_EQ(guarded_io.completion().wait().status(),
+              execution::ComputeIoCompletionStatus::Succeeded);
+  }
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove(yaml_path);
+}
+
+/**
+ * @brief Proves byte-budget rejection precedes codec and filesystem entry.
+ *
+ * @return Nothing; GoogleTest reports admission typing, side effects,
+ * publication, or executor-accounting residue.
+ * @throws Setup, Graph, filesystem, allocation, and synchronization exceptions
+ * outside the expected compute admission failure.
+ * @note A one-byte private limit is smaller than the read-only planned estimate
+ * for the real staged output. The fake codec records every entry, so an empty
+ * history proves rejection occurred before the lazy cache callback.
+ */
+TEST(CacheSemantics, ExecutorByteRejectionPrecedesCacheSideEffects) {
+  register_contract_ops();
+  const std::string graph_name = "bounded_compute_io_byte_rejection";
+  const std::filesystem::path root =
+      clean_temp_path("photospider-bounded-compute-io-rejection-root");
+  const std::filesystem::path cache_base =
+      clean_temp_path("photospider-bounded-compute-io-rejection-cache");
+  const std::filesystem::path yaml_path =
+      temp_path("photospider-bounded-compute-io-rejection.yaml");
+  write_blocking_source_graph(yaml_path, 8, true);
+
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
+  compute::ExecutionResourceLimits limits =
+      compute::ExecutionService::default_resource_limits();
+  limits.compute_io_task_limit = 1U;
+  limits.compute_io_planned_bytes_limit = 1U;
+  auto execution_service =
+      std::make_shared<compute::ExecutionService>(1U, std::move(limits));
+  const auto document_adapter = testing::make_yaml_graph_document_adapter();
+  Kernel kernel(image_codec, testing::make_yaml_cache_metadata_codec(),
+                document_adapter, document_adapter, execution_service);
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string(),
+                                "", cache_base.string()));
+  const auto before =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::pair<GraphRevision, bool>{
+                graph.revision(),
+                graph.node(1).cached_output_high_precision.has_value()};
+          })
+          .get();
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = false;
+  request.cache.nosave = false;
+  request.execution.parallel = true;
+  EXPECT_FALSE(kernel.compute(request));
+
+  const std::optional<Kernel::LastError> error = kernel.last_error(graph_name);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_EQ(error->code, GraphErrc::ComputeError);
+  EXPECT_NE(error->message.find("planned_byte_limit"), std::string::npos);
+  const auto after =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::pair<GraphRevision, bool>{
+                graph.revision(),
+                graph.node(1).cached_output_high_precision.has_value()};
+          })
+          .get();
+  EXPECT_EQ(after, before);
+  EXPECT_TRUE(image_codec->calls().empty());
+
+  const std::filesystem::path node_cache_dir = cache_base / graph_name / "1";
+  EXPECT_FALSE(std::filesystem::exists(node_cache_dir));
+  const execution::ComputeIoExecutorSnapshot io_snapshot =
+      execution_service->compute_io_executor().snapshot();
+  EXPECT_EQ(io_snapshot.active_tasks, 0U);
+  EXPECT_EQ(io_snapshot.active_planned_bytes, 0U);
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove_all(cache_base);
+  std::filesystem::remove(yaml_path);
+}
+
+/**
+ * @brief Proves executor-backed codec failure precedes visible HP publication.
+ *
+ * @return Nothing; GoogleTest reports exception typing, live-state mutation,
+ * artifact, or executor-accounting residue.
+ * @throws Setup, Graph, filesystem, allocation, and synchronization exceptions
+ * outside the expected compute failure.
+ * @note The fake is injected at the real cache codec boundary. Its exact
+ * `GraphError` returns through typed executor completion, while the prepared
+ * publication and its timing update are discarded.
+ */
+TEST(CacheSemantics, ExecutorCodecFailureLeavesLiveGraphUnpublished) {
+  register_contract_ops();
+  const std::string graph_name = "bounded_compute_io_codec_failure";
+  const std::filesystem::path root =
+      clean_temp_path("photospider-bounded-compute-io-failure-root");
+  const std::filesystem::path cache_base =
+      clean_temp_path("photospider-bounded-compute-io-failure-cache");
+  const std::filesystem::path yaml_path =
+      temp_path("photospider-bounded-compute-io-failure.yaml");
+  write_blocking_source_graph(yaml_path, 8, true);
+
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      testing::FakeImageArtifactCodec::DecodeCallback{},
+      [](const std::filesystem::path&, const ImageBuffer&,
+         ImageArtifactPrecision) {
+        throw GraphError(GraphErrc::Io,
+                         "injected executor cache codec failure");
+      });
+  Kernel kernel = testing::make_kernel_with_yaml_graph_documents(image_codec);
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string(),
+                                "", cache_base.string()));
+  const auto before =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::pair<GraphRevision, bool>{
+                graph.revision(),
+                graph.node(1).cached_output_high_precision.has_value()};
+          })
+          .get();
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = false;
+  request.cache.nosave = false;
+  request.execution.parallel = true;
+  EXPECT_FALSE(kernel.compute(request));
+
+  const std::optional<Kernel::LastError> error = kernel.last_error(graph_name);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_EQ(error->code, GraphErrc::Io);
+  EXPECT_NE(error->message.find("injected executor cache codec failure"),
+            std::string::npos);
+  const auto after =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::pair<GraphRevision, bool>{
+                graph.revision(),
+                graph.node(1).cached_output_high_precision.has_value()};
+          })
+          .get();
+  EXPECT_EQ(after, before);
+
+  const std::vector<testing::FakeImageArtifactCodec::Call> calls =
+      image_codec->calls();
+  ASSERT_EQ(calls.size(), 1U);
+  EXPECT_EQ(calls.front().kind,
+            testing::FakeImageArtifactCodec::Call::Kind::Encode);
+  const std::filesystem::path image_path =
+      cache_base / graph_name / "1" / "blocking-output.png";
+  EXPECT_EQ(calls.front().path, image_path);
+  EXPECT_FALSE(std::filesystem::exists(image_path));
+  const std::shared_ptr<compute::ExecutionService> execution_service =
+      testing::KernelTestAccess::execution_service_owner(kernel);
+  const execution::ComputeIoExecutorSnapshot io_snapshot =
+      execution_service->compute_io_executor().snapshot();
+  EXPECT_EQ(io_snapshot.active_tasks, 0U);
+  EXPECT_EQ(io_snapshot.active_planned_bytes, 0U);
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove_all(cache_base);
+  std::filesystem::remove(yaml_path);
 }
 
 /**
@@ -4578,7 +4969,8 @@ TEST(ComputeContracts, CommitPredicateAndPublicationExcludeMutationToctou) {
  * @note The monolithic provider is non-preemptible. Cancellation becomes
  * terminal while it is blocked, the request remains pending until provider
  * return, and the post-provider sequential observation discards the private
- * staged Graph before product publication.
+ * staged Graph before product publication. Ledger and Run authority must
+ * settle before an uncancelled retry enters the same provider.
  */
 TEST(ComputeContracts,
      SequentialCancellationAfterProviderReturnSuppressesPublication) {
@@ -4592,6 +4984,8 @@ TEST(ComputeContracts,
   write_blocking_source_graph(yaml_path);
 
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  const auto execution_service =
+      testing::KernelTestAccess::execution_service_owner(kernel);
   ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
   const auto initial_state =
       testing::KernelTestAccess::submit_graph_state(
@@ -4656,7 +5050,20 @@ TEST(ComputeContracts,
           })
           .get();
   EXPECT_EQ(final_state, initial_state);
+
   reset_blocking_contract_source();
+  request.cancellation_source.reset();
+  EXPECT_TRUE(kernel.compute(request));
+  EXPECT_TRUE(g_blocking_source_started.load(std::memory_order_acquire));
+  const compute::ExecutionLifecyclePage settled =
+      execution_service->lifecycle_snapshot(0U, 64U);
+  EXPECT_EQ(settled.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(settled.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(settled.counters.admitted_run_group_count, 0U);
+  EXPECT_EQ(settled.counters.live_root_reservation_count, 0U);
+  EXPECT_EQ(settled.counters.entered_callback_count, 0U);
+  EXPECT_EQ(execution_service->resource_snapshot().reserved, ResourceVector{});
+
   EXPECT_TRUE(kernel.close_graph(graph_name));
   std::filesystem::remove_all(root);
   std::filesystem::remove(yaml_path);

@@ -28,8 +28,12 @@ class ComputeCachePolicy {
    * @brief Checks whether a node has reusable HP output.
    *
    * @param node Node whose formal cache should be inspected.
-   * @return True when cached_output_high_precision is populated.
-   * @throws Nothing.
+   * @return True when output is populated and its exact hp_region covers the
+   * complete derived output Region.
+   * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+   * std::bad_alloc when retained output facts cannot be validated.
+   * @note A partial Region remains staged cache state but is not reusable for
+   * a whole-output read.
    */
   static bool has_reusable_output(const Node& node);
 
@@ -37,8 +41,8 @@ class ComputeCachePolicy {
    * @brief Returns mutable reusable HP output when available.
    *
    * @param node Node whose HP cache should be inspected.
-   * @return Pointer to HP output, or nullptr when absent.
-   * @throws Nothing.
+   * @return Pointer to complete HP output, or nullptr when absent/partial.
+   * @throws The same exceptions as has_reusable_output().
    */
   static NodeOutput* reusable_output(Node& node);
 
@@ -46,8 +50,8 @@ class ComputeCachePolicy {
    * @brief Returns immutable reusable HP output when available.
    *
    * @param node Node whose HP cache should be inspected.
-   * @return Pointer to HP output, or nullptr when absent.
-   * @throws Nothing.
+   * @return Pointer to complete HP output, or nullptr when absent/partial.
+   * @throws The same exceptions as has_reusable_output().
    */
   static const NodeOutput* reusable_output(const Node& node);
 
@@ -58,7 +62,7 @@ class ComputeCachePolicy {
    * @param mode Requested read mode; InteractivePreferred is accepted for
    * compatibility but returns HP output only.
    * @return Optional pointer to reusable HP output.
-   * @throws Nothing.
+   * @throws The same exceptions as has_reusable_output().
    * @note RT proxy output is not node-local and is therefore never returned.
    */
   static std::optional<const NodeOutput*> select_output(const Node& node,
@@ -75,11 +79,12 @@ class ComputeCachePolicy {
   static bool can_read_disk_cache(bool disable_disk_cache, bool force_recache);
 
   /**
-   * @brief Clears formal HP output before a recompute.
+   * @brief Clears formal HP output and matching Region before a recompute.
    *
-   * @param node Node whose HP cache should be reset.
+   * @param node Node whose HP cache and validity metadata should be reset.
    * @throws Nothing directly.
-   * @note RT proxy state is owned outside GraphModel and is not affected.
+   * @note The monotonic HP version is retained until replacement publication.
+   * RT proxy state is owned outside GraphModel and is not affected.
    */
   static void clear_for_recompute(Node& node);
 };

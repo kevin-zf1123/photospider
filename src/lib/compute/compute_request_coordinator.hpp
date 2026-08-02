@@ -123,6 +123,18 @@ class ComputeRequestCoordinator final {
   using SupersededCallback = std::function<void()>;
   /** @brief Fallback completion for an unexpected callback escape. */
   using FailureCallback = std::function<void(std::exception_ptr)>;
+  /**
+   * @brief No-throw observer for one accepted current-generation publication.
+   *
+   * @throws Implementations must not throw; an escaping exception terminates
+   * the process because partial current-generation publication is unsafe.
+   * @note The callback runs with the coordinator mutex held immediately before
+   * `is_current()` can observe the new generation. It may take only the bounded
+   * external freshness mutex; it must not allocate, wait for work, or re-enter
+   * this coordinator or either Graph executor lane.
+   */
+  using CurrentGenerationCallback =
+      std::function<void(const SupersessionIdentity&)>;
 
   /**
    * @brief Binds one Graph domain to its graph-state and request lanes.
@@ -168,6 +180,8 @@ class ComputeRequestCoordinator final {
    * @param execute Existing possibly blocking Kernel/ComputeService path.
    * @param settle_superseded Exact-once pending/born-stale completion callback.
    * @param settle_failure Unexpected callback-escape completion callback.
+   * @param publish_current Optional no-throw observer invoked only when this
+   * candidate becomes current.
    * @return Nothing after the graph-state publication work item is admitted.
    * @throws std::invalid_argument for null/empty ownership callbacks.
    * @throws std::bad_alloc for candidate ownership or graph-state submission.
@@ -177,12 +191,16 @@ class ComputeRequestCoordinator final {
    * order. A newer publication replaces one mailbox value, nonblockingly
    * requests Superseded on the active source, settles displaced pending work,
    * and wakes only the adopted reserved ticket. The caller waits for neither
-   * graph-state availability nor execution quiescence after admission.
+   * graph-state availability nor execution quiescence after admission. The
+   * current observer runs before the coordinator publishes the generation,
+   * making external freshness invalidation and `is_current()` observation one
+   * ordered transaction.
    */
   void publish(PreparedCandidate prepared,
                std::shared_ptr<ComputeRequestCancellationSource> cancellation,
                ExecuteCallback execute, SupersededCallback settle_superseded,
-               FailureCallback settle_failure);
+               FailureCallback settle_failure,
+               CurrentGenerationCallback publish_current = {});
 
   /**
    * @brief Tests exact current key/generation currency.

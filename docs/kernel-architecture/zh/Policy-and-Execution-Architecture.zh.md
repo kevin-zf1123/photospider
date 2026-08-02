@@ -19,10 +19,10 @@
 - 有界就绪存储，以及其中完整的就绪字节计费；
 - Interactive 和 Throughput 各一个策略绑定；
 - 进程公平性状态和三比一类别仲裁状态；
-- 固定 CPU 工作线程池、一个由 service 拥有的 Metal 工作线程 lane，以及私有
-  `serial_debug` 和 `gpu_pipeline` 路由；
+- 固定 CPU 工作线程池、一个由 service 拥有的 Metal 工作线程 lane、固定的
+  `DeviceExecutorRegistry`，以及私有 `serial_debug` 和 `gpu_pipeline` 路由；
 - 由 Host 生成的候选项、Graph、Run、条目版本、入队、快照和选择身份；
-- 从就绪到执行的资源交换，以及飞行中回调的所有权。
+- 从就绪到执行的资源交换、精确 implementation/exclusive-key gate，以及飞行中回调的所有权。
 
 `GraphRuntime` 只保存复制得到的 HP 和 RT 路由 ID 及其非零代次。它拥有 Graph
 状态、计算/事件/跟踪观察能力和请求串行化，但不拥有物理工作线程池或策略插件
@@ -143,11 +143,14 @@ Host 首先根据原始调用校验回调完成状态和每一个决策字节：
 ## 预留后启动
 
 返回的候选项 ID 并不是执行权限。Host 保留一个私有 `SelectionPin`，其中包含
-原始条目身份/版本，并按规定的锁顺序重新检查当前状态。`StartTransaction` 使用
-不抛异常的 RAII 暂存 CPU、保留内存和临时空间授权。
+原始条目身份/版本，并按规定的锁顺序重新检查当前状态。在不可逆的 ready/fairness
+mutation 之前，`StartTransaction` 会暂存 CPU、retained-memory 与 scratch child grant，
+以及首次使用的 implementation/key gate row。可能失败的 gate allocation 先于 active-counter
+mutation；任何拒绝都会通过不抛异常的 RAII 释放暂存 grant。
 
-最终提交不进行分配且不抛异常。它以原子方式：
+余下的提交不进行分配且不抛异常。它以原子方式：
 
+- 获取精确 implementation count 与非空 exclusive key；
 - 移除精确匹配的就绪条目；
 - 将其就绪授权交换成执行授权；
 - 推进类别、Graph 和 Run 服务计账；
@@ -155,8 +158,10 @@ Host 首先根据原始调用校验回调完成状态和每一个决策字节：
 - 把回调所有权转移给所选私有路由。
 
 提交之前不会开始任何执行器回调。提交前的每一次拒绝或异常都会保持就绪/公平性/
-突发/飞行中状态不变，并且只释放一次暂存授权。完成、取消、取代、依赖释放和
-Run 结算同样只释放一次各自授权。
+突发/飞行中状态不变，并且只释放一次暂存 grant 与 gate row。完成、取消、取代、
+依赖释放和 Run 结算同样只释放一次各自拥有的状态。已启动 callback 会一直持有
+operation gate，直到 provider exit 或 callback skip；即使 cancellation 或 failure 已清除
+其 queued sibling 也不例外。
 
 重验后 execution grant 暂时耗尽不属于 plugin fault 或 obsolete-decision retry。ready
 store 只在该 worker 的当前 cycle 中标记精确 candidate/version，并在不移除 entry、不释放
@@ -167,6 +172,24 @@ completion/grant release、cancellation/failure purge、policy replacement 与 s
 该 epoch。spurious wake 不触发 retry；50 ms low-frequency fallback 覆盖其他不可观测的外部
 child-grant release，随后清除 cycle mark，并重验 current Host state。
 
+Implementation cap 或已占用 exclusive key 会把对应 candidate 从 startable frontier 移除，
+但不会向 policy plugin 暴露 operation metadata。Worker retirement 释放 gate 时会推进同一个
+notification epoch。Direct sequential caller 会在不持有 resource reservation 的情况下进行
+cancellation-aware wait，随后只在 provider entry 周围获取同一 gate 以及一份 CPU/byte/scratch root。
+
+每个由 Host 拥有的 retained operation 或 constraint key 都按实际复制的
+`std::string::capacity()` 加空终止符计费。Full-plan admission 会为每个逻辑 task（包括每个
+tile）预先分配一份独立拥有、已经计费的 constraint record，并把每份 record 恰好一次移入
+对应 task 的唯一 `ReadyTaskSubmission`。Dirty admission 会对每个 active task 采用相同做法。
+二者都在移动任何 record 之前冻结完整 shared estimate。Connected-preflight
+callable/submission 的副本与 direct lease 分别独立计费。operation gate 只保存 borrowed
+`string_view`，并在稳定 submission 或 direct-lease owner 退出前擦除。Queued work 借用其
+`QueueEntry` 所拥有的 submission；direct acquisition 会在查询 gate 前把 caller constraints
+复制进自身 lease state，其 wait predicate、start 与 finish 都借用该 state-owned 副本。因此
+caller 输入不必比返回的 lease 存活更久。该做法既不重复也不漏算 string ownership。Checked
+terminator overflow 与少一个 byte 的 retained limit 都会在 provider entry 前失败，不留下 gate
+或 ledger 残留。
+
 ## 私有执行路由
 
 路由词汇表是封闭的：
@@ -175,7 +198,7 @@ child-grant release，随后清除 cycle mark，并重验 current Host state。
 | --- | --- |
 | `cpu` | Host 生命周期固定 CPU 工作线程池，支持可复用的多条目执行；只暴露 CPU |
 | `serial_debug` | CPU 工作线程零，只允许一个回调处于飞行中；只暴露 CPU |
-| `gpu_pipeline` | CPU fallback 使用同一个固定 CPU 池，Metal 使用一个由 service 拥有的 lane；Host 报告 Metal 时依次暴露 Metal、CPU，否则只暴露 CPU |
+| `gpu_pipeline` | CPU fallback 使用同一个固定 CPU 池，Metal 使用一个由 service 拥有的 lane；固定 registry 拥有 Metal executor 时依次暴露 Metal、CPU，否则只暴露 CPU |
 
 `heterogeneous` 不是别名。执行路由不是插件，不能扫描或加载。
 
@@ -187,19 +210,149 @@ child-grant release，随后清除 cycle mark，并重验 current Host state。
 与同一会话的活动请求串行化，并发布新的非零代次。同名替换同样推进代次。
 失败时保留旧路由。
 
-操作选择会在 Run 准入前同时冻结实现 callback 及其 `Device`。完整 HP、dirty HP/RT
-和连接参数预检都使用同一份 route-aware inventory。connected-preflight preparation 还会在
-不进入 provider code 的情况下冻结每个 callable/DSO lease 与完整 service root；只有已安装 Run
-才能执行 reserved start 并调用 provider，之后依赖 output 的 dirty planning 仍由 Run 拥有。
-每个 ready submission 都携带冻结的 device；如果 device 不在已配置 route/Host inventory 中，
+操作选择会在 Run 准入前冻结一份 coherent callback、metadata、`Device` 与非零 implementation
+revision。Planning 只保留 callback-free identity/metadata/shape；submission 必须重新解析同一个
+identity，之后才能保留 callable/DSO lease。完整 HP、dirty HP/RT 和连接参数预检都使用同一份
+规范化 route-aware inventory；full-task cache identity 会包含该 inventory 与 registry generation。
+Region propagation 与 dirty TensorSlice eligibility 也会使用该 request inventory 和匹配的
+HP/RT intent，在检查 source-private core identity 前选出实际的 revisioned
+`OpImplementation`。它们不会使用 scalar-only lookup，也不会过滤掉 route 已选中的 same-key
+device candidate。HP TensorSlice planning 会立即把每个已接受的 executable target/upstream
+selection 转换成 callback-free operation key 与完整 identity/device/shape/metadata route，
+随后释放临时 callable/DSO lease。Dirty preparation 会在 ROI mutation、task materialization、
+callable resolution 或 admission 前，把这些冻结 route 与 active task-population route 比较；
+空 active view 会在 frozen context 比较前返回，而任何剩余 active route 或 context 不匹配都返回
+`NoOperation`。最终 callable re-resolution 仍是强制步骤。
+connected-preflight preparation 还会在不进入 provider code 的情况下冻结每个 callable/DSO
+lease 与完整 service root；只有已安装 Run 才能执行 reserved start 并调用 provider，之后依赖
+output 的 dirty planning 仍由 Run 拥有。
+每个 ready submission 都携带冻结的 device；如果 device 不在已配置 route/registry inventory 中，
 `ExecutionService` 会在发布 Run 前拒绝它。CPU submission 进入固定 CPU 池，Metal submission
-进入单一 GPU lane。两个 lane 共用 ready store、policy decision、reserved-start transaction、Host
-ledger、Run maximum-parallelism grant、cancellation、completion、exception、reuse、
-shutdown 与 drainage 规则；不会创建第二套 device-capacity authority 或 per-Graph
-executor。
+进入单一 GPU lane，再进入匹配的 registry executor。两个 lane 共用 ready store、policy
+decision、reserved-start transaction、Host
+ledger、Run maximum-parallelism grant、operation implementation/key gate、cancellation、
+completion、exception、reuse、shutdown 与 drainage 规则；不会创建第二套 device-capacity
+authority 或 per-Graph executor。
 
 完整 HP、dirty HP/RT、连通性预检、初始就绪工作和依赖释放工作，都会进入同一套
 就绪存储、策略、预留后启动、私有路由及 Run 租约完成路径。
+
+V-6 不新增 configured execution route，也不新增第二套 ready store。
+`ReadyFence::async_wait` 接收一个共享的注入 executor；该 executor 必须入队，而不能 inline
+调用。预先构造的 continuation 会在 pending 或 queued 时保留 executor，并在 callback 进入时
+把该 owner 转移到 callback-local retention。这既让临时 executor ownership 存活到 callback
+完成或 exception unwinding 结束，也会释放 executor-owned queue 的 self-reference。Fence
+state 与 source-private `ValueTransferTask` 都不拥有 worker 或 queue。仓库 fake executor 只是
+确定性且线程安全的测试机制；C++17 mutex/condition-variable rendezvous 会在不使用 sleep 的
+情况下执行真实的 registration/publication、cancellation/callback-entry 与
+transfer-destruction/callback-entry 竞争。
+
+V-7 在同一个 `ExecutionService` domain 中增加 source-private 的固定
+`DeviceExecutorRegistry`。仓库 Metal plugin 启用时，Apple entry 拥有一个 device 与 command
+queue，提供 invocation-scoped texture/buffer allocator，并保留经过校验的 process-lifetime
+pipeline cache。
+Reserved-start worker 会同步进入该 executor，并通过同一条 Run completion/exception path 调用
+已经选中的 operation。Metal Perlin provider 现在只借用这些 resource，不保留 static native
+state；`GraphRuntime`、`Kernel`、operation metadata 与 policy state 都不暴露 native handle 或
+capability hook。
+
+V-8 在同一个 execution domain 中增加 source-private 的显式 CPU/Metal access 与 residency。
+`AccessPlan` 精确选择 direct、map、import、transfer 或 unsupported 中的一种，且不会执行隐藏
+工作。Transfer 在发布不同且经过检查的 `StorageBinding` 时保留逻辑
+`ValueRevisionId`；CPU-to-Metal upload 与 Metal-to-CPU readback 都是显式 asynchronous task。
+Metal Perlin provider 发布 pending native Value，并编码 texture-to-shared-buffer readback，
+不会等待 command buffer，也不会调用同步 `getBytes`。
+
+`ExecutionService` 拥有唯一的进程级 `ResidencyManager`，并让 pending Value continuation
+经过既有 ready store。精确 completion identity 包含 Graph/revision/target/intent/generation、
+Run/task、source/destination revision、producer 与 binding fact。Freshness admission、
+source/destination terminal publication 和 resident insertion 构成一个由 manager lock 保护的
+事务。为该 publication 提供的每个 source 或 destination producer 还必须保留与对应 pending Value
+完全相同、非空的私有 `ReadyFence` control state；revision、producer、allocation、binding 或
+其他 scalar fact 即使匹配，也不能代替这项 terminal authority。Capability 不匹配会被拒绝，且不
+消费 rightful admission、不结算任一 fence、不插入 residency，也不释放被保留的 resource owner，
+因此经过精确准入的 producer pair 可以重试。晚到、重复或 identity 不匹配的 completion 不能发布 Ready、释放 dependent work、进入
+residency 或恢复旧 commit right；如果它仍拥有对应 producer，就以 typed failure 结算受影响的
+destination。Run settlement 会保留 executor 与 continuation，直至每个 pending fence callback
+都退役。V-8 不新增第二套 ready store、Graph authority、persistence path 或 device-memory
+capacity authority。已结算 replica 可在 Run 释放后继续复用，但 manager 默认的 64-entry
+上限会在 publication pressure 下释放 revision 最低的 entry，从而限制强
+native/provider retention；generation 推进本身不会批量清除它们。这个 entry 数量既不
+测量也不准入 bytes。
+
+V-9 把权威 device-memory 与 scratch admission 放入既有 service `ResourceLedger`，而不是
+policy 或 residency。每个已配置非 CPU `DeviceId` 都有隔离 limit。Metal 会在 allocation
+前原子预留 native size/alignment plan、审计 `allocatedSize`，并在 command submission 前提交
+actual byte。Persistent memory 随 native Value owner 跨 residency 延续；scratch 随精确
+command completion 延续。Policy 看不到 native handle 或 token，不排列 byte owner，也不会
+获得第二套 waiting/fairness queue。
+
+Freshness publication 分为两个阶段。Kernel 先要求 `ExecutionService` 预跟踪 lineage，
+但不改变其 current generation；该可失败 allocation 会在 coordinator submission 前完成。
+Candidate 被接受为 current 时，coordinator 会在持有自身 mutex 且发布自身 current row 前，
+调用一个 no-throw、no-allocation 的 service callback。该 callback 在 manager mutex 下推进
+manager。失败、被 close 拒绝或 born-stale 的 candidate 绝不调用它；之后才启动的较旧 Run
+也不能让单调 manager generation 倒退。
+
+## Compute I/O 执行边界
+
+`ExecutionService::PoolState` 拥有唯一 source-private `ComputeIoExecutor`，其中有一个独立
+worker。Admission 会在同一 mutex 下、且早于 lazy payload construction、queue publication、
+filesystem mutation 或 codec entry，同时计入 task 数与正数 estimated-retained-byte。每项已接受
+任务保留显式 transaction lifetime token，并返回 typed completion。Success、failure、queued
+cancellation、running late cancellation、construction rollback 与 graceful shutdown 最终都会
+恰好一次释放账本。
+
+Worker 与 completion 边界会阻止按 identity 生效的 self-blocking。当准入仍开放时，owning
+I/O worker 的 nested submission 会在改变任一 budget 或 lazy factory 前返回 inactive
+`InvalidRequest`；若并发 admission stop 已发生，则 `ShuttingDown` 保持更高优先级。
+Owning worker 可以复制已经 terminal 的 completion，但 nonterminal completion wait 会在
+condition-variable blocking 前失败。Completion 只为该比较弱保留 executor identity。向另一套
+独立 executor 提交并等待仍然合法。
+
+Lazy factory invocation 使用无分配、异常安全的 thread-local scope stack。`shutdown()` 会在
+改变 `accepting`/`stopping`、取得 join authority 或等待 worker 前，拒绝 stack 任意位置中的
+目标。这既覆盖 direct factory re-entry，也覆盖间接
+`A factory -> B factory -> A shutdown`，且不会拒绝无关 executor。外部 shutdown 仍会停止
+准入并等待每个已经计费的 factory。若 factory 在停止后返回，则产生既有
+Accepted/Cancelled submission 并精确结算；若 factory 抛出，则执行精确 rollback。只有
+construction 已结算且 FIFO 已 drain，worker join 才会完成。
+
+首条生产垂直路径是 staged HP cache save。`GraphCacheService` 仍选择 eligibility、path、
+precision、codec 与错误解释。既有 live lifecycle、supersession 与 revision predicate 通过后，
+graph-state policy 提交 mechanism callback，并在既有 no-throw Graph publication 前等待。
+CPU compute worker 被禁止同步等待该 completion，因此阻塞的 cache codec 不会占用 CPU
+execution domain。由于当前 image-codec API 不可拆分，其整个 I/O-facing call 都在 I/O worker
+上运行；未来拆分后的 API 必须把独立准入的 CPU-heavy phase 送回 CPU executor。
+
+V-15 在不改变该 mechanism 的前提下增加第二个有界使用方。Source-private OpenEXR deep
+adapter 会把一次完整且不可拆分的 single-part deep-scanline read 或 write 作为 callback 提交。
+在 `ComputeIoExecutor::try_submit` 前，一个共享的 source-private path check 会把 empty 或包含
+embedded NUL 的 `std::string` 映射为既有 inactive `InvalidRequest` fact。它不会计入 budget、
+执行 lazy construction、捕获 path/Value/registry、进入 hook 或 worker、访问 filesystem 或调用
+OpenEXR；因此 C-string filename API 无法静默选择 NUL 前缀。Direct write preflight 会复用这项
+contract，并抛出 Host 自有 adapter `InvalidRequest` 类别。
+
+对于有效 path，executor admission 会接收正数 retained-byte estimate，并先于 path capture、
+Value/provider generation retention、result-state construction、filesystem side effect 或
+OpenEXR entry 发生。任务一旦被接受，就会在完整 codec call 期间保留 transaction token、复制后的
+path、精确 provider generation，以及 input Value 或 decoded-result state。调用 OpenEXR 时使用
+`numThreads=0`，因此 executor 的唯一 worker 仍是 adapter 创建的唯一 execution lane。Running
+cancellation 无法抢占 foreign codec code；它会抑制延迟 result publication，并仍恰好一次释放
+task/byte account。
+
+完成通用 Value 检查后，write path 必须先跨过一个 source-private continuation barrier，才可以
+准备 OpenEXR Header/frame buffer 或打开 output path。该 barrier 会验证两个有符号 window、
+logical-site 与 row-width 算术、inclusive `Box2i` 坐标的精确可表示性，以及 `writePixels` 消费的
+`int` scan-line count。只有完整 preflight 放行的 continuation 才能准备或打开 output。因此，
+类型化 shape rejection 会逐字节保留既有 destination，也不会创建原本缺失的 destination。
+
+这是机制边界，不是第四种 scheduler 或 persistence authority。它不新增 execution route、
+ready store、Graph owner、policy decision surface、Host/device ledger dimension 或 public ABI。
+同步 cache administration/load、Graph 文档 operation、daemon job state 与私有 `OutputStore`
+保持不变。Executor 不拥有用户 path、retry、overwrite、receipt 或 durability policy。当前仍无
+组件提供 crash-durable user-output commit，ADR 0009 中 Run publication 之后的独立 cache
+outcome 仍是未来工作。
 
 ## Host、CLI 与 IPC 接口面
 
@@ -247,21 +400,37 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 
 ## 实现与验证入口
 
+- `include/photospider/plugin/op_contract.hpp`
+- `src/lib/core/ps_types.hpp` 与 `.cpp`
+- `src/lib/compute/task_graph_planning.hpp` 与 `.cpp`
+- `src/lib/compute/compute_task_submission.hpp` 与 `.cpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/policy/policy_registry.hpp` 和 `.cpp`
 - `src/lib/compute/execution_service.hpp` 和 `.cpp`
 - `src/lib/compute/run_lifecycle_registry.hpp` 和 `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` 和 `.cpp`
+- `src/lib/execution/compute_io_executor.*`
+- `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/execution/execution_task_runtime.hpp`
-- `src/lib/runtime/graph_runtime.hpp` 和 `.mm`
+- `src/lib/execution/device_executor_registry.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `include/photospider/memory/ready_fence.hpp`
+- `src/lib/execution/value_transfer_task.*`
+- `src/lib/runtime/graph_runtime.hpp` 和 `.cpp`
 - `src/lib/runtime/kernel_execution_facade.cpp`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
 - `include/photospider/host/host.hpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/ipc/{codec,client,host,request_router}.cpp`
 - `tests/unit/test_policy_registry.cpp`
+- `tests/unit/test_compute_io_executor.cpp`
+- `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
+- `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
 
 另请参阅[计算流程](Compute-Flow.zh.md)、
