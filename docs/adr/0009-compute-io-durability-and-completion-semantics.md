@@ -17,6 +17,13 @@ move cache failure behind Run publication, or turn the current private IPC
 post-publication cache outcomes, durable output commit, Graph-document
 transactions, and legacy output-side-effect migration.
 
+Late review of Issue #118 at Primary head
+`c99c94b56065aee6d456337af8ee0aa45c12e0a1` found two deadlocks in that reused
+Issue #88 executor dependency: same-worker submission followed by completion
+wait, and same-executor shutdown from an admitted lazy factory. Their repair is
+Issue #88 mechanism hardening required for Issue #118 settlement; it does not
+transfer executor ownership or policy authority to the OpenEXR V-15 change.
+
 ## Context
 
 PhotoSpider already has several valid completion and persistence mechanisms,
@@ -290,6 +297,23 @@ typed `Succeeded`, `Failed`, or `Cancelled` completion. Cancellation,
 callback failure, late return, and graceful shutdown release that token and
 both accounts exactly once. CPU compute workers cannot synchronously wait on
 the completion.
+
+The sole I/O worker cannot admit another task to its owning executor: while
+admission remains open, that call returns inactive `InvalidRequest` before
+either budget or the lazy factory changes. A completion wait on the owning
+worker may copy an already terminal fact, but rejects a nonterminal fact before
+condition-variable waiting. These guards compare exact executor identity, so
+an I/O callback may still submit to and wait for another independent executor.
+
+Lazy factory execution is tracked by an allocation-free, exception-safe
+thread-local stack. Shutdown targeting any executor still present in that
+stack fails before changing shutdown state or joining, including indirect
+`A factory -> B factory -> A shutdown` cycles; unrelated executor shutdown
+remains legal. External shutdown still linearizes admission stop, waits for
+every charged factory to return or throw, cancels a returned submission before
+callback entry when publication lost the race, rolls an escaping exception
+back exactly once, drains published work, and only then completes the worker
+join.
 
 The first production route is the staged HP cache-save callback. The
 graph-state policy owner chooses eligibility, paths, precision, codecs, and

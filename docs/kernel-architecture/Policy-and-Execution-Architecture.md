@@ -361,6 +361,26 @@ retains an explicit transaction lifetime token and returns a typed completion.
 Success, failure, queued cancellation, running late cancellation, construction
 rollback, and graceful shutdown converge on exactly-once account release.
 
+The worker and completion boundaries prevent identity-specific self-blocking.
+While admission remains open, the owning I/O worker's nested submission returns
+inactive `InvalidRequest` before either budget or the lazy factory changes; a
+concurrent admission stop retains `ShuttingDown` priority. The owning worker may
+copy an already terminal completion, but a nonterminal completion wait fails
+before condition-variable blocking. A completion keeps only a weak executor
+identity for that comparison. Submitting to and waiting for another independent
+executor remains legal.
+
+Lazy factory invocation uses an allocation-free, exception-safe thread-local
+scope stack. `shutdown()` rejects a target found anywhere in that stack before
+changing `accepting`/`stopping`, acquiring join authority, or waiting for the
+worker. This covers direct factory re-entry and indirect
+`A factory -> B factory -> A shutdown` without rejecting an unrelated executor.
+An external shutdown still stops admission and waits for every already charged
+factory. A factory that returns after the stop produces the existing
+Accepted/Cancelled submission and exact settlement; a factory that throws
+performs exact rollback. Worker join completes only after construction
+settlement and FIFO drain.
+
 The first production vertical is staged HP cache save. `GraphCacheService`
 still chooses eligibility, paths, precision, codecs, and error interpretation.
 After the existing live lifecycle, supersession, and revision predicates,

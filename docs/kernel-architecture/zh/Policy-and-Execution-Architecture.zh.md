@@ -299,6 +299,21 @@ filesystem mutation 或 codec entry，同时计入 task 数与正数 estimated-r
 cancellation、running late cancellation、construction rollback 与 graceful shutdown 最终都会
 恰好一次释放账本。
 
+Worker 与 completion 边界会阻止按 identity 生效的 self-blocking。当准入仍开放时，owning
+I/O worker 的 nested submission 会在改变任一 budget 或 lazy factory 前返回 inactive
+`InvalidRequest`；若并发 admission stop 已发生，则 `ShuttingDown` 保持更高优先级。
+Owning worker 可以复制已经 terminal 的 completion，但 nonterminal completion wait 会在
+condition-variable blocking 前失败。Completion 只为该比较弱保留 executor identity。向另一套
+独立 executor 提交并等待仍然合法。
+
+Lazy factory invocation 使用无分配、异常安全的 thread-local scope stack。`shutdown()` 会在
+改变 `accepting`/`stopping`、取得 join authority 或等待 worker 前，拒绝 stack 任意位置中的
+目标。这既覆盖 direct factory re-entry，也覆盖间接
+`A factory -> B factory -> A shutdown`，且不会拒绝无关 executor。外部 shutdown 仍会停止
+准入并等待每个已经计费的 factory。若 factory 在停止后返回，则产生既有
+Accepted/Cancelled submission 并精确结算；若 factory 抛出，则执行精确 rollback。只有
+construction 已结算且 FIFO 已 drain，worker join 才会完成。
+
 首条生产垂直路径是 staged HP cache save。`GraphCacheService` 仍选择 eligibility、path、
 precision、codec 与错误解释。既有 live lifecycle、supersession 与 revision predicate 通过后，
 graph-state policy 提交 mechanism callback，并在既有 no-throw Graph publication 前等待。

@@ -14,6 +14,12 @@ Issue #87 以决策与文档变更的形式接受本 ADR。Issue #88 现在只�
 `OutputStore` 变成 crash-durable store。后续专项变更必须实现 Run publication
 之后的 cache outcome、durable 输出提交、Graph 文档事务和旧输出副作用迁移。
 
+在 Primary head `c99c94b56065aee6d456337af8ee0aa45c12e0a1` 上对 Issue #118
+进行的后期审核，在其复用的 Issue #88 executor 依赖中发现两条死锁：同一 worker
+提交后等待 completion，以及已准入 lazy factory 对同一 executor 发起 shutdown。
+这两项修复是 Issue #118 结算所需的 Issue #88 mechanism hardening；它不会把
+executor 所有权或 policy authority 转移给 OpenEXR V-15 change。
+
 ## 背景
 
 PhotoSpider 已经有若干有效的完成与持久化机制，但每个机制回答的问题都不同：
@@ -235,6 +241,19 @@ asset 与 codec 子工作。准入会在 lazy payload construction 或副作用�
 Run/transaction lifetime token，并返回 `Succeeded`、`Failed` 或 `Cancelled`
 typed completion。Cancellation、callback failure、late return 与 graceful shutdown
 都会恰好一次释放该 token 与两项账本。CPU compute worker 不能同步等待 completion。
+
+唯一 I/O worker 不能向自身 owning executor 准入另一个任务：准入仍开放时，该调用
+会在改变任一 budget 或 lazy factory 前返回 inactive `InvalidRequest`。Owning worker
+上的 completion wait 可以复制已经 terminal 的 fact，但会在 condition-variable wait 前
+拒绝 nonterminal fact。这些 guard 比较准确 executor identity，因此一个 I/O callback
+仍可向另一套独立 executor 提交并等待。
+
+Lazy factory execution 由无分配、异常安全的 thread-local stack 跟踪。凡 shutdown
+目标仍存在于该 stack 中，调用都会在改变 shutdown state 或 join 前失败，其中包括
+间接 `A factory -> B factory -> A shutdown` cycle；无关 executor shutdown 仍合法。
+外部 shutdown 仍会线性化 admission stop，等待每个已计费 factory 返回或抛出；若返回的
+submission 在 publication race 中落败，则会在 callback entry 前取消；若异常逃逸，则精确
+回滚一次；随后 drain 已发布工作，最后才完成 worker join。
 
 首条生产路径是 staged HP cache-save callback。Graph-state policy owner 选择
 eligibility、path、precision、codec 与 publication 前的排序，然后等待 typed
