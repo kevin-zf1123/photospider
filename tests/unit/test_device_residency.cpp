@@ -105,7 +105,7 @@ struct PendingLeasedUpload final {
   /** @brief Ready host-visible source revision. */
   Value source;
 
-  /** @brief Pending device-local revision-preserving destination. */
+  /** @brief Pending Metal revision-preserving destination. */
   PendingDeviceValuePublication destination;
 
   /** @brief Probe for the shared native-and-lease owner lifetime. */
@@ -151,12 +151,15 @@ PendingReplicaPair make_pending_replica_pair() {
 /**
  * @brief Publishes one pending fake upload with real ledger memory ownership.
  * @param ledger Ledger containing a Metal account with at least 16 free bytes.
+ * @param host_visible Whether the fake Metal allocation also exposes a
+ *        host-visible Shared binding for post-publication read verification.
  * @return Ready CPU source and pending device destination sharing one revision.
  * @throws Ledger admission, publication, allocation, or identity exceptions.
  * @note The creator commits actual bytes before the pending Value is returned;
  * no Run-scoped owner remains.
  */
-PendingLeasedUpload make_pending_leased_upload(ResourceLedger& ledger) {
+PendingLeasedUpload make_pending_leased_upload(ResourceLedger& ledger,
+                                               bool host_visible = false) {
   constexpr std::size_t kStorageSize = 4U * sizeof(float);
   constexpr DeviceResourceVector kResources{kStorageSize, 0U};
   std::vector<std::byte> source_bytes(kStorageSize);
@@ -179,10 +182,31 @@ PendingLeasedUpload make_pending_leased_upload(ResourceLedger& ledger) {
       PendingDeviceValuePublisher::publish_dense_tensor(
           make_descriptor(), std::nullopt,
           StridedLayout{{static_cast<std::ptrdiff_t>(sizeof(float))}, 0U},
-          owner, owner->native_handle(), nullptr, kStorageSize,
-          DeviceId(DeviceBackend::Metal), MemoryDomain::DeviceLocal,
+          owner, owner->native_handle(),
+          host_visible ? allocation->bytes.data() : nullptr, kStorageSize,
+          DeviceId(DeviceBackend::Metal),
+          host_visible ? MemoryDomain::Shared : MemoryDomain::DeviceLocal,
           source.revision_id());
   return {std::move(source), std::move(destination), owner};
+}
+
+/**
+ * @brief Publishes one host-visible pending replica of an existing source.
+ * @param source Valid Ready DenseTensor whose logical revision is preserved.
+ * @param memory_domain Distinct CPU allocation domain for residency lookup.
+ * @return Pending host-visible publication with a fresh fence and allocation.
+ * @throws Publication validation, allocation, or identity exceptions.
+ * @note The returned bytes are zero-initialized fake storage. No transfer or
+ * terminal publication occurs in this helper.
+ */
+PendingDeviceValuePublication make_pending_host_replica(
+    const Value& source, MemoryDomain memory_domain) {
+  auto owner = std::make_shared<FakeAllocation>(source.storage_size());
+  return PendingDeviceValuePublisher::publish_dense_tensor(
+      source.dense_tensor_descriptor(), source.image_facet(),
+      source.strided_layout(), owner, owner.get(), owner->bytes.data(),
+      source.storage_size(), DeviceId(DeviceBackend::CPU), memory_domain,
+      source.revision_id());
 }
 
 /**
@@ -267,6 +291,209 @@ TEST(DeviceResidency, PublishesOnlyExactReadyReplica) {
             pair.destination.value.producer_identity());
   EXPECT_EQ(resident->storage_binding(),
             pair.destination.value.storage_binding());
+}
+
+/**
+ * @brief Proves two transfer identities cannot exchange destination authority.
+ * @return Nothing; GoogleTest reports fence, residency, lease, or read errors.
+ * @throws Fake publication, ledger, identity, and manager exceptions.
+ * @note Each rejected swap preserves both exact admissions, pending fences,
+ * and device-memory owners. The matching capabilities can then publish once,
+ * and both retained Shared replicas remain host-readable.
+ */
+TEST(DeviceResidency,
+     SwappedDestinationCapabilitiesPreservePendingFencesAndDeviceLeases) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {2U * kAllocationBytes, 0U}}});
+  {
+    ResidencyManager manager;
+    PendingLeasedUpload first = make_pending_leased_upload(ledger, true);
+    PendingLeasedUpload second = make_pending_leased_upload(ledger, true);
+    const DeviceCompletionIdentity first_identity(
+        make_seed(8U, 81U), first.source, first.destination.value);
+    const DeviceCompletionIdentity second_identity(
+        make_seed(8U, 82U), second.source, second.destination.value);
+    const std::weak_ptr<FakeLeasedDeviceAllocation> first_owner =
+        first.destination_owner;
+    const std::weak_ptr<FakeLeasedDeviceAllocation> second_owner =
+        second.destination_owner;
+
+    manager.observe_generation(first_identity.seed());
+    ASSERT_NO_THROW(manager.register_transfer(first_identity));
+    ASSERT_NO_THROW(manager.register_transfer(second_identity));
+    EXPECT_EQ(manager.publish_ready_transfer(first_identity, first.source,
+                                             first.destination.value, nullptr,
+                                             second.destination.producer),
+              ResidencyCompletionDisposition::Rejected);
+    EXPECT_EQ(manager.publish_ready_transfer(second_identity, second.source,
+                                             second.destination.value, nullptr,
+                                             first.destination.producer),
+              ResidencyCompletionDisposition::Rejected);
+
+    EXPECT_EQ(first.destination.value.ready_fence().poll().state(),
+              ReadyFenceState::Pending);
+    EXPECT_EQ(second.destination.value.ready_fence().poll().state(),
+              ReadyFenceState::Pending);
+    EXPECT_FALSE(first_owner.expired());
+    EXPECT_FALSE(second_owner.expired());
+    EXPECT_FALSE(manager
+                     .find(first.destination.value.revision_id(), metal,
+                           MemoryDomain::Shared)
+                     .has_value());
+    EXPECT_FALSE(manager
+                     .find(second.destination.value.revision_id(), metal,
+                           MemoryDomain::Shared)
+                     .has_value());
+    const auto pending_snapshot = ledger.device_snapshot(metal);
+    ASSERT_TRUE(pending_snapshot.has_value());
+    EXPECT_EQ(pending_snapshot->reserved,
+              (DeviceResourceVector{2U * kAllocationBytes, 0U}));
+
+    ASSERT_EQ(manager.publish_ready_transfer(first_identity, first.source,
+                                             first.destination.value, nullptr,
+                                             first.destination.producer),
+              ResidencyCompletionDisposition::Published);
+    ASSERT_EQ(manager.publish_ready_transfer(second_identity, second.source,
+                                             second.destination.value, nullptr,
+                                             second.destination.producer),
+              ResidencyCompletionDisposition::Published);
+    const std::optional<Value> first_resident = manager.find(
+        first.destination.value.revision_id(), metal, MemoryDomain::Shared);
+    const std::optional<Value> second_resident = manager.find(
+        second.destination.value.revision_id(), metal, MemoryDomain::Shared);
+    ASSERT_TRUE(first_resident.has_value());
+    ASSERT_TRUE(second_resident.has_value());
+    EXPECT_EQ(first_resident->buffer_handle().acquire_read().size(),
+              kAllocationBytes);
+    EXPECT_EQ(second_resident->buffer_handle().acquire_read().size(),
+              kAllocationBytes);
+    const auto published_snapshot = ledger.device_snapshot(metal);
+    ASSERT_TRUE(published_snapshot.has_value());
+    EXPECT_EQ(published_snapshot->reserved,
+              (DeviceResourceVector{2U * kAllocationBytes, 0U}));
+  }
+  const auto released_snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released_snapshot.has_value());
+  EXPECT_EQ(released_snapshot->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves equal logical revision cannot stand in for fence provenance.
+ * @return Nothing; GoogleTest reports rejection, retry, or read mismatches.
+ * @throws Fake publication, identity, and synchronized manager exceptions.
+ * @note Both destinations preserve the same descriptor and ValueRevisionId but
+ * own distinct pending fences. Swapped capabilities touch neither fence or
+ * admission; each exact capability subsequently publishes its own binding.
+ */
+TEST(DeviceResidency,
+     SameRevisionDestinationsStillRequireExactFenceCapability) {
+  std::vector<std::byte> source_bytes(4U * sizeof(float));
+  const Value source = Value::from_cpu_dense_tensor(
+      make_descriptor(), std::nullopt,
+      StridedLayout{{static_cast<std::ptrdiff_t>(sizeof(float))}, 0U},
+      std::move(source_bytes));
+  PendingDeviceValuePublication pinned =
+      make_pending_host_replica(source, MemoryDomain::HostPinned);
+  PendingDeviceValuePublication shared =
+      make_pending_host_replica(source, MemoryDomain::Shared);
+  const DeviceCompletionIdentity pinned_identity(make_seed(9U, 91U), source,
+                                                 pinned.value);
+  const DeviceCompletionIdentity shared_identity(make_seed(9U, 92U), source,
+                                                 shared.value);
+  ASSERT_EQ(pinned.value.revision_id(), source.revision_id());
+  ASSERT_EQ(shared.value.revision_id(), source.revision_id());
+  ASSERT_NE(pinned.value.producer_identity(), shared.value.producer_identity());
+
+  ResidencyManager manager;
+  manager.observe_generation(pinned_identity.seed());
+  ASSERT_NO_THROW(manager.register_transfer(pinned_identity));
+  ASSERT_NO_THROW(manager.register_transfer(shared_identity));
+  EXPECT_EQ(
+      manager.publish_ready_transfer(pinned_identity, source, pinned.value,
+                                     nullptr, shared.producer),
+      ResidencyCompletionDisposition::Rejected);
+  EXPECT_EQ(
+      manager.publish_ready_transfer(shared_identity, source, shared.value,
+                                     nullptr, pinned.producer),
+      ResidencyCompletionDisposition::Rejected);
+  EXPECT_EQ(pinned.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_EQ(shared.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_FALSE(manager
+                   .find(source.revision_id(), DeviceId(DeviceBackend::CPU),
+                         MemoryDomain::HostPinned)
+                   .has_value());
+  EXPECT_FALSE(manager
+                   .find(source.revision_id(), DeviceId(DeviceBackend::CPU),
+                         MemoryDomain::Shared)
+                   .has_value());
+
+  ASSERT_EQ(
+      manager.publish_ready_transfer(pinned_identity, source, pinned.value,
+                                     nullptr, pinned.producer),
+      ResidencyCompletionDisposition::Published);
+  ASSERT_EQ(
+      manager.publish_ready_transfer(shared_identity, source, shared.value,
+                                     nullptr, shared.producer),
+      ResidencyCompletionDisposition::Published);
+  const std::optional<Value> pinned_resident =
+      manager.find(source.revision_id(), DeviceId(DeviceBackend::CPU),
+                   MemoryDomain::HostPinned);
+  const std::optional<Value> shared_resident = manager.find(
+      source.revision_id(), DeviceId(DeviceBackend::CPU), MemoryDomain::Shared);
+  ASSERT_TRUE(pinned_resident.has_value());
+  ASSERT_TRUE(shared_resident.has_value());
+  EXPECT_EQ(pinned_resident->buffer_handle().acquire_read().size(),
+            4U * sizeof(float));
+  EXPECT_EQ(shared_resident->buffer_handle().acquire_read().size(),
+            4U * sizeof(float));
+}
+
+/**
+ * @brief Proves pending source authority is also bound to its exact fence.
+ * @return Nothing; GoogleTest reports source/destination state mismatches.
+ * @throws Fake publication, identity, and synchronized manager exceptions.
+ * @note A producer from another pending source cannot be completed as part of
+ * the admitted transfer. The rightful source/destination pair remains able to
+ * publish exactly once afterward.
+ */
+TEST(DeviceResidency, MismatchedPendingSourceCapabilityCannotPublishReplica) {
+  ResidencyManager manager;
+  PendingReplicaPair admitted = make_pending_replica_pair();
+  PendingReplicaPair unrelated = make_pending_replica_pair();
+  const DeviceCompletionIdentity identity(
+      make_seed(10U, 101U), admitted.source.value, admitted.destination.value);
+  manager.observe_generation(identity.seed());
+  ASSERT_NO_THROW(manager.register_transfer(identity));
+
+  EXPECT_EQ(manager.publish_ready_transfer(
+                identity, admitted.source.value, admitted.destination.value,
+                &unrelated.source.producer, admitted.destination.producer),
+            ResidencyCompletionDisposition::Rejected);
+  EXPECT_EQ(admitted.source.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_EQ(admitted.destination.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_EQ(unrelated.source.value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_FALSE(manager
+                   .find(admitted.destination.value.revision_id(),
+                         DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned)
+                   .has_value());
+
+  ASSERT_EQ(manager.publish_ready_transfer(
+                identity, admitted.source.value, admitted.destination.value,
+                &admitted.source.producer, admitted.destination.producer),
+            ResidencyCompletionDisposition::Published);
+  EXPECT_TRUE(manager
+                  .find(admitted.destination.value.revision_id(),
+                        DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned)
+                  .has_value());
 }
 
 /**

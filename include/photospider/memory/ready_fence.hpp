@@ -442,6 +442,8 @@ class ReadyFence final {
   std::shared_ptr<State> state_;
 
   friend class FenceCompleter;
+  /** @brief Allows source-private exact producer/fence provenance checks. */
+  friend class PendingDeviceValueProducer;
   friend class ReadyFenceWaitRegistration;
   friend PendingReadyFence make_pending_ready_fence();
 };
@@ -560,6 +562,8 @@ class FenceCompleter final {
   /** @brief Shared pending state, or null after move/terminal publication. */
   std::shared_ptr<ReadyFence::State> state_;
 
+  /** @brief Allows source-private exact producer/fence provenance checks. */
+  friend class PendingDeviceValueProducer;
   friend PendingReadyFence make_pending_ready_fence();
 };
 

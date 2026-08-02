@@ -270,6 +270,21 @@ class PendingDeviceValueProducer final {
   bool valid() const noexcept;
 
   /**
+   * @brief Checks exact terminal authority for one pending fence instance.
+   *
+   * @param fence Observer whose private control state must match this
+   *        producer's active completer.
+   * @return True only while both objects retain the same non-null internal
+   *         ReadyFence state.
+   * @throws Nothing.
+   * @note This source-private check compares the shared control-state instance,
+   *       not revision, producer, allocation, or other scalar identities. The
+   *       owning physical task must externally serialize this move-only
+   *       producer, as required for every producer operation.
+   */
+  bool matches_pending_fence(const ReadyFence& fence) const noexcept;
+
+  /**
    * @brief Publishes Ready after caller-side producer/visibility retirement.
    * @return True only for the unique terminal transition.
    * @throws Nothing.

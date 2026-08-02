@@ -32,7 +32,10 @@ enum class ResidencyCompletionDisposition : std::uint32_t {
   Published = 0U,
   /** @brief A newer canonical request generation made this completion stale. */
   Stale = 1U,
-  /** @brief Identity or terminal destination facts did not match admission. */
+  /**
+   * @brief Identity, terminal facts, or exact producer capability did not
+   * match admission.
+   */
   Rejected = 2U,
 };
 
@@ -172,10 +175,16 @@ class ResidencyManager final {
    * generation either precedes this method and makes it Stale before
    * destination Ready, or follows a completed current publication. Stale
    * consumes its obsolete admission without touching either producer;
-   * Rejected leaves a different rightful admission untouched. Callers must
-   * publish typed failure or cancellation for a Stale destination. A new
-   * exact replica that exceeds the fixed resident-entry capacity causes the
-   * oldest logical revision entry to be released in the same interval.
+   * a missing or different registered identity leaves any other rightful
+   * admission untouched. After exact Value metadata validation, a
+   * producer-capability rejection preserves the current admission and both
+   * producer fences. Each supplied producer must be active and share the exact
+   * private ReadyFence control state of its corresponding pending Value;
+   * matching revision, producer, allocation, or binding scalars cannot
+   * substitute for that provenance. Callers must publish typed failure or
+   * cancellation for a Stale destination. A new exact replica that exceeds the
+   * fixed resident-entry capacity causes the oldest logical revision entry to
+   * be released in the same interval.
    */
   ResidencyCompletionDisposition publish_ready_transfer(
       const DeviceCompletionIdentity& identity, const Value& source,

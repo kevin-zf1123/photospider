@@ -185,32 +185,40 @@ ResidencyCompletionDisposition ResidencyManager::publish_ready_transfer(
   if (pending == pending_transfers_.end() || !(pending->second == identity)) {
     return ResidencyCompletionDisposition::Rejected;
   }
-  const LineageKey key = lineage_key(identity.seed());
-  const auto current = current_generations_.find(key);
-  if (current == current_generations_.end() ||
-      current->second != identity.seed().supersession_generation()) {
-    pending_transfers_.erase(pending);
-    return ResidencyCompletionDisposition::Stale;
-  }
   if (!source.valid() || source.revision_id() != identity.source_revision() ||
       source.producer_identity() != identity.source_producer() ||
       source.storage_binding() != identity.source_binding() ||
       !destination.valid() ||
       destination.revision_id() != identity.destination_revision() ||
       destination.producer_identity() != identity.destination_producer() ||
-      destination.storage_binding() != identity.destination_binding() ||
-      destination.ready_fence().poll().state() != ReadyFenceState::Pending ||
-      !destination_producer.valid()) {
+      destination.storage_binding() != identity.destination_binding()) {
     pending_transfers_.erase(pending);
     return ResidencyCompletionDisposition::Rejected;
   }
-  const ReadyFenceState source_state = source.ready_fence().poll().state();
-  if ((source_producer == nullptr && source_state != ReadyFenceState::Ready) ||
-      (source_producer != nullptr &&
-       (source_state != ReadyFenceState::Pending ||
-        !source_producer->valid()))) {
+
+  const ReadyFence source_fence = source.ready_fence();
+  const ReadyFence destination_fence = destination.ready_fence();
+  const ReadyFenceState source_state = source_fence.poll().state();
+  const ReadyFenceState destination_state = destination_fence.poll().state();
+  if (destination_state != ReadyFenceState::Pending) {
     pending_transfers_.erase(pending);
     return ResidencyCompletionDisposition::Rejected;
+  }
+  if (!destination_producer.valid() ||
+      !destination_producer.matches_pending_fence(destination_fence) ||
+      (source_producer == nullptr && source_state != ReadyFenceState::Ready) ||
+      (source_producer != nullptr &&
+       (source_state != ReadyFenceState::Pending || !source_producer->valid() ||
+        !source_producer->matches_pending_fence(source_fence)))) {
+    return ResidencyCompletionDisposition::Rejected;
+  }
+
+  const LineageKey key = lineage_key(identity.seed());
+  const auto current = current_generations_.find(key);
+  if (current == current_generations_.end() ||
+      current->second != identity.seed().supersession_generation()) {
+    pending_transfers_.erase(pending);
+    return ResidencyCompletionDisposition::Stale;
   }
 
   const StorageBinding binding = destination.storage_binding();
