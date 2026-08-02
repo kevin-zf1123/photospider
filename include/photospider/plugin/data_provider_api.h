@@ -575,7 +575,10 @@ typedef ps_data_status_v3(PS_DATA_CALL* ps_data_create_owner_fn_v3)(
  * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable callback status.
  * @throws Nothing across the pure-C ABI.
- * @note Variable-size diagnostic output uses `output` during this call.
+ * @note Variable-size diagnostic output uses `output` during this call. When
+ * the last Host owner release occurs inside another provider callback on the
+ * same thread, the Host retains this generation and invokes destroy exactly
+ * once only after the outer callback returns.
  */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_destroy_owner_fn_v3)(
     void* provider_context, void* owner, ps_data_diagnostic_v3* diagnostic,
@@ -587,7 +590,10 @@ typedef ps_data_status_v3(PS_DATA_CALL* ps_data_destroy_owner_fn_v3)(
  * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable callback status.
  * @throws Nothing across the pure-C ABI.
- * @note Variable-size diagnostic output uses `output` during this call.
+ * @note Variable-size diagnostic output uses `output` during this call. When
+ * the last Host generation release occurs inside another provider callback on
+ * the same thread, the Host retains the module lease and invokes final destroy
+ * only after the outer callback returns.
  */
 typedef ps_data_status_v3(PS_DATA_CALL* ps_data_destroy_provider_fn_v3)(
     void* provider_context, ps_data_diagnostic_v3* diagnostic,

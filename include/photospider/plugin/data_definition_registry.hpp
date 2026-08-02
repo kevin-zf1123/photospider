@@ -109,6 +109,8 @@ class DataDefinitionLease;
  * @throws Nothing for default/copy/move/assignment/destruction.
  * @note The underlying provider owner receives exactly one destroy callback
  * after the last copy releases and while the generation module remains live.
+ * A final release inside another provider callback on the same thread defers
+ * destruction to that callback's tail, after provider code has returned.
  */
 class ProviderOwner final {
  public:
@@ -220,8 +222,10 @@ class ProviderReadLease final {
  * @note Every callback copies this lease and executes outside the registry
  * lock. Each callback call first prepares move-safe owning storage, then
  * materializes its borrowed pure-C Value view at the final local address for
- * callback duration only. An invalid lease contains no provider or callback
- * authority.
+ * callback duration only. A final generation release inside another provider
+ * callback on the same thread defers provider destruction to that callback's
+ * tail while retaining the module lease. An invalid lease contains no provider
+ * or callback authority.
  */
 class DataDefinitionLease final {
  public:
@@ -372,9 +376,12 @@ class DataDefinitionLease final {
    * @throws ExtensionContractError for provider failure or invalid output.
    * @throws std::bad_alloc when Host owner state cannot allocate.
    * @note The provider destroy-owner callback runs once after the last copy.
-   *       A successfully created owner is also destroyed if Host diagnostic
-   *       validation or owner-state allocation subsequently fails. Diagnostic
-   *       bytes never outlive the synchronous Host output-copy call.
+   *       If that release occurs inside provider code on the same thread, the
+   *       Host queues no-allocation FIFO cleanup and invokes destroy only after
+   *       the outer callback returns. A successfully created owner is also
+   *       destroyed if Host diagnostic validation or owner-state allocation
+   *       subsequently fails. Diagnostic bytes never outlive the synchronous
+   *       Host output-copy call.
    */
   ProviderOwner create_owner() const;
 
@@ -469,7 +476,8 @@ class DataDefinitionRegistry final {
    * @brief Retires visible generations before destroying registry state.
    * @throws Nothing.
    * @note Outstanding leases remain safe and may outlive this object; final
-   * provider destruction occurs after their release.
+   * provider destruction occurs after their release. Retirement triggered in
+   * provider code on the same thread drains only at the outer callback tail.
    */
   ~DataDefinitionRegistry() noexcept;
 
@@ -493,7 +501,8 @@ class DataDefinitionRegistry final {
    * @param provider Permanent provider identity.
    * @return True when one active bundle entered retirement.
    * @throws Nothing.
-   * @note Existing leases/Values/owners remain safe until final release.
+   * @note Existing leases/Values/owners remain safe until final release. A
+   * same-thread final release from provider code uses callback-tail cleanup.
    */
   bool unload(ExtensionIdentity provider) noexcept;
 

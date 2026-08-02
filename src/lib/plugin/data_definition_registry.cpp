@@ -26,8 +26,155 @@ constexpr std::size_t kMaximumProviderDiagnosticBytes = 4096U;
 /** @brief Maximum copied pure property byte result. */
 constexpr std::size_t kMaximumPropertyResultBytes = 64U * 1024U;
 
-/** @brief True while one provider callback is entered on this thread. */
-thread_local bool provider_callback_active = false;
+/**
+ * @brief Intrusive queue node for one deferred provider-owned cleanup.
+ *
+ * The node is embedded in the object whose final shared owner has disappeared,
+ * so enqueueing at a provider callback tail never allocates and never borrows
+ * storage from an expired shared-pointer control block.
+ *
+ * @throws Nothing during construction and destruction.
+ * @note `destroy_object` is installed before a custom shared-pointer deleter
+ * can see this node. A queued node remains allocated until that function
+ * deletes the complete derived object.
+ */
+struct DeferredProviderCleanupNode {
+  /** @brief Non-throwing complete-object destroy operation type. */
+  using DestroyObject = void (*)(
+      DeferredProviderCleanupNode*) noexcept;  // NOLINT(readability/casting)
+
+  /** @brief Next FIFO entry, or null at the queue tail. */
+  DeferredProviderCleanupNode* next = nullptr;
+  /** @brief Exact complete-object destroy operation installed by the factory.
+   */
+  DestroyObject destroy_object = nullptr;
+};
+
+/**
+ * @brief Per-thread provider callback fence and callback-tail cleanup queue.
+ *
+ * `active` rejects recursive provider callbacks. `draining` keeps cleanup
+ * cascades iterative: final releases caused by a destroy callback or by member
+ * destruction append to the same FIFO and are handled by the outer drain.
+ *
+ * @throws Nothing during construction and destruction.
+ * @note The state is trivially destructible. Every normally or exceptionally
+ * unwound callback guard drains the queue synchronously, so normal thread exit
+ * observes an empty queue without a TLS-destructor callback phase.
+ */
+struct ProviderCallbackState final {
+  /** @brief True only while provider code is executing on this thread. */
+  bool active = false;
+  /** @brief True while this thread owns the iterative cleanup drain. */
+  bool draining = false;
+  /** @brief Oldest deferred cleanup entry. */
+  DeferredProviderCleanupNode* head = nullptr;
+  /** @brief Newest deferred cleanup entry. */
+  DeferredProviderCleanupNode* tail = nullptr;
+};
+
+/** @brief Independent callback and cleanup state for the current Host thread.
+ */
+thread_local ProviderCallbackState provider_callback_state;
+
+/**
+ * @brief Reports whether provider code is active on the current thread.
+ * @return True only between construction and destruction of one callback guard.
+ * @throws Nothing.
+ */
+bool provider_callback_is_active() noexcept {
+  return provider_callback_state.active;
+}
+
+/**
+ * @brief Appends one complete-object cleanup to the current thread's FIFO.
+ * @param node Non-null, unqueued object-embedded cleanup node.
+ * @throws Nothing.
+ * @note The caller must ensure `node` remains allocated until the FIFO invokes
+ * its installed destroy operation.
+ */
+void enqueue_provider_cleanup(DeferredProviderCleanupNode* node) noexcept {
+  node->next = nullptr;
+  if (provider_callback_state.tail == nullptr) {
+    provider_callback_state.head = node;
+  } else {
+    provider_callback_state.tail->next = node;
+  }
+  provider_callback_state.tail = node;
+}
+
+/**
+ * @brief Drains all current-thread provider cleanups in FIFO order.
+ *
+ * Each destroy operation may enter provider code and may release additional
+ * owners or generations. Such releases append to the same queue and are
+ * consumed by this iterative loop after entries that were already waiting.
+ *
+ * @throws Nothing.
+ * @note Draining is suppressed while a provider callback is active and while
+ * an outer drain already owns the queue.
+ */
+void drain_provider_cleanups() noexcept {
+  if (provider_callback_state.active || provider_callback_state.draining) {
+    return;
+  }
+  provider_callback_state.draining = true;
+  while (provider_callback_state.head != nullptr) {
+    DeferredProviderCleanupNode* node = provider_callback_state.head;
+    provider_callback_state.head = node->next;
+    if (provider_callback_state.head == nullptr) {
+      provider_callback_state.tail = nullptr;
+    }
+    node->next = nullptr;
+    node->destroy_object(node);
+  }
+  provider_callback_state.draining = false;
+}
+
+/**
+ * @brief Deletes one complete deferred-cleanup object.
+ * @tparam T Complete object type derived from DeferredProviderCleanupNode.
+ * @param node Embedded base node belonging to one `T` object.
+ * @throws Nothing; `T` must provide a non-throwing destructor.
+ */
+template <typename T>
+void destroy_provider_cleanup(DeferredProviderCleanupNode* node) noexcept {
+  delete static_cast<T*>(node);
+}
+
+/**
+ * @brief Shared-pointer deleter that queues final cleanup without allocation.
+ * @tparam T Complete object type derived from DeferredProviderCleanupNode.
+ * @note Both callback-time and ordinary final releases use the FIFO. An
+ * ordinary release drains it immediately, preserving synchronous destruction.
+ */
+template <typename T>
+struct ProviderCleanupDeleter final {
+  /**
+   * @brief Queues and, when safe, synchronously drains one final object.
+   * @param object Non-null complete object allocated by the matching factory.
+   * @throws Nothing.
+   */
+  void operator()(T* object) const noexcept {
+    enqueue_provider_cleanup(object);
+    drain_provider_cleanups();
+  }
+};
+
+/**
+ * @brief Allocates one callback-tail-cleaned shared object.
+ * @tparam T Complete object type derived from DeferredProviderCleanupNode.
+ * @return Unique initial shared owner with the no-allocation final deleter.
+ * @throws std::bad_alloc when object or control-block allocation fails.
+ * @note The node destroy operation is armed before control-block construction;
+ * therefore a failed shared-pointer construction also cleans the raw object.
+ */
+template <typename T>
+std::shared_ptr<T> make_provider_cleanup_shared() {
+  T* object = new T();
+  object->destroy_object = &destroy_provider_cleanup<T>;
+  return std::shared_ptr<T>(object, ProviderCleanupDeleter<T>{});
+}
 
 /**
  * @brief Host-owned variable-size outputs for one provider callback.
@@ -72,7 +219,9 @@ ps_data_output_sink_v3 make_callback_output_sink(
  *
  * @throws std::logic_error when the same thread recursively enters a provider
  * callback.
- * @note Registry mutation checks this guard and rejects callback reentry.
+ * @note Registry mutation checks this guard and rejects callback reentry. The
+ * destructor clears callback activity before synchronously draining deferred
+ * owner/generation cleanup.
  */
 class ProviderCallbackGuard final {
  public:
@@ -81,10 +230,10 @@ class ProviderCallbackGuard final {
    * @throws std::logic_error on recursive provider callback entry.
    */
   ProviderCallbackGuard() {
-    if (provider_callback_active) {
+    if (provider_callback_state.active) {
       throw std::logic_error("Recursive data-provider callback is forbidden.");
     }
-    provider_callback_active = true;
+    provider_callback_state.active = true;
   }
 
   /** @brief Copying callback-entry state is forbidden. */
@@ -93,10 +242,14 @@ class ProviderCallbackGuard final {
   ProviderCallbackGuard& operator=(const ProviderCallbackGuard&) = delete;
 
   /**
-   * @brief Leaves the provider callback fence.
+   * @brief Leaves the provider callback fence and drains callback-tail cleanup.
    * @throws Nothing.
+   * @note An outer cleanup drain remains responsible for cascaded entries.
    */
-  ~ProviderCallbackGuard() noexcept { provider_callback_active = false; }
+  ~ProviderCallbackGuard() noexcept {
+    provider_callback_state.active = false;
+    drain_provider_cleanups();
+  }
 };
 
 /**
@@ -921,7 +1074,7 @@ void require_content_traversal_success(ContentTraversalOutcome outcome,
 /**
  * @brief Immutable copied typed definition owned by one generation.
  */
-struct DataDefinitionLease::Impl final {
+struct DataDefinitionLease::Impl final : DeferredProviderCleanupNode {
   /**
    * @brief One copied typed definition and diagnostic name.
    */
@@ -952,8 +1105,10 @@ struct DataDefinitionLease::Impl final {
   /**
    * @brief Performs one final provider destroy while module code remains live.
    * @throws Nothing; callback exceptions and malformed diagnostics are fenced.
-   * @note No registry lock is held. Member destruction releases the module
-   * only after this destructor body returns.
+   * @note The custom final deleter reaches this body only from the iterative
+   * cleanup drain, after any same-thread outer provider callback has returned.
+   * No registry lock is held. Member destruction releases the module only
+   * after this destructor body returns.
    */
   ~Impl() noexcept {
     if (api.destroy_provider == nullptr || !module_lease) {
@@ -974,9 +1129,9 @@ struct DataDefinitionLease::Impl final {
 };
 
 /**
- * @brief Exact-once provider owner implementation.
+ * @brief Exact-once provider owner implementation with callback-tail cleanup.
  */
-struct ProviderOwner::Impl final {
+struct ProviderOwner::Impl final : DeferredProviderCleanupNode {
   /** @brief Retains provider code/context until after owner destroy. */
   std::shared_ptr<const void> generation_lease;
   /** @brief Exact retained process-owner generation. */
@@ -991,6 +1146,9 @@ struct ProviderOwner::Impl final {
   /**
    * @brief Calls provider owner destroy once before generation release.
    * @throws Nothing; foreign callback failures are fenced.
+   * @note The custom final deleter reaches this body only from the iterative
+   * cleanup drain, after any same-thread outer provider callback has returned.
+   * Member destruction retains the generation through the callback.
    */
   ~Impl() noexcept {
     if (destroy == nullptr || owner == nullptr || !generation_lease) {
@@ -1539,7 +1697,7 @@ ProviderOwner DataDefinitionLease::create_owner() const {
           with_fallback(std::move(message),
                         "Data provider failed to create a nonnull owner."));
     }
-    auto state = std::make_shared<ProviderOwner::Impl>();
+    auto state = make_provider_cleanup_shared<ProviderOwner::Impl>();
     state->generation_lease = impl_;
     state->generation = impl_->generation;
     state->provider_context = impl_->api.provider_context;
@@ -1591,7 +1749,7 @@ DataDefinitionRegistry::~DataDefinitionRegistry() noexcept {
 /** @copydoc DataDefinitionRegistry::load */
 DataProviderLoadResult DataDefinitionRegistry::load(
     DataProviderCandidate candidate) {
-  if (provider_callback_active) {
+  if (provider_callback_is_active()) {
     return {DataProviderLoadStatus::InvalidCandidate,
             {},
             0U,
@@ -1656,7 +1814,7 @@ DataProviderLoadResult DataDefinitionRegistry::load(
   }
 
   CandidateGenerationCleanup candidate_cleanup(api, candidate.module_lease);
-  auto staged = std::make_shared<DataDefinitionLease::Impl>();
+  auto staged = make_provider_cleanup_shared<DataDefinitionLease::Impl>();
   staged->module_lease = std::move(candidate.module_lease);
   staged->api = api;
   candidate_cleanup.release();
@@ -1777,7 +1935,7 @@ DataProviderLoadResult DataDefinitionRegistry::load(
 
 /** @copydoc DataDefinitionRegistry::unload */
 bool DataDefinitionRegistry::unload(ExtensionIdentity provider) noexcept {
-  if (provider_callback_active || !impl_ || !provider.valid()) {
+  if (provider_callback_is_active() || !impl_ || !provider.valid()) {
     return false;
   }
   Impl::Generation retiring;

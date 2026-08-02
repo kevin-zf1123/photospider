@@ -136,6 +136,14 @@ struct SyntheticCounters final {
   std::atomic<std::uint64_t> owner_destroys{0U};
   /** @brief Number of final generation-destroy callbacks. */
   std::atomic<std::uint64_t> provider_destroys{0U};
+  /** @brief Destroy callbacks entered before an outer callback returned. */
+  std::atomic<std::uint64_t> destroy_callback_overlaps{0U};
+  /** @brief Monotonic identity source for synthetic owner tokens. */
+  std::atomic<std::uint64_t> next_owner_identity{0U};
+  /** @brief Number of exact owner identities recorded at destruction. */
+  std::atomic<std::uint64_t> owner_destroy_sequence_size{0U};
+  /** @brief Fixed no-allocation owner-destroy order observation. */
+  std::array<std::atomic<std::uint64_t>, 8U> owner_destroy_sequence{};
   /** @brief Number of module-lease destructor observations. */
   std::atomic<std::uint64_t> module_releases{0U};
   /** @brief Successful registry reads made from final destroy callbacks. */
@@ -188,6 +196,14 @@ struct SyntheticProviderState final {
   bool overflowing_content_count = false;
   /** @brief Whether the hashing pass emits fewer bytes than measurement. */
   bool short_content_hash_traversal = false;
+  /** @brief Owner handles released in order by the next scalar query. */
+  std::array<std::optional<ProviderOwner>*, 2U> owners_to_release_in_query{};
+  /** @brief Foreign generation lease released by the next scalar query. */
+  std::optional<DataDefinitionLease>* generation_to_release_in_query = nullptr;
+  /** @brief Whether a hook-bearing scalar query returns provider failure. */
+  bool fail_query_after_release = false;
+  /** @brief Owner handle released by the next owner-destroy callback. */
+  std::optional<ProviderOwner>* owner_to_release_during_destroy = nullptr;
   /** @brief Stable implementation-version bytes. */
   std::string implementation_version = "synthetic-variable-sample-field-v1";
   /** @brief Stable diagnostic definition names. */
@@ -226,6 +242,57 @@ struct SyntheticProviderState final {
           static_cast<std::uint64_t>(names[index].size())};
     }
   }
+};
+
+/** @brief Current depth of instrumented synthetic callbacks on this thread. */
+thread_local std::uint64_t synthetic_callback_depth = 0U;
+
+/**
+ * @brief Records instrumented callback nesting without allocating.
+ *
+ * @throws Nothing during construction and destruction.
+ * @note Query callbacks establish the outer depth. Owner/provider destroy
+ * callbacks additionally report any forbidden overlap with an outer callback,
+ * including a callback belonging to another synthetic provider generation.
+ */
+class SyntheticCallbackDepth final {
+ public:
+  /**
+   * @brief Enters one instrumented callback scope.
+   * @param counters Non-null shared observations for this provider generation.
+   * @param destruction Whether this is an owner/provider destroy callback.
+   * @throws Nothing.
+   */
+  SyntheticCallbackDepth(SyntheticCounters* counters,
+                         bool destruction) noexcept {
+    if (destruction && synthetic_callback_depth != 0U) {
+      counters->destroy_callback_overlaps.fetch_add(1U,
+                                                    std::memory_order_relaxed);
+    }
+    ++synthetic_callback_depth;
+  }
+
+  /** @brief Copying one callback-depth scope is forbidden. */
+  SyntheticCallbackDepth(const SyntheticCallbackDepth&) = delete;
+  /** @brief Copy assignment of callback-depth scope is forbidden. */
+  SyntheticCallbackDepth& operator=(const SyntheticCallbackDepth&) = delete;
+
+  /**
+   * @brief Leaves one instrumented callback scope.
+   * @throws Nothing.
+   */
+  ~SyntheticCallbackDepth() noexcept { --synthetic_callback_depth; }
+};
+
+/**
+ * @brief Opaque synthetic provider owner payload.
+ * @throws Nothing for aggregate construction and destruction.
+ */
+struct SyntheticOwnerToken final {
+  /** @brief Provider generation that created the token. */
+  std::uint64_t generation_tag = 0U;
+  /** @brief Monotonic identity used for FIFO destruction assertions. */
+  std::uint64_t identity = 0U;
 };
 
 /**
@@ -1567,6 +1634,136 @@ TEST(VariableSampleFieldExtensions,
 }
 
 TEST(VariableSampleFieldExtensions,
+     OwnerDestroyDrainsAtCallbackTailBeforeWorkerThreadExit) {
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(53U);
+  SyntheticProviderState* const provider_state = fixture.state;
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+  ASSERT_TRUE(load_candidate(registry, std::move(fixture)).ok());
+  SyntheticStorage storage = make_storage();
+  Value value = Value::from_provider_defined(registry, make_descriptor(),
+                                             storage.layout, storage.buffers);
+  std::optional<ProviderOwner> owner = value.create_provider_owner();
+  std::atomic<bool> query_succeeded{false};
+
+  std::thread worker([&]() {
+    provider_state->owners_to_release_in_query[0] = &owner;
+    try {
+      const PropertyQueryResult result =
+          value.query_property({kGenerationProperty});
+      query_succeeded.store(result.state == PropertyQueryState::Available &&
+                                result.unsigned_value == 53U,
+                            std::memory_order_relaxed);
+    } catch (...) {
+      query_succeeded.store(false, std::memory_order_relaxed);
+    }
+  });
+  worker.join();
+
+  EXPECT_TRUE(query_succeeded.load(std::memory_order_relaxed));
+  EXPECT_FALSE(owner.has_value());
+  EXPECT_EQ(counters->owner_destroys.load(), 1U);
+  EXPECT_EQ(counters->destroy_callback_overlaps.load(), 0U);
+  ASSERT_EQ(counters->owner_destroy_sequence_size.load(), 1U);
+  EXPECT_EQ(counters->owner_destroy_sequence[0].load(), 1U);
+}
+
+TEST(VariableSampleFieldExtensions,
+     OwnerDestroyDrainsAfterFailingProviderCallback) {
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(54U);
+  SyntheticProviderState* const provider_state = fixture.state;
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+  ASSERT_TRUE(load_candidate(registry, std::move(fixture)).ok());
+  SyntheticStorage storage = make_storage();
+  Value value = Value::from_provider_defined(registry, make_descriptor(),
+                                             storage.layout, storage.buffers);
+  std::optional<ProviderOwner> owner = value.create_provider_owner();
+  provider_state->owners_to_release_in_query[0] = &owner;
+  provider_state->fail_query_after_release = true;
+
+  const PropertyQueryResult result =
+      value.query_property({kGenerationProperty});
+  EXPECT_EQ(result.state, PropertyQueryState::InvalidDescriptor);
+  EXPECT_NE(result.diagnostic.find("failed after releasing"),
+            std::string::npos);
+  EXPECT_FALSE(owner.has_value());
+  EXPECT_EQ(counters->owner_destroys.load(), 1U);
+  EXPECT_EQ(counters->destroy_callback_overlaps.load(), 0U);
+  ASSERT_EQ(counters->owner_destroy_sequence_size.load(), 1U);
+  EXPECT_EQ(counters->owner_destroy_sequence[0].load(), 1U);
+}
+
+TEST(VariableSampleFieldExtensions,
+     ForeignGenerationDestroyDrainsAfterOuterProviderCallback) {
+  DataDefinitionRegistry query_registry;
+  SyntheticCandidate query_fixture = make_candidate(55U);
+  SyntheticProviderState* const query_state = query_fixture.state;
+  ASSERT_TRUE(load_candidate(query_registry, std::move(query_fixture)).ok());
+
+  DataDefinitionRegistry retiring_registry;
+  SyntheticCandidate retiring_fixture = make_candidate(56U);
+  const std::shared_ptr<SyntheticCounters> retiring_counters =
+      retiring_fixture.counters;
+  ASSERT_TRUE(
+      load_candidate(retiring_registry, std::move(retiring_fixture)).ok());
+  SyntheticStorage storage = make_storage();
+  DataDefinitionResolveResult resolved =
+      retiring_registry.resolve(make_descriptor(), storage.layout);
+  ASSERT_TRUE(resolved.ok()) << resolved.diagnostic;
+  std::optional<DataDefinitionLease> retiring_generation{
+      std::move(resolved.lease)};
+  ASSERT_TRUE(retiring_registry.unload(kProviderIdentity));
+  EXPECT_EQ(retiring_counters->provider_destroys.load(), 0U);
+
+  Value query_value = Value::from_provider_defined(
+      query_registry, make_descriptor(), storage.layout, storage.buffers);
+  query_state->generation_to_release_in_query = &retiring_generation;
+  const PropertyQueryResult result =
+      query_value.query_property({kGenerationProperty});
+
+  EXPECT_EQ(result.state, PropertyQueryState::Available);
+  EXPECT_EQ(result.unsigned_value, 55U);
+  EXPECT_FALSE(retiring_generation.has_value());
+  EXPECT_EQ(retiring_counters->provider_destroys.load(), 1U);
+  EXPECT_EQ(retiring_counters->module_releases.load(), 1U);
+  EXPECT_EQ(retiring_counters->destroy_callback_overlaps.load(), 0U);
+  EXPECT_LT(retiring_counters->provider_destroy_order.load(),
+            retiring_counters->module_release_order.load());
+}
+
+TEST(VariableSampleFieldExtensions,
+     CallbackTailCleanupPreservesFifoAcrossDestroyCascade) {
+  DataDefinitionRegistry registry;
+  SyntheticCandidate fixture = make_candidate(57U);
+  SyntheticProviderState* const provider_state = fixture.state;
+  const std::shared_ptr<SyntheticCounters> counters = fixture.counters;
+  ASSERT_TRUE(load_candidate(registry, std::move(fixture)).ok());
+  SyntheticStorage storage = make_storage();
+  Value value = Value::from_provider_defined(registry, make_descriptor(),
+                                             storage.layout, storage.buffers);
+  std::optional<ProviderOwner> first = value.create_provider_owner();
+  std::optional<ProviderOwner> second = value.create_provider_owner();
+  std::optional<ProviderOwner> cascading = value.create_provider_owner();
+  provider_state->owners_to_release_in_query = {&first, &second};
+  provider_state->owner_to_release_during_destroy = &cascading;
+
+  const PropertyQueryResult result =
+      value.query_property({kGenerationProperty});
+
+  EXPECT_EQ(result.state, PropertyQueryState::Available);
+  EXPECT_FALSE(first.has_value());
+  EXPECT_FALSE(second.has_value());
+  EXPECT_FALSE(cascading.has_value());
+  EXPECT_EQ(counters->owner_destroys.load(), 3U);
+  EXPECT_EQ(counters->destroy_callback_overlaps.load(), 0U);
+  ASSERT_EQ(counters->owner_destroy_sequence_size.load(), 3U);
+  EXPECT_EQ(counters->owner_destroy_sequence[0].load(), 1U);
+  EXPECT_EQ(counters->owner_destroy_sequence[1].load(), 2U);
+  EXPECT_EQ(counters->owner_destroy_sequence[2].load(), 3U);
+}
+
+TEST(VariableSampleFieldExtensions,
      ConcurrentReplacementNeverExposesMixedDefinitionGeneration) {
   DataDefinitionRegistry registry;
   SyntheticCandidate first = make_candidate(61U, kProviderIdentity, &registry);
@@ -1669,6 +1866,8 @@ namespace {
  * @param output Host-owned synchronous diagnostic/property output sink.
  * @return Stable callback status.
  * @throws Nothing across the pure-C ABI.
+ * @note Test-only release hooks run after one scalar result is populated, so
+ * callback-tail lifetime behavior is observable on success and failure.
  */
 ps_data_status_v3 PS_DATA_CALL synthetic_query(
     void* provider_context, const ps_data_value_view_v3* value,
@@ -1682,6 +1881,7 @@ ps_data_status_v3 PS_DATA_CALL synthetic_query(
     return invalid_callback(diagnostic, output,
                             "Synthetic pure query is malformed.");
   }
+  SyntheticCallbackDepth callback_depth(state->counters.get(), false);
   state->counters->query_calls.fetch_add(1U, std::memory_order_relaxed);
   DescriptorFacts facts;
   if (!parse_descriptor(value, &facts)) {
@@ -1729,6 +1929,26 @@ ps_data_status_v3 PS_DATA_CALL synthetic_query(
   } else {
     result->state = PS_DATA_PROPERTY_NOT_APPLICABLE_V3;
     result->value_kind = PS_DATA_PROPERTY_VALUE_NONE_V3;
+  }
+  const auto owners_to_release = state->owners_to_release_in_query;
+  state->owners_to_release_in_query = {};
+  std::optional<DataDefinitionLease>* const generation_to_release =
+      state->generation_to_release_in_query;
+  state->generation_to_release_in_query = nullptr;
+  const bool fail_after_release = state->fail_query_after_release;
+  state->fail_query_after_release = false;
+  for (std::optional<ProviderOwner>* owner_to_release : owners_to_release) {
+    if (owner_to_release != nullptr) {
+      owner_to_release->reset();
+    }
+  }
+  if (generation_to_release != nullptr) {
+    generation_to_release->reset();
+  }
+  if (fail_after_release) {
+    return invalid_callback(
+        diagnostic, output,
+        "Synthetic query failed after releasing callback-tail owners.");
   }
   return PS_DATA_STATUS_OK_V3;
 }
@@ -2012,7 +2232,10 @@ ps_data_status_v3 PS_DATA_CALL synthetic_create_owner(
     return invalid_callback(diagnostic, output,
                             "Synthetic owner output is malformed.");
   }
-  auto* token = new (std::nothrow) std::uint64_t{state->generation_tag};
+  auto* token = new (std::nothrow) SyntheticOwnerToken{
+      state->generation_tag, state->counters->next_owner_identity.fetch_add(
+                                 1U, std::memory_order_relaxed) +
+                                 1U};
   if (token == nullptr) {
     return PS_DATA_STATUS_OUT_OF_MEMORY_V3;
   }
@@ -2032,6 +2255,8 @@ ps_data_status_v3 PS_DATA_CALL synthetic_create_owner(
  * @param output Host-owned synchronous diagnostic output sink.
  * @return Stable status.
  * @throws Nothing across the pure-C ABI.
+ * @note Records a fixed-capacity destroy sequence before invoking the optional
+ * test-only cascading owner release hook.
  */
 ps_data_status_v3 PS_DATA_CALL synthetic_destroy_owner(
     void* provider_context, void* owner, ps_data_diagnostic_v3* diagnostic,
@@ -2042,8 +2267,23 @@ ps_data_status_v3 PS_DATA_CALL synthetic_destroy_owner(
     return invalid_callback(diagnostic, output,
                             "Synthetic owner destroy input is malformed.");
   }
-  delete static_cast<std::uint64_t*>(owner);
+  SyntheticCallbackDepth callback_depth(state->counters.get(), true);
+  auto* token = static_cast<SyntheticOwnerToken*>(owner);
+  const std::uint64_t sequence_index =
+      state->counters->owner_destroy_sequence_size.fetch_add(
+          1U, std::memory_order_relaxed);
+  if (sequence_index < state->counters->owner_destroy_sequence.size()) {
+    state->counters->owner_destroy_sequence[sequence_index].store(
+        token->identity, std::memory_order_relaxed);
+  }
+  std::optional<ProviderOwner>* const cascading_owner =
+      state->owner_to_release_during_destroy;
+  state->owner_to_release_during_destroy = nullptr;
+  delete token;
   state->counters->owner_destroys.fetch_add(1U, std::memory_order_relaxed);
+  if (cascading_owner != nullptr) {
+    cascading_owner->reset();
+  }
   return PS_DATA_STATUS_OK_V3;
 }
 
@@ -2064,6 +2304,7 @@ ps_data_status_v3 PS_DATA_CALL synthetic_destroy_provider(
     return invalid_callback(diagnostic, output,
                             "Synthetic provider destroy context missing.");
   }
+  SyntheticCallbackDepth callback_depth(state->counters.get(), true);
   state->counters->provider_destroys.fetch_add(1U, std::memory_order_relaxed);
   state->counters->provider_destroy_order.store(
       state->counters->lifetime_order.fetch_add(1U, std::memory_order_relaxed) +
