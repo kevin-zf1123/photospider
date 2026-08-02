@@ -393,8 +393,20 @@ Replacement 按永久 provider identity 执行，并原子发布一个全新完�
 可见性中移除 active generation。已有 `DataDefinitionLease`、provider-defined `Value`、带 index 的
 `ProviderReadLease`、callback staging 和 `ProviderOwner` 值会让正在退役的 callback、context、
 definition 与 module lease 保持存活。最终 owner destroy 恰好运行一次；最终 provider destroy
-在全部 generation user 之后、module lease 释放之前运行。因此，永不返回的 callback 可以无限期
-保留其 generation；V-14 不提供强制展开或进程隔离。
+在全部 generation user 之后、module lease 释放之前运行。
+
+如果最后一个 `ProviderOwner` 或 generation 引用在同一 Host 线程的任意 provider callback 内释放，
+Host 不会递归进入对应的 destroy callback。Owner/generation state 内嵌自己的 cleanup node，因此最终
+shared release 无需分配即可将它追加到 per-thread FIFO。外层 callback guard 会先清除 active-callback
+fence，再在 provider code 返回后 drain 该 FIFO；provider 返回成功、返回失败以及 Host invocation
+进行正常 C++ stack unwinding 时都遵循此规则。Destroy callback 或 cleanup member 析构所释放的 owner
+或 generation 会加入 FIFO 尾部；单次迭代式 drain 会保留已有 FIFO 顺序，并防止 cleanup callback
+递归进入。Provider callback 外的释放使用同一队列，但会同步 drain。Owner state 在整个
+`destroy_owner` 期间保留其精确 generation，generation state 在整个 `destroy_provider` 期间保留
+module lease，callback-tail 级联也不例外。正常 callback 返回会在正常 thread exit 前清空 per-thread
+queue；永不返回的 callback 仍可无限期保留其 generation。这项 Host-side lifetime 修复不会改变
+任何 v3 record layout、callback signature 或 provider responsibility。V-14 不提供强制展开或
+进程隔离。
 
 ## 数据定义 SDK Target 与链接方式
 

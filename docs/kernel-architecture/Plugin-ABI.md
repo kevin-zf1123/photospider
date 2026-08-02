@@ -526,8 +526,25 @@ visibility. Existing `DataDefinitionLease`, provider-defined `Value`, indexed
 `ProviderReadLease`, callback staging, and `ProviderOwner` values keep the
 retiring callbacks, context, definitions, and module lease alive. Final owner
 destroy runs once; final provider destroy runs after all generation users and
-before the module lease releases. A callback that never returns can therefore
-retain its generation indefinitely; V-14 provides no forced unwind or process
+before the module lease releases.
+
+If the last `ProviderOwner` or generation reference is released inside any
+provider callback on the same Host thread, the Host does not recursively enter
+the corresponding destroy callback. The owner/generation state embeds its own
+cleanup node, so final shared release appends it to a per-thread FIFO without
+allocating. The outer callback guard clears the active-callback fence and then
+drains that FIFO after provider code returns, for both provider success and
+failure and during normal C++ stack unwinding of the Host invocation. An owner
+or generation released by a destroy callback or by cleanup member destruction
+joins the FIFO tail; one iterative drain preserves existing FIFO order and
+prevents recursive cleanup callback entry. Releases outside provider callbacks
+use the same queue but drain synchronously. Owner state retains its exact
+generation throughout `destroy_owner`, and generation state retains the module
+lease throughout `destroy_provider`, including all callback-tail cascades.
+Normal callback return empties the per-thread queue before normal thread exit;
+a callback that never returns can still retain its generation indefinitely.
+This Host-side lifetime repair changes no v3 record layout, callback signature,
+or provider responsibility. V-14 provides no forced unwind or process
 isolation.
 
 ## Data-Definition SDK Target and Linkage
