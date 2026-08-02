@@ -231,7 +231,7 @@ real `photospider_kernel` aggregate, `photospider` product,
 `test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`,
 `test_variable_sample_field_extensions`, and `test_value_identity_across_dsos`
 binaries. Before installation it runs all 48 dense-image cases, all four packed
-FP4 cases, all thirteen provider-defined VariableSampleField cases, and the
+FP4 cases, all seventeen provider-defined VariableSampleField cases, and the
 dual-DSO identity case in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
@@ -283,7 +283,7 @@ completed cache to require zero executed OpenEXR package lookups and zero
 discovery keys. The driver performs the complete producer build, then builds
 the exact `test_variable_sample_field_extensions` target and runs a nonempty
 `^VariableSampleFieldExtensions\.` CTest selection with `build-smoke` excluded
-as an explicit recursion guard. The current selection contains all thirteen
+as an explicit recursion guard. The current selection contains all seventeen
 V-14 cases.
 
 After installation, that smoke inventories the neutral public header, package
@@ -1287,7 +1287,7 @@ verify:
   drift rejection, plus `GraphErrc::ComputeError` when execute returns a valid
   Value whose descriptor disagrees with inference.
 
-`test_region_contracts` owns 28 durable Region cases for canonical
+`test_region_contracts` owns 31 durable Region cases for canonical
 Empty/Whole, keys, intervals, normalization, rank-general TensorSlice,
 overflow-safe clipping/algebra, representable one-axis and Tensor-axis unions,
 nonrepresentable multi-axis union rejection, explicit budgets, typed failures,
@@ -1308,7 +1308,7 @@ zero or non-divisible blocks, nonfinite/nonpositive scales, bad layout version/
 alignment/overlap/size, quantized Strided publication, and oversized blocked
 transfer aliases.
 
-`test_variable_sample_field_extensions` owns thirteen standard-library-only V-14
+`test_variable_sample_field_extensions` owns seventeen standard-library-only V-14
 integration cases. A synthetic pure-C definition suite publishes versioned
 VariableSampleField Schema, Facet, and Layout records with three physical
 buffers. The cases verify typed namespaces, candidate conflicts and malformed
@@ -1329,7 +1329,11 @@ wrong nonzero, wrong zero, and `uint64_t` product overflow; and concurrent
 replacement without mixed-generation resolution. Concurrent readers sample
 callback-local properties from their own output states, and retained old Values
 query the same property after replacement to cover thread/generation lifetime
-boundaries.
+boundaries. Four callback-tail cases additionally require owner destruction to
+drain after a successful outer callback but before its worker exits, after a
+failing provider callback, and after a foreign-generation destroy request;
+they also preserve FIFO owner-destroy order across a cascading cleanup before
+module release.
 
 The callback-view case is the structural input-lifetime regression. It enters
 validation, property, DataSpec, Region, and content callbacks through one
@@ -1375,7 +1379,7 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `DependencyDisabledInstallSmoke` builds and runs all 48 dense cases plus all
-four packed FP4 and thirteen V-14 extension cases in an actual
+four packed FP4 and seventeen V-14 extension cases in an actual
 OpenCV/YAML/OpenEXR-discovery-disabled
 product before proving the installed consumers.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
@@ -1451,13 +1455,16 @@ inventory is the union of that derived set and
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
 `KernelLifecycleConcurrency.*` cases.
 
-At the current V-13 checkpoint, CMake registers exactly seven active GoogleTest
-targets in this profile. The focused build materializes five of them and CTest
-discovers 55 runnable focused cases. The two derived sentinels are exactly
-`test_compute_io_executor_NOT_BUILT` and
-`test_packed_fp4_dense_tensor_NOT_BUILT`; together with
+At the current V-14 checkpoint, CMake registers exactly eight active GoogleTest
+targets in this profile. The six-target focused build materializes five of
+those registered executables; its sixth target, `test_kernel_contracts`, is
+build-only and deliberately undiscovered. CTest discovers 55 runnable focused
+cases. The three derived sentinels are exactly
+`test_compute_io_executor_NOT_BUILT`,
+`test_packed_fp4_dense_tensor_NOT_BUILT`, and
+`test_variable_sample_field_extensions_NOT_BUILT`; together with
 `DependencyDisabledInstallSmoke`, the exact CTest inventory therefore contains
-58 entries. This is a verified result of the dynamic manifest and build closure,
+59 entries. This is a verified result of the dynamic manifest and build closure,
 not a target count or sentinel list maintained by the production driver.
 Derived sentinels carry no label or timeout. Disk-cache cases retain only the
 `kernel-concurrency` label and a 20-second timeout; lifecycle cases retain that

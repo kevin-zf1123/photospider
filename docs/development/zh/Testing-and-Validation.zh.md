@@ -177,7 +177,7 @@ dependency-neutral test surface，
 `test_cpu_dense_tensor_image_operation`、`test_packed_fp4_dense_tensor` 与
 `test_variable_sample_field_extensions`、`test_value_identity_across_dsos` binary。安装前，
 它会在该真实 disabled producer 中运行全部 48 个 dense-image case、全部 4 个 packed FP4 case、
-全部 13 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
+全部 17 个 provider-defined VariableSampleField case 与一个双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
 默认值，以及三类无效显式组合的精确诊断。
@@ -216,7 +216,7 @@ yaml-cpp、OpenEXR discovery、graph CLI、IPC 与仓库 operation provider 的�
 trace 与最终 cache，要求实际执行的 OpenEXR package lookup 和 discovery key 都为零。Driver
 先完成 producer 的完整 build，再构建精确的 `test_variable_sample_field_extensions` target，随后
 运行非空的 `^VariableSampleFieldExtensions\.` CTest selection，并排除 `build-smoke` 作为显式
-递归保护。当前 selection 包含全部 13 个 V-14 case。
+递归保护。当前 selection 包含全部 17 个 V-14 case。
 
 安装后，该 smoke 会盘点中立 public header、package Config/Targets 文件、build-tree native
 product 与 installed native product。它依次采用 producer 传入的 `CMAKE_NM`、child toolchain 的
@@ -1020,7 +1020,7 @@ integration binary。它的 48 个长期用例验证：
   drift rejection；execute 返回 descriptor 与 inference 不一致的合法 Value 时，仍以
   `GraphErrc::ComputeError` 拒绝。
 
-`test_region_contracts` 拥有 28 个长期 Region case，覆盖规范 Empty/Whole、key、interval、
+`test_region_contracts` 拥有 31 个长期 Region case，覆盖规范 Empty/Whole、key、interval、
 normalization、rank-general TensorSlice、overflow-safe clipping/algebra、可表示的单轴与
 Tensor-axis union、不可表示 multi-axis union rejection、显式 budget、typed failure、
 checked ImageRect/PixelRect conversion、Region propagation、route 选中的 same-key device
@@ -1036,7 +1036,7 @@ fake-device transfer、精确正式 memory-cache retention，以及在 executor�
 rank/count、zero 或 non-divisible block、nonfinite/nonpositive scale、错误 layout version/
 alignment/overlap/size、quantized Strided publication 与 oversized blocked transfer alias。
 
-`test_variable_sample_field_extensions` 拥有 13 个只使用标准库的 V-14 integration case。
+`test_variable_sample_field_extensions` 拥有 17 个只使用标准库的 V-14 integration case。
 一个合成纯 C definition suite 会发布带版本的 VariableSampleField Schema、Facet 和 Layout record，
 并使用三个 physical buffer。这些用例会验证 typed namespace、candidate conflict 与 malformed
 record rollback；在 revision minting 前拒绝通用 cross-reference 错误；provider semantic rejection；
@@ -1051,7 +1051,10 @@ lifetime；最终 provider-before-module destroy 顺序；callback-local diagnos
 site count，包括错误非零 count、错误零 count 与 `uint64_t` product overflow；以及 concurrent
 replacement 不存在 mixed-generation resolution。并发 reader 会从各自 output state 抽样
 callback-local property；保留的旧 Value 则在 replacement 后查询同一 property，以覆盖
-thread/generation lifetime boundary。
+thread/generation lifetime boundary。新增的 4 个 callback-tail case 还要求 owner destruction
+在成功的外层 callback 返回后、worker 退出前完成 drain，在失败的 provider callback 之后完成
+drain，并在 foreign-generation destroy request 之后延迟处理；同时要求 cascading cleanup 在
+module release 前保持 FIFO owner-destroy 顺序。
 
 Callback-view case 是 input 生命周期结构化回归。它通过同一个 Value 进入 validation、property、
 DataSpec、Region 与 content callback，并要求每个 Schema/Layout record、可选 Facet array、buffer
@@ -1094,7 +1097,7 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `DependencyDisabledInstallSmoke` 会在真实禁用 OpenCV/YAML/OpenEXR discovery 的 product 中构建并
-运行全部 48 个 dense 用例、全部 4 个 packed FP4 用例与 13 个 V-14 extension 用例，再证明
+运行全部 48 个 dense 用例、全部 4 个 packed FP4 用例与 17 个 V-14 extension 用例，再证明
 installed consumer；
 `StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
@@ -1152,11 +1155,13 @@ inventory 等于该推导集合与以下条目的并集：`DependencyDisabledIns
 `DiskCacheDiagnosticConcurrency.*` case，以及两个 `KernelLifecycleConcurrency.*` case。推导出的
 sentinel 不得带 label 或 timeout。
 
-在当前 V-13 checkpoint 中，CMake 在该 profile 下精确注册七个 active GoogleTest target。
-Focused build 会具现其中五个，CTest discover 出 55 个可运行 focused case；两个动态推导出的
-sentinel 精确为 `test_compute_io_executor_NOT_BUILT` 与
-`test_packed_fp4_dense_tensor_NOT_BUILT`。再加上 `DependencyDisabledInstallSmoke`，精确 CTest
-inventory 因而包含 58 项。这是 dynamic manifest 与真实 build closure 的已验证结果，不是
+在当前 V-14 checkpoint 中，CMake 在该 profile 下精确注册八个 active GoogleTest target。
+包含六个 target 的 focused build 会具现其中五个已注册 executable；第六个 target
+`test_kernel_contracts` 只参与构建，且特意不被 discover。CTest discover 出 55 个可运行
+focused case；三个动态推导出的 sentinel 精确为
+`test_compute_io_executor_NOT_BUILT`、`test_packed_fp4_dense_tensor_NOT_BUILT` 与
+`test_variable_sample_field_extensions_NOT_BUILT`。再加上 `DependencyDisabledInstallSmoke`，精确
+CTest inventory 因而包含 59 项。这是 dynamic manifest 与真实 build closure 的已验证结果，不是
 production driver 维护的 target 数量或 sentinel 名单。推导出的 sentinel 不带 label 或 timeout；
 disk-cache case 只保留 `kernel-concurrency` label 与 20 秒 timeout，lifecycle case 保留同一 label
 与 60 秒 timeout；dense-image 与 Value-runtime case 保留 30 秒 timeout，且只有后者携带
