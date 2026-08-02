@@ -42,7 +42,9 @@ struct ComputeIoExecutorLimits final {
 enum class ComputeIoAdmissionStatus : std::uint8_t {
   /** @brief Both budgets committed and a completion fact was created. */
   Accepted,
-  /** @brief Estimate or lifetime-token input was invalid. */
+  /**
+   * @brief Input was invalid or the owning I/O worker attempted re-entry.
+   */
   InvalidRequest,
   /** @brief The active task-count limit denied admission. */
   TaskLimit,
@@ -155,8 +157,9 @@ class ComputeIoTaskResult final {
  * destruction.
  *
  * @throws Nothing for default/copy/move/destruction.
- * @note `wait()` is forbidden from an `ExecutionService` CPU worker. Such
- * workers must progress through nonblocking coordination instead.
+ * @note `wait()` is forbidden from an `ExecutionService` CPU worker. The
+ * owning executor's I/O worker may copy an already terminal result but cannot
+ * wait for a nonterminal result that requires that same worker to progress.
  */
 class ComputeIoCompletion final {
  public:
@@ -191,9 +194,12 @@ class ComputeIoCompletion final {
    * @brief Waits for and copies the exact terminal result.
    * @return Succeeded, Failed, or Cancelled completion fact.
    * @throws std::logic_error for an inactive handle or when called by an
-   * `ExecutionService` CPU worker.
+   * `ExecutionService` CPU worker, or when the owning executor's I/O worker
+   * observes a nonterminal result.
    * @throws std::system_error if completion waiting fails.
-   * @note The wait grants no Graph mutation, persistence, or retry authority.
+   * @note An owning worker may copy an already published terminal result
+   * because that path requires no worker progress or condition-variable wait.
+   * The wait grants no Graph mutation, persistence, or retry authority.
    */
   ComputeIoTaskResult wait() const;
 
@@ -346,7 +352,10 @@ class ComputeIoWaitProhibitionScope final {
  * Submission atomically charges task count and planned bytes before invoking a
  * non-owning lazy factory. The resulting callback and explicit lifetime token
  * are then published to a private FIFO. One worker contains callback failures,
- * produces typed completion, and releases both charges exactly once.
+ * produces typed completion, and releases both charges exactly once. The sole
+ * worker cannot submit back into this executor, and a lazy factory cannot
+ * synchronously shut down any executor for which it is still constructing a
+ * task.
  *
  * @throws std::invalid_argument for zero limits.
  * @throws std::bad_alloc or std::system_error from state/thread construction.
@@ -386,12 +395,16 @@ class ComputeIoExecutor final {
    * @param lifetime_token Non-null Run/transaction owner retained through
    * callback settlement.
    * @param factory Non-owning factory invoked only after both budgets commit.
-   * @return Typed rejection, or Accepted with an active completion.
+   * @return Typed rejection, or Accepted with an active completion. A call
+   * from this executor's I/O worker returns inactive `InvalidRequest` before
+   * factory invocation or budget mutation.
    * @throws std::invalid_argument when an admitted factory returns empty.
    * @throws Exceptions from the factory or queue/task-state allocation after
    * exact admission rollback.
-   * @note Rejection never invokes or copies the payload produced by `factory`.
-   * The factory object itself remains caller-owned for this synchronous call.
+   * @note Shutdown rejection linearizes before I/O-worker re-entry rejection,
+   * followed by task and byte capacity checks. Every rejection avoids lazy
+   * payload construction. The factory object itself remains caller-owned for
+   * this synchronous call.
    */
   template <typename TaskFactory>
   ComputeIoSubmission try_submit(
@@ -419,9 +432,13 @@ class ComputeIoExecutor final {
   /**
    * @brief Stops admission, drains accepted work, and joins exactly once.
    * @return Nothing after every phase and both budget totals reach zero.
-   * @throws std::logic_error when called by the I/O worker itself.
+   * @throws std::logic_error when called by the I/O worker itself or from a
+   * nested lazy-factory stack that is constructing for this executor.
    * @throws std::system_error from control synchronization.
-   * @note Repeated calls after complete shutdown are idempotent.
+   * @note A rejected factory re-entry changes no shutdown flag and performs no
+   * join. External shutdown still stops admission, waits for every already
+   * charged factory to return or throw, drains accepted callbacks, and joins.
+   * Repeated calls after complete shutdown are idempotent.
    */
   void shutdown();
 
@@ -438,6 +455,8 @@ class ComputeIoExecutor final {
    * @return Typed submission result.
    * @throws Factory, state-allocation, queue-allocation, or invalid-task errors
    * after exact rollback.
+   * @note Re-entry from the owning I/O worker returns inactive
+   * `InvalidRequest` before budget mutation or factory invocation.
    */
   ComputeIoSubmission try_submit_erased(
       std::uint64_t planned_bytes,

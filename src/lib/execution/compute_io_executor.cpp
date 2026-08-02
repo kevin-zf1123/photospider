@@ -25,6 +25,93 @@ thread_local std::uint32_t g_compute_io_wait_prohibition_depth = 0U;
  */
 thread_local const ComputeIoExecutorState* g_current_io_executor = nullptr;
 
+/** @brief One node in the current thread's nested lazy-factory stack. */
+class ComputeIoFactoryInvocationScope;
+
+/** @brief Borrowed pointer to one stack-owned lazy-factory scope. */
+using ComputeIoFactoryScopePointer = const ComputeIoFactoryInvocationScope*;
+
+/**
+ * @brief Innermost active compute-I/O lazy-factory scope on this thread.
+ *
+ * @note The linked scopes are stack-owned, allocate no memory, and retain no
+ * executor. Walking the full chain distinguishes legal different-executor
+ * control from direct or indirect shutdown re-entry.
+ */
+thread_local ComputeIoFactoryScopePointer g_io_factory_scope = nullptr;
+
+/**
+ * @brief Tracks one exception-safe nested lazy-factory invocation.
+ *
+ * Each scope pushes a borrowed executor-state identity onto a thread-local
+ * linked stack. `shutdown()` can therefore reject any executor still present
+ * in an outer or inner factory frame, including `A -> B -> A` control cycles,
+ * without rejecting an unrelated executor.
+ *
+ * @throws Nothing for construction and destruction.
+ * @note Scope nodes and state identities are borrowed only for synchronous
+ * factory invocation. Destruction requires strict LIFO order.
+ */
+class ComputeIoFactoryInvocationScope final {
+ public:
+  /**
+   * @brief Pushes one executor identity onto the current factory stack.
+   * @param state Non-null borrowed state whose factory is about to run.
+   * @throws Nothing; a null state terminates as an internal invariant breach.
+   */
+  explicit ComputeIoFactoryInvocationScope(
+      const ComputeIoExecutorState* state) noexcept
+      : state_(state), previous_(g_io_factory_scope) {
+    if (state_ == nullptr) {
+      std::terminate();
+    }
+    g_io_factory_scope = this;
+  }
+
+  /**
+   * @brief Pops this exact scope and restores the outer factory identity.
+   * @throws Nothing; non-LIFO destruction terminates as an invariant breach.
+   */
+  ~ComputeIoFactoryInvocationScope() noexcept {
+    if (g_io_factory_scope != this) {
+      std::terminate();
+    }
+    g_io_factory_scope = previous_;
+  }
+
+  /** @brief Factory-scope ownership cannot be copied. */
+  ComputeIoFactoryInvocationScope(const ComputeIoFactoryInvocationScope&) =
+      delete;
+
+  /** @brief Factory-scope ownership cannot be assigned. */
+  ComputeIoFactoryInvocationScope& operator=(
+      const ComputeIoFactoryInvocationScope&) = delete;
+
+  /**
+   * @brief Searches every active factory frame on the current thread.
+   * @param state Borrowed executor identity to find.
+   * @return True when an inner or outer factory is constructing for `state`.
+   * @throws Nothing.
+   */
+  static bool current_thread_contains(
+      const ComputeIoExecutorState* state) noexcept {
+    for (const ComputeIoFactoryInvocationScope* scope = g_io_factory_scope;
+         scope != nullptr; scope = scope->previous_) {
+      if (scope->state_ == state) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+ private:
+  /** @brief Borrowed identity of the executor under construction. */
+  const ComputeIoExecutorState* state_ = nullptr;
+
+  /** @brief Borrowed outer scope, or null at the stack root. */
+  const ComputeIoFactoryInvocationScope* previous_ = nullptr;
+};
+
 /**
  * @brief Reports whether the current thread may not block on compute I/O.
  * @return True inside at least one prohibition scope.
@@ -44,6 +131,17 @@ bool compute_io_wait_prohibited() noexcept {
  * entry instead, so terminal completion handles retain none of them.
  */
 struct ComputeIoTaskState final {
+  /**
+   * @brief Creates nonterminal completion state for one owning executor.
+   * @param executor Shared executor identity observed weakly by `wait()`.
+   * @throws Nothing.
+   * @note Weak ownership prevents a retained terminal completion from keeping
+   * the process executor alive or causing address-reuse false positives.
+   */
+  explicit ComputeIoTaskState(
+      const std::shared_ptr<ComputeIoExecutorState>& executor) noexcept
+      : owning_executor(executor) {}
+
   /** @brief Internal nonterminal/terminal progress category. */
   enum class Phase : std::uint8_t {
     /** @brief Queue owns the task but worker callback has not entered. */
@@ -68,6 +166,14 @@ struct ComputeIoTaskState final {
 
   /** @brief Immutable terminal result present exactly in Terminal. */
   std::optional<ComputeIoTaskResult> result;
+
+  /**
+   * @brief Weak identity of the executor whose worker owns this completion.
+   *
+   * @note The pointer is locked only for identity comparison and never grants
+   * queue, shutdown, or budget authority.
+   */
+  std::weak_ptr<ComputeIoExecutorState> owning_executor;
 
   /**
    * @brief Publishes the one immutable terminal fact while already locked.
@@ -431,9 +537,17 @@ ComputeIoTaskResult ComputeIoCompletion::wait() const {
     throw std::logic_error("CPU compute worker cannot wait for compute I/O.");
   }
   std::unique_lock<std::mutex> lock(state_->mutex);
-  state_->completion_cv.wait(lock, [this]() {
-    return state_->phase == ComputeIoTaskState::Phase::Terminal;
-  });
+  if (state_->phase != ComputeIoTaskState::Phase::Terminal) {
+    const std::shared_ptr<ComputeIoExecutorState> owning_executor =
+        state_->owning_executor.lock();
+    if (owning_executor && g_current_io_executor == owning_executor.get()) {
+      throw std::logic_error(
+          "Compute-I/O worker cannot wait for its own executor.");
+    }
+    state_->completion_cv.wait(lock, [this]() {
+      return state_->phase == ComputeIoTaskState::Phase::Terminal;
+    });
+  }
   if (!state_->result.has_value()) {
     throw std::logic_error("Compute-I/O terminal result is missing.");
   }
@@ -514,6 +628,9 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
     if (!state->accepting) {
       return ComputeIoSubmission(ComputeIoAdmissionStatus::ShuttingDown, {});
     }
+    if (g_current_io_executor == state.get()) {
+      return ComputeIoSubmission(ComputeIoAdmissionStatus::InvalidRequest, {});
+    }
     if (state->active_tasks >= state->limits.task_limit) {
       return ComputeIoSubmission(ComputeIoAdmissionStatus::TaskLimit, {});
     }
@@ -530,12 +647,16 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
 
   ComputeIoConstructionRollback rollback(state, planned_bytes);
   std::shared_ptr<const void> retained_lifetime = lifetime_token;
-  Task task = invoke(factory_context);
+  Task task;
+  {
+    const ComputeIoFactoryInvocationScope factory_scope(state.get());
+    task = invoke(factory_context);
+  }
   if (!task) {
     throw std::invalid_argument(
         "Compute-I/O task factory returned an empty callback.");
   }
-  auto completion_state = std::make_shared<ComputeIoTaskState>();
+  auto completion_state = std::make_shared<ComputeIoTaskState>(state);
   ComputeIoCompletion completion(completion_state);
   ComputeIoQueueEntry entry{completion_state, std::move(retained_lifetime),
                             std::move(task), planned_bytes};
@@ -598,6 +719,11 @@ void ComputeIoExecutor::shutdown() {
   if (g_current_io_executor == state.get()) {
     throw std::logic_error(
         "Compute-I/O worker cannot synchronously shut down itself.");
+  }
+  if (ComputeIoFactoryInvocationScope::current_thread_contains(state.get())) {
+    throw std::logic_error(
+        "Compute-I/O task factory cannot synchronously shut down its "
+        "executor.");
   }
 
   std::lock_guard<std::mutex> shutdown_lock(state->shutdown_mutex);
