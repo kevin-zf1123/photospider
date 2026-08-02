@@ -695,7 +695,9 @@ Important current behavior:
   telemetry are current. Public cancellation control remains future.
 - [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
   defines the versioned data, binding, and Region direction. Issues #79 through
-  #90 and #117 are current. V-8 provides explicit CPU/Metal transfer,
+  #90 and #117 are current. Issue #118's implementation is delivered and
+  independently validated, pending final issue closure. V-8 provides explicit
+  CPU/Metal transfer,
   revision-preserving replicas, process-owned residency, exact stale-completion
   rejection, and pending-Value continuation without changing operation ABI v2.
   V-9 adds atomic per-device memory/scratch plans, native actual-byte
@@ -703,8 +705,10 @@ Important current behavior:
   service `ResourceLedger`. V-13 adds one packed FP4/quantized vertical. V-14
   adds the pure-C definition-suite ABI, injected typed registry,
   provider-defined multi-buffer Value, pure queries, canonical digests, and
-  generation-safe replacement/unload. The remaining provider suites, graph
-  migration, and optional OpenEXR V-15 stay future work.
+  generation-safe replacement/unload. V-15 adds the optional single-part
+  deep-scanline OpenEXR provider/codec while keeping the v3 ABI and neutral
+  package surface unchanged. The remaining provider suites, graph migration,
+  deep-tiled/multipart support, and broader import policy stay future work.
 - [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
   separates current Run, readiness, cache, Graph-document, daemon-delivery,
   and output-publication observations from the accepted durability target.

@@ -564,14 +564,17 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   fence、精确 settlement 与 source-private telemetry 已是当前行为。Public cancellation control
   仍是未来行为。
 - [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
-  定义版本化 data、binding 与 Region 方向。其中 issue #79 至 #90 和 #117 已是当前行为。V-8 提供显式
+  定义版本化 data、binding 与 Region 方向。其中 issue #79 至 #90 和 #117 已是当前行为。Issue #118
+  的实现已经交付并通过独立验证，正等待 issue 最终关闭。V-8 提供显式
   CPU/Metal transfer、保留 revision 的 replica、进程级 residency、精确 stale-completion
   rejection 与 pending-Value continuation，且不改变 operation ABI v2。V-9 在唯一的 service
   `ResourceLedger` 内新增原子 per-device memory/scratch plan、native actual-byte 校准，以及
   persistent/completion 生命周期 lease。V-13 新增一条 packed FP4/quantized 垂直路径。V-14
   新增纯 C definition-suite ABI、注入式 typed registry、provider-defined multi-buffer Value、
-  pure query、canonical digest 以及 generation-safe replacement/unload。其余 provider suite、
-  graph migration 与可选 OpenEXR V-15 仍是未来工作。
+  pure query、canonical digest 以及 generation-safe replacement/unload。V-15 新增可选的
+  single-part deep-scanline OpenEXR provider/codec，同时保持 v3 ABI 与中立 package surface
+  不变。其余 provider suite、graph migration、deep-tiled/multipart 支持与更广泛 import policy
+  仍是未来工作。
 - [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
   把当前 Run、readiness、cache、Graph 文档、daemon delivery 与 output publication observation
   同已接受 durability target 分离。Issue #88 现已提供 source-private、process-owned、按
