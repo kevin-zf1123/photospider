@@ -49,6 +49,8 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_operation_runtime` | Installable shared image-buffer, DenseTensor/provider-defined Value, Region, extension-digest, and data-definition registry implementation. | It owns the sole process-wide allocation/revision minting authority plus dependency-neutral registry/Region logic, with no external package or back-link to the operation SDK. |
 | `photospider_operation_sdk` | Installable operation v2 interface SDK. | It transitively carries `operation_runtime`, so it is the sole ordinary plugin link target. |
 | `photospider_data_provider_sdk` | Installable dependency-neutral pure-C data-definition ABI v3 SDK. | It carries one C11/C++17-compatible header and no runtime, registry, loader, or optional dependency. |
+| `photospider_openexr_deep_provider` | Optional installable OpenEXR deep data-definition provider module. | It is built and exported only when enabled, links the data-provider SDK plus OpenEXR 3, and keeps OpenEXR out of neutral package surfaces. |
+| `photospider_openexr_deep_adapter` | Build-only source-private Host codec adapter. | It is a non-exported static target available only in the enabled build and links `operation_runtime` plus OpenEXR 3. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter. | It discovers and links only OpenCV `core`. |
 | `photospider_policy_sdk` | Installable dependency-neutral pure-C policy ABI v1 SDK. | It carries one C11/C++17-compatible header and no execution/runtime dependency. |
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Matches the desired static product and public Host shape while folding role-owned backend sources into one archive. |
@@ -212,10 +214,14 @@ include/photospider/data/
   value.hpp
   extension.hpp
   image_view.hpp
+  packed_dense_tensor_view.hpp
   region.hpp
 
 include/photospider/memory/
+  access_plan.hpp
+  blocked_layout.hpp
   buffer_handle.hpp
+  ready_fence.hpp
   strided_layout.hpp
 
 include/photospider/plugin/
@@ -344,6 +350,8 @@ Current target shape:
 | `photospider_operation_runtime` | Shared | Yes | Public image-buffer, DenseTensor/provider-defined Value, Region, canonical extension metadata, and injected data-definition registry implementation plus sole process-wide allocation/revision minting authority, with no external-package dependency or SDK back-link. |
 | `photospider_operation_sdk` | Interface | Yes | Operation v2 headers and transitive `operation_runtime` link. |
 | `photospider_data_provider_sdk` | Interface | Yes | One dependency-neutral pure-C ABI v3 header with C11/C++17 usage requirements and no link interface. |
+| `photospider_openexr_deep_provider` | Module | Optional | Installed/exported as `Photospider::openexr_deep_provider`; this OpenEXR deep data-definition provider DSO is available only when explicitly enabled. |
+| `photospider_openexr_deep_adapter` | Static | No | Source-private Host codec adapter for enabled OpenEXR builds; it is never installed or exported. |
 | `photospider_operation_opencv` | Static | Yes | Opt-in public OpenCV adapter with only OpenCV `core`. |
 | `photospider_policy_sdk` | Interface | Yes | One dependency-neutral pure-C ABI v1 header with C11/C++17 usage requirements. |
 | `photospider` / `libphotospider` | Static | Yes | Public static library for in-process frontends. |
@@ -417,10 +425,18 @@ CMake rules:
   `yaml-cpp` types. `${CMAKE_DL_LIBS}` adds the platform dynamic-loader library
   only where CMake requires one.
 - Package components are `embedded`, `ipc_client`, `data_provider_sdk`,
-  `operation_sdk`, `operation_runtime`, `operation_opencv`, and `policy_sdk`. Omitting
-  components uses `embedded` and preserves the dependency behavior above.
-  `data_provider_sdk`, `policy_sdk`, `operation_sdk`, and `operation_runtime` resolve no external
-  package; `operation_opencv` resolves only OpenCV `core`; an explicit required
+  `operation_sdk`, `operation_runtime`, `operation_opencv`,
+  `openexr_deep_provider`, and `policy_sdk`. Omitting components uses
+  `embedded`, preserves the dependency behavior above, and does not discover
+  OpenEXR. `data_provider_sdk`, `policy_sdk`, `operation_sdk`, and
+  `operation_runtime` resolve no external package; `operation_opencv` resolves
+  only OpenCV `core`. `openexr_deep_provider` is available only in an install
+  built with that provider and is the sole component that requests OpenEXR 3:
+  a required request uses `find_dependency(OpenEXR 3 CONFIG)`, while an
+  optional request uses `find_package(OpenEXR 3 QUIET CONFIG)` and marks the
+  component not-found when `OpenEXR::OpenEXR` is unavailable. A required
+  request from a provider-disabled install fails without attempting OpenEXR
+  discovery. An explicit required
   `ipc_client` component resolves only Threads; an optional `embedded`
   component becomes not-found when its backend dependencies are unavailable
   without invalidating a required IPC component. Unknown required components,

@@ -41,6 +41,8 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_operation_runtime` | 可安装的 shared image-buffer、DenseTensor/provider-defined Value、Region、extension-digest 与 data-definition registry 实现。 | 持有唯一的进程级 allocation/revision minting authority 以及 dependency-neutral registry/Region 逻辑；没有外部 package，也不反向链接 operation SDK。 |
 | `photospider_operation_sdk` | 可安装的 operation v2 interface SDK。 | 传递链接 `operation_runtime`，是普通插件唯一所需 link target。 |
 | `photospider_data_provider_sdk` | 可安装、dependency-neutral 的纯 C data-definition ABI v3 SDK。 | 只携带一个兼容 C11/C++17 的 header，不带 runtime、registry、loader 或可选依赖。 |
+| `photospider_openexr_deep_provider` | 可选安装的 OpenEXR deep data-definition provider module。 | 只在显式启用时构建并导出，链接 data-provider SDK 与 OpenEXR 3，并使中立 package surface 不依赖 OpenEXR。 |
+| `photospider_openexr_deep_adapter` | 仅用于构建、source-private 的 Host codec adapter。 | 只在启用配置中存在，是不导出的 static target，链接 `operation_runtime` 与 OpenEXR 3。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter。 | 只发现并链接 OpenCV `core`。 |
 | `photospider_policy_sdk` | 可安装、dependency-neutral 的纯 C policy ABI v1 SDK。 | 只携带一个兼容 C11/C++17 的 header，不带 execution/runtime dependency。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 已符合目标静态产品和 public Host 形态，同时把按角色归属的后端源码折叠进单一归档。 |
@@ -176,10 +178,14 @@ include/photospider/data/
   value.hpp
   extension.hpp
   image_view.hpp
+  packed_dense_tensor_view.hpp
   region.hpp
 
 include/photospider/memory/
+  access_plan.hpp
+  blocked_layout.hpp
   buffer_handle.hpp
+  ready_fence.hpp
   strided_layout.hpp
 
 include/photospider/plugin/
@@ -299,6 +305,8 @@ implementation owner 都不会成为 public Host 或 IPC type。
 | `photospider_operation_runtime` | Shared | 是 | Public image-buffer、DenseTensor/provider-defined Value、Region、canonical extension metadata 与注入式 data-definition registry 实现及唯一进程级 allocation/revision minting authority；无外部 package dependency，也无 SDK 反向链接。 |
 | `photospider_operation_sdk` | Interface | 是 | Operation v2 header，并传递链接 `operation_runtime`。 |
 | `photospider_data_provider_sdk` | Interface | 是 | 一个 dependency-neutral 的纯 C ABI v3 header，携带 C11/C++17 usage requirement 且没有 link interface。 |
+| `photospider_openexr_deep_provider` | Module | 可选 | 会安装并导出为 `Photospider::openexr_deep_provider`；该 OpenEXR deep data-definition provider DSO 仅在显式启用时可用。 |
+| `photospider_openexr_deep_adapter` | Static | 否 | 启用 OpenEXR 的 build 所使用的 source-private Host codec adapter；不会安装或导出。 |
 | `photospider_operation_opencv` | Static | 是 | 只使用 OpenCV `core` 的 opt-in public adapter。 |
 | `photospider_policy_sdk` | Interface | 是 | 一个 dependency-neutral 的纯 C ABI v1 header，携带 C11/C++17 usage requirement。 |
 | `photospider` / `libphotospider` | Static | 是 | 面向进程内前端的公共静态库。 |
@@ -361,9 +369,16 @@ CMake 规则：
   可以链接导出的 target，但 public Host/core 头不要求 OpenCV 或 `yaml-cpp` 类型。
   `${CMAKE_DL_LIBS}` 只在 CMake 判断目标平台需要时加入 dynamic-loader 库。
 - Package component 为 `embedded`、`ipc_client`、`data_provider_sdk`、`operation_sdk`、`operation_runtime`、
-  `operation_opencv` 与 `policy_sdk`。省略 component 时使用 `embedded`，并保留上述 dependency
-  行为。`data_provider_sdk`、`policy_sdk`、`operation_sdk` 和 `operation_runtime` 不解析外部 package；
-  `operation_opencv` 只解析 OpenCV `core`；显式 required `ipc_client` component 只解析 Threads；optional
+  `operation_opencv`、`openexr_deep_provider` 与 `policy_sdk`。省略 component 时使用
+  `embedded`，保留上述 dependency 行为，且不会发现 OpenEXR。`data_provider_sdk`、
+  `policy_sdk`、`operation_sdk` 和 `operation_runtime` 不解析外部 package；
+  `operation_opencv` 只解析 OpenCV `core`。`openexr_deep_provider` 只在安装包构建时启用该
+  provider 的情况下可用，并且是唯一会请求 OpenEXR 3 的 component：required request 使用
+  `find_dependency(OpenEXR 3 CONFIG)`；optional request 使用
+  `find_package(OpenEXR 3 QUIET CONFIG)`，并在 `OpenEXR::OpenEXR` 不可用时把该 component
+  标记为 not-found。Provider-disabled install 的 required request 会在不尝试 OpenEXR
+  discovery 的情况下失败。显式 required `ipc_client`
+  component 只解析 Threads；optional
   `embedded` 的 backend dependency 不可用时，该 component 会成为 not-found，但不会使 required
   IPC component 无效。Unknown required component 会失败；IPC-disabled install 中的 required
   IPC component 也会失败。
