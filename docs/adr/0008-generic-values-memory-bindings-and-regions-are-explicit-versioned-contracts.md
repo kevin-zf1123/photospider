@@ -60,9 +60,10 @@ Issue #78 ratified this contract. Issues #79 through #90 delivered the bounded
 V-2 through V-13 implementation and decision slices. Issue #117 implemented the
 separate synthetic `VariableSampleField` V-14 proof without an optional codec.
 Issue #118 implemented and independently validated the bounded V-15
-provider/codec slice described above. Live Issue and Project records remain the
-delivery-status authority; this ADR does not claim that PR #116 is merged or
-that parent Issue #77 is closed.
+provider/codec slice described above. These delivered slices complete the
+bounded Project 4 migration tracked by Issue #77. Live Issue and Project
+records remain the delivery-status authority; this ADR does not claim that PR
+#116 is merged.
 
 ## Context
 

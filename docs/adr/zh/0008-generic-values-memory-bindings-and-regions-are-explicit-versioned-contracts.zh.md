@@ -46,8 +46,9 @@ V-15 不新增余下 access/conversion/inference/execution suite、generic graph
 
 Issue #78 批准了本契约。Issue #79 至 #90 交付了有界的 V-2 至 V-13 实现与决策切片。
 Issue #117 已实现独立的合成 `VariableSampleField` V-14 证明，不依赖可选 codec。Issue #118
-已经实现并独立验证上述有界 V-15 provider/codec 切片。Live Issue 与 Project 记录仍是交付
-状态的权威来源；本 ADR 不声称 PR #116 已合并，也不声称父 Issue #77 已关闭。
+已经实现并独立验证上述有界 V-15 provider/codec 切片。这些已交付切片完成了 Issue #77
+所跟踪的有界 Project 4 迁移。Live Issue 与 Project 记录仍是交付状态的权威来源；本 ADR
+不声称 PR #116 已合并。
 
 ## 背景
 
