@@ -52,6 +52,8 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_operation_runtime` | Installable shared implementation of public image-buffer factories, DenseTensor and provider-defined Value contracts, Region algebra, ReadyFence, canonical extension metadata/digests, and the injected data-definition registry. It owns the sole process-wide allocation/revision minting authority used by the static Host and every Value-using DSO, with no OpenCV, yaml-cpp, Graph, policy registry, native-device SDK, or embedded-product dependency. |
 | `photospider_operation_sdk` | Installable interface target for operation v2 and dependency-neutral data/memory headers; it transitively links `operation_runtime`. |
 | `photospider_data_provider_sdk` | Installable dependency-neutral interface target carrying only the self-contained pure-C data-definition provider ABI v3 header plus C11/C++17 requirements. |
+| `photospider_openexr_deep_provider` | Optional installable MODULE provider, built only with `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON`. It implements the data-definition provider ABI v3 single-part deep-scanline OpenEXR candidate, links `data_provider_sdk` plus `OpenEXR::OpenEXR`, and exports as `Photospider::openexr_deep_provider`. |
+| `photospider_openexr_deep_adapter` | Source-private optional STATIC Host codec adapter, built with the provider option for Host composition and long-lived product tests. It links `operation_runtime` plus `OpenEXR::OpenEXR` and is neither installed nor exported. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component; it exists only with `PHOTOSPIDER_ENABLE_OPENCV=ON`. |
 | `photospider_policy_sdk` | Installable dependency-neutral interface target carrying the self-contained pure-C policy ABI header plus C11/C++17 requirements. |
 | `photospider` | Static installable backend product, archived as `libphotospider`, linked by enabled CLI and embedded Host frontends. It exports `Photospider::photospider` and remains buildable with OpenCV and YAML disabled; operation plugins register through `ps::plugin::OperationPluginRegistrar` and `register_photospider_ops_v2` instead of linking the product for registry state. |
@@ -90,7 +92,12 @@ Package boundary:
   `PhotospiderEmbeddedTargets.cmake`, and `PhotospiderConfig.cmake`. When
   OpenCV is enabled it additionally installs the operation-OpenCV archive,
   header, and `PhotospiderOpenCVTargets.cmake`; otherwise none of that surface
-  is installed or advertised. The main
+  is installed or advertised. When the OpenEXR deep provider option is enabled,
+  it additionally installs the provider module under
+  `${CMAKE_INSTALL_LIBDIR}/photospider/providers` and exports
+  `Photospider::openexr_deep_provider` through
+  `PhotospiderOpenEXRTargets.cmake`; the source-private static adapter is never
+  installed or exported. The main
   archive is `libphotospider.a` on Unix-like toolchains and `photospider.lib`
   with MSVC. The config completes dependency and required-component checks
   before importing the base export set. It imports only export sets created by
@@ -132,15 +139,20 @@ Package boundary:
   no link interface. C11 and C++17 providers receive only the installed include
   root; Host-side registry/Value consumers link `operation_runtime` separately.
 - Package components are `embedded`, `ipc_client`, `data_provider_sdk`,
-  `operation_sdk`, `operation_runtime`, `operation_opencv`, and `policy_sdk`.
-  Omitting components preserves the embedded default. `data_provider_sdk` and `policy_sdk` discover no
-  external package; `operation_sdk`/`operation_runtime` discover none;
-  `operation_opencv` discovers only OpenCV `core`; and `ipc_client` resolves
-  only Threads. If optional `operation_opencv` discovery cannot find OpenCV
+  `operation_sdk`, `operation_runtime`, `operation_opencv`,
+  `openexr_deep_provider`, and `policy_sdk`. Omitting components preserves the
+  embedded default and does not import the provider. `data_provider_sdk` and
+  `policy_sdk` discover no external package; `operation_sdk`/
+  `operation_runtime` discover none; `operation_opencv` discovers only OpenCV
+  `core`; `openexr_deep_provider` discovers only `OpenEXR::OpenEXR`; and
+  `ipc_client` resolves only Threads. If optional `operation_opencv` discovery
+  cannot find OpenCV
   `core`, the package remains found, `Photospider_operation_opencv_FOUND` is
   false, its target is not imported, and dependency-free requested targets
   remain available. Requiring that component instead makes package discovery
-  fail.
+  fail. The OpenEXR component follows the same optional/required rule: an
+  unavailable producer or optional OpenEXR lookup leaves that component false
+  and unimported, while requiring it makes package discovery fail.
 - Producer capability values are recorded in the package config, including
   `Photospider_metal_executor_enabled`. An OpenCV-disabled install reports
   `operation_opencv` unavailable without discovering OpenCV. An embedded

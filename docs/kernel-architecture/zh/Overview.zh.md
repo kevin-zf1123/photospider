@@ -45,6 +45,8 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | `photospider_operation_runtime` | 可安装的 public image-buffer factory、DenseTensor 与 provider-defined Value contract、Region algebra、ReadyFence、canonical extension metadata/digest 及注入式 data-definition registry 共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Graph、policy registry、native-device SDK 或 embedded product。 |
 | `photospider_operation_sdk` | operation v2 与 dependency-neutral data/memory header 的可安装 interface target；传递链接 `operation_runtime`。 |
 | `photospider_data_provider_sdk` | 只携带自包含纯 C data-definition provider ABI v3 头文件与 C11/C++17 requirement 的可安装、dependency-neutral interface target。 |
+| `photospider_openexr_deep_provider` | 仅在 `PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER=ON` 时构建的可选、可安装 MODULE provider。它实现 data-definition provider ABI v3 的 single-part deep-scanline OpenEXR candidate，链接 `data_provider_sdk` 与 `OpenEXR::OpenEXR`，并导出为 `Photospider::openexr_deep_provider`。 |
+| `photospider_openexr_deep_adapter` | 随 provider option 构建、供 Host composition 与长期 product test 使用的 source-private 可选 STATIC Host codec adapter。它链接 `operation_runtime` 与 `OpenEXR::OpenEXR`，既不安装也不导出。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter，只使用 OpenCV `core` component；仅在 `PHOTOSPIDER_ENABLE_OPENCV=ON` 时存在。 |
 | `photospider_policy_sdk` | 携带自包含纯 C policy ABI header 与 C11/C++17 requirement 的可安装、无依赖 interface target。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`，由已启用的 CLI 和 embedded Host 前端链接。它导出 `Photospider::photospider`，在 OpenCV 与 YAML 均禁用时仍可构建；operation plugin 通过 `ps::plugin::OperationPluginRegistrar` 和 `register_photospider_ops_v2` 注册，而不是为了 registry 状态链接该产品。 |
@@ -78,7 +80,12 @@ Package 边界：
   SDK、`include/photospider/**` 下已启用的 public-header inventory，以及基础
   `PhotospiderTargets.cmake`、`PhotospiderEmbeddedTargets.cmake` 和
   `PhotospiderConfig.cmake`。OpenCV 启用时还会安装 operation-OpenCV 归档、header 与
-  `PhotospiderOpenCVTargets.cmake`；否则不会安装或宣告这部分 surface。Unix-like 工具链中的主归档名为
+  `PhotospiderOpenCVTargets.cmake`；否则不会安装或宣告这部分 surface。OpenEXR deep provider
+  option 启用时，还会把 provider module 安装到
+  `${CMAKE_INSTALL_LIBDIR}/photospider/providers`，并通过
+  `PhotospiderOpenEXRTargets.cmake` 导出
+  `Photospider::openexr_deep_provider`；source-private static adapter 始终不安装、不导出。
+  Unix-like 工具链中的主归档名为
   `libphotospider.a`，MSVC 中为 `photospider.lib`。Config 会在导入基础 export set 前完成 dependency
   与 required-component 检查；此后只导入 producer 实际创建的 export set，并且只发现 producer
   启用的 dependency。显式选择的 component 或省略 component 时的 embedded 默认路径仍决定导入
@@ -111,13 +118,16 @@ Package 边界：
   C11 与 C++17 provider 只获得安装后的 include root；Host-side registry/Value consumer
   单独链接 `operation_runtime`。
 - Package component 包括 `embedded`、`ipc_client`、`data_provider_sdk`、`operation_sdk`、
-  `operation_runtime`、`operation_opencv` 与 `policy_sdk`。省略 component 时保留 embedded
-  默认行为。`data_provider_sdk`、`policy_sdk`、`operation_sdk` 和 `operation_runtime`
-  不发现外部 package；
-  `operation_opencv` 只发现 OpenCV `core`；`ipc_client` 只解析 Threads。如果 optional
-  `operation_opencv` discovery 找不到 OpenCV `core`，package 仍保持 found，
+  `operation_runtime`、`operation_opencv`、`openexr_deep_provider` 与 `policy_sdk`。省略
+  component 时保留 embedded 默认行为，且不导入 provider。`data_provider_sdk`、
+  `policy_sdk`、`operation_sdk` 和 `operation_runtime` 不发现外部 package；
+  `operation_opencv` 只发现 OpenCV `core`；`openexr_deep_provider` 只发现
+  `OpenEXR::OpenEXR`；`ipc_client` 只解析 Threads。如果 optional `operation_opencv`
+  discovery 找不到 OpenCV `core`，package 仍保持 found，
   `Photospider_operation_opencv_FOUND` 为 false，不导入其 target，而所请求的无依赖 target 仍然
-  可用。若将该 component 设为 required，则 package discovery 失败。
+  可用。若将该 component 设为 required，则 package discovery 失败。OpenEXR component 遵循
+  相同的 optional/required 规则：producer 不可用或 optional OpenEXR lookup 失败时，该
+  component 为 false 且不导入；required 请求则使 package discovery 失败。
 - Producer capability value 会记录在 package config 中，其中包括
   `Photospider_metal_executor_enabled`。OpenCV-disabled install 会在不发现 OpenCV 的情况下报告
   `operation_opencv` unavailable。OpenCV/YAML-disabled product 的 embedded consumer 不会发现

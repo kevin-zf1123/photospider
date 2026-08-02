@@ -321,7 +321,14 @@ Value continuations through its existing ready store. Exact completion
 identity includes Graph/revision/target/intent/generation, Run/task, source and
 destination revision, producer, and binding facts. Freshness admission,
 source/destination terminal publication, and resident insertion form one
-manager-locked transaction. A late, duplicate, or mismatched completion
+manager-locked transaction. Each source or destination producer supplied for
+that publication must also retain the exact same non-null private `ReadyFence`
+control state as its corresponding pending Value; matching revision, producer,
+allocation, binding, or other scalar facts cannot substitute for this terminal
+authority. A capability mismatch is rejected without consuming the rightful
+admission, settling either fence, inserting residency, or releasing the
+retained resource owner, so the exact admitted producer pair can retry. A late,
+duplicate, or mismatched completion
 cannot publish Ready, release dependent work, enter residency, or restore an
 older commit right; it settles the affected destination with a typed failure
 when it still owns that producer. Run settlement retains the executor and

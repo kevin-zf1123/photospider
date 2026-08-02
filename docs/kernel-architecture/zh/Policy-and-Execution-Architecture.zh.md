@@ -267,7 +267,11 @@ Metal Perlin provider 发布 pending native Value，并编码 texture-to-shared-
 经过既有 ready store。精确 completion identity 包含 Graph/revision/target/intent/generation、
 Run/task、source/destination revision、producer 与 binding fact。Freshness admission、
 source/destination terminal publication 和 resident insertion 构成一个由 manager lock 保护的
-事务。晚到、重复或 identity 不匹配的 completion 不能发布 Ready、释放 dependent work、进入
+事务。为该 publication 提供的每个 source 或 destination producer 还必须保留与对应 pending Value
+完全相同、非空的私有 `ReadyFence` control state；revision、producer、allocation、binding 或
+其他 scalar fact 即使匹配，也不能代替这项 terminal authority。Capability 不匹配会被拒绝，且不
+消费 rightful admission、不结算任一 fence、不插入 residency，也不释放被保留的 resource owner，
+因此经过精确准入的 producer pair 可以重试。晚到、重复或 identity 不匹配的 completion 不能发布 Ready、释放 dependent work、进入
 residency 或恢复旧 commit right；如果它仍拥有对应 producer，就以 typed failure 结算受影响的
 destination。Run settlement 会保留 executor 与 continuation，直至每个 pending fence callback
 都退役。V-8 不新增第二套 ready store、Graph authority、persistence path 或 device-memory
