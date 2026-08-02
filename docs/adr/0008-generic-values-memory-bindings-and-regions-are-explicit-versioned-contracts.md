@@ -3,7 +3,7 @@
 ## Status
 
 Accepted as the target contract for Project 4 generic data and heterogeneous
-execution. The source tree now implements bounded V-2 through V-14 slices:
+execution. The source tree now implements bounded V-2 through V-15 slices:
 CPU DenseTensor/ImageView values, checked BufferHandle ownership and runtime
 identity, and the public Region MVP used by dirty planning, validity, and the
 core dense operation; V-5 operation-metadata routing and the bounded V-6
@@ -44,11 +44,25 @@ SHA-256 identities, artifact-envelope round-trip, and generation-retaining
 replacement/unload. It intentionally adds no access, conversion, inference,
 execution, codec, OpenEXR, or operation-ABI-v2 replacement suite.
 
+V-15 adds the optional repository OpenEXR single-part deep-scanline
+provider/codec vertical. It maps explicitly identified, unit-sampled FP32
+channels to `VariableSampleField + ImageFacet + DeepSampleFacet`, routes each
+whole-file operation through bounded `ComputeIoExecutor`, retains registry
+generation and `Value` leases, and keeps discovery and package dependency
+behind the default-OFF component. Issue #118 implemented and independently
+validated this bounded slice. Deep tiled, multipart, mixed shallow/deep parts,
+sampled or non-FP32 channels, streaming decode/encode, broader import mapping,
+and public Host/frontend provider selection remain future work. V-15 does not
+add the remaining access/conversion/inference/execution suites, generic
+graph/cache persistence, or operation ABI v2/Host migration.
+
 Issue #78 ratified this contract. Issues #79 through #90 delivered the bounded
-V-2 through V-13 implementation and decision slices. Issue #117 implements the
+V-2 through V-13 implementation and decision slices. Issue #117 implemented the
 separate synthetic `VariableSampleField` V-14 proof without an optional codec.
-Issue #118 remains the separate V-15 optional OpenEXR Deep provider/codec
-slice; V-14 does not claim that dependency or format behavior.
+Issue #118 implemented and independently validated the bounded V-15
+provider/codec slice described above. Live Issue and Project records remain the
+delivery-status authority; this ADR does not claim that PR #116 is merged or
+that parent Issue #77 is closed.
 
 ## Context
 
@@ -651,13 +665,15 @@ frozen golden identity. The shipped ABI v3 is deliberately the definition
 suite only; the broader access/conversion/inference/execution suites in this
 target remain future generations or slices.
 
-A separate optional OpenEXR slice, tracked as V-15, initially supports only
-single-part deep-scanline read/write. It maps to
+The implemented optional OpenEXR V-15 slice supports only complete single-part
+deep-scanline read/write. It maps to
 `VariableSampleField + ImageFacet + DeepSampleFacet` and keeps OpenEXR types,
 headers, links, symbols, codec/IO, and package requirements provider-only.
-Deep tiled, multipart, and mixed shallow/deep parts remain later work. With the
-option disabled, OpenEXR is absent from the kernel, public ABI,
-dependency-disabled product, and transitive install dependencies.
+Deep tiled, multipart, mixed shallow/deep parts, sampled or non-FP32 channels,
+streaming decode/encode, broader import mapping, and public Host/frontend
+provider selection remain later work. With the option disabled, OpenEXR is
+absent from the kernel, public ABI, dependency-disabled product, and transitive
+install dependencies.
 
 ## Consequences
 

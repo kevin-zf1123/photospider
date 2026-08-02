@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-14
+已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-15
 切片：CPU DenseTensor/ImageView Value、checked BufferHandle ownership 与 runtime identity，
 以及由 dirty planning、validity 和 core dense operation 使用的 public Region MVP；V-5
 operation-metadata routing 与有界 V-6 ReadyFence、pending CPU Value 和显式 fake-device
@@ -34,9 +34,20 @@ property/DataSpec/Region 求值、canonical descriptor/content/layout SHA-256 id
 envelope round-trip，以及保留 generation 的 replacement/unload。它有意不加入 access、
 conversion、inference、execution、codec、OpenEXR 或 operation ABI v2 replacement suite。
 
+V-15 新增仓库可选的 OpenEXR single-part deep-scanline provider/codec 纵向路径。它把具有
+显式 identity、unit-sampled 的 FP32 channel 映射为
+`VariableSampleField + ImageFacet + DeepSampleFacet`，让每次完整文件操作经过有界
+`ComputeIoExecutor`，保留 registry generation 与 `Value` lease，并把 discovery 和 package
+dependency 限定在默认关闭的 component 后。Issue #118 已实现并独立验证这条有界切片。
+Deep tiled、multipart、mixed shallow/deep part、sampled 或 non-FP32 channel、streaming
+decode/encode、更宽泛的 import mapping 与公开 Host/frontend provider selection 仍属未来工作。
+V-15 不新增余下 access/conversion/inference/execution suite、generic graph/cache persistence，
+也不迁移 operation ABI v2/Host。
+
 Issue #78 批准了本契约。Issue #79 至 #90 交付了有界的 V-2 至 V-13 实现与决策切片。
-Issue #117 实现独立的合成 `VariableSampleField` V-14 证明，不依赖可选 codec。Issue #118
-仍是独立的 V-15 可选 OpenEXR Deep provider/codec 切片；V-14 不声称具备该依赖或格式行为。
+Issue #117 已实现独立的合成 `VariableSampleField` V-14 证明，不依赖可选 codec。Issue #118
+已经实现并独立验证上述有界 V-15 provider/codec 切片。Live Issue 与 Project 记录仍是交付
+状态的权威来源；本 ADR 不声称 PR #116 已合并，也不声称父 Issue #77 已关闭。
 
 ## 背景
 
@@ -536,11 +547,12 @@ Content-digest 覆盖包括超过原 64 MiB 上限的生成式 stream 及其独�
 保持既有冻结 golden identity。交付的 ABI v3 有意只包含 definition suite；本目标中更宽的
 access/conversion/inference/execution suite 仍属于未来 generation 或切片。
 
-另一个独立的可选 OpenEXR 切片跟踪为 V-15，首期只支持 single-part deep-scanline read/write。
-它映射到 `VariableSampleField + ImageFacet + DeepSampleFacet`，并让 OpenEXR type、header、
-link、symbol、codec/IO 与 package requirement 只属于 provider。Deep tiled、multipart 与混合
-shallow/deep part 仍是后续工作。关闭 option 时，kernel、public ABI、dependency-disabled
-product 与 transitive install dependency 中都不存在 OpenEXR。
+已实现的可选 OpenEXR V-15 切片只支持完整的 single-part deep-scanline read/write。它映射到
+`VariableSampleField + ImageFacet + DeepSampleFacet`，并让 OpenEXR type、header、link、
+symbol、codec/IO 与 package requirement 只属于 provider。Deep tiled、multipart、mixed
+shallow/deep part、sampled 或 non-FP32 channel、streaming decode/encode、更宽泛的 import
+mapping 与公开 Host/frontend provider selection 仍是后续工作。关闭 option 时，kernel、
+public ABI、dependency-disabled product 与 transitive install dependency 中都不存在 OpenEXR。
 
 ## 结果
 
