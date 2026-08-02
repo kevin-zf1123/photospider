@@ -575,7 +575,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   仍是未来行为。
 - [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
   定义版本化 data、binding 与 Region 方向。其中 issue #79 至 #90 和 #117 已是当前行为。Issue #118
-  的实现已经交付并通过独立验证，正等待 issue 最终关闭。V-8 提供显式
+  已完成实现并通过独立验证。V-8 提供显式
   CPU/Metal transfer、保留 revision 的 replica、进程级 residency、精确 stale-completion
   rejection 与 pending-Value continuation，且不改变 operation ABI v2。V-9 在唯一的 service
   `ResourceLedger` 内新增原子 per-device memory/scratch plan、native actual-byte 校准，以及

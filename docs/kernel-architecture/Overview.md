@@ -707,8 +707,8 @@ Important current behavior:
   telemetry are current. Public cancellation control remains future.
 - [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
   defines the versioned data, binding, and Region direction. Issues #79 through
-  #90 and #117 are current. Issue #118's implementation is delivered and
-  independently validated, pending final issue closure. V-8 provides explicit
+  #90 and #117 are current. Issue #118 is implemented and independently
+  validated. V-8 provides explicit
   CPU/Metal transfer,
   revision-preserving replicas, process-owned residency, exact stale-completion
   rejection, and pending-Value continuation without changing operation ABI v2.
