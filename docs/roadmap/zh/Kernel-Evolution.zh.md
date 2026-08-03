@@ -909,11 +909,22 @@ manifest/digest，忽略 M1 无关 storage。
 
 冻结 protocol 不声称操作系统会精确到纳秒醒来。它固定相隔 16,666,667 ns 的
 nominal monotonic start、最大 2 ms admission-start lateness、精确 750,000,000 ns
-episode origin，以及 fail-closed miss/drop/gap 处理。Logical result 使用 typed
-canonical `ContentDigest`；raw little-endian payload、canonical manifest、semantic
-trace 与 golden identity 始终彼此分离。M1 除普通 candidate/reference baseline
+episode origin，以及 fail-closed miss/drop/gap 处理。唯一 actual-admission sample
+`A_i` 会启动 latency，并通过 checked addition 得到 absolute I1 Run deadline
+`D_i=A_i+150,000,000 ns`；nominal `S_i` 与 quiescence drain 绝不会延长该 budget，
+missed 或 expired work 也不能发布。Logical result 使用 typed canonical
+`ContentDigest`；raw little-endian payload、canonical manifest、semantic trace 与
+golden identity 始终彼此分离。每个重复 M1 B1 occurrence 都携带不同的 phase/cycle/
+job identity，并贯穿 charge、admission、output commit、receipt 与 evidence；corpus
+cycle 绝不会伪装成 retry attempt。M1 除普通 candidate/reference baseline
 digest 外，还要记录不同且 same-ordinal 的 isolated-I1 与 isolated-B1-cap-8 pair
 digest。
+
+Evidence row 与 bundle 也具有封闭 ASCII length-framed manifest。固定 field order/
+type、显式 known-empty 与 N/A encoding、section/row/bundle SHA-256 domain
+separator、digest self-exclusion、canonical row list 与 external acyclic comparison/
+pair resolution，使独立 reader 可以复算每个 content address。#93 至 #96 可以新增
+各自负责的 inner collector record，但不能重新定义 v1 envelope 或 identity join。
 
 交付证据行已经冻结：
 

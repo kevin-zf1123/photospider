@@ -1126,11 +1126,25 @@ base manifest/digest and ignores M1's unrelated storage.
 The frozen protocol does not claim nanosecond-exact operating-system wakes.
 It fixes nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum admission-
 start lateness, exact 750,000,000 ns episode origins, and fail-closed
-miss/drop/gap handling. Logical results use the typed canonical
+miss/drop/gap handling. The one actual-admission sample `A_i` starts latency
+and checked-adds the absolute I1 Run deadline
+`D_i=A_i+150,000,000 ns`; nominal `S_i` and the quiescence drain never extend
+that budget, and missed or expired work cannot publish. Logical results use the
+typed canonical
 `ContentDigest`; raw little-endian payload, canonical manifest, semantic trace,
-and golden identities remain separate. M1 records distinct same-ordinal
+and golden identities remain separate. Every repeated M1 B1 occurrence carries
+a distinct phase/cycle/job identity through charge, admission, output commit,
+receipt, and evidence; corpus cycle never masquerades as retry attempt. M1
+records distinct same-ordinal
 isolated-I1 and isolated-B1-cap-8 pair digests in addition to the ordinary
 candidate/reference baseline digest.
+
+Evidence rows and bundles also have closed ASCII length-framed manifests. Their
+fixed field order/types, explicit known-empty and N/A encodings, section/row/
+bundle SHA-256 domain separators, digest self-exclusion, canonical row lists,
+and external acyclic comparison/pair resolution let an independent reader
+recompute every content address. #93 through #96 may add their assigned inner
+collector records but cannot redefine this v1 envelope or identity join.
 
 The delivery rows are fixed:
 

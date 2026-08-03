@@ -78,7 +78,7 @@ The canonical workload matrix is:
 
 | Workload | Frozen behavior |
 | --- | --- |
-| `I1-edit-storm-v1` | Uses seed zero and the twelve natural edit ordinals `1..12`. For `edit_index = edit_ordinal - 1` in `0..11`, node one's `k` is selected from `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`, and the source Region is `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`. Every Run uses `ComputeIntent::GlobalHighPrecision`, `ComputeRunQuality::Full`, Interactive QoS, weight 1, Run cap 8, a 150 ms relative monotonic deadline, and the exact `(Graph, target node four, GlobalHighPrecision)` supersession key. Only the twelfth edit (`edit_index=11`, `k=1.04`, Region `(768,512,256,256)`) must publish; it receives a 500 ms drain. |
+| `I1-edit-storm-v1` | Uses seed zero and the twelve natural edit ordinals `1..12`. For `edit_index = edit_ordinal - 1` in `0..11`, node one's `k` is selected from `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`, and the source Region is `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`. Every Run uses `ComputeIntent::GlobalHighPrecision`, `ComputeRunQuality::Full`, Interactive QoS, weight 1, Run cap 8, the checked absolute monotonic deadline `D_i=A_i+150,000,000 ns`, and the exact `(Graph, target node four, GlobalHighPrecision)` supersession key. The twelfth edit (`edit_index=11`, `k=1.04`, Region `(768,512,256,256)`) is the only required publication and must publish no later than `D_11`; a separate 500 ms quiescence drain follows the cadence. |
 | `I2-progressive-v1` | Reuses the exact I1 source, graph, seed, edit ordinals, source-space Regions, and realtime request lineage. The 512x512 preview source is a per-channel 4x4 box average of the 2048 source, rounded once to binary32 before the same four transforms; preview Region `edit_index` is `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`. The final evaluates the 2048 source. Only the twelfth edit (`edit_index=11`, preview Region `(192,128,64,64)`) has required preview and final latency results, in that order; stale output cannot publish. |
 | `B1-immutable-v1` | Contains immutable jobs `0..29`; job `n` uses source seed `n`, the baseline graph, Throughput QoS, weight 1, no deadline or supersession, exact reservation evidence, a canonical semantic trace, a crash-durable committed artifact, and job-indexed logical/raw goldens. Even jobs belong to Graph A and odd jobs to Graph B. At the measurement boundary the harness offers both ordered 15-job queues and never pauses a nonempty queue; bounded Host admission, rather than the harness, decides how many Runs are resident. Run caps 1 and 8 are separate required rows. |
 | `M1-shared-v1` | At measured time zero, starts I1 and then repeats it every 750,000,000 ns, giving exactly 40 episode starts, while cycling the exact B1 corpus with its even/odd Graph assignment, Run cap 8, and continuous offered backlog for 30 measured seconds. Both streams use one `ExecutionService`, worker set, ready store, policy binding set, and `ResourceLedger`; no hidden pool, duplicate ledger, or separate process may absorb either stream. |
@@ -89,6 +89,53 @@ time awaiting bounded admission; it does not claim that all 30 B1 Runs are
 admitted simultaneously. Within each Graph the producer offers jobs in
 ascending index order and synchronously offers the next job when the prior one
 becomes terminal. M1 starts a new `0..29` cycle without a producer-side gap.
+
+#### B1 job occurrence identity is distinct from retry identity
+
+`job_index` remains the immutable fixture and golden selector in `0..255`; it
+is not sufficient to identify one execution occurrence because M1 reuses
+`0..29` in every cycle. Every B1-bearing cold, warmup, or measured row therefore
+assigns each offered job one canonical `job-instance-v1` fixed record with
+components in this exact order:
+
+```text
+(row_workload_id:identifier,
+ replicate_ordinal:uint64,
+ phase:enum(cold|warmup|measured),
+ cycle_ordinal:uint64,
+ job_index:uint64,
+ run_cap:uint64)
+```
+
+The canonical payload is the concatenation of one `frame(component-payload)`
+per component under the fixed-record grammar below. `replicate_ordinal` is
+`1..3`; `job_index` is `0..255`; `run_cap` is the row's frozen cap. In every
+phase, `cycle_ordinal` starts at zero. It advances only after the preceding
+complete `0..29` M1 corpus in that same phase and is never used for a partial
+retry. B1 cold/warmup seed jobs and isolated measured jobs use cycle zero; M1
+jobs in every phase use the current repeated-corpus cycle. The coordinate
+`(phase,cycle_ordinal,job_index)` cannot repeat within one B1-bearing row.
+
+The logical Compute I/O task is `(job_instance_id,stage)`, where `stage` is
+`payload-stage` or `manifest-commit`; its full attempt identity is
+`(job_instance_id,stage,attempt)`. `attempt` starts at zero and changes only
+when an explicit retry/reconciliation policy reissues the same logical task
+after a terminal failure. Capacity rejection, repeated observation, or an
+idempotent duplicate `try_submit` keeps the same attempt identity and charge.
+`cycle_ordinal` must never be encoded as, inferred from, or increment
+`attempt`. Fault-free B1/M1 permits only attempt zero, one accepted admission,
+and one start per logical task.
+
+Every charge declaration, admission/status event, ledger or executor snapshot,
+start/terminal record, `OutputCommitId`, rooted no-replace output slot,
+`OutputCommitReceipt`, and row-evidence entry for B1 work binds the complete
+`job_instance_id`; task-specific records additionally bind `stage` and
+`attempt`. Different cycles may have the same fixture/golden and semantic-trace
+digests, but they have distinct commit identities, output slots, receipts, and
+evidence keys. The normalized semantic trace deliberately continues to encode
+`job_index` rather than occurrence or physical scheduling identity so exact
+determinism comparisons remain possible; the row's job-instance index binds
+each retained physical trace and trace digest to its unique occurrence.
 
 #### Edit ordinals and monotonic cadence are exact
 
@@ -108,14 +155,36 @@ baseline is materialized and settled. The nominal admission-call start for
 S_i = E + i * 16,666,667 ns,  i in 0..11
 ```
 
-The harness must not start the Host admission call before `S_i`. Its recorded
-actual start `A_i` must satisfy `S_i <= A_i <= S_i + 2,000,000 ns`; this is a
-bounded start-lateness rule, not a claim that an operating system wakes at an
-exact nanosecond. An early start, a start more than 2 ms late, an admission
-failure, a dropped edit, or a cadence-event gap invalidates the replicate. A
-missed edit is not submitted late: the harness cancels the rest of that
+The harness must not start the Host admission call before `S_i`. `A_i` is the
+single monotonic-clock sample captured immediately before the final Host
+admission invocation; it is both the latency start and the deadline anchor.
+The harness checks `S_i <= A_i <= S_i + 2,000,000 ns` before invoking Host and
+computes, with checked arithmetic, the one absolute Run deadline:
+
+```text
+D_i = A_i + 150,000,000 ns
+```
+
+Anchoring `D_i` to `S_i`, the episode origin, an earlier preparation timestamp,
+or the post-admission return time is invalid. The permitted start lateness does
+not consume the 150 ms Run budget. An overflow, early start, start more than
+2 ms late, admission failure, dropped edit, or cadence-event gap invalidates
+the replicate. A missed edit is not submitted late: before any Host call for
+that edit, the harness requests cancellation/supersession for every earlier
+generation, records its acceptance, revokes all publication permission for the
 episode, records the missed/drop/gap facts, and never catches up, backfills, or
-shifts later nominal times.
+shifts later nominal times. Already entered non-preemptible work may drain and
+is charged as waste; work starting after accepted cancellation must remain
+zero. No invalid or expired edit may publish output, receipt, or a successful
+latency sample.
+
+Expiry at `D_i` uses the same monotonic clock, requests cancellation of that
+Run, and records its acceptance. Queued work is removed, dependent re-entry is
+denied, and entered non-preemptible work drains without commit authority. A
+deadline-expired result
+cannot become current even if execution later succeeds. These rules apply to
+every isolated and M1 I1 episode, including the twelfth edit; the separate
+500 ms drain is only a quiescence observation window and never extends `D_i`.
 
 Within each cold, warmup, or measured phase, episode origins are exactly
 `E_r = E_0 + r * 750,000,000 ns`. Reset/baseline preparation must finish before
@@ -212,8 +281,8 @@ manifest length is `242 + decimal_digit_count(job)` bytes: 243 bytes for jobs
 Consequently, measured jobs `0..29` use 243 or 244 bytes, while the cold/warmup
 jobs `252..255` use 245 bytes. Each job's target durable-output owner uses the
 process-owned `ComputeIoExecutor` for two ordered tasks with stable charge
-identities `(job, payload-stage, attempt)` and
-`(job, manifest-commit, attempt)`. The payload-stage task declares
+identities `(job_instance_id,payload-stage,attempt)` and
+`(job_instance_id,manifest-commit,attempt)`. The payload-stage task declares
 `planned_bytes=67,108,864`; the manifest-commit task declares `planned_bytes`
 equal to that job's exact manifest length.
 Checked arithmetic must produce those values before every `try_submit`, and
@@ -241,7 +310,8 @@ no-replace publication, a weaker achieved class, or any transaction failure
 makes the job invalid and yields no successful crash-durable receipt.
 
 The `OutputCommitReceipt` evidence binds at least the stable `OutputCommitId`,
-rooted namespace/output slot, job index, descriptor and logical content
+rooted namespace/output slot, complete `job_instance_id`, job index, descriptor
+and logical content
 identity, committed version/generation, payload and manifest names, exact byte
 counts and raw SHA-256 values, requested and achieved durability, and the
 published manifest identity. It is returned only after all requested barriers
@@ -389,9 +459,10 @@ The only v1 `not-applicable` pairs are:
 | base `metal_resource_limits` | `configured-metal-executor-absent` |
 | environment-class `storage_environment_digest` | `row-has-no-output-commit` |
 
-No other field accepts `not-applicable`. Layer opacity, lack of a probe, or a
-remote provider boundary is not layer absence; those conditions use one of the
-four ineligible states.
+No other field in the three environment manifests accepts `not-applicable`.
+The evidence-row and bundle envelopes define their own closed optional-reference
+reasons below. Layer opacity, lack of a probe, or a remote provider boundary is
+not layer absence; those conditions use one of the four ineligible states.
 
 Every B1 or M1 row sets `storage_environment_applicability=required`. Its
 storage manifest starts with the exact header
@@ -1071,6 +1142,138 @@ verdict `invalid`. Different disposable absolute paths may compare only when
 their stable normalized fields match and both containment proofs succeed;
 equal path strings never override manifest drift.
 
+#### Evidence row and bundle bytes are closed v1 schemas
+
+Content addressing is reproducible only from canonical bytes. The evidence
+envelope therefore reuses the exact `field=<frame(...)>...\n` grammar, scalar
+lexical rules, fixed-record grammar, list framing, state/reason rules, and
+no-BOM/final-LF rules above. Row and bundle manifests do not permit JSON,
+provider-native objects, omitted fields, `null`, reordered fields, or extension
+fields. For digest formulas in this subsection only, `frame(O)` accepts any
+octet sequence `O` and uses its byte count; field-record names, metadata, and
+canonical manifests remain ASCII as specified above.
+
+An evidence row begins with the exact ASCII header
+`execution-profile-evidence-row-v1\n` and then has exactly these 15 records:
+
+| # | Field | Exact type and known value domain | Allowed N/A |
+| ---: | --- | --- | --- |
+| 1 | `workload_id` | `identifier`; one of the four frozen workload ids | No |
+| 2 | `subject_role` | `enum`: `candidate` or `reference` | No |
+| 3 | `replicate_ordinal` | `uint64`; `1..3` | No |
+| 4 | `run_cap` | `uint64`; the workload row's frozen cap | No |
+| 5 | `base_environment_digest` | `sha256`; independently recomputed | No |
+| 6 | `storage_environment_applicability` | `enum`: `required` or `not-applicable` | No |
+| 7 | `storage_environment_digest` | `sha256`; independently recomputed when required | `row-has-no-output-commit` |
+| 8 | `environment_class_digest` | `sha256`; independently recomputed | No |
+| 9 | `workload_manifest_digest` | `sha256`; section digest defined below | No |
+| 10 | `job_instance_index_digest` | `sha256`; section digest defined below | No |
+| 11 | `measurement_evidence_digest` | `sha256`; section digest defined below | No |
+| 12 | `output_evidence_digest` | `sha256`; section digest defined below | No |
+| 13 | `verdict_evidence_digest` | `sha256`; section digest defined below | No |
+| 14 | `paired_isolated_i1` | `evidence-pair-reference-v1` | `row-has-no-isolated-pair` |
+| 15 | `paired_isolated_b1_cap8` | `evidence-pair-reference-v1` | `row-has-no-isolated-pair` |
+
+The environment records repeat the exact applicable manifest digests so a row
+can be validated without an implicit machine label. I1/I2 use the exact
+storage-N/A state/reason/zero-byte payload already defined above. Both pair
+records are known only for M1; every non-M1 row encodes each as
+`not-applicable/row-has-no-isolated-pair` with a zero-byte payload. No digest
+uses an empty string as a sentinel.
+
+`evidence-pair-reference-v1` is one fixed record whose payload concatenates
+frames for `(row_digest:sha256,bundle_digest:sha256,replicate_ordinal:uint64)`
+in that order. `job-instance-list-v1` is the generic list grammar with one
+frame around each complete `job-instance-v1` payload. Items sort by phase rank
+`cold < warmup < measured`, numeric `cycle_ordinal`, numeric `job_index`, then
+the remaining complete payload bytes; duplicate complete payloads and repeated
+`(phase,cycle_ordinal,job_index)` coordinates are invalid. Its retained section
+bytes are exactly the ASCII header
+`execution-profile-job-instance-index-v1\n` followed by one field record named
+`job_instances`, state `known`, reason `none`, type
+`job-instance-list-v1`, and the canonical list payload. I1/I2 encode a known
+empty list as payload `0:`; B1/M1 encode every offered B1 occurrence, including
+cold and warmup. This index is the authoritative join from occurrence identity
+to charge, admission, output, receipt, trace, aggregate, and verdict evidence.
+
+The five section fields use these exact `(section_name,section_schema_id)`
+pairs:
+
+| Row field | `section_name` | `section_schema_id` |
+| --- | --- | --- |
+| `workload_manifest_digest` | `workload-manifest` | `execution-profile-workload-manifest-v1` |
+| `job_instance_index_digest` | `job-instance-index` | `execution-profile-job-instance-index-v1` |
+| `measurement_evidence_digest` | `measurement-evidence` | `execution-profile-measurement-evidence-v1` |
+| `output_evidence_digest` | `output-evidence` | `execution-profile-output-evidence-v1` |
+| `verdict_evidence_digest` | `verdict-evidence` | `execution-profile-verdict-evidence-v1` |
+
+For each field, the exact retained section octets, including an explicit
+known-empty collection where its versioned section schema permits one, produce:
+
+```text
+section_digest = lowerhex(SHA-256(
+  "execution-profile-evidence-section-digest-v1\n" ||
+  frame(section_name) || frame(section_schema_id) || frame(section_bytes)))
+```
+
+The row stores that value. The retained section bytes are mandatory and must
+recompute it; the digest never substitutes for the section. #93 through #96
+own the versioned inner records for their assigned collectors, but may not
+change this envelope, domain separator, section-name binding, or occurrence
+join.
+
+An evidence bundle begins with the exact ASCII header
+`execution-profile-evidence-bundle-v1\n` and then has exactly these five
+records:
+
+| # | Field | Exact type and known value domain | Allowed N/A |
+| ---: | --- | --- | --- |
+| 1 | `workload_id` | `identifier`; one of the four frozen workload ids | No |
+| 2 | `subject_role` | `enum`: `candidate` or `reference` | No |
+| 3 | `bundle_provenance_digest` | `sha256`; section digest over retained repository/build/binary/provider provenance | No |
+| 4 | `comparison_reference_bundle_digest` | `sha256`; immutable external reference for a candidate | `reference-has-no-comparison-baseline` |
+| 5 | `row_references` | `row-reference-list-v1`; nonempty canonical list | No |
+
+`bundle_provenance_digest` uses the section formula above with
+`section_name=bundle-provenance` and
+`section_schema_id=execution-profile-bundle-provenance-v1`.
+`row-reference-v1` is a fixed record with components in the exact order
+`(workload_id:identifier,run_cap:uint64,replicate_ordinal:uint64,row_digest:sha256)`.
+`row-reference-list-v1` uses the generic list grammar with one frame around
+each complete row-reference payload. It is nonempty, unique, and sorted by
+numeric run cap, numeric replicate ordinal, then the complete payload bytes;
+every item workload id must equal the enclosing bundle `workload_id`. A
+candidate encodes a known external
+`comparison_reference_bundle_digest`; a reference encodes
+`not-applicable/reference-has-no-comparison-baseline` with a zero-byte payload.
+
+Let `row_manifest_bytes` and `bundle_manifest_bytes` be the complete canonical
+bytes from header through final LF. Their content addresses are exactly:
+
+```text
+row_digest = lowerhex(SHA-256(
+  "execution-profile-evidence-row-digest-v1\n" ||
+  frame(row_manifest_bytes)))
+bundle_digest = lowerhex(SHA-256(
+  "execution-profile-evidence-bundle-digest-v1\n" ||
+  frame(bundle_manifest_bytes)))
+```
+
+In these formulas, quotation marks are notation: the bytes between them,
+including the displayed LF, are input, and the quote characters are not.
+
+The claimed `row_digest` and `bundle_digest` are stored beside their canonical
+objects and are deliberately absent from their own manifest bytes. A bundle
+contains row digests but never its own digest. A comparison reference or M1
+pair must name an already materialized external bundle, cannot name the current
+bundle, and cannot create a reference cycle. For every known pair, the named
+external bundle's canonical `row_references` must contain the named row digest
+with the required workload, cap, and replicate ordinal. These rules let an
+independent verifier recompute section, row, bundle, comparison, and pairing
+identities without trusting producer-assigned ids. A missing canonical object,
+retained section, claimed/recomputed match, list member, or acyclic external
+reference makes every dependent verdict `invalid`.
+
 Every M1 replicate ordinal `1..3` additionally records two same-subject pairs:
 `paired_isolated_i1={row_digest,bundle_digest,replicate_ordinal}` and
 `paired_isolated_b1_cap8={row_digest,bundle_digest,replicate_ordinal}`. A
@@ -1105,8 +1308,8 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 | --- | --- |
 | #93 | Implement I1 request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
 | #94 | Implement I2 on the exact I1 lineage; publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
-| #95 | Implement B1 immutable manifests, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
-| #96 | Compose the exact I1 and B1 fixtures into M1, reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish mixed latency, throughput progress, fairness, waste, and memory rows. |
+| #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
+| #96 | Compose the exact I1 and B1 fixtures into M1, assign a distinct `cycle_ordinal` to every repeated B1 corpus without treating it as retry, reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

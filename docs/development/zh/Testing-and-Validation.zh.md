@@ -1308,11 +1308,19 @@ Region `(768,512,256,256)`、preview Region `(192,128,64,64)`）。裸写“edit
 不是 v1 evidence identity。
 
 Baseline 结算后，episode 选择 monotonic origin `E`，并使用
-`S_i=E+i*16,666,667 ns`。Host admission-call start `A_i` 必须处于
-`[S_i,S_i+2,000,000 ns]`；提前启动、迟于 2 ms、miss/drop/gap 或 admission failure
-都会使 replicate 无效。Runner 不会迟到提交 missed edit、追赶、回填或移动后续
-时刻。Episode origin 精确间隔 750,000,000 ns；baseline 准备必须在每个 origin 前
-完成。M1 在 measured time zero 重启该 schedule，共精确启动 40 个 episode，并
+`S_i=E+i*16,666,667 ns`。`A_i` 是 final Host admission 前立即取得的唯一
+monotonic-clock sample；它启动 latency sample，并通过 checked addition 得到唯一
+absolute Run deadline `D_i=A_i+150,000,000 ns`。`A_i` 必须处于
+`[S_i,S_i+2,000,000 ns]`；nominal `S_i` 绝不锚定 deadline，允许的 wake lateness
+也不消耗 150 ms budget。Overflow、提前启动、迟于 2 ms、miss/drop/gap 或
+admission failure 都会使 replicate 无效。Runner 在任何迟到 Host call 前请求
+cancellation/supersession 并记录其被接受、撤销 publication，并且不会追赶、回填或
+移动后续时刻。已进入的 non-preemptible work 按 waste drain；post-cancel start
+为零，missed/expired work 不能发布 output、receipt 或 successful latency。Final
+500 ms drain 只观察 quiescence，绝不延长 `D_i`。Episode origin 精确间隔
+750,000,000 ns；
+baseline 准备必须在每个 origin 前完成。M1 在 measured time zero 重启该
+schedule，共精确启动 40 个 episode，并
 持续提供 cap-8 B1。这是可复现的 nominal monotonic time 与 lateness bound，不是
 精确 OS wake 的声称。
 
@@ -1335,10 +1343,23 @@ Host scratch、65,536 个 ready entry 与 256 MiB ready byte；Interactive headr
 边界同时提供两个有序的 15-job queue，按递增 job index 推进每个 Graph，并在 M1
 中无 producer gap 地开始新 cycle；它不会绕过正常 bound 准入全部 30 个 Run。
 
+每个 B1 occurrence 都通过 canonical `job-instance-v1`
+`(row_workload_id,replicate_ordinal,phase,cycle_ordinal,job_index,run_cap)` 建立
+index。Phase-local cycle zero 覆盖 cold/warmup 与 isolated measured B1；M1 使用
+当前 phase-local cycle，并且只在同 phase 的完整 `0..29` corpus 后增加 cycle。
+Logical I/O task 增加 stage，完整 task
+identity 再增加 `attempt`。Capacity rejection 或幂等 duplicate 保持 attempt zero
+与相同 charge；只有 terminal failure 后的显式 retry 才增加 attempt。Cycle 绝不
+表示 retry。Charge、admission/status、snapshot、start/terminal、commit id/slot、
+receipt、raw trace 与 row evidence 都必须携带完整 job-instance identity。Normalized
+semantic trace 继续按 job index 编码，并通过 row job-instance index 把其 digest join
+到每个唯一 occurrence。
+
 每个 B1 job 在所选且已指纹化的 `OutputStore` root 下的全新可丢弃目录中写入
 ADR 0010 规定的精确
 `output.rgba32le` payload 与固定顺序 `manifest.txt`。两个有序
-`ComputeIoExecutor` task 使用稳定 charge identity：payload-stage 的
+`ComputeIoExecutor` task 使用稳定
+`(job_instance_id,stage,attempt)` charge identity：payload-stage 的
 `planned_bytes=67,108,864`，manifest-commit 的 planned byte 是该 job 的精确
 `242 + decimal_digit_count(job)` manifest 长度：job `0..9` 为 243 byte，job
 `10..99` 为 244 byte，job `100..255` 为 245 byte。因此 measured job `0..29` 使用
@@ -1353,7 +1374,8 @@ ownership evidence。
 目标 `OutputStore` 请求并且必须达到 typed `crash-durable`；它结算 payload，最后
 以 no-replace 方式发布 canonical manifest，完成全部 leaf-to-root barrier，然后返回
 ADR 0009 receipt。较弱、不支持或失败的 durability 都会使结果无效。一个 B1 job
-只有在该 receipt 和 logical/raw 两种 golden check 后才贡献 throughput。每个 I2
+的 commit id、rooted no-replace slot 与 receipt 会绑定完整 job instance 及其 fixture
+job index。只有在该 receipt 和 logical/raw 两种 golden check 后才贡献 throughput。每个 I2
 第十二次 edit（`edit_index=11`）preview/final 都通过相同 Host
 binding 获取两次。已配置 Metal device 允许每个不同 preview/final revision 的
 首次 access 执行一次精确大小的 upload；第二次必须命中相同 residency。禁止
@@ -1667,14 +1689,18 @@ Issue #92 不新增当前 test binary、serializer、probe、runner、API 或 ru
    独立的 candidate `comparison_reference_bundle_digest` 语义；
 5. 保留 cold first-use，执行精确且不参与测量的 warmup，在不替换冻结环境的情况下
    重置测量 counter，然后执行精确 measured window；
-6. 在各自 owner 边界采集 raw admission、visibility、cancellation/quiescence、
+6. 在包含 B1 的 work 前分配并保留 canonical job-instance index，拒绝重复 phase/
+   cycle/job coordinate，并验证每个 charge、admission、commit、receipt 与 evidence
+   join 使用 occurrence identity 而不是 retry identity；
+7. 在各自 owner 边界采集 raw admission、visibility、cancellation/quiescence、
    start、completion、offered-demand eligibility、artifact/receipt、trace、digest、
    transfer/copy/residency 与 resource-lifetime observation；
-7. 拒绝任何必需的 telemetry cursor gap/drop，不估算缺失 observation；
-8. 使用 checked arithmetic 从 raw evidence 计算每个 replicate aggregate 与各项
+8. 拒绝任何必需的 telemetry cursor gap/drop，不估算缺失 observation；
+9. 使用 checked arithmetic 从 raw evidence 计算每个 replicate aggregate 与各项
    独立 dimension verdict；以及
-9. 封存 canonical bundle、计算其 digest，并在报告 conformance 前独立复算每个
-   aggregate/verdict。
+10. 封存精确 canonical row 与 bundle manifest，在不自引用的情况下计算其彼此不同
+    的 domain-separated digest，解析每个 external row/bundle pair，并在报告
+    conformance 前独立复算每个 section、aggregate 与 verdict。
 
 全部 duration 使用 monotonic clock。Percentile 使用 nearest rank：排序 `N` 个
 sample，并选择从一开始的 rank `ceil(p*N)`。每个 replicate 必须通过；pooling
@@ -1731,6 +1757,29 @@ completion order 不进入 canonical byte，但保留在独立 raw trace 中。
   `comparison_reference_bundle_digest`，以及每个 M1 replicate 分离的 same-subject/
   same-ordinal isolated-I1 与 isolated-B1-cap-8 row/bundle digest，其中 I1 使用
   base-only compatibility，B1 使用精确 storage-compatible pairing。
+
+Outer wire format 不是 implementation-defined。每个 row 都由精确
+`execution-profile-evidence-row-v1\n` header 与 ADR 0010 的固定 15 个 field record
+组成：workload/subject/replicate/cap、三个 environment coordinate、五个 section
+digest 与两个 pair reference。非 M1 pair field 使用
+`not-applicable/row-has-no-isolated-pair` 与 zero payload。Job-instance section 包含
+完整 occurrence record 的 canonical list；I1/I2 使用显式 known-empty `0:` list。
+每个 section digest 对字面量
+`execution-profile-evidence-section-digest-v1\n` domain、framed section name、
+schema id 与 retained exact byte 计算 hash。
+
+每个 bundle 由精确 `execution-profile-evidence-bundle-v1\n` header 与五个 record
+组成：workload id、subject role、provenance-section digest、comparison reference，
+以及 item 均使用该 workload id 的非空 canonical row-reference list。Reference
+bundle 使用
+`not-applicable/reference-has-no-comparison-baseline`；任何 optional field 都不能省略
+或使用空 digest 表示。`row_digest` 与 `bundle_digest` 对各自不同的 ADR 0010 domain
+tag 加上完整 canonical manifest byte 的一个 frame 计算 hash。Claim 存储在 object
+旁边，并排除在 hashed byte 之外。Comparison 与 M1 pair reference 必须是 external、
+pre-existing、acyclic，并在 target bundle 的 canonical row list 中解析出指定 row/
+workload/cap/replicate。Validator 会拒绝 missing retained byte、self-reference、cycle、
+unresolved membership、unknown/extra/reordered field 或任何 claimed/recomputed
+mismatch。
 
 Prose summary、未记录的“known good” build 重跑或当前 `BenchmarkResult` output
 都不是规范 reference。Raw bundle 必须足以让独立 reader 复算每个 aggregate 与

@@ -1649,12 +1649,21 @@ edit (`edit_index=11`, `k=1.04`, source Region `(768,512,256,256)`, preview
 Region `(192,128,64,64)`). A bare “edit 12” is not a v1 evidence identity.
 
 After baseline settlement, an episode chooses monotonic origin `E` and uses
-`S_i=E+i*16,666,667 ns`. Host admission-call start `A_i` must be in
-`[S_i,S_i+2,000,000 ns]`; early start, more than 2 ms lateness, missed/drop/gap,
-or admission failure invalidates the replicate. The runner does not submit a
-missed edit late, catch up, backfill, or shift later times. Episode origins are
-exactly 750,000,000 ns apart; baseline preparation must finish before each
-origin. M1 restarts this schedule at measured time zero, starts exactly 40
+`S_i=E+i*16,666,667 ns`. `A_i` is the one monotonic-clock sample immediately
+before final Host admission; it starts the latency sample and checked-adds the
+sole absolute Run deadline `D_i=A_i+150,000,000 ns`. `A_i` must be in
+`[S_i,S_i+2,000,000 ns]`; nominal `S_i` never anchors the deadline and permitted
+wake lateness never consumes the 150 ms budget. Overflow, early start, more
+than 2 ms lateness, missed/drop/gap, or admission failure invalidates the
+replicate. The runner requests cancellation/supersession and records its
+acceptance before any late Host call, revokes publication, and does not catch
+up, backfill, or shift later times. Entered non-preemptible work drains as
+waste; post-cancel starts are zero, and missed/expired work cannot publish
+output, receipt, or successful latency. The final 500 ms drain only observes
+quiescence and never extends
+`D_i`. Episode origins are exactly 750,000,000 ns apart; baseline preparation
+must finish before each origin. M1 restarts this schedule at measured time zero,
+starts exactly 40
 episodes, and keeps cap-8 B1 offered continuously. These are reproducible
 nominal monotonic times and lateness bounds, not exact OS wake claims.
 
@@ -1681,10 +1690,24 @@ admission wait. The harness offers both ordered 15-job queues at the measured
 boundary, advances each Graph in ascending job order, and begins a new M1 cycle
 without a producer gap; it does not admit all 30 Runs outside normal bounds.
 
+Every B1 occurrence is indexed by canonical `job-instance-v1`
+`(row_workload_id,replicate_ordinal,phase,cycle_ordinal,job_index,run_cap)`.
+Phase-local cycle zero covers cold/warmup and isolated measured B1; M1 uses the
+current phase-local cycle and increments it only after a complete `0..29`
+corpus in that phase. The logical I/O task
+adds stage and the full task identity adds `attempt`. Capacity rejection or an
+idempotent duplicate keeps attempt zero and the same charge; only an explicit
+retry after terminal failure increments it. Cycle is never retry. Charge,
+admission/status, snapshot, start/terminal, commit id/slot, receipt, raw trace,
+and row evidence must carry the complete job-instance identity. The normalized
+semantic trace remains job-index based and its digest is joined to each unique
+occurrence through the row job-instance index.
+
 Every B1 job writes the exact ADR 0010 `output.rgba32le` payload and fixed-order
 `manifest.txt` in a fresh disposable directory below the selected fingerprinted
 `OutputStore` root. Its two ordered
-`ComputeIoExecutor` tasks use stable charge identities: payload-stage has
+`ComputeIoExecutor` tasks use stable
+`(job_instance_id,stage,attempt)` charge identities: payload-stage has
 `planned_bytes=67,108,864`, while manifest-commit has that job's exact
 `242 + decimal_digit_count(job)` manifest length: 243 bytes for jobs `0..9`,
 244 bytes for jobs `10..99`, and 245 bytes for jobs `100..255`. Thus measured
@@ -1700,7 +1723,9 @@ they do not replace RSS or ledger/device ownership evidence.
 The target `OutputStore` requests and must achieve typed `crash-durable`; it
 settles the payload, publishes the canonical manifest no-replace and last,
 completes all leaf-to-root barriers, then returns the ADR 0009 receipt. Weaker,
-unsupported, or failed durability is invalid. A B1 job contributes throughput
+unsupported, or failed durability is invalid. The commit id, rooted no-replace
+slot, and receipt bind the complete job instance as well as its fixture job
+index. A B1 job contributes throughput
 only after that receipt and both logical/raw golden checks. Every I2
 twelfth-edit (`edit_index=11`) preview/final is
 acquired twice through the same Host binding. A configured Metal device permits
@@ -2049,16 +2074,22 @@ For each candidate or reference bundle:
 5. retain cold first use, run the exact non-measured warmup, reset measurement
    counters without replacing the frozen environment, then execute the exact
    measured window;
-6. capture raw admission, visibility, cancellation/quiescence, start,
+6. assign and retain the canonical job-instance index before B1-bearing work,
+   reject repeated phase/cycle/job coordinates, and verify that every charge,
+   admission, commit, receipt, and evidence join uses occurrence rather than
+   retry identity;
+7. capture raw admission, visibility, cancellation/quiescence, start,
    completion, offered-demand eligibility, artifact/receipt, trace, digest,
    transfer/copy/residency, and resource-lifetime observations at their owning
    boundaries;
-7. reject any required telemetry cursor gap/drop rather than estimating lost
+8. reject any required telemetry cursor gap/drop rather than estimating lost
    observations;
-8. compute every replicate aggregate and independent dimension verdict from
+9. compute every replicate aggregate and independent dimension verdict from
    raw evidence using checked arithmetic; and
-9. seal the canonical bundle, compute its digest, and independently recompute
-   every aggregate/verdict before reporting conformance.
+10. seal the exact canonical row and bundle manifests, compute their distinct
+    domain-separated digests without self-reference, resolve every external
+    row/bundle pair, and independently recompute every section, aggregate, and
+    verdict before reporting conformance.
 
 All durations use a monotonic clock. Percentiles use nearest rank: sort `N`
 samples and select one-based rank `ceil(p*N)`. Every replicate must pass; pooled
@@ -2122,6 +2153,30 @@ An `execution-profile-slo-v1` bundle contains:
   same-subject/same-ordinal isolated-I1 and isolated-B1-cap-8 row/bundle
   digests, with base-only I1 compatibility and exact storage-compatible B1
   pairing.
+
+The outer wire format is not implementation-defined. Each row is the exact
+`execution-profile-evidence-row-v1\n` header followed by the ADR 0010 fixed 15
+field records: workload/subject/replicate/cap, three environment coordinates,
+five section digests, and two pair references. Non-M1 pair fields use
+`not-applicable/row-has-no-isolated-pair` with zero payload. The job-instance
+section contains one canonical list of complete occurrence records; I1/I2 use
+an explicit known-empty `0:` list. Each section digest hashes the literal
+`execution-profile-evidence-section-digest-v1\n` domain plus framed section
+name, schema id, and retained exact bytes.
+
+Each bundle is the exact `execution-profile-evidence-bundle-v1\n` header plus
+five records: workload id, subject role, provenance-section digest, comparison
+reference, and nonempty canonical row-reference list whose items all use that
+workload id. Reference bundles use
+`not-applicable/reference-has-no-comparison-baseline`; no optional field is
+omitted or represented by an empty digest. `row_digest` and `bundle_digest`
+hash their distinct ADR 0010 domain tags plus one frame around the complete
+canonical manifest bytes. The claim is stored beside its object and excluded
+from the hashed bytes. Comparison and M1 pair references are external,
+pre-existing, acyclic, and must resolve the named row/workload/cap/replicate in
+the target bundle's canonical row list. The validator rejects missing retained
+bytes, self-reference, cycles, unresolved membership, unknown/extra/reordered
+fields, or any claimed/recomputed mismatch.
 
 A prose summary, an unrecorded rerun of a “known good” build, or current
 `BenchmarkResult` output is not a normative reference. The raw bundle must be
