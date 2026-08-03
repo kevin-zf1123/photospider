@@ -1625,7 +1625,9 @@ measurement role, but machine-dependent latency, throughput, and reference
 ratios must remain absent from ordinary CTest and default CI correctness gates.
 The runner writes only to an explicit disposable path outside the checkout or
 to release-artifact storage; generated bundles are not committed to the primary
-or personal-overlay repository.
+or personal-overlay repository. For every B1-bearing run, either destination
+must be below the selected fingerprinted `OutputStore` root or rooted namespace
+and must not bypass its proven crash-durability path.
 
 ### Frozen rows and sample windows
 
@@ -1680,7 +1682,8 @@ boundary, advances each Graph in ascending job order, and begins a new M1 cycle
 without a producer gap; it does not admit all 30 Runs outside normal bounds.
 
 Every B1 job writes the exact ADR 0010 `output.rgba32le` payload and fixed-order
-`manifest.txt` in a fresh disposable directory. Its two ordered
+`manifest.txt` in a fresh disposable directory below the selected fingerprinted
+`OutputStore` root. Its two ordered
 `ComputeIoExecutor` tasks use stable charge identities: payload-stage has
 `planned_bytes=67,108,864`, while manifest-commit has that job's exact
 `242 + decimal_digit_count(job)` manifest length: 243 bytes for jobs `0..9`,
@@ -1721,6 +1724,67 @@ Required logical values call `compute_content_digest(Value)` and require
 payload SHA-256, canonical manifest SHA-256, semantic-trace SHA-256, and the
 logical/raw golden identity remain separate evidence families.
 
+### Storage environment fingerprint
+
+The runner treats storage as measured environment for B1 and the B1 component
+of M1, not as an unrecorded output-path choice. Every B1/M1 row records
+`storage_environment_applicability=required`; I1/I2 rows record
+`not-applicable` and no storage digest because their required paths perform no
+`OutputStore` artifact commit. The row-applicable `environment-class digest`
+combines a `base_environment_digest` for the existing machine/build/provider/
+resource facts with the applicability tag and, when required, the
+`storage_environment_digest`.
+
+Before B1 warmup, the runner selects one `OutputStore` root or rooted namespace
+and records the normalized
+`execution-profile-storage-environment-v1` fingerprint:
+
+- `OutputStore` provider/backend identity and applicable generation/version;
+- backend class, local/remote locality, and volatile/nonvolatile persistence
+  class;
+- filesystem type, stable mount identity, and normalized relevant mount
+  options plus file-sync, directory-sync, atomic-no-replace, rename, barrier,
+  and copy-on-write semantics;
+- the durability capability set and typed requested/provably achieved class;
+- stable backing volume/device/storage identity and storage class, or a
+  provider-specific stable equivalent; and
+- hardware write-cache and power-loss-protection policies with explicit known,
+  unknown, or justified not-applicable state.
+
+Every required field is a typed observation whose state is `known`,
+`not-applicable`, `unknown`, `unobserved`, `unsupported`, or `unprovable`.
+`not-applicable` requires a schema-defined reason and proof that the layer is
+outside the end-to-end durability path. The complete normalized object is raw
+evidence. Its canonical version-one serialization is SHA-256 hashed as
+lowercase `storage_environment_digest`, and the runner records a separate
+compatibility-eligibility verdict with reasons. Eligibility requires all facts
+to be known or justified not applicable, the required file/directory sync,
+atomic no-replace, rename, and barrier capabilities to be proven, and requested
+and achieved durability both to be `crash-durable`. Equal unknown, unobserved,
+unsupported, or unprovable states remain incompatible even when their digests
+match.
+
+The runner also retains the selected absolute/rooted path, resolved root and
+mount identity, raw capability observations, and proof that each disposable
+job directory and retained release artifact is below the selected root. Those
+facts audit root selection but do not make a disposable absolute path the sole
+compatibility key. Remote, RAM-backed, copy-on-write, and other storage classes
+are not automatically forbidden; they can produce comparable evidence only
+when the capability path succeeds and every required comparison below has an
+eligible, exactly matching normalized fingerprint and recomputed digest.
+
+Storage compatibility means equal fingerprint schema, exact normalized-field
+equality, equal independently recomputed `storage_environment_digest`, and
+eligibility on both sides. Candidate/reference B1 replicate ordinals, B1 cap-1/
+cap-8 determinism comparisons, and M1 with its same-ordinal paired isolated B1
+cap-8 row require that compatibility. M1 and its paired isolated I1 row compare
+the exact `base_environment_digest` and existing I1 component facts only; the
+I1 row's `storage_environment_applicability=not-applicable` means unrelated M1
+storage fields cannot invalidate that latency pair. A missing or ineligible
+fingerprint, unknown or unsupported fact, field/digest mismatch, or failed
+root-containment proof makes the affected throughput, memory-reference, or
+other relative verdict `invalid`.
+
 ### Run procedure
 
 For each candidate or reference bundle:
@@ -1731,13 +1795,19 @@ For each candidate or reference bundle:
    dirty state, build/compiler/flags, OS/kernel, CPU/GPU/device inventory,
    power/thermal eligibility, provider/plugin binaries and generations,
    process workers, Run caps, all limits/headroom, fixture hashes, seeds, and
-   cache/residency preconditions;
+   cache/residency preconditions; for B1/M1 also select the `OutputStore` root,
+   capture its raw storage/capability observations, normalize the storage
+   fingerprint, and compute its eligibility and digest before warmup;
 3. require candidate and reference to have the same evidence schema, workload
-   id, environment class, limits, and fixture hashes;
+   id, row-applicable environment class, limits, and fixture hashes; B1/M1
+   comparisons require exact eligible storage compatibility, while I1/I2 do
+   not acquire an unrelated storage requirement;
 4. for M1 replicate ordinal `1..3`, pin same-subject, same-ordinal isolated I1
-   and isolated B1 cap-8 row/bundle digests; require compatible environment,
-   resources, fixtures, build/providers, and preconditions, while retaining the
-   separate candidate `comparison_reference_bundle_digest` semantics;
+   and isolated B1 cap-8 row/bundle digests; require an exact base-environment
+   match for both pairs and an exact eligible storage-environment match only
+   for the B1 pair, together with compatible resources, fixtures,
+   build/providers, and preconditions, while retaining the separate candidate
+   `comparison_reference_bundle_digest` semantics;
 5. retain cold first use, run the exact non-measured warmup, reset measurement
    counters without replacing the frozen environment, then execute the exact
    measured window;
@@ -1761,7 +1831,7 @@ samples and a median summary cannot hide a failed process.
 | Dimension | Required calculation and pass rule |
 | --- | --- |
 | Latency | I1 starts immediately before final Host admission and ends at matching current visibility. I2 twelfth-edit (`edit_index=11`) preview starts before preview admission and ends at preview visibility; final uses that same start and ends at final visibility. I1 p50/p95/p99 <=50/100/150 ms and 100% final success; I2 preview p50/p95/p99 <=50/75/100 ms and final p95/p99 <=500/1000 ms, with required `ContentDigest` matches; M1 also satisfies I1 absolute bounds and p99 <=2.0x its same-ordinal paired isolated I1. Cancelled intermediates are excluded; accepted-cancel-to-quiescence is separate. |
-| Throughput | Successful logical RGBA pixel-site transforms per second, reported as MPix-op/s; one B1 job contributes 16,777,216 site-operations only after Run success + crash-durable receipt + logical/raw golden verification. The interval ends at final golden verification. Pair candidate/reference replicate ordinals: median ratio >=0.95 and every ratio >=0.90. Each M1 one-second B1 rate uses its same-subject, same-ordinal paired isolated cap-8 B1 rate; p05 >=0.20, and a missing/zero/incompatible denominator is invalid. |
+| Throughput | Successful logical RGBA pixel-site transforms per second, reported as MPix-op/s; one B1 job contributes 16,777,216 site-operations only after Run success + crash-durable receipt + logical/raw golden verification. The interval ends at final golden verification. Pair candidate/reference replicate ordinals under one exactly compatible storage environment: median ratio >=0.95 and every ratio >=0.90. Each M1 one-second B1 rate uses its same-subject, same-ordinal, storage-compatible paired isolated cap-8 B1 rate; p05 >=0.20, and a missing/zero/incompatible denominator or storage fingerprint is invalid. |
 | Fairness | For a complete one-second window where both B1 Graphs retain unconsumed offered demand without a producer pause, `J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`, where `x` is completed `work_units + ceil(ready_bytes/4096)`. Zero total service is invalid; p05 Jain >=0.95. While both classes remain startable, at most three Interactive starts precede Throughput. M1 also has zero headroom-caused Interactive admission failures and independently passes latency/progress. |
 | Determinism | For the same B1 job index across three replicates, fresh-process restart, and Run caps 1/8, typed logical `ContentDigest`, raw payload SHA-256, canonical manifest SHA-256, `execution-profile-semantic-trace-v1` SHA-256, and job-indexed logical/raw golden mismatch counts are all zero. |
 | Waste | `discarded_started_service / all_started_service`, using `work_units + ceil(ready_bytes/4096)`. Every started callback whose result cannot commit is charged; entered non-preemptible work drains honestly. I1/I2 Interactive <=0.25 per replicate, and M1 applies that bound to Interactive service alone; work starting after accepted cancellation/supersession is exactly zero. I2 extra filesystem/codec, CPU-copy, readback, transfer, and allocation bytes are zero under its permitted first-transfer rule. Fault-free isolated/mixed B1 discarded/duplicate/retry service is zero. |
@@ -1771,8 +1841,10 @@ Each required dimension emits `pass`, `fail`, `invalid`, or a schema-defined
 `not-applicable`; there is no composite score. Missing source evidence,
 arithmetic overflow, monotonic-clock failure, cursor/drop gaps, fixture or
 environment drift, an unpinned/incompatible reference, a zero required
-denominator, or an unapproved `not-applicable` makes the affected row invalid
-and non-conformant.
+denominator, a missing/ineligible/mismatched required storage fingerprint, or
+an unapproved `not-applicable` makes the affected row invalid and
+non-conformant. Equal unknown or unobserved storage states do not establish a
+compatible environment.
 
 The semantic trace uses exactly three records per deterministic plan task:
 `ready`, `start`, and `terminal`. Records carry job/Graph, contiguous
@@ -1789,6 +1861,10 @@ excluded from the canonical bytes but retained in the separate raw trace.
 An `execution-profile-slo-v1` bundle contains:
 
 - all provenance and frozen environment values listed above;
+- row-level storage applicability; for B1/M1, the normalized storage
+  fingerprint, raw capability/root-containment observations, compatibility
+  eligibility/reasons, `storage_environment_digest`, `base_environment_digest`,
+  and recomputable `environment-class digest`;
 - workload/fixture/source/graph/payload hashes and all seeds;
 - warmup, cold, and measured counts/windows kept separately;
 - raw samples/events, offered-demand eligibility intervals, and drop/gap
@@ -1803,7 +1879,9 @@ An `execution-profile-slo-v1` bundle contains:
   verdict per required dimension; and
 - `subject_role`, the candidate's immutable
   `comparison_reference_bundle_digest`, and for every M1 replicate the separate
-  same-subject/same-ordinal isolated-I1 and isolated-B1-cap-8 row/bundle digests.
+  same-subject/same-ordinal isolated-I1 and isolated-B1-cap-8 row/bundle
+  digests, with base-only I1 compatibility and exact storage-compatible B1
+  pairing.
 
 A prose summary, an unrecorded rerun of a “known good” build, or current
 `BenchmarkResult` output is not a normative reference. The raw bundle must be
@@ -1818,6 +1896,13 @@ thresholds and candidate/reference ratios remain in this manual/release
 workflow. No issue-specific replay, provenance/result orchestrator, phase-
 completion scan, or performance-result file may be registered with CTest or CI
 or retained as repository content.
+
+Issue #95 owns the B1 `OutputStore` capability observations, normalized storage
+fingerprint/digest producer, root-containment evidence, and cap-1/cap-8 plus
+candidate/reference compatibility checks. Issue #96 reuses that schema for M1
+and enforces its B1 pair while keeping the I1-only pair storage-independent.
+Issue #92 defines only this evidence contract; it adds no current probe, public
+API, runner, or runtime result field.
 
 ## CTest Registration
 

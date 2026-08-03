@@ -1284,7 +1284,9 @@ operation-concurrency 变更时，应重新运行准确命令，并解释新输�
 测量职责，它可以留在 primary repository；但与机器相关的 latency、throughput
 与 reference ratio 必须始终不进入普通 CTest 和默认 CI correctness gate。Runner
 只能写入 checkout 外的显式可丢弃路径或 release-artifact storage；生成的 bundle
-不得提交到 primary 或 personal-overlay repository。
+不得提交到 primary 或 personal-overlay repository。对每个包含 B1 的运行，两种
+destination 都必须位于已选且已指纹化的 `OutputStore` root 或 rooted namespace
+之下，不能绕过其已证明的 crash-durability path。
 
 ### 冻结的证据行与采样窗口
 
@@ -1333,7 +1335,8 @@ Host scratch、65,536 个 ready entry 与 256 MiB ready byte；Interactive headr
 边界同时提供两个有序的 15-job queue，按递增 job index 推进每个 Graph，并在 M1
 中无 producer gap 地开始新 cycle；它不会绕过正常 bound 准入全部 30 个 Run。
 
-每个 B1 job 在全新的可丢弃目录中写入 ADR 0010 规定的精确
+每个 B1 job 在所选且已指纹化的 `OutputStore` root 下的全新可丢弃目录中写入
+ADR 0010 规定的精确
 `output.rgba32le` payload 与固定顺序 `manifest.txt`。两个有序
 `ComputeIoExecutor` task 使用稳定 charge identity：payload-stage 的
 `planned_bytes=67,108,864`，manifest-commit 的 planned byte 是该 job 的精确
@@ -1369,6 +1372,58 @@ latency 从 preview admission 前立即开始，到 preview visibility 结束；
 digest、raw little-endian payload SHA-256、canonical manifest SHA-256、semantic-
 trace SHA-256 与 logical/raw golden identity 始终是不同的 evidence family。
 
+### 存储环境指纹
+
+Runner 把 storage 视为 B1 及 M1 中 B1 component 的 measured environment，而不是
+未记录的 output-path 选择。每个 B1/M1 行记录
+`storage_environment_applicability=required`；I1/I2 行记录 `not-applicable` 且不
+携带 storage digest，因为其必需路径不执行 `OutputStore` artifact commit。按行
+适用的 `environment-class digest` 把现有 machine/build/provider/resource fact 的
+`base_environment_digest`、applicability tag，以及需要时的
+`storage_environment_digest` 组合起来。
+
+B1 warmup 前，runner 选择一个 `OutputStore` root 或 rooted namespace，并记录
+规范化 `execution-profile-storage-environment-v1` fingerprint：
+
+- `OutputStore` provider/backend identity 与适用 generation/version；
+- backend class、local/remote locality 与 volatile/nonvolatile persistence class；
+- filesystem type、稳定 mount identity，以及规范化的相关 mount option 和
+  file-sync、directory-sync、atomic-no-replace、rename、barrier、copy-on-write
+  semantics；
+- durability capability set 与 typed requested/可证明 achieved class；
+- 稳定 backing volume/device/storage identity 与 storage class，或 provider 特有的
+  稳定等价 identity；以及
+- hardware write-cache 与 power-loss-protection policy，携带显式 known、unknown
+  或有依据的 not-applicable state。
+
+每个必需 field 都是 typed observation，其 state 为 `known`、`not-applicable`、
+`unknown`、`unobserved`、`unsupported` 或 `unprovable`。`not-applicable` 需要
+schema 规定的 reason，并证明该层不在端到端 durability path 中。完整规范化
+object 是 raw evidence；其规范 version-one serialization 使用 SHA-256 计算为
+小写 `storage_environment_digest`，runner 还单独记录带 reason 的 compatibility-
+eligibility verdict。Eligibility 要求全部 fact 已知或有依据地不适用，必需的
+file/directory sync、atomic no-replace、rename 与 barrier capability 均已证明，且
+requested 与 achieved durability 都为 `crash-durable`。即使 digest 相等，相同的
+unknown、unobserved、unsupported 或 unprovable state 仍不兼容。
+
+Runner 还保留所选 absolute/rooted path、解析后的 root 与 mount identity、raw
+capability observation，以及每个 disposable job directory 和 retained release
+artifact 均位于所选 root 下的证明。这些 fact 用于审计 root 选择，但不会把
+disposable absolute path 变成唯一 compatibility key。Remote、RAM-backed、
+copy-on-write 及其他 storage class 不会被自动禁止；只有 capability path 成功，
+并且下述每项必需比较都具有 eligible、规范化 field 精确匹配且复算 digest 相等的
+fingerprint 时，才可产生可比较证据。
+
+Storage compatibility 表示 fingerprint schema 相同、规范化 field 精确相等、独立
+复算的 `storage_environment_digest` 相等，且两侧都具有 eligibility。Candidate/
+reference B1 replicate ordinal、B1 cap-1/cap-8 determinism comparison，以及 M1
+与其 same-ordinal paired isolated B1 cap-8 行都要求该兼容性。M1 与 paired
+isolated I1 行只比较精确 `base_environment_digest` 和既有 I1 component fact；
+I1 行的 `storage_environment_applicability=not-applicable` 表示无关 M1 storage
+field 不能使该 latency pair 无效。Fingerprint 缺失或 ineligible、存在 unknown 或
+unsupported fact、field/digest mismatch，或 root-containment proof 失败，都会使
+受影响 throughput、memory-reference 或其他 relative verdict 成为 `invalid`。
+
 ### 运行流程
 
 对每个 candidate 或 reference bundle：
@@ -1379,12 +1434,17 @@ trace SHA-256 与 logical/raw golden identity 始终是不同的 evidence family
    state、build/compiler/flag、OS/kernel、CPU/GPU/device inventory、power/thermal
    eligibility、provider/plugin binary 与 generation、process worker、Run cap、
    全部 limit/headroom、fixture hash、seed 和 cache/residency precondition；
+   对 B1/M1，还要在 warmup 前选择 `OutputStore` root、采集 raw storage/capability
+   observation、规范化 storage fingerprint，并计算其 eligibility 与 digest；
 3. 要求 candidate 与 reference 的 evidence schema、workload id、environment
-   class、limit 与 fixture hash 相同；
+   class、limit 与 fixture hash 相同；environment class 按行确定适用范围，B1/M1
+   比较要求精确且 eligible 的 storage compatibility，I1/I2 不会获得无关 storage
+   要求；
 4. 对 ordinal 为 `1..3` 的 M1 replicate，分别固定 same-subject、same-ordinal 的
-   isolated I1 与 isolated B1 cap-8 row/bundle digest；要求 environment、resource、
-   fixture、build/provider 与 precondition 兼容，同时保留独立的 candidate
-   `comparison_reference_bundle_digest` 语义；
+   isolated I1 与 isolated B1 cap-8 row/bundle digest；要求两个 pair 都精确匹配
+   base environment，只对 B1 pair 要求精确且 eligible 的 storage environment
+   匹配，同时要求 resource、fixture、build/provider 与 precondition 兼容，并保留
+   独立的 candidate `comparison_reference_bundle_digest` 语义；
 5. 保留 cold first-use，执行精确且不参与测量的 warmup，在不替换冻结环境的情况下
    重置测量 counter，然后执行精确 measured window；
 6. 在各自 owner 边界采集 raw admission、visibility、cancellation/quiescence、
@@ -1405,7 +1465,7 @@ sample 或 median summary 不能隐藏失败进程。
 | 维度 | 必需计算与通过规则 |
 | --- | --- |
 | Latency | I1 从 final Host admission 前立即开始，到匹配的 current visibility 结束。I2 第十二次 edit（`edit_index=11`）preview 从 preview admission 前开始，到 preview visibility 结束；final 使用同一起点，到 final visibility 结束。I1 p50/p95/p99 <=50/100/150 ms 且 final success 为 100%；I2 preview p50/p95/p99 <=50/75/100 ms，final p95/p99 <=500/1000 ms，并匹配必需 `ContentDigest`；M1 还要满足 I1 绝对上界，且 p99 <=其 same-ordinal paired isolated I1 的 2.0 倍。被取消的 intermediate 不进入 percentile；accepted-cancel-to-quiescence 单独报告。 |
-| Throughput | 每秒成功的 logical RGBA pixel-site transform，以 MPix-op/s 报告；一个 B1 job 只有在 Run success + crash-durable receipt + logical/raw golden verification 后才贡献 16,777,216 个 site-operation。Interval 在 final golden verification 结束。按 ordinal 配对 candidate/reference replicate：ratio 中位数 >=0.95，且每个 ratio >=0.90。每个 M1 一秒 B1 rate 使用 same-subject、same-ordinal paired isolated cap-8 B1 rate；p05 >=0.20，denominator 缺失、为零或不兼容时 invalid。 |
+| Throughput | 每秒成功的 logical RGBA pixel-site transform，以 MPix-op/s 报告；一个 B1 job 只有在 Run success + crash-durable receipt + logical/raw golden verification 后才贡献 16,777,216 个 site-operation。Interval 在 final golden verification 结束。Candidate/reference replicate 按 ordinal 在一个精确兼容 storage environment 下配对：ratio 中位数 >=0.95，且每个 ratio >=0.90。每个 M1 一秒 B1 rate 使用 same-subject、same-ordinal 且 storage-compatible 的 paired isolated cap-8 B1 rate；p05 >=0.20，denominator 或 storage fingerprint 缺失、为零或不兼容时 invalid。 |
 | Fairness | 对两个 B1 Graph 整个一秒 window 都保有未消费 offered demand、且 producer 均未暂停的窗口，`J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`，其中 `x` 是 completed `work_units + ceil(ready_bytes/4096)`。总 service 为零时 invalid；Jain p05 >=0.95。两个 class 都保持 startable 时，最多三次 Interactive start 后出现 Throughput。M1 还要求 headroom 导致的 Interactive admission failure 为零，并独立通过 latency/progress。 |
 | Determinism | 对三个 replicate、fresh-process restart 与 Run cap 1/8 中相同的 B1 job index，typed logical `ContentDigest`、raw payload SHA-256、canonical manifest SHA-256、`execution-profile-semantic-trace-v1` SHA-256 与按 job index 区分的 logical/raw golden mismatch count 全部为零。 |
 | Waste | `discarded_started_service / all_started_service`，使用 `work_units + ceil(ready_bytes/4096)`。每个无法 commit 结果的已启动 callback 都会被计费；已经进入的不可抢占 work 如实 drain。I1/I2 Interactive 每个 replicate <=0.25，M1 对 Interactive service 单独应用该上限；accepted cancellation/supersession 后才启动的 work 精确为零。I2 在允许的首次 transfer 规则下，额外 filesystem/codec、CPU-copy、readback、transfer 与 allocation byte 为零。无故障 isolated/mixed B1 的 discarded/duplicate/retry service 为零。 |
@@ -1414,8 +1474,9 @@ sample 或 median summary 不能隐藏失败进程。
 每个必需维度输出 `pass`、`fail`、`invalid` 或 schema 预定义的
 `not-applicable`；不存在 composite score。缺少源证据、算术 overflow、monotonic-
 clock failure、cursor/drop gap、fixture 或 environment drift、未固定/不兼容的
-reference、必需 denominator 为零，或未经批准的 `not-applicable`，都会使受影响
-行成为 invalid 且不符合要求。
+reference、必需 denominator 为零、必需 storage fingerprint 缺失/ineligible/
+mismatched，或未经批准的 `not-applicable`，都会使受影响行成为 invalid 且不符合
+要求。相同 unknown 或 unobserved storage state 不能证明环境兼容。
 
 Semantic trace 对每个 deterministic plan task 精确使用三条 record：`ready`、
 `start` 与 `terminal`。Record 携带 job/Graph、连续的 plan-relative task ordinal、
@@ -1431,6 +1492,10 @@ completion order 不进入 canonical byte，但保留在独立 raw trace 中。
 一个 `execution-profile-slo-v1` bundle 包含：
 
 - 上述全部 provenance 与冻结环境值；
+- row-level storage applicability；对 B1/M1，还包括规范化 storage fingerprint、
+  raw capability/root-containment observation、compatibility eligibility/reason、
+  `storage_environment_digest`、`base_environment_digest` 与可复算的
+  `environment-class digest`；
 - workload/fixture/source/graph/payload hash 与全部 seed；
 - 相互分离的 warmup、cold 与 measured count/window；
 - raw sample/event、offered-demand eligibility interval 与 drop/gap counter；
@@ -1443,7 +1508,8 @@ completion order 不进入 canonical byte，但保留在独立 raw trace 中。
   verdict；以及
 - `subject_role`、candidate 的 immutable
   `comparison_reference_bundle_digest`，以及每个 M1 replicate 分离的 same-subject/
-  same-ordinal isolated-I1 与 isolated-B1-cap-8 row/bundle digest。
+  same-ordinal isolated-I1 与 isolated-B1-cap-8 row/bundle digest，其中 I1 使用
+  base-only compatibility，B1 使用精确 storage-compatible pairing。
 
 Prose summary、未记录的“known good” build 重跑或当前 `BenchmarkResult` output
 都不是规范 reference。Raw bundle 必须足以让独立 reader 复算每个 aggregate 与
@@ -1456,6 +1522,12 @@ resource-limit 或 settlement invariant 时，应注册长期确定性产品行�
 的性能 threshold 与 candidate/reference ratio 保留在本手工/release workflow。
 任何 Issue 专属 replay、provenance/result orchestrator、phase-completion scan 或
 performance-result file 都不得注册到 CTest/CI，也不得作为仓库内容长期保留。
+
+Issue #95 负责 B1 `OutputStore` capability observation、规范化 storage
+fingerprint/digest producer、root-containment evidence，以及 cap-1/cap-8 和
+candidate/reference compatibility check。Issue #96 为 M1 复用该 schema，并强制
+执行其 B1 pair，同时让 I1-only pair 不依赖 storage。Issue #92 只定义本 evidence
+contract；它不新增当前 probe、public API、runner 或 runtime result field。
 
 ## CTest 注册
 

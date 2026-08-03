@@ -248,6 +248,46 @@ published manifest identity. It is returned only after all requested barriers
 succeed. This is ADR 0009's target `OutputStore` authority, not the current
 private IPC delivery store and not an expansion of #92 runtime behavior.
 
+Every B1 artifact destination, whether an explicitly disposable path or
+release-artifact storage, must be below one selected `OutputStore` root or
+rooted namespace whose requested `crash-durable` capability succeeds. A remote,
+RAM-backed, copy-on-write, or otherwise nonlocal root is not rejected by name,
+but it is not presumed durable or comparable. The bundle retains the selected
+root/path spelling, resolved root and mount identity, and proof that every job
+directory is below that root. Those path facts are audit evidence; a transient
+absolute path or fresh job-directory name is not the compatibility key.
+
+Each B1 or M1 row sets `storage_environment_applicability=required` and records
+one normalized, hashable `execution-profile-storage-environment-v1`
+fingerprint. It contains at least:
+
+- the `OutputStore` provider/backend identity and its applicable generation or
+  version;
+- backend class, explicit local/remote locality, and volatile/nonvolatile
+  persistence class;
+- filesystem type, stable mount identity, and the normalized mount options and
+  semantics that affect file sync, directory sync, atomic no-replace, rename,
+  barriers, and copy-on-write behavior;
+- the durability capability set plus requested and provably achieved
+  durability classes;
+- a stable backing volume/device/storage identity and storage class, or the
+  provider-specific equivalent; and
+- hardware write-cache and power-loss-protection policies, each with an
+  explicit known, unknown, or schema-defined not-applicable state.
+
+Every required fact is a typed observation with state `known`,
+`not-applicable`, `unknown`, `unobserved`, `unsupported`, or `unprovable`.
+`not-applicable` is valid only with a schema-defined reason and evidence that
+the layer is outside the end-to-end durability path. The normalized object is
+retained in raw evidence, and its canonical
+`execution-profile-storage-environment-v1` serialization is hashed with
+SHA-256 into lowercase `storage_environment_digest`. A fingerprint is
+compatibility-eligible only when all required facts are `known` or justified
+`not-applicable`, the capability set proves the required operations, and both
+requested and achieved durability are `crash-durable`. Equal `unknown`,
+`unobserved`, `unsupported`, or `unprovable` states never become compatible by
+having equal bytes or equal digests.
+
 The raw payload SHA-256 hashes the exact 67,108,864 little-endian bytes; the
 manifest SHA-256 hashes that job's exact
 `242 + decimal_digit_count(job)` canonical bytes (243, 244, or 245 bytes over
@@ -276,7 +316,10 @@ each replicate records and freezes:
 - provider/plugin binary hashes and generations, fixed process worker count,
   Run caps, workload/fixture hashes, seeds, cache and residency preconditions;
   and
-- all resource limits and Interactive headroom.
+- all resource limits and Interactive headroom; and
+- for B1 and M1, the selected `OutputStore` root evidence, normalized storage
+  fingerprint, `storage_environment_digest`, compatibility eligibility, and
+  raw capability observations.
 
 The v1 resource configuration is 32 CPU slots, 1 GiB Host retained memory,
 512 MiB Host scratch, 65,536 ready entries, 256 MiB ready bytes, and
@@ -355,6 +398,10 @@ queues are offered and ends at the final job's golden-verification completion.
 Candidate and
 reference replicates are paired by ordinal: the median of the three
 candidate/reference ratios must be at least 0.95 and every ratio at least 0.90.
+At each ordinal the candidate and reference B1 rows must have compatible
+storage fingerprints as defined below. B1 cap-1/cap-8 determinism comparisons
+within a subject also require that same compatible fingerprint; Run cap is the
+intended difference, not storage.
 
 For M1, each one-second mixed B1 rate is divided by its paired isolated cap-8
 replicate's measured B1 rate. The nearest-rank p05 ratio must be at least 0.20.
@@ -494,6 +541,29 @@ workload id, environment class, resource configuration, and fixture hashes.
 Their repository/build identity may differ and is recorded because that is the
 subject of the comparison.
 
+Environment class is row-applicable rather than one unqualified machine label.
+`base_environment_digest` binds OS/kernel, architecture, CPU/GPU/device
+inventory, compiler/build mode and flags, worker count, provider/plugin
+generations, frozen resources, cache/residency preconditions, and
+power/thermal eligibility, but not repository commit. The row's
+`environment-class digest` hashes the base digest plus
+`storage_environment_applicability` and, when applicability is `required`, the
+compatibility-eligible `storage_environment_digest`. I1 and I2 set storage
+applicability to `not-applicable` and carry no storage digest because their
+required paths perform no `OutputStore` artifact commit. B1 and M1 set it to
+`required`. The normalized fingerprint and raw observations remain in the
+bundle so a reader can recompute both digests.
+
+Storage compatibility requires the same fingerprint schema, exact equality of
+every normalized field, and equal independently recomputed
+`storage_environment_digest` values, with both fingerprints compatibility-
+eligible. A missing object, digest, raw field, eligibility proof, or any field
+or digest mismatch makes every affected B1/M1 candidate/reference throughput,
+memory-reference, or other relative verdict `invalid`. Different disposable
+absolute paths may still compare when their normalized fields match and each
+root-containment proof succeeds; equal path strings never override a
+fingerprint mismatch.
+
 Every M1 replicate ordinal `1..3` additionally records two same-subject pairs:
 `paired_isolated_i1={row_digest,bundle_digest,replicate_ordinal}` and
 `paired_isolated_b1_cap8={row_digest,bundle_digest,replicate_ordinal}`. A
@@ -504,16 +574,18 @@ denominator. Neither pair may be replaced by the generic comparison reference
 or by one ambiguous “reference bundle digest”.
 
 The paired row and M1 row must have the same replicate ordinal, evidence schema
-version, subject build/provider/plugin identities, environment-class digest,
-worker count, resource limits/headroom, cache/residency preconditions, and
-power/thermal eligibility policy. The paired I1 fixture hash must equal the I1
-component embedded by M1; the paired B1 fixture/corpus/golden hashes and Run cap
-8 must equal M1's B1 component. The environment-class digest binds OS/kernel,
-architecture, CPU/GPU/device inventory, compiler/build mode and flags, worker
-count, provider/plugin generations, and frozen resources, but intentionally
-does not bind repository commit so candidate/reference builds can differ.
-Missing, zero, wrong-ordinal, cross-subject, or incompatible pair evidence makes
-the affected M1 relative verdict `invalid`.
+version, subject build/provider/plugin identities, worker count, resource
+limits/headroom, cache/residency preconditions, and power/thermal eligibility
+policy. Both isolated pairs must exactly match `base_environment_digest`. The
+paired I1 fixture hash must equal the I1 component embedded by M1, but the I1
+row keeps `storage_environment_applicability=not-applicable`; M1's unrelated
+storage fields neither participate in nor invalidate the I1 latency pair. The
+paired B1 fixture/corpus/golden hashes and Run cap 8 must equal M1's B1
+component, and the M1/B1 pair must have equal full `environment-class digest`
+and compatible storage fingerprints. Missing, zero, wrong-ordinal,
+cross-subject, unknown/unobserved/unsupported/unprovable storage state, or
+otherwise incompatible pair evidence makes the affected M1 relative verdict
+`invalid`.
 
 All referenced bundles and rows are immutable and selected by content digest.
 An unrecorded rerun of a “known good” build and a Markdown summary are not
@@ -525,8 +597,8 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 | --- | --- |
 | #93 | Implement I1 request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
 | #94 | Implement I2 on the exact I1 lineage; publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
-| #95 | Implement B1 immutable manifests, reservations, canonical semantic trace, crash-durable artifact commit, and logical/raw goldens; publish isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
-| #96 | Compose the exact I1 and B1 fixtures into M1; publish mixed latency, throughput progress, fairness, waste, and memory rows. |
+| #95 | Implement B1 immutable manifests, reservations, canonical semantic trace, crash-durable artifact commit, storage-environment collection/canonicalization, and logical/raw goldens; publish isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
+| #96 | Compose the exact I1 and B1 fixtures into M1, record its required storage fingerprint, enforce the M1/B1 storage pair while leaving the I1-only pair storage-independent, and publish mixed latency, throughput progress, fairness, waste, and memory rows. |
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

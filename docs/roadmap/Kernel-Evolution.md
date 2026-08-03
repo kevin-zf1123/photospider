@@ -1102,6 +1102,15 @@ Exact output/artifact/semantic-trace/golden digests, bounded discarded service,
 absolute resource limits, and exact quiescent settlement cannot be traded for
 speed in another dimension.
 
+For B1 and M1, “same environment” includes an eligible, exactly equal
+`execution-profile-storage-environment-v1` fingerprint and recomputed digest
+covering the `OutputStore` backend, filesystem/mount/sync/barrier semantics,
+backing storage, and write-cache/power-loss policy. Remote, RAM-backed, or
+copy-on-write storage is capability-gated rather than automatically accepted or
+forbidden. The M1/B1 cap-8 pair requires that storage match; the I1-only latency
+pair compares the base execution environment and is not constrained by M1's
+unrelated storage fields.
+
 The frozen protocol does not claim nanosecond-exact operating-system wakes.
 It fixes nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum admission-
 start lateness, exact 750,000,000 ns episode origins, and fail-closed
@@ -1117,8 +1126,8 @@ The delivery rows are fixed:
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency, waste, memory, and required output correctness. |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact I1 lineage. |
-| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, and memory at caps 1 and 8. |
-| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures. |
+| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and storage-environment fingerprint evidence at caps 1 and 8. |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
 
 ADR 0010 is the current accepted decision record, not a statement of current
 runtime capability. The workloads, missing collectors, and valid evidence rows

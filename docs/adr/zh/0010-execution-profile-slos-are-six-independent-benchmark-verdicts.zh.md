@@ -219,6 +219,41 @@ achieved durability，以及 published manifest identity。只有所有请求的
 成功后才能返回 receipt。这是 ADR 0009 的目标 `OutputStore` authority，不是当前
 private IPC delivery store，也不是 #92 对 runtime behavior 的扩展。
 
+每个 B1 artifact destination，无论采用显式 disposable path 还是 release-artifact
+storage，都必须位于一个已选 `OutputStore` root 或 rooted namespace 之下，且该
+root 请求的 `crash-durable` 能力必须成功。Remote、RAM-backed、copy-on-write 或
+其他 nonlocal root 不会仅因名称被拒绝，但也绝不预设为 durable 或可比较。Bundle
+保留所选 root/path 拼写、解析后的 root 与 mount identity，以及每个 job directory
+都位于该 root 之下的证明。这些 path fact 是审计证据；临时 absolute path 或全新
+job-directory name 不是兼容键。
+
+每个 B1 或 M1 行都设置 `storage_environment_applicability=required`，并记录一个
+规范化、可散列的 `execution-profile-storage-environment-v1` fingerprint。它至少
+包含：
+
+- `OutputStore` provider/backend identity 及适用的 generation 或 version；
+- backend class、显式 local/remote locality，以及 volatile/nonvolatile persistence
+  class；
+- filesystem type、稳定 mount identity，以及会影响 file sync、directory sync、
+  atomic no-replace、rename、barrier 与 copy-on-write 行为的规范化 mount option 和
+  semantics；
+- durability capability set，以及 requested 与可证明 achieved durability class；
+- 稳定的 backing volume/device/storage identity 和 storage class，或 provider 特有
+  的等价 identity；以及
+- hardware write-cache 与 power-loss-protection policy，二者分别携带显式 known、
+  unknown 或 schema 规定的 not-applicable state。
+
+每个必需 fact 都是 typed observation，其 state 为 `known`、`not-applicable`、
+`unknown`、`unobserved`、`unsupported` 或 `unprovable`。只有在 schema 规定了
+reason、且有证据证明该层不在端到端 durability path 中时，`not-applicable` 才
+有效。规范化 object 保留在 raw evidence 中；其规范
+`execution-profile-storage-environment-v1` serialization 使用 SHA-256 计算为小写
+`storage_environment_digest`。只有当全部必需 fact 都为 `known` 或有依据的
+`not-applicable`、capability set 证明必需 operation、且 requested 与 achieved
+durability 均为 `crash-durable` 时，fingerprint 才具备 compatibility eligibility。
+即使 byte 或 digest 相等，相同的 `unknown`、`unobserved`、`unsupported` 或
+`unprovable` state 也绝不因此变得兼容。
+
 Raw payload SHA-256 hash 精确的 67,108,864 个 little-endian byte；manifest
 SHA-256 hash 该 job 的精确 `242 + decimal_digit_count(job)` 个 canonical byte（在
 有效范围内为 243、244 或 245 byte）。按 job index 区分的
@@ -242,7 +277,10 @@ replicate 都要记录并冻结：
   OS/kernel、CPU/GPU/device inventory 和 power/thermal eligibility；
 - provider/plugin binary hash 与 generation、固定 process worker count、Run cap、
   workload/fixture hash、seed、cache 与 residency precondition；以及
-- 全部 resource limit 与 Interactive headroom。
+- 全部 resource limit 与 Interactive headroom；以及
+- 对 B1 与 M1，所选 `OutputStore` root evidence、规范化 storage fingerprint、
+  `storage_environment_digest`、compatibility eligibility 与 raw capability
+  observation。
 
 v1 resource configuration 是 32 个 CPU slot、1 GiB Host retained memory、
 512 MiB Host scratch、65,536 个 ready entry、256 MiB ready byte；Interactive
@@ -312,6 +350,9 @@ verification 完成后才精确贡献 16,777,216 个 site-operation。其 isolat
 completion 结束。Candidate
 与 reference replicate 按 ordinal 配对：三个 candidate/reference ratio 的中位数
 必须至少为 0.95，且每个 ratio 至少为 0.90。
+每个 ordinal 的 candidate 与 reference B1 行都必须使用下文定义的兼容 storage
+fingerprint。同一 subject 内 B1 cap-1/cap-8 determinism 比较也要求相同且兼容的
+fingerprint；Run cap 是有意存在的差异，storage 不是。
 
 对 M1，每个一秒 mixed B1 rate 除以配对 isolated cap-8 replicate 实测的 B1 rate。
 Nearest-rank p05 ratio 必须至少为 0.20。Denominator 缺失或为零时结果为
@@ -434,6 +475,26 @@ reference 必须具有相同 evidence schema、workload id、environment class�
 configuration 与 fixture hash。二者的 repository/build identity 可以不同，并且必须
 记录，因为这正是 comparison 的 subject。
 
+Environment class 按行确定适用范围，而不是一个没有限定的 machine label。
+`base_environment_digest` 绑定 OS/kernel、architecture、CPU/GPU/device inventory、
+compiler/build mode 与 flag、worker count、provider/plugin generation、冻结 resource、
+cache/residency precondition 和 power/thermal eligibility，但不绑定 repository commit。
+逐行 `environment-class digest` 对 base digest、
+`storage_environment_applicability`，以及 applicability 为 `required` 时具有
+compatibility eligibility 的 `storage_environment_digest` 一并计算 hash。I1 与 I2
+把 storage applicability 设为 `not-applicable`，且不携带 storage digest，因为其
+必需路径不执行 `OutputStore` artifact commit；B1 与 M1 把它设为 `required`。
+规范化 fingerprint 与 raw observation 仍保留在 bundle 中，使 reader 可以复算
+两个 digest。
+
+Storage compatibility 要求 fingerprint schema 相同、每个规范化 field 精确相等、
+独立复算的 `storage_environment_digest` 相等，并且两个 fingerprint 都具有
+compatibility eligibility。Object、digest、raw field 或 eligibility proof 缺失，或
+任一 field/digest 不同，都会使受影响 B1/M1 的 candidate/reference throughput、
+memory-reference 或其他 relative verdict 成为 `invalid`。若规范化 field 匹配且
+各自 root-containment proof 成功，不同 disposable absolute path 仍可比较；相同
+path string 绝不能覆盖 fingerprint mismatch。
+
 每个 ordinal 为 `1..3` 的 M1 replicate 还要记录两个 same-subject pair：
 `paired_isolated_i1={row_digest,bundle_digest,replicate_ordinal}` 与
 `paired_isolated_b1_cap8={row_digest,bundle_digest,replicate_ordinal}`。Candidate M1
@@ -443,14 +504,16 @@ throughput denominator。二者都不能由 generic comparison reference 或一�
 模糊的“reference bundle digest”替代。
 
 Paired row 与 M1 row 必须具有相同 replicate ordinal、evidence schema version、
-subject build/provider/plugin identity、environment-class digest、worker count、
-resource limit/headroom、cache/residency precondition 与 power/thermal eligibility
-policy。Paired I1 fixture hash 必须等于 M1 内嵌的 I1 component；paired B1 fixture/
-corpus/golden hash 与 Run cap 8 必须等于 M1 的 B1 component。Environment-class
-digest 绑定 OS/kernel、architecture、CPU/GPU/device inventory、compiler/build mode
-与 flag、worker count、provider/plugin generation 及冻结 resource，但有意不绑定
-repository commit，使 candidate/reference build 可以不同。Pair 缺失、为零、ordinal
-错误、跨 subject 或不兼容，都会使受影响的 M1 relative verdict 成为 `invalid`。
+subject build/provider/plugin identity、worker count、resource limit/headroom、
+cache/residency precondition 与 power/thermal eligibility policy。两个 isolated pair
+都必须精确匹配 `base_environment_digest`。Paired I1 fixture hash 必须等于 M1
+内嵌的 I1 component，但 I1 行保持
+`storage_environment_applicability=not-applicable`；M1 的无关 storage field 不参与
+I1 latency pair，也不会使其无效。Paired B1 fixture/corpus/golden hash 与 Run cap 8
+必须等于 M1 B1 component，而且 M1/B1 pair 必须具有相同的完整
+`environment-class digest` 与兼容 storage fingerprint。Pair 缺失、为零、ordinal
+错误、跨 subject，存在 unknown/unobserved/unsupported/unprovable storage state，
+或其他不兼容证据，都会使受影响 M1 relative verdict 成为 `invalid`。
 
 所有被引用 bundle 与 row 都不可变，并按 content digest 选择。未记录的“known
 good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidence 必须能够
@@ -462,8 +525,8 @@ good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidenc
 | --- | --- |
 | #93 | 实现 I1 request/current-generation 与 cancellation/quiescence 观测；发布 isolated latency、waste 与 memory 行，以及必需的 output-correctness 证据。 |
 | #94 | 在精确 I1 lineage 上实现 I2；发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
-| #95 | 实现 B1 immutable manifest、reservation、canonical semantic trace、crash-durable artifact commit 与 logical/raw golden；在 Run cap 1 与 8 下发布 isolated throughput、determinism、zero-fault waste 与 memory 行。 |
-| #96 | 把精确 I1 与 B1 fixture 组合为 M1；发布 mixed latency、throughput progress、fairness、waste 与 memory 行。 |
+| #95 | 实现 B1 immutable manifest、reservation、canonical semantic trace、crash-durable artifact commit、storage-environment collection/canonicalization 与 logical/raw golden；在 Run cap 1 与 8 下发布 isolated throughput、determinism、zero-fault waste 与 memory 行。 |
+| #96 | 把精确 I1 与 B1 fixture 组合为 M1，记录其必需 storage fingerprint，强制执行 M1/B1 storage pair，同时让 I1-only pair 不依赖 storage，并发布 mixed latency、throughput progress、fairness、waste 与 memory 行。 |
 
 每个 Issue 可以为其机制新增长期确定性行为测试，但不能重定义 workload，也不能
 用缺失、invalid 或不同版本的行提升目标。与机器相关的 latency、throughput 与

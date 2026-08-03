@@ -889,6 +889,14 @@ Interactive admission failure 为零，以及相对 isolated latency。精确 ou
 semantic-trace/golden digest、有界 discarded service、绝对 resource limit 与精确
 quiescent settlement 都不能用另一维更快的速度交换。
 
+对 B1 与 M1，“同环境”包含 eligible、精确相等的
+`execution-profile-storage-environment-v1` fingerprint 与复算 digest；该
+fingerprint 覆盖 `OutputStore` backend、filesystem/mount/sync/barrier semantics、
+backing storage 与 write-cache/power-loss policy。Remote、RAM-backed 或
+copy-on-write storage 受 capability 门禁约束，而不是被自动接受或禁止。M1/B1
+cap-8 pair 要求该 storage 匹配；I1-only latency pair 比较 base execution
+environment，不受 M1 无关 storage field 约束。
+
 冻结 protocol 不声称操作系统会精确到纳秒醒来。它固定相隔 16,666,667 ns 的
 nominal monotonic start、最大 2 ms admission-start lateness、精确 750,000,000 ns
 episode origin，以及 fail-closed miss/drop/gap 处理。Logical result 使用 typed
@@ -903,8 +911,8 @@ digest。
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency、waste、memory 与必需 output correctness。 |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 I1 lineage 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness。 |
-| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste 与 memory。 |
-| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 使用精确 I1/B1 fixture 生成 M1 mixed latency、Throughput progress、fairness、waste 与 memory。 |
+| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory 与 storage-environment fingerprint 证据。 |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 M1 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
 
 ADR 0010 是当前已接受的决策记录，不是当前 runtime capability 的事实陈述。
 Workload、缺失 collector 与有效证据行仍属于下游目标工作。既有 policy-order
