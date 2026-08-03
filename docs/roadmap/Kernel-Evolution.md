@@ -1134,10 +1134,17 @@ base manifest/digest and ignores M1's unrelated storage.
 The frozen protocol does not claim nanosecond-exact operating-system wakes.
 I1 and M1 fix nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum
 admission-start lateness, exact 750,000,000 ns episode origins, and fail-closed
-miss/drop/gap handling. The one actual-admission sample `A_i` starts latency
-and checked-adds the absolute I1 Run deadline
-`D_i=A_i+150,000,000 ns`; nominal `S_i` and the quiescence drain never extend
-that budget, and missed or expired work cannot publish. Isolated I1 derives
+miss/drop/gap handling. The one pre-Host-invocation sample `A_i` starts latency,
+checked-adds the absolute I1 Run deadline `D_i=A_i+150,000,000 ns`, and is also
+the normative admission/acceptance timestamp when Host succeeds. The harness
+reserves a unique row-local `event_sequence_i` before that call; success creates
+exact coordinate `(A_i,event_sequence_i)` and makes the generation current
+there. Host return time/status remain raw evidence and never replace the
+coordinate. Failure creates no accepted event, invalidates the replicate, and
+cannot backfill an alternate timestamp. These facts use existing inner
+manifest/measurement evidence without adding an outer field. Nominal `S_i` and
+the quiescence drain never extend that budget, and missed or expired work cannot
+publish. Isolated I1 derives
 cold slot zero, warmup slots `1..20`, measured slots `21..220`, and terminal
 stride 221 from one `G^I1`; phases cannot choose fresh origins or cooling
 delays. Every episode fixes
@@ -1165,12 +1172,16 @@ At the exact `B^M1=M_0` warmup cutoff and measurement origin, an ordered,
 zero-duration transaction closes warmup offers, snapshots the fixed offered
 prefix's terminal-derived incomplete subset, resets only logical measured
 accumulators, establishes measured I1, and offers measured B1 Graph A job zero
-then Graph B job one behind each retained per-Graph prefix. If the first actual
-measured-I1 admission shares timestamp `B^M1`, it orders after both offers. The
-final warmup I1 twelfth-edit publication is still current in the boundary
-snapshot and remains current until that first measured admission is accepted
-within `[B^M1,B^M1+2,000,000 ns]`; missing, failed, early, or late acceptance is
-invalid. Only that acceptance may ordinarily latest-wins supersede it. No
+then Graph B job one behind each retained per-Graph prefix. The first
+measured-I1 Host call is exactly `edit_index=0`; it samples `A_0` and reserves
+`event_sequence_0` before invocation. A successful admission creates exact
+accepted coordinate `(A_0,event_sequence_0)` with
+`B^M1<=A_0<=B^M1+2,000,000 ns`. If `A_0=B^M1`, its sequence orders after both
+offers. The final warmup I1 twelfth-edit publication is still current in the
+boundary snapshot and remains current until that coordinate; only that
+coordinate may make measured I1 current and ordinarily latest-wins supersede
+it. Missing, failed, early, or late admission is invalid, failure creates no
+accepted event, and Host return time/status remain raw evidence. No
 earlier supersession, phase-only cancellation, or snapshot rewrite is allowed.
 The old generation retains its unchanged
 `Q_end=B^M1+183,333,337 ns`, leaving
@@ -1237,10 +1248,10 @@ The delivery rows are fixed:
 
 | Issue | Required target evidence |
 | --- | --- |
-| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 continuous 221-slot isolated grid, exact `S_11` drain/tie/guard behavior, latency, waste, memory, and required output correctness. |
+| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | Reusable I1 accepted-boundary collector with pre-call `A_i` sampling and row-local sequence reservation, success-only `(A_i,event_sequence_i)` current/latest-wins ordering, failure without an accepted event, the continuous 221-slot isolated grid, exact `S_11` drain/tie/guard behavior, latency, waste, memory, and required output correctness. |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-next-edit ordering, I1 coefficient/index/update lineage, and full-resolution final path; #94 cannot redefine that cadence or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and fixed storage/performance probe-to-schema, encoder, eligibility, and compatibility evidence at caps 1 and 8. |
-| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact `C^M1`/`W^M1` input grid, fixed B1 offer protocol, cross-boundary I1 settlement, the frozen final-warmup current-hold exception through accepted measured-I1 admission without redefining it, independent producer-local cycles, phase-boundary/carryover/FIFO/attribution evidence, plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact `C^M1`/`W^M1` input grid, fixed B1 offer protocol, cross-boundary I1 settlement, reuse of #93's collector binding the first measured edit to `edit_index=0`, `A_0`, and its pre-call sequence, the frozen final-warmup current-hold exception through that successful coordinate without redefining it, independent producer-local cycles, phase-boundary/carryover/FIFO/attribution evidence, plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
 
 ADR 0010 is the current accepted decision record, not a statement of current
 runtime capability. The workloads, missing collectors, and valid evidence rows

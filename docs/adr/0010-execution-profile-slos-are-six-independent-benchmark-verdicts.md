@@ -177,9 +177,13 @@ S_i = E + i * 16,666,667 ns,  i in 0..11
 
 The harness must not start the Host admission call before `S_i`. `A_i` is the
 single monotonic-clock sample captured immediately before the final Host
-admission invocation; it is both the latency start and the deadline anchor.
-The harness checks `S_i <= A_i <= S_i + 2,000,000 ns` before invoking Host and
-computes, with checked arithmetic, the one absolute Run deadline:
+admission invocation; it is the latency start, deadline anchor, and, if that
+invocation succeeds, the normative admission/acceptance timestamp. After
+validating `A_i` and before invoking Host, the harness reserves one unique,
+strictly increasing row-local `event_sequence_i` for that would-be
+accepted-admission logical event. The harness checks
+`S_i <= A_i <= S_i + 2,000,000 ns` before invoking Host and computes, with
+checked arithmetic, the one absolute Run deadline:
 
 ```text
 D_i = A_i + 150,000,000 ns
@@ -187,16 +191,29 @@ D_i = A_i + 150,000,000 ns
 
 Anchoring `D_i` to `S_i`, the episode origin, an earlier preparation timestamp,
 or the post-admission return time is invalid. The permitted start lateness does
-not consume the 150 ms Run budget. An overflow, early start, start more than
-2 ms late, admission failure, dropped edit, or cadence-event gap invalidates
-the replicate. A missed edit is not submitted late: before any Host call for
-that edit, the harness requests cancellation/supersession for every earlier
-generation, records its acceptance, revokes all publication permission for the
-episode, records the missed/drop/gap facts, and never catches up, backfills, or
-shifts later nominal times. Already entered non-preemptible work may drain and
-is charged as waste; work starting after accepted cancellation must remain
-zero. No invalid or expired edit may publish output, receipt, or a successful
-latency sample.
+not consume the 150 ms Run budget. On successful Host admission, the
+accepted-admission logical event has the exact coordinate
+`(A_i,event_sequence_i)`. The new edit/generation becomes current at that
+coordinate, and every current-generation, latest-wins, supersession, and
+same-timestamp ordering decision uses it. The later Host return timestamp and
+status remain raw measurement evidence only; neither may replace or reanchor
+that coordinate, and learning success only on return does not move the logical
+boundary. On admission failure, no accepted-admission logical event
+exists, the reserved sequence plus failure/return facts remain raw evidence,
+the replicate is invalid, and the harness must not synthesize, backfill, or
+select an alternate acceptance timestamp. These facts remain in the existing
+workload-manifest and measurement-evidence sections and add no outer row or
+bundle field.
+
+An overflow, early start, start more than 2 ms late, admission failure, dropped
+edit, or cadence-event gap invalidates the replicate. A missed edit is not
+submitted late: before any Host call for that edit, the harness requests
+cancellation/supersession for every earlier generation, records its acceptance,
+revokes all publication permission for the episode, records the missed/drop/gap
+facts, and never catches up, backfills, or shifts later nominal times. Already
+entered non-preemptible work may drain and is charged as waste; work starting
+after accepted cancellation must remain zero. No invalid or expired edit may
+publish output, receipt, or a successful latency sample.
 
 Expiry at `D_i` uses the same monotonic clock, requests cancellation of that
 Run, and records its acceptance. Queued work is removed, dependent re-entry is
@@ -230,9 +247,10 @@ arithmetic; overflow is invalid.
 Except solely for M1's final warmup occurrence at `k=6`, the twelfth-edit
 publication remains current through `Q^I1_end`. That one exception keeps the
 same publication current at the `B^M1` carryover snapshot and until the first
-measured-I1 actual admission is accepted; the exact acceptance and
-supersession rules are frozen in the M1 boundary below. The exception does not
-move `Q^I1_end` or weaken its occurrence-local quiescence requirement.
+measured edit's success-only accepted coordinate
+`(A_0,event_sequence_0)`; the exact acceptance and supersession rules are
+frozen in the M1 boundary below. The exception does not move `Q^I1_end` or
+weaken its occurrence-local quiescence requirement.
 
 One retained isolated-I1 replicate-grid origin `G^I1` fixes every phase rather
 than allowing three independent origins:
@@ -1223,18 +1241,23 @@ or counter reset. A lifecycle event at timestamp `B^M1` with sequence below
 orders after its snapshot/reset and then relative to the two measured B1 offers
 by sequence.
 
-The actual first measured-I1 admission is not part of the atomic snapshot. If
-its timestamp equals `B^M1`, its sequence must order after both measured B1
-offers. The final warmup I1 twelfth-edit publication must still be current in
-the `B^M1` snapshot and immediately before that measured admission's accepted
-event coordinate. The first measured-I1 actual admission must be accepted in
-the closed interval `[B^M1,B^M1+2,000,000 ns]`; a missing, failed, early, or
-late admission invalidates the replicate. Acceptance of that admission is the
-sole event permitted to trigger the ordinary latest-wins supersession of the
-old warmup generation. No earlier event--including the phase cutoff, nominal
-measured origin, carryover snapshot, or either measured B1 offer--may revoke
-its current status, cancel it, or rewrite the snapshot. If acceptance occurs
-at `B^M1`, its sequence follows both B1 offers. The old generation still
+The first measured-I1 Host admission invocation targets measured
+`edit_index=0` and is not part of the atomic snapshot. Under the shared I1
+rule, the harness samples `A_0` and reserves its row-local `event_sequence_0`
+before that call. A successful call creates the exact accepted coordinate
+`(A_0,event_sequence_0)`, with
+`B^M1 <= A_0 <= B^M1+2,000,000 ns`; that coordinate, and only that coordinate,
+may make the measured generation current and ordinarily latest-wins supersede
+the old warmup generation. If `A_0` equals `B^M1`,
+`event_sequence_0` must order after both measured B1 offers. The final warmup
+I1 twelfth-edit publication must still be current in the `B^M1` snapshot and
+immediately before `(A_0,event_sequence_0)`. A missing, failed, early, or late
+admission invalidates the replicate; failure creates no accepted event and
+cannot supersede the warmup generation. A Host return timestamp/status remains
+raw evidence and never replaces `A_0` or the reserved sequence. No earlier
+event--including the phase cutoff, nominal measured origin, carryover snapshot,
+or either measured B1 offer--may revoke the old generation's current status,
+cancel it, or rewrite the snapshot. The old generation still
 settles and quiesces at its unchanged
 `Q_end=B^M1+183,333,337 ns`; after acceptance, the remaining settlement time is
 therefore within `[181,333,337 ns,183,333,337 ns]`. Any cancellation, terminal,
@@ -1247,9 +1270,9 @@ reflects its new state; if it orders after, it is a cross-boundary event. A
 terminal warmup event at the same timestamp never creates a new warmup
 successor after step one. There is no phase-boundary wait, cooling interval,
 drain, cancellation, process restart, worker/policy/queue reconstruction, or
-resource release. Only the accepted first measured-I1 admission described
-above may supersede the retained final warmup I1 generation under the frozen
-latest-wins rules; the harness adds no boundary-only cancellation.
+resource release. Only the successful `(A_0,event_sequence_0)` coordinate
+described above may supersede the retained final warmup I1 generation under
+the frozen latest-wins rules; the harness adds no boundary-only cancellation.
 
 Every outstanding warmup B1 occurrence retains its immutable `phase=warmup`,
 cycle, job, and attempt identity and its existing per-Graph FIFO position. The
@@ -1755,10 +1778,10 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 
 | Issue | Required v1 delivery |
 | --- | --- |
-| #93 | Implement the continuous 221-slot isolated-I1 grid, exact `S_11` drain/tie/guard behavior, request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
+| #93 | Implement the reusable I1 accepted-boundary collector that samples `A_i`, reserves row-local `event_sequence_i` before Host invocation, emits `(A_i,event_sequence_i)` only on successful admission, retains return/failure as raw evidence without an accepted event, and drives current/latest-wins ordering; use it for the continuous 221-slot isolated-I1 grid, exact `S_11` drain/tie/guard behavior, request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
 | #94 | Implement I2 on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-before-next-edit ordering, and I1 coefficient/index/update/full-resolution-final lineage frozen here; it cannot redefine those schedules or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
 | #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
-| #96 | Compose the exact I1 and B1 fixtures into M1; implement the fixed `C^M1`/`W^M1` cold/warmup origins, counts, B1 offer protocol, cross-`B^M1` I1 settlement, and the frozen final-warmup current-hold exception through the accepted first measured-I1 admission in `[B^M1,B^M1+2,000,000 ns]`, without redefining it; implement the exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary; interpret the existing `cycle_ordinal` component as an independent producer-local counter for each measured B1 Graph without treating it as retry or adding a field; reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
+| #96 | Compose the exact I1 and B1 fixtures into M1; reuse #93's I1 accepted-boundary collector without redefining it, binding the first measured edit exactly to `edit_index=0`, `A_0`, and its pre-call reserved sequence; implement the fixed `C^M1`/`W^M1` cold/warmup origins, counts, B1 offer protocol, cross-`B^M1` I1 settlement, and the frozen final-warmup current-hold exception through that successful coordinate in `[B^M1,B^M1+2,000,000 ns]`; implement the exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary; interpret the existing `cycle_ordinal` component as an independent producer-local counter for each measured B1 Graph without treating it as retry or adding a field; reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

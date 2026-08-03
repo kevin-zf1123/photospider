@@ -916,10 +916,16 @@ manifest/digest，忽略 M1 无关 storage。
 
 冻结 protocol 不声称操作系统会精确到纳秒醒来。I1 与 M1 固定相隔 16,666,667 ns 的
 nominal monotonic start、最大 2 ms admission-start lateness、精确 750,000,000 ns
-episode origin，以及 fail-closed miss/drop/gap 处理。唯一 actual-admission sample
-`A_i` 会启动 latency，并通过 checked addition 得到 absolute I1 Run deadline
-`D_i=A_i+150,000,000 ns`；nominal `S_i` 与 quiescence drain 绝不会延长该 budget，
-missed 或 expired work 也不能发布。Isolated I1 从唯一 `G^I1` 派生 cold slot zero、
+episode origin，以及 fail-closed miss/drop/gap 处理。Host invocation 前的唯一 sample
+`A_i` 会启动 latency、通过 checked addition 得到
+absolute I1 Run deadline `D_i=A_i+150,000,000 ns`，并在 Host 成功时作为规范的
+admission/acceptance timestamp。Harness 在该 call 前预留唯一 row-local
+`event_sequence_i`；成功时产生精确 coordinate `(A_i,event_sequence_i)`，并让
+generation 在此成为 current。Host return time/status 保持为 raw evidence，绝不替代
+该 coordinate。Failure 不产生 accepted event，使 replicate invalid，也不能回填替代
+timestamp。这些事实使用既有 inner manifest/measurement evidence，不新增 outer field。
+Nominal `S_i` 与 quiescence drain 绝不会延长该 budget，missed 或 expired work 也不能
+发布。Isolated I1 从唯一 `G^I1` 派生 cold slot zero、
 warmup slot `1..20`、measured slot `21..220` 与 terminal stride 221；任何 phase 都
 不能另选 origin 或插入 cooling delay。每个 episode 固定
 `Q_start=S_11=E+183,333,337 ns` 与 `Q_end=E+683,333,337 ns`。同 timestamp
@@ -944,11 +950,14 @@ occurrence/generation settlement，不要求并发活跃的 measured work 或整
 会关闭 warmup offer、对固定 offered prefix 中由 terminal history 决定的 incomplete subset
 取得 snapshot、只重置 logical measured accumulator、建立 measured I1，并把 measured
 B1 Graph A job zero、Graph B job one 依次 offer 到每个保留的 per-Graph prefix 之后。
-若第一次 measured-I1 actual admission 与 `B^M1` 同 timestamp，则它排在两次 offer
-之后。最后一个 warmup I1 的第十二次 edit publication 在 boundary snapshot 中仍为
-current，并持续 current 到该第一次 measured admission 在
-`[B^M1,B^M1+2,000,000 ns]` 内被接受；missing、failed、early 或 late acceptance 都是
-invalid。只有该 acceptance 可以用普通 latest-wins supersede 它。禁止任何更早
+第一次 measured-I1 Host call 精确为 `edit_index=0`；它在 invocation 前采样 `A_0`
+并预留 `event_sequence_0`。成功 admission 产生精确 accepted coordinate
+`(A_0,event_sequence_0)`，满足 `B^M1<=A_0<=B^M1+2,000,000 ns`。若
+`A_0=B^M1`，其 sequence 排在两次 offer 之后。最后一个 warmup I1 的第十二次 edit
+publication 在 boundary snapshot 中仍为 current，并持续到该 coordinate；只有该
+coordinate 可以让 measured I1 成为 current，并以普通 latest-wins supersede 它。
+Missing、failed、early 或 late admission 都是 invalid；failure 不产生 accepted event，
+Host return time/status 保持为 raw evidence。禁止任何更早
 supersession、phase-only cancellation 或 snapshot rewrite。旧 generation 保留未改变的
 `Q_end=B^M1+183,333,337 ns`，因此 acceptance 后剩余
 `[181,333,337 ns,183,333,337 ns]` 的 settlement 时间；之后的旧 generation
@@ -1004,10 +1013,10 @@ self、enclosing、later-stage、comparison 或 M1 cycle 都会 fail closed。#9
 
 | Issue | 必需目标证据 |
 | --- | --- |
-| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 连续 221-slot isolated grid、精确 `S_11` drain/tie/guard 行为、latency、waste、memory 与必需 output correctness。 |
+| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | 可复用的 I1 accepted-boundary collector，包含 call 前 `A_i` 采样与 row-local sequence 预留、仅成功时产生的 `(A_i,event_sequence_i)` current/latest-wins 排序、failure 不产生 accepted event，以及连续 221-slot isolated grid、精确 `S_11` drain/tie/guard 行为、latency、waste、memory 与必需 output correctness。 |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-next-edit ordering、I1 coefficient/index/update lineage 与 full-resolution final path 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness；#94 不得重新定义该 cadence，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。 |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory，以及固定 storage/performance probe-to-schema、encoder、eligibility 与 compatibility 证据。 |
-| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 生成 M1 精确 `C^M1`/`W^M1` input grid、固定 B1 offer protocol、跨 boundary I1 settlement、不得重新定义的 final-warmup current-hold 直到 accepted measured-I1 admission 这一冻结例外、独立 producer-local cycle 与 phase-boundary/carryover/FIFO/attribution evidence，并使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 生成 M1 精确 `C^M1`/`W^M1` input grid、固定 B1 offer protocol、跨 boundary I1 settlement，复用 #93 collector 并把第一次 measured edit 绑定到 `edit_index=0`、`A_0` 与其 call 前 sequence，以及不得重新定义的 final-warmup current-hold 直到该成功 coordinate 这一冻结例外、独立 producer-local cycle 与 phase-boundary/carryover/FIFO/attribution evidence，并使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
 
 ADR 0010 是当前已接受的决策记录，不是当前 runtime capability 的事实陈述。
 Workload、缺失 collector 与有效证据行仍属于下游目标工作。既有 policy-order

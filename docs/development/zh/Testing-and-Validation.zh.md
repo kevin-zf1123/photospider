@@ -1370,8 +1370,15 @@ upsample、复用或其他方式从 preview 派生的 Value。
 
 对 I1，baseline 结算后，位于 monotonic origin `E` 的 episode 使用
 `S_i=E+i*16,666,667 ns`。`A_i` 是 final Host admission 前立即取得的唯一
-monotonic-clock sample；它启动 latency sample，并通过 checked addition 得到唯一
-absolute Run deadline `D_i=A_i+150,000,000 ns`。`A_i` 必须处于
+monotonic-clock sample；它启动 latency sample，通过 checked addition 得到唯一
+absolute Run deadline `D_i=A_i+150,000,000 ns`，并在该 call 成功时作为规范的
+admission/acceptance timestamp。Runner 在校验 `A_i` 后、调用 Host 前预留一个唯一且
+严格递增的 row-local `event_sequence_i`。成功时产生 accepted 逻辑 event coordinate
+`(A_i,event_sequence_i)`，让该 generation 在此成为 current，并用该 coordinate 完成
+全部 latest-wins 与同 timestamp 决策。Host return timestamp/status 保持为 raw
+evidence，绝不替代该 coordinate。Failure 不产生 accepted event，会使 replicate
+invalid，也不能合成或回填其他 timestamp；预留的 sequence 与 failure/return 事实保留在
+既有 inner evidence 中，不改变 15/5-field envelope。`A_i` 必须处于
 `[S_i,S_i+2,000,000 ns]`；nominal `S_i` 绝不锚定 deadline，允许的 wake lateness
 也不消耗 150 ms budget。Overflow、提前启动、迟于 2 ms、miss/drop/gap 或
 admission failure 都会使 replicate 无效。Runner 在任何迟到 Host call 前请求
@@ -1384,6 +1391,8 @@ cancellation/supersession 并记录其被接受、撤销 publication，并且不
 | 场景 | Oracle |
 | --- | --- |
 | 连续 isolated phase grid | 保留唯一 `G^I1`；派生 cold slot zero、warmup slot `1..20`、measured slot `21..220`，并且只把 `T^I1=G^I1+221*750,000,000 ns` 作为 terminal non-start boundary。把每个 phase 的自然 ordinal 映射为从零开始的 `r`；拒绝 fresh phase origin、cooling delay、shifted slot 或迟到的 counter reset。 |
+| 成功的 accepted-boundary coordinate | 校验每个 `A_i` 后，在 Host invocation 前预留其唯一 row-local `event_sequence_i`。成功时要求规范 accepted coordinate 精确等于 `(A_i,event_sequence_i)`，让 generation 在此成为 current，并拒绝把 Host return timestamp/status 用作 deadline、current-generation、supersession 或 tie-order coordinate。 |
+| 失败的 admission 不产生 accepted event | Host failure 时，把预留 sequence 与 failure/return observation 保留为 raw inner evidence，使 replicate invalid，并要求不存在 accepted-admission event、current-generation transition、替代 timestamp、backfill 或 outer schema field。 |
 | 精确 drain anchor | 每个 episode 要求 `Q_start=S_11=E+183,333,337 ns` 与 `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`，不受 actual admission 或 deadline 变化影响。Window 可以与 active final Run 重叠，但不会取消它或延长 `D_i`。 |
 | Deadline 与 next-origin guard | 在最晚合法 admission 下，要求 `D_11<=E+335,333,337 ns`、从该 deadline 到 `Q_end` 精确 348,000,000 ns，以及从 `Q_end` 到下一 origin 精确 66,666,663 ns。Reset/baseline preparation 必须容纳在该 guard 中；最后一个 measured episode 在 `T^I1` 前使用相同 guard。 |
 | Boundary tie 与 settlement | 在 `Q_start`，nominal marker 先于同 timestamp admission；在 `Q_end`，同 timestamp lifecycle event 先按保留 causal order 应用，再取得 quiescence snapshot。Snapshot 仍有 active work 或之后仍有 terminal/settlement 都是 invalid。 |
@@ -1410,7 +1419,7 @@ observation 绝不进入 measured aggregate；M1 boundary 在不重启进程或�
 | Cold origin 与 settlement | 在 `(C^M1,c^M1)` 建立唯一 cold I1 origin，并在 boundary marker 后 offer Graph A seed 252，identity 为 `(phase=cold,cycle=0,attempt=0)`；同 timestamp 的 I1 admission 排在该 offer 之后。要求 I1 `Q_end=C^M1+683,333,337 ns` quiescence snapshot，以及 B252 terminal/owner settlement/output removal 全部位于 `W^M1` 前；固定 316,666,663 ns I1 guard 不移动 `W^M1`，miss 直接 invalid，而不是执行 drain。 |
 | Warmup origin 与 count | 在 `(W^M1,w^M1)` 验证 cold 已经 settled，并建立精确 `E^M1_warmup,k=W^M1+k*750,000,000 ns`，其中 `k=0..6`。遗漏/重复 origin、不同 count/index、从 `C^M1` 倒推的跨 phase 连续 grid 或 delayed transition 都应拒绝。 |
 | 固定 warmup B1 offer protocol | 在 `W^M1` 先 offer B253、再 offer A254，满足 `w^M1<sequence(B253)<sequence(A254)`，并使用 warmup cycle/attempt zero；同 timestamp 的第一个 I1 admission 排在两者之后。只有 B253 terminal 时才同步 offer B255，并使用更大的 same-time sequence；B255 必须在 `(B^M1,b^M1)` 前已经 offered。Graph A 在 A254 后没有 warmup successor。Offered prefix 由 protocol 固定，只有 incomplete subset 由 terminal history 派生。 |
-| 确定性跨 `B^M1` I1 | Warmup origin `k=6` 精确为 `B^M1-500,000,000 ns`，且 `Q_end=B^M1+183,333,337 ns`；要求该 settlement-pending warmup occurrence/generation 及其第十二次 edit publication 出现在 `B^M1` snapshot 中，且该 publication 仍为 current。它持续 current 到第一次 measured-I1 actual admission 被接受。在未改变的 `Q_end`，只要求该旧 occurrence/generation 达到 quiescence 并 settled，不要求并发 measured generation 或整个 shared service 为空。 |
+| 确定性跨 `B^M1` I1 | Warmup origin `k=6` 精确为 `B^M1-500,000,000 ns`，且 `Q_end=B^M1+183,333,337 ns`；要求该 settlement-pending warmup occurrence/generation 及其第十二次 edit publication 出现在 `B^M1` snapshot 中，且该 publication 仍为 current。它持续 current 到首个 measured edit 仅成功时存在的 accepted coordinate `(A_0,event_sequence_0)`。在未改变的 `Q_end`，只要求该旧 occurrence/generation 达到 quiescence 并 settled，不要求并发 measured generation 或整个 shared service 为空。 |
 | 不可变 attribution 与 temporal effect | 最后一个 warmup generation 拥有的每个 event/result 都保持 `phase=warmup`，包括 measured latest-wins supersession 后产生的 cancellation 或 settlement。其 occurrence-owned value 不进入 measured aggregate，但 `B^M1` 后每个 start、contention、reservation/grant、Compute I/O 与 high-water effect 都进入按时间 window 归属的 evidence。 |
 | 无隐藏 transition | Cold/warmup transition 不得 pause、wait、cool、restart、rebuild queue、release shared resource 或移动 boundary。把全部 origin/count/index、固定 offer、由 terminal 派生的 B255 transition、phase endpoint 与 failure 保留在既有 workload-manifest/measurement section 中并复算 digest，不新增 outer field。 |
 
@@ -1420,7 +1429,7 @@ observation 绝不进入 measured aggregate；M1 boundary 在不重启进程或�
 | --- | --- |
 | 精确 boundary 与 interval | 保留 boundary coordinate `(B^M1=M_0,b^M1)`、经过 checked arithmetic 的 terminal-cutoff coordinate `(U^M1=B^M1+30,000,000,000 ns,u^M1)`，以及唯一且严格递增的 row-local event sequence。按 `(monotonic_timestamp,event_sequence)` 排列相等 timestamp；measured interval 是 `[(B^M1,b^M1),(U^M1,u^M1))`。 |
 | 有序零时长 transition | 在 `(B^M1,b^M1)`，以 atomic transition 关闭 warmup I1 cadence 与两个 B1 Graph producer，对此前已经 offered 但未完成的每个 warmup I1/B1 occurrence/state 取得 snapshot，只重置 logical measured accumulator，并建立 measured I1 origin。随后在 timestamp `B^M1` 依次 offer measured Graph A job zero 与 Graph B job one；二者均为 producer-local cycle zero，sequence 严格大于 `b^M1`。Snapshot/reset 中不得插入其他 event，也不得 pause/wait/cooling/drain/boundary cancellation/restart/queue rebuild/resource release。 |
-| Supersession 顺序 | 要求第一次 measured-I1 actual admission 在 `[B^M1,B^M1+2,000,000 ns]` 内被接受；missing、failed、early 或 late admission 都是 invalid。只有该 accepted admission 可以用普通 latest-wins supersede 最后一个 warmup generation。若其 timestamp 为 `B^M1`，要求其 sequence 排在两次 measured B1 offer 之后。拒绝任何更早 supersession、phase-only cancellation 或 snapshot rewrite。保留旧 generation 的固定 `Q_end`，使 acceptance 后剩余 `[181,333,337 ns,183,333,337 ns]`，并让之后每个 cancellation/terminal/settlement 保持 warmup attribution，同时把 boundary 后的物理 effect 保留为 measured-window evidence。 |
+| Supersession 顺序 | 把第一次 measured I1 call 绑定到 `edit_index=0`；在 Host invocation 前采样 `A_0` 并预留 `event_sequence_0`。成功时精确产生 `(A_0,event_sequence_0)`，满足 `B^M1<=A_0<=B^M1+2,000,000 ns`；只有该 coordinate 可以让 measured I1 成为 current，并以普通 latest-wins supersede 最后一个 warmup generation。若 `A_0=B^M1`，要求其 sequence 排在两次 measured B1 offer 之后。Missing、failed、early 或 late admission 都是 invalid；failure 不产生 accepted event，Host return time/status 保持为 raw evidence。拒绝任何更早 supersession、phase-only cancellation、替代 coordinate 或 snapshot rewrite。保留旧 generation 的固定 `Q_end`，使成功 acceptance 后剩余 `[181,333,337 ns,183,333,337 ns]`，并让之后每个 cancellation/terminal/settlement 保持 warmup attribution，同时把 boundary 后的物理 effect 保留为 measured-window evidence。 |
 | Carryover identity 与 FIFO | 保留 warmup phase/cycle/job/attempt、queue predecessor、admission state、reservation/grant 与 owner settlement。即使仍 queued/running，measured cycle-zero offer 也排在每个 Graph 已经 offered 的 warmup prefix 之后；只有该 transition 可以绕过 predecessor-terminal offer timing。后续 measured offer 恢复普通 per-Graph 规则，绝不推进或改写未完成的 warmup identity。 |
 | Occurrence attribution | 按不可变 phase 归属 terminal/completed service、output byte、latency、receipt/golden/digest、determinism、retry/duplicate/discarded service、waste 与 settlement。把 `B^M1` 后的 warmup occurrence-owned quantity 从 measured throughput、Jain service `x`、latency、determinism 与 waste aggregate 排除。 |
 | Temporal scheduler/resource effect | 包含 boundary 后每个 phase 的 actual class start、headroom failure、queue contention、reservation/grant、Compute I/O state 与 Host/device/ready-memory high-water。Measured class-start rule 计算 warmup Throughput start，而 Jain completed service 只使用 measured occurrence。 |
@@ -1958,12 +1967,16 @@ resource-limit 或 settlement invariant 时，应注册长期确定性产品行�
 任何 Issue 专属 replay、provenance/result orchestrator、phase-completion scan 或
 performance-result file 都不得注册到 CTest/CI，也不得作为仓库内容长期保留。
 
-Issue #93 负责连续 isolated-I1 grid 与精确 drain/tie/guard collector 行为。Issue #95
-负责 B1 `OutputStore` 固定 raw probe-to-schema mapping、backend 到固定
+Issue #93 负责可复用的 I1 accepted-boundary collector：call 前 `A_i` 采样与 row-local
+sequence 预留、仅成功时产生的 `(A_i,event_sequence_i)` acceptance/current 排序、失败
+且不产生 acceptance 的 evidence、连续 isolated-I1 grid，以及精确 drain/tie/guard 行为。
+Issue #95 负责 B1 `OutputStore` 固定 raw probe-to-schema mapping、backend 到固定
 schema 的 adapter、mount normalizer、performance-configuration mapping/proof、唯一
 canonical encoder/digest、eligibility 与 root-containment evidence，以及 cap-1/
 cap-8 和 candidate/reference check。Issue #96 为 M1 原样复用精确 manifest byte，
-实现冻结的 `C^M1`/`W^M1` pre-boundary protocol、独立 producer-local cycle、不得
+复用 #93 的 accepted-boundary collector，把第一次 measured edit 绑定到
+`edit_index=0`、`A_0` 与其预留 sequence 且不得重新定义 acceptance，并实现冻结的
+`C^M1`/`W^M1` pre-boundary protocol、独立 producer-local cycle、不得
 重新定义的精确 final-warmup current-hold/accepted-admission 例外与
 cutoff/carryover/phase-attribution boundary，并强制执行其 same-ordinal 完整 B1 pair，
 同时让 I1-only pair 只比较 base。上述 Issue 都不能重定义 v1 grammar、

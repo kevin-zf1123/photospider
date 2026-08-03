@@ -1714,8 +1714,18 @@ The mandatory I2 cadence scenario oracle is:
 
 For I1, after baseline settlement, an episode at monotonic origin `E` uses
 `S_i=E+i*16,666,667 ns`. `A_i` is the one monotonic-clock sample immediately
-before final Host admission; it starts latency and checked-adds the sole
-absolute deadline `D_i=A_i+150,000,000 ns`. `A_i` must be in
+before final Host admission; it starts latency, checked-adds the sole absolute
+deadline `D_i=A_i+150,000,000 ns`, and is the normative admission/acceptance
+timestamp if that call succeeds. After validating `A_i` and before invoking
+Host, the runner reserves one unique, strictly increasing row-local
+`event_sequence_i`. Success creates the accepted logical-event coordinate
+`(A_i,event_sequence_i)`, makes that generation current there, and uses that
+coordinate for every latest-wins and same-timestamp decision. Host return
+timestamp/status remain raw evidence and never replace the coordinate. Failure
+creates no accepted event, invalidates the replicate, and cannot synthesize or
+backfill another timestamp; the reserved sequence and failure/return facts stay
+in existing inner evidence without changing the 15/5-field envelope. `A_i`
+must be in
 `[S_i,S_i+2,000,000 ns]`; `S_i` never anchors the deadline and permitted wake
 lateness never consumes the 150 ms budget. Overflow, early start, more than
 2 ms lateness, missed/drop/gap, or admission failure invalidates the replicate.
@@ -1730,6 +1740,8 @@ The mandatory I1 phase/drain scenario oracle is:
 | Scenario | Oracle |
 | --- | --- |
 | Continuous isolated phase grid | Retain one `G^I1`; derive cold slot zero, warmup slots `1..20`, measured slots `21..220`, and only `T^I1=G^I1+221*750,000,000 ns` as a terminal non-start boundary. Map each phase's natural ordinal to zero-based `r`; reject a fresh phase origin, cooling delay, shifted slot, or late counter reset. |
+| Successful accepted-boundary coordinate | After validating each `A_i`, reserve its unique row-local `event_sequence_i` before Host invocation. On success require the normative accepted coordinate to equal `(A_i,event_sequence_i)`, make the generation current there, and reject a Host return timestamp/status as a deadline, current-generation, supersession, or tie-order coordinate. |
+| Failed admission has no accepted event | On Host failure retain the reserved sequence and failure/return observations as raw inner evidence, invalidate the replicate, and require no accepted-admission event, current-generation transition, alternate timestamp, backfill, or outer schema field. |
 | Exact drain anchor | For every episode require `Q_start=S_11=E+183,333,337 ns` and `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`, independent of actual admission and deadline. The window may overlap an active final Run but does not cancel it or extend `D_i`. |
 | Deadline and next-origin guards | With latest legal admission, require `D_11<=E+335,333,337 ns`, exactly 348,000,000 ns from that deadline to `Q_end`, and exactly 66,666,663 ns from `Q_end` to the next origin. Reset/baseline preparation must fit that guard; the last measured episode uses the same guard before `T^I1`. |
 | Boundary tie and settlement | At `Q_start`, nominal marker precedes equal-time admission. At `Q_end`, equal-time lifecycle events apply in retained causal order before the quiescence snapshot. Active work at the snapshot or later terminal/settlement is invalid. |
@@ -1757,7 +1769,7 @@ The mandatory M1 pre-boundary input-grid oracle is:
 | Cold origin and settlement | At `(C^M1,c^M1)`, establish the sole cold I1 origin and offer Graph A seed 252 with `(phase=cold,cycle=0,attempt=0)` after the boundary marker; an equal-time I1 admission follows that offer. Require the I1 `Q_end=C^M1+683,333,337 ns` quiescence snapshot and B252 terminal/owner settlement/output removal before `W^M1`; the fixed 316,666,663 ns I1 guard does not move `W^M1`, and a miss is invalid rather than a drain. |
 | Warmup origins and count | At `(W^M1,w^M1)`, verify cold already settled and establish exactly `E^M1_warmup,k=W^M1+k*750,000,000 ns`, `k=0..6`. Reject an omitted/duplicate origin, another count/index, a phase-continuous grid back-derived from `C^M1`, or a delayed transition. |
 | Fixed warmup B1 offer protocol | At `W^M1`, offer B253 then A254 with `w^M1<sequence(B253)<sequence(A254)` and warmup cycle/attempt zero; an equal-time first I1 admission follows both. Offer B255 synchronously only when B253 becomes terminal, with a greater same-time sequence, and require B255 to have been offered before `(B^M1,b^M1)`. Graph A has no warmup successor. The offered prefix is protocol-fixed; only its incomplete subset is terminal-history-derived. |
-| Deterministic cross-`B^M1` I1 | Warmup origin `k=6` is exactly `B^M1-500,000,000 ns` and has `Q_end=B^M1+183,333,337 ns`; require that settlement-pending warmup occurrence/generation and its twelfth-edit publication in the `B^M1` snapshot, with that publication still current. It remains current until the first measured-I1 actual admission is accepted. At its unchanged `Q_end`, require only that old occurrence/generation to be quiescent and settled, not the concurrent measured generation or the whole shared service. |
+| Deterministic cross-`B^M1` I1 | Warmup origin `k=6` is exactly `B^M1-500,000,000 ns` and has `Q_end=B^M1+183,333,337 ns`; require that settlement-pending warmup occurrence/generation and its twelfth-edit publication in the `B^M1` snapshot, with that publication still current. It remains current until the first measured edit's success-only accepted coordinate `(A_0,event_sequence_0)`. At its unchanged `Q_end`, require only that old occurrence/generation to be quiescent and settled, not the concurrent measured generation or the whole shared service. |
 | Immutable attribution and temporal effect | Keep every event/result owned by the last warmup generation in `phase=warmup`, including cancellation or settlement caused after measured latest-wins supersession. Exclude its occurrence-owned values from measured aggregates, but include every post-`B^M1` start, contention, reservation/grant, Compute I/O, and high-water effect in time-windowed evidence. |
 | No hidden transition | Cold/warmup transitions do not pause, wait, cool, restart, rebuild queues, release shared resources, or shift a boundary. Retain all origins/counts/indexes, fixed offers, terminal-derived B255 transition, phase endpoints, and failures in the existing workload-manifest/measurement sections and recompute their digests without adding an outer field. |
 
@@ -1767,7 +1779,7 @@ The mandatory M1 phase-boundary scenario oracle is:
 | --- | --- |
 | Exact boundary and interval | Retain boundary coordinate `(B^M1=M_0,b^M1)`, checked terminal-cutoff coordinate `(U^M1=B^M1+30,000,000,000 ns,u^M1)`, and unique strictly increasing row-local event sequences. Order equal timestamps by `(monotonic_timestamp,event_sequence)`; the measured interval is `[(B^M1,b^M1),(U^M1,u^M1))`. |
 | Ordered zero-duration transition | At `(B^M1,b^M1)`, atomically close the warmup I1 cadence and both B1 Graph producers, snapshot every previously offered incomplete warmup I1/B1 occurrence and state, reset only logical measured accumulators, and establish measured I1 origin. Then offer measured Graph A job zero followed by Graph B job one at timestamp `B^M1`, both at producer-local cycle zero and with sequence values strictly greater than `b^M1`. Require no event interleaving in the snapshot/reset and no pause/wait/cooling/drain/boundary cancellation/restart/queue rebuild/resource release. |
-| Supersession order | Require the first measured-I1 actual admission to be accepted in `[B^M1,B^M1+2,000,000 ns]`; missing, failed, early, or late admission is invalid. Only that accepted admission may ordinarily latest-wins supersede the final warmup generation. If its timestamp is `B^M1`, require its sequence after both measured B1 offers. Reject any earlier supersession, phase-only cancellation, or snapshot rewrite. Preserve the old generation's fixed `Q_end`, leaving `[181,333,337 ns,183,333,337 ns]` after acceptance, and keep every later cancellation/terminal/settlement warmup-attributed while retaining post-boundary physical effects in measured-window evidence. |
+| Supersession order | Bind the first measured I1 call to `edit_index=0`; sample `A_0` and reserve `event_sequence_0` before Host invocation. Success creates exactly `(A_0,event_sequence_0)` with `B^M1<=A_0<=B^M1+2,000,000 ns`; only that coordinate may make measured I1 current and ordinarily latest-wins supersede the final warmup generation. If `A_0=B^M1`, require its sequence after both measured B1 offers. Missing, failed, early, or late admission is invalid; failure creates no accepted event, and Host return time/status remain raw evidence. Reject any earlier supersession, phase-only cancellation, alternate coordinate, or snapshot rewrite. Preserve the old generation's fixed `Q_end`, leaving `[181,333,337 ns,183,333,337 ns]` after successful acceptance, and keep every later cancellation/terminal/settlement warmup-attributed while retaining post-boundary physical effects in measured-window evidence. |
 | Carryover identity and FIFO | Preserve warmup phase/cycle/job/attempt, queue predecessor, admission state, reservation/grant, and owner settlement. Measured cycle-zero offers follow each Graph's already-offered warmup prefix even when queued/running; this transition alone bypasses predecessor-terminal offer timing. Subsequent measured offers resume the normal per-Graph rule and never advance or rewrite an incomplete warmup identity. |
 | Occurrence attribution | Attribute terminal/completed service, output bytes, latency, receipt/golden/digest, determinism, retry/duplicate/discarded service, waste, and settlement by immutable phase. Exclude warmup occurrence-owned quantities after `B^M1` from measured throughput, Jain service `x`, latency, determinism, and waste aggregates. |
 | Temporal scheduler/resource effects | Include every post-boundary phase's actual class starts, headroom failures, queue contention, reservations/grants, Compute I/O state, and Host/device/ready-memory high-water. Count a warmup Throughput start in the measured class-start rule while retaining measured-only Jain completed service. |
@@ -2371,13 +2383,18 @@ workflow. No issue-specific replay, provenance/result orchestrator, phase-
 completion scan, or performance-result file may be registered with CTest or CI
 or retained as repository content.
 
-Issue #93 owns the continuous isolated-I1 grid and exact drain/tie/guard
-collector behavior. Issue #95 owns the B1 `OutputStore` fixed raw probe-to-
+Issue #93 owns the reusable I1 accepted-boundary collector: pre-call `A_i`
+sampling and row-local sequence reservation, success-only
+`(A_i,event_sequence_i)` acceptance/current ordering, failure evidence without
+an accepted event, the continuous isolated-I1 grid, and exact drain/tie/guard
+behavior. Issue #95 owns the B1 `OutputStore` fixed raw probe-to-
 schema mappings,
 backend-to-fixed-schema adapters, mount normalizer, performance-configuration
 mapping/proof, the single canonical encoder/digests, eligibility and
 root-containment evidence, and cap-1/cap-8 plus candidate/reference checks.
-Issue #96 reuses the exact manifest bytes for M1, implements the frozen
+Issue #96 reuses #93's accepted-boundary collector and the exact manifest bytes
+for M1, binds the first measured edit to `edit_index=0`, `A_0`, and its reserved
+sequence without redefining acceptance, implements the frozen
 `C^M1`/`W^M1` pre-boundary protocol, independent producer-local cycles, the
 exact final-warmup current-hold/accepted-admission exception without redefining
 it, and the cutoff/carryover/phase-attribution boundary, and enforces its same-
