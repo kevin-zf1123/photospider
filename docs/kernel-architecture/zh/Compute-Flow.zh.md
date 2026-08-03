@@ -44,6 +44,12 @@ session identity 与显式 Run QoS 数据。parallel/runtime 选择则通过独�
 `HostComputeExecutionOptions::maximum_parallelism` 字段会把单次 Run 的一个可选正并发上限
 穿过 adapter 传入该 QoS。其余 identity 与 QoS 仍只是私有 descriptor input；plugin ABI 不变。
 
+Source-private 的 Issue #93 `I1Host` seam 会复用同一 embedded path，而不是使用 benchmark-only
+executor。它会在普通 `HostComputeRequest` 外附加显式 Interactive QoS、weight one、cap eight、
+每次 edit 的 immutable deadline，以及只读 observation sink。该 seam 只由 embedded Host 实现，
+不会安装，也不会通过 Host、IPC、CLI 或 plugin record 暴露。其 asynchronous scheduling
+成功返回是冻结的 I1 acceptance boundary；返回的 future 仍表示稍后的产品 settlement。
+
 Dirty ROI 从 `HostComputeRequest` 复制到 `Kernel::ComputeRequest`，再经过 graph propagation、
 planning、task selection、staged execution 与 `NodeExecutor` 时，始终保持为内核自有的
 `PixelRect`；extent 使用 `PixelSize`。这条路径不会进行 OpenCV geometry 转换；provider 只有在
@@ -295,6 +301,15 @@ revision 与 current supersession key/generation，执行符合条件的延迟 H
 同一 graph-state work item 中交换完整可见状态。
 只有该 transaction 成功后才会发布 Run success。
 
+对于被观察的 Run，产品路径会在不改变 publication order 的前提下发出 source-private
+只读 boundary：current-generation assignment、physically committed callback start、accepted
+cancellation、terminal outcome 与 current-visible output。Service start 只在 reserved-start
+transaction commit 后报告，并携带精确 `(RunId, RunLocalTaskId)`、generation、QoS 与 policy
+charge。Current-visible output 只在普通 live Graph swap 成功后报告；terminal success 仍排在
+该 observation 之后。唯一 HP contender 会在同一个 Run-arbiter claim 下解析这两个
+observation，因此被拒绝或已经解析的 contender 不会发出其中任何一个。这些 callback 只保留
+scalar fact 或 immutable Value，不能启动、取消、提高优先级、settle 或发布 work。
+
 这是截至 issue #76 的当前基线。私有 request source 可以 cooperative cancel 一个 HP Run，或当前
 realtime request 的两个 child Run；immutable deadline 会在有界 observation point 提议
 `DeadlineExceeded`，Run-owned terminal arbiter 则会排列 cancellation、failure 与 visible commit。
@@ -434,6 +449,13 @@ subscription surface 都不属于当前软件契约。
 
 ## 事件和计时
 
+I1 evidence path 与 public graph-event ring 分离。其有界 request-scoped collector 会为十二次
+edit 预分配 observation slot，并为每次 product callback 分配一个 collector-local causal
+sequence。Overflow 会使 row invalid，而不会静默丢弃 evidence。在冻结的 `Q_end` cut，private
+Host 还会复制 Host/device `ResourceLedger` 的 current、limit 与 lifetime-high-water value，
+以及一页 `ExecutionLifecycleTelemetry`。Snapshot 只用于 observation：它不会等待 quiescence、
+重置 counter，也不会 mint Run/ledger/queue capability。
+
 `GraphEventService` 把每节点计算事件发布到线程安全、固定容量的 ring。Production 容量是每图
 8,192 个事件。每条被接纳的 publication 都会获得 `1..UINT64_MAX-1` 范围内单调递增的
 unsigned 64-bit sequence；`UINT64_MAX` 是 exhaustion sentinel，绝不会分配给事件。Ring 满时
@@ -524,6 +546,9 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
+- `src/lib/benchmark/i1_host.hpp`
+- `src/lib/benchmark/i1_profile.*`
+- `src/lib/benchmark/i1_evidence.*`
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
@@ -549,4 +574,7 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_i1_profile.cpp`
+- `tests/unit/test_i1_evidence.cpp`
+- `tests/integration/test_i1_product_path.cpp`
 - `tests/unit/test_event_stream_boundaries.cpp`

@@ -846,6 +846,24 @@ block, corrupt memory, allocate outside accounting, or create unreported
 threads. It simply receives no legitimate execution capability through the
 ABI.
 
+Issue #93 changes none of these three ABI inventories or record layouts. Its
+`I1Host`, `ComputeRunObservationSink`, accepted-boundary collector, inner-row
+evaluator, and exact runner are source-private benchmark/Host mechanisms. They
+are absent from installed Host requests, operation registrar records,
+data-provider v3 records, policy-plugin v1 records, SDK targets, IPC, and CLI.
+The observer receives copied facts and an immutable final Value only; it is not
+a fourth extension boundary and exposes no callback to a DSO.
+
+The installed `compute_content_digest(Value)` now handles built-in DenseTensor
+values through a Host/runtime canonical-v1 implementation in addition to the
+existing provider-defined traversal. The built-in path uses reserved
+Schema/ImageFacet identities, descriptor metadata, and logical payload bytes;
+it does not invoke or add a data-provider callback. Provider-defined values
+continue to use the unchanged mandatory v3 `visit_content` callback. Therefore
+the data-provider API table remains 160 bytes, every frozen v2/v3/v1 record and
+symbol inventory remains unchanged, and no compatibility generation is
+introduced.
+
 Execution-profile evidence does not strengthen that trust boundary. A valid
 `execution-profile-slo-v1` row freezes and hashes the exact in-process
 operation/provider and policy generations, rejects unreported worker pools or
@@ -917,6 +935,7 @@ record the follow-up direction.
 - `include/photospider/plugin/op_contract.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/core/value.cpp`
+- `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
@@ -938,6 +957,7 @@ record the follow-up direction.
 - `tests/unit/test_device_residency.cpp`
 - `tests/fixtures/value_identity_dso.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
+- `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/test_variable_sample_field_extensions.cpp`
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/integration/openexr_deep_provider_option_off_smoke.py`

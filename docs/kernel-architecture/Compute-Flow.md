@@ -54,6 +54,15 @@ optional positive Run concurrency ceiling through the adapter to that QoS.
 The remaining identity and QoS values stay private descriptor inputs; the
 plugin ABI is unchanged.
 
+The source-private Issue #93 `I1Host` seam uses this same embedded path rather
+than a benchmark-only executor. It wraps an ordinary `HostComputeRequest` with
+explicit Interactive QoS, weight one, cap eight, an immutable per-edit
+deadline, and a read-only observation sink. The seam is implemented only by
+the embedded Host and is not installed or exposed through Host, IPC, CLI, or a
+plugin record. Its successful asynchronous scheduling return is the frozen I1
+acceptance boundary; the returned future still represents later product
+settlement.
+
 The dirty ROI remains a kernel-owned `PixelRect` while it is copied from
 `HostComputeRequest` through `Kernel::ComputeRequest`, graph propagation,
 planning, task selection, staged execution, and `NodeExecutor`. Extents use
@@ -379,6 +388,18 @@ supersession key/generation, performs eligible deferred HP cache persistence,
 and swaps complete visible state in the same graph-state work item. It publishes
 Run success only after that transaction succeeds.
 
+For an observed Run, the product path emits source-private read-only boundaries
+without changing publication order: current-generation assignment, physically
+committed callback start, accepted cancellation, terminal outcome, and
+current-visible output. Service start is reported only after the reserved-start
+transaction commits and carries the exact `(RunId, RunLocalTaskId)`,
+generation, QoS, and policy charge. Current-visible output is reported only
+after the ordinary live Graph swap succeeds; terminal success remains ordered
+after that observation. The sole HP contender resolves both observations under
+one Run-arbiter claim, so a rejected or already-resolved contender emits
+neither. These callbacks retain scalar facts or an immutable Value only and
+cannot start, cancel, prioritize, settle, or publish work.
+
 This is the current baseline through issue #76. A private request source can
 cooperatively cancel one HP Run or both current realtime child Runs; immutable
 deadlines propose `DeadlineExceeded` at bounded observation points, and the
@@ -553,6 +574,15 @@ These constants are not permanent ABI.
 
 ## Events and Timing
 
+The I1 evidence path is separate from the public graph-event ring. Its bounded
+request-scoped collector preallocates observation slots for the twelve edits
+and assigns one collector-local causal sequence to every product callback.
+Overflow invalidates the row rather than dropping evidence silently. At the
+frozen `Q_end` cut, the private Host also copies Host/device
+`ResourceLedger` current, limit, and lifetime-high-water values plus one
+`ExecutionLifecycleTelemetry` page. The snapshot is observation only: it does
+not wait for quiescence, reset counters, or mint a Run/ledger/queue capability.
+
 `GraphEventService` publishes per-node compute events into a thread-safe,
 fixed-capacity ring. The production capacity is 8,192 events per graph. Each
 accepted publication receives a monotonically increasing unsigned 64-bit
@@ -666,6 +696,9 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
+- `src/lib/benchmark/i1_host.hpp`
+- `src/lib/benchmark/i1_profile.*`
+- `src/lib/benchmark/i1_evidence.*`
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
@@ -691,4 +724,7 @@ retains the durable ownership direction without changing these current facts.
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_i1_profile.cpp`
+- `tests/unit/test_i1_evidence.cpp`
+- `tests/integration/test_i1_product_path.cpp`
 - `tests/unit/test_event_stream_boundaries.cpp`

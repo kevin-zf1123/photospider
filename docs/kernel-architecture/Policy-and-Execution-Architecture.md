@@ -493,34 +493,48 @@ process-isolated plugin supervision belongs to Issue #91.
 
 ## Current Execution-Profile Evidence and Limitations
 
-Current policy behavior is not an execution-profile SLO. The built-in paths
+Built-in policy behavior by itself is not an execution-profile SLO. The paths
 have deterministic weighted ordering, eight-dispatch aging, a three-to-one
 class-start bound, and Interactive headroom. Maintained tests prove those
-mechanisms and exact resource release, but they do not measure end-to-end tail
-latency, completed-progress fairness, discarded service, or workload memory
-high-water marks.
+mechanisms and exact resource release. ADR 0010 separately defines latency,
+throughput, fairness, determinism, waste, and memory as independent verdicts
+over four immutable workloads.
 
-`BenchmarkService` currently reports mean wall time, a trimmed operation-time
-mean, mean I/O time, and the resolved per-Run cap. The manual
-`opencv_operation_concurrency_benchmark` adds warmups, raw wall samples,
-median MPix/s, speedup, and maximum callback overlap for one synthetic graph.
-Neither path implements the canonical execution-profile workloads, percentile
-windows, output/artifact/trace digests, independent verdicts, or immutable
-reference comparison.
+Issue #93 now implements the isolated `I1-edit-storm-v1` mechanism and inner
+evidence path. A source-private `I1Host` submits the exact HP request through
+the ordinary embedded asynchronous Host, InteractionService, Kernel,
+supersession, and `ExecutionService` path while supplying explicit Interactive
+QoS, weight one, cap eight, and the immutable per-edit deadline. A read-only
+`ComputeRunObservationSink` records current generation, physically committed
+service start with `(RunId, RunLocalTaskId)` and charge, accepted
+cancellation, terminal outcome, and current-visible output. It grants no
+scheduling, cancellation, ledger, graph, or commit authority and is not an
+installed Host, IPC, CLI, policy-plugin, or operation-plugin contract.
+After the live HP Graph swap, the sole commit contender emits current-visible
+output and the succeeding terminal-success observation in one Run-arbiter
+resolution; a rejected or already-resolved contender emits neither event.
 
-Lifecycle telemetry can prove bounded transitions and current object counts,
-but it has no queue-wait, completed-work, Host/device-byte, or result-digest
-fields. A ring cursor gap prevents lossless reconstruction. `ResourceLedger`
-snapshots are authoritative for their configured dimensions, but the current
-benchmark path does not retain per-row high-water samples. RSS remains a
-diagnostic outside that authority.
+The frozen I1 graph, twelve coefficients/Regions, success-only accepted
+coordinate collector, continuous cold/warmup/measured 221-slot grid, tie and
+guard rules, canonical DenseTensor output digest, resource snapshots, and
+fail-closed episode/replicate evaluator are current. `ResourceLedger` Host and
+device snapshots now retain lifetime high-water values for successful
+reservations as well as current/limit values; the I1 boundary snapshot combines
+those values with lifecycle counters and cursor/drop facts. The closed
+`execution-profile-i1-inner-row-v1` evidence independently evaluates latency,
+waste, memory settlement, and output correctness. It does not claim the ADR
+0010 canonical 15-field outer row, section, bundle, reference comparison, or
+the profiles assigned to Issues #94 through #96.
 
-[ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
-therefore defines latency, throughput, fairness, determinism, waste, and
-memory as six independent target verdicts over four immutable workloads.
-Issues #93 through #96 own the missing fixtures, collectors, and isolated/mixed
-evidence. Until their assigned valid rows exist, this document makes no
-Interactive, batch/render/testbench, or mixed-profile conformance claim.
+The manual `i1_edit_storm_benchmark` is excluded from the default build and
+CTest. It executes the exact 221-slot workload and writes raw inner rows plus a
+replicate summary to an explicit disposable directory outside the checkout.
+Building the harness or running deterministic tests is not a machine
+conformance result: an I1 claim requires a complete valid exact-cadence run and
+retained evidence, and this document makes no Interactive, batch/render/
+testbench, or mixed-profile conformance claim. `BenchmarkService` and
+`opencv_operation_concurrency_benchmark` retain their narrower legacy metrics
+and are not canonical execution-profile evidence.
 
 The target contract deliberately reuses legal current descriptor values rather
 than inventing an execution-profile enum. I1 is
@@ -553,6 +567,10 @@ bytes do not replace diagnostic RSS or ledger/device ownership evidence.
 - `src/lib/compute/execution_service.hpp` and `.cpp`
 - `src/lib/compute/run_lifecycle_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` and `.cpp`
+- `src/lib/benchmark/i1_host.hpp`
+- `src/lib/benchmark/i1_profile.*`
+- `src/lib/benchmark/i1_evidence.*`
+- `src/lib/runtime/resource_ledger.*`
 - `src/lib/execution/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/execution/execution_task_runtime.hpp`
@@ -571,6 +589,10 @@ bytes do not replace diagnostic RSS or ledger/device ownership evidence.
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_i1_profile.cpp`
+- `tests/unit/test_i1_evidence.cpp`
+- `tests/integration/test_i1_product_path.cpp`
+- `tests/verification/i1_edit_storm_benchmark.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
 - `tests/integration/test_ipc_daemon.cpp`

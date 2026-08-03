@@ -1733,7 +1733,9 @@ The runner records accepted cancellation/supersession before any late Host
 call, revokes publication, and never catches up, backfills, or shifts later
 times. Entered non-preemptible work drains as waste; post-cancel starts are
 zero, and missed/expired work cannot publish output, receipt, or successful
-latency.
+latency. Concretely, an invalid admission result synchronously closes the Graph
+to revoke episode publication and cancel/drain earlier generations before the
+runner aborts every later edit and grid slot.
 
 The mandatory I1 phase/drain scenario oracle is:
 
@@ -1742,6 +1744,7 @@ The mandatory I1 phase/drain scenario oracle is:
 | Continuous isolated phase grid | Retain one `G^I1`; derive cold slot zero, warmup slots `1..20`, measured slots `21..220`, and only `T^I1=G^I1+221*750,000,000 ns` as a terminal non-start boundary. Map each phase's natural ordinal to zero-based `r`; reject a fresh phase origin, cooling delay, shifted slot, or late counter reset. |
 | Successful accepted-boundary coordinate | After validating each `A_i`, reserve its unique row-local `event_sequence_i` before Host invocation. On success require the normative accepted coordinate to equal `(A_i,event_sequence_i)`, make the generation current there, and reject a Host return timestamp/status as a deadline, current-generation, supersession, or tie-order coordinate. |
 | Failed admission has no accepted event | On Host failure retain the reserved sequence and failure/return observations as raw inner evidence, invalidate the replicate, and require no accepted-admission event, current-generation transition, alternate timestamp, backfill, or outer schema field. |
+| Per-edit expiry is publication-closing | Require every intermediate visible output at or before its own `D_i`; a later intermediate publication contradicts the frozen product/workload contract and invalidates the row. The required twelfth output remains a complete latency-gate failure when visible after its own deadline. |
 | Exact drain anchor | For every episode require `Q_start=S_11=E+183,333,337 ns` and `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`, independent of actual admission and deadline. The window may overlap an active final Run but does not cancel it or extend `D_i`. |
 | Deadline and next-origin guards | With latest legal admission, require `D_11<=E+335,333,337 ns`, exactly 348,000,000 ns from that deadline to `Q_end`, and exactly 66,666,663 ns from `Q_end` to the next origin. Reset/baseline preparation must fit that guard; the last measured episode uses the same guard before `T^I1`. |
 | Boundary tie and settlement | At `Q_start`, nominal marker precedes equal-time admission. At `Q_end`, equal-time lifecycle events apply in retained causal order before the quiescence snapshot. Active work at the snapshot or later terminal/settlement is invalid. |
@@ -2402,6 +2405,44 @@ ordinal full B1 pair while keeping the I1-only pair base-only. None may redefine
 v1 grammar, fields, or sentinels. Issue #92 defines only this evidence contract;
 it adds no current probe, serializer, public API, runner, or runtime result
 field.
+
+Issue #93 now registers the long-lived deterministic I1 behavior in
+`test_i1_profile`, `test_i1_evidence`,
+`test_dense_tensor_content_digest`, `test_resource_ledger`, and, when the
+repository OpenCV operation provider is enabled, `test_i1_product_path`.
+Together they cover checked grid/admission arithmetic, success-only accepted
+coordinates, exact frozen graph/request construction, one-based nearest-rank
+aggregation, independent discarded and post-cancel service, Host/device
+lifetime-high-water observation, final settlement, canonical DenseTensor
+logical identity, and the real embedded Host latest-wins product path. These
+are correctness tests; they do not assert machine-dependent percentile or
+waste thresholds from a timed 221-slot run.
+
+The exact timed workload is the manual, `EXCLUDE_FROM_ALL`
+`i1_edit_storm_benchmark` target and is not registered with CTest or CI. Build
+it explicitly, then run each replicate in a different absent or empty absolute
+directory whose existing parent is outside the checkout:
+
+```shell
+cmake --build build --target i1_edit_storm_benchmark -j
+./build/tests/i1_edit_storm_benchmark \
+  --output-dir /tmp/photospider-i1-r1 --replicate-ordinal 1
+./build/tests/i1_edit_storm_benchmark \
+  --output-dir /tmp/photospider-i1-r2 --replicate-ordinal 2
+./build/tests/i1_edit_storm_benchmark \
+  --output-dir /tmp/photospider-i1-r3 --replicate-ordinal 3
+```
+
+The runner fixes the product worker count at eight, keeps one continuous
+221-slot cold/warmup/measured grid, never shifts or backfills a missed slot,
+and aborts later submissions on invalid evidence. Each directory contains the
+frozen `i1-graph.yaml`, `invocation.json`, raw `episodes.ndjson`, and
+`summary.json`, or `failure.json` after a setup/cadence/evidence failure. These
+are closed Issue #93 inner artifacts and explicitly carry no canonical outer
+row/section/bundle claim. Exit zero means all four I1 inner verdicts passed;
+exit two means complete evidence failed at least one threshold; exit one means
+parsing, setup, cadence, or evidence invalidation. Building the target or
+running `--help` is only a harness smoke, not performance evidence.
 
 ## CTest Registration
 

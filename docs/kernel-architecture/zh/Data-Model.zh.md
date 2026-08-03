@@ -416,6 +416,20 @@ byte 增量送入 SHA-256。两次 invocation 使用独立的 callback-local dia
 三个可选 digest identity，但它不是 graph document、manifest/chunk store、filesystem codec 或
 cache-policy integration。
 
+同一个已安装的 `compute_content_digest(Value)` 入口现在也为内建 DenseTensor value 提供
+冻结的 canonical-v1 逻辑 identity，且不会调用 provider callback。其保留的内建 Schema
+record 会编码 rank、shape、element semantics、storage encoding kind/width，以及可选的
+quantization block shape 和 binary32 scale bit。可选的保留 `ImageFacet` record 会编码 x/y
+axis 与可选 channel axis。Content traversal 按 row-major logical coordinate 执行：whole-byte
+scalar 以 little-endian 发出，blocked FP4 则为每个 logical element 发出一个 low-nibble code
+byte。Stride、byte/bit offset、padding、block placement、nibble order、allocation/binding
+identity、device identity、readiness metadata 与 Value revision 均不进入 logical content
+identity；descriptor-bound quantization metadata 会进入 descriptor digest。Non-Ready 或不可读
+payload 返回 `PayloadUnavailable`；malformed 或 unsupported retained state 返回
+`InvalidDescriptor`；allocation failure 仍以 `std::bad_alloc` 传播。这些规则让经过 repack、
+但逻辑相等的 DenseTensor output 可以用带类型的 `Sha256CanonicalV1` `ContentDigest` 比较，
+而不是比较 raw storage byte。
+
 V-15 为这套未改变的 v3 definition suite 提供首个可选具体 generation。仓库自有 OpenEXR
 provider 会发布一个 `VariableSampleField` Schema、`ImageFacet`、`DeepSampleFacet` 与一个
 multi-buffer Layout。其版本化 descriptor payload 会保留有符号半开 data/display window，以及
@@ -482,6 +496,7 @@ dependency 工作由
 - `src/lib/ipc/output_store.*`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/value_image_adapter.*`
@@ -506,6 +521,7 @@ dependency 工作由
 - `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
+- `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`

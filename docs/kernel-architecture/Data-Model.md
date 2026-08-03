@@ -517,6 +517,23 @@ Schema/Facet/Layout unknown bytes and all three optional digest identities
 without a provider, but it is not a graph document, manifest/chunk store,
 filesystem codec, or cache-policy integration.
 
+The same installed `compute_content_digest(Value)` entry now gives built-in
+DenseTensor values a frozen canonical-v1 logical identity without invoking a
+provider callback. Its reserved built-in Schema record encodes rank, shape,
+element semantics, storage encoding kind and width, and optional quantization
+block shape plus binary32 scale bits. An optional reserved `ImageFacet` record
+encodes the x/y axes and optional channel axis. Content traversal follows
+row-major logical coordinates: whole-byte scalars are emitted little-endian,
+while blocked FP4 emits one low-nibble code byte per logical element. Strides,
+byte/bit offsets, padding, block placement, nibble order, allocation/binding
+identity, device identity, readiness metadata, and Value revision do not enter
+logical content identity. Descriptor-bound quantization metadata does enter the
+descriptor digest. A non-Ready or unreadable payload returns
+`PayloadUnavailable`; malformed or unsupported retained state returns
+`InvalidDescriptor`; allocation failure still propagates as `std::bad_alloc`.
+These rules make repacked but logically equal DenseTensor outputs comparable by
+typed `Sha256CanonicalV1` `ContentDigest` rather than raw storage bytes.
+
 V-15 supplies the first optional concrete generation for that unchanged v3
 definition suite. The repository OpenEXR provider publishes one
 `VariableSampleField` Schema, `ImageFacet`, `DeepSampleFacet`, and one
@@ -593,6 +610,7 @@ neither document changes the current fields described above.
 - `src/lib/ipc/output_store.*`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/value_image_adapter.*`
@@ -617,6 +635,7 @@ neither document changes the current fields described above.
 - `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
+- `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`

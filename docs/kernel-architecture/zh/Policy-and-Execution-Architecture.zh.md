@@ -400,28 +400,39 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 
 ## 当前执行画像证据与限制
 
-当前 policy 行为不是执行画像 SLO。内建路径具有确定性 weighted ordering、八次
-dispatch aging、3:1 class-start 上界与 Interactive headroom。长期测试证明这些
-机制和精确资源释放，但不会测量端到端 tail latency、completed-progress fairness、
-discarded service 或逐 workload memory high-water mark。
+内建 policy 行为本身不是执行画像 SLO。现有路径具有确定性 weighted ordering、八次
+dispatch aging、3:1 class-start 上界与 Interactive headroom。长期测试会证明这些机制
+和精确资源释放；ADR 0010 则把 latency、throughput、fairness、determinism、waste 与
+memory 分别定义为四个不可变 workload 上的独立判定。
 
-`BenchmarkService` 当前报告平均 wall time、operation time 截尾平均、平均 I/O
-time 和解析后的逐 Run cap。手工 `opencv_operation_concurrency_benchmark` 还会
-针对一个合成 graph 提供 warmup、原始 wall sample、MPix/s 中位数、speedup 和
-最大 callback overlap。两条路径都没有实现规范执行画像 workload、percentile
-window、output/artifact/trace digest、独立判定或不可变 reference comparison。
+Issue #93 现已实现 isolated `I1-edit-storm-v1` mechanism 与 inner evidence path。
+Source-private `I1Host` 会经过普通 embedded asynchronous Host、InteractionService、Kernel、
+supersession 与 `ExecutionService` path 提交精确 HP request，同时提供显式 Interactive QoS、
+weight one、cap eight 与每次 edit 的 immutable deadline。只读
+`ComputeRunObservationSink` 会记录 current generation、带 `(RunId, RunLocalTaskId)` 与 charge
+的 physically committed service start、accepted cancellation、terminal outcome，以及
+current-visible output。它不授予 scheduling、cancellation、ledger、graph 或 commit authority，
+也不是 installed Host、IPC、CLI、policy-plugin 或 operation-plugin contract。
+Live HP Graph swap 完成后，唯一 commit contender 会在同一次 Run-arbiter resolution 中依次
+发出 current-visible output 与 terminal-success observation；被拒绝或已经解析的 contender
+不会发出其中任何一个 event。
 
-生命周期 telemetry 可以证明有界 transition 与当前 object count，但没有
-queue-wait、completed-work、Host/device-byte 或 result-digest 字段。Ring cursor
-gap 会阻止无损重建。`ResourceLedger` snapshot 对其已配置 dimension 具有权威性，
-但当前 benchmark 路径不会保留逐 row high-water sample。RSS 只是在该权威之外的
-diagnostic。
+冻结的 I1 graph、十二项 coefficient/Region、仅成功时产生 accepted coordinate 的 collector、
+连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor output digest、
+resource snapshot，以及 fail-closed episode/replicate evaluator 均已成为当前实现。
+`ResourceLedger` 的 Host/device snapshot 现在除 current/limit 外，还保留 successful reservation
+的 lifetime high-water value；I1 boundary snapshot 会把这些值与 lifecycle counter、cursor/drop
+fact 组合。封闭的 `execution-profile-i1-inner-row-v1` evidence 会分别判定 latency、waste、
+memory settlement 与 output correctness。它不声称实现 ADR 0010 canonical 15-field outer row、
+section、bundle、reference comparison，也不覆盖 Issues #94 至 #96 负责的 profile。
 
-[ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
-因此把 latency、throughput、fairness、determinism、waste 与 memory 定义为四个
-不可变 workload 上的六项独立目标判定。Issues #93 至 #96 负责缺失的 fixture、
-collector 以及 isolated/mixed 证据。在其分配的有效证据行存在之前，本文不声明
-Interactive、batch/render/testbench 或 mixed-profile 符合要求。
+手工 `i1_edit_storm_benchmark` 被排除在默认 build 与 CTest 之外。它会执行精确 221-slot
+workload，并把 raw inner row 与 replicate summary 写入 checkout 外显式指定的 disposable
+directory。仅构建 harness 或运行 deterministic test 不构成机器符合性结果：I1 声明要求一轮
+完整、有效且 cadence 精确的运行及其 retained evidence；本文不声明 Interactive、batch/render/
+testbench 或 mixed-profile 符合要求。`BenchmarkService` 与
+`opencv_operation_concurrency_benchmark` 保留各自更窄的 legacy metric，不是 canonical
+execution-profile evidence。
 
 目标契约有意复用合法的当前 descriptor value，而不是虚构 execution-profile enum。
 I1 使用 `GlobalHighPrecision`/`Full`；I2 的 realtime request lineage 携带
@@ -451,6 +462,10 @@ diagnostic RSS 或 ledger/device ownership evidence。
 - `src/lib/compute/execution_service.hpp` 和 `.cpp`
 - `src/lib/compute/run_lifecycle_registry.hpp` 和 `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` 和 `.cpp`
+- `src/lib/benchmark/i1_host.hpp`
+- `src/lib/benchmark/i1_profile.*`
+- `src/lib/benchmark/i1_evidence.*`
+- `src/lib/runtime/resource_ledger.*`
 - `src/lib/execution/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
 - `src/lib/execution/execution_task_runtime.hpp`
@@ -469,6 +484,10 @@ diagnostic RSS 或 ledger/device ownership evidence。
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_i1_profile.cpp`
+- `tests/unit/test_i1_evidence.cpp`
+- `tests/integration/test_i1_product_path.cpp`
+- `tests/verification/i1_edit_storm_benchmark.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
 - `tests/integration/test_ipc_daemon.cpp`

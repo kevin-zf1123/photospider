@@ -649,6 +649,20 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 插件仍在 Host 进程内执行受信任的原生代码，可能阻塞、破坏内存、在计账外分配
 或创建未申报线程；它只是无法通过 ABI 合法获得执行能力。
 
+Issue #93 不会改变上述三条 ABI 的 inventory 或 record layout。其 `I1Host`、
+`ComputeRunObservationSink`、accepted-boundary collector、inner-row evaluator 与精确 runner
+均是 source-private benchmark/Host mechanism。它们不会进入 installed Host request、operation
+registrar record、data-provider v3 record、policy-plugin v1 record、SDK target、IPC 或 CLI。
+Observer 只接收 copied fact 与 immutable final Value；它不是第四条 extension boundary，也不向
+DSO 暴露 callback。
+
+已安装的 `compute_content_digest(Value)` 现在除既有 provider-defined traversal 外，也会通过
+Host/runtime canonical-v1 实现处理内建 DenseTensor value。内建路径使用保留的
+Schema/ImageFacet identity、descriptor metadata 与 logical payload byte；它不会调用或新增
+data-provider callback。Provider-defined value 继续使用未改变的 v3 mandatory `visit_content`
+callback。因此 data-provider API table 仍为 160 byte，冻结的 v2/v3/v1 record 与 symbol
+inventory 均保持不变，也不会引入新的 compatibility generation。
+
 执行画像证据不会加强这条信任边界。有效的 `execution-profile-slo-v1` 行会冻结并
 hash 精确的进程内 operation/provider 与 policy generation，拒绝未申报的 worker
 pool 或 resource authority，并把当前 ledger/device authority 之外的 allocation
@@ -710,6 +724,7 @@ server/plugin-isolation 目标。
 - `include/photospider/plugin/op_contract.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/core/value.cpp`
+- `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
@@ -735,5 +750,6 @@ server/plugin-isolation 目标。
 - `tests/unit/test_device_residency.cpp`
 - `tests/fixtures/value_identity_dso.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
+- `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

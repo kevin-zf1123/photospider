@@ -1384,7 +1384,9 @@ invalid，也不能合成或回填其他 timestamp；预留的 sequence 与 fail
 admission failure 都会使 replicate 无效。Runner 在任何迟到 Host call 前请求
 cancellation/supersession 并记录其被接受、撤销 publication，并且不会追赶、回填或
 移动后续时刻。已进入的 non-preemptible work 按 waste drain；post-cancel start
-为零，missed/expired work 不能发布 output、receipt 或 successful latency。
+为零，missed/expired work 不能发布 output、receipt 或 successful latency。具体而言，
+无效 admission result 会同步关闭 Graph，以撤销该 episode 的 publication 并取消、drain
+较早 generation，然后 runner 才中止全部后续 edit 与 grid slot。
 
 强制 I1 phase/drain scenario oracle 如下：
 
@@ -1393,6 +1395,7 @@ cancellation/supersession 并记录其被接受、撤销 publication，并且不
 | 连续 isolated phase grid | 保留唯一 `G^I1`；派生 cold slot zero、warmup slot `1..20`、measured slot `21..220`，并且只把 `T^I1=G^I1+221*750,000,000 ns` 作为 terminal non-start boundary。把每个 phase 的自然 ordinal 映射为从零开始的 `r`；拒绝 fresh phase origin、cooling delay、shifted slot 或迟到的 counter reset。 |
 | 成功的 accepted-boundary coordinate | 校验每个 `A_i` 后，在 Host invocation 前预留其唯一 row-local `event_sequence_i`。成功时要求规范 accepted coordinate 精确等于 `(A_i,event_sequence_i)`，让 generation 在此成为 current，并拒绝把 Host return timestamp/status 用作 deadline、current-generation、supersession 或 tie-order coordinate。 |
 | 失败的 admission 不产生 accepted event | Host failure 时，把预留 sequence 与 failure/return observation 保留为 raw inner evidence，使 replicate invalid，并要求不存在 accepted-admission event、current-generation transition、替代 timestamp、backfill 或 outer schema field。 |
+| 每次 edit 的 expiry 都会关闭 publication | 要求每个 intermediate visible output 不晚于其自身 `D_i`；更晚的 intermediate publication 与冻结的 product/workload contract 冲突，并使 row invalid。必需的 twelfth output 若晚于自身 deadline，仍属于证据完整的 latency-gate failure。 |
 | 精确 drain anchor | 每个 episode 要求 `Q_start=S_11=E+183,333,337 ns` 与 `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`，不受 actual admission 或 deadline 变化影响。Window 可以与 active final Run 重叠，但不会取消它或延长 `D_i`。 |
 | Deadline 与 next-origin guard | 在最晚合法 admission 下，要求 `D_11<=E+335,333,337 ns`、从该 deadline 到 `Q_end` 精确 348,000,000 ns，以及从 `Q_end` 到下一 origin 精确 66,666,663 ns。Reset/baseline preparation 必须容纳在该 guard 中；最后一个 measured episode 在 `T^I1` 前使用相同 guard。 |
 | Boundary tie 与 settlement | 在 `Q_start`，nominal marker 先于同 timestamp admission；在 `Q_end`，同 timestamp lifecycle event 先按保留 causal order 应用，再取得 quiescence snapshot。Snapshot 仍有 active work 或之后仍有 terminal/settlement 都是 invalid。 |
@@ -1983,6 +1986,37 @@ cutoff/carryover/phase-attribution boundary，并强制执行其 same-ordinal �
 field 或 sentinel。Issue #92 只定义本 evidence
 contract；它不新增当前 probe、serializer、public API、runner 或 runtime result
 field。
+
+Issue #93 现已通过 `test_i1_profile`、`test_i1_evidence`、
+`test_dense_tensor_content_digest`、`test_resource_ledger`，以及在启用仓库 OpenCV operation
+provider 时的 `test_i1_product_path`，注册长期确定性的 I1 行为。它们共同覆盖 checked
+grid/admission arithmetic、仅成功时产生的 accepted coordinate、精确冻结的 graph/request
+construction、one-based nearest-rank aggregate、彼此独立的 discarded/post-cancel service、
+Host/device lifetime-high-water observation、final settlement、canonical DenseTensor logical
+identity，以及真实 embedded Host latest-wins product path。这些是 correctness test；它们不会
+断言 timed 221-slot run 中与机器相关的 percentile 或 waste threshold。
+
+精确定时 workload 由手工、`EXCLUDE_FROM_ALL` 的 `i1_edit_storm_benchmark` target 承担；
+它不注册到 CTest 或 CI。必须显式构建，并把每个 replicate 分别写入 checkout 外、父目录已存在、
+且自身不存在或为空的不同绝对目录：
+
+```shell
+cmake --build build --target i1_edit_storm_benchmark -j
+./build/tests/i1_edit_storm_benchmark \
+  --output-dir /tmp/photospider-i1-r1 --replicate-ordinal 1
+./build/tests/i1_edit_storm_benchmark \
+  --output-dir /tmp/photospider-i1-r2 --replicate-ordinal 2
+./build/tests/i1_edit_storm_benchmark \
+  --output-dir /tmp/photospider-i1-r3 --replicate-ordinal 3
+```
+
+Runner 会把产品 worker count 固定为 eight，保留唯一连续的 221-slot cold/warmup/measured
+grid，绝不移动或 backfill 已错过的 slot，并在 evidence invalid 后停止后续 submission。每个目录
+包含冻结的 `i1-graph.yaml`、`invocation.json`、raw `episodes.ndjson` 与 `summary.json`；setup/
+cadence/evidence failure 后则包含 `failure.json`。这些是封闭的 Issue #93 inner artifact，并明确
+不声明 canonical outer row/section/bundle。Exit zero 表示四项 I1 inner verdict 全部通过；exit two
+表示完整 evidence 至少有一项 threshold 失败；exit one 表示 parsing、setup、cadence 或 evidence
+invalid。仅构建 target 或运行 `--help` 只是 harness smoke，不是 performance evidence。
 
 ## CTest 注册
 
