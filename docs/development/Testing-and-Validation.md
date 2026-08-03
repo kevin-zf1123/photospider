@@ -1699,7 +1699,20 @@ The mandatory I2 coefficient/path scenario oracle is:
 | Full-resolution final path | Final starts from the original 2048 source, applies the same `K[i]` update and four transforms as I1, and is never produced by upsampling or reusing preview pixels. |
 | Digest and golden linkage | The manifest binds the complete coefficient/mapping/order/rounding/path contract; the required `edit_index=11` final logical digest equals I1 at index 11 and the preview equals its own fixture golden. Any mismatch or manifest drift invalidates the v1 row. |
 
-After baseline settlement, an episode chooses monotonic origin `E` and uses
+The mandatory I2 cadence scenario oracle is:
+
+| Scenario | Oracle |
+| --- | --- |
+| Continuous phase grid and measured origin/index | Retain one replicate-grid origin `G^I2` for all 111 episode slots: cold starts at `G^I2`, warmup at `G^I2+1*1,500,000,000 ns`, measured at `E^I2_0=G^I2+11*1,500,000,000 ns`, and the non-start terminal boundary is `T^I2=G^I2+111*1,500,000,000 ns`. In measured, map `episode_ordinal=1..100` to `episode_index=0..99` and derive every origin as `E^I2_r=E^I2_0+r*1,500,000,000 ns`; reject any fresh episode/phase origin or transition delay. |
+| Twelve-edit admission schedule | For every episode and `edit_index=i` in `0..11`, require `S^I2_{r,i}=E^I2_r+i*16,666,667 ns` and one preview Host-admission sample `A^I2_{r,i}` in the closed interval `[S^I2_{r,i},S^I2_{r,i}+2,000,000 ns]`. |
+| Single invalid edit event | Move one admission below its nominal start or above its lateness bound, omit/duplicate/reorder/fail one admission, trigger checked-arithmetic overflow, or insert one cadence gap; the replicate is invalid, publication is revoked, and no edit or later episode catches up, backfills, or shifts. |
+| Episode spacing and quiescence | Require consecutive origins exactly 1,500,000,000 ns apart and all prior work quiescent before the next origin; require the final measured episode quiescent before `T^I2`. The latest legal twelfth final deadline is origin plus 1,185,333,337 ns, leaving a minimum 314,666,663 ns guard that never extends the deadline. |
+| Preview versus next edit | Edits `0..10` never wait for preview. Preview `i` may publish only with visibility strictly before `A^I2_{r,i+1}`; equality orders the newer edit acceptance first and makes the preview stale. |
+| Shared child-deadline anchor | Checked-add preview and final deadlines as `A^I2_{r,i}+100,000,000 ns` and `A^I2_{r,i}+1,000,000,000 ns`. Retain the later final trigger/admission but never reanchor the deadline; require the twelfth preview/final visible by their bounds. |
+| Existing-envelope evidence | Retain clock/replicate-grid/derived-phase-origin/index/schedule/tie rules in the existing workload-manifest section and all actual admission/deadline/visibility/cancel/drop/gap/quiescence events in measurement evidence. Recompute their section/verdict digests while preserving the closed 15-field row and five-field bundle. |
+| Manifest/golden drift | Reject any origin/stride/cadence/order/lateness/anchor/tie-rule drift under `I2-progressive-v1` even when image goldens match; a deliberate change needs a new workload id and manifest/digest/golden lineage. |
+
+For isolated I1, after baseline settlement, an episode chooses monotonic origin `E` and uses
 `S_i=E+i*16,666,667 ns`. `A_i` is the one monotonic-clock sample immediately
 before final Host admission; it starts the latency sample and checked-adds the
 sole absolute Run deadline `D_i=A_i+150,000,000 ns`. `A_i` must be in
@@ -1786,17 +1799,27 @@ one exact-size first upload per distinct preview/final revision; the second
 access must hit the same residency. No CPU copy, readback, disk/codec access, or
 additional transfer is permitted.
 
-I2 uses the ADR 0010 target state machine, not an invented current API: every
-edit mints a realtime request generation, immediately submits the legal
+I2 uses the ADR 0010 target state machine, not an invented current API: one
+replicate-grid origin fixes a continuous 111-slot cold/warmup/measured grid,
+with measured beginning at stride 11, a terminal quiescence boundary at stride
+111, and exact 1,500 ms episode spacing; no phase transition chooses a new
+origin or inserts a delay. Every episode admits
+twelve edits on the 16,666,667 ns nominal schedule with at most 2 ms lateness.
+Before each nominal start, the harness pre-mints a realtime request generation;
+successful Host admission makes it current, immediately submits the legal
 `RealTimeUpdate`/`Interactive` preview child, and arms the legal
 `GlobalHighPrecision`/`Full` final child under the shared realtime request
-identity. The final submits only when its preview becomes visible while still
+identity. Edits `0..10` never wait: the next acceptance follows the frozen
+schedule, and a prior preview must be visible strictly before it to remain
+current. The final submits only when its preview becomes visible while still
 current. A newer generation revokes both older publication permissions. Preview
-latency starts immediately before preview admission and ends at preview
-visibility; final latency uses the same start and ends at final visibility.
-Only `edit_index=11` must publish both, in order. #94 consumes the frozen I1
-coefficient/update sequence and full-resolution final path; it cannot select a
-different coefficient for edits `0..10` while retaining `I2-progressive-v1`.
+latency and both child deadlines anchor to the same actual preview admission;
+final trigger/admission is retained but cannot reset the 1,000 ms deadline.
+Only `edit_index=11` must publish both, in order and within the two absolute
+bounds. #94 implements this frozen cadence and the I1 coefficient/update
+sequence and full-resolution final path; it cannot redefine the cadence or
+select a different coefficient for edits `0..10` while retaining
+`I2-progressive-v1`.
 
 Required logical values call `compute_content_digest(Value)` and require
 `Available`, a present `ContentDigest`, and

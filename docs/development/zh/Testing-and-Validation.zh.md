@@ -1355,7 +1355,20 @@ upsample、复用或其他方式从 preview 派生的 Value。
 | Full-resolution final path | Final 从原始 2048 source 开始，执行与 I1 相同的 `K[i]` update 与四个 transform，绝不通过 upsample 或复用 preview pixel 生成。 |
 | Digest 与 golden linkage | Manifest 绑定完整 coefficient/mapping/order/rounding/path 契约；必需的 `edit_index=11` final logical digest 等于 I1 index 11，preview 等于其自身 fixture golden。任何 mismatch 或 manifest drift 都使 v1 row 无效。 |
 
-Baseline 结算后，episode 选择 monotonic origin `E`，并使用
+强制 I2 cadence scenario oracle 如下：
+
+| 场景 | Oracle |
+| --- | --- |
+| 连续 phase grid 与 measured origin/index | 为全部 111 个 episode slot 保留唯一 replicate-grid origin `G^I2`：cold 从 `G^I2` 开始，warmup 从 `G^I2+1*1,500,000,000 ns` 开始，measured 从 `E^I2_0=G^I2+11*1,500,000,000 ns` 开始，不启动 episode 的 terminal boundary 为 `T^I2=G^I2+111*1,500,000,000 ns`。在 measured 中，把 `episode_ordinal=1..100` 映射为 `episode_index=0..99`，并按 `E^I2_r=E^I2_0+r*1,500,000,000 ns` 派生每个 origin；拒绝任何新选的 episode/phase origin 或 transition delay。 |
+| 十二次 edit admission schedule | 对每个 episode 与 `0..11` 中的 `edit_index=i`，要求 `S^I2_{r,i}=E^I2_r+i*16,666,667 ns`，且唯一 preview Host-admission sample `A^I2_{r,i}` 位于封闭区间 `[S^I2_{r,i},S^I2_{r,i}+2,000,000 ns]`。 |
+| 单个无效 edit event | 把一个 admission 移到 nominal start 之前或 lateness bound 之后，遗漏/重复/重排/令一个 admission 失败、触发 checked-arithmetic overflow，或插入一个 cadence gap；replicate 无效、publication 被撤销，且任何 edit 或后续 episode 都不得追赶、回填或移动。 |
+| Episode spacing 与 quiescence | 要求相邻 origin 精确相差 1,500,000,000 ns，且前一 episode 的全部 work 在下一 origin 前 quiescent；最后一个 measured episode 必须在 `T^I2` 前 quiescent。最晚合法第十二次 final deadline 为 origin 加 1,185,333,337 ns，留下最少 314,666,663 ns 且绝不延长 deadline 的 guard。 |
+| Preview 与下一 edit | Edit `0..10` 绝不等待 preview。Preview `i` 只有在 visibility 严格早于 `A^I2_{r,i+1}` 时才可发布；二者相等时，更新 edit acceptance 先排序，该 preview 成为 stale。 |
+| 共享 child-deadline anchor | Preview 与 final deadline 分别 checked-add 为 `A^I2_{r,i}+100,000,000 ns` 与 `A^I2_{r,i}+1,000,000,000 ns`。保留较晚的 final trigger/admission，但绝不重新锚定 deadline；第十二次 preview/final 必须在各自 bound 前可见。 |
+| 既有 envelope evidence | 在既有 workload-manifest section 中保留 clock/replicate-grid/派生 phase-origin/index/schedule/tie rule，在 measurement evidence 中保留全部 actual admission/deadline/visibility/cancel/drop/gap/quiescence event。复算其 section/verdict digest，同时保持封闭 15-field row 与五 field bundle。 |
+| Manifest/golden drift | 即使 image golden 匹配，也拒绝 `I2-progressive-v1` 下的任何 origin/stride/cadence/order/lateness/anchor/tie-rule 漂移；有意改变必须使用新的 workload id 与 manifest/digest/golden lineage。 |
+
+对 isolated I1，baseline 结算后，episode 选择 monotonic origin `E`，并使用
 `S_i=E+i*16,666,667 ns`。`A_i` 是 final Host admission 前立即取得的唯一
 monotonic-clock sample；它启动 latency sample，并通过 checked addition 得到唯一
 absolute Run deadline `D_i=A_i+150,000,000 ns`。`A_i` 必须处于
@@ -1431,15 +1444,23 @@ binding 获取两次。已配置 Metal device 允许每个不同 preview/final r
 首次 access 执行一次精确大小的 upload；第二次必须命中相同 residency。禁止
 CPU copy、readback、disk/codec access 或额外 transfer。
 
-I2 使用 ADR 0010 的目标 state machine，而不是虚构当前 API：每次 edit 生成一个
-realtime request generation，立即提交合法的 `RealTimeUpdate`/`Interactive` preview
-child，并在共享 realtime request identity 下 arm 合法的
-`GlobalHighPrecision`/`Full` final child。Final 只在其 preview 可见且仍为 current
-时提交。更新 generation 会撤销两个较旧 child 的 publication permission。Preview
-latency 从 preview admission 前立即开始，到 preview visibility 结束；final latency
-使用同一起点，到 final visibility 结束。只有 `edit_index=11` 必须依次发布二者。
-Issue #94 消费冻结的 I1 coefficient/update sequence 与 full-resolution final path；它不能为
-edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。
+I2 使用 ADR 0010 的目标 state machine，而不是虚构当前 API：唯一 replicate-grid
+origin 固定连续的 111-slot cold/warmup/measured grid，measured 从 stride 11 开始，
+terminal quiescence boundary 位于 stride 111，episode spacing 精确为 1,500 ms；任何
+phase transition 都不得新选 origin 或插入 delay。
+每个 episode 在相隔 16,666,667 ns 的 nominal schedule 上 admit 十二次 edit，最多允许
+迟到 2 ms。Harness 在每个 nominal start 前预先生成 realtime request generation；
+成功 Host admission 会令其成为 current、立即提交合法的
+`RealTimeUpdate`/`Interactive` preview child，并在共享 realtime request identity 下 arm 合法的
+`GlobalHighPrecision`/`Full` final child。Edit `0..10` 绝不等待：下一次 acceptance
+遵循冻结 schedule，较早 preview 必须严格在其之前可见，才能保持 current。Final
+只在其 preview 可见且仍为 current 时提交。更新 generation 会撤销两个较旧 child
+的 publication permission。Preview latency 与两个 child deadline 都锚定到同一个
+actual preview admission；final trigger/admission 被保留，但不能重置 1,000 ms deadline。
+只有 `edit_index=11` 必须按顺序并在两个 absolute bound 内发布二者。Issue #94 实现
+该冻结 cadence、I1 coefficient/update sequence 与 full-resolution final path；它不能
+重新定义 cadence，也不能为 edit `0..10` 选择不同 coefficient 后仍保留
+`I2-progressive-v1`。
 
 必需 logical value 调用 `compute_content_digest(Value)`，并且要求 `Available`、
 存在 `ContentDigest`，以及 `CanonicalDigestAlgorithm::Sha256CanonicalV1`。Logical

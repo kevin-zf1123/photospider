@@ -1088,7 +1088,7 @@ immutable workload ids:
 | Workload | Target role |
 | --- | --- |
 | `I1-edit-storm-v1` | Natural edit ordinals `1..12` map to `edit_index=0..11`; twelve exact parameter/256x256-Region edits use one latest-wins key, Interactive QoS, a monotonic nominal cadence with bounded start lateness, and twelfth-edit (`edit_index=11`) visibility. |
-| `I2-progressive-v1` | The exact I1 Graph/target/revision, `edit_index` mapping, complete 12-value node-one coefficient/update sequence, and node-one-through-node-four transform order use a separate legal realtime request key with RT-preview and HP-final child contracts. Preview performs the 4x4 source average and one binary32 rounding before that sequence; final uses the original 2048 source and the same I1 full-resolution path. The twelfth edit (`edit_index=11`) publishes preview then final with exact Host/conditional-Metal residency reuse and zero hidden I/O/copy. |
+| `I2-progressive-v1` | One retained steady-clock replicate-grid origin derives a continuous 111-slot cold/warmup/measured grid, with 100 measured episode indices, every origin exactly 1,500,000,000 ns apart, and a terminal quiescence boundary at stride 111; every episode has twelve nominal preview admissions 16,666,667 ns apart with at most 2,000,000 ns lateness. The exact I1 Graph/target/revision, `edit_index` mapping, complete 12-value node-one coefficient/update sequence, and node-one-through-node-four transform order use a separate legal realtime request key with RT-preview and HP-final child contracts. Preview performs the 4x4 source average and one binary32 rounding before that sequence; final uses the original 2048 source and the same I1 full-resolution path. The twelfth edit (`edit_index=11`) publishes preview then final by absolute 100/1,000 ms deadlines anchored to the same actual preview admission, with exact Host/conditional-Metal residency reuse and zero hidden I/O/copy. |
 | `B1-immutable-v1` | Thirty job-indexed immutable full-frame jobs are offered in order across two Graphs, with bounded Compute I/O task/planned-byte admission, canonical raw artifacts/manifests and semantic traces, crash-durable receipts, and logical/raw goldens at Run caps 1 and 8. |
 | `M1-shared-v1` | Forty exact I1 starts and continuously offered cap-8 B1 cycles sharing one process execution authority for 30 measured seconds. |
 
@@ -1132,13 +1132,24 @@ same-ordinal full M1/B1 pair; the I1-only latency pair compares only the exact
 base manifest/digest and ignores M1's unrelated storage.
 
 The frozen protocol does not claim nanosecond-exact operating-system wakes.
-It fixes nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum admission-
-start lateness, exact 750,000,000 ns episode origins, and fail-closed
+I1 and M1 fix nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum
+admission-start lateness, exact 750,000,000 ns episode origins, and fail-closed
 miss/drop/gap handling. The one actual-admission sample `A_i` starts latency
 and checked-adds the absolute I1 Run deadline
 `D_i=A_i+150,000,000 ns`; nominal `S_i` and the quiescence drain never extend
-that budget, and missed or expired work cannot publish. Logical results use the
-typed canonical
+that budget, and missed or expired work cannot publish. I2 separately fixes
+one continuous replicate-grid origin, cold/warmup/measured phase offsets of
+zero/one/eleven strides and a terminal boundary at stride 111 without
+transition delay, exact 1,500,000,000 ns episode spacing, 100 measured episode
+indices, the same twelve nominal edit
+offsets and 2 ms lateness bound, and one
+actual preview-admission anchor for its absolute 100/1,000 ms child deadlines.
+Edits `0..10` do not wait for preview; equal-time next-edit acceptance orders
+before old-preview visibility. Any early/late/missed/order/gap/origin/anchor
+drift is invalid without schedule shift, and the latest final deadline leaves
+an exact minimum 314,666,663 ns non-extending quiescence guard. Existing
+workload-manifest and measurement-evidence sections prove the cadence without
+changing the closed row/bundle fields. Logical results use the typed canonical
 `ContentDigest`; raw little-endian payload, canonical manifest, semantic trace,
 and golden identities remain separate. Every repeated M1 B1 occurrence carries
 a distinct phase/cycle/job identity through charge, admission, output commit,
@@ -1169,7 +1180,7 @@ The delivery rows are fixed:
 | Issue | Required target evidence |
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency, waste, memory, and required output correctness. |
-| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact I1 coefficient/index/update lineage and full-resolution final path; #94 cannot select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
+| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-next-edit ordering, I1 coefficient/index/update lineage, and full-resolution final path; #94 cannot redefine that cadence or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and fixed storage/performance probe-to-schema, encoder, eligibility, and compatibility evidence at caps 1 and 8. |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
 

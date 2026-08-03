@@ -79,7 +79,7 @@ The canonical workload matrix is:
 | Workload | Frozen behavior |
 | --- | --- |
 | `I1-edit-storm-v1` | Uses seed zero and the twelve natural edit ordinals `1..12`. For `edit_index = edit_ordinal - 1` in `0..11`, node one's `k` is selected from `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`, and the source Region is `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`. Every Run uses `ComputeIntent::GlobalHighPrecision`, `ComputeRunQuality::Full`, Interactive QoS, weight 1, Run cap 8, the checked absolute monotonic deadline `D_i=A_i+150,000,000 ns`, and the exact `(Graph, target node four, GlobalHighPrecision)` supersession key. The twelfth edit (`edit_index=11`, `k=1.04`, Region `(768,512,256,256)`) is the only required publication and must publish no later than `D_11`; a separate 500 ms quiescence drain follows the cadence. |
-| `I2-progressive-v1` | Reuses the exact I1 source, graph, seed, edit ordinals, source-space Regions, realtime request lineage, and complete node-one coefficient sequence `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` under the same `edit_index=edit_ordinal-1` mapping. At each index it updates node one to that coefficient, then executes nodes one through four in order with `k` values `[coefficient, 1.00, 1.20, 1.40]`. The 512x512 preview source is a per-channel 4x4 box average of the original 2048 source, rounded once to binary32 before that update/transform sequence; preview Region `edit_index` is `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`. The final starts from the original 2048 source and uses the same I1 full-resolution update/transform path; it is never derived from preview pixels. Only the twelfth edit (`edit_index=11`, preview Region `(192,128,64,64)`) has required preview and final latency results, in that order; stale output cannot publish. |
+| `I2-progressive-v1` | Reuses the exact I1 source, graph, seed, edit ordinals, source-space Regions, realtime request lineage, and complete node-one coefficient sequence `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` under the same `edit_index=edit_ordinal-1` mapping. One continuous 111-slot steady-clock grid links the cold, warmup, and measured phase origins; episodes are exactly 1,500,000,000 ns apart and contain twelve nominal preview-admission starts 16,666,667 ns apart with at most 2,000,000 ns lateness. At each index it updates node one to that coefficient, then executes nodes one through four in order with `k` values `[coefficient, 1.00, 1.20, 1.40]`. The 512x512 preview source is a per-channel 4x4 box average of the original 2048 source, rounded once to binary32 before that update/transform sequence; preview Region `edit_index` is `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`. The final starts from the original 2048 source and uses the same I1 full-resolution update/transform path; it is never derived from preview pixels. Only the twelfth edit (`edit_index=11`, preview Region `(192,128,64,64)`) has required preview and final latency results, in that order; stale output cannot publish. |
 | `B1-immutable-v1` | Contains immutable jobs `0..29`; job `n` uses source seed `n`, the baseline graph, Throughput QoS, weight 1, no deadline or supersession, exact reservation evidence, a canonical semantic trace, a crash-durable committed artifact, and job-indexed logical/raw goldens. Even jobs belong to Graph A and odd jobs to Graph B. At the measurement boundary the harness offers both ordered 15-job queues and never pauses a nonempty queue; bounded Host admission, rather than the harness, decides how many Runs are resident. Run caps 1 and 8 are separate required rows. |
 | `M1-shared-v1` | At measured time zero, starts I1 and then repeats it every 750,000,000 ns, giving exactly 40 episode starts, while cycling the exact B1 corpus with its even/odd Graph assignment, Run cap 8, and continuous offered backlog for 30 measured seconds. Both streams use one `ExecutionService`, worker set, ready store, policy binding set, and `ResourceLedger`; no hidden pool, duplicate ledger, or separate process may absorb either stream. |
 
@@ -196,7 +196,7 @@ cannot become current even if execution later succeeds. These rules apply to
 every isolated and M1 I1 episode, including the twelfth edit; the separate
 500 ms drain is only a quiescence observation window and never extends `D_i`.
 
-Within each cold, warmup, or measured phase, episode origins are exactly
+For isolated I1, within each cold, warmup, or measured phase, episode origins are exactly
 `E_r = E_0 + r * 750,000,000 ns`. Reset/baseline preparation must finish before
 `E_r`; failure to do so invalidates that episode rather than sliding the
 schedule or inserting an unrecorded cooling delay. M1 uses
@@ -223,6 +223,67 @@ deadline 1,000 ms after the same start. Both children carry the realtime request
 its canonical request key as required by the current `ComputeRunSubmission`
 contract.
 
+I2 uses the same steady-clock domain but freezes its own complete episode
+cadence. Within each cold, warmup, or measured phase's local enumeration,
+`episode_ordinal=1..N` maps to zero-based
+`episode_index=r=episode_ordinal-1`; measured I2 uses exactly `N=100` and
+`r=0..99`. One retained phase origin `E^I2_0` fixes every origin as:
+
+```text
+E^I2_r = E^I2_0 + r * 1,500,000,000 ns
+S^I2_{r,i} = E^I2_r + i * 16,666,667 ns,  i in 0..11
+```
+
+Here `E^I2_0` is the first origin of the current phase. One retained replicate-
+grid origin `G^I2` determines all three phase origins without a pause:
+
+```text
+E^I2_{cold,0} = G^I2
+E^I2_{warmup,0} = G^I2 + 1 * 1,500,000,000 ns
+E^I2_{measured,0} = G^I2 + 11 * 1,500,000,000 ns
+T^I2 = G^I2 + 111 * 1,500,000,000 ns
+```
+
+Thus cold, warmup, and measured episode starts occupy one continuous 111-slot
+grid. The warmup-to-measured counter reset occurs before the already fixed
+measured origin; it never inserts a cooling delay or chooses a new clock
+origin. `T^I2` is the terminal grid boundary, not an episode start.
+
+The harness prepares immutable edit input before `S^I2_{r,i}`. The single
+monotonic sample `A^I2_{r,i}` captured immediately before preview Host admission
+is the normative edit-acceptance/admission time: a successful call accepts the
+edit, makes its pre-minted generation current, and admits its preview child as
+one ordered boundary. Before the call, the harness must prove
+`S^I2_{r,i} <= A^I2_{r,i} <= S^I2_{r,i} + 2,000,000 ns`. It must use checked
+arithmetic to retain both absolute child deadlines:
+
+```text
+D^preview_{r,i} = A^I2_{r,i} + 100,000,000 ns
+D^final_{r,i} = A^I2_{r,i} + 1,000,000,000 ns
+```
+
+An overflow, early admission, admission more than 2 ms late, failed admission,
+missing/duplicate/out-of-order edit, or cadence-event gap invalidates the
+replicate. The missing or invalid edit is never submitted late; publication is
+revoked, accepted cancellation/supersession is recorded, and no later nominal
+start or episode origin moves to catch up, backfill, or cool down. Entered work
+may drain only as waste, and work starting after accepted cancellation remains
+zero. Baseline preparation and all prior episode work must be quiescent before
+the next fixed origin; the final measured episode must be quiescent before
+`T^I2`. Failure is invalid rather than permission to shift either boundary.
+
+The 1,500,000,000 ns stride is exact, not runner-selected pacing. Even at the
+latest legal twelfth admission,
+`D^final_{r,11} <= E^I2_r + 1,185,333,337 ns`, leaving a deterministic minimum
+314,666,663 ns quiescence guard before `E^I2_{r+1}`, or before `T^I2` for the
+last measured episode. The guard does not extend the final deadline. Thus the
+one cold, ten warmup, and 100 measured episodes
+use the same continuous replicate grid, while only the 100 measured twelfth-
+preview/final pairs enter steady-state aggregates. The
+ten warmup slots and 100 measured slots occupy nominal 15 s and 150 s phase
+spans, matching I1's 20-by-750-ms warmup and 200-by-750-ms measured pacing
+without overlapping I2's 1,000 ms final deadline.
+
 For this state machine, “same I1 lineage” also freezes the complete numeric and
 execution sequence. Let
 `K=[0.82,1.18,0.86,1.14,0.90,1.10,0.94,1.06,0.98,1.02,0.96,1.04]`.
@@ -240,7 +301,11 @@ or different final path is not `I2-progressive-v1`: a row carrying that id is
 invalid, and a deliberately changed fixture requires a new workload id.
 
 The final child is submitted exactly when that edit's preview first becomes
-visible and its generation is still current. If a newer edit is accepted first,
+visible and its generation is still current. Edits `0..10` do not wait for
+their preview: acceptance of `i+1` remains fixed by `S^I2_{r,i+1}` and
+`A^I2_{r,i+1}`. A preview for `i` is current only when its visibility timestamp
+is strictly less than `A^I2_{r,i+1}`; at equality, acceptance of the newer edit
+orders first and the preview is stale. If a newer edit is accepted first,
 the armed final is discarded without submission; an already submitted preview
 or final is superseded and may only drain. A new generation revokes publication
 permission for both older children. A stale terminal event may update cleanup,
@@ -249,14 +314,34 @@ or required latency result. The twelfth edit (`edit_index=11`) must publish its
 preview and then its final; failure, deadline expiry, reverse order, duplicate
 publication, or a newer generation before both endpoints makes the episode
 invalid. Earlier generations may publish only while current and are not
-required results.
+required results. The twelfth preview must become visible no later than
+`D^preview_{r,11}`; its final must become visible no later than
+`D^final_{r,11}`. Expiry uses the same clock, revokes publication, and never
+reanchors either deadline.
 
-Preview latency starts immediately before the preview Host admission call and
+Preview latency starts at `A^I2_{r,i}` immediately before the preview Host
+admission call and
 ends at current preview visibility. Final end-to-end latency uses that same
-start and ends at current final visibility; the later final Host admission time
-is retained separately as a diagnostic trigger timestamp. Thus the final gate
-includes preview, trigger, admission, execution, and publication rather than
-hiding the preview interval.
+start and ends at current final visibility; the later final trigger and Host
+admission timestamps are retained separately but never reset
+`D^final_{r,i}`. Thus the final gate includes preview, trigger, admission,
+execution, and publication rather than hiding the preview interval.
+
+No outer evidence-envelope field changes for this cadence. The existing
+`execution-profile-workload-manifest-v1` section retains the clock domain,
+replicate-grid origin, derived phase origins, terminal boundary, episode
+ordinal/index, stride, twelve nominal starts, lateness bound, deadline formulas,
+and tie-order rule.
+The existing
+`execution-profile-measurement-evidence-v1` section and raw events retain every
+`E^I2`, `S^I2`, `A^I2`, child deadline, preview visibility, final trigger/
+admission/visibility, cancellation, gap/drop, and quiescence observation.
+Their existing section digests and verdict evidence are sufficient for an
+independent cadence oracle; the closed 15-record row and five-record bundle do
+not gain fields. Any origin/index, episode stride, edit cadence/order,
+start-lateness, deadline anchor, or equal-time ordering drift makes a row
+labelled `I2-progressive-v1` invalid. A deliberate change requires a new
+workload id and new manifest/digest/golden lineage.
 
 I2 has a required Host-local output path and a conditional Metal residency
 component. Preview and final each expose their immutable CPU
@@ -1439,7 +1524,7 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 | Issue | Required v1 delivery |
 | --- | --- |
 | #93 | Implement I1 request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
-| #94 | Implement I2 on the exact I1 coefficient/index/update and full-resolution-final lineage; it cannot select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
+| #94 | Implement I2 on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-before-next-edit ordering, and I1 coefficient/index/update/full-resolution-final lineage frozen here; it cannot redefine those schedules or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
 | #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
 | #96 | Compose the exact I1 and B1 fixtures into M1, assign a distinct `cycle_ordinal` to every repeated B1 corpus without treating it as retry, reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
 

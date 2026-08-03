@@ -877,7 +877,7 @@ ordering、policy 与 receipt ownership。
 | Workload | 目标职责 |
 | --- | --- |
 | `I1-edit-storm-v1` | 自然 edit ordinal `1..12` 映射为 `edit_index=0..11`；在一个 latest-wins key 下执行十二次精确 parameter/256x256-Region edit，采用 Interactive QoS、具有有界 start lateness 的 monotonic nominal cadence，并观察第十二次 edit（`edit_index=11`）visibility。 |
-| `I2-progressive-v1` | 精确的 I1 Graph/target/revision、`edit_index` mapping、完整 12-value 第一个 node coefficient/update sequence，以及 node one 至 node four transform order，使用独立的合法 realtime request key 与 RT-preview/HP-final child 契约。Preview 在该 sequence 前执行 4x4 source average 与一次 binary32 rounding；final 使用原始 2048 source 及相同 I1 full-resolution path。第十二次 edit（`edit_index=11`）依次发布 preview 与 final，精确复用 Host/条件式 Metal residency，且 hidden I/O/copy 为零。 |
+| `I2-progressive-v1` | 一个保留的 steady-clock replicate-grid origin 派生连续的 111-slot cold/warmup/measured grid，其中包含 100 个 measured episode index，相邻 origin 精确相隔 1,500,000,000 ns，且 terminal quiescence boundary 位于 stride 111；每个 episode 有十二个相隔 16,666,667 ns 且最多迟到 2,000,000 ns 的 nominal preview admission。精确的 I1 Graph/target/revision、`edit_index` mapping、完整 12-value 第一个 node coefficient/update sequence，以及 node one 至 node four transform order，使用独立的合法 realtime request key 与 RT-preview/HP-final child 契约。Preview 在该 sequence 前执行 4x4 source average 与一次 binary32 rounding；final 使用原始 2048 source 及相同 I1 full-resolution path。第十二次 edit（`edit_index=11`）在锚定到同一个 actual preview admission 的 absolute 100/1,000 ms deadline 前依次发布 preview 与 final，精确复用 Host/条件式 Metal residency，且 hidden I/O/copy 为零。 |
 | `B1-immutable-v1` | 三十个按 job index 区分的 immutable full-frame job 按顺序提供给两个 Graph，并在 Run cap 1 与 8 下保留 bounded Compute I/O task/planned-byte admission、canonical raw artifact/manifest 与 semantic trace、crash-durable receipt，以及 logical/raw golden。 |
 | `M1-shared-v1` | 四十次精确 I1 start 与持续提供的 cap-8 B1 cycle 共用一个进程执行权威，共测量 30 秒。 |
 
@@ -914,12 +914,22 @@ schema mapping、唯一 encoder、eligibility 与 B1 check。#96 原样复用这
 并强制执行 same-ordinal 完整 M1/B1 pair；I1-only latency pair 只比较精确 base
 manifest/digest，忽略 M1 无关 storage。
 
-冻结 protocol 不声称操作系统会精确到纳秒醒来。它固定相隔 16,666,667 ns 的
+冻结 protocol 不声称操作系统会精确到纳秒醒来。I1 与 M1 固定相隔 16,666,667 ns 的
 nominal monotonic start、最大 2 ms admission-start lateness、精确 750,000,000 ns
 episode origin，以及 fail-closed miss/drop/gap 处理。唯一 actual-admission sample
 `A_i` 会启动 latency，并通过 checked addition 得到 absolute I1 Run deadline
 `D_i=A_i+150,000,000 ns`；nominal `S_i` 与 quiescence drain 绝不会延长该 budget，
-missed 或 expired work 也不能发布。Logical result 使用 typed canonical
+missed 或 expired work 也不能发布。I2 单独冻结一个连续 replicate-grid origin、无
+transition delay 的 cold/warmup/measured 零/一/十一 stride phase offset 与 stride 111
+terminal boundary、精确
+1,500,000,000 ns episode spacing、100 个 measured episode index、相同十二个 nominal
+edit offset 与 2 ms lateness bound，并以一个 actual preview-admission anchor 生成其
+absolute 100/1,000 ms child deadline。Edit `0..10` 不等待 preview；同 timestamp 的
+next-edit acceptance 在旧 preview visibility 前排序。任何 early/late/missed/order/gap/
+origin/anchor 漂移都在不移动 schedule 的情况下判为 invalid，且最晚 final deadline
+后仍有精确最少 314,666,663 ns、不延长 deadline 的 quiescence guard。既有 workload-
+manifest 与 measurement-evidence section 无需改变封闭 row/bundle field 即可证明该
+cadence。Logical result 使用 typed canonical
 `ContentDigest`；raw little-endian payload、canonical manifest、semantic trace 与
 golden identity 始终彼此分离。每个重复 M1 B1 occurrence 都携带不同的 phase/cycle/
 job identity，并贯穿 charge、admission、output commit、receipt 与 evidence；corpus
@@ -946,7 +956,7 @@ self、enclosing、later-stage、comparison 或 M1 cycle 都会 fail closed。#9
 | Issue | 必需目标证据 |
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency、waste、memory 与必需 output correctness。 |
-| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 I1 coefficient/index/update lineage 与 full-resolution final path 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness；#94 不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。 |
+| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-next-edit ordering、I1 coefficient/index/update lineage 与 full-resolution final path 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness；#94 不得重新定义该 cadence，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。 |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory，以及固定 storage/performance probe-to-schema、encoder、eligibility 与 compatibility 证据。 |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 M1 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
 

@@ -71,7 +71,7 @@ payload 都在 workload manifest 中按内容寻址。
 | Workload | 冻结行为 |
 | --- | --- |
 | `I1-edit-storm-v1` | 使用 seed zero 与自然序号为 `1..12` 的十二次 edit。对 `0..11` 中的 `edit_index = edit_ordinal - 1`，第一个 node 的 `k` 从 `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` 取值，source Region 为 `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`。每个 Run 使用 `ComputeIntent::GlobalHighPrecision`、`ComputeRunQuality::Full`、Interactive QoS、weight 1、Run cap 8、经过 checked arithmetic 的 absolute monotonic deadline `D_i=A_i+150,000,000 ns`，以及精确的 `(Graph, target node four, GlobalHighPrecision)` supersession key。第十二次 edit（`edit_index=11`、`k=1.04`、Region `(768,512,256,256)`）是唯一必需 publication，且必须不晚于 `D_11` 发布；cadence 后另有 500 ms quiescence drain。 |
-| `I2-progressive-v1` | 复用精确的 I1 source、graph、seed、edit ordinal、source-space Region、realtime request lineage，以及完整的第一个 node coefficient 序列 `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`，并使用相同的 `edit_index=edit_ordinal-1` 映射。每个 index 都先把第一个 node 更新为对应 coefficient，再按顺序执行 node one 至 node four，其 `k` 值为 `[coefficient, 1.00, 1.20, 1.40]`。512x512 preview source 是对原始 2048 source 逐 channel 执行 4x4 box average、只舍入一次到 binary32 后，再执行该 update/transform 序列；preview Region `edit_index` 为 `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`。Final 从原始 2048 source 开始，使用与 I1 相同的 full-resolution update/transform path，绝不从 preview pixel 派生。只有第十二次 edit（`edit_index=11`、preview Region `(192,128,64,64)`）具有必需的 preview 与 final latency result，且必须按此顺序出现；stale output 不得发布。 |
+| `I2-progressive-v1` | 复用精确的 I1 source、graph、seed、edit ordinal、source-space Region、realtime request lineage，以及完整的第一个 node coefficient 序列 `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`，并使用相同的 `edit_index=edit_ordinal-1` 映射。一个连续的 111-slot steady-clock grid 连接 cold、warmup 与 measured phase origin；episode 精确相隔 1,500,000,000 ns，并包含十二个相隔 16,666,667 ns、最多迟到 2,000,000 ns 的 nominal preview-admission start。每个 index 都先把第一个 node 更新为对应 coefficient，再按顺序执行 node one 至 node four，其 `k` 值为 `[coefficient, 1.00, 1.20, 1.40]`。512x512 preview source 是对原始 2048 source 逐 channel 执行 4x4 box average、只舍入一次到 binary32 后，再执行该 update/transform 序列；preview Region `edit_index` 为 `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`。Final 从原始 2048 source 开始，使用与 I1 相同的 full-resolution update/transform path，绝不从 preview pixel 派生。只有第十二次 edit（`edit_index=11`、preview Region `(192,128,64,64)`）具有必需的 preview 与 final latency result，且必须按此顺序出现；stale output 不得发布。 |
 | `B1-immutable-v1` | 包含 immutable job `0..29`；job `n` 使用 source seed `n`、baseline graph、Throughput QoS、weight 1、无 deadline 或 supersession、精确 reservation 证据、canonical semantic trace、crash-durable committed artifact 与按 job index 区分的 logical/raw golden。偶数 job 属于 Graph A，奇数 job 属于 Graph B。测量边界上 harness 同时提供两个有序的 15-job queue，且不会暂停非空 queue；由有界 Host admission 而非 harness 决定驻留多少个 Run。Run cap 1 与 8 是两行独立的必需证据。 |
 | `M1-shared-v1` | 在 measured time zero 启动 I1，此后每 750,000,000 ns 重复一次，共精确启动 40 个 episode；同时循环执行精确的 B1 corpus，保留偶数/奇数 Graph 分配、Run cap 8 与持续 offered backlog，共测量 30 秒。两条 stream 共用一个 `ExecutionService`、worker set、ready store、policy binding set 与 `ResourceLedger`；不得用隐藏 pool、重复 ledger 或独立进程承接任一 stream。 |
 
@@ -175,7 +175,7 @@ deadline-expired result 也
 不能成为 current。这些规则适用于每个 isolated 与 M1 I1 episode，包括第十二次 edit；
 单独的 500 ms drain 只是 quiescence observation window，绝不会延长 `D_i`。
 
-在每个 cold、warmup 或 measured phase 内，episode origin 精确为
+对 isolated I1，在每个 cold、warmup 或 measured phase 内，episode origin 精确为
 `E_r = E_0 + r * 750,000,000 ns`。Reset/baseline 准备必须在 `E_r` 前完成；否则
 该 episode 无效，不能滑动 schedule 或插入未记录的 cooling delay。M1 对
 `r=0..39` 使用 `E_r = M_0 + r * 750,000,000 ns`。因此，配对的 isolated 与 mixed
@@ -199,6 +199,64 @@ edit 记录的 Host admission start 后 100 ms 的 absolute steady-clock deadlin
 `SupersessionIdentity`，因此 HP child 的 compute intent 仍与其 canonical request
 key 分离，符合当前 `ComputeRunSubmission` 契约。
 
+I2 使用同一个 steady-clock domain，但冻结自身完整的 episode cadence。在 cold、
+warmup 或 measured phase 各自的局部 enumeration 内，自然序号
+`episode_ordinal=1..N` 映射为从零开始的
+`episode_index=r=episode_ordinal-1`；measured I2 精确使用 `N=100` 与 `r=0..99`。
+一个保留在证据中的 phase origin `E^I2_0` 按下式固定所有 origin：
+
+```text
+E^I2_r = E^I2_0 + r * 1,500,000,000 ns
+S^I2_{r,i} = E^I2_r + i * 16,666,667 ns,  i in 0..11
+```
+
+这里的 `E^I2_0` 是当前 phase 的第一个 origin。一个保留在证据中的 replicate-grid
+origin `G^I2` 会在没有 pause 的情况下精确确定三个 phase origin：
+
+```text
+E^I2_{cold,0} = G^I2
+E^I2_{warmup,0} = G^I2 + 1 * 1,500,000,000 ns
+E^I2_{measured,0} = G^I2 + 11 * 1,500,000,000 ns
+T^I2 = G^I2 + 111 * 1,500,000,000 ns
+```
+
+因此，cold、warmup 与 measured episode start 位于一个连续的 111-slot grid 上。
+Warmup-to-measured counter reset 必须在已经固定的 measured origin 前完成；它绝不
+插入 cooling delay，也不重新选择 clock origin。`T^I2` 是 terminal grid boundary，
+不会启动 episode。
+
+Harness 在 `S^I2_{r,i}` 之前准备 immutable edit input。`A^I2_{r,i}` 是 preview Host
+admission 前立即捕获的唯一 monotonic sample，也是规范的 edit acceptance/admission
+时刻：成功调用会在一个有序边界中接受 edit、令预先生成的 generation 成为 current，
+并 admit preview child。调用前，harness 必须证明
+`S^I2_{r,i} <= A^I2_{r,i} <= S^I2_{r,i} + 2,000,000 ns`，并通过 checked addition
+得到且保留两个 absolute child deadline：
+
+```text
+D^preview_{r,i} = A^I2_{r,i} + 100,000,000 ns
+D^final_{r,i} = A^I2_{r,i} + 1,000,000,000 ns
+```
+
+Overflow、提前 admission、admission 迟到超过 2 ms、admission failure、edit
+缺失/重复/失序或 cadence-event gap 都会使 replicate 无效。缺失或无效的 edit 绝不
+迟到补交；publication 会被撤销，accepted cancellation/supersession 会被记录，且
+任何后续 nominal start 或 episode origin 都不得为了追赶、回填或降温而移动。已经
+进入的 work 只能作为 waste drain；accepted cancellation 之后启动的 work 保持为零。
+Baseline preparation 与前一个 episode 的全部 work 必须在下一个固定 origin 前
+quiescent；最后一个 measured episode 必须在 `T^I2` 前 quiescent。失败意味着无效，
+不是移动任一 boundary 的许可。
+
+1,500,000,000 ns stride 是精确契约，而非 runner 自选 pacing。即使第十二次 admission
+达到最晚合法时刻，也有
+`D^final_{r,11} <= E^I2_r + 1,185,333,337 ns`，从而在 `E^I2_{r+1}` 前留下精确的
+最小 314,666,663 ns quiescence guard；对最后一个 measured episode，该 guard 位于
+`T^I2` 前。该 guard 不会延长 final deadline。因此，一个 cold、十个 warmup 与 100 个
+measured episode 使用同一个连续 replicate grid；只有
+100 个 measured episode 的第十二次 preview/final pair 进入
+steady-state aggregate。十个 warmup slot 与 100 个 measured slot 的 nominal phase
+span 分别是 15 s 与 150 s，与 I1 的 20×750-ms warmup 与 200×750-ms measured pacing
+相同，同时不与 I2 的 1,000 ms final deadline 重叠。
+
 对于该 state machine，“相同 I1 lineage”还冻结完整 numeric 与 execution sequence。令
 `K=[0.82,1.18,0.86,1.14,0.90,1.10,0.94,1.06,0.98,1.02,0.96,1.04]`。
 对于 `0..11` 中每个 `edit_index=i`，I2 使用 `K[i]`、index `i` 对应的 I1 source
@@ -213,19 +271,38 @@ point 或改变 final path，都不属于 `I2-progressive-v1`：携带该 id 的
 有意改变的 fixture 必须使用新的 workload id。
 
 Final child 只在该 edit 的 preview 首次可见、且其 generation 仍为 current 时精确
-提交。若更新的 edit 先被接受，armed final 不经提交即被丢弃；已经提交的 preview
+提交。Edit `0..10` 不会等待其 preview：`i+1` 的 acceptance 仍由
+`S^I2_{r,i+1}` 与 `A^I2_{r,i+1}` 固定。只有 preview `i` 的 visibility timestamp
+严格早于 `A^I2_{r,i+1}` 时，它才仍为 current；二者相等时，更新 edit 的 acceptance
+先排序，该 preview 属于 stale。若更新的 edit 先被接受，armed final 不经提交即被丢弃；已经提交的 preview
 或 final 被 supersede，且只能 drain。新 generation 会撤销两个较旧 child 的
 publication permission。Stale terminal event 可以更新 cleanup、waste 与 quiescence
 证据，但不能发布 `Value`、digest、receipt 或必需 latency result。第十二次 edit
 （`edit_index=11`）必须先发布 preview、再发布 final；failure、deadline expiry、
 反序、重复 publication，或在两个 endpoint 完成前出现更新 generation，都会使
 episode 无效。较早 generation 只能在仍为 current 时发布，并不属于必需 result。
+第十二次 preview 必须不晚于 `D^preview_{r,11}` 可见；其 final 必须不晚于
+`D^final_{r,11}` 可见。Expiry 使用同一个 clock，撤销 publication，并且绝不重新锚定
+任一 deadline。
 
-Preview latency 从 preview Host admission call 前立即开始，到 current preview
+Preview latency 从 preview Host admission call 前的 `A^I2_{r,i}` 立即开始，到 current preview
 可见时结束。Final end-to-end latency 使用同一起点，到 current final 可见时结束；
-较晚的 final Host admission time 作为 diagnostic trigger timestamp 单独保留。因此
-final 门禁包含 preview、trigger、admission、execution 与 publication，不会隐藏
-preview interval。
+较晚的 final trigger 与 Host admission timestamp 单独保留，但绝不重置
+`D^final_{r,i}`。因此 final 门禁包含 preview、trigger、admission、execution 与
+publication，不会隐藏 preview interval。
+
+本 cadence 不改变 outer evidence envelope 的 field。既有
+`execution-profile-workload-manifest-v1` section 保留 clock domain、replicate-grid
+origin、派生 phase origin、terminal boundary、episode ordinal/index、stride、十二个
+nominal start、lateness bound、deadline formula 与同 timestamp ordering rule。既有
+`execution-profile-measurement-evidence-v1`
+section 与 raw event 保留每个 `E^I2`、`S^I2`、`A^I2`、child deadline、preview
+visibility、final trigger/admission/visibility、cancellation、gap/drop 与 quiescence
+observation。其既有 section digest 与 verdict evidence 足以支持独立 cadence oracle；
+封闭的 15-record row 与五 record bundle 不新增 field。Origin/index、episode stride、
+edit cadence/order、start-lateness、deadline anchor 或 equal-time ordering 任一漂移，
+都会使带 `I2-progressive-v1` 标签的 row 无效。有意改变时必须使用新的 workload id
+和新的 manifest/digest/golden lineage。
 
 I2 具有必需的 Host-local output path 与条件式 Metal residency 组件。Preview 与
 final 都向同一个本地 consumer 两次暴露各自不可变的 CPU `ValueRevisionId`、Host
@@ -1270,7 +1347,7 @@ good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidenc
 | Issue | 必需 v1 交付 |
 | --- | --- |
 | #93 | 实现 I1 request/current-generation 与 cancellation/quiescence 观测；发布 isolated latency、waste 与 memory 行，以及必需的 output-correctness 证据。 |
-| #94 | 在精确 I1 coefficient/index/update 与 full-resolution-final lineage 上实现 I2；不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
+| #94 | 在此处冻结的精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-before-next-edit ordering，以及 I1 coefficient/index/update/full-resolution-final lineage 上实现 I2；不得重新定义这些 schedule，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
 | #95 | 实现 B1 immutable manifest、occurrence-scoped job/task identity、reservation、canonical semantic trace、crash-durable artifact commit、固定 storage/performance probe-to-schema adapter、mount normalization、唯一 encoder/digest、eligibility/B1 check 与 logical/raw golden；在 Run cap 1 与 8 下发布 closed-schema isolated throughput、determinism、zero-fault waste 与 memory 行。 |
 | #96 | 把精确 I1 与 B1 fixture 组合为 M1，为每个重复 B1 corpus 分配独立 `cycle_ordinal` 且绝不把它当作 retry，原样复用精确 v1 manifest byte，强制执行 same-ordinal 完整 M1/B1 environment pair，同时让 I1-only pair 只比较 base，并发布 closed-schema mixed latency、throughput progress、fairness、waste 与 memory 行。 |
 
