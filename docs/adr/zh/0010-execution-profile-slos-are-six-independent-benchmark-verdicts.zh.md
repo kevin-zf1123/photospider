@@ -75,6 +75,15 @@ payload 都在 workload manifest 中按内容寻址。
 | `B1-immutable-v1` | 包含 immutable job `0..29`；job `n` 使用 source seed `n`、baseline graph、Throughput QoS、weight 1、无 deadline 或 supersession、精确 reservation 证据、canonical semantic trace、crash-durable committed artifact 与按 job index 区分的 logical/raw golden。偶数 job 属于 Graph A，奇数 job 属于 Graph B。测量边界上 harness 同时提供两个有序的 15-job queue，且不会暂停非空 queue；由有界 Host admission 而非 harness 决定驻留多少个 Run。Run cap 1 与 8 是两行独立的必需证据。 |
 | `M1-shared-v1` | 在 measured time zero 启动 I1，此后每 750,000,000 ns 重复一次，共精确启动 40 个 episode；同时循环执行精确的 B1 corpus，保留偶数/奇数 Graph 分配、Run cap 8 与持续 offered backlog，共测量 30 秒。两条 stream 共用一个 `ExecutionService`、worker set、ready store、policy binding set 与 `ResourceLedger`；不得用隐藏 pool、重复 ledger 或独立进程承接任一 stream。 |
 
+每个携带 workload 的 field 或 fixed-record component 都使用专用、区分大小写的
+scalar type `workload-id-v1`。其完整 domain 精确且仅包含
+`I1-edit-storm-v1`、`I2-progressive-v1`、`B1-immutable-v1` 与
+`M1-shared-v1`；它不执行 case folding、alias、Unicode normalization，也不接受开放式
+identifier。上述 raw ASCII payload 的精确 frame 分别为
+`16:I1-edit-storm-v1`、`17:I2-progressive-v1`、
+`15:B1-immutable-v1` 与 `12:M1-shared-v1`。通用 `identifier` type 继续保持
+lowercase-only，并继续用于所有声明为该类型的非 workload field。
+
 对 fairness 而言，只要某个 Graph 的 producer 仍有未消费的 offered demand 且没有
 暂停提交，该 Graph 就是 *eligible*。这段 workload-level interval 包含等待有界
 admission 的时间；它不声明全部 30 个 B1 Run 同时被准入。每个 Graph 内部按递增
@@ -89,7 +98,7 @@ B1 的 cold、warmup 或 measured row 都要为每个 offered job 分配一个 c
 `job-instance-v1` fixed record，其 component 按以下精确顺序排列：
 
 ```text
-(row_workload_id:identifier,
+(row_workload_id:workload-id-v1,
  replicate_ordinal:uint64,
  phase:enum(cold|warmup|measured),
  cycle_ordinal:uint64,
@@ -313,8 +322,10 @@ record 都不属于 v1 manifest。
 
 Scalar 与 composite payload grammar 是封闭的：
 
-- `identifier` 是匹配 `[a-z0-9][a-z0-9._+-]*` 的非空小写 ASCII；`enum` 是
-  field 特有集合中的一个精确 token。
+- `identifier` 是匹配 `[a-z0-9][a-z0-9._+-]*` 的非空小写 ASCII。
+  `workload-id-v1` 是上文精确四值 domain 中的一个 raw ASCII token，并区分大小写；
+  它不是 `identifier`，lowercase alias 或未知 token 都是 invalid。`enum` 是 field
+  特有集合中的一个精确 token。
 - `uint64` 是完整匹配 `0|[1-9][0-9]*` 的 ASCII 十进制数，解释后的取值闭区间为
   `0..18446744073709551615`；`00`、`01`、任何其他前导零拼写以及溢出均为
   invalid。Field table 可以规定更高下限。`boolean` 精确为 `true` 或 `false`，
@@ -360,6 +371,21 @@ Scalar 与 composite payload grammar 是封闭的：
   `known` record 的 reason 是 `none`，payload 是规范的非空 payload（允许为空的
   collection 使用显式 payload `0:`）。其他 state 的 payload 都是零 byte，由最后的
   `0:` frame 编码。
+
+例如，完整的 known I1 workload field record 为：
+
+```text
+field=11:workload_id5:known4:none14:workload-id-v116:I1-edit-storm-v1\n
+```
+
+其余三个 payload frame 是上文列出的精确 17、15 与 12 byte frame。
+`job-instance-v1` 或 `row-reference-v1` fixed-record payload 只包含 component payload
+frame，因此本次纠错保留这些 token byte，只改变其 schema/parser domain。相反，
+evidence row 与 bundle field record 的 canonical byte 包含 type frame：必须使用
+`14:workload-id-v1`，`10:identifier` 为 invalid，而且每个 row 或 bundle address
+都必须按纠正后的 byte 重新计算。此前的 `identifier` annotation 在未改变的
+lowercase grammar 下无法编码四个 uppercase-leading workload，因此没有定义可供
+重新解释的有效 legacy v1 object。
 
 八项 durability capability 的示例是逐 byte 精确的。其 `token-set-v1` payload
 包含 156 个 ASCII byte：
@@ -1032,7 +1058,7 @@ Evidence row 以精确 ASCII header `execution-profile-evidence-row-v1\n` 开始
 
 | # | Field | 精确 type 与 known value domain | 允许的 N/A |
 | ---: | --- | --- | --- |
-| 1 | `workload_id` | `identifier`；四个冻结 workload id 之一 | 否 |
+| 1 | `workload_id` | `workload-id-v1`；四个冻结 token 中精确的一个 | 否 |
 | 2 | `subject_role` | `enum`：`candidate` 或 `reference` | 否 |
 | 3 | `replicate_ordinal` | `uint64`；`1..3` | 否 |
 | 4 | `run_cap` | `uint64`；workload row 冻结的 cap | 否 |
@@ -1102,7 +1128,7 @@ Evidence bundle 以精确 ASCII header
 
 | # | Field | 精确 type 与 known value domain | 允许的 N/A |
 | ---: | --- | --- | --- |
-| 1 | `workload_id` | `identifier`；四个冻结 workload id 之一 | 否 |
+| 1 | `workload_id` | `workload-id-v1`；四个冻结 token 中精确的一个 | 否 |
 | 2 | `subject_role` | `enum`：`candidate` 或 `reference` | 否 |
 | 3 | `bundle_provenance_digest` | `sha256`；对 retained repository/build/binary/provider provenance 计算的 section digest | 否 |
 | 4 | `comparison_reference_bundle_digest` | `sha256`；candidate 使用的 immutable external reference | `reference-has-no-comparison-baseline` |
@@ -1112,13 +1138,19 @@ Evidence bundle 以精确 ASCII header
 `section_name=bundle-provenance`、
 `section_schema_id=execution-profile-bundle-provenance-v1`。
 `row-reference-v1` 是 fixed record，component 按精确顺序排列为
-`(workload_id:identifier,run_cap:uint64,replicate_ordinal:uint64,row_digest:sha256)`。
+`(workload_id:workload-id-v1,run_cap:uint64,replicate_ordinal:uint64,row_digest:sha256)`。
 `row-reference-list-v1` 使用 generic list grammar，在每个完整 row-reference payload
 外加一个 frame。其功能行 key 精确为
 `(workload_id,run_cap,replicate_ordinal)`。该 list 非空，并按此 key 保持功能唯一；
 即使 `row_digest` 不同，具有相同 key 的两个 item 也无效。完整 payload 重复同样无效。
 List 按数值 run cap、数值 replicate ordinal，最后按完整 payload byte 排序；每个 item
 的 workload id 必须等于 enclosing bundle 的 `workload_id`。
+
+在比较 workload 是否相等、构造 functional key 或查找 target 之前，每个 row、
+bundle、job-instance 与 row-reference workload component 都必须按
+`workload-id-v1` 解析。
+Generic `identifier` type frame、大小写变体或未知 workload 都会使 canonical validation
+失败；verifier 不得仅因两个 invalid byte string 相等而绕过该失败。
 
 对每个 item，verifier 必须把 `row_digest` 解析到恰好一个 retained canonical row，
 复算 row digest，解析全部 15 个 field，并要求 parsed row 的 `workload_id`、`run_cap`

@@ -881,6 +881,13 @@ ordering、policy 与 receipt ownership。
 | `B1-immutable-v1` | 三十个按 job index 区分的 immutable full-frame job 按顺序提供给两个 Graph，并在 Run cap 1 与 8 下保留 bounded Compute I/O task/planned-byte admission、canonical raw artifact/manifest 与 semantic trace、crash-durable receipt，以及 logical/raw golden。 |
 | `M1-shared-v1` | 四十次精确 I1 start 与持续提供的 cap-8 B1 cycle 共用一个进程执行权威，共测量 30 秒。 |
 
+每个携带 workload 的 row、bundle、job-instance 与 row-reference component 都
+使用封闭且区分大小写的 `workload-id-v1` scalar，其 domain 精确为上述四个 token。
+通用 `identifier` 继续对所有其他声明为 identifier 的 field 保持 lowercase-only。
+Evidence row 与 bundle byte 包含纠正后的 `14:workload-id-v1` type frame，因此必须
+独立重算 address；job-instance 与 row-reference fixed record 保留 workload 的精确
+16/17/15/12-byte payload frame，同时按封闭 domain 校验。
+
 Latency、throughput、fairness、determinism、waste 与 memory 是六项独立判定。
 Interactive latency 具有绝对 p50/p95/p99 门禁；batch throughput 与 B1/I2 memory
 使用不可变同环境 reference 门禁；mixed load 还要求 0.20 p05 Throughput-progress

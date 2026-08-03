@@ -1642,6 +1642,35 @@ in ADR 0010; a convenient substitute graph is not a v1 row.
 | B1 cap 8 | The same B1 corpus and environment except Run cap | seed 252 | seeds 253/254/255 | jobs `0..29` |
 | M1 shared | `M1-shared-v1`; latency, progress, fairness, waste, memory | 1 second | 5 seconds | 30 non-overlapping one-second windows |
 
+Every workload-bearing field and fixed-record component uses the closed,
+case-sensitive `workload-id-v1` scalar. Its only accepted payloads are the four
+table tokens above, whose exact frames are `16:I1-edit-storm-v1`,
+`17:I2-progressive-v1`, `15:B1-immutable-v1`, and `12:M1-shared-v1`.
+Generic `identifier` remains a distinct lowercase ASCII type matching
+`[a-z0-9][a-z0-9._+-]*`; neither validator may borrow the other's domain.
+The mandatory lexical/type oracle is:
+
+| Declared context | Input | Expected |
+| --- | --- | --- |
+| `workload-id-v1` | Each of the four exact frozen tokens | Accept all four independently. |
+| `workload-id-v1` | A lowercase/case-changed alias such as `i1-edit-storm-v1` | Reject; workload tokens are case-sensitive. |
+| `workload-id-v1` | An unknown token such as `I3-edit-storm-v1` | Reject; the domain is closed. |
+| Generic `identifier` | `abc`, `a0`, or `a0._+-` | Accept under the unchanged lowercase grammar. |
+| Generic `identifier` | `I1-edit-storm-v1`, empty input, or a leading invalid byte | Reject under the unchanged lowercase grammar. |
+| Evidence `workload_id` field | Exact token with type frame `10:identifier` | Reject; the required type frame is `14:workload-id-v1`. |
+| Non-workload identifier field | A `workload-id-v1` type frame or workload token | Reject schema/type mixing. |
+
+A known I1 evidence row or bundle starts its workload field with the exact
+record `field=11:workload_id5:known4:none14:workload-id-v116:I1-edit-storm-v1\n`.
+The `job-instance-v1` and `row-reference-v1` fixed records instead retain the
+same first component payload frame and validate it under the dedicated type;
+their fixed-record payloads do not contain component type tokens. A focused
+wire oracle must round-trip all four workload tokens through job-instance,
+15-field row, five-field bundle, and row-reference encodings; must reject any
+case, unknown-token, type-frame, or enclosing-workload mismatch; and must
+recompute row/bundle digests from the corrected canonical bytes. The former
+`identifier` annotation never described a valid uppercase-leading v1 object.
+
 Every row uses three fresh process/execution-domain replicates. Cold first-use
 is captured separately and excluded from steady-state aggregates. Natural edit
 ordinals `1..12` map to `edit_index=0..11`; the required final is the twelfth
@@ -1691,7 +1720,9 @@ boundary, advances each Graph in ascending job order, and begins a new M1 cycle
 without a producer gap; it does not admit all 30 Runs outside normal bounds.
 
 Every B1 occurrence is indexed by canonical `job-instance-v1`
-`(row_workload_id,replicate_ordinal,phase,cycle_ordinal,job_index,run_cap)`.
+`(row_workload_id:workload-id-v1,replicate_ordinal:uint64,
+phase:enum(cold|warmup|measured),cycle_ordinal:uint64,job_index:uint64,
+run_cap:uint64)`.
 Phase-local cycle zero covers cold/warmup and isolated measured B1; M1 uses the
 current phase-local cycle and increments it only after a complete `0..29`
 corpus in that phase. The logical I/O task
@@ -2161,8 +2192,9 @@ An `execution-profile-slo-v1` bundle contains:
 
 The outer wire format is not implementation-defined. Each row is the exact
 `execution-profile-evidence-row-v1\n` header followed by the ADR 0010 fixed 15
-field records: workload/subject/replicate/cap, three environment coordinates,
-five section digests, and two pair references. Non-M1 pair fields use
+field records: `workload_id:workload-id-v1`, subject/replicate/cap, three
+environment coordinates, five section digests, and two pair references.
+Non-M1 pair fields use
 `not-applicable/row-has-no-isolated-pair` with zero payload. The job-instance
 section contains one canonical list of complete occurrence records; I1/I2 use
 an explicit known-empty `0:` list. Each section digest hashes the literal
@@ -2170,9 +2202,10 @@ an explicit known-empty `0:` list. Each section digest hashes the literal
 name, schema id, and retained exact bytes.
 
 Each bundle is the exact `execution-profile-evidence-bundle-v1\n` header plus
-five records: workload id, subject role, provenance-section digest, comparison
-reference, and nonempty canonical row-reference list whose items all use that
-workload id. Reference bundles use
+five records: `workload_id:workload-id-v1`, subject role, provenance-section
+digest, comparison reference, and nonempty canonical row-reference list whose
+items all use that workload id through a `workload-id-v1` first component.
+Reference bundles use
 `not-applicable/reference-has-no-comparison-baseline`; no optional field is
 omitted or represented by an empty digest. `row_digest` and `bundle_digest`
 hash their distinct ADR 0010 domain tags plus one frame around the complete
@@ -2206,13 +2239,13 @@ The comparison-bundle resolver has this mandatory scenario/oracle matrix:
 
 | Scenario | Oracle |
 | --- | --- |
-| Exact-one valid | One retained object parses as the exact canonical five-field bundle, its independent rehash equals the claim, role is `reference`, workload matches, its full row list is canonical and functionally unique, and the candidate key selects exactly one valid target row; resolution may proceed to the remaining compatibility checks. |
+| Exact-one valid | One retained object parses as the exact canonical five-field bundle, all workload-bearing fields/components parse as `workload-id-v1`, its independent rehash equals the claim, role is `reference`, workload matches, its full row list is canonical and functionally unique, and the candidate key selects exactly one valid target row; resolution may proceed to the remaining compatibility checks. |
 | Zero object | No retained bundle object resolves from the claim; every related reference-relative verdict is `invalid`. |
 | Multiple objects with the same claim | Two or more retained objects resolve from the same digest claim, even if their bytes are equal; the validator does not choose by path, insertion order, or bytes, and every related verdict is `invalid`. |
 | Five-field schema failure | The target has a wrong header, field count/order/type/state/reason, malformed frame, missing final LF, or extra byte; it is not a canonical bundle and every related verdict is `invalid`. |
 | Independent rehash mismatch | The canonical target bytes recompute to a bundle digest different from the candidate claim; every related verdict is `invalid`. |
 | Wrong role | The resolved bundle has `subject_role=candidate`; every related verdict is `invalid`. |
-| Wrong workload | The resolved `reference` bundle workload differs from the candidate workload; every related verdict is `invalid`. |
+| Wrong workload | The resolved bundle/candidate/item workload differs, has a case/unknown token, or uses a generic `identifier` type frame; canonical validation fails before equality/key lookup and every related verdict is `invalid`. |
 | Target key missing | No target row-reference item has the candidate row's functional key; the related verdict is `invalid`. |
 | Target key duplicated | More than one target row-reference item has that key, including different row digests; the related verdict is `invalid`. |
 | Target row mismatch | The selected item resolves zero or multiple rows, fails row rehash or 15-field parsing, or mismatches item/bundle workload, cap, replicate, or role; the related verdict is `invalid`. |

@@ -1301,6 +1301,33 @@ Runner 必须使用 ADR 0010 中精确的 graph/source/edit/preview/job/cadence 
 | B1 cap 8 | 相同 B1 corpus 与环境，仅 Run cap 不同 | seed 252 | seed 253/254/255 | job `0..29` |
 | M1 shared | `M1-shared-v1`；latency、progress、fairness、waste、memory | 1 秒 | 5 秒 | 30 个互不重叠的一秒 window |
 
+每个携带 workload 的 field 与 fixed-record component 都使用封闭且区分大小写的
+`workload-id-v1` scalar。它只接受上表四个 token，精确 frame 分别为
+`16:I1-edit-storm-v1`、`17:I2-progressive-v1`、
+`15:B1-immutable-v1` 与 `12:M1-shared-v1`。通用 `identifier` 仍是独立的
+lowercase ASCII type，匹配 `[a-z0-9][a-z0-9._+-]*`；两个 validator 都不得借用
+对方的 domain。强制 lexical/type oracle 如下：
+
+| 声明的上下文 | 输入 | 预期 |
+| --- | --- | --- |
+| `workload-id-v1` | 四个精确冻结 token 中的每一个 | 分别接受全部四个。 |
+| `workload-id-v1` | `i1-edit-storm-v1` 等 lowercase/case-changed alias | 拒绝；workload token 区分大小写。 |
+| `workload-id-v1` | `I3-edit-storm-v1` 等未知 token | 拒绝；domain 是封闭的。 |
+| 通用 `identifier` | `abc`、`a0` 或 `a0._+-` | 按未改变的 lowercase grammar 接受。 |
+| 通用 `identifier` | `I1-edit-storm-v1`、空输入或 invalid leading byte | 按未改变的 lowercase grammar 拒绝。 |
+| Evidence `workload_id` field | 精确 token 与 type frame `10:identifier` | 拒绝；必需 type frame 为 `14:workload-id-v1`。 |
+| 非 workload identifier field | `workload-id-v1` type frame 或 workload token | 拒绝 schema/type 混用。 |
+
+Known I1 evidence row 或 bundle 的 workload field 以精确 record
+`field=11:workload_id5:known4:none14:workload-id-v116:I1-edit-storm-v1\n`
+开始。`job-instance-v1` 与 `row-reference-v1` fixed record 则保留相同的首个
+component payload frame，并按专用类型进行校验；其 fixed-record payload 不包含
+component type token。聚焦 wire oracle 必须让四个 workload token 通过
+job-instance、15-field row、五 field bundle 与 row-reference encoding round-trip；
+必须拒绝任何大小写、未知 token、type-frame 或 enclosing-workload mismatch；并从
+纠正后的 canonical byte 复算 row/bundle digest。此前的 `identifier` annotation 从未
+描述有效的 uppercase-leading v1 object。
+
 每一行使用三个全新的 process/execution-domain replicate。Cold first-use 单独
 采集，并排除在 steady-state aggregate 之外。自然 edit ordinal `1..12` 映射为
 `edit_index=0..11`；必需 final 是第十二次 edit（`edit_index=11`、`k=1.04`、source
@@ -1344,8 +1371,10 @@ Host scratch、65,536 个 ready entry 与 256 MiB ready byte；Interactive headr
 中无 producer gap 地开始新 cycle；它不会绕过正常 bound 准入全部 30 个 Run。
 
 每个 B1 occurrence 都通过 canonical `job-instance-v1`
-`(row_workload_id,replicate_ordinal,phase,cycle_ordinal,job_index,run_cap)` 建立
-index。Phase-local cycle zero 覆盖 cold/warmup 与 isolated measured B1；M1 使用
+`(row_workload_id:workload-id-v1,replicate_ordinal:uint64,
+phase:enum(cold|warmup|measured),cycle_ordinal:uint64,job_index:uint64,
+run_cap:uint64)` 建立 index。Phase-local cycle zero 覆盖 cold/warmup 与 isolated
+measured B1；M1 使用
 当前 phase-local cycle，并且只在同 phase 的完整 `0..29` corpus 后增加 cycle。
 Logical I/O task 增加 stage，完整 task
 identity 再增加 `attempt`。Capacity rejection 或幂等 duplicate 保持 attempt zero
@@ -1764,8 +1793,8 @@ completion order 不进入 canonical byte，但保留在独立 raw trace 中。
 
 Outer wire format 不是 implementation-defined。每个 row 都由精确
 `execution-profile-evidence-row-v1\n` header 与 ADR 0010 的固定 15 个 field record
-组成：workload/subject/replicate/cap、三个 environment coordinate、五个 section
-digest 与两个 pair reference。非 M1 pair field 使用
+组成：`workload_id:workload-id-v1`、subject/replicate/cap、三个 environment
+coordinate、五个 section digest 与两个 pair reference。非 M1 pair field 使用
 `not-applicable/row-has-no-isolated-pair` 与 zero payload。Job-instance section 包含
 完整 occurrence record 的 canonical list；I1/I2 使用显式 known-empty `0:` list。
 每个 section digest 对字面量
@@ -1773,9 +1802,9 @@ digest 与两个 pair reference。非 M1 pair field 使用
 schema id 与 retained exact byte 计算 hash。
 
 每个 bundle 由精确 `execution-profile-evidence-bundle-v1\n` header 与五个 record
-组成：workload id、subject role、provenance-section digest、comparison reference，
-以及 item 均使用该 workload id 的非空 canonical row-reference list。Reference
-bundle 使用
+组成：`workload_id:workload-id-v1`、subject role、provenance-section digest、
+comparison reference，以及 item 均通过 `workload-id-v1` 首个 component 使用该
+workload id 的非空 canonical row-reference list。Reference bundle 使用
 `not-applicable/reference-has-no-comparison-baseline`；任何 optional field 都不能省略
 或使用空 digest 表示。`row_digest` 与 `bundle_digest` 对各自不同的 ADR 0010 domain
 tag 加上完整 canonical manifest byte 的一个 frame 计算 hash。Claim 存储在 object
@@ -1803,13 +1832,13 @@ Comparison-bundle resolver 必须覆盖以下 scenario/oracle 矩阵：
 
 | 场景 | Oracle |
 | --- | --- |
-| Exact-one valid | 一个 retained object 解析为精确 canonical 五 field bundle，其独立 rehash 等于 claim，role 为 `reference`、workload 匹配、完整 row list canonical 且功能唯一，candidate key 选择恰好一个有效 target row；随后可以继续其他 compatibility check。 |
+| Exact-one valid | 一个 retained object 解析为精确 canonical 五 field bundle，全部携带 workload 的 field/component 都按 `workload-id-v1` 解析，其独立 rehash 等于 claim，role 为 `reference`、workload 匹配、完整 row list canonical 且功能唯一，candidate key 选择恰好一个有效 target row；随后可以继续其他 compatibility check。 |
 | Zero object | Claim 没有解析出 retained bundle object；全部相关 reference-relative verdict 为 `invalid`。 |
 | Multiple objects with the same claim | 同一 digest claim 解析出两个或更多 retained object，即使其 byte 相同；validator 不按 path、insertion order 或 byte 选择，全部相关 verdict 为 `invalid`。 |
 | Five-field schema failure | Target 的 header、field count/order/type/state/reason 错误、frame malformed、缺少 final LF 或有 extra byte；它不是 canonical bundle，全部相关 verdict 为 `invalid`。 |
 | Independent rehash mismatch | Canonical target byte 复算出的 bundle digest 与 candidate claim 不同；全部相关 verdict 为 `invalid`。 |
 | Wrong role | 解析出的 bundle 具有 `subject_role=candidate`；全部相关 verdict 为 `invalid`。 |
-| Wrong workload | 解析出的 `reference` bundle workload 与 candidate workload 不同；全部相关 verdict 为 `invalid`。 |
+| Wrong workload | 解析出的 bundle/candidate/item workload 不同、使用大小写变体或未知 token，或者使用通用 `identifier` type frame；canonical validation 在 equality/key lookup 前失败，全部相关 verdict 为 `invalid`。 |
 | Target key missing | 没有 target row-reference item 具有 candidate row 的功能 key；相关 verdict 为 `invalid`。 |
 | Target key duplicated | 多个 target row-reference item 具有该 key，包括命名不同 row digest 的情形；相关 verdict 为 `invalid`。 |
 | Target row mismatch | Selected item 解析出零个或多个 row、row rehash 或 15-field parsing 失败，或 item/bundle workload、cap、replicate、role 不匹配；相关 verdict 为 `invalid`。 |

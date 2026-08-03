@@ -1092,6 +1092,14 @@ immutable workload ids:
 | `B1-immutable-v1` | Thirty job-indexed immutable full-frame jobs are offered in order across two Graphs, with bounded Compute I/O task/planned-byte admission, canonical raw artifacts/manifests and semantic traces, crash-durable receipts, and logical/raw goldens at Run caps 1 and 8. |
 | `M1-shared-v1` | Forty exact I1 starts and continuously offered cap-8 B1 cycles sharing one process execution authority for 30 measured seconds. |
 
+Every workload-bearing row, bundle, job-instance, and row-reference component
+uses the closed, case-sensitive `workload-id-v1` scalar whose domain is exactly
+those four tokens. Generic `identifier` remains lowercase-only for all other
+declared identifier fields. Evidence row and bundle bytes include the corrected
+`14:workload-id-v1` type frame and therefore require independent address
+recomputation; job-instance and row-reference fixed records retain the exact
+16/17/15/12-byte workload payload frames while validating the closed domain.
+
 Latency, throughput, fairness, determinism, waste, and memory are six
 independent verdicts. Interactive latency has absolute p50/p95/p99 gates;
 batch throughput and B1/I2 memory have immutable same-environment reference

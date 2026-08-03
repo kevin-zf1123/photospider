@@ -83,6 +83,16 @@ The canonical workload matrix is:
 | `B1-immutable-v1` | Contains immutable jobs `0..29`; job `n` uses source seed `n`, the baseline graph, Throughput QoS, weight 1, no deadline or supersession, exact reservation evidence, a canonical semantic trace, a crash-durable committed artifact, and job-indexed logical/raw goldens. Even jobs belong to Graph A and odd jobs to Graph B. At the measurement boundary the harness offers both ordered 15-job queues and never pauses a nonempty queue; bounded Host admission, rather than the harness, decides how many Runs are resident. Run caps 1 and 8 are separate required rows. |
 | `M1-shared-v1` | At measured time zero, starts I1 and then repeats it every 750,000,000 ns, giving exactly 40 episode starts, while cycling the exact B1 corpus with its even/odd Graph assignment, Run cap 8, and continuous offered backlog for 30 measured seconds. Both streams use one `ExecutionService`, worker set, ready store, policy binding set, and `ResourceLedger`; no hidden pool, duplicate ledger, or separate process may absorb either stream. |
 
+Every workload-bearing field or fixed-record component uses the dedicated,
+case-sensitive scalar type `workload-id-v1`. Its complete domain is exactly
+`I1-edit-storm-v1`, `I2-progressive-v1`, `B1-immutable-v1`, and
+`M1-shared-v1`; it performs no case folding, aliasing, Unicode normalization,
+or open-ended identifier acceptance. These raw ASCII payloads frame exactly as
+`16:I1-edit-storm-v1`, `17:I2-progressive-v1`,
+`15:B1-immutable-v1`, and `12:M1-shared-v1`. The generic `identifier` type
+remains lowercase-only and continues to serve every non-workload field that
+declares it.
+
 For fairness, one Graph is *eligible* while its producer has unconsumed offered
 demand and has not paused submission. This workload-level interval includes
 time awaiting bounded admission; it does not claim that all 30 B1 Runs are
@@ -99,7 +109,7 @@ assigns each offered job one canonical `job-instance-v1` fixed record with
 components in this exact order:
 
 ```text
-(row_workload_id:identifier,
+(row_workload_id:workload-id-v1,
  replicate_ordinal:uint64,
  phase:enum(cold|warmup|measured),
  cycle_ordinal:uint64,
@@ -352,7 +362,10 @@ not a v1 manifest.
 The scalar and composite payload grammar is closed:
 
 - `identifier` is nonempty lowercase ASCII matching
-  `[a-z0-9][a-z0-9._+-]*`; an `enum` is one exact field-specific token.
+  `[a-z0-9][a-z0-9._+-]*`. `workload-id-v1` is one raw ASCII token from the
+  exact four-value domain above and is case-sensitive; it is not an
+  `identifier`, and lowercase aliases or unknown tokens are invalid. An
+  `enum` is one exact field-specific token.
 - `uint64` is one complete ASCII decimal matching exactly
   `0|[1-9][0-9]*`, interpreted in the inclusive range
   `0..18446744073709551615`; `00`, `01`, any other leading-zero spelling, and
@@ -407,6 +420,23 @@ The scalar and composite payload grammar is closed:
   nonempty payload (`0:` is the explicit payload of an allowed empty
   collection). Every other state has a zero-byte payload, encoded by the final
   `0:` frame.
+
+For example, the complete known I1 workload field record is:
+
+```text
+field=11:workload_id5:known4:none14:workload-id-v116:I1-edit-storm-v1\n
+```
+
+The other three payload frames are the exact 17-, 15-, and 12-byte frames
+listed above. A `job-instance-v1` or `row-reference-v1` fixed-record payload
+contains only the component payload frame, so this correction preserves those
+token bytes while changing their schema/parser domain. By contrast, evidence
+row and bundle field records include the type frame in their canonical bytes:
+`14:workload-id-v1` is mandatory, `10:identifier` is invalid, and every row or
+bundle address must be recomputed from the corrected bytes. The earlier
+`identifier` annotation could not encode any of the four uppercase-leading
+workloads under the unchanged lowercase grammar, so it did not define a valid
+legacy v1 object to reinterpret.
 
 The eight-token durability capability example is byte-exact. Its
 `token-set-v1` payload is 156 ASCII bytes:
@@ -1158,7 +1188,7 @@ An evidence row begins with the exact ASCII header
 
 | # | Field | Exact type and known value domain | Allowed N/A |
 | ---: | --- | --- | --- |
-| 1 | `workload_id` | `identifier`; one of the four frozen workload ids | No |
+| 1 | `workload_id` | `workload-id-v1`; one of the exact four frozen tokens | No |
 | 2 | `subject_role` | `enum`: `candidate` or `reference` | No |
 | 3 | `replicate_ordinal` | `uint64`; `1..3` | No |
 | 4 | `run_cap` | `uint64`; the workload row's frozen cap | No |
@@ -1238,7 +1268,7 @@ records:
 
 | # | Field | Exact type and known value domain | Allowed N/A |
 | ---: | --- | --- | --- |
-| 1 | `workload_id` | `identifier`; one of the four frozen workload ids | No |
+| 1 | `workload_id` | `workload-id-v1`; one of the exact four frozen tokens | No |
 | 2 | `subject_role` | `enum`: `candidate` or `reference` | No |
 | 3 | `bundle_provenance_digest` | `sha256`; section digest over retained repository/build/binary/provider provenance | No |
 | 4 | `comparison_reference_bundle_digest` | `sha256`; immutable external reference for a candidate | `reference-has-no-comparison-baseline` |
@@ -1248,7 +1278,7 @@ records:
 `section_name=bundle-provenance` and
 `section_schema_id=execution-profile-bundle-provenance-v1`.
 `row-reference-v1` is a fixed record with components in the exact order
-`(workload_id:identifier,run_cap:uint64,replicate_ordinal:uint64,row_digest:sha256)`.
+`(workload_id:workload-id-v1,run_cap:uint64,replicate_ordinal:uint64,row_digest:sha256)`.
 `row-reference-list-v1` uses the generic list grammar with one frame around
 each complete row-reference payload. Its functional row key is exactly
 `(workload_id,run_cap,replicate_ordinal)`. The list is nonempty and functionally
@@ -1257,6 +1287,12 @@ unique by that key; two items with the same key are invalid even when their
 list is sorted by numeric run cap, numeric replicate ordinal, then the complete
 payload bytes, and every item workload id must equal the enclosing bundle
 `workload_id`.
+
+Before workload equality, functional-key construction, or target lookup, every
+row, bundle, job-instance, and row-reference workload component must parse as
+`workload-id-v1`. A generic `identifier` type frame, a case variant, or an
+unknown workload fails canonical validation; a verifier must not bypass that
+failure merely because two invalid byte strings compare equal.
 
 For every item, the verifier resolves the `row_digest` to exactly one retained
 canonical row, recomputes the row digest, parses all 15 fields, and requires
