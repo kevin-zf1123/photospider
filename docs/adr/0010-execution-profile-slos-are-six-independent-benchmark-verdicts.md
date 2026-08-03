@@ -79,7 +79,7 @@ The canonical workload matrix is:
 | Workload | Frozen behavior |
 | --- | --- |
 | `I1-edit-storm-v1` | Uses seed zero and the twelve natural edit ordinals `1..12`. For `edit_index = edit_ordinal - 1` in `0..11`, node one's `k` is selected from `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`, and the source Region is `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`. Every Run uses `ComputeIntent::GlobalHighPrecision`, `ComputeRunQuality::Full`, Interactive QoS, weight 1, Run cap 8, the checked absolute monotonic deadline `D_i=A_i+150,000,000 ns`, and the exact `(Graph, target node four, GlobalHighPrecision)` supersession key. The twelfth edit (`edit_index=11`, `k=1.04`, Region `(768,512,256,256)`) is the only required publication and must publish no later than `D_11`; a separate 500 ms quiescence drain follows the cadence. |
-| `I2-progressive-v1` | Reuses the exact I1 source, graph, seed, edit ordinals, source-space Regions, and realtime request lineage. The 512x512 preview source is a per-channel 4x4 box average of the 2048 source, rounded once to binary32 before the same four transforms; preview Region `edit_index` is `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`. The final evaluates the 2048 source. Only the twelfth edit (`edit_index=11`, preview Region `(192,128,64,64)`) has required preview and final latency results, in that order; stale output cannot publish. |
+| `I2-progressive-v1` | Reuses the exact I1 source, graph, seed, edit ordinals, source-space Regions, realtime request lineage, and complete node-one coefficient sequence `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` under the same `edit_index=edit_ordinal-1` mapping. At each index it updates node one to that coefficient, then executes nodes one through four in order with `k` values `[coefficient, 1.00, 1.20, 1.40]`. The 512x512 preview source is a per-channel 4x4 box average of the original 2048 source, rounded once to binary32 before that update/transform sequence; preview Region `edit_index` is `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`. The final starts from the original 2048 source and uses the same I1 full-resolution update/transform path; it is never derived from preview pixels. Only the twelfth edit (`edit_index=11`, preview Region `(192,128,64,64)`) has required preview and final latency results, in that order; stale output cannot publish. |
 | `B1-immutable-v1` | Contains immutable jobs `0..29`; job `n` uses source seed `n`, the baseline graph, Throughput QoS, weight 1, no deadline or supersession, exact reservation evidence, a canonical semantic trace, a crash-durable committed artifact, and job-indexed logical/raw goldens. Even jobs belong to Graph A and odd jobs to Graph B. At the measurement boundary the harness offers both ordered 15-job queues and never pauses a nonempty queue; bounded Host admission, rather than the harness, decides how many Runs are resident. Run caps 1 and 8 are separate required rows. |
 | `M1-shared-v1` | At measured time zero, starts I1 and then repeats it every 750,000,000 ns, giving exactly 40 episode starts, while cycling the exact B1 corpus with its even/odd Graph assignment, Run cap 8, and continuous offered backlog for 30 measured seconds. Both streams use one `ExecutionService`, worker set, ready store, policy binding set, and `ResourceLedger`; no hidden pool, duplicate ledger, or separate process may absorb either stream. |
 
@@ -223,6 +223,22 @@ deadline 1,000 ms after the same start. Both children carry the realtime request
 its canonical request key as required by the current `ComputeRunSubmission`
 contract.
 
+For this state machine, “same I1 lineage” also freezes the complete numeric and
+execution sequence. Let
+`K=[0.82,1.18,0.86,1.14,0.90,1.10,0.94,1.06,0.98,1.02,0.96,1.04]`.
+For every `edit_index=i` in `0..11`, I2 uses `K[i]`, the I1 source Region at
+index `i`, the I2 preview Region at index `i`, and the same ordinal/generation
+record. Each preview first computes the per-channel 4x4 box average from the
+original 2048 source and rounds that source once to binary32, then updates node
+one to `K[i]` and executes node one, node two, node three, and node four in that
+order with `k` values `[K[i],1.00,1.20,1.40]`. Each final instead starts from
+the original 2048 source, applies the same node-one update, and executes the
+same four-node full-resolution path as I1. It must not upsample, reuse, or
+otherwise derive final pixels from the preview. A coefficient substitution,
+sequence reorder, index shift, Region/index mismatch, different rounding point,
+or different final path is not `I2-progressive-v1`: a row carrying that id is
+invalid, and a deliberately changed fixture requires a new workload id.
+
 The final child is submitted exactly when that edit's preview first becomes
 visible and its generation is still current. If a newer edit is accepted first,
 the armed final is discarded without submission; an already submitted preview
@@ -254,7 +270,11 @@ beyond those two conditional first accesses are forbidden. Without Metal only
 the device-specific component is predefined `not-applicable`; the Host reuse
 and no-I/O gates still apply. The twelfth edit (`edit_index=11`) final logical
 digest must equal the I1 `edit_index=11` digest, and its preview logical digest
-must equal its own fixture golden.
+must equal its own fixture golden. The workload manifest and fixture oracle bind
+the complete `K` array, index/Region mapping, node-update/transform order,
+preview average-and-rounding order, and full-resolution final path; a drift in
+any of those inputs changes the manifest and cannot be accepted under the v1
+digest/golden linkage.
 
 Every required logical output digest is obtained by calling
 `compute_content_digest(Value)`. A sample is valid only when the returned
@@ -1419,7 +1439,7 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 | Issue | Required v1 delivery |
 | --- | --- |
 | #93 | Implement I1 request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
-| #94 | Implement I2 on the exact I1 lineage; publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
+| #94 | Implement I2 on the exact I1 coefficient/index/update and full-resolution-final lineage; it cannot select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
 | #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
 | #96 | Compose the exact I1 and B1 fixtures into M1, assign a distinct `cycle_ordinal` to every repeated B1 corpus without treating it as retry, reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
 

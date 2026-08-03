@@ -71,7 +71,7 @@ payload 都在 workload manifest 中按内容寻址。
 | Workload | 冻结行为 |
 | --- | --- |
 | `I1-edit-storm-v1` | 使用 seed zero 与自然序号为 `1..12` 的十二次 edit。对 `0..11` 中的 `edit_index = edit_ordinal - 1`，第一个 node 的 `k` 从 `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` 取值，source Region 为 `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`。每个 Run 使用 `ComputeIntent::GlobalHighPrecision`、`ComputeRunQuality::Full`、Interactive QoS、weight 1、Run cap 8、经过 checked arithmetic 的 absolute monotonic deadline `D_i=A_i+150,000,000 ns`，以及精确的 `(Graph, target node four, GlobalHighPrecision)` supersession key。第十二次 edit（`edit_index=11`、`k=1.04`、Region `(768,512,256,256)`）是唯一必需 publication，且必须不晚于 `D_11` 发布；cadence 后另有 500 ms quiescence drain。 |
-| `I2-progressive-v1` | 复用精确的 I1 source、graph、seed、edit ordinal、source-space Region 与 realtime request lineage。512x512 preview source 是对 2048 source 逐 channel 执行 4x4 box average、只舍入一次到 binary32 后，再经过相同四个 transform；preview Region `edit_index` 为 `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`。Final 计算 2048 source。只有第十二次 edit（`edit_index=11`、preview Region `(192,128,64,64)`）具有必需的 preview 与 final latency result，且必须按此顺序出现；stale output 不得发布。 |
+| `I2-progressive-v1` | 复用精确的 I1 source、graph、seed、edit ordinal、source-space Region、realtime request lineage，以及完整的第一个 node coefficient 序列 `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`，并使用相同的 `edit_index=edit_ordinal-1` 映射。每个 index 都先把第一个 node 更新为对应 coefficient，再按顺序执行 node one 至 node four，其 `k` 值为 `[coefficient, 1.00, 1.20, 1.40]`。512x512 preview source 是对原始 2048 source 逐 channel 执行 4x4 box average、只舍入一次到 binary32 后，再执行该 update/transform 序列；preview Region `edit_index` 为 `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`。Final 从原始 2048 source 开始，使用与 I1 相同的 full-resolution update/transform path，绝不从 preview pixel 派生。只有第十二次 edit（`edit_index=11`、preview Region `(192,128,64,64)`）具有必需的 preview 与 final latency result，且必须按此顺序出现；stale output 不得发布。 |
 | `B1-immutable-v1` | 包含 immutable job `0..29`；job `n` 使用 source seed `n`、baseline graph、Throughput QoS、weight 1、无 deadline 或 supersession、精确 reservation 证据、canonical semantic trace、crash-durable committed artifact 与按 job index 区分的 logical/raw golden。偶数 job 属于 Graph A，奇数 job 属于 Graph B。测量边界上 harness 同时提供两个有序的 15-job queue，且不会暂停非空 queue；由有界 Host admission 而非 harness 决定驻留多少个 Run。Run cap 1 与 8 是两行独立的必需证据。 |
 | `M1-shared-v1` | 在 measured time zero 启动 I1，此后每 750,000,000 ns 重复一次，共精确启动 40 个 episode；同时循环执行精确的 B1 corpus，保留偶数/奇数 Graph 分配、Run cap 8 与持续 offered backlog，共测量 30 秒。两条 stream 共用一个 `ExecutionService`、worker set、ready store、policy binding set 与 `ResourceLedger`；不得用隐藏 pool、重复 ledger 或独立进程承接任一 stream。 |
 
@@ -199,6 +199,19 @@ edit 记录的 Host admission start 后 100 ms 的 absolute steady-clock deadlin
 `SupersessionIdentity`，因此 HP child 的 compute intent 仍与其 canonical request
 key 分离，符合当前 `ComputeRunSubmission` 契约。
 
+对于该 state machine，“相同 I1 lineage”还冻结完整 numeric 与 execution sequence。令
+`K=[0.82,1.18,0.86,1.14,0.90,1.10,0.94,1.06,0.98,1.02,0.96,1.04]`。
+对于 `0..11` 中每个 `edit_index=i`，I2 使用 `K[i]`、index `i` 对应的 I1 source
+Region、index `i` 对应的 I2 preview Region，以及相同 ordinal/generation record。每个
+preview 都先从原始 2048 source 逐 channel 计算 4x4 box average，并把该 source 只
+舍入一次到 binary32；然后把第一个 node 更新为 `K[i]`，再依次执行 node one、node
+two、node three 与 node four，其 `k` 值为 `[K[i],1.00,1.20,1.40]`。每个 final 则
+从原始 2048 source 开始，执行相同的第一个 node update，以及与 I1 相同的四 node
+full-resolution path。Final 不得 upsample、复用或以其他方式从 preview pixel 派生。
+替换 coefficient、重排 sequence、偏移 index、令 Region 与 index 不匹配、改变 rounding
+point 或改变 final path，都不属于 `I2-progressive-v1`：携带该 id 的 row 无效，而
+有意改变的 fixture 必须使用新的 workload id。
+
 Final child 只在该 edit 的 preview 首次可见、且其 generation 仍为 current 时精确
 提交。若更新的 edit 先被接受，armed final 不经提交即被丢弃；已经提交的 preview
 或 final 被 supersede，且只能 drain。新 generation 会撤销两个较旧 child 的
@@ -225,7 +238,9 @@ transfer、filesystem/codec I/O，以及上述两个条件式首次 access 之�
 没有 Metal 时，只有 device-specific 组件属于预定义 `not-applicable`；Host reuse
 与 no-I/O 门禁仍然适用。第十二次 edit（`edit_index=11`）的 final logical digest
 必须等于 I1 `edit_index=11` digest，preview logical digest 必须等于其自身 fixture
-golden。
+golden。Workload manifest 与 fixture oracle 绑定完整 `K` array、index/Region mapping、
+node update/transform order、preview average-and-rounding order，以及 full-resolution
+final path；任一输入漂移都会改变 manifest，不能在 v1 digest/golden linkage 下被接受。
 
 每个必需 logical output digest 都通过调用 `compute_content_digest(Value)` 得到。
 Sample 只有在返回的 `ContentDigestResult.state` 为
@@ -1255,7 +1270,7 @@ good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidenc
 | Issue | 必需 v1 交付 |
 | --- | --- |
 | #93 | 实现 I1 request/current-generation 与 cancellation/quiescence 观测；发布 isolated latency、waste 与 memory 行，以及必需的 output-correctness 证据。 |
-| #94 | 在精确 I1 lineage 上实现 I2；发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
+| #94 | 在精确 I1 coefficient/index/update 与 full-resolution-final lineage 上实现 I2；不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
 | #95 | 实现 B1 immutable manifest、occurrence-scoped job/task identity、reservation、canonical semantic trace、crash-durable artifact commit、固定 storage/performance probe-to-schema adapter、mount normalization、唯一 encoder/digest、eligibility/B1 check 与 logical/raw golden；在 Run cap 1 与 8 下发布 closed-schema isolated throughput、determinism、zero-fault waste 与 memory 行。 |
 | #96 | 把精确 I1 与 B1 fixture 组合为 M1，为每个重复 B1 corpus 分配独立 `cycle_ordinal` 且绝不把它当作 retry，原样复用精确 v1 manifest byte，强制执行 same-ordinal 完整 M1/B1 environment pair，同时让 I1-only pair 只比较 base，并发布 closed-schema mixed latency、throughput progress、fairness、waste 与 memory 行。 |
 

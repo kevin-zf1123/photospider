@@ -1334,6 +1334,27 @@ job-instance、15-field row、五 field bundle 与 row-reference encoding round-
 Region `(768,512,256,256)`、preview Region `(192,128,64,64)`）。裸写“edit 12”
 不是 v1 evidence identity。
 
+I2 继承的不只是 edit label。对于每个 `edit_index=i`，它使用精确的 I1 第一个 node
+序列
+`K=[0.82,1.18,0.86,1.14,0.90,1.10,0.94,1.06,0.98,1.02,0.96,1.04]`、
+相同的 `edit_index=edit_ordinal-1` lookup，以及相同的第一个 node update，随后按
+node one 至 node four 的顺序执行 transform，其 `k` 值为
+`[K[i],1.00,1.20,1.40]`。Preview 先从原始 2048 source 逐 channel 计算 4x4 box
+average，把该 source 只舍入一次到 binary32，再执行共享 update/transform sequence。
+Final 从原始 2048 source 开始，并执行相同的 I1 full-resolution path；它不是通过
+upsample、复用或其他方式从 preview 派生的 Value。
+
+强制 I2 coefficient/path scenario oracle 如下：
+
+| 场景 | Oracle |
+| --- | --- |
+| 精确匹配十二个 index | 枚举 `edit_index=0..11`，要求 I2 第一个 node 的值逐元素等于 I1，即 `[0.82,1.18,0.86,1.14,0.90,1.10,0.94,1.06,0.98,1.02,0.96,1.04]`，且 ordinal、source Region、preview Region 与 generation index 相同。 |
+| 单个 coefficient 漂移 | 替换任意一个 `K[i]` 却保留 `I2-progressive-v1` 都是 invalid；有意改变的 fixture 必须使用新的 workload id。 |
+| Sequence 重排或 index 偏移 | 交换 entry、直接把 `edit_ordinal` 当作从零开始的 array index、移动/循环 array，或把另一 index 的 coefficient/Region/generation 配在一起，在 v1 下都无效。 |
+| Preview rounding order | Preview oracle 对原始 source 逐 channel 执行 4x4 box average，只舍入一次到 binary32，再以 `K[i]` 执行 node one，并依次执行 node two 至 node four。在 transform 后、transform 之间进行舍入，或从已经 transform 的 pixel 计算 preview，都无效。 |
+| Full-resolution final path | Final 从原始 2048 source 开始，执行与 I1 相同的 `K[i]` update 与四个 transform，绝不通过 upsample 或复用 preview pixel 生成。 |
+| Digest 与 golden linkage | Manifest 绑定完整 coefficient/mapping/order/rounding/path 契约；必需的 `edit_index=11` final logical digest 等于 I1 index 11，preview 等于其自身 fixture golden。任何 mismatch 或 manifest drift 都使 v1 row 无效。 |
+
 Baseline 结算后，episode 选择 monotonic origin `E`，并使用
 `S_i=E+i*16,666,667 ns`。`A_i` 是 final Host admission 前立即取得的唯一
 monotonic-clock sample；它启动 latency sample，并通过 checked addition 得到唯一
@@ -1417,6 +1438,8 @@ child，并在共享 realtime request identity 下 arm 合法的
 时提交。更新 generation 会撤销两个较旧 child 的 publication permission。Preview
 latency 从 preview admission 前立即开始，到 preview visibility 结束；final latency
 使用同一起点，到 final visibility 结束。只有 `edit_index=11` 必须依次发布二者。
+Issue #94 消费冻结的 I1 coefficient/update sequence 与 full-resolution final path；它不能为
+edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。
 
 必需 logical value 调用 `compute_content_digest(Value)`，并且要求 `Available`、
 存在 `ContentDigest`，以及 `CanonicalDigestAlgorithm::Sha256CanonicalV1`。Logical

@@ -877,7 +877,7 @@ ordering、policy 与 receipt ownership。
 | Workload | 目标职责 |
 | --- | --- |
 | `I1-edit-storm-v1` | 自然 edit ordinal `1..12` 映射为 `edit_index=0..11`；在一个 latest-wins key 下执行十二次精确 parameter/256x256-Region edit，采用 Interactive QoS、具有有界 start lateness 的 monotonic nominal cadence，并观察第十二次 edit（`edit_index=11`）visibility。 |
-| `I2-progressive-v1` | 精确 I1 Graph/target/revision 与 edit mapping 使用独立的合法 realtime request key 及 RT-preview/HP-final child 契约；第十二次 edit（`edit_index=11`）先发布 512x512 preview，再发布 2048x2048 final；精确复用 Host/条件式 Metal residency，且 hidden I/O/copy 为零。 |
+| `I2-progressive-v1` | 精确的 I1 Graph/target/revision、`edit_index` mapping、完整 12-value 第一个 node coefficient/update sequence，以及 node one 至 node four transform order，使用独立的合法 realtime request key 与 RT-preview/HP-final child 契约。Preview 在该 sequence 前执行 4x4 source average 与一次 binary32 rounding；final 使用原始 2048 source 及相同 I1 full-resolution path。第十二次 edit（`edit_index=11`）依次发布 preview 与 final，精确复用 Host/条件式 Metal residency，且 hidden I/O/copy 为零。 |
 | `B1-immutable-v1` | 三十个按 job index 区分的 immutable full-frame job 按顺序提供给两个 Graph，并在 Run cap 1 与 8 下保留 bounded Compute I/O task/planned-byte admission、canonical raw artifact/manifest 与 semantic trace、crash-durable receipt，以及 logical/raw golden。 |
 | `M1-shared-v1` | 四十次精确 I1 start 与持续提供的 cap-8 B1 cycle 共用一个进程执行权威，共测量 30 秒。 |
 
@@ -946,7 +946,7 @@ self、enclosing、later-stage、comparison 或 M1 cycle 都会 fail closed。#9
 | Issue | 必需目标证据 |
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency、waste、memory 与必需 output correctness。 |
-| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 I1 lineage 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness。 |
+| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 I1 coefficient/index/update lineage 与 full-resolution final path 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness；#94 不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。 |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory，以及固定 storage/performance probe-to-schema、encoder、eligibility 与 compatibility 证据。 |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 M1 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
 

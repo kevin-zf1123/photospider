@@ -1677,6 +1677,28 @@ ordinals `1..12` map to `edit_index=0..11`; the required final is the twelfth
 edit (`edit_index=11`, `k=1.04`, source Region `(768,512,256,256)`, preview
 Region `(192,128,64,64)`). A bare “edit 12” is not a v1 evidence identity.
 
+I2 inherits more than the edit labels. For every `edit_index=i`, it uses the
+exact I1 node-one sequence
+`K=[0.82,1.18,0.86,1.14,0.90,1.10,0.94,1.06,0.98,1.02,0.96,1.04]`,
+the same `edit_index=edit_ordinal-1` lookup, and the same node-one update followed
+by node-one-to-node-four transform order with `k` values
+`[K[i],1.00,1.20,1.40]`. Preview first computes the per-channel 4x4 box average
+from the original 2048 source and rounds that source once to binary32, then
+executes the shared update/transform sequence. Final starts from the original
+2048 source and executes the same I1 full-resolution path; it is not an
+upsampled, reused, or otherwise preview-derived value.
+
+The mandatory I2 coefficient/path scenario oracle is:
+
+| Scenario | Oracle |
+| --- | --- |
+| Exact twelve-index match | Enumerate `edit_index=0..11` and require I2 node-one values to equal I1 element-for-element as `[0.82,1.18,0.86,1.14,0.90,1.10,0.94,1.06,0.98,1.02,0.96,1.04]`, with the same ordinal, source Region, preview Region, and generation index. |
+| Single coefficient drift | Replacing any one `K[i]` while retaining `I2-progressive-v1` is invalid; the deliberately changed fixture must receive a new workload id. |
+| Sequence reorder or index shift | Swapping entries, using `edit_ordinal` directly as the zero-based array index, shifting/wrapping the array, or pairing a coefficient/Region/generation from another index is invalid under v1. |
+| Preview rounding order | The preview oracle performs per-channel 4x4 box average on the original source, rounds once to binary32, then applies node one with `K[i]` and nodes two through four in order. Rounding after a transform, between transforms, or from already transformed pixels is invalid. |
+| Full-resolution final path | Final starts from the original 2048 source, applies the same `K[i]` update and four transforms as I1, and is never produced by upsampling or reusing preview pixels. |
+| Digest and golden linkage | The manifest binds the complete coefficient/mapping/order/rounding/path contract; the required `edit_index=11` final logical digest equals I1 at index 11 and the preview equals its own fixture golden. Any mismatch or manifest drift invalidates the v1 row. |
+
 After baseline settlement, an episode chooses monotonic origin `E` and uses
 `S_i=E+i*16,666,667 ns`. `A_i` is the one monotonic-clock sample immediately
 before final Host admission; it starts the latency sample and checked-adds the
@@ -1772,7 +1794,9 @@ identity. The final submits only when its preview becomes visible while still
 current. A newer generation revokes both older publication permissions. Preview
 latency starts immediately before preview admission and ends at preview
 visibility; final latency uses the same start and ends at final visibility.
-Only `edit_index=11` must publish both, in order.
+Only `edit_index=11` must publish both, in order. #94 consumes the frozen I1
+coefficient/update sequence and full-resolution final path; it cannot select a
+different coefficient for edits `0..10` while retaining `I2-progressive-v1`.
 
 Required logical values call `compute_content_digest(Value)` and require
 `Available`, a present `ContentDigest`, and

@@ -1088,7 +1088,7 @@ immutable workload ids:
 | Workload | Target role |
 | --- | --- |
 | `I1-edit-storm-v1` | Natural edit ordinals `1..12` map to `edit_index=0..11`; twelve exact parameter/256x256-Region edits use one latest-wins key, Interactive QoS, a monotonic nominal cadence with bounded start lateness, and twelfth-edit (`edit_index=11`) visibility. |
-| `I2-progressive-v1` | The exact I1 Graph/target/revision and edit mapping uses its separate legal realtime request key with RT-preview and HP-final child contracts; the twelfth edit (`edit_index=11`) publishes a 512x512 preview followed by the 2048x2048 final, with exact Host/conditional-Metal residency reuse and zero hidden I/O/copy. |
+| `I2-progressive-v1` | The exact I1 Graph/target/revision, `edit_index` mapping, complete 12-value node-one coefficient/update sequence, and node-one-through-node-four transform order use a separate legal realtime request key with RT-preview and HP-final child contracts. Preview performs the 4x4 source average and one binary32 rounding before that sequence; final uses the original 2048 source and the same I1 full-resolution path. The twelfth edit (`edit_index=11`) publishes preview then final with exact Host/conditional-Metal residency reuse and zero hidden I/O/copy. |
 | `B1-immutable-v1` | Thirty job-indexed immutable full-frame jobs are offered in order across two Graphs, with bounded Compute I/O task/planned-byte admission, canonical raw artifacts/manifests and semantic traces, crash-durable receipts, and logical/raw goldens at Run caps 1 and 8. |
 | `M1-shared-v1` | Forty exact I1 starts and continuously offered cap-8 B1 cycles sharing one process execution authority for 30 measured seconds. |
 
@@ -1169,7 +1169,7 @@ The delivery rows are fixed:
 | Issue | Required target evidence |
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency, waste, memory, and required output correctness. |
-| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact I1 lineage. |
+| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact I1 coefficient/index/update lineage and full-resolution final path; #94 cannot select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and fixed storage/performance probe-to-schema, encoder, eligibility, and compatibility evidence at caps 1 and 8. |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
 
