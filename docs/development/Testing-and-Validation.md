@@ -1805,16 +1805,18 @@ replacement field.
 
 Each manifest record uses the exact ASCII length-frame form
 `field=<frame(name)><frame(state)><frame(reason)><frame(type)><frame(payload)>`
-plus LF. `frame(B)` is unpadded decimal byte length, colon, then `B`. Text is
-NFC UTF-8 encoded as lowercase hexadecimal; identifiers, enums, booleans,
-uint64 decimals, SHA-256 values, lists, maps, sets, and fixed records follow the
-closed ADR grammar. Headers are exactly
+plus LF. `frame(B)` is unpadded decimal byte length, colon, then `B`. The exact
+`uint64` lexical language is `0|[1-9][0-9]*` over the complete ASCII value,
+with the inclusive numeric range `0..18446744073709551615`; leading-zero forms
+such as `00` and `01`, and overflow, are invalid. Text is NFC UTF-8 encoded as
+lowercase hexadecimal; identifiers, enums, booleans, SHA-256 values, lists,
+maps, sets, and fixed records follow the closed ADR grammar. Headers are exactly
 `execution-profile-storage-environment-v1\n`,
 `execution-profile-base-environment-v1\n`, and
 `execution-profile-environment-class-v1\n`. Missing/extra/reordered/duplicate
 records, malformed lengths, BOM/CR/extra whitespace, noncanonical scalars,
-unsorted set/map/record-list values, or a duplicate collection item are
-invalid.
+or an unsorted or duplicate item in a set, map, record list, or other binding
+that requires uniqueness are invalid.
 
 The validator does not infer a concrete collection type from that generic
 description. `token-set-v1` is a count plus one frame per exact raw ASCII
@@ -1880,6 +1882,22 @@ disposable paths, subject commits/binaries, and instantaneous load, queue,
 cache, autoscaler, free-space, RTT, or jitter samples; those remain raw
 preconditions/diagnostics and need not be exactly equal between runs.
 
+For `layout_mode=provider-managed`, all four geometry components remain in the
+fixed record. A positive value means the concept exists on the complete path
+and the exact effective value was observed. Zero requires the corresponding
+retained raw-proof kind: `provider-layout-data-units-absent`,
+`provider-layout-parity-units-absent`,
+`provider-layout-replica-count-absent`, or
+`provider-layout-stripe-unit-absent`. Those closed labels prove concept absence
+and do not create a component state, N/A pair, field, or digest input. The
+stable non-placeholder `layout_profile`, four values/proofs, and complete path
+must come from one frozen observation and satisfy the recorded backend-
+semantics generation. Opacity, variability, nondisclosure, or a missing exact
+value makes the entire performance field
+`unprovable/evidence-chain-incomplete`; contradictory values/proofs make it
+`unprovable/conflicting-effective-values`. A partial fixed record and opacity-
+encoded zero are both invalid.
+
 The observation state is one of `known`, `not-applicable`, `unknown`,
 `unobserved`, `unsupported`, or `unprovable`. Known uses reason `none` and a
 canonical payload. Every other state has an empty payload and only its closed
@@ -1908,6 +1926,40 @@ fixed `commit_semantics` keys, eight closed durability capability tokens, and
 `compress=zstd` and disabled compression must encode different performance
 records and cannot compare as one environment.
 
+Eligibility reasons are recomputed as exact predicates rather than accepted as
+an arbitrary subset. A failure anywhere in canonical framing, lexical/scalar/
+composite validation, field/type/state/reason rules, domain/cardinality,
+ordering/uniqueness, fixed-record shape, or cross-field validation produces the
+single reason `canonical-schema-invalid` and stops eligibility evaluation. For
+a canonical manifest, the validator evaluates every row below and emits all
+and only true tokens once, in unsigned-ASCII order. No true token means
+`eligible`; one or more means `ineligible`.
+
+| Token | Exact trigger for a canonical manifest |
+| --- | --- |
+| `commit-semantics-inconsistent` | Known commit-map values and retained transaction/receipt observations cannot form one consistent payload-stage, manifest-last, no-replace, synchronization, and complete barrier/provider-transaction commit. |
+| `durability-class-not-crash-durable` | A known requested or achieved durability value is not `crash-durable`; an ineligible state without a known weaker value is handled by the required-observation predicate. |
+| `durability-path-inconsistent` | Known contract/backend/instance/mount, endpoint, anchor, commit, and receipt/path facts affirmatively conflict or identify more than one path. Mere missing binding proof is a raw-proof failure. |
+| `mount-normalization-unprovable` | A present mount cannot be reduced uniquely because `mount_identity` or `mount_effective_options` is unprovable, normalization resolution is unresolved, or retained native observations contradict the known identity/seven-key map. |
+| `not-applicable-proof-invalid` | A permitted N/A pair lacks its exact complete-path layer-absence proof or that proof conflicts with the path. |
+| `performance-configuration-unprovable` | The field is not known, a relevant option lacks mapping/no-effect proof, provider geometry is incomplete, or the frozen configuration drifts. Complete observed drift maps here. |
+| `raw-observation-proof-incomplete` | Proof required for a known storage value, permitted N/A claim, or raw-to-canonical normalization is missing, incomplete, stale, or conflicting. It does not absorb schema, capability, durability-class, complete-evidence inconsistency/drift, or containment failures. |
+| `required-capability-absent` | Known `access_mode` is `read-only`, or any of the eight required durability tokens is absent. |
+| `required-observation-ineligible` | A required storage field is `unknown`, `unobserved`, `unsupported`, or `unprovable`; a permitted N/A state is handled by its proof predicate. |
+| `root-containment-unproved` | A measured job or retained release artifact lacks a successful unambiguous containment proof, or that proof fails/conflicts. |
+
+The exact possible order is `canonical-schema-invalid`,
+`commit-semantics-inconsistent`, `durability-class-not-crash-durable`,
+`durability-path-inconsistent`, `mount-normalization-unprovable`,
+`not-applicable-proof-invalid`, `performance-configuration-unprovable`,
+`raw-observation-proof-incomplete`, `required-capability-absent`,
+`required-observation-ineligible`, `root-containment-unproved`. Category and
+raw-proof tokens deliberately overlap only when both predicates are true: for
+example, an unprovable mount with conflicting raw mapping emits mount,
+raw-proof, and required-observation tokens, whereas a fully observed
+configuration drift emits only the performance token. The reason list is not
+an environment-digest input but must be independently reproducible.
+
 The independent validator performs these steps in order:
 
 1. parse every frame with checked `uint64` length/count arithmetic and require
@@ -1916,7 +1968,9 @@ The independent validator performs these steps in order:
 2. validate scalar/composite canonical form, enum domains, list cardinality,
    the concrete token/text/record-list and map/fixed-record bindings,
    ordering/uniqueness, nested record shape, fixed resources, all 37
-   performance components, and cross-field consistency;
+   performance components, and cross-field consistency; if step 1 or 2 fails,
+   return exactly `canonical-schema-invalid` and stop before raw-proof, digest,
+   environment-class, or other eligibility evaluation;
 3. bind each normalized field to retained raw observation/proof and validate
    every field-specific N/A claim, mount normalization decision, stable
    instance/endpoint/anchor identity, fixed performance configuration,
@@ -1928,15 +1982,10 @@ The independent validator performs these steps in order:
    digest, while I1/I2 require known `not-applicable`, reason
    `row-has-no-output-commit`, and a N/A storage-digest record with empty
    payload; and
-6. derive storage eligibility. Eligible means all observations are known or
-   use their sole proved N/A, performance configuration is complete/proved and
-   remained frozen, every excluded effective option is proved irrelevant to
-   the complete measured path, `access_mode=read-write`, all eight capabilities
-   are present, commit/endpoint/anchor evidence forms one consistent path,
-   requested and achieved durability are `crash-durable`, and containment
-   succeeds. Ineligible evidence carries a nonempty sorted subset of the ADR's
-   closed eleven reason tokens, including
-   `performance-configuration-unprovable`.
+6. evaluate every canonical-manifest predicate in the table, emit all and only
+   true reason tokens once in unsigned-ASCII order, and derive `eligible`
+   exactly from an empty list or `ineligible` from a nonempty list. The reason
+   list is retained evidence but is not included in an environment digest.
 
 Exact compatibility requires byte-identical canonical manifests, equal
 independently recomputed digests, and eligibility where storage applies.
@@ -1951,16 +2000,20 @@ failed containment makes the affected relative verdict `invalid`.
 
 Issue #95 must add deterministic mechanism tests covering fixed field/type/
 enum/cardinality rejection; every state/reason/payload combination; NFC/text
-and scalar encodings; the exact 156-byte durability set and its 221-byte field
-record; known-empty ordered text versus zero-byte N/A payloads; every CPU/
+and scalar encodings, including accepted uint64 `0`, `1`, `2`, `8`, `9`, `10`,
+`23`, and `18446744073709551615` plus rejected `00`, `01`, and overflow; the
+exact 156-byte durability set and its 221-byte field record; known-empty
+ordered text, including repeated flags, versus zero-byte N/A payloads; every CPU/
 device/contract record-list cardinality, frame, sort, and duplicate rule;
 mount/commit map counts and every fixed-record component order; omitted versus
 explicit mount defaults; native option order/case; deterministic and
 conflicting duplicates; unknown-option proof; malformed/overflowed frames;
 all 37 performance fields, enum/sentinel/zero/cross-component rules, transient-
-noise exclusion, unmapped-option fail-closed behavior, and the Btrfs
-compression mismatch; all three independent digest recomputations; all eleven
-eligibility reasons; and exact B1 candidate/reference plus cap-1/cap-8
+noise exclusion, positive/absence/opaque/conflicting cases for each of the four
+provider-layout components, unmapped-option fail-closed behavior, and the Btrfs compression
+mismatch; all three independent digest recomputations; the eleven-reason truth
+table, unsigned-ASCII order, canonical-invalid short circuit, exact overlap,
+and eligible empty set; and exact B1 candidate/reference plus cap-1/cap-8
 compatibility. Issue #96 reuses those fixtures and tests exact same-ordinal
 M1/B1 matching plus base-only M1/I1 matching. Issue #92 adds no current test
 binary, serializer, probe, runner, API, or runtime field.

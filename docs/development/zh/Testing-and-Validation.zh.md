@@ -1451,14 +1451,16 @@ Storage adapter 把每个 backend 都映射到相同的 `durability_endpoint_ide
 
 每个 manifest record 使用精确 ASCII length-frame 形式
 `field=<frame(name)><frame(state)><frame(reason)><frame(type)><frame(payload)>`
-并追加 LF。`frame(B)` 是不补零的十进制 byte length、冒号与 `B`。Text 是编码为
-小写十六进制的 NFC UTF-8；identifier、enum、boolean、uint64 decimal、SHA-256、
-list、map、set 与 fixed record 遵循 ADR 的封闭 grammar。Header 精确为
+并追加 LF。`frame(B)` 是不补零的十进制 byte length、冒号与 `B`。完整 ASCII
+`uint64` 的精确 lexical language 是 `0|[1-9][0-9]*`，数值闭区间为
+`0..18446744073709551615`；`00`、`01` 等前导零形式和溢出均为 invalid。Text 是
+编码为小写十六进制的 NFC UTF-8；identifier、enum、boolean、SHA-256、list、map、
+set 与 fixed record 遵循 ADR 的封闭 grammar。Header 精确为
 `execution-profile-storage-environment-v1\n`、
 `execution-profile-base-environment-v1\n` 与
 `execution-profile-environment-class-v1\n`。缺失/额外/重排/重复 record、malformed
-length、BOM/CR/额外 whitespace、非 canonical scalar、未排序 set/map/record-list
-value 或重复 collection item 都是 invalid。
+length、BOM/CR/额外 whitespace、非 canonical scalar，或 set、map、record list
+及其他要求唯一的 binding 中未排序或重复的 item 都是 invalid。
 
 Validator 不能依据上述通用说明自行推断具体 collection type。`token-set-v1` 是
 count 加每个精确 raw ASCII token 的一个 frame，按未加 frame 的 token byte 排序并
@@ -1520,6 +1522,20 @@ unit 与 `not-applicable` identifier 要求缺失/non-applicable layer 的肯定
 free-space、RTT 或 jitter sample；这些保持为 raw precondition/diagnostic，两个运行
 之间无需精确相等。
 
+当 `layout_mode=provider-managed` 时，四个 geometry component 仍留在 fixed
+record 中。正值表示该概念存在于完整 path，并已观测到精确 effective value。零值
+要求相应 retained raw-proof kind：`provider-layout-data-units-absent`、
+`provider-layout-parity-units-absent`、
+`provider-layout-replica-count-absent` 或
+`provider-layout-stripe-unit-absent`。这些封闭 label 用来证明概念不存在，不会创建
+component state、N/A pair、field 或 digest 输入。稳定且非 placeholder 的
+`layout_profile`、四项 value/proof 与完整 path 必须来自同一次冻结 observation，并
+满足已记录 backend-semantics generation。Opacity、variability、nondisclosure 或精确
+value 缺失会使整个 performance field 成为
+`unprovable/evidence-chain-incomplete`；value/proof 冲突会使其成为
+`unprovable/conflicting-effective-values`。部分 fixed record 与用零编码 opacity 都是
+invalid。
+
 Observation state 是 `known`、`not-applicable`、`unknown`、`unobserved`、
 `unsupported` 或 `unprovable` 之一。Known 使用 reason `none` 与 canonical payload。
 其他 state 都使用空 payload，且只能携带其封闭的 state-specific reason。唯一 eligible
@@ -1544,13 +1560,47 @@ commit/revalidation/golden-readback path 上的 performance/durability 时，才
 performance component 要独立验证。Btrfs `compress=zstd` 与 disabled compression
 必须编码为不同 performance record，不能比较为同一个 environment。
 
+Eligibility reason 必须作为精确 predicate 重新计算，不能接受任意 subset。Canonical
+framing、lexical/scalar/composite validation、field/type/state/reason rule、domain/
+cardinality、ordering/uniqueness、fixed-record shape 或 cross-field validation 任一
+失败，都只产生 `canonical-schema-invalid`，并停止 eligibility evaluation。对于
+canonical manifest，validator 评估下表每一行，并只输出所有为真的 token，每项一次，
+按 unsigned-ASCII 排序。没有 true token 表示 `eligible`；一个或多个表示
+`ineligible`。
+
+| Token | Canonical manifest 的精确触发条件 |
+| --- | --- |
+| `commit-semantics-inconsistent` | Known commit-map value 与 retained transaction/receipt observation 无法形成一个一致的 payload-stage、manifest-last、no-replace、synchronization 与完整 barrier/provider-transaction commit。 |
+| `durability-class-not-crash-durable` | Known requested 或 achieved durability value 不是 `crash-durable`；没有 known 较弱 value 的 ineligible state 由 required-observation predicate 处理。 |
+| `durability-path-inconsistent` | Known contract/backend/instance/mount、endpoint、anchor、commit 与 receipt/path fact 明确冲突或标识多条 path。仅缺少 binding proof 属于 raw-proof failure。 |
+| `mount-normalization-unprovable` | Present mount 因 `mount_identity` 或 `mount_effective_options` unprovable、normalization resolution 未解决，或 retained native observation 与 known identity/七 key map 冲突而无法唯一归约。 |
+| `not-applicable-proof-invalid` | 允许的 N/A pair 缺少精确完整路径 layer-absence proof，或该 proof 与 path 冲突。 |
+| `performance-configuration-unprovable` | Field 不是 known，相关 option 缺少 mapping/no-effect proof，provider geometry 不完整，或冻结 configuration drift。完整观测到的 drift 归此项。 |
+| `raw-observation-proof-incomplete` | 用于 known storage value、允许的 N/A claim 或 raw-to-canonical normalization 的 proof 缺失、不完整、陈旧或冲突。它不吸收 schema、capability、durability-class、证据完整的 inconsistency/drift 或 containment failure。 |
+| `required-capability-absent` | Known `access_mode` 为 `read-only`，或八项 required durability token 中任意一项缺失。 |
+| `required-observation-ineligible` | Required storage field 为 `unknown`、`unobserved`、`unsupported` 或 `unprovable`；允许的 N/A state 由其 proof predicate 处理。 |
+| `root-containment-unproved` | Measured job 或 retained release artifact 缺少成功且无歧义的 containment proof，或该 proof 失败/冲突。 |
+
+完整可能顺序精确为 `canonical-schema-invalid`、
+`commit-semantics-inconsistent`、`durability-class-not-crash-durable`、
+`durability-path-inconsistent`、`mount-normalization-unprovable`、
+`not-applicable-proof-invalid`、`performance-configuration-unprovable`、
+`raw-observation-proof-incomplete`、`required-capability-absent`、
+`required-observation-ineligible`、`root-containment-unproved`。只有两个 predicate
+都为真时，category token 与 raw-proof token 才刻意重叠：例如，raw mapping 冲突的
+unprovable mount 会输出 mount、raw-proof 与 required-observation token；raw stream
+完整的 configuration drift 则只输出 performance token。Reason list 不是
+environment-digest 输入，但必须可以独立复现。
+
 独立 validator 按顺序执行：
 
 1. 使用 checked `uint64` length/count arithmetic 解析每个 frame，并要求精确 header、
    LF、field count、field order、type、state/reason pair 与 end of input；
 2. 验证 scalar/composite canonical form、enum domain、list cardinality、order/unique、
    具体 token/text/record-list 与 map/fixed-record binding、nested record shape、固定
-   resource、全部 37 个 performance component 与 cross-field consistency；
+   resource、全部 37 个 performance component 与 cross-field consistency；如果步骤
+   1 或 2 失败，则精确返回 `canonical-schema-invalid`，并在 raw-proof、digest、
+   environment-class 或其他 eligibility evaluation 之前停止；
 3. 把每个规范化 field 绑定到保留的 raw observation/proof，并验证每个 field-specific
    N/A claim、mount normalization decision、稳定 instance/endpoint/anchor identity、
    固定 performance configuration、被排除 option 的 no-effect proof 与 root-
@@ -1561,13 +1611,9 @@ performance component 要独立验证。Btrfs `compress=zstd` 与 disabled compr
    `environment_class_digest`；B1/M1 要求 known `required` 与 storage digest，I1/I2
    要求 known `not-applicable`、reason `row-has-no-output-commit`，以及 payload 为空的
    N/A storage-digest record；以及
-6. 派生 storage eligibility。Eligible 要求所有 observation known 或使用唯一且有证明
-   的 N/A、performance configuration 完整/有证明且保持冻结、每个被排除的
-   effective option 均被证明与完整 measured path 无关、`access_mode=read-write`、
-   八项 capability 全部存在、commit/endpoint/anchor evidence 形成一条一致路径、
-   requested 与 achieved durability 都是 `crash-durable`，且 containment 成功。
-   Ineligible evidence 携带 ADR 封闭十一项 reason token（包括
-   `performance-configuration-unprovable`）中一个非空、已排序 subset。
+6. 评估表中每个 canonical-manifest predicate，只输出所有为真的 reason token，每项
+   一次并按 unsigned-ASCII 排序；空 list 精确派生 `eligible`，非空 list 派生
+   `ineligible`。Reason list 是 retained evidence，但不进入 environment digest。
 
 精确 compatibility 要求 canonical manifest 逐 byte 相同、独立复算 digest 相等，
 并在 storage 适用时要求 eligibility。对 storage，该 byte comparison 包含完整 framed
@@ -1579,15 +1625,19 @@ environment manifest 有意不同。Raw field/proof 缺失、state invalid、byt
 mismatch 或 containment 失败，都会使受影响 relative verdict 成为 `invalid`。
 
 Issue #95 必须增加长期确定性机制测试，覆盖固定 field/type/enum/cardinality 拒绝；
-每种 state/reason/payload 组合；NFC/text 与 scalar encoding；精确 156-byte
-durability set 与 221-byte field record；known-empty ordered text 与 zero-byte N/A
-payload；每种 CPU/device/contract record-list cardinality、frame、sort 与 duplicate
-rule；mount/commit map count 与每个 fixed-record component order；omitted 对 explicit
+每种 state/reason/payload 组合；NFC/text 与 scalar encoding，包括接受 uint64 `0`、
+`1`、`2`、`8`、`9`、`10`、`23`、`18446744073709551615`，拒绝 `00`、`01` 与
+overflow；精确 156-byte durability set 与 221-byte field record；known-empty ordered
+text（包括重复 flag）与 zero-byte N/A payload；每种 CPU/device/contract record-list
+cardinality、frame、sort 与 duplicate rule；mount/commit map count 与每个
+fixed-record component order；omitted 对 explicit
 mount default；native option order/case；确定与冲突的 duplicate；unknown-option
 proof；malformed/overflow frame；全部 37 个 performance field、enum/sentinel/zero/
-cross-component rule、transient-noise exclusion、unmapped-option fail-closed 与 Btrfs
-compression mismatch；三层 digest 独立复算；全部十一项 eligibility reason；以及
-精确 B1 candidate/reference 和 cap-1/cap-8 compatibility。Issue #96 复用这些
+cross-component rule、transient-noise exclusion、四个 provider-layout component
+各自的 positive/absence/opaque/conflicting case、unmapped-option fail-closed 与 Btrfs compression
+mismatch；三层 digest 独立复算；十一 reason truth table、unsigned-ASCII order、
+canonical-invalid short circuit、精确 overlap 与 eligible empty set；以及精确 B1
+candidate/reference 和 cap-1/cap-8 compatibility。Issue #96 复用这些
 fixture，并测试精确 same-ordinal M1/B1 matching 与 base-only M1/I1 matching。
 Issue #92 不新增当前 test binary、serializer、probe、runner、API 或 runtime field。
 

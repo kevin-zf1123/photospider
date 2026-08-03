@@ -283,9 +283,11 @@ The scalar and composite payload grammar is closed:
 
 - `identifier` is nonempty lowercase ASCII matching
   `[a-z0-9][a-z0-9._+-]*`; an `enum` is one exact field-specific token.
-- `uint64` is `0` or an unpadded decimal beginning with `1`, in the inclusive
-  range `0..18446744073709551615`; field tables may impose a higher minimum.
-  `boolean` is exactly `true` or `false`, and `sha256` is exactly 64 lowercase
+- `uint64` is one complete ASCII decimal matching exactly
+  `0|[1-9][0-9]*`, interpreted in the inclusive range
+  `0..18446744073709551615`; `00`, `01`, any other leading-zero spelling, and
+  overflow are invalid. Field tables may impose a higher minimum. `boolean`
+  is exactly `true` or `false`, and `sha256` is exactly 64 lowercase
   hexadecimal digits.
 - `text` is nonempty valid UTF-8 normalized to Unicode NFC and then encoded as
   two lowercase hexadecimal digits per UTF-8 byte. The manifest therefore
@@ -544,9 +546,39 @@ rules:
   `striped` requires data at least two, parity zero, replica one, and positive
   stripe unit. `mirrored` or `replicated` requires data one, parity zero,
   replica at least two, and stripe zero. `erasure-coded` requires positive
-  data, parity, and stripe values and replica one. `provider-managed` still
-  requires a stable non-`none` layout profile and every applicable effective
-  geometry value; provider opacity is not a profile.
+  data, parity, and stripe values and replica one.
+- `layout_mode=provider-managed` still requires one stable non-`none`
+  `layout_profile` that identifies the exact effective provider layout or
+  service profile under the recorded backend-semantics generation; a generic
+  `provider-managed`, opaque, unknown, or undisclosed placeholder is not a
+  profile. All four geometry frames remain present in a `known` performance
+  payload. For each frame, a positive value means that the concept exists on
+  the complete measured provider path and that this exact effective value was
+  observed. Zero is permitted only with the matching retained raw-proof kind:
+
+  | Geometry component | Exact raw-proof kind required for zero |
+  | --- | --- |
+  | `layout_data_units` | `provider-layout-data-units-absent` |
+  | `layout_parity_units` | `provider-layout-parity-units-absent` |
+  | `layout_replica_count` | `provider-layout-replica-count-absent` |
+  | `layout_stripe_unit_bytes` | `provider-layout-stripe-unit-absent` |
+
+  Each proof must establish that the named concept is absent from the complete
+  effective provider path, not merely hidden by an API boundary. These four
+  proof kinds are closed raw-evidence labels; they are not new manifest
+  state/reason pairs, N/A cases, fields, or digest inputs. If a concept exists
+  but its one exact effective value is opaque, variable, undisclosed, or
+  unobserved, the entire `b1_performance_configuration` field is
+  `unprovable/evidence-chain-incomplete` with an empty payload; it cannot carry
+  zero or a partial 37-component record. Conflicting values or an absence
+  proof that contradicts the observed path produce
+  `unprovable/conflicting-effective-values`. The profile, all positive values,
+  all zero proofs, and the complete provider path must come from one frozen
+  observation and satisfy the profile-specific relationships defined by
+  `backend_semantics_id` and `backend_semantics_generation`. An all-zero
+  geometry vector is therefore valid only when all four exact absence proofs
+  and the non-placeholder layout profile are present and mutually consistent;
+  provider opacity is never absence.
 - `upper_write_cache_mode=absent` requires profile `not-applicable` with raw
   layer-absence proof; `disabled` requires `none`; every enabled or managed
   mode requires its exact profile. Queue/concurrency `serial` requires value
@@ -692,24 +724,53 @@ or `row-has-no-output-commit`. I1/I2 encode known values `not-applicable` and
 `not-applicable`, that same reason, and an empty payload. No row omits any of
 the four records.
 
-Storage compatibility eligibility is derived evidence, not digest input. It
-is `eligible` with an empty reason set only when the manifest is canonical,
-all fields are known or use their sole proved N/A pair, mount normalization and
-raw observation chains are complete, the fixed B1 performance configuration
-is fully mapped, proved, frozen, and cross-component-valid, no excluded
-effective option can affect the complete measured storage path,
-`access_mode=read-write`, all eight durability capabilities are present,
-commit semantics and endpoint/anchor evidence describe one consistent
-durability path, requested and achieved durability are both `crash-durable`,
-and every job/release-artifact root-containment proof succeeds. Otherwise it
-is `ineligible` with a nonempty, sorted subset of the closed reasons
-`canonical-schema-invalid`,
-`required-observation-ineligible`, `not-applicable-proof-invalid`,
-`mount-normalization-unprovable`, `commit-semantics-inconsistent`,
-`performance-configuration-unprovable`,
-`required-capability-absent`, `durability-class-not-crash-durable`,
-`durability-path-inconsistent`, `root-containment-unproved`, and
-`raw-observation-proof-incomplete`.
+Storage compatibility eligibility is derived evidence, not digest input. Its
+reason list is a deterministic result, not a producer-selected subset:
+
+1. The validator first parses and validates the complete canonical storage
+   manifest through framing, lexical form, field/type/state/reason rules,
+   scalar/composite domains, cardinality, ordering/uniqueness, fixed-record
+   shape, and all cross-field rules. If any of that phase fails, storage is
+   `ineligible`, the reason list is exactly the single token
+   `canonical-schema-invalid`, and eligibility evaluation stops because no
+   raw-evidence or semantic predicate can be evaluated safely.
+2. For a canonical manifest, the validator evaluates every predicate below
+   independently and emits all and only the tokens whose predicates are true,
+   once each, in unsigned-ASCII order. The exact possible output order is
+   `canonical-schema-invalid`, `commit-semantics-inconsistent`,
+   `durability-class-not-crash-durable`, `durability-path-inconsistent`,
+   `mount-normalization-unprovable`, `not-applicable-proof-invalid`,
+   `performance-configuration-unprovable`,
+   `raw-observation-proof-incomplete`, `required-capability-absent`,
+   `required-observation-ineligible`, and `root-containment-unproved`.
+   An empty list means `eligible`; any nonempty list means `ineligible`.
+
+For the canonical-manifest phase, the predicates are exact:
+
+| Reason token | Predicate that makes it true |
+| --- | --- |
+| `commit-semantics-inconsistent` | The six known commit-semantic values and retained transaction/receipt observations do not describe one internally consistent payload-stage, manifest-last, no-replace, synchronization, and leaf-to-root/provider-transaction commit under the recorded backend semantics. Missing capabilities are not this predicate. |
+| `durability-class-not-crash-durable` | At least one of `requested_durability` or `achieved_durability` is `known` and is not `crash-durable`. An ineligible observation state without a known weaker value is handled by `required-observation-ineligible`. |
+| `durability-path-inconsistent` | Known contract/backend/instance/mount, endpoint, anchor, commit, and retained receipt/path facts affirmatively identify conflicting paths or fail to form one end-to-end durability path. A merely missing raw binding proof is handled by `raw-observation-proof-incomplete`. |
+| `mount-normalization-unprovable` | A present mount cannot be reduced uniquely to the known identity and seven-key effective map because `mount_identity` or `mount_effective_options` is `unprovable`, default/case/duplicate/unknown-option resolution is unresolved, or retained native observations contradict the canonical mount mapping. A proved absent mount uses the N/A predicate instead. |
+| `not-applicable-proof-invalid` | At least one syntactically permitted N/A field/reason pair lacks its exact complete-path layer-absence proof, or that proof conflicts with retained path observations. |
+| `performance-configuration-unprovable` | The performance field is not `known`; any effective performance/durability option lacks a complete mapping or no-effect proof; any provider-managed geometry value/zero proof is incomplete; or the frozen configuration drifts during the replicate. Observed drift maps here even when the raw observation stream is otherwise complete. |
+| `raw-observation-proof-incomplete` | Raw observation or raw-to-canonical mapping proof required to justify a `known` storage value, a permitted N/A claim, or a canonical normalization is missing, incomplete, stale, or contradicts the canonical value. This is not a catch-all for schema failure, read-only access, a missing capability, a known weaker durability class, complete-evidence commit/path inconsistency, observed configuration drift, or root containment. |
+| `required-capability-absent` | The known effective `access_mode` is `read-only`, or one or more of the eight closed durability capability tokens is absent. |
+| `required-observation-ineligible` | At least one required storage field has state `unknown`, `unobserved`, `unsupported`, or `unprovable`. A syntactically permitted N/A state is evaluated only by its proof predicate. |
+| `root-containment-unproved` | Any measured job or retained release-artifact destination lacks a successful, unambiguous proof below the selected `OutputStore` root, or the retained proof fails or conflicts. Containment proof is owned by this predicate rather than the generic raw-mapping predicate. |
+
+Overlaps are intentional and deterministic. An `unprovable` mount or
+performance field also triggers `required-observation-ineligible`; a missing or
+conflicting mount/performance raw mapping triggers its specific token and
+`raw-observation-proof-incomplete`; an invalid N/A absence proof triggers
+`not-applicable-proof-invalid` and `raw-observation-proof-incomplete`. A mount
+conflict may therefore emit all three applicable tokens. A commit or
+durability-path contradiction emits its specific token and adds the raw-proof
+token only when the raw-to-canonical binding itself is missing or conflicting.
+The reason list remains excluded from every environment digest, but the
+canonical manifest plus retained raw evidence must let an independent
+validator reproduce it exactly.
 
 Two storage environments are compatible only when both are eligible, their
 retained canonical storage manifests are byte-for-byte equal, each supplied

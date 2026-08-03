@@ -251,9 +251,10 @@ Scalar 与 composite payload grammar 是封闭的：
 
 - `identifier` 是匹配 `[a-z0-9][a-z0-9._+-]*` 的非空小写 ASCII；`enum` 是
   field 特有集合中的一个精确 token。
-- `uint64` 是 `0`，或以 `1` 开头且不补零的十进制数，取值闭区间为
-  `0..18446744073709551615`；field table 可以规定更高下限。`boolean` 精确为
-  `true` 或 `false`，`sha256` 精确为 64 个小写十六进制 digit。
+- `uint64` 是完整匹配 `0|[1-9][0-9]*` 的 ASCII 十进制数，解释后的取值闭区间为
+  `0..18446744073709551615`；`00`、`01`、任何其他前导零拼写以及溢出均为
+  invalid。Field table 可以规定更高下限。`boolean` 精确为 `true` 或 `false`，
+  `sha256` 精确为 64 个小写十六进制 digit。
 - `text` 是非空有效 UTF-8；先规范化为 Unicode NFC，再把每个 UTF-8 byte 编码为
   两个小写十六进制 digit。这样 manifest 保持 ASCII，同时保留区分大小写的 identity
   byte。
@@ -490,8 +491,34 @@ component name 不出现在 wire 中：
   要求 data 至少为二、parity 为零、replica 为一且 stripe unit 为正；`mirrored` 或
   `replicated` 要求 data 为一、parity 为零、replica 至少为二且 stripe 为零；
   `erasure-coded` 要求 data、parity 与 stripe 都为正，replica 为一。
-  `provider-managed` 仍要求稳定的非 `none` layout profile 与每个 applicable
-  effective geometry value；provider opacity 不是 profile。
+- `layout_mode=provider-managed` 仍要求一个稳定、非 `none` 的
+  `layout_profile`，该 profile 必须在已记录 backend-semantics generation 下标识精确
+  effective provider layout 或 service profile；通用 `provider-managed`、opaque、
+  unknown 或 undisclosed placeholder 都不是 profile。一个 `known` performance
+  payload 中四个 geometry frame 必须全部存在。每个 frame 的正数表示该概念存在于
+  完整 measured provider path，而且该数值就是观测到的精确 effective value。零值
+  只允许与下列匹配的 retained raw-proof kind 一起出现：
+
+  | Geometry component | 零值要求的精确 raw-proof kind |
+  | --- | --- |
+  | `layout_data_units` | `provider-layout-data-units-absent` |
+  | `layout_parity_units` | `provider-layout-parity-units-absent` |
+  | `layout_replica_count` | `provider-layout-replica-count-absent` |
+  | `layout_stripe_unit_bytes` | `provider-layout-stripe-unit-absent` |
+
+  每项 proof 必须证明命名概念不存在于完整 effective provider path，而不只是被 API
+  boundary 隐藏。这四个 proof kind 是封闭 raw-evidence label，不是新的 manifest
+  state/reason pair、N/A 情况、field 或 digest 输入。如果概念存在，但其唯一精确
+  effective value opaque、variable、undisclosed 或 unobserved，则整个
+  `b1_performance_configuration` field 必须为
+  `unprovable/evidence-chain-incomplete` 且 payload 为空；不能用零或部分 37-component
+  record 表示。Value 冲突，或 absence proof 与 observed path 冲突时，整个 field 为
+  `unprovable/conflicting-effective-values`。Profile、所有正值、所有零值 proof 与完整
+  provider path 必须来自同一次冻结 observation，并满足
+  `backend_semantics_id`/`backend_semantics_generation` 定义的 profile-specific
+  relationship。因此，只有四个精确 absence proof、非 placeholder layout profile
+  都存在且相互一致时，全零 geometry vector 才有效；provider opacity 永远不代表
+  absence。
 - `upper_write_cache_mode=absent` 要求 profile 为 `not-applicable` 并具有 raw
   layer-absence proof；`disabled` 要求 `none`；其他 enabled 或 managed mode 要求其
   精确 profile。Queue/concurrency 为 `serial` 时 value 为一，`fixed` 与
@@ -624,22 +651,48 @@ Environment-class manifest header 精确为
 `row-has-no-output-commit`；最后一条 digest record 的 state 为 `not-applicable`，
 reason 相同，payload 为空。任何行都不遗漏四条 record 中的任意一条。
 
-Storage compatibility eligibility 是 derived evidence，不是 digest 输入。只有当
-manifest canonical、全部 field known 或使用唯一且有证明的 N/A pair、mount
-normalization 与 raw observation chain 完整、固定 B1 performance configuration
-完整映射、具有证明、已冻结且通过 cross-component 验证、每个被排除的 effective
-option 都有证据证明不影响完整 measured storage path、`access_mode=read-write`、
-八项 durability capability 全部存在、commit semantics 与 endpoint/anchor evidence
-描述同一条一致的 durability path、requested 与 achieved durability 都是
-`crash-durable`，并且每个 job/release-artifact root-containment proof 都成功时，
-它才是带空 reason set 的 `eligible`。否则它是带有以下封闭 reason 集合非空、已排序
-subset 的 `ineligible`：`canonical-schema-invalid`、
-`required-observation-ineligible`、`not-applicable-proof-invalid`、
-`mount-normalization-unprovable`、`commit-semantics-inconsistent`、
-`performance-configuration-unprovable`、
-`required-capability-absent`、`durability-class-not-crash-durable`、
-`durability-path-inconsistent`、`root-containment-unproved` 与
-`raw-observation-proof-incomplete`。
+Storage compatibility eligibility 是 derived evidence，不是 digest 输入。Reason
+list 是确定性结果，不是 producer 自选 subset：
+
+1. Validator 首先完成整个 canonical storage manifest 的 parsing 与 validation，
+   覆盖 framing、lexical form、field/type/state/reason rule、scalar/composite
+   domain、cardinality、ordering/uniqueness、fixed-record shape 与全部 cross-field
+   rule。该阶段任一失败都会使 storage 为 `ineligible`，reason list 精确且仅为
+   `canonical-schema-invalid`，并立即停止 eligibility evaluation，因为此时无法安全
+   评估 raw-evidence 或 semantic predicate。
+2. 对 canonical manifest，validator 独立评估下表每个 predicate，并且只输出所有为真
+   的 token，每项恰好一次，按 unsigned-ASCII 排序。完整可能顺序精确为
+   `canonical-schema-invalid`、`commit-semantics-inconsistent`、
+   `durability-class-not-crash-durable`、`durability-path-inconsistent`、
+   `mount-normalization-unprovable`、`not-applicable-proof-invalid`、
+   `performance-configuration-unprovable`、
+   `raw-observation-proof-incomplete`、`required-capability-absent`、
+   `required-observation-ineligible`、`root-containment-unproved`。空 list 表示
+   `eligible`；任何非空 list 都表示 `ineligible`。
+
+Canonical-manifest 阶段的 predicate 精确定义如下：
+
+| Reason token | 为真的精确 predicate |
+| --- | --- |
+| `commit-semantics-inconsistent` | 六个 known commit-semantic value 与 retained transaction/receipt observation 无法在已记录 backend semantics 下共同描述一个内部一致的 payload-stage、manifest-last、no-replace、synchronization 与 leaf-to-root/provider-transaction commit。Capability 缺失不属于此 predicate。 |
+| `durability-class-not-crash-durable` | `requested_durability` 或 `achieved_durability` 至少一个为 `known` 且不是 `crash-durable`。没有 known 较弱 value 的 ineligible observation state 由 `required-observation-ineligible` 处理。 |
+| `durability-path-inconsistent` | Known contract/backend/instance/mount、endpoint、anchor、commit 与 retained receipt/path fact 明确标识互相冲突的 path，或无法形成一条端到端 durability path。仅缺少 raw binding proof 由 `raw-observation-proof-incomplete` 处理。 |
+| `mount-normalization-unprovable` | Present mount 因 `mount_identity` 或 `mount_effective_options` 为 `unprovable`、default/case/duplicate/unknown-option resolution 未解决，或 retained native observation 与 canonical mount mapping 冲突，无法唯一归约到 known identity 与七 key effective map。已证明 absent 的 mount 使用 N/A predicate。 |
+| `not-applicable-proof-invalid` | 至少一个语法允许的 N/A field/reason pair 缺少精确完整路径 layer-absence proof，或该 proof 与 retained path observation 冲突。 |
+| `performance-configuration-unprovable` | Performance field 不是 `known`；某个 effective performance/durability option 缺少完整 mapping 或 no-effect proof；provider-managed geometry value/zero proof 不完整；或冻结 configuration 在 replicate 中 drift。即便 raw observation stream 完整，已观测 drift 也映射到这里。 |
+| `raw-observation-proof-incomplete` | 用于证明 `known` storage value、允许的 N/A claim 或 canonical normalization 的 raw observation/raw-to-canonical mapping proof 缺失、不完整、陈旧或与 canonical value 冲突。这不是 schema failure、read-only access、capability 缺失、known 较弱 durability class、证据完整的 commit/path inconsistency、已观测 configuration drift 或 root containment 的兜底项。 |
+| `required-capability-absent` | Known effective `access_mode` 为 `read-only`，或八个封闭 durability capability token 中至少一个缺失。 |
+| `required-observation-ineligible` | 至少一个 required storage field 的 state 为 `unknown`、`unobserved`、`unsupported` 或 `unprovable`。语法允许的 N/A state 只由其 proof predicate 评估。 |
+| `root-containment-unproved` | 任一 measured job 或 retained release-artifact destination 缺少所选 `OutputStore` root 之下成功且无歧义的 proof，或 retained proof 失败/冲突。Containment proof 归此 predicate，而不归 generic raw-mapping predicate。 |
+
+重叠是刻意且确定的。`unprovable` mount 或 performance field 还会触发
+`required-observation-ineligible`；mount/performance raw mapping 缺失或冲突会触发其
+特定 token 与 `raw-observation-proof-incomplete`；无效 N/A absence proof 会触发
+`not-applicable-proof-invalid` 与 `raw-observation-proof-incomplete`。因此 mount 冲突
+可能输出全部三个适用 token。Commit 或 durability-path contradiction 输出其特定
+token；只有 raw-to-canonical binding 本身缺失或冲突时才另外输出 raw-proof token。
+Reason list 仍排除在所有 environment digest 外，但 canonical manifest 与 retained raw
+evidence 必须让独立 validator 精确复现它。
 
 只有当两侧都 eligible、保留的 canonical storage manifest 逐 byte 相同、各自提供的
 digest 等于独立复算值，而且两个 digest 相等时，两个 storage environment 才兼容。
