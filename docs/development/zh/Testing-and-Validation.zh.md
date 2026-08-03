@@ -1374,55 +1374,149 @@ trace SHA-256 与 logical/raw golden identity 始终是不同的 evidence family
 
 ### 存储环境指纹
 
-Runner 把 storage 视为 B1 及 M1 中 B1 component 的 measured environment，而不是
-未记录的 output-path 选择。每个 B1/M1 行记录
-`storage_environment_applicability=required`；I1/I2 行记录 `not-applicable` 且不
-携带 storage digest，因为其必需路径不执行 `OutputStore` artifact commit。按行
-适用的 `environment-class digest` 把现有 machine/build/provider/resource fact 的
-`base_environment_digest`、applicability tag，以及需要时的
-`storage_environment_digest` 组合起来。
+封闭的 byte schema 以
+[ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md#storagebase-与逐行-environment-manifest-是封闭的-v1-schema)
+为规范权威。Runner 与独立 validator 必须拒绝 provider extension、替代的“等价”
+object、遗漏 record 与 best-effort parsing。
 
-B1 warmup 前，runner 选择一个 `OutputStore` root 或 rooted namespace，并记录
-规范化 `execution-profile-storage-environment-v1` fingerprint：
+Storage 的精确 field 顺序是：
 
-- `OutputStore` provider/backend identity 与适用 generation/version；
-- backend class、local/remote locality 与 volatile/nonvolatile persistence class；
-- filesystem type、稳定 mount identity，以及规范化的相关 mount option 和
-  file-sync、directory-sync、atomic-no-replace、rename、barrier、copy-on-write
-  semantics；
-- durability capability set 与 typed requested/可证明 achieved class；
-- 稳定 backing volume/device/storage identity 与 storage class，或 provider 特有的
-  稳定等价 identity；以及
-- hardware write-cache 与 power-loss-protection policy，携带显式 known、unknown
-  或有依据的 not-applicable state。
+```text
+output_store_contract_id
+output_store_contract_generation
+backend_semantics_id
+backend_semantics_generation
+backend_instance_id
+backend_class
+locality
+persistence
+filesystem_type
+mount_identity
+mount_effective_options
+commit_semantics
+durability_capabilities
+requested_durability
+achieved_durability
+durability_endpoint_identity
+durability_anchor_identity
+storage_class
+hardware_write_cache_policy
+power_loss_protection_policy
+```
 
-每个必需 field 都是 typed observation，其 state 为 `known`、`not-applicable`、
-`unknown`、`unobserved`、`unsupported` 或 `unprovable`。`not-applicable` 需要
-schema 规定的 reason，并证明该层不在端到端 durability path 中。完整规范化
-object 是 raw evidence；其规范 version-one serialization 使用 SHA-256 计算为
-小写 `storage_environment_digest`，runner 还单独记录带 reason 的 compatibility-
-eligibility verdict。Eligibility 要求全部 fact 已知或有依据地不适用，必需的
-file/directory sync、atomic no-replace、rename 与 barrier capability 均已证明，且
-requested 与 achieved durability 都为 `crash-durable`。即使 digest 相等，相同的
-unknown、unobserved、unsupported 或 unprovable state 仍不兼容。
+Base 的精确 field 顺序是：
 
-Runner 还保留所选 absolute/rooted path、解析后的 root 与 mount identity、raw
-capability observation，以及每个 disposable job directory 和 retained release
-artifact 均位于所选 root 下的证明。这些 fact 用于审计 root 选择，但不会把
-disposable absolute path 变成唯一 compatibility key。Remote、RAM-backed、
-copy-on-write 及其他 storage class 不会被自动禁止；只有 capability path 成功，
-并且下述每项必需比较都具有 eligible、规范化 field 精确匹配且复算 digest 相等的
-fingerprint 时，才可产生可比较证据。
+```text
+os_family
+os_release
+kernel_name
+kernel_release
+architecture
+cpu_inventory
+gpu_inventory
+other_device_inventory
+compiler_id
+compiler_version
+compiler_target
+standard_library_id
+standard_library_version
+build_mode
+build_flags
+process_worker_count
+provider_contracts
+plugin_contracts
+resource_limits
+metal_resource_limits
+cache_preconditions
+residency_preconditions
+power_policy
+thermal_eligibility
+```
 
-Storage compatibility 表示 fingerprint schema 相同、规范化 field 精确相等、独立
-复算的 `storage_environment_digest` 相等，且两侧都具有 eligibility。Candidate/
-reference B1 replicate ordinal、B1 cap-1/cap-8 determinism comparison，以及 M1
-与其 same-ordinal paired isolated B1 cap-8 行都要求该兼容性。M1 与 paired
-isolated I1 行只比较精确 `base_environment_digest` 和既有 I1 component fact；
-I1 行的 `storage_environment_applicability=not-applicable` 表示无关 M1 storage
-field 不能使该 latency pair 无效。Fingerprint 缺失或 ineligible、存在 unknown 或
-unsupported fact、field/digest mismatch，或 root-containment proof 失败，都会使
-受影响 throughput、memory-reference 或其他 relative verdict 成为 `invalid`。
+Environment-class 的精确 field/type 顺序是：
+
+```text
+base_environment_digest:sha256
+storage_environment_applicability:enum
+storage_environment_not_applicable_reason:enum
+storage_environment_digest:sha256
+```
+
+Validator 应用 ADR 的精确 type、enum domain、nested record layout、cardinality 与
+固定 resource value。Repository/dirty identity、subject binary hash、所选 absolute
+path 与 fresh job directory 保持为必需 raw evidence，但位于两个 manifest 之外。
+Storage adapter 把每个 backend 都映射到相同的 `durability_endpoint_identity` 与
+`durability_anchor_identity` field；不能提供 provider 特有替代 field。
+
+每个 manifest record 使用精确 ASCII length-frame 形式
+`field=<frame(name)><frame(state)><frame(reason)><frame(type)><frame(payload)>`
+并追加 LF。`frame(B)` 是不补零的十进制 byte length、冒号与 `B`。Text 是编码为
+小写十六进制的 NFC UTF-8；identifier、enum、boolean、uint64 decimal、SHA-256、
+list、map、set 与 fixed record 遵循 ADR 的封闭 grammar。Header 精确为
+`execution-profile-storage-environment-v1\n`、
+`execution-profile-base-environment-v1\n` 与
+`execution-profile-environment-class-v1\n`。缺失/额外/重排/重复 record、malformed
+length、BOM/CR/额外 whitespace、非 canonical scalar、未排序 set/map/record-list
+value 或重复 collection item 都是 invalid。
+
+Observation state 是 `known`、`not-applicable`、`unknown`、`unobserved`、
+`unsupported` 或 `unprovable` 之一。Known 使用 reason `none` 与 canonical payload。
+其他 state 都使用空 payload，且只能携带其封闭的 state-specific reason。唯一 eligible
+的 N/A pair 是：`filesystem_type` 的 filesystem absence；`mount_identity` 与
+`mount_effective_options` 的 mount absence；两个匹配 policy field 的 hardware-cache/
+PLP layer absence；`metal_resource_limits` 的 configured Metal absence；以及 I1/I2
+storage-digest record 的 `row-has-no-output-commit`。缺少 probe、provider opacity 或
+remote boundary 永远不能证明 absence。
+
+对于 mounted backend，`mount_effective_options` 精确拥有七个已排序 key：
+`access_mode`、`atime_policy`、`cache_coherence`、`copy_on_write_mode`、
+`data_write_mode`、`journal_mode` 与 `metadata_write_mode`，value 只能来自 ADR enum。
+Adapter 发出 effective behavior：omitted default 与 explicit default 输入 canonicalize
+为相同值，丢弃 native order；只有 platform 声明 option domain 对 ASCII 大小写不
+敏感时才 fold case。Platform 已定义的 duplicate winner 要 probe 后只发出一次；
+winner 不可证明或冲突时为 `unprovable/conflicting-effective-values`。只有保留 proof
+表明未知 native option 既不影响七个 key，也不影响 `commit_semantics` 时，才可排除
+它；否则 normalization 为 unprovable。六个固定 `commit_semantics` key 与八个封闭
+durability capability token 要独立验证。
+
+独立 validator 按顺序执行：
+
+1. 使用 checked `uint64` length/count arithmetic 解析每个 frame，并要求精确 header、
+   LF、field count、field order、type、state/reason pair 与 end of input；
+2. 验证 scalar/composite canonical form、enum domain、list cardinality、order/unique、
+   nested record shape、固定 resource 与 cross-field consistency；
+3. 把每个规范化 field 绑定到保留的 raw observation/proof，并验证每个 field-specific
+   N/A claim、mount normalization decision、稳定 instance/endpoint/anchor identity 与
+   root-containment proof；
+4. 对完整精确 manifest byte 计算小写 SHA-256，从而复算
+   `storage_environment_digest` 与 `base_environment_digest`；
+5. 解析精确四 field environment-class manifest 并复算
+   `environment_class_digest`；B1/M1 要求 known `required` 与 storage digest，I1/I2
+   要求 known `not-applicable`、reason `row-has-no-output-commit`，以及 payload 为空的
+   N/A storage-digest record；以及
+6. 派生 storage eligibility。Eligible 要求所有 observation known 或使用唯一且有证明
+   的 N/A、`access_mode=read-write`、八项 capability 全部存在、commit/endpoint/
+   anchor evidence 形成一条一致路径、requested 与 achieved durability 都是
+   `crash-durable`，且 containment 成功。Ineligible evidence 携带 ADR 封闭十项
+   reason token 中一个非空、已排序 subset。
+
+精确 compatibility 要求 canonical manifest 逐 byte 相同、独立复算 digest 相等，
+并在 storage 适用时要求 eligibility。仅 digest 相等不够。Candidate/reference I1/I2
+使用精确 base compatibility 与固定 storage-N/A environment manifest。
+Candidate/reference B1/M1、B1 cap-1/cap-8 与 M1/paired-B1-cap-8 使用精确 base、
+storage 和完整 environment-class compatibility。M1/paired-I1 只比较精确 base
+manifest/digest；二者的 environment manifest 有意不同。Raw field/proof 缺失、state
+invalid、byte/digest mismatch 或 containment 失败，都会使受影响 relative verdict
+成为 `invalid`。
+
+Issue #95 必须增加长期确定性机制测试，覆盖固定 field/type/enum/cardinality 拒绝；
+每种 state/reason/payload 组合；NFC/text 与 scalar encoding；collection order 与
+duplicate；omitted 对 explicit mount default；native option order/case；确定与冲突的
+duplicate；unknown-option proof；malformed/overflow frame；三层 digest 的独立复算；
+eligibility reason；以及精确 B1 candidate/reference 和 cap-1/cap-8 compatibility。
+Issue #96 复用这些 fixture，并测试精确 same-ordinal M1/B1 matching 与 base-only
+M1/I1 matching。Issue #92 不新增当前 test binary、serializer、probe、runner、API 或
+runtime field。
 
 ### 运行流程
 
@@ -1433,17 +1527,19 @@ unsupported fact、field/digest mismatch，或 root-containment proof 失败，�
 2. 每个 replicate 启动一个 fresh process，并记录 repository commit、dirty
    state、build/compiler/flag、OS/kernel、CPU/GPU/device inventory、power/thermal
    eligibility、provider/plugin binary 与 generation、process worker、Run cap、
-   全部 limit/headroom、fixture hash、seed 和 cache/residency precondition；
-   对 B1/M1，还要在 warmup 前选择 `OutputStore` root、采集 raw storage/capability
-   observation、规范化 storage fingerprint，并计算其 eligibility 与 digest；
+   全部 limit/headroom、fixture hash、seed 和 cache/residency precondition；在
+   warmup 前编码并独立验证精确 24-field base manifest；对 B1/M1，还要选择
+   `OutputStore` root、采集 raw storage/capability observation、编码精确 20-field
+   storage manifest，并计算其 eligibility 与 digest；
 3. 要求 candidate 与 reference 的 evidence schema、workload id、environment
-   class、limit 与 fixture hash 相同；environment class 按行确定适用范围，B1/M1
-   比较要求精确且 eligible 的 storage compatibility，I1/I2 不会获得无关 storage
-   要求；
+   class、limit 与 fixture hash 相同；B1/M1 比较要求逐 byte 相同且 eligible 的
+   storage/base manifest 与匹配的四 field environment-class manifest，I1/I2 使用
+   固定 storage-N/A environment class，不会获得无关 storage 要求；
 4. 对 ordinal 为 `1..3` 的 M1 replicate，分别固定 same-subject、same-ordinal 的
-   isolated I1 与 isolated B1 cap-8 row/bundle digest；要求两个 pair 都精确匹配
-   base environment，只对 B1 pair 要求精确且 eligible 的 storage environment
-   匹配，同时要求 resource、fixture、build/provider 与 precondition 兼容，并保留
+   isolated I1 与 isolated B1 cap-8 row/bundle digest；要求两个 pair 都具有逐 byte
+   相同的 base manifest 与相等的复算 base digest，只对 B1 pair 要求精确且 eligible
+   的完整 environment-class 匹配，同时要求 resource、fixture、build/provider 与
+   precondition 兼容，并保留
    独立的 candidate `comparison_reference_bundle_digest` 语义；
 5. 保留 cold first-use，执行精确且不参与测量的 warmup，在不替换冻结环境的情况下
    重置测量 counter，然后执行精确 measured window；
@@ -1492,10 +1588,10 @@ completion order 不进入 canonical byte，但保留在独立 raw trace 中。
 一个 `execution-profile-slo-v1` bundle 包含：
 
 - 上述全部 provenance 与冻结环境值；
-- row-level storage applicability；对 B1/M1，还包括规范化 storage fingerprint、
-  raw capability/root-containment observation、compatibility eligibility/reason、
-  `storage_environment_digest`、`base_environment_digest` 与可复算的
-  `environment-class digest`；
+- 精确 base 与 environment-class manifest byte，以及 claimed 和独立复算的
+  `base_environment_digest` 与 `environment_class_digest`；对 B1/M1，还包括精确
+  storage manifest byte、raw capability/root-containment observation、eligibility/
+  reason，以及 claimed 和复算的 `storage_environment_digest`；
 - workload/fixture/source/graph/payload hash 与全部 seed；
 - 相互分离的 warmup、cold 与 measured count/window；
 - raw sample/event、offered-demand eligibility interval 与 drop/gap counter；
@@ -1523,11 +1619,12 @@ resource-limit 或 settlement invariant 时，应注册长期确定性产品行�
 任何 Issue 专属 replay、provenance/result orchestrator、phase-completion scan 或
 performance-result file 都不得注册到 CTest/CI，也不得作为仓库内容长期保留。
 
-Issue #95 负责 B1 `OutputStore` capability observation、规范化 storage
-fingerprint/digest producer、root-containment evidence，以及 cap-1/cap-8 和
-candidate/reference compatibility check。Issue #96 为 M1 复用该 schema，并强制
-执行其 B1 pair，同时让 I1-only pair 不依赖 storage。Issue #92 只定义本 evidence
-contract；它不新增当前 probe、public API、runner 或 runtime result field。
+Issue #95 负责 B1 `OutputStore` raw probe、backend 到固定 schema 的 adapter、mount
+normalizer、canonical encoder/digest、eligibility 与 root-containment evidence，
+以及 cap-1/cap-8 和 candidate/reference check。Issue #96 为 M1 原样复用精确
+manifest byte，并强制执行其 same-ordinal 完整 B1 pair，同时让 I1-only pair 只比较
+base。Issue #92 只定义本 evidence contract；它不新增当前 probe、serializer、
+public API、runner 或 runtime result field。
 
 ## CTest 注册
 

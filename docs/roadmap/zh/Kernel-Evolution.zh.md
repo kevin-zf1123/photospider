@@ -889,13 +889,18 @@ Interactive admission failure 为零，以及相对 isolated latency。精确 ou
 semantic-trace/golden digest、有界 discarded service、绝对 resource limit 与精确
 quiescent settlement 都不能用另一维更快的速度交换。
 
-对 B1 与 M1，“同环境”包含 eligible、精确相等的
-`execution-profile-storage-environment-v1` fingerprint 与复算 digest；该
-fingerprint 覆盖 `OutputStore` backend、filesystem/mount/sync/barrier semantics、
-backing storage 与 write-cache/power-loss policy。Remote、RAM-backed 或
-copy-on-write storage 受 capability 门禁约束，而不是被自动接受或禁止。M1/B1
-cap-8 pair 要求该 storage 匹配；I1-only latency pair 比较 base execution
-environment，不受 M1 无关 storage field 约束。
+对 B1 与 M1，“同环境”使用 ADR 0010 的封闭 manifest：固定 24-field
+`execution-profile-base-environment-v1`、固定 20-field
+`execution-profile-storage-environment-v1` 与固定四 field
+`execution-profile-environment-class-v1`。其 ASCII length-framed canonical byte
+与独立复算 SHA-256 必须精确匹配；digest 相等绝不替代 byte 相等。Storage schema
+固定 typed state/reason pair、唯一允许的 N/A reason、七 key effective-mount map、
+六项 commit-semantics key、durability endpoint/anchor identity 与封闭 capability/
+enum set。Remote、RAM-backed 或 copy-on-write storage 受 capability 门禁约束，
+而不是按 class 自动接受或禁止。#95 在不改变 schema 的前提下实现 probe、adapter、
+normalization、encoder/digest、eligibility、containment 与 B1 check。#96 原样复用
+这些精确 byte，并强制执行 same-ordinal 完整 M1/B1 pair；I1-only latency pair 只
+比较精确 base manifest/digest，忽略 M1 无关 storage。
 
 冻结 protocol 不声称操作系统会精确到纳秒醒来。它固定相隔 16,666,667 ns 的
 nominal monotonic start、最大 2 ms admission-start lateness、精确 750,000,000 ns

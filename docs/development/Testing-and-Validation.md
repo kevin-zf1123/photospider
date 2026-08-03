@@ -1726,64 +1726,163 @@ logical/raw golden identity remain separate evidence families.
 
 ### Storage environment fingerprint
 
-The runner treats storage as measured environment for B1 and the B1 component
-of M1, not as an unrecorded output-path choice. Every B1/M1 row records
-`storage_environment_applicability=required`; I1/I2 rows record
-`not-applicable` and no storage digest because their required paths perform no
-`OutputStore` artifact commit. The row-applicable `environment-class digest`
-combines a `base_environment_digest` for the existing machine/build/provider/
-resource facts with the applicability tag and, when required, the
-`storage_environment_digest`.
+The closed byte schema is normative in
+[ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md#storage-base-and-row-environment-manifests-are-closed-v1-schemas).
+The runner and an independent validator must reject provider extensions,
+alternate “equivalent” objects, omitted records, and best-effort parsing.
 
-Before B1 warmup, the runner selects one `OutputStore` root or rooted namespace
-and records the normalized
-`execution-profile-storage-environment-v1` fingerprint:
+The exact storage field order is:
 
-- `OutputStore` provider/backend identity and applicable generation/version;
-- backend class, local/remote locality, and volatile/nonvolatile persistence
-  class;
-- filesystem type, stable mount identity, and normalized relevant mount
-  options plus file-sync, directory-sync, atomic-no-replace, rename, barrier,
-  and copy-on-write semantics;
-- the durability capability set and typed requested/provably achieved class;
-- stable backing volume/device/storage identity and storage class, or a
-  provider-specific stable equivalent; and
-- hardware write-cache and power-loss-protection policies with explicit known,
-  unknown, or justified not-applicable state.
+```text
+output_store_contract_id
+output_store_contract_generation
+backend_semantics_id
+backend_semantics_generation
+backend_instance_id
+backend_class
+locality
+persistence
+filesystem_type
+mount_identity
+mount_effective_options
+commit_semantics
+durability_capabilities
+requested_durability
+achieved_durability
+durability_endpoint_identity
+durability_anchor_identity
+storage_class
+hardware_write_cache_policy
+power_loss_protection_policy
+```
 
-Every required field is a typed observation whose state is `known`,
-`not-applicable`, `unknown`, `unobserved`, `unsupported`, or `unprovable`.
-`not-applicable` requires a schema-defined reason and proof that the layer is
-outside the end-to-end durability path. The complete normalized object is raw
-evidence. Its canonical version-one serialization is SHA-256 hashed as
-lowercase `storage_environment_digest`, and the runner records a separate
-compatibility-eligibility verdict with reasons. Eligibility requires all facts
-to be known or justified not applicable, the required file/directory sync,
-atomic no-replace, rename, and barrier capabilities to be proven, and requested
-and achieved durability both to be `crash-durable`. Equal unknown, unobserved,
-unsupported, or unprovable states remain incompatible even when their digests
-match.
+The exact base field order is:
 
-The runner also retains the selected absolute/rooted path, resolved root and
-mount identity, raw capability observations, and proof that each disposable
-job directory and retained release artifact is below the selected root. Those
-facts audit root selection but do not make a disposable absolute path the sole
-compatibility key. Remote, RAM-backed, copy-on-write, and other storage classes
-are not automatically forbidden; they can produce comparable evidence only
-when the capability path succeeds and every required comparison below has an
-eligible, exactly matching normalized fingerprint and recomputed digest.
+```text
+os_family
+os_release
+kernel_name
+kernel_release
+architecture
+cpu_inventory
+gpu_inventory
+other_device_inventory
+compiler_id
+compiler_version
+compiler_target
+standard_library_id
+standard_library_version
+build_mode
+build_flags
+process_worker_count
+provider_contracts
+plugin_contracts
+resource_limits
+metal_resource_limits
+cache_preconditions
+residency_preconditions
+power_policy
+thermal_eligibility
+```
 
-Storage compatibility means equal fingerprint schema, exact normalized-field
-equality, equal independently recomputed `storage_environment_digest`, and
-eligibility on both sides. Candidate/reference B1 replicate ordinals, B1 cap-1/
-cap-8 determinism comparisons, and M1 with its same-ordinal paired isolated B1
-cap-8 row require that compatibility. M1 and its paired isolated I1 row compare
-the exact `base_environment_digest` and existing I1 component facts only; the
-I1 row's `storage_environment_applicability=not-applicable` means unrelated M1
-storage fields cannot invalidate that latency pair. A missing or ineligible
-fingerprint, unknown or unsupported fact, field/digest mismatch, or failed
-root-containment proof makes the affected throughput, memory-reference, or
-other relative verdict `invalid`.
+The exact environment-class field/type order is:
+
+```text
+base_environment_digest:sha256
+storage_environment_applicability:enum
+storage_environment_not_applicable_reason:enum
+storage_environment_digest:sha256
+```
+
+The validator applies the ADR's exact types, enum domains, nested record
+layouts, cardinalities, and fixed resource values. Repository/dirty identity,
+subject binary hashes, selected absolute path, and fresh job directories stay
+in mandatory raw evidence but outside both manifests. The storage adapter maps
+every backend into the same `durability_endpoint_identity` and
+`durability_anchor_identity` fields; it cannot supply a provider-specific
+replacement field.
+
+Each manifest record uses the exact ASCII length-frame form
+`field=<frame(name)><frame(state)><frame(reason)><frame(type)><frame(payload)>`
+plus LF. `frame(B)` is unpadded decimal byte length, colon, then `B`. Text is
+NFC UTF-8 encoded as lowercase hexadecimal; identifiers, enums, booleans,
+uint64 decimals, SHA-256 values, lists, maps, sets, and fixed records follow the
+closed ADR grammar. Headers are exactly
+`execution-profile-storage-environment-v1\n`,
+`execution-profile-base-environment-v1\n`, and
+`execution-profile-environment-class-v1\n`. Missing/extra/reordered/duplicate
+records, malformed lengths, BOM/CR/extra whitespace, noncanonical scalars,
+unsorted set/map/record-list values, or a duplicate collection item are
+invalid.
+
+The observation state is one of `known`, `not-applicable`, `unknown`,
+`unobserved`, `unsupported`, or `unprovable`. Known uses reason `none` and a
+canonical payload. Every other state has an empty payload and only its closed
+state-specific reason. The only eligible N/A pairs are filesystem absence for
+`filesystem_type`, mount absence for `mount_identity` and
+`mount_effective_options`, hardware-cache/PLP layer absence for their matching
+policy fields, absent configured Metal for `metal_resource_limits`, and
+`row-has-no-output-commit` for an I1/I2 storage-digest record. Lack of a probe,
+provider opacity, or a remote boundary never proves absence.
+
+For a mounted backend, `mount_effective_options` has exactly seven sorted keys:
+`access_mode`, `atime_policy`, `cache_coherence`, `copy_on_write_mode`,
+`data_write_mode`, `journal_mode`, and `metadata_write_mode`, with only the ADR
+enum values. The adapter emits effective behavior: omitted default and explicit
+default inputs canonicalize identically, native order is discarded, and case
+folding occurs only for a platform-declared ASCII case-insensitive option
+domain. A platform-defined duplicate winner is probed and emitted once; an
+unproved/conflicting winner is `unprovable/conflicting-effective-values`.
+Unknown native options are excluded only with retained proof that they affect
+neither the seven keys nor `commit_semantics`; otherwise normalization is
+unprovable. The six fixed `commit_semantics` keys and eight closed durability
+capability tokens are validated independently.
+
+The independent validator performs these steps in order:
+
+1. parse every frame with checked `uint64` length/count arithmetic and require
+   exact header, LF, field count, field order, type, state/reason pairing, and
+   end of input;
+2. validate scalar/composite canonical form, enum domains, list cardinality,
+   ordering/uniqueness, nested record shape, fixed resources, and cross-field
+   consistency;
+3. bind each normalized field to retained raw observation/proof and validate
+   every field-specific N/A claim, mount normalization decision, stable
+   instance/endpoint/anchor identity, and root-containment proof;
+4. recompute `storage_environment_digest` and `base_environment_digest` as
+   lowercase SHA-256 over their complete exact manifest bytes;
+5. parse the exact four-field environment-class manifest and recompute
+   `environment_class_digest`; B1/M1 require known `required` plus the storage
+   digest, while I1/I2 require known `not-applicable`, reason
+   `row-has-no-output-commit`, and a N/A storage-digest record with empty
+   payload; and
+6. derive storage eligibility. Eligible means all observations are known or
+   use their sole proved N/A, `access_mode=read-write`, all eight capabilities
+   are present, commit/endpoint/anchor evidence forms one consistent path,
+   requested and achieved durability are `crash-durable`, and containment
+   succeeds. Ineligible evidence carries a nonempty sorted subset of the ADR's
+   closed ten reason tokens.
+
+Exact compatibility requires byte-identical canonical manifests, equal
+independently recomputed digests, and eligibility where storage applies.
+Digest equality alone is insufficient. Candidate/reference I1/I2 use exact
+base compatibility and the fixed storage-N/A environment manifest.
+Candidate/reference B1/M1, B1 cap-1/cap-8, and M1/paired-B1-cap-8 use exact
+base, storage, and full environment-class compatibility. M1/paired-I1 compares
+only exact base manifests/digests; its environment manifests intentionally
+differ. A missing raw field/proof, invalid state, byte/digest mismatch, or
+failed containment makes the affected relative verdict `invalid`.
+
+Issue #95 must add deterministic mechanism tests covering fixed field/type/
+enum/cardinality rejection; every state/reason/payload combination; NFC/text
+and scalar encodings; collection ordering and duplicates; omitted versus
+explicit mount defaults; native option order/case; deterministic and
+conflicting duplicates; unknown-option proof; malformed/overflowed frames;
+all three independent digest recomputations; eligibility reasons; and exact
+B1 candidate/reference plus cap-1/cap-8 compatibility. Issue #96 reuses those
+fixtures and tests exact same-ordinal M1/B1 matching plus base-only M1/I1
+matching. Issue #92 adds no current test binary, serializer, probe, runner, API,
+or runtime field.
 
 ### Run procedure
 
@@ -1795,17 +1894,21 @@ For each candidate or reference bundle:
    dirty state, build/compiler/flags, OS/kernel, CPU/GPU/device inventory,
    power/thermal eligibility, provider/plugin binaries and generations,
    process workers, Run caps, all limits/headroom, fixture hashes, seeds, and
-   cache/residency preconditions; for B1/M1 also select the `OutputStore` root,
-   capture its raw storage/capability observations, normalize the storage
-   fingerprint, and compute its eligibility and digest before warmup;
+   cache/residency preconditions; encode and independently validate the exact
+   24-field base manifest before warmup; for B1/M1 also select the
+   `OutputStore` root, capture its raw storage/capability observations, encode
+   the exact 20-field storage manifest, and compute its eligibility and digest;
 3. require candidate and reference to have the same evidence schema, workload
    id, row-applicable environment class, limits, and fixture hashes; B1/M1
-   comparisons require exact eligible storage compatibility, while I1/I2 do
-   not acquire an unrelated storage requirement;
+   comparisons require byte-identical eligible storage/base manifests and a
+   matching four-field environment-class manifest, while I1/I2 use the fixed
+   storage-N/A environment class and do not acquire an unrelated storage
+   requirement;
 4. for M1 replicate ordinal `1..3`, pin same-subject, same-ordinal isolated I1
-   and isolated B1 cap-8 row/bundle digests; require an exact base-environment
-   match for both pairs and an exact eligible storage-environment match only
-   for the B1 pair, together with compatible resources, fixtures,
+   and isolated B1 cap-8 row/bundle digests; require byte-identical base
+   manifests and equal recomputed base digests for both pairs, and an exact
+   eligible full environment-class match only for the B1 pair, together with
+   compatible resources, fixtures,
    build/providers, and preconditions, while retaining the separate candidate
    `comparison_reference_bundle_digest` semantics;
 5. retain cold first use, run the exact non-measured warmup, reset measurement
@@ -1861,10 +1964,11 @@ excluded from the canonical bytes but retained in the separate raw trace.
 An `execution-profile-slo-v1` bundle contains:
 
 - all provenance and frozen environment values listed above;
-- row-level storage applicability; for B1/M1, the normalized storage
-  fingerprint, raw capability/root-containment observations, compatibility
-  eligibility/reasons, `storage_environment_digest`, `base_environment_digest`,
-  and recomputable `environment-class digest`;
+- the exact base and environment-class manifest bytes plus claimed and
+  independently recomputed `base_environment_digest` and
+  `environment_class_digest`; for B1/M1, the exact storage manifest bytes,
+  raw capability/root-containment observations, eligibility/reasons, and both
+  claimed and recomputed `storage_environment_digest`;
 - workload/fixture/source/graph/payload hashes and all seeds;
 - warmup, cold, and measured counts/windows kept separately;
 - raw samples/events, offered-demand eligibility intervals, and drop/gap
@@ -1897,12 +2001,13 @@ workflow. No issue-specific replay, provenance/result orchestrator, phase-
 completion scan, or performance-result file may be registered with CTest or CI
 or retained as repository content.
 
-Issue #95 owns the B1 `OutputStore` capability observations, normalized storage
-fingerprint/digest producer, root-containment evidence, and cap-1/cap-8 plus
-candidate/reference compatibility checks. Issue #96 reuses that schema for M1
-and enforces its B1 pair while keeping the I1-only pair storage-independent.
-Issue #92 defines only this evidence contract; it adds no current probe, public
-API, runner, or runtime result field.
+Issue #95 owns the B1 `OutputStore` raw probes, backend-to-fixed-schema
+adapters, mount normalizer, canonical encoder/digests, eligibility and
+root-containment evidence, and cap-1/cap-8 plus candidate/reference checks.
+Issue #96 reuses the exact manifest bytes for M1 and enforces its same-ordinal
+full B1 pair while keeping the I1-only pair base-only. Issue #92 defines only
+this evidence contract; it adds no current probe, serializer, public API,
+runner, or runtime result field.
 
 ## CTest Registration
 

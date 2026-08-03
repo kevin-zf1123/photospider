@@ -1102,14 +1102,20 @@ Exact output/artifact/semantic-trace/golden digests, bounded discarded service,
 absolute resource limits, and exact quiescent settlement cannot be traded for
 speed in another dimension.
 
-For B1 and M1, “same environment” includes an eligible, exactly equal
-`execution-profile-storage-environment-v1` fingerprint and recomputed digest
-covering the `OutputStore` backend, filesystem/mount/sync/barrier semantics,
-backing storage, and write-cache/power-loss policy. Remote, RAM-backed, or
-copy-on-write storage is capability-gated rather than automatically accepted or
-forbidden. The M1/B1 cap-8 pair requires that storage match; the I1-only latency
-pair compares the base execution environment and is not constrained by M1's
-unrelated storage fields.
+For B1 and M1, “same environment” uses ADR 0010's closed manifests: a fixed
+24-field `execution-profile-base-environment-v1`, fixed 20-field
+`execution-profile-storage-environment-v1`, and fixed four-field
+`execution-profile-environment-class-v1`. Their ASCII length-framed canonical
+bytes and independently recomputed SHA-256 values must match exactly; digest
+equality never substitutes for byte equality. The storage schema fixes typed
+state/reason pairs, the only allowed N/A reasons, a seven-key effective-mount
+map, six commit-semantics keys, durability endpoint/anchor identities, and
+closed capability/enum sets. Remote, RAM-backed, or copy-on-write storage is
+capability-gated rather than accepted or forbidden by class. #95 implements
+the probes, adapters, normalization, encoder/digests, eligibility, containment,
+and B1 checks without changing the schema. #96 reuses those exact bytes and
+enforces the same-ordinal full M1/B1 pair; the I1-only latency pair compares
+only the exact base manifest/digest and ignores M1's unrelated storage.
 
 The frozen protocol does not claim nanosecond-exact operating-system wakes.
 It fixes nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum admission-
