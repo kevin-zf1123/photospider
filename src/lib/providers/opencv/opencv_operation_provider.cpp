@@ -9,6 +9,7 @@
 #endif
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -1191,6 +1192,114 @@ static PixelRect identity_dirty_roi(
 // =============================================================================
 
 /**
+ * @brief Converts one byte numerator divided by 255 to exact IEEE binary32.
+ * @param numerator Unsigned numerator in `[0,255]`.
+ * @return Round-to-nearest-ties-to-even representation of `numerator / 255`.
+ * @throws Nothing.
+ * @note The conversion uses integer normalization, division, and bit copying;
+ * it is independent of the ambient floating-point rounding mode. Every
+ * nonzero fraction is a normal binary32 value, so no subnormal path exists.
+ */
+static float byte_fraction_to_binary32(std::uint8_t numerator) noexcept {
+  if (numerator == 0U) {
+    return 0.0F;
+  }
+  if (numerator == 255U) {
+    std::uint32_t one_bits = 0x3f800000U;
+    float one = 0.0F;
+    std::memcpy(&one, &one_bits, sizeof(one));
+    return one;
+  }
+
+  unsigned int highest_bit = 0U;
+  for (std::uint32_t value = numerator; value > 1U; value >>= 1U) {
+    ++highest_bit;
+  }
+  int exponent = static_cast<int>(highest_bit) - 8;
+  const unsigned int shift = static_cast<unsigned int>(23 - exponent);
+  const std::uint64_t scaled = static_cast<std::uint64_t>(numerator) << shift;
+  std::uint64_t significand = scaled / 255U;
+  const std::uint64_t remainder = scaled % 255U;
+  const std::uint64_t doubled_remainder = remainder * 2U;
+  if (doubled_remainder > 255U ||
+      (doubled_remainder == 255U && (significand & 1U) != 0U)) {
+    ++significand;
+  }
+  if (significand == (std::uint64_t{1U} << 24U)) {
+    significand >>= 1U;
+    ++exponent;
+  }
+  const std::uint32_t biased_exponent =
+      static_cast<std::uint32_t>(exponent + 127);
+  const std::uint32_t mantissa =
+      static_cast<std::uint32_t>(significand - (std::uint64_t{1U} << 23U));
+  const std::uint32_t bits = (biased_exponent << 23U) | mantissa;
+  float result = 0.0F;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+/**
+ * @brief Generates the frozen coordinate-pattern FP32 image exactly.
+ * @param node Generator node carrying width, height, channels, and byte seed.
+ * @param inputs Unused generator inputs.
+ * @return Owned CPU image whose sample `(x,y,c)` is the exact binary32 value
+ * of `((17*x + 31*y + 47*c + seed) mod 256) / 255`.
+ * @throws GraphError with `GraphErrc::InvalidParameter` for non-positive
+ * dimensions, unsupported channel count, or a seed outside `[0,255]`.
+ * @throws cv::Exception internally for matrix allocation/access failure; the
+ * provider fence translates the exception category.
+ * @throws std::bad_alloc when Host image ownership cannot allocate.
+ * @note Every sample is constructed from integer arithmetic and explicit IEEE
+ * bits, independent of ambient rounding mode. Invocation-local storage makes
+ * the callback reentrant across execution workers.
+ */
+static NodeOutput op_coordinate_pattern(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_generator:coordinate_pattern");
+  static_cast<void>(inputs);
+  const auto& parameters = node.runtime_parameters;
+  const int width = as_int_flexible(parameters, "width", 2048);
+  const int height = as_int_flexible(parameters, "height", 2048);
+  const int channels = as_int_flexible(parameters, "channels", 4);
+  const int seed = as_int_flexible(parameters, "seed", 0);
+  if (width <= 0 || height <= 0) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "coordinate_pattern requires positive width and height");
+  }
+  if (channels <= 0 || channels > 4) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "coordinate_pattern requires one through four channels");
+  }
+  if (seed < 0 || seed > 255) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "coordinate_pattern seed must be in [0,255]");
+  }
+
+  cv::Mat output(height, width, CV_MAKETYPE(CV_32F, channels));
+  for (int y = 0; y < height; ++y) {
+    float* row = output.ptr<float>(y);
+    for (int x = 0; x < width; ++x) {
+      for (int channel = 0; channel < channels; ++channel) {
+        const std::uint64_t numerator =
+            (17U * static_cast<std::uint64_t>(x) +
+             31U * static_cast<std::uint64_t>(y) +
+             47U * static_cast<std::uint64_t>(channel) +
+             static_cast<std::uint64_t>(seed)) &
+            255U;
+        row[static_cast<std::size_t>(x) * static_cast<std::size_t>(channels) +
+            static_cast<std::size_t>(channel)] =
+            byte_fraction_to_binary32(static_cast<std::uint8_t>(numerator));
+      }
+    }
+  }
+
+  NodeOutput result;
+  result.image_buffer = fromCvMat(output);
+  return result;
+}
+
+/**
  * @brief Loads one image file and normalizes scalar storage to float32.
  *
  * @param node Source node carrying a required static `path` parameter.
@@ -2260,6 +2369,10 @@ void register_provider() {
       fence_monolithic_operation("image_generator:constant",
                                  MonolithicOpFunc(op_constant_image)));
   registry.register_op_hp_monolithic(
+      "image_generator", "coordinate_pattern",
+      fence_monolithic_operation("image_generator:coordinate_pattern",
+                                 MonolithicOpFunc(op_coordinate_pattern)));
+  registry.register_op_hp_monolithic(
       "image_generator", "perlin_noise",
       fence_monolithic_operation("image_generator:perlin_noise",
                                  MonolithicOpFunc(op_perlin_noise)));
@@ -2291,11 +2404,15 @@ void register_provider() {
   registry.register_dirty_propagator("image_source", "path", identity_roi);
   registry.register_dirty_propagator("image_generator", "constant",
                                      identity_roi);
+  registry.register_dirty_propagator("image_generator", "coordinate_pattern",
+                                     identity_roi);
   registry.register_dirty_propagator("image_generator", "perlin_noise",
                                      identity_roi);
   registry.register_forward_propagator("image_source", "path",
                                        identity_forward);
   registry.register_forward_propagator("image_generator", "constant",
+                                       identity_forward);
+  registry.register_forward_propagator("image_generator", "coordinate_pattern",
                                        identity_forward);
   registry.register_forward_propagator("image_generator", "perlin_noise",
                                        identity_forward);

@@ -339,11 +339,50 @@ TEST(DeviceResourceLedgerAdmission, PlanIsAtomicAcrossBothDimensions) {
   const auto after = ledger.device_snapshot(metal);
   ASSERT_TRUE(after.has_value());
   EXPECT_EQ(after->reserved, before->reserved);
+  EXPECT_EQ(after->high_water, before->high_water);
   EXPECT_EQ(after->available, before->available);
   EXPECT_FALSE(ledger
                    .try_reserve_device(DeviceId(DeviceBackend::CUDA),
                                        DeviceResourceVector{})
                    .has_value());
+}
+
+/**
+ * @brief Retains the largest successful device plan after exact release.
+ * @throws Nothing when smaller/rejected plans preserve monotonic diagnostics.
+ */
+TEST(DeviceResourceLedgerObservation, HighWaterIsMonotonicAndReadOnly) {
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(ResourceVector{},
+                        std::vector<DeviceResourceLimit>{
+                            DeviceResourceLimit{metal, {100U, 200U}}});
+  {
+    auto largest =
+        ledger.try_reserve_device(metal, DeviceResourceVector{80U, 140U});
+    ASSERT_TRUE(largest.has_value());
+    const auto active = ledger.device_snapshot(metal);
+    ASSERT_TRUE(active.has_value());
+    EXPECT_EQ(active->reserved, (DeviceResourceVector{80U, 140U}));
+    EXPECT_EQ(active->high_water, (DeviceResourceVector{80U, 140U}));
+    EXPECT_FALSE(ledger.try_reserve_device(metal, DeviceResourceVector{21U, 0U})
+                     .has_value());
+    EXPECT_EQ(ledger.device_snapshot(metal)->high_water,
+              (DeviceResourceVector{80U, 140U}));
+  }
+
+  auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+  EXPECT_EQ(released->high_water, (DeviceResourceVector{80U, 140U}));
+  {
+    auto smaller =
+        ledger.try_reserve_device(metal, DeviceResourceVector{20U, 30U});
+    ASSERT_TRUE(smaller.has_value());
+  }
+  released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+  EXPECT_EQ(released->high_water, (DeviceResourceVector{80U, 140U}));
 }
 
 /**
@@ -612,6 +651,35 @@ TEST(ResourceLedgerAdmission, EveryDimensionRejectsAndRecoversExactly) {
     EXPECT_TRUE(ledger.try_reserve(one_dimension(dimension, 5U)).has_value())
         << dimension;
   }
+}
+
+/**
+ * @brief Retains component-wise Host maxima while current ownership settles.
+ * @throws Nothing when pair admission, rejection, and RAII release are exact.
+ */
+TEST(ResourceLedgerObservation,
+     HighWaterSurvivesReleaseWithoutMintingCapacity) {
+  const ResourceVector limits{8U, 100U, 200U, 16U, 4096U};
+  ResourceLedger ledger(limits);
+  EXPECT_EQ(ledger.snapshot().high_water, ResourceVector{});
+
+  {
+    auto first = ledger.try_reserve(ResourceVector{2U, 60U, 20U, 8U, 1024U});
+    ASSERT_TRUE(first.has_value());
+    auto second = ledger.try_reserve(ResourceVector{3U, 10U, 90U, 2U, 2048U});
+    ASSERT_TRUE(second.has_value());
+    const auto active = ledger.snapshot();
+    EXPECT_EQ(active.reserved, (ResourceVector{5U, 70U, 110U, 10U, 3072U}));
+    EXPECT_EQ(active.high_water, (ResourceVector{5U, 70U, 110U, 10U, 3072U}));
+    EXPECT_FALSE(
+        ledger.try_reserve(ResourceVector{4U, 0U, 0U, 0U, 0U}).has_value());
+    EXPECT_EQ(ledger.snapshot().high_water, active.high_water);
+  }
+
+  const auto released = ledger.snapshot();
+  EXPECT_EQ(released.reserved, ResourceVector{});
+  EXPECT_EQ(released.high_water, (ResourceVector{5U, 70U, 110U, 10U, 3072U}));
+  EXPECT_EQ(released.limits, limits);
 }
 
 /**

@@ -279,6 +279,46 @@ compute::ComputeRunQos make_default_compute_run_qos(
 }
 
 /**
+ * @brief Selects an explicit private QoS or the established product default.
+ * @param request Complete internal Kernel compute request.
+ * @return Exact private QoS when present, otherwise Throughput/default values.
+ * @throws std::invalid_argument when default public parallelism is zero.
+ * @note Semantic QoS validation remains owned by ComputeRun construction. The
+ * selector adds no profile inference and does not mutate caller input.
+ */
+compute::ComputeRunQos select_compute_run_qos(
+    const Kernel::ComputeRequest& request) {
+  if (request.run_qos.has_value()) {
+    return *request.run_qos;
+  }
+  return make_default_compute_run_qos(request.execution.parallel,
+                                      request.execution.maximum_parallelism);
+}
+
+/**
+ * @brief Publishes one current generation to product freshness and evidence.
+ * @param execution_service Process execution/residency owner.
+ * @param graph_instance_id Exact live Graph identity.
+ * @param observation_sink Optional observation-only request sink.
+ * @param identity Product-assigned generation becoming current.
+ * @return Nothing.
+ * @throws Nothing; product observation is already a no-throw correctness
+ * boundary and the optional sink shares that contract.
+ * @note The coordinator invokes this while holding its publication mutex.
+ * Neither observer may allocate, wait, or re-enter Graph/coordinator state.
+ */
+void observe_current_product_generation(
+    compute::ExecutionService& execution_service,
+    GraphInstanceId graph_instance_id,
+    const std::shared_ptr<compute::ComputeRunObservationSink>& observation_sink,
+    const compute::SupersessionIdentity& identity) noexcept {
+  execution_service.observe_current_supersession(graph_instance_id, identity);
+  if (observation_sink != nullptr) {
+    observation_sink->on_current_generation(identity);
+  }
+}
+
+/**
  * @brief Converts a Kernel request into the narrower ComputeService request.
  *
  * @param request Internal Kernel compute request produced by the embedded Host
@@ -307,12 +347,12 @@ ComputeService::Request make_service_compute_request(
       request.intent,
       request.dirty_roi,
       request.name,
-      make_default_compute_run_qos(request.execution.parallel,
-                                   request.execution.maximum_parallelism),
+      select_compute_run_qos(request),
       std::move(commit_policy),
       staged_proxy,
       request.cancellation_source,
-      request.supersession};
+      request.supersession,
+      request.observation_sink};
 }
 
 /**
@@ -374,6 +414,8 @@ class KernelGraphRevisionCommitPolicy final
       throw GraphError(GraphErrc::ComputeError,
                        "HP staged commit has no validated target output.");
     }
+    const Value current_output =
+        target->cached_output_high_precision->image_value;
 
     std::shared_ptr<GraphModel> graph_publication(
         staged_graph.clone_for_compute());
@@ -392,7 +434,7 @@ class KernelGraphRevisionCommitPolicy final
     compute::ComputeRunLease commit_lease = run_lease;
     runtime_.graph_state()
         .submit([this, instance_id, revision,
-                 commit_lease = std::move(commit_lease),
+                 commit_lease = std::move(commit_lease), current_output,
                  graph_publication = std::move(graph_publication),
                  proxy_publication = std::move(proxy_publication)](
                     GraphModel& live_graph) mutable {
@@ -419,7 +461,8 @@ class KernelGraphRevisionCommitPolicy final
               runtime_.realtime_proxy_graph().publish_compute_snapshot(
                   *proxy_publication);
             }
-            if (!contender->publish_succeeded()) {
+            if (!contender->publish_visible_succeeded(
+                    std::move(current_output))) {
               throw std::logic_error(
                   "HP commit contender failed to resolve success.");
             }
@@ -762,6 +805,8 @@ bool Kernel::compute_request(const ComputeRequest& request) {
     auto completion = std::make_shared<CandidateCompletion<void>>();
     std::future<void> settled = completion->take_future();
     ComputeRequest candidate_request = std::move(product.request);
+    const std::shared_ptr<compute::ComputeRunObservationSink> observation_sink =
+        candidate_request.observation_sink;
     const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     execution_service_->prepare_supersession_lineage(
         graph_instance_id, product.prepared.identity());
@@ -781,10 +826,12 @@ bool Kernel::compute_request(const ComputeRequest& request) {
         [completion](std::exception_ptr failure) {
           completion->set_exception(std::move(failure));
         },
-        [execution_service = execution_service_, graph_instance_id](
+        [execution_service = execution_service_, graph_instance_id,
+         observation_sink](
             const compute::SupersessionIdentity& identity) noexcept {
-          execution_service->observe_current_supersession(graph_instance_id,
-                                                          identity);
+          observe_current_product_generation(*execution_service,
+                                             graph_instance_id,
+                                             observation_sink, identity);
         });
     settled.get();
 
@@ -848,6 +895,8 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
     auto completion = std::make_shared<CandidateCompletion<NodeOutput>>();
     std::future<NodeOutput> settled = completion->take_future();
     ComputeRequest candidate_request = std::move(product.request);
+    const std::shared_ptr<compute::ComputeRunObservationSink> observation_sink =
+        candidate_request.observation_sink;
     const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     execution_service_->prepare_supersession_lineage(
         graph_instance_id, product.prepared.identity());
@@ -869,10 +918,12 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
         [completion](std::exception_ptr failure) {
           completion->set_exception(std::move(failure));
         },
-        [execution_service = execution_service_, graph_instance_id](
+        [execution_service = execution_service_, graph_instance_id,
+         observation_sink](
             const compute::SupersessionIdentity& identity) noexcept {
-          execution_service->observe_current_supersession(graph_instance_id,
-                                                          identity);
+          observe_current_product_generation(*execution_service,
+                                             graph_instance_id,
+                                             observation_sink, identity);
         });
     NodeOutput output = settled.get();
 
@@ -946,6 +997,8 @@ Kernel::compute_async_request(ComputeRequest request) {
   auto completion = std::make_shared<CandidateCompletion<AsyncComputeResult>>();
   std::future<AsyncComputeResult> settled = completion->take_future();
   ComputeRequest candidate_request = std::move(product.request);
+  const std::shared_ptr<compute::ComputeRunObservationSink> observation_sink =
+      candidate_request.observation_sink;
   const GraphInstanceId graph_instance_id = runtime->model().instance_id();
   execution_service_->prepare_supersession_lineage(graph_instance_id,
                                                    product.prepared.identity());
@@ -1001,10 +1054,11 @@ Kernel::compute_async_request(ComputeRequest request) {
       [completion](std::exception_ptr failure) {
         completion->set_exception(std::move(failure));
       },
-      [execution_service = execution_service_, graph_instance_id](
+      [execution_service = execution_service_, graph_instance_id,
+       observation_sink](
           const compute::SupersessionIdentity& identity) noexcept {
-        execution_service->observe_current_supersession(graph_instance_id,
-                                                        identity);
+        observe_current_product_generation(
+            *execution_service, graph_instance_id, observation_sink, identity);
       });
   return std::optional<std::future<AsyncComputeResult>>{std::move(settled)};
 }

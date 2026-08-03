@@ -683,7 +683,8 @@ ComputeRunSubmission make_metal_run_submission(std::string label,
       ComputeRunQos{ComputeRunQosClass::Throughput, std::nullopt, 1U, 1U},
       SupersessionIdentity{SupersessionKey(static_cast<int>(identity),
                                            ComputeIntent::GlobalHighPrecision),
-                           SupersessionGeneration(1U)}};
+                           SupersessionGeneration(1U)},
+      nullptr};
 }
 
 /**

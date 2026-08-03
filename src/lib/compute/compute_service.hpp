@@ -177,6 +177,14 @@ class ComputeService {
      * that grants no product supersession authority.
      */
     std::optional<compute::SupersessionIdentity> supersession;
+
+    /**
+     * @brief Optional source-private read-only Run observation sink.
+     * @note Kernel may supply this for maintained verification. ComputeService
+     * copies it into every materialized child Run; it owns no execution or
+     * commit authority and is absent from installed request contracts.
+     */
+    std::shared_ptr<compute::ComputeRunObservationSink> observation_sink;
   };
 
   /**

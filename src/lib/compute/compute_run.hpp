@@ -22,6 +22,7 @@ namespace ps {
 class GraphModel;
 class GraphTraversalService;
 class ExecutionTaskRuntime;
+class Value;
 }  // namespace ps
 
 namespace ps::testing {
@@ -32,12 +33,15 @@ namespace ps::compute {
 class ComputeRunControl;
 class ComputeRunCancellationSlot;
 class ComputeRequestCancellationControl;
+class ComputeRunDescriptor;
 class HighPrecisionDirtyWriteBuffer;
 class TaskSubmissionPlan;
 class ComputeRun;
 class ExecutionService;
 class ExecutionLifecycleTelemetry;
 class RunLifecycleRegistry;
+enum class ComputeRunTerminalKind;
+enum class ComputeRunCancellationReason;
 
 /**
  * @brief Opaque stable identity for one request-owned compute Run.
@@ -298,6 +302,99 @@ struct ComputeRunQos {
 };
 
 /**
+ * @brief Source-private, observation-only sink for one product compute request.
+ *
+ * The sink receives immutable identities, scalar service facts, terminal
+ * categories, and a retained immutable output Value at the exact product
+ * boundaries that own those facts. It cannot reach a Graph, scheduler, ready
+ * queue, cancellation source, ledger token, resource grant, commit contender,
+ * or mutable output, and its return values never participate in runtime
+ * decisions.
+ *
+ * @throws Nothing. Implementations must contain every failure; an escaping
+ * exception terminates because callbacks run on product correctness
+ * boundaries.
+ * @note Callbacks may run while the coordinator, Run, or execution-service
+ * mutex is held. Implementations must remain bounded, nonblocking, and must
+ * not re-enter compute services. The interface is source-private and is absent
+ * from installed Host, operation, policy, CLI, and IPC contracts.
+ */
+class ComputeRunObservationSink {
+ public:
+  /**
+   * @brief Releases observation-only implementation state.
+   * @throws Nothing.
+   * @note Destruction owns no product work and requests no cancellation.
+   */
+  virtual ~ComputeRunObservationSink() noexcept = default;
+
+  /**
+   * @brief Observes publication of one accepted current request generation.
+   * @param identity Product-assigned key and generation becoming current.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The coordinator invokes this immediately before publishing the same
+   * generation to `is_current()`.
+   */
+  virtual void on_current_generation(
+      const SupersessionIdentity& identity) noexcept = 0;
+
+  /**
+   * @brief Observes one physically committed callback service start.
+   * @param descriptor Immutable identity and policy inputs of the owning Run.
+   * @param task_identity Exact Run-local callback identity.
+   * @param service_charge Exact `work_units + ceil(ready_bytes/4096)` charge.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The service invokes this after ready removal, grant/gate commitment,
+   * and start counters become authoritative, while cancellation/start order is
+   * still serialized by product locks.
+   */
+  virtual void on_service_start(const ComputeRunDescriptor& descriptor,
+                                ComputeRunTaskIdentity task_identity,
+                                std::uint64_t service_charge) noexcept = 0;
+
+  /**
+   * @brief Observes acceptance of one Run cancellation reason.
+   * @param descriptor Immutable identity and policy inputs of the cancelled
+   * Run.
+   * @param reason Stable cancellation reason that won terminal arbitration.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Rejected or repeated cancellation requests produce no callback.
+   */
+  virtual void on_cancellation(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunCancellationReason reason) noexcept = 0;
+
+  /**
+   * @brief Observes the exactly-once terminal category of one Run.
+   * @param descriptor Immutable identity and policy inputs of the terminal Run.
+   * @param kind Succeeded, Failed, or Cancelled terminal category.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Failure exception payload is deliberately excluded from the
+   * authority-free evidence seam.
+   */
+  virtual void on_terminal(const ComputeRunDescriptor& descriptor,
+                           ComputeRunTerminalKind kind) noexcept = 0;
+
+  /**
+   * @brief Observes one current HP publication and retains its immutable Value.
+   * @param descriptor Immutable identity of the Run whose contender committed.
+   * @param output Copy of the exact immutable image Value published visibly.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Value copying retains immutable shared state and grants no mutation
+   * or graph ownership. The commit contender emits this callback and its
+   * succeeding terminal callback in one Run-arbiter resolution, so a stale,
+   * failed, empty, or already-resolved contender produces no visibility.
+   */
+  virtual void on_current_visible(const ComputeRunDescriptor& descriptor,
+                                  Value output) noexcept = 0;
+};
+
+/**
  * @brief Caller-supplied immutable inputs used to construct one domain Run.
  *
  * @throws std::bad_alloc when graph_identity is copied into Run ownership.
@@ -332,6 +429,13 @@ struct ComputeRunSubmission {
    * request retains the realtime request key carried here.
    */
   SupersessionIdentity supersession;
+
+  /**
+   * @brief Optional source-private read-only observer retained by the Run.
+   * @note The observer owns no product authority and is absent from installed
+   * request or ABI values.
+   */
+  std::shared_ptr<ComputeRunObservationSink> observation_sink;
 };
 
 /**
@@ -427,6 +531,18 @@ class ComputeRunDescriptor {
     return supersession_;
   }
 
+  /**
+   * @brief Returns the optional observation-only request sink.
+   * @return Shared sink retained for the complete Run lifetime, or null.
+   * @throws Nothing.
+   * @note Copying the owner grants no scheduling, cancellation, resource, or
+   * commit authority.
+   */
+  const std::shared_ptr<ComputeRunObservationSink>& observation_sink()
+      const noexcept {
+    return observation_sink_;
+  }
+
  private:
   friend class ComputeRun;
   friend class ComputeRunControl;
@@ -469,6 +585,9 @@ class ComputeRunDescriptor {
 
   /** @brief Canonical request lineage version captured before planning. */
   SupersessionIdentity supersession_;
+
+  /** @brief Optional observation-only owner retained through settlement. */
+  std::shared_ptr<ComputeRunObservationSink> observation_sink_;
 };
 
 /**
@@ -887,6 +1006,18 @@ class ComputeRunCommitContender final {
    * @note Success becomes observable before the serialized transaction returns.
    */
   bool publish_succeeded();
+
+  /**
+   * @brief Resolves visible HP success and its terminal event atomically.
+   * @param output Exact immutable Value already published to the live Graph.
+   * @return True only for this still-active matching contender; false emits
+   * neither the current-visible nor terminal callback.
+   * @throws std::system_error if Run-state locking fails.
+   * @note The current-visible callback is emitted before the Succeeded terminal
+   * callback while the same `CommitClaimed` arbitration remains owned. Product
+   * code calls this only after no-throw live Graph publication.
+   */
+  bool publish_visible_succeeded(Value output);
 
   /**
    * @brief Resolves this accepted commit with its exact predicate/persist

@@ -1142,6 +1142,16 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       DeviceId device) const;
 
   /**
+   * @brief Copies every configured concrete-device resource account.
+   * @return Deterministically ordered immutable device snapshots.
+   * @throws std::bad_alloc when result storage cannot allocate.
+   * @throws std::system_error from ledger snapshot locking.
+   * @note Snapshots contain current and lifetime high-water accounting but no
+   * native handle, reservation, grant, or release authority.
+   */
+  std::vector<ResourceLedger::DeviceSnapshot> device_resource_snapshots() const;
+
+  /**
    * @brief Tests whether the fixed process registry owns one device executor.
    * @param device Device label to inspect.
    * @return True only for a registered non-CPU executor.

@@ -241,7 +241,8 @@ ComputeRunSubmission make_group_submission(
                               quality,
                               ComputeRunQos{ComputeRunQosClass::Throughput,
                                             std::nullopt, 1, std::nullopt},
-                              identity};
+                              identity,
+                              nullptr};
 }
 
 /**

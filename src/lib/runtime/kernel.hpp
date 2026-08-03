@@ -272,6 +272,22 @@ class Kernel {
      * Run descriptor. It is private and absent from Host, CLI, and IPC v1.
      */
     std::optional<compute::SupersessionIdentity> supersession;
+
+    /**
+     * @brief Optional explicit private Run QoS for maintained verification.
+     * @note Embedded public Host conversion leaves this empty and receives the
+     * established Throughput default. Source-private verification may supply a
+     * complete value without adding a public profile selector or wire field.
+     */
+    std::optional<compute::ComputeRunQos> run_qos;
+
+    /**
+     * @brief Optional source-private observation-only request sink.
+     * @note The sink follows materialized Runs and current publication but owns
+     * no scheduler, cancellation, ledger, or commit authority. Public Host,
+     * CLI, operation, policy, and IPC values do not contain this field.
+     */
+    std::shared_ptr<compute::ComputeRunObservationSink> observation_sink;
   };
 
   /**

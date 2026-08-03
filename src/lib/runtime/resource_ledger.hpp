@@ -837,6 +837,13 @@ class ResourceLedger final {
 
     /** @brief Current complete root commitments. */
     ResourceVector reserved;
+
+    /**
+     * @brief Component-wise lifetime maximum of complete root commitments.
+     * @note Values advance only in the same transaction that successfully
+     * commits `reserved`; release never lowers them and they mint no capacity.
+     */
+    ResourceVector high_water;
   };
 
   /**
@@ -852,6 +859,13 @@ class ResourceLedger final {
 
     /** @brief Current planned or committed byte ownership. */
     DeviceResourceVector reserved;
+
+    /**
+     * @brief Component-wise lifetime maximum device byte ownership.
+     * @note Values advance only on successful device reservation and grant no
+     * allocation authority.
+     */
+    DeviceResourceVector high_water;
 
     /** @brief Checked component-wise limit minus reservation. */
     DeviceResourceVector available;
@@ -961,14 +975,14 @@ class ResourceLedger final {
       DeviceId device, const DeviceResourceVector& planned);
 
   /**
-   * @brief Copies limits and current root commitments for diagnostics/tests.
+   * @brief Copies limits, current commitments, and lifetime high-water values.
    * @return Non-authoritative immutable snapshot.
    * @throws std::system_error when internal mutex locking fails.
    */
   Snapshot snapshot() const;
 
   /**
-   * @brief Copies one exact configured device account.
+   * @brief Copies one configured device account and its lifetime high-water.
    * @param device Device identity to inspect.
    * @return Immutable snapshot, or `std::nullopt` when unconfigured.
    * @throws std::system_error when root synchronization fails.

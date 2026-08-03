@@ -59,7 +59,8 @@ ComputeRunSubmission make_submission(
       ComputeRunQos{service_class, std::nullopt, 1U, 2U},
       SupersessionIdentity{
           SupersessionKey(target_node_id, ComputeIntent::GlobalHighPrecision),
-          SupersessionGeneration(1U)}};
+          SupersessionGeneration(1U)},
+      nullptr};
 }
 
 /**

@@ -266,6 +266,7 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
 # embedded product dependency. DataDefinitionRegistry is an injected object;
 # this shared runtime owns its one implementation but creates no singleton.
 add_library(photospider_operation_runtime SHARED
+    src/lib/core/dense_tensor_content_digest.cpp
     src/lib/core/extension.cpp
     src/lib/core/image_buffer.cpp
     src/lib/core/ready_fence.cpp
@@ -689,6 +690,8 @@ target_link_libraries(photospider_graph_internal PRIVATE
 
 # Module: compute, dirty execution, GraphRuntime, and interaction ownership.
 set(KERNEL_FACADE_SOURCES
+    src/lib/benchmark/i1_evidence.cpp
+    src/lib/benchmark/i1_profile.cpp
     src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp
@@ -1978,6 +1981,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_compile_definitions(test_resource_admission PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        add_ps_test(test_i1_product_path
+            tests/integration/test_i1_product_path.cpp)
+        target_compile_definitions(test_i1_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         add_ps_test(test_opencv_operation_concurrency
             tests/integration/test_opencv_operation_concurrency.cpp)
         target_compile_definitions(test_opencv_operation_concurrency PRIVATE
@@ -2005,8 +2012,29 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             photospider_cli_common
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
+        add_executable(i1_edit_storm_benchmark EXCLUDE_FROM_ALL
+            tests/verification/i1_edit_storm_benchmark.cpp)
+        set_target_properties(i1_edit_storm_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(i1_edit_storm_benchmark PRIVATE cxx_std_17)
+        target_include_directories(i1_edit_storm_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(i1_edit_storm_benchmark PRIVATE
+            PHOTOSPIDER_I1_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(i1_edit_storm_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
     endif()
     add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
+    add_ps_test(test_i1_evidence tests/unit/test_i1_evidence.cpp)
+    add_ps_test(test_i1_profile tests/unit/test_i1_profile.cpp)
+    add_ps_test(test_dense_tensor_content_digest
+        tests/unit/test_dense_tensor_content_digest.cpp)
     add_ps_test(test_physical_execution_routes
         tests/unit/test_physical_execution_routes.cpp
         photospider_execution_internal)
@@ -2374,6 +2402,22 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_resource_ledger
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i1_evidence
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_dense_tensor_content_digest
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        gtest_discover_tests(test_i1_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+    endif()
     gtest_discover_tests(test_device_executor_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES

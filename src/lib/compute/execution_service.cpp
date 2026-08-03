@@ -1770,6 +1770,13 @@ class ExecutionService::BoundedReadyStore final {
     ++class_dispatch_count(pin.service_class);
     ++run.committed_starts;
     ++run.in_flight;
+    const std::shared_ptr<ComputeRunObservationSink>& observation_sink =
+        pin.entry->submission.lease_.descriptor().observation_sink();
+    if (observation_sink != nullptr) {
+      observation_sink->on_service_start(
+          pin.entry->submission.lease_.descriptor(),
+          pin.entry->submission.identity(), pin.entry->policy_service_cost);
+    }
     if (pin.service_class == ComputeRunQosClass::Interactive &&
         throughput_ready) {
       ++consecutive_interactive_;
@@ -4264,6 +4271,12 @@ const execution::ComputeIoExecutor& ExecutionService::compute_io_executor()
 std::optional<ResourceLedger::DeviceSnapshot>
 ExecutionService::device_resource_snapshot(DeviceId device) const {
   return pool_->ledger.device_snapshot(device);
+}
+
+/** @copydoc ExecutionService::device_resource_snapshots */
+std::vector<ResourceLedger::DeviceSnapshot>
+ExecutionService::device_resource_snapshots() const {
+  return pool_->ledger.device_snapshots();
 }
 
 /** @copydoc ExecutionService::register_graph_lifecycle */

@@ -581,15 +581,17 @@ StorageLayoutDigest compute_storage_layout_digest(
     const ProviderDefinedLayout& layout);
 
 /**
- * @brief Computes canonical logical content through the Value generation.
- * @param value Valid provider-defined Value.
+ * @brief Computes canonical logical content through the Value representation.
+ * @param value Valid built-in DenseTensor or provider-defined Value.
  * @return Typed availability and optional ContentDigest.
  * @throws std::bad_alloc when bounded metadata or fixed digest state cannot
  * allocate.
  * @note The operation is explicit and may read Ready host-visible payload;
- * property, Region, and DataSpec query paths never call it implicitly. The
- * Host measures then incrementally hashes the deterministic provider stream
- * without retaining payload-proportional storage or imposing a cumulative
+ * property, Region, and DataSpec query paths never call it implicitly.
+ * DenseTensor traversal hashes its logical row-major scalar/code stream while
+ * excluding physical layout and binding facts. Provider-defined traversal
+ * measures then incrementally hashes the deterministic provider stream.
+ * Neither path retains payload-proportional staging or imposes a cumulative
  * 64 MiB logical-content limit.
  */
 ContentDigestResult compute_content_digest(const Value& value);

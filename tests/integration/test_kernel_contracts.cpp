@@ -153,7 +153,8 @@ compute::ComputeRunSubmission make_kernel_shutdown_submission(
                              std::nullopt, 1U, std::nullopt},
       compute::SupersessionIdentity{
           compute::SupersessionKey(1, ComputeIntent::GlobalHighPrecision),
-          compute::SupersessionGeneration(1U)}};
+          compute::SupersessionGeneration(1U)},
+      nullptr};
 }
 
 /**

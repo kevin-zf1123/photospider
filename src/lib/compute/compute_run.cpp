@@ -20,6 +20,7 @@
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/execution_lifecycle_telemetry.hpp"
 #include "compute/resource_demand_estimator.hpp"
+#include "photospider/data/value.hpp"
 
 namespace ps::compute {
 namespace {
@@ -304,6 +305,16 @@ class ComputeRunControl {
   bool resolve_commit(ComputeRunTerminalOutcome outcome);
 
   /**
+   * @brief Resolves visible HP success under the sole commit claim.
+   * @param output Exact immutable Value already published to the live Graph.
+   * @return True only while CommitClaimed; false emits no observation.
+   * @throws std::system_error when Run/plan synchronization fails.
+   * @note Current-visible observation precedes terminal observation while one
+   * mutex acquisition proves that neither cancellation nor failure intervened.
+   */
+  bool resolve_visible_commit(Value output);
+
+  /**
    * @brief Installs or immediately invokes a cancellation cleanup slot.
    * @param slot Shared non-null callback slot.
    * @return True when installed for a future cancellation, false when no future
@@ -449,7 +460,8 @@ ComputeRunDescriptor::ComputeRunDescriptor(ComputeRunId id,
       intent_(submission.intent),
       quality_(submission.quality),
       qos_(submission.qos),
-      supersession_(std::move(submission.supersession)) {
+      supersession_(std::move(submission.supersession)),
+      observation_sink_(std::move(submission.observation_sink)) {
 }  // NOLINT(whitespace/indent_namespace)
 
 /**
@@ -491,8 +503,12 @@ bool ComputeRunControl::publish_terminal(ComputeRunTerminalOutcome outcome) {
     if (arbiter_state != ComputeRunArbiterState::Open) {
       return false;
     }
+    const ComputeRunTerminalKind terminal_kind = outcome.kind;
     terminal_outcome = std::move(outcome);
     arbiter_state = ComputeRunArbiterState::Terminal;
+    if (descriptor.observation_sink() != nullptr) {
+      descriptor.observation_sink()->on_terminal(descriptor, terminal_kind);
+    }
     plan = submission_plan.get();
   }
   if (plan != nullptr) {
@@ -531,6 +547,11 @@ ComputeRunControl::request_cancellation_containing_callbacks(
       request_child_cancellation_won->store(true, std::memory_order_release);
     }
     arbiter_state = ComputeRunArbiterState::Terminal;
+    if (descriptor.observation_sink() != nullptr) {
+      descriptor.observation_sink()->on_cancellation(descriptor, reason);
+      descriptor.observation_sink()->on_terminal(
+          descriptor, ComputeRunTerminalKind::Cancelled);
+    }
     plan = submission_plan.get();
   }
   if (plan != nullptr) {
@@ -600,6 +621,12 @@ bool ComputeRunControl::try_claim_commit() {
           ComputeRunTerminalKind::Cancelled, nullptr,
           ComputeRunCancellationReason::DeadlineExceeded};
       arbiter_state = ComputeRunArbiterState::Terminal;
+      if (descriptor.observation_sink() != nullptr) {
+        descriptor.observation_sink()->on_cancellation(
+            descriptor, ComputeRunCancellationReason::DeadlineExceeded);
+        descriptor.observation_sink()->on_terminal(
+            descriptor, ComputeRunTerminalKind::Cancelled);
+      }
       plan = submission_plan.get();
       deadline_cancelled = true;
     } else if (phase != ComputeRunPhase::CommitPending) {
@@ -640,8 +667,39 @@ bool ComputeRunControl::resolve_commit(ComputeRunTerminalOutcome outcome) {
     if (arbiter_state != ComputeRunArbiterState::CommitClaimed) {
       return false;
     }
+    const ComputeRunTerminalKind terminal_kind = outcome.kind;
     terminal_outcome = std::move(outcome);
     arbiter_state = ComputeRunArbiterState::Terminal;
+    if (descriptor.observation_sink() != nullptr) {
+      descriptor.observation_sink()->on_terminal(descriptor, terminal_kind);
+    }
+    plan = submission_plan.get();
+  }
+  if (plan != nullptr) {
+    plan->close_publication();
+  }
+  return true;
+}
+
+/** @copydoc ComputeRunControl::resolve_visible_commit */
+bool ComputeRunControl::resolve_visible_commit(Value output) {
+  TaskSubmissionPlan* plan = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (arbiter_state != ComputeRunArbiterState::CommitClaimed) {
+      return false;
+    }
+    if (descriptor.observation_sink() != nullptr) {
+      descriptor.observation_sink()->on_current_visible(descriptor,
+                                                        std::move(output));
+    }
+    terminal_outcome = ComputeRunTerminalOutcome{
+        ComputeRunTerminalKind::Succeeded, nullptr, std::nullopt};
+    arbiter_state = ComputeRunArbiterState::Terminal;
+    if (descriptor.observation_sink() != nullptr) {
+      descriptor.observation_sink()->on_terminal(
+          descriptor, ComputeRunTerminalKind::Succeeded);
+    }
     plan = submission_plan.get();
   }
   if (plan != nullptr) {
@@ -1050,6 +1108,18 @@ bool ComputeRunCommitContender::publish_succeeded() {
   }
   const bool published = control_->resolve_commit(ComputeRunTerminalOutcome{
       ComputeRunTerminalKind::Succeeded, nullptr, std::nullopt});
+  if (published) {
+    control_.reset();
+  }
+  return published;
+}
+
+/** @copydoc ComputeRunCommitContender::publish_visible_succeeded */
+bool ComputeRunCommitContender::publish_visible_succeeded(Value output) {
+  if (control_ == nullptr) {
+    return false;
+  }
+  const bool published = control_->resolve_visible_commit(std::move(output));
   if (published) {
     control_.reset();
   }

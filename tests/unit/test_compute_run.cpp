@@ -38,6 +38,7 @@
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/value.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
@@ -76,8 +77,121 @@ ComputeRunSubmission make_test_submission(std::string graph_identity,
       ComputeRunQos{ComputeRunQosClass::Throughput, std::nullopt, 3, 2},
       SupersessionIdentity{
           SupersessionKey(target_node_id, ComputeIntent::GlobalHighPrecision),
-          SupersessionGeneration(1)}};
+          SupersessionGeneration(1)},
+      nullptr};
 }
+
+/**
+ * @brief Records the two observations owned by visible commit resolution.
+ * @throws Nothing for construction, callbacks, or scalar inspection.
+ * @note Fixed storage keeps every noexcept callback allocation-free.
+ */
+class VisibleCommitObservationSink final : public ComputeRunObservationSink {
+ public:
+  /** @copydoc ComputeRunObservationSink::on_current_generation */
+  void on_current_generation(
+      const SupersessionIdentity& identity) noexcept override {
+    (void)identity;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_service_start */
+  void on_service_start(const ComputeRunDescriptor& descriptor,
+                        ComputeRunTaskIdentity task_identity,
+                        std::uint64_t service_charge) noexcept override {
+    (void)descriptor;
+    (void)task_identity;
+    (void)service_charge;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_cancellation */
+  void on_cancellation(const ComputeRunDescriptor& descriptor,
+                       ComputeRunCancellationReason reason) noexcept override {
+    (void)descriptor;
+    (void)reason;
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_terminal */
+  void on_terminal(const ComputeRunDescriptor& descriptor,
+                   ComputeRunTerminalKind kind) noexcept override {
+    (void)descriptor;
+    terminal_kind_ = kind;
+    ++terminal_count_;
+    record(2);
+  }
+
+  /** @copydoc ComputeRunObservationSink::on_current_visible */
+  void on_current_visible(const ComputeRunDescriptor& descriptor,
+                          Value output) noexcept override {
+    (void)descriptor;
+    (void)output;
+    ++visible_count_;
+    record(1);
+  }
+
+  /**
+   * @brief Returns the number of current-visible callbacks.
+   * @return Exact callback count.
+   * @throws Nothing.
+   */
+  std::size_t visible_count() const noexcept { return visible_count_; }
+
+  /**
+   * @brief Returns the number of terminal callbacks.
+   * @return Exact callback count.
+   * @throws Nothing.
+   */
+  std::size_t terminal_count() const noexcept { return terminal_count_; }
+
+  /**
+   * @brief Returns the retained terminal kind.
+   * @return Latest terminal category, if observed.
+   * @throws Nothing.
+   */
+  std::optional<ComputeRunTerminalKind> terminal_kind() const noexcept {
+    return terminal_kind_;
+  }
+
+  /**
+   * @brief Returns one fixed observation-order marker.
+   * @param index Zero-based position below observation_count().
+   * @return One for visible and two for terminal.
+   * @throws Nothing; callers validate the index before access.
+   */
+  int observation_at(std::size_t index) const noexcept {
+    return observation_order_[index];
+  }
+
+  /**
+   * @brief Returns the number of retained observation-order markers.
+   * @return Count in `[0,2]`.
+   * @throws Nothing.
+   */
+  std::size_t observation_count() const noexcept { return observation_count_; }
+
+ private:
+  /**
+   * @brief Appends one marker when fixed observation storage has capacity.
+   * @param marker One for visible or two for terminal.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void record(int marker) noexcept {
+    if (observation_count_ < observation_order_.size()) {
+      observation_order_[observation_count_++] = marker;
+    }
+  }
+
+  /** @brief Fixed callback order without allocation. */
+  std::array<int, 2U> observation_order_{};
+  /** @brief Number of initialized order entries. */
+  std::size_t observation_count_ = 0U;
+  /** @brief Exact current-visible callback count. */
+  std::size_t visible_count_ = 0U;
+  /** @brief Exact terminal callback count. */
+  std::size_t terminal_count_ = 0U;
+  /** @brief Terminal category retained for assertion. */
+  std::optional<ComputeRunTerminalKind> terminal_kind_;
+};
 
 /**
  * @brief Builds a submission matching one explicitly registered test Graph.
@@ -4088,6 +4202,37 @@ TEST(ComputeRunCommitArbiter, LinearizesCancellationBeforeOrAfterCommitClaim) {
   ASSERT_TRUE(committed.terminal_outcome().has_value());
   EXPECT_EQ(committed.terminal_outcome()->kind,
             ComputeRunTerminalKind::Succeeded);
+}
+
+/**
+ * @brief Proves HP visibility and success terminal resolve as one claim.
+ * @return Nothing; GoogleTest assertions report missing, duplicate, or
+ * reordered observations.
+ * @throws Allocation or synchronization exceptions from Run setup unchanged.
+ * @note Reusing the resolved contender returns false and emits no observation.
+ */
+TEST(ComputeRunCommitArbiter,
+     VisibleSuccessEmitsExactlyOneOrderedObservationPair) {
+  auto sink = std::make_shared<VisibleCommitObservationSink>();
+  ComputeRunSubmission submission =
+      make_test_submission("visible-success", 340U, 440);
+  submission.observation_sink = sink;
+  ComputeRun run(std::move(submission));
+  ComputeRunLease lease = run.acquire_lease();
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::CommitPending));
+  std::optional<ComputeRunCommitContender> contender = lease.try_claim_commit();
+  ASSERT_TRUE(contender.has_value());
+
+  EXPECT_TRUE(contender->publish_visible_succeeded(Value{}));
+  EXPECT_FALSE(contender->publish_visible_succeeded(Value{}));
+  EXPECT_EQ(sink->visible_count(), 1U);
+  EXPECT_EQ(sink->terminal_count(), 1U);
+  ASSERT_EQ(sink->observation_count(), 2U);
+  EXPECT_EQ(sink->observation_at(0U), 1);
+  EXPECT_EQ(sink->observation_at(1U), 2);
+  EXPECT_EQ(sink->terminal_kind(), ComputeRunTerminalKind::Succeeded);
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Succeeded);
 }
 
 /**

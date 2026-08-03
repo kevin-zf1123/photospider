@@ -173,7 +173,8 @@ ComputeRunSubmission make_standalone_submission(
                     std::nullopt},
       SupersessionIdentity{
           SupersessionKey(target_node_id, ComputeIntent::GlobalHighPrecision),
-          SupersessionGeneration(1U)}};
+          SupersessionGeneration(1U)},
+      nullptr};
 }
 
 /**
@@ -200,7 +201,8 @@ ComputeRunSubmission make_group_submission(GraphInstanceId graph_instance_id,
                               quality,
                               ComputeRunQos{ComputeRunQosClass::Throughput,
                                             std::nullopt, 1U, std::nullopt},
-                              identity};
+                              identity,
+                              nullptr};
 }
 
 /**

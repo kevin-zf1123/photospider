@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "benchmark/i1_host.hpp"
 #include "compute/dirty_region_snapshot.hpp"
 #include "compute/execution_service.hpp"
 #include "core/parameter_value_text.hpp"
@@ -2305,7 +2306,7 @@ HostPluginLoadReport to_public_plugin_report(const PluginLoadResult& report) {
  *       unit. Per-adapter graph state is independent, while operation plugin
  *       state comes from the one process owner shared by every adapter.
  */
-class EmbeddedHost final : public Host {
+class EmbeddedHost final : public Host, public benchmark::I1Host {
  public:
   /**
    * @brief Creates a Host with a fresh explicitly composed backend state.
@@ -2634,74 +2635,28 @@ class EmbeddedHost final : public Host {
    */
   Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) override {
-    return guarded_result<std::future<OperationStatus>>(
-        "compute_async", GraphErrc::ComputeError, [&] {
-          if (!valid_compute_execution_options(request.execution)) {
-            return failure_result<std::future<OperationStatus>>(
-                GraphErrc::InvalidParameter,
-                "compute maximum_parallelism must be positive when present");
-          }
-          auto kernel_request = to_kernel_compute_request(request);
-          GraphSessionId session = request.session;
-          auto state = state_;
-          auto registration = state->schedule_and_track_async_compute(
-              request.session,
-              [state, kernel_request = std::move(kernel_request)]() mutable {
-                return state->interaction.cmd_compute_async(
-                    std::move(kernel_request));
-              });
-          if (!registration.scheduled) {
-            return failure_result<std::future<OperationStatus>>(
-                GraphErrc::NotFound,
-                "failed to schedule compute for graph session: " +
-                    request.session.value);
-          }
+    return compute_async_internal(std::move(request), std::nullopt, nullptr);
+  }
 
-          std::shared_future<Kernel::AsyncComputeResult> shared_future =
-              std::move(registration.future);
-          const uint64_t tracking_id = registration.tracking_id;
-          std::future<OperationStatus> wrapped;
-          try {
-            // After backend acceptance, every allocating setup stage is covered
-            // by the catch path until the joined worker is attached.
-            std::optional<std::promise<OperationStatus>> publication(
-                std::in_place);
-            wrapped = publication->get_future();
-            EmbeddedHostState* const state_ptr = state.get();
-            std::future<void> status_worker = std::async(
-                std::launch::async,
-                [state_ptr, session, tracking_id, shared_future,
-                 publication = std::move(publication)]() mutable {
-                  // set_value/set_exception (or reset as the defensive
-                  // fallback) makes the caller-visible future ready before
-                  // close is notified.
-                  try {
-                    publication->set_value(
-                        await_async_compute_status(shared_future, session));
-                  } catch (...) {
-                    const std::exception_ptr failure = std::current_exception();
-                    try {
-                      publication->set_exception(failure);
-                    } catch (...) {
-                      publication.reset();
-                    }
-                  }
-                  state_ptr->mark_async_status_published(tracking_id);
-                });
-            state->attach_async_status_worker(tracking_id,
-                                              std::move(status_worker));
-          } catch (...) {
-            try {
-              if (shared_future.valid()) {
-                shared_future.wait();
-              }
-            } catch (...) {
-            }
-            state->remove_async_compute_tracking(tracking_id);
-            throw;
-          }
-          return success_result(std::move(wrapped));
-        });
+  /** @copydoc benchmark::I1Host::compute_i1_async */
+  Result<std::future<OperationStatus>> compute_i1_async(
+      benchmark::I1HostComputeRequest request) override {
+    return compute_async_internal(std::move(request.request), request.qos,
+                                  std::move(request.observation_sink));
+  }
+
+  /** @copydoc benchmark::I1Host::i1_execution_snapshot */
+  benchmark::I1ExecutionSnapshot i1_execution_snapshot(
+      std::uint64_t after_cursor, std::size_t limit) const override {
+    if (limit > compute::kExecutionLifecycleTelemetryMaxPageSize) {
+      throw std::invalid_argument(
+          "I1 lifecycle snapshot limit exceeds the maintained maximum.");
+    }
+    return benchmark::I1ExecutionSnapshot{
+        state_->execution_service->resource_snapshot(),
+        state_->execution_service->device_resource_snapshots(),
+        state_->execution_service->lifecycle_snapshot(
+            after_cursor, static_cast<std::uint32_t>(limit))};
   }
 
   /**
@@ -3927,6 +3882,126 @@ class EmbeddedHost final : public Host {
   }
 
  private:
+  /**
+   * @brief Shares asynchronous Host admission/tracking across public and I1
+   * callers.
+   *
+   * The method first validates installed execution controls and the optional
+   * all-or-none private I1 QoS/observer pair. It then translates the ordinary
+   * Host request, attaches the private fields, pre-registers lifecycle
+   * tracking, submits through InteractionService, and joins one status worker
+   * that publishes the exact backend outcome before notifying close.
+   *
+   * @param request Ordinary Host request transferred into tracking ownership.
+   * @param run_qos Optional complete private I1 QoS; absence selects the
+   * established public Throughput default.
+   * @param observation_sink Optional observation-only sink paired with
+   * `run_qos`.
+   * @return Scheduling status and a future for the exact product outcome.
+   * @throws std::bad_alloc when request, future, or tracking ownership cannot
+   * allocate.
+   * @throws std::system_error from Host/backend synchronization.
+   * @note A successful return is the Host acceptance boundary. Later compute
+   * cancellation or failure is reported only by the returned future. Private
+   * fields never enter the installed Host request or any IPC value.
+   */
+  Result<std::future<OperationStatus>> compute_async_internal(
+      HostComputeRequest request, std::optional<compute::ComputeRunQos> run_qos,
+      std::shared_ptr<compute::ComputeRunObservationSink> observation_sink) {
+    return guarded_result<std::future<OperationStatus>>(
+        "compute_async", GraphErrc::ComputeError, [&] {
+          if (!valid_compute_execution_options(request.execution)) {
+            return failure_result<std::future<OperationStatus>>(
+                GraphErrc::InvalidParameter,
+                "compute maximum_parallelism must be positive when present");
+          }
+          const bool has_private_qos = run_qos.has_value();
+          const bool has_private_observer = observation_sink != nullptr;
+          if (has_private_qos != has_private_observer) {
+            return failure_result<std::future<OperationStatus>>(
+                GraphErrc::InvalidParameter,
+                "private I1 QoS and observation sink must be supplied "
+                "together");
+          }
+          if (has_private_qos &&
+              (run_qos->service_class !=
+                   compute::ComputeRunQosClass::Interactive ||
+               !run_qos->deadline.has_value() || run_qos->weight != 1U ||
+               run_qos->maximum_parallelism !=
+                   std::optional<std::uint32_t>{8U})) {
+            return failure_result<std::future<OperationStatus>>(
+                GraphErrc::InvalidParameter,
+                "private I1 QoS requires Interactive, deadline, weight one, "
+                "and cap eight");
+          }
+
+          Kernel::ComputeRequest kernel_request =
+              to_kernel_compute_request(request);
+          kernel_request.run_qos = std::move(run_qos);
+          kernel_request.observation_sink = std::move(observation_sink);
+          GraphSessionId session = request.session;
+          std::shared_ptr<EmbeddedHostState> state = state_;
+          EmbeddedHostState::AsyncComputeRegistration registration =
+              state->schedule_and_track_async_compute(
+                  request.session, [state, kernel_request = std::move(
+                                               kernel_request)]() mutable {
+                    return state->interaction.cmd_compute_async(
+                        std::move(kernel_request));
+                  });
+          if (!registration.scheduled) {
+            return failure_result<std::future<OperationStatus>>(
+                GraphErrc::NotFound,
+                "failed to schedule compute for graph session: " +
+                    request.session.value);
+          }
+
+          std::shared_future<Kernel::AsyncComputeResult> shared_future =
+              std::move(registration.future);
+          const uint64_t tracking_id = registration.tracking_id;
+          std::future<OperationStatus> wrapped;
+          try {
+            // After backend acceptance, every allocating setup stage is covered
+            // by the catch path until the joined worker is attached.
+            std::optional<std::promise<OperationStatus>> publication(
+                std::in_place);
+            wrapped = publication->get_future();
+            EmbeddedHostState* const state_ptr = state.get();
+            std::future<void> status_worker = std::async(
+                std::launch::async,
+                [state_ptr, session, tracking_id, shared_future,
+                 publication = std::move(publication)]() mutable {
+                  // set_value/set_exception (or reset as the defensive
+                  // fallback) makes the caller-visible future ready before
+                  // close is notified.
+                  try {
+                    publication->set_value(
+                        await_async_compute_status(shared_future, session));
+                  } catch (...) {
+                    const std::exception_ptr failure = std::current_exception();
+                    try {
+                      publication->set_exception(failure);
+                    } catch (...) {
+                      publication.reset();
+                    }
+                  }
+                  state_ptr->mark_async_status_published(tracking_id);
+                });
+            state->attach_async_status_worker(tracking_id,
+                                              std::move(status_worker));
+          } catch (...) {
+            try {
+              if (shared_future.valid()) {
+                shared_future.wait();
+              }
+            } catch (...) {
+            }
+            state->remove_async_compute_tracking(tracking_id);
+            throw;
+          }
+          return success_result(std::move(wrapped));
+        });
+  }
+
   /** @brief Shared backend state owned by this Host and its joined workers. */
   std::shared_ptr<EmbeddedHostState> state_;
 };

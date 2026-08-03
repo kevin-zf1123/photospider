@@ -469,7 +469,8 @@ compute::ComputeRunSubmission make_run_submission(
           ? compute::ComputeRunQuality::Interactive
           : compute::ComputeRunQuality::Full,
       request.qos,
-      supersession};
+      supersession,
+      request.observation_sink};
 }
 
 /**
