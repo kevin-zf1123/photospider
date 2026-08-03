@@ -290,24 +290,80 @@ The scalar and composite payload grammar is closed:
 - `text` is nonempty valid UTF-8 normalized to Unicode NFC and then encoded as
   two lowercase hexadecimal digits per UTF-8 byte. The manifest therefore
   remains ASCII while preserving case-sensitive identity bytes.
-- A list payload is
-  `<unpadded-count>:<frame(item-1)>...<frame(item-n)>`. A map payload is
-  `<unpadded-count>:<frame(key-1)><frame(value-1)>...`. A fixed record payload
-  is the concatenation of one frame for each component in its declared order.
-  Frame lengths and collection counts use the `uint64` lexical form and range;
-  a list count is its item count and a map count is its key/value-pair count.
+- A generic list payload is
+  `<unpadded-count>:<frame(item-1)>...<frame(item-n)>`. A generic map payload is
+  `<unpadded-count>:<frame(key-1)><frame(value-1)>...`. A generic fixed-record
+  payload is the concatenation of one frame for each component's canonical
+  scalar or composite payload in its declared order; component names and type
+  tokens are schema metadata and do not appear inside that payload. Frame
+  lengths and collection counts use the `uint64` lexical form and range; a
+  list count is its item count and a map count is its key/value-pair count.
   Checked parsing rejects arithmetic overflow, a declared length beyond the
   remaining input, or a count that does not consume exactly that many values.
-  A record-list frames each complete fixed-record payload. Sets, maps,
-  inventories, and contract lists sort by unsigned ASCII byte order of the
-  complete canonical key or record and reject duplicates. Only
-  `build_flags` is ordered rather than sorted because compiler-option order is
-  semantic; it preserves invocation order and permits repeated items.
+- `token-set-v1` is exactly the generic list grammar whose items are raw ASCII
+  bytes of one exact token from the field's closed enum/identifier universe.
+  Items sort by unsigned ASCII comparison of those unframed token bytes and
+  are unique. The encoded payload is the count followed by one frame per
+  token; the empty set is exactly `0:`. A duplicate or a token outside the
+  field's closed universe is invalid, not merely ineligible.
+- `ordered-text-list-v1` is exactly the generic list grammar whose item bytes
+  are the canonical lowercase-hex payload of one `text` value, not a complete
+  field record and not an additional text frame. The list grammar contributes
+  the one item frame. Items remain in compiler invocation order and may
+  repeat; the empty list is exactly `0:`.
+- `cpu-record-list-v1`, `device-record-list-v1`, and
+  `contract-record-list-v1` are exactly the generic list grammar. Each item is
+  one frame around the complete corresponding fixed-record payload. Sorting
+  and duplicate detection compare the unframed complete fixed-record payload
+  bytes in unsigned ASCII order, not only `stable_identity` or `contract_id`.
+  CPU and provider-contract lists contain at least one item; GPU,
+  other-device, and plugin-contract lists may be exactly `0:`.
+- `mount-map-v1` and `commit-semantics-v1` are exactly the generic map grammar.
+  Their key and value item bytes are the raw ASCII tokens shown below, each
+  surrounded by the map grammar's one frame. Keys sort by their unframed
+  unsigned ASCII bytes and are unique; their counts are exactly seven and six
+  key/value pairs respectively.
+- `cpu-record-v1`, `device-record-v1`, `contract-record-v1`,
+  `b1-performance-configuration-v1`, `resource-limits-v1`,
+  `metal-resource-limits-v1`, `cache-preconditions-v1`,
+  `residency-preconditions-v1`, `power-policy-v1`, and
+  `thermal-eligibility-v1` are exactly the generic fixed-record grammar. Their
+  component orders and scalar types are fixed below; there is no separator,
+  component-name text, omitted component, or alternate provider object.
 - The `type` frame contains the exact type token from the field table even when
   `state` is not `known`. A `known` record has reason `none` and its canonical
   nonempty payload (`0:` is the explicit payload of an allowed empty
   collection). Every other state has a zero-byte payload, encoded by the final
   `0:` frame.
+
+The eight-token durability capability example is byte-exact. Its
+`token-set-v1` payload is 156 ASCII bytes:
+
+```text
+8:17:atomic-no-replace14:atomic-visible13:crash-durable20:idempotent-reconcile13:manifest-last13:manifest-sync28:namespace-durability-barrier12:payload-sync
+```
+
+The complete 221-byte field record, including its final LF, is:
+
+```text
+field=23:durability_capabilities5:known4:none12:token-set-v1156:8:17:atomic-no-replace14:atomic-visible13:crash-durable20:idempotent-reconcile13:manifest-last13:manifest-sync28:namespace-durability-barrier12:payload-sync\n
+```
+
+Here and in the remaining inline byte examples, the displayed final `\n`
+denotes one LF byte. A known empty collection and a non-applicable scalar are
+different bytes. Known-empty `build_flags` frames the two-byte list payload
+`0:` and therefore ends in `2:0:`:
+
+```text
+field=11:build_flags5:known4:none20:ordered-text-list-v12:0:\n
+```
+
+By contrast, the I1/I2 non-applicable storage digest has a zero-byte payload
+and therefore ends in `0:`:
+
+```text
+field=26:storage_environment_digest14:not-applicable24:row-has-no-output-commit6:sha2560:\n
+```
 
 States and reasons are also closed:
 
@@ -337,7 +393,7 @@ four ineligible states.
 
 Every B1 or M1 row sets `storage_environment_applicability=required`. Its
 storage manifest starts with the exact header
-`execution-profile-storage-environment-v1\n`, followed by exactly these 20
+`execution-profile-storage-environment-v1\n`, followed by exactly these 21
 records:
 
 | # | Field | Exact type and known value domain | Allowed N/A |
@@ -360,8 +416,9 @@ records:
 | 16 | `durability_endpoint_identity` | `text`; configured namespace/root through which the last required barrier or provider commit extends | No |
 | 17 | `durability_anchor_identity` | `text`; stable backing filesystem, volume, device, bucket, or provider durability-domain identity | No |
 | 18 | `storage_class` | `enum`: `memory`, `local-block`, `remote-block`, `network-filesystem`, `object`, or `composite` | No |
-| 19 | `hardware_write_cache_policy` | `enum`: `disabled`, `write-through`, `write-back-protected`, `write-back-unprotected`, `provider-managed-protected`, or `provider-managed-unprotected` | `hardware-write-cache-layer-absent` |
-| 20 | `power_loss_protection_policy` | `enum`: `present`, `absent`, `provider-guaranteed`, or `provider-not-guaranteed` | `power-loss-protection-layer-absent` |
+| 19 | `b1_performance_configuration` | `b1-performance-configuration-v1`; exact fixed record below | No |
+| 20 | `hardware_write_cache_policy` | `enum`: `disabled`, `write-through`, `write-back-protected`, `write-back-unprotected`, `provider-managed-protected`, or `provider-managed-unprotected` | `hardware-write-cache-layer-absent` |
+| 21 | `power_loss_protection_policy` | `enum`: `present`, `absent`, `provider-guaranteed`, or `provider-not-guaranteed` | `power-loss-protection-layer-absent` |
 
 `durability_anchor_identity` is the one fixed representation for the backing
 volume/device/storage identity previously described as a provider-specific
@@ -391,8 +448,9 @@ tokens above. The canonical map never preserves native order or duplicates. If
 the platform defines a deterministic duplicate winner, the collector probes
 and emits that one effective value; otherwise conflicting duplicates produce
 `unprovable/conflicting-effective-values`. An unknown native option is excluded
-only when retained evidence proves it cannot affect any of the seven keys or
-`commit_semantics`; otherwise the field is
+only when retained evidence proves it cannot affect any of the seven keys,
+`commit_semantics`, the fixed B1 performance configuration, hardware-cache/PLP
+policy, or any measured storage-path timing; otherwise the relevant record is
 `unprovable/evidence-chain-incomplete`. A missing canonical key, extra key,
 duplicate key, unsorted key, or raw/canonical inconsistency is invalid.
 
@@ -415,6 +473,123 @@ The closed `durability_capabilities` token universe is
 `namespace-durability-barrier`, and `payload-sync`. A
 compatibility-eligible manifest contains all eight. The set is still retained
 for an ineligible manifest so a validator can report exactly what was absent.
+
+`b1-performance-configuration-v1` is one fixed-record payload with exactly the
+following 37 components. Each row contributes one frame containing the
+component's canonical scalar payload, in this order; the component names do
+not appear on the wire:
+
+| # | Component | Exact scalar type and domain |
+| ---: | --- | --- |
+| 1 | `compression_mode` | `enum`: `disabled`, `enabled`, or `provider-managed` |
+| 2 | `compression_algorithm` | `identifier`; exact normalized algorithm id or the sentinel required below |
+| 3 | `compression_level` | `uint64`; effective numeric level, or the exact zero case below |
+| 4 | `compression_profile` | `identifier`; exact normalized profile id or sentinel |
+| 5 | `encryption_path` | `enum`: `none`, `host-client`, `filesystem`, `block-device`, `network-service`, `provider-managed`, or `composite` |
+| 6 | `encryption_profile` | `identifier`; exact algorithm/mode/offload profile or `none` |
+| 7 | `checksum_mode` | `enum`: `disabled`, `metadata-only`, `data-only`, `data-and-metadata`, or `provider-managed` |
+| 8 | `checksum_algorithm` | `identifier`; exact storage checksum id or `none` |
+| 9 | `deduplication_mode` | `enum`: `disabled`, `inline`, `post-process`, or `provider-managed` |
+| 10 | `logical_block_bytes` | `uint64`; effective logical block size |
+| 11 | `physical_block_bytes` | `uint64`; effective physical block size |
+| 12 | `record_bytes` | `uint64`; effective backend record/object-write unit |
+| 13 | `allocation_unit_bytes` | `uint64`; effective allocation unit |
+| 14 | `allocation_mode` | `enum`: `preallocated`, `on-demand`, `sparse`, `copy-on-write`, `memory-resident`, or `provider-managed` |
+| 15 | `provisioning_mode` | `enum`: `thick`, `thin`, `elastic`, `memory-resident`, or `provider-managed` |
+| 16 | `layout_mode` | `enum`: `single`, `striped`, `mirrored`, `replicated`, `erasure-coded`, or `provider-managed` |
+| 17 | `layout_data_units` | `uint64`; effective data-unit count |
+| 18 | `layout_parity_units` | `uint64`; effective parity-unit count |
+| 19 | `layout_replica_count` | `uint64`; effective complete-copy count |
+| 20 | `layout_stripe_unit_bytes` | `uint64`; effective stripe/chunk unit |
+| 21 | `layout_profile` | `identifier`; exact normalized geometry/service profile or `none` |
+| 22 | `upper_write_cache_mode` | `enum`: `absent`, `disabled`, `write-through`, `write-back`, or `provider-managed` |
+| 23 | `upper_write_cache_profile` | `identifier`; exact filesystem/backend/provider cache profile, `none`, or `not-applicable` |
+| 24 | `io_scheduler` | `identifier`; exact normalized scheduler/profile id |
+| 25 | `io_queue_policy` | `enum`: `serial`, `fixed`, `unbounded`, or `provider-managed` |
+| 26 | `io_queue_depth` | `uint64`; effective queue depth under the rule below |
+| 27 | `io_concurrency_policy` | `enum`: `serial`, `fixed`, `unbounded`, or `provider-managed` |
+| 28 | `io_concurrency_limit` | `uint64`; effective storage-write concurrency under the rule below |
+| 29 | `network_path` | `enum`: `not-applicable`, `host-loopback`, `lan`, `wan`, or `provider-internal` |
+| 30 | `network_protocol` | `identifier`; exact protocol/version profile or `not-applicable` |
+| 31 | `network_link_profile` | `identifier`; exact link/transport profile or `not-applicable` |
+| 32 | `network_mtu_bytes` | `uint64`; effective path MTU, or zero only when no network hop exists |
+| 33 | `network_qos_profile` | `identifier`; exact QoS/traffic-class profile or `not-applicable` |
+| 34 | `network_region` | `identifier`; exact provider/placement region or `not-applicable` |
+| 35 | `backend_service` | `identifier`; exact backend/provider service id |
+| 36 | `backend_performance_tier` | `identifier`; exact service/performance tier or `not-applicable` |
+| 37 | `device_performance_profile` | `identifier`; exact device/volume performance profile or `not-applicable` |
+
+This fixed record uses the following closed sentinel and cross-component
+rules:
+
+- `compression_mode=disabled` requires algorithm/profile `none` and level
+  zero. `enabled` requires a non-`none` algorithm and a profile that names the
+  exact effective default or explicit parameter set; `provider-managed`
+  requires algorithm `provider-managed`, level zero, and a non-`none` stable
+  profile. A default level is not silently encoded as zero unless the named
+  profile defines that exact default under the recorded backend-semantics
+  generation.
+- `encryption_path=none` requires `encryption_profile=none`; every other path
+  requires a non-`none` profile that identifies algorithm, mode, and offload
+  path without recording secrets or key material. `checksum_mode=disabled`
+  requires `checksum_algorithm=none`; every other checksum mode requires its
+  exact algorithm id. Deduplication has no omitted state: `disabled` is the
+  explicit known-disabled value.
+- A byte-unit component is zero only when retained evidence proves that the
+  complete measured path genuinely has no fixed/applicable unit of that kind.
+  An opaque, unobserved, variable, or undisclosed unit is not zero and makes
+  the outer performance record ineligible. Otherwise the exact effective
+  value is at least one.
+- `layout_mode=single` requires data/parity/replica/stripe values `1/0/1/0`.
+  `striped` requires data at least two, parity zero, replica one, and positive
+  stripe unit. `mirrored` or `replicated` requires data one, parity zero,
+  replica at least two, and stripe zero. `erasure-coded` requires positive
+  data, parity, and stripe values and replica one. `provider-managed` still
+  requires a stable non-`none` layout profile and every applicable effective
+  geometry value; provider opacity is not a profile.
+- `upper_write_cache_mode=absent` requires profile `not-applicable` with raw
+  layer-absence proof; `disabled` requires `none`; every enabled or managed
+  mode requires its exact profile. Queue/concurrency `serial` requires value
+  one, `fixed` and `provider-managed` require a positive effective bound, and
+  `unbounded` requires zero. An undisclosed provider limit is not unbounded.
+- `network_path=not-applicable` requires protocol, link, QoS, and region all
+  `not-applicable` plus MTU zero, with proof that the complete storage path has
+  no network hop. Every other path requires non-sentinel protocol/link/QoS/
+  region identifiers and a positive effective MTU. A remote-provider boundary
+  does not waive those fields.
+- `backend_service` always names the exact effective service. A performance
+  tier or device profile may be `not-applicable` only with retained proof that
+  the corresponding configurable layer is absent. Normalized identifier
+  values are bound to `backend_semantics_id` and
+  `backend_semantics_generation`; an implementation cannot invent aliases to
+  force two native configurations to compare equal.
+
+The complete performance configuration is observed and frozen before warmup
+and must remain effective through the replicate. It contains stable effective
+configuration, not instantaneous queue occupancy/latency, cache temperature,
+free-space watermark, provider autoscaler/load state, competing-process load,
+network RTT/jitter, a disposable path/job-directory name, or the subject
+repository commit/build/binary identity. Those time-varying facts remain
+eligibility/precondition evidence or raw diagnostics, and v1 does not require
+two runs to have identical background noise. Configuration drift during a
+replicate is invalid; diagnostic noise is not promoted into compatibility
+bytes.
+
+Every effective mount, filesystem, volume, device, backend, provider, or
+network option/configuration that can change B1 payload or manifest write,
+synchronization, barrier, provider-commit, revalidation, or golden-readback
+timing must map to the fixed mount map, commit map, performance record,
+hardware-cache policy, or PLP policy. Pure application CPU hashing does not by
+itself add a storage field, but an option that changes the reads or writes
+feeding revalidation remains in scope. An option may be excluded only when
+retained authoritative evidence proves that it affects neither performance nor
+durability anywhere on that complete measured path. Otherwise
+`b1_performance_configuration` is
+`unprovable/evidence-chain-incomplete`, and storage eligibility includes
+`performance-configuration-unprovable`. For example, Btrfs
+`compress=zstd` and disabled compression necessarily produce different
+performance records and are incompatible even if their seven-key mount maps,
+commit maps, and artifact manifests are otherwise identical.
 
 The base manifest starts with
 `execution-profile-base-environment-v1\n` and then exactly these 24 records.
@@ -474,18 +649,20 @@ device_scratch_limit_bytes:uint64=268435456)`.
 
 The remaining fixed records are:
 
-- `cache-preconditions-v1` is `(disk_cache=disabled, codec_io=disabled,
-  cross_episode_result_reuse=disabled, cross_job_result_reuse=disabled)`.
+- `cache-preconditions-v1` is `(disk_cache:enum=disabled,
+  codec_io:enum=disabled, cross_episode_result_reuse:enum=disabled,
+  cross_job_result_reuse:enum=disabled)`.
 - `residency-preconditions-v1` is
-  `(i1_host=baseline-and-current,
-  i2_host=baseline-preview-final,
-  i2_metal=conditional-first-upload-then-reuse,
-  b1_result_reuse=disabled, m1_execution_authority=single-process-domain)`.
-- `power-policy-v1` is `(source, mode, sleep)`, where `source` is
+  `(i1_host:enum=baseline-and-current,
+  i2_host:enum=baseline-preview-final,
+  i2_metal:enum=conditional-first-upload-then-reuse,
+  b1_result_reuse:enum=disabled,
+  m1_execution_authority:enum=single-process-domain)`.
+- `power-policy-v1` is `(source:enum, mode:enum, sleep:enum)`, where `source` is
   `external-ac` or `battery`, `mode` is `automatic`, `balanced`,
   `high-performance`, or `low-power`, and `sleep` is `inhibited` or `allowed`.
-- `thermal-eligibility-v1` is `(start, maximum_allowed)`; each component is
-  `nominal`, `fair`, `serious`, or `critical`.
+- `thermal-eligibility-v1` is `(start:enum, maximum_allowed:enum)`; each
+  component is `nominal`, `fair`, `serious`, or `critical`.
 
 Repository commit, dirty state, executable/library/provider/plugin binary
 hashes, bundle and row identities, and disposable paths remain mandatory raw
@@ -518,14 +695,18 @@ the four records.
 Storage compatibility eligibility is derived evidence, not digest input. It
 is `eligible` with an empty reason set only when the manifest is canonical,
 all fields are known or use their sole proved N/A pair, mount normalization and
-raw observation chains are complete, `access_mode=read-write`, all eight
-durability capabilities are present, commit semantics and endpoint/anchor
-evidence describe one consistent durability path, requested and achieved
-durability are both `crash-durable`, and every job/release-artifact root-
-containment proof succeeds. Otherwise it is `ineligible` with a nonempty,
-sorted subset of the closed reasons `canonical-schema-invalid`,
+raw observation chains are complete, the fixed B1 performance configuration
+is fully mapped, proved, frozen, and cross-component-valid, no excluded
+effective option can affect the complete measured storage path,
+`access_mode=read-write`, all eight durability capabilities are present,
+commit semantics and endpoint/anchor evidence describe one consistent
+durability path, requested and achieved durability are both `crash-durable`,
+and every job/release-artifact root-containment proof succeeds. Otherwise it
+is `ineligible` with a nonempty, sorted subset of the closed reasons
+`canonical-schema-invalid`,
 `required-observation-ineligible`, `not-applicable-proof-invalid`,
 `mount-normalization-unprovable`, `commit-semantics-inconsistent`,
+`performance-configuration-unprovable`,
 `required-capability-absent`, `durability-class-not-crash-durable`,
 `durability-path-inconsistent`, `root-containment-unproved`, and
 `raw-observation-proof-incomplete`.
@@ -533,24 +714,28 @@ sorted subset of the closed reasons `canonical-schema-invalid`,
 Two storage environments are compatible only when both are eligible, their
 retained canonical storage manifests are byte-for-byte equal, each supplied
 digest equals its independent recomputation, and the two digests are equal.
-Digest equality never substitutes for byte equality. Base compatibility uses
-the same exact-byte and recomputed-digest rule on the base manifests. A
-candidate/reference I1 or I2 comparison requires exact base compatibility and
-the fixed storage-N/A environment-class manifest. Candidate/reference B1/M1,
-B1 cap-1/cap-8, and M1/paired-B1-cap-8 comparisons require exact base and
-storage compatibility plus equal recomputed full environment-class manifests
-and digests. M1/paired-I1 compares only exact base compatibility; their
-environment-class manifests intentionally differ, and M1 storage cannot
-invalidate that I1 latency pair.
+The byte comparison necessarily includes the complete framed
+`b1_performance_configuration` field. Digest equality never substitutes for
+byte equality. Base compatibility uses the same exact-byte and
+recomputed-digest rule on the base manifests. A candidate/reference I1 or I2
+comparison requires exact base compatibility and the fixed storage-N/A
+environment-class manifest. Candidate/reference B1/M1, B1 cap-1/cap-8, and
+M1/paired-B1-cap-8 comparisons require exact base and storage compatibility
+plus equal recomputed full environment-class manifests and digests.
+M1/paired-I1 compares only exact base compatibility; their environment-class
+manifests intentionally differ, and M1 storage cannot invalidate that I1
+latency pair.
 
-Issue #95 owns storage-path raw probes, backend adapters into this exact
-schema, mount normalization, state/reason proof, canonical storage bytes and
-digest production, eligibility/root-containment evidence, and B1 cap-1/cap-8
+Issue #95 owns fixed raw probe-to-schema mappings for the complete storage
+path, including performance configuration; backend adapters into this exact
+schema; mount normalization; state/reason proof; the one canonical encoder and
+digest production; eligibility/root-containment evidence; and B1 cap-1/cap-8
 plus candidate/reference checks. Issue #96 reuses those bytes unchanged,
 records the M1 storage observation before warmup, and enforces the exact
 same-ordinal M1/B1 pair while preserving base-only M1/I1 pairing. Neither issue
-may add a v1 field or alternate provider grammar. Issue #92 adds no probe,
-serializer, API, runtime result field, harness, or compatibility code.
+may add a v1 field, reinterpret a sentinel, or define an alternate provider
+grammar. Issue #92 adds no probe, serializer, API, runtime result field,
+harness, or compatibility code.
 
 The raw payload SHA-256 hashes the exact 67,108,864 little-endian bytes; the
 manifest SHA-256 hashes that job's exact
@@ -582,8 +767,9 @@ each replicate records and freezes:
   and
 - all resource limits and Interactive headroom; and
 - for B1 and M1, the selected `OutputStore` root evidence, normalized storage
-  fingerprint, `storage_environment_digest`, compatibility eligibility, and
-  raw capability observations.
+  fingerprint including the frozen B1 performance configuration,
+  `storage_environment_digest`, compatibility eligibility, and raw
+  capability/configuration observations.
 
 The v1 resource configuration is 32 CPU slots, 1 GiB Host retained memory,
 512 MiB Host scratch, 65,536 ready entries, 256 MiB ready bytes, and
@@ -806,7 +992,7 @@ Their repository/build identity may differ and is recorded because that is the
 subject of the comparison.
 
 Environment class is row-applicable rather than one unqualified machine label.
-The exact 24-field base manifest, 20-field storage manifest, four-field
+The exact 24-field base manifest, 21-field storage manifest, four-field
 environment-class manifest, record grammar, and digest inputs are fixed above.
 The base manifest binds OS/kernel, architecture, inventories, compiler/build
 configuration, worker count, execution provider/plugin contracts, frozen
@@ -858,7 +1044,7 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 | --- | --- |
 | #93 | Implement I1 request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
 | #94 | Implement I2 on the exact I1 lineage; publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
-| #95 | Implement B1 immutable manifests, reservations, canonical semantic trace, crash-durable artifact commit, the fixed storage probes/adapters/mount normalizer/encoder/digests/eligibility checks, and logical/raw goldens; publish isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
+| #95 | Implement B1 immutable manifests, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
 | #96 | Compose the exact I1 and B1 fixtures into M1, reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish mixed latency, throughput progress, fairness, waste, and memory rows. |
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but

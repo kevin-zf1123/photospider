@@ -1103,19 +1103,25 @@ absolute resource limits, and exact quiescent settlement cannot be traded for
 speed in another dimension.
 
 For B1 and M1, “same environment” uses ADR 0010's closed manifests: a fixed
-24-field `execution-profile-base-environment-v1`, fixed 20-field
+24-field `execution-profile-base-environment-v1`, fixed 21-field
 `execution-profile-storage-environment-v1`, and fixed four-field
 `execution-profile-environment-class-v1`. Their ASCII length-framed canonical
 bytes and independently recomputed SHA-256 values must match exactly; digest
 equality never substitutes for byte equality. The storage schema fixes typed
 state/reason pairs, the only allowed N/A reasons, a seven-key effective-mount
 map, six commit-semantics keys, durability endpoint/anchor identities, and
-closed capability/enum sets. Remote, RAM-backed, or copy-on-write storage is
-capability-gated rather than accepted or forbidden by class. #95 implements
-the probes, adapters, normalization, encoder/digests, eligibility, containment,
-and B1 checks without changing the schema. #96 reuses those exact bytes and
-enforces the same-ordinal full M1/B1 pair; the I1-only latency pair compares
-only the exact base manifest/digest and ignores M1's unrelated storage.
+closed capability/enum sets. Its fixed 37-component B1 performance record binds
+compression, encryption, checksum/deduplication, block/record/allocation units,
+provisioning/layout geometry, upper write cache, I/O scheduling/queue/
+concurrency, remote network path, backend service tier, and device profile.
+Any effective option that can affect the complete measured storage path is
+mapped or proved irrelevant; opacity fails closed, while instantaneous load
+noise remains raw diagnostic evidence. Remote, RAM-backed, or copy-on-write
+storage is capability-gated rather than accepted or forbidden by class. #95
+implements the fixed probe-to-schema mapping, single encoder, eligibility, and
+B1 checks without changing v1. #96 reuses those exact bytes and enforces the
+same-ordinal full M1/B1 pair; the I1-only latency pair compares only the exact
+base manifest/digest and ignores M1's unrelated storage.
 
 The frozen protocol does not claim nanosecond-exact operating-system wakes.
 It fixes nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum admission-
@@ -1132,7 +1138,7 @@ The delivery rows are fixed:
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency, waste, memory, and required output correctness. |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact I1 lineage. |
-| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and storage-environment fingerprint evidence at caps 1 and 8. |
+| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and fixed storage/performance probe-to-schema, encoder, eligibility, and compatibility evidence at caps 1 and 8. |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
 
 ADR 0010 is the current accepted decision record, not a statement of current

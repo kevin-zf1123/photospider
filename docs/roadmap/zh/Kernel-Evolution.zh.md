@@ -890,17 +890,22 @@ semantic-trace/golden digest、有界 discarded service、绝对 resource limit 
 quiescent settlement 都不能用另一维更快的速度交换。
 
 对 B1 与 M1，“同环境”使用 ADR 0010 的封闭 manifest：固定 24-field
-`execution-profile-base-environment-v1`、固定 20-field
+`execution-profile-base-environment-v1`、固定 21-field
 `execution-profile-storage-environment-v1` 与固定四 field
 `execution-profile-environment-class-v1`。其 ASCII length-framed canonical byte
 与独立复算 SHA-256 必须精确匹配；digest 相等绝不替代 byte 相等。Storage schema
 固定 typed state/reason pair、唯一允许的 N/A reason、七 key effective-mount map、
 六项 commit-semantics key、durability endpoint/anchor identity 与封闭 capability/
-enum set。Remote、RAM-backed 或 copy-on-write storage 受 capability 门禁约束，
-而不是按 class 自动接受或禁止。#95 在不改变 schema 的前提下实现 probe、adapter、
-normalization、encoder/digest、eligibility、containment 与 B1 check。#96 原样复用
-这些精确 byte，并强制执行 same-ordinal 完整 M1/B1 pair；I1-only latency pair 只
-比较精确 base manifest/digest，忽略 M1 无关 storage。
+enum set。其固定 37-component B1 performance record 绑定 compression、encryption、
+checksum/deduplication、block/record/allocation unit、provisioning/layout geometry、
+upper write cache、I/O scheduling/queue/concurrency、remote network path、backend
+service tier 与 device profile。任何可能影响完整 measured storage path 的 effective
+option 都要映射或证明无关；opacity fail closed，而瞬时 load noise 保持为 raw
+diagnostic evidence。Remote、RAM-backed 或 copy-on-write storage 受 capability 门禁
+约束，而不是按 class 自动接受或禁止。#95 在不改变 v1 的前提下实现固定 probe-to-
+schema mapping、唯一 encoder、eligibility 与 B1 check。#96 原样复用这些精确 byte，
+并强制执行 same-ordinal 完整 M1/B1 pair；I1-only latency pair 只比较精确 base
+manifest/digest，忽略 M1 无关 storage。
 
 冻结 protocol 不声称操作系统会精确到纳秒醒来。它固定相隔 16,666,667 ns 的
 nominal monotonic start、最大 2 ms admission-start lateness、精确 750,000,000 ns
@@ -916,7 +921,7 @@ digest。
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency、waste、memory 与必需 output correctness。 |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 I1 lineage 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness。 |
-| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory 与 storage-environment fingerprint 证据。 |
+| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory，以及固定 storage/performance probe-to-schema、encoder、eligibility 与 compatibility 证据。 |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 M1 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
 
 ADR 0010 是当前已接受的决策记录，不是当前 runtime capability 的事实陈述。

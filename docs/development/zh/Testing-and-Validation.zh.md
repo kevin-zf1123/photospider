@@ -1400,6 +1400,7 @@ achieved_durability
 durability_endpoint_identity
 durability_anchor_identity
 storage_class
+b1_performance_configuration
 hardware_write_cache_policy
 power_loss_protection_policy
 ```
@@ -1459,6 +1460,66 @@ list、map、set 与 fixed record 遵循 ADR 的封闭 grammar。Header 精确�
 length、BOM/CR/额外 whitespace、非 canonical scalar、未排序 set/map/record-list
 value 或重复 collection item 都是 invalid。
 
+Validator 不能依据上述通用说明自行推断具体 collection type。`token-set-v1` 是
+count 加每个精确 raw ASCII token 的一个 frame，按未加 frame 的 token byte 排序并
+保持唯一；空 set 为 `0:`，未知 token 为 invalid。`ordered-text-list-v1` 是 count 加
+每个 canonical lowercase-hex `text` payload 的一个 frame，保留 invocation order；
+允许 duplicate，空 list 为 `0:`。CPU/device/contract record list 为每个完整 fixed-
+record payload 加 frame，按未加外层 frame 的完整 record byte 排序并保持唯一，同时
+执行各自的 `>=1`、`>=0` 与 provider/plugin cardinality。Mount 与 commit type 使用
+通用 map grammar，分别精确包含 7 与 6 个已排序 raw-token pair。其他每个 named
+composite 都使用通用 fixed-record grammar，按 ADR 声明顺序精确包含 component frame，
+wire 中没有 component name。
+
+`b1-performance-configuration-v1` 的精确 fixed-record component/type 顺序是：
+
+```text
+compression_mode:enum
+compression_algorithm:identifier
+compression_level:uint64
+compression_profile:identifier
+encryption_path:enum
+encryption_profile:identifier
+checksum_mode:enum
+checksum_algorithm:identifier
+deduplication_mode:enum
+logical_block_bytes:uint64
+physical_block_bytes:uint64
+record_bytes:uint64
+allocation_unit_bytes:uint64
+allocation_mode:enum
+provisioning_mode:enum
+layout_mode:enum
+layout_data_units:uint64
+layout_parity_units:uint64
+layout_replica_count:uint64
+layout_stripe_unit_bytes:uint64
+layout_profile:identifier
+upper_write_cache_mode:enum
+upper_write_cache_profile:identifier
+io_scheduler:identifier
+io_queue_policy:enum
+io_queue_depth:uint64
+io_concurrency_policy:enum
+io_concurrency_limit:uint64
+network_path:enum
+network_protocol:identifier
+network_link_profile:identifier
+network_mtu_bytes:uint64
+network_qos_profile:identifier
+network_region:identifier
+backend_service:identifier
+backend_performance_tier:identifier
+device_performance_profile:identifier
+```
+
+ADR 的封闭 enum/sentinel/cross-component rule 都属于 validation 范围。Zero byte
+unit 与 `not-applicable` identifier 要求缺失/non-applicable layer 的肯定证明，不能
+表示 opacity。Configuration 在 warmup 前采集，并在整个 replicate 中保持稳定。
+它排除 disposable path、subject commit/binary 与瞬时 load、queue、cache、autoscaler、
+free-space、RTT 或 jitter sample；这些保持为 raw precondition/diagnostic，两个运行
+之间无需精确相等。
+
 Observation state 是 `known`、`not-applicable`、`unknown`、`unobserved`、
 `unsupported` 或 `unprovable` 之一。Known 使用 reason `none` 与 canonical payload。
 其他 state 都使用空 payload，且只能携带其封闭的 state-specific reason。唯一 eligible
@@ -1475,19 +1536,25 @@ Adapter 发出 effective behavior：omitted default 与 explicit default 输入 
 为相同值，丢弃 native order；只有 platform 声明 option domain 对 ASCII 大小写不
 敏感时才 fold case。Platform 已定义的 duplicate winner 要 probe 后只发出一次；
 winner 不可证明或冲突时为 `unprovable/conflicting-effective-values`。只有保留 proof
-表明未知 native option 既不影响七个 key，也不影响 `commit_semantics` 时，才可排除
-它；否则 normalization 为 unprovable。六个固定 `commit_semantics` key 与八个封闭
-durability capability token 要独立验证。
+表明未知 native option 既不影响七个 key、`commit_semantics`、固定 performance
+record、hardware-cache/PLP policy，也不影响完整 B1 write/sync/barrier/provider-
+commit/revalidation/golden-readback path 上的 performance/durability 时，才可排除它；
+否则 normalization 或 performance record 为 unprovable。六个固定
+`commit_semantics` key、八个封闭 durability capability token 与 37 个固定
+performance component 要独立验证。Btrfs `compress=zstd` 与 disabled compression
+必须编码为不同 performance record，不能比较为同一个 environment。
 
 独立 validator 按顺序执行：
 
 1. 使用 checked `uint64` length/count arithmetic 解析每个 frame，并要求精确 header、
    LF、field count、field order、type、state/reason pair 与 end of input；
 2. 验证 scalar/composite canonical form、enum domain、list cardinality、order/unique、
-   nested record shape、固定 resource 与 cross-field consistency；
+   具体 token/text/record-list 与 map/fixed-record binding、nested record shape、固定
+   resource、全部 37 个 performance component 与 cross-field consistency；
 3. 把每个规范化 field 绑定到保留的 raw observation/proof，并验证每个 field-specific
-   N/A claim、mount normalization decision、稳定 instance/endpoint/anchor identity 与
-   root-containment proof；
+   N/A claim、mount normalization decision、稳定 instance/endpoint/anchor identity、
+   固定 performance configuration、被排除 option 的 no-effect proof 与 root-
+   containment proof；
 4. 对完整精确 manifest byte 计算小写 SHA-256，从而复算
    `storage_environment_digest` 与 `base_environment_digest`；
 5. 解析精确四 field environment-class manifest 并复算
@@ -1495,28 +1562,34 @@ durability capability token 要独立验证。
    要求 known `not-applicable`、reason `row-has-no-output-commit`，以及 payload 为空的
    N/A storage-digest record；以及
 6. 派生 storage eligibility。Eligible 要求所有 observation known 或使用唯一且有证明
-   的 N/A、`access_mode=read-write`、八项 capability 全部存在、commit/endpoint/
-   anchor evidence 形成一条一致路径、requested 与 achieved durability 都是
-   `crash-durable`，且 containment 成功。Ineligible evidence 携带 ADR 封闭十项
-   reason token 中一个非空、已排序 subset。
+   的 N/A、performance configuration 完整/有证明且保持冻结、每个被排除的
+   effective option 均被证明与完整 measured path 无关、`access_mode=read-write`、
+   八项 capability 全部存在、commit/endpoint/anchor evidence 形成一条一致路径、
+   requested 与 achieved durability 都是 `crash-durable`，且 containment 成功。
+   Ineligible evidence 携带 ADR 封闭十一项 reason token（包括
+   `performance-configuration-unprovable`）中一个非空、已排序 subset。
 
 精确 compatibility 要求 canonical manifest 逐 byte 相同、独立复算 digest 相等，
-并在 storage 适用时要求 eligibility。仅 digest 相等不够。Candidate/reference I1/I2
-使用精确 base compatibility 与固定 storage-N/A environment manifest。
-Candidate/reference B1/M1、B1 cap-1/cap-8 与 M1/paired-B1-cap-8 使用精确 base、
-storage 和完整 environment-class compatibility。M1/paired-I1 只比较精确 base
-manifest/digest；二者的 environment manifest 有意不同。Raw field/proof 缺失、state
-invalid、byte/digest mismatch 或 containment 失败，都会使受影响 relative verdict
-成为 `invalid`。
+并在 storage 适用时要求 eligibility。对 storage，该 byte comparison 包含完整 framed
+performance record。仅 digest 相等不够。Candidate/reference I1/I2 使用精确 base
+compatibility 与固定 storage-N/A environment manifest。Candidate/reference B1/M1、
+B1 cap-1/cap-8 与 M1/paired-B1-cap-8 使用精确 base、storage 和完整 environment-
+class compatibility。M1/paired-I1 只比较精确 base manifest/digest；二者的
+environment manifest 有意不同。Raw field/proof 缺失、state invalid、byte/digest
+mismatch 或 containment 失败，都会使受影响 relative verdict 成为 `invalid`。
 
 Issue #95 必须增加长期确定性机制测试，覆盖固定 field/type/enum/cardinality 拒绝；
-每种 state/reason/payload 组合；NFC/text 与 scalar encoding；collection order 与
-duplicate；omitted 对 explicit mount default；native option order/case；确定与冲突的
-duplicate；unknown-option proof；malformed/overflow frame；三层 digest 的独立复算；
-eligibility reason；以及精确 B1 candidate/reference 和 cap-1/cap-8 compatibility。
-Issue #96 复用这些 fixture，并测试精确 same-ordinal M1/B1 matching 与 base-only
-M1/I1 matching。Issue #92 不新增当前 test binary、serializer、probe、runner、API 或
-runtime field。
+每种 state/reason/payload 组合；NFC/text 与 scalar encoding；精确 156-byte
+durability set 与 221-byte field record；known-empty ordered text 与 zero-byte N/A
+payload；每种 CPU/device/contract record-list cardinality、frame、sort 与 duplicate
+rule；mount/commit map count 与每个 fixed-record component order；omitted 对 explicit
+mount default；native option order/case；确定与冲突的 duplicate；unknown-option
+proof；malformed/overflow frame；全部 37 个 performance field、enum/sentinel/zero/
+cross-component rule、transient-noise exclusion、unmapped-option fail-closed 与 Btrfs
+compression mismatch；三层 digest 独立复算；全部十一项 eligibility reason；以及
+精确 B1 candidate/reference 和 cap-1/cap-8 compatibility。Issue #96 复用这些
+fixture，并测试精确 same-ordinal M1/B1 matching 与 base-only M1/I1 matching。
+Issue #92 不新增当前 test binary、serializer、probe、runner、API 或 runtime field。
 
 ### 运行流程
 
@@ -1529,8 +1602,9 @@ runtime field。
    eligibility、provider/plugin binary 与 generation、process worker、Run cap、
    全部 limit/headroom、fixture hash、seed 和 cache/residency precondition；在
    warmup 前编码并独立验证精确 24-field base manifest；对 B1/M1，还要选择
-   `OutputStore` root、采集 raw storage/capability observation、编码精确 20-field
-   storage manifest，并计算其 eligibility 与 digest；
+   `OutputStore` root、采集 raw storage/capability/configuration observation、编码
+   精确 21-field storage manifest、冻结固定 performance configuration，并计算其
+   eligibility 与 digest；
 3. 要求 candidate 与 reference 的 evidence schema、workload id、environment
    class、limit 与 fixture hash 相同；B1/M1 比较要求逐 byte 相同且 eligible 的
    storage/base manifest 与匹配的四 field environment-class manifest，I1/I2 使用
@@ -1590,8 +1664,9 @@ completion order 不进入 canonical byte，但保留在独立 raw trace 中。
 - 上述全部 provenance 与冻结环境值；
 - 精确 base 与 environment-class manifest byte，以及 claimed 和独立复算的
   `base_environment_digest` 与 `environment_class_digest`；对 B1/M1，还包括精确
-  storage manifest byte、raw capability/root-containment observation、eligibility/
-  reason，以及 claimed 和复算的 `storage_environment_digest`；
+  storage manifest byte、raw capability/performance-configuration/root-containment
+  observation、eligibility/reason，以及 claimed 和复算的
+  `storage_environment_digest`；
 - workload/fixture/source/graph/payload hash 与全部 seed；
 - 相互分离的 warmup、cold 与 measured count/window；
 - raw sample/event、offered-demand eligibility interval 与 drop/gap counter；
@@ -1619,12 +1694,14 @@ resource-limit 或 settlement invariant 时，应注册长期确定性产品行�
 任何 Issue 专属 replay、provenance/result orchestrator、phase-completion scan 或
 performance-result file 都不得注册到 CTest/CI，也不得作为仓库内容长期保留。
 
-Issue #95 负责 B1 `OutputStore` raw probe、backend 到固定 schema 的 adapter、mount
-normalizer、canonical encoder/digest、eligibility 与 root-containment evidence，
-以及 cap-1/cap-8 和 candidate/reference check。Issue #96 为 M1 原样复用精确
-manifest byte，并强制执行其 same-ordinal 完整 B1 pair，同时让 I1-only pair 只比较
-base。Issue #92 只定义本 evidence contract；它不新增当前 probe、serializer、
-public API、runner 或 runtime result field。
+Issue #95 负责 B1 `OutputStore` 固定 raw probe-to-schema mapping、backend 到固定
+schema 的 adapter、mount normalizer、performance-configuration mapping/proof、唯一
+canonical encoder/digest、eligibility 与 root-containment evidence，以及 cap-1/
+cap-8 和 candidate/reference check。Issue #96 为 M1 原样复用精确 manifest byte，
+并强制执行其 same-ordinal 完整 B1 pair，同时让 I1-only pair 只比较 base。两个
+Issue 都不能重定义 v1 grammar、field 或 sentinel。Issue #92 只定义本 evidence
+contract；它不新增当前 probe、serializer、public API、runner 或 runtime result
+field。
 
 ## CTest 注册
 

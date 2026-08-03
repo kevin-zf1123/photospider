@@ -1752,6 +1752,7 @@ achieved_durability
 durability_endpoint_identity
 durability_anchor_identity
 storage_class
+b1_performance_configuration
 hardware_write_cache_policy
 power_loss_protection_policy
 ```
@@ -1815,6 +1816,70 @@ records, malformed lengths, BOM/CR/extra whitespace, noncanonical scalars,
 unsorted set/map/record-list values, or a duplicate collection item are
 invalid.
 
+The validator does not infer a concrete collection type from that generic
+description. `token-set-v1` is a count plus one frame per exact raw ASCII
+token, sorted/unique by the unframed token bytes; empty is `0:` and an unknown
+token is invalid. `ordered-text-list-v1` is a count plus one frame around each
+canonical lowercase-hex `text` payload in invocation order; duplicates are
+allowed and empty is `0:`. CPU/device/contract record lists frame each complete
+fixed-record payload, sort/unique by the complete unframed record bytes, and
+enforce their respective `>=1`, `>=0`, and provider/plugin cardinalities.
+Mount and commit types use the generic map grammar with exactly 7 and 6 sorted
+raw-token pairs. Every other named composite uses the generic fixed-record
+grammar with exactly the ADR-declared component frames and no component names
+on the wire.
+
+The exact `b1-performance-configuration-v1` fixed-record component/type order
+is:
+
+```text
+compression_mode:enum
+compression_algorithm:identifier
+compression_level:uint64
+compression_profile:identifier
+encryption_path:enum
+encryption_profile:identifier
+checksum_mode:enum
+checksum_algorithm:identifier
+deduplication_mode:enum
+logical_block_bytes:uint64
+physical_block_bytes:uint64
+record_bytes:uint64
+allocation_unit_bytes:uint64
+allocation_mode:enum
+provisioning_mode:enum
+layout_mode:enum
+layout_data_units:uint64
+layout_parity_units:uint64
+layout_replica_count:uint64
+layout_stripe_unit_bytes:uint64
+layout_profile:identifier
+upper_write_cache_mode:enum
+upper_write_cache_profile:identifier
+io_scheduler:identifier
+io_queue_policy:enum
+io_queue_depth:uint64
+io_concurrency_policy:enum
+io_concurrency_limit:uint64
+network_path:enum
+network_protocol:identifier
+network_link_profile:identifier
+network_mtu_bytes:uint64
+network_qos_profile:identifier
+network_region:identifier
+backend_service:identifier
+backend_performance_tier:identifier
+device_performance_profile:identifier
+```
+
+The ADR's closed enum/sentinel/cross-component rules are part of validation.
+Zero byte units and `not-applicable` identifiers require affirmative proof of
+an absent/non-applicable layer; they cannot encode opacity. The configuration
+is captured before warmup and remains stable through the replicate. It excludes
+disposable paths, subject commits/binaries, and instantaneous load, queue,
+cache, autoscaler, free-space, RTT, or jitter samples; those remain raw
+preconditions/diagnostics and need not be exactly equal between runs.
+
 The observation state is one of `known`, `not-applicable`, `unknown`,
 `unobserved`, `unsupported`, or `unprovable`. Known uses reason `none` and a
 canonical payload. Every other state has an empty payload and only its closed
@@ -1834,9 +1899,14 @@ folding occurs only for a platform-declared ASCII case-insensitive option
 domain. A platform-defined duplicate winner is probed and emitted once; an
 unproved/conflicting winner is `unprovable/conflicting-effective-values`.
 Unknown native options are excluded only with retained proof that they affect
-neither the seven keys nor `commit_semantics`; otherwise normalization is
-unprovable. The six fixed `commit_semantics` keys and eight closed durability
-capability tokens are validated independently.
+neither the seven keys, `commit_semantics`, the fixed performance record,
+hardware-cache/PLP policy, nor performance/durability anywhere on the complete
+B1 write/sync/barrier/provider-commit/revalidation/golden-readback path;
+otherwise normalization or the performance record is unprovable. The six
+fixed `commit_semantics` keys, eight closed durability capability tokens, and
+37 fixed performance components are validated independently. Btrfs
+`compress=zstd` and disabled compression must encode different performance
+records and cannot compare as one environment.
 
 The independent validator performs these steps in order:
 
@@ -1844,11 +1914,13 @@ The independent validator performs these steps in order:
    exact header, LF, field count, field order, type, state/reason pairing, and
    end of input;
 2. validate scalar/composite canonical form, enum domains, list cardinality,
-   ordering/uniqueness, nested record shape, fixed resources, and cross-field
-   consistency;
+   the concrete token/text/record-list and map/fixed-record bindings,
+   ordering/uniqueness, nested record shape, fixed resources, all 37
+   performance components, and cross-field consistency;
 3. bind each normalized field to retained raw observation/proof and validate
    every field-specific N/A claim, mount normalization decision, stable
-   instance/endpoint/anchor identity, and root-containment proof;
+   instance/endpoint/anchor identity, fixed performance configuration,
+   excluded-option no-effect proof, and root-containment proof;
 4. recompute `storage_environment_digest` and `base_environment_digest` as
    lowercase SHA-256 over their complete exact manifest bytes;
 5. parse the exact four-field environment-class manifest and recompute
@@ -1857,16 +1929,20 @@ The independent validator performs these steps in order:
    `row-has-no-output-commit`, and a N/A storage-digest record with empty
    payload; and
 6. derive storage eligibility. Eligible means all observations are known or
-   use their sole proved N/A, `access_mode=read-write`, all eight capabilities
+   use their sole proved N/A, performance configuration is complete/proved and
+   remained frozen, every excluded effective option is proved irrelevant to
+   the complete measured path, `access_mode=read-write`, all eight capabilities
    are present, commit/endpoint/anchor evidence forms one consistent path,
    requested and achieved durability are `crash-durable`, and containment
    succeeds. Ineligible evidence carries a nonempty sorted subset of the ADR's
-   closed ten reason tokens.
+   closed eleven reason tokens, including
+   `performance-configuration-unprovable`.
 
 Exact compatibility requires byte-identical canonical manifests, equal
 independently recomputed digests, and eligibility where storage applies.
-Digest equality alone is insufficient. Candidate/reference I1/I2 use exact
-base compatibility and the fixed storage-N/A environment manifest.
+For storage, that byte comparison includes the complete framed performance
+record. Digest equality alone is insufficient. Candidate/reference I1/I2 use
+exact base compatibility and the fixed storage-N/A environment manifest.
 Candidate/reference B1/M1, B1 cap-1/cap-8, and M1/paired-B1-cap-8 use exact
 base, storage, and full environment-class compatibility. M1/paired-I1 compares
 only exact base manifests/digests; its environment manifests intentionally
@@ -1875,14 +1951,19 @@ failed containment makes the affected relative verdict `invalid`.
 
 Issue #95 must add deterministic mechanism tests covering fixed field/type/
 enum/cardinality rejection; every state/reason/payload combination; NFC/text
-and scalar encodings; collection ordering and duplicates; omitted versus
+and scalar encodings; the exact 156-byte durability set and its 221-byte field
+record; known-empty ordered text versus zero-byte N/A payloads; every CPU/
+device/contract record-list cardinality, frame, sort, and duplicate rule;
+mount/commit map counts and every fixed-record component order; omitted versus
 explicit mount defaults; native option order/case; deterministic and
 conflicting duplicates; unknown-option proof; malformed/overflowed frames;
-all three independent digest recomputations; eligibility reasons; and exact
-B1 candidate/reference plus cap-1/cap-8 compatibility. Issue #96 reuses those
-fixtures and tests exact same-ordinal M1/B1 matching plus base-only M1/I1
-matching. Issue #92 adds no current test binary, serializer, probe, runner, API,
-or runtime field.
+all 37 performance fields, enum/sentinel/zero/cross-component rules, transient-
+noise exclusion, unmapped-option fail-closed behavior, and the Btrfs
+compression mismatch; all three independent digest recomputations; all eleven
+eligibility reasons; and exact B1 candidate/reference plus cap-1/cap-8
+compatibility. Issue #96 reuses those fixtures and tests exact same-ordinal
+M1/B1 matching plus base-only M1/I1 matching. Issue #92 adds no current test
+binary, serializer, probe, runner, API, or runtime field.
 
 ### Run procedure
 
@@ -1896,8 +1977,9 @@ For each candidate or reference bundle:
    process workers, Run caps, all limits/headroom, fixture hashes, seeds, and
    cache/residency preconditions; encode and independently validate the exact
    24-field base manifest before warmup; for B1/M1 also select the
-   `OutputStore` root, capture its raw storage/capability observations, encode
-   the exact 20-field storage manifest, and compute its eligibility and digest;
+   `OutputStore` root, capture its raw storage/capability/configuration
+   observations, encode the exact 21-field storage manifest, freeze the fixed
+   performance configuration, and compute its eligibility and digest;
 3. require candidate and reference to have the same evidence schema, workload
    id, row-applicable environment class, limits, and fixture hashes; B1/M1
    comparisons require byte-identical eligible storage/base manifests and a
@@ -1967,8 +2049,9 @@ An `execution-profile-slo-v1` bundle contains:
 - the exact base and environment-class manifest bytes plus claimed and
   independently recomputed `base_environment_digest` and
   `environment_class_digest`; for B1/M1, the exact storage manifest bytes,
-  raw capability/root-containment observations, eligibility/reasons, and both
-  claimed and recomputed `storage_environment_digest`;
+  raw capability/performance-configuration/root-containment observations,
+  eligibility/reasons, and both claimed and recomputed
+  `storage_environment_digest`;
 - workload/fixture/source/graph/payload hashes and all seeds;
 - warmup, cold, and measured counts/windows kept separately;
 - raw samples/events, offered-demand eligibility intervals, and drop/gap
@@ -2001,13 +2084,15 @@ workflow. No issue-specific replay, provenance/result orchestrator, phase-
 completion scan, or performance-result file may be registered with CTest or CI
 or retained as repository content.
 
-Issue #95 owns the B1 `OutputStore` raw probes, backend-to-fixed-schema
-adapters, mount normalizer, canonical encoder/digests, eligibility and
+Issue #95 owns the B1 `OutputStore` fixed raw probe-to-schema mappings,
+backend-to-fixed-schema adapters, mount normalizer, performance-configuration
+mapping/proof, the single canonical encoder/digests, eligibility and
 root-containment evidence, and cap-1/cap-8 plus candidate/reference checks.
 Issue #96 reuses the exact manifest bytes for M1 and enforces its same-ordinal
-full B1 pair while keeping the I1-only pair base-only. Issue #92 defines only
-this evidence contract; it adds no current probe, serializer, public API,
-runner, or runtime result field.
+full B1 pair while keeping the I1-only pair base-only. Neither may redefine v1
+grammar, fields, or sentinels. Issue #92 defines only this evidence contract;
+it adds no current probe, serializer, public API, runner, or runtime result
+field.
 
 ## CTest Registration
 
