@@ -512,8 +512,8 @@ Lifecycle telemetry can prove bounded transitions and current object counts,
 but it has no queue-wait, completed-work, Host/device-byte, or result-digest
 fields. A ring cursor gap prevents lossless reconstruction. `ResourceLedger`
 snapshots are authoritative for their configured dimensions, but the current
-benchmark path does not retain per-row high-water samples. RSS remains outside
-that authority.
+benchmark path does not retain per-row high-water samples. RSS remains a
+diagnostic outside that authority.
 
 [ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
 therefore defines latency, throughput, fairness, determinism, waste, and
@@ -521,6 +521,26 @@ memory as six independent target verdicts over four immutable workloads.
 Issues #93 through #96 own the missing fixtures, collectors, and isolated/mixed
 evidence. Until their assigned valid rows exist, this document makes no
 Interactive, batch/render/testbench, or mixed-profile conformance claim.
+
+The target contract deliberately reuses legal current descriptor values rather
+than inventing an execution-profile enum. I1 is
+`GlobalHighPrecision`/`Full`; I2's realtime request lineage carries an
+`Interactive`-quality `RealTimeUpdate` preview child and a `Full`-quality
+`GlobalHighPrecision` final child, each with explicit Interactive QoS. #94 must
+provide the target progressive trigger/publication observer; that state machine
+is not a current public API. Required logical equality uses
+`compute_content_digest(Value)` and the typed
+`Sha256CanonicalV1` `ContentDigest`, not raw storage bytes.
+
+Likewise, current `ComputeIoExecutor` supplies only bounded task/planned-byte
+mechanism and exact settlement snapshots. #95 must compose it with ADR 0009's
+single target `OutputStore` authority, typed crash-durability receipt, canonical
+semantic-trace encoder, and separate raw-payload/manifest/golden identities. In
+that target evidence contract, exact per-job planned-byte charges and snapshots
+are mandatory and authoritative for Compute I/O admission, planned-byte
+high-water, and final settlement. Neither planned bytes nor atomic manifest
+visibility proves physical memory ownership or crash durability, and planned
+bytes do not replace diagnostic RSS or ledger/device ownership evidence.
 
 ## Implementation and Validation Entry Points
 

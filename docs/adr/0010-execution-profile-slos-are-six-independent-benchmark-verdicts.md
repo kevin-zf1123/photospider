@@ -78,9 +78,9 @@ The canonical workload matrix is:
 
 | Workload | Frozen behavior |
 | --- | --- |
-| `I1-edit-storm-v1` | Uses seed zero. Zero-based edit `i` sets node one's `k` from `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` and marks Region `(256*(i mod 4), 256*floor(i/4), 256, 256)`. The 12 edits are submitted 16,666,667 ns apart under the exact `(Graph, target node four, GlobalHighPrecision)` supersession key, Interactive QoS, weight 1, Run cap 8, and a 150 ms relative monotonic deadline per edit. Only edit 12 must publish; it receives a 500 ms drain. Episodes start at least 750,000,000 ns apart. Before every episode, node one is reset to `0.80` and the baseline target is materialized and settled outside the latency sample. |
-| `I2-progressive-v1` | Reuses the exact I1 source, graph, seed, edits, source-space Regions, and generation lineage. The 512x512 preview source is a per-channel 4x4 box average of the 2048 source, rounded once to binary32 before the same four transforms; an I1 Region maps to `(64*(i mod 4), 64*floor(i/4), 64, 64)` in preview coordinates. The final evaluates the 2048 source. Only edit 12's preview and final are required latency results, in that order; stale output cannot publish. |
-| `B1-immutable-v1` | Contains immutable jobs `0..29`; job `n` uses source seed `n`, the baseline graph, Throughput QoS, weight 1, no deadline or supersession, exact reservation evidence, canonical trace, committed artifact, and a job-indexed golden digest. Even jobs belong to Graph A and odd jobs to Graph B. At the measurement boundary the harness offers both ordered 15-job queues and never pauses a nonempty queue; bounded Host admission, rather than the harness, decides how many Runs are resident. Run caps 1 and 8 are separate required rows. |
+| `I1-edit-storm-v1` | Uses seed zero and the twelve natural edit ordinals `1..12`. For `edit_index = edit_ordinal - 1` in `0..11`, node one's `k` is selected from `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`, and the source Region is `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`. Every Run uses `ComputeIntent::GlobalHighPrecision`, `ComputeRunQuality::Full`, Interactive QoS, weight 1, Run cap 8, a 150 ms relative monotonic deadline, and the exact `(Graph, target node four, GlobalHighPrecision)` supersession key. Only the twelfth edit (`edit_index=11`, `k=1.04`, Region `(768,512,256,256)`) must publish; it receives a 500 ms drain. |
+| `I2-progressive-v1` | Reuses the exact I1 source, graph, seed, edit ordinals, source-space Regions, and realtime request lineage. The 512x512 preview source is a per-channel 4x4 box average of the 2048 source, rounded once to binary32 before the same four transforms; preview Region `edit_index` is `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`. The final evaluates the 2048 source. Only the twelfth edit (`edit_index=11`, preview Region `(192,128,64,64)`) has required preview and final latency results, in that order; stale output cannot publish. |
+| `B1-immutable-v1` | Contains immutable jobs `0..29`; job `n` uses source seed `n`, the baseline graph, Throughput QoS, weight 1, no deadline or supersession, exact reservation evidence, a canonical semantic trace, a crash-durable committed artifact, and job-indexed logical/raw goldens. Even jobs belong to Graph A and odd jobs to Graph B. At the measurement boundary the harness offers both ordered 15-job queues and never pauses a nonempty queue; bounded Host admission, rather than the harness, decides how many Runs are resident. Run caps 1 and 8 are separate required rows. |
 | `M1-shared-v1` | At measured time zero, starts I1 and then repeats it every 750,000,000 ns, giving exactly 40 episode starts, while cycling the exact B1 corpus with its even/odd Graph assignment, Run cap 8, and continuous offered backlog for 30 measured seconds. Both streams use one `ExecutionService`, worker set, ready store, policy binding set, and `ResourceLedger`; no hidden pool, duplicate ledger, or separate process may absorb either stream. |
 
 For fairness, one Graph is *eligible* while its producer has unconsumed offered
@@ -89,6 +89,79 @@ time awaiting bounded admission; it does not claim that all 30 B1 Runs are
 admitted simultaneously. Within each Graph the producer offers jobs in
 ascending index order and synchronously offers the next job when the prior one
 becomes terminal. M1 starts a new `0..29` cycle without a producer-side gap.
+
+#### Edit ordinals and monotonic cadence are exact
+
+Natural-language edit numbers always mean `edit_ordinal` in `1..12`; formulas,
+arrays, Regions, lineage records, and evidence use zero-based `edit_index` in
+`0..11`, with `edit_index = edit_ordinal - 1`. A bare phrase such as “edit 12”
+is not a v1 identifier. The required final is always written as “the twelfth
+edit (`edit_index=11`)”. Its coefficient, source Region, preview Region,
+lineage, logical digest, metric sample, and evidence record all carry that same
+index.
+
+For one episode, the harness chooses monotonic origin `E` only after the reset
+baseline is materialized and settled. The nominal admission-call start for
+`edit_index=i` is:
+
+```text
+S_i = E + i * 16,666,667 ns,  i in 0..11
+```
+
+The harness must not start the Host admission call before `S_i`. Its recorded
+actual start `A_i` must satisfy `S_i <= A_i <= S_i + 2,000,000 ns`; this is a
+bounded start-lateness rule, not a claim that an operating system wakes at an
+exact nanosecond. An early start, a start more than 2 ms late, an admission
+failure, a dropped edit, or a cadence-event gap invalidates the replicate. A
+missed edit is not submitted late: the harness cancels the rest of that
+episode, records the missed/drop/gap facts, and never catches up, backfills, or
+shifts later nominal times.
+
+Within each cold, warmup, or measured phase, episode origins are exactly
+`E_r = E_0 + r * 750,000,000 ns`. Reset/baseline preparation must finish before
+`E_r`; failure to do so invalidates that episode rather than sliding the
+schedule or inserting an unrecorded cooling delay. M1 uses
+`E_r = M_0 + r * 750,000,000 ns` for `r=0..39`. Paired isolated and mixed
+evidence therefore share the same v1 schedule, start-lateness bound, and
+miss/drop/gap rules without claiming identical physical wake times.
+
+#### I2 freezes one target progressive state machine
+
+This state machine is target benchmark-harness semantics assigned to #94. It
+does not claim that #92 adds a current public API or that current callers
+already expose progressive publication. “Same I1 lineage” means the same
+Graph/target/revision and ordinal-to-generation mapping; it does not reuse I1's
+`GlobalHighPrecision` canonical request key. For each `edit_index`, the target
+harness mints the next nonzero generation under the legal realtime request key
+`(Graph, target node four, ComputeIntent::RealTimeUpdate)`. It immediately
+starts one preview child with `ComputeIntent::RealTimeUpdate`,
+`ComputeRunQuality::Interactive`, Interactive QoS, weight 1, Run cap 8, and an
+absolute steady-clock deadline 100 ms after that edit's recorded Host admission
+start. It also arms one final child with `ComputeIntent::GlobalHighPrecision`,
+`ComputeRunQuality::Full`, Interactive QoS, weight 1, Run cap 8, and an absolute
+deadline 1,000 ms after the same start. Both children carry the realtime request
+`SupersessionIdentity`, so the HP child's compute intent remains distinct from
+its canonical request key as required by the current `ComputeRunSubmission`
+contract.
+
+The final child is submitted exactly when that edit's preview first becomes
+visible and its generation is still current. If a newer edit is accepted first,
+the armed final is discarded without submission; an already submitted preview
+or final is superseded and may only drain. A new generation revokes publication
+permission for both older children. A stale terminal event may update cleanup,
+waste, and quiescence evidence, but cannot publish a `Value`, digest, receipt,
+or required latency result. The twelfth edit (`edit_index=11`) must publish its
+preview and then its final; failure, deadline expiry, reverse order, duplicate
+publication, or a newer generation before both endpoints makes the episode
+invalid. Earlier generations may publish only while current and are not
+required results.
+
+Preview latency starts immediately before the preview Host admission call and
+ends at current preview visibility. Final end-to-end latency uses that same
+start and ends at current final visibility; the later final Host admission time
+is retained separately as a diagnostic trigger timestamp. Thus the final gate
+includes preview, trigger, admission, execution, and publication rather than
+hiding the preview interval.
 
 I2 has a required Host-local output path and a conditional Metal residency
 component. Preview and final each expose their immutable CPU
@@ -100,8 +173,19 @@ the second must reuse the same device-local residency with zero transfer or
 allocation. Metal-to-Host transfer, filesystem/codec I/O, and any transfer
 beyond those two conditional first accesses are forbidden. Without Metal only
 the device-specific component is predefined `not-applicable`; the Host reuse
-and no-I/O gates still apply. Edit 12's final logical digest must equal the I1
-edit-12 digest, and its preview digest must equal its own fixture golden.
+and no-I/O gates still apply. The twelfth edit (`edit_index=11`) final logical
+digest must equal the I1 `edit_index=11` digest, and its preview logical digest
+must equal its own fixture golden.
+
+Every required logical output digest is obtained by calling
+`compute_content_digest(Value)`. A sample is valid only when the returned
+`ContentDigestResult.state` is `ContentDigestState::Available`, `digest` is
+present, and `digest->algorithm` is
+`CanonicalDigestAlgorithm::Sha256CanonicalV1`. Evidence stores the algorithm
+tag and lowercase hexadecimal `ContentDigest.bytes`. Any other state, absent
+digest, provider/readiness failure, or different algorithm makes the affected
+row `invalid`. This canonical logical `ContentDigest` is not the SHA-256 of an
+artifact's raw bytes.
 
 Each B1 job commits two files below a fresh disposable job directory. The
 payload `output.rgba32le` is tightly packed row-major RGBA with little-endian
@@ -121,9 +205,61 @@ payload=output.rgba32le
 payload-sha256=<lowercase 64-hex SHA-256>
 ```
 
-The durable-output owner writes and settles the payload before atomically
-publishing the manifest last. The commit receipt, payload, and manifest hashes
-are evidence; the payload digest must match the immutable job-indexed golden.
+For v1, the payload byte count is checked as
+`2048 * 2048 * 4 * 4 = 67,108,864`. For every valid job `0..255`, the exact
+manifest length is `242 + decimal_digit_count(job)` bytes: 243 bytes for jobs
+`0..9`, 244 bytes for jobs `10..99`, and 245 bytes for jobs `100..255`.
+Consequently, measured jobs `0..29` use 243 or 244 bytes, while the cold/warmup
+jobs `252..255` use 245 bytes. Each job's target durable-output owner uses the
+process-owned `ComputeIoExecutor` for two ordered tasks with stable charge
+identities `(job, payload-stage, attempt)` and
+`(job, manifest-commit, attempt)`. The payload-stage task declares
+`planned_bytes=67,108,864`; the manifest-commit task declares `planned_bytes`
+equal to that job's exact manifest length.
+Checked arithmetic must produce those values before every `try_submit`, and
+all attempts for one identity must use the same charge. The 64-task and
+268,435,456-byte summed-planned-byte limits apply at every accepted admission.
+
+`planned_bytes` is a stable admission estimate of task-retained bytes. It is
+mandatory and authoritative evidence for Compute I/O admission, snapshot
+high-water, and final settlement, but it is not a measurement of physical
+allocation or proof of memory ownership. It does not replace process RSS or
+the ledger/device ownership evidence. Capacity rejection leaves the already
+offered job eligible and the same task pending; every admission attempt and
+typed status is retained. In fault-free B1 each task may be accepted and
+started only once, and no output retry, duplicate task, or changed charge
+identity is permitted.
+
+The payload-stage task completely writes, hashes, synchronizes, and revalidates
+the private payload stage before it settles. Only then may manifest-commit
+write and synchronize the private canonical manifest, atomically publish it
+with no replacement, revalidate the published identity, and execute every
+leaf-to-root directory barrier. B1 requests typed `crash-durable` durability
+and accepts only typed achieved `crash-durable`; atomic visibility alone is not
+success. Unsupported file synchronization, directory barriers, atomic
+no-replace publication, a weaker achieved class, or any transaction failure
+makes the job invalid and yields no successful crash-durable receipt.
+
+The `OutputCommitReceipt` evidence binds at least the stable `OutputCommitId`,
+rooted namespace/output slot, job index, descriptor and logical content
+identity, committed version/generation, payload and manifest names, exact byte
+counts and raw SHA-256 values, requested and achieved durability, and the
+published manifest identity. It is returned only after all requested barriers
+succeed. This is ADR 0009's target `OutputStore` authority, not the current
+private IPC delivery store and not an expansion of #92 runtime behavior.
+
+The raw payload SHA-256 hashes the exact 67,108,864 little-endian bytes; the
+manifest SHA-256 hashes that job's exact
+`242 + decimal_digit_count(job)` canonical bytes (243, 244, or 245 bytes over
+the valid range). The job-indexed golden fixture separately binds the expected
+typed logical `ContentDigest`, expected raw-payload SHA-256, and its own
+content-addressed golden identity. These three identities are never substituted
+for one another.
+One B1 job reaches its unique throughput completion endpoint only after Run
+success, a valid crash-durable receipt, and successful comparison with both
+goldens. The isolated interval ends at the last job's golden-verification
+completion, not at provider return, Run terminal, payload close, manifest
+rename, or atomic visibility.
 
 The first downstream fixture implementation may only materialize and hash these
 choices. Changing a source formula, operation, coefficient, edit, preview
@@ -149,6 +285,16 @@ Interactive headroom of one CPU slot, 64 MiB retained memory, 32 MiB scratch,
 to 64 tasks and 256 MiB of summed planned bytes. When Metal is configured, its
 device-memory and scratch limits are 512 MiB and 256 MiB. Absent Metal is predefined
 `not-applicable`, not a zero observation.
+
+B1 evidence samples `ComputeIoExecutor::snapshot()` immediately after every
+accepted task admission and every task settlement, with an initial pre-row
+sample and a final post-quiescent sample. It retains the task charge identity,
+planned bytes, admission status, completion status, active-task count, and
+active-planned-byte count. Every active-planned-byte total is the checked sum
+of the true per-job charges, and its high-water is the maximum of this complete
+event-aligned stream. Any missing sample, arithmetic inconsistency, value over
+the frozen limit, or nonzero final count makes the row invalid. The final
+snapshot must be exactly zero for both active tasks and active planned bytes.
 
 Disk-cache/codec I/O and cross-episode/job result reuse are disabled for cold,
 warmup, and measured work. I1/I2 retain only the explicitly recomputed baseline
@@ -184,14 +330,15 @@ sample, or faster dimension may replace another verdict.
 
 #### Latency
 
-Latency starts immediately before Host admission and ends when the matching
-current generation becomes visible.
+I1 latency starts immediately before the final edit's Host admission and ends
+when its matching current generation becomes visible. I2 uses the two explicit
+start/end boundaries in its state machine above.
 
 - I1 final-generation p50/p95/p99 must be at most 50/100/150 ms, with every
   measured episode publishing its final generation.
-- I2 edit-12 first-preview p50/p95/p99 must be at most 50/75/100 ms; edit-12
-  final p95/p99 must be at most 500/1000 ms. Both endpoints must match their
-  required logical digest.
+- I2 twelfth-edit (`edit_index=11`) first-preview p50/p95/p99 must be at most
+  50/75/100 ms; twelfth-edit final p95/p99 must be at most 500/1000 ms. Both
+  endpoints must match their required logical `ContentDigest`.
 - M1 must satisfy the I1 absolute limits, and its p99 must be no more than 2.0
   times the paired isolated I1 p99.
 
@@ -202,9 +349,10 @@ Accepted-cancel-to-physical-quiescence duration remains a separate observation.
 
 Throughput is successful logical site-operations per second, reported as
 MPix-op/s. One B1 job contributes exactly 16,777,216 site-operations only after
-Run success, required artifact commit, and golden verification. Its isolated
-interval starts immediately before both measured queues are offered and ends
-after the final manifest commit and golden verification. Candidate and
+Run success, a crash-durable output receipt, and both logical/raw golden
+verifications. Its isolated interval starts immediately before both measured
+queues are offered and ends at the final job's golden-verification completion.
+Candidate and
 reference replicates are paired by ordinal: the median of the three
 candidate/reference ratios must be at least 0.95 and every ratio at least 0.90.
 
@@ -237,16 +385,54 @@ independent evidence.
 For the same B1 job index across all three replicates, fresh-process restarts,
 and Run caps 1 and 8, every mismatch count must be zero for:
 
-- logical output SHA-256;
+- typed logical output `ContentDigest`;
+- raw little-endian payload SHA-256;
 - canonical artifact-manifest SHA-256;
-- job-indexed golden SHA-256; and
-- a semantic trace fingerprint.
+- immutable job-indexed logical/raw golden identity; and
+- the `execution-profile-semantic-trace-v1` fingerprint.
 
-The semantic fingerprint excludes timestamps, physical worker ids, globally
-minted ids, and raw sequence numbers, but retains run-relative task, action,
-dependency, terminal-outcome, and required-resource facts. Raw physical trace
-remains evidence. Cross-environment tolerant comparison is compatibility
-evidence and cannot satisfy this exact same-environment verdict.
+The semantic trace has exactly one `ready`, one `start`, and one `terminal`
+record for every logical task in the deterministic plan. `task` is the
+zero-based contiguous plan ordinal assigned by deterministic plan traversal,
+not physical start order. Each record contains `job`, Graph role, `task`,
+`action`, the numerically sorted dependency ordinals, terminal outcome, and the
+task's declared `work_units`, ready entries/bytes, CPU slots, Host
+retained/scratch bytes, and device-memory/scratch bytes. Fault-free B1 requires
+terminal outcome `succeeded`; nonterminal records use outcome `-`.
+
+The canonical bytes begin with this exact ASCII header and LF:
+
+```text
+execution-profile-semantic-trace-v1
+```
+
+Each following record is one exact ASCII line in this field order:
+
+```text
+job=<u>;graph=<A|B>;task=<u>;action=<ready|start|terminal>;deps=<u,...|->;outcome=<succeeded|->;work=<u>;ready-entries=<u>;ready-bytes=<u>;cpu=<u>;host-retained=<u>;host-scratch=<u>;device-memory=<u>;device-scratch=<u>\n
+```
+
+The displayed `\n` denotes one LF byte (`0x0a`), not the two bytes backslash
+and `n`.
+All unsigned integers are unpadded decimal (`0` is the only zero spelling),
+there is no whitespace or BOM, dependencies are comma-separated ascending
+ordinals or `-`, and LF terminates every line including the last. Records sort
+by numeric job, Graph `A` before `B`, numeric task, then action rank
+`ready < start < terminal`. The fingerprint is lowercase hexadecimal SHA-256
+of those exact bytes.
+
+Missing or duplicate required records, noncontiguous task ordinals, an absent
+dependency target, an unknown/extra field or action, an invalid outcome, an
+encoding violation, or an event-collector gap makes the trace invalid rather
+than merely different. Timestamps, durations, physical worker/thread/device
+queue identities, globally minted Run/task ids, raw sequence numbers, queue
+positions, retries, and physical start/completion order are excluded. The
+uncanonicalized physical trace, including those diagnostics, remains separately
+retained. The semantic record set therefore compares cap 1, cap 8, and fresh
+replicates without encoding their permitted physical completion order.
+
+Cross-environment tolerant comparison is compatibility evidence and cannot
+satisfy this exact same-environment verdict.
 
 #### Waste
 
@@ -274,9 +460,14 @@ mixed B1 must have zero discarded, duplicate, and retry service.
 
 Memory evidence retains byte high-water marks for Host retained memory, Host
 scratch, ready bytes, and each configured device's memory and scratch, plus
-row-owned post-quiescent reservation/grant deltas. No authoritative dimension
-may exceed its frozen limit. An isolated row must settle exactly to its
-pre-row baseline; M1 shutdown must settle to zero.
+row-owned post-quiescent reservation/grant deltas. B1 additionally retains the
+event-aligned `ComputeIoExecutor` active-task and active-planned-byte high-water
+and its exact zero settlement. The B1 planned-byte stream is mandatory,
+authoritative evidence for Compute I/O admission, planned-byte high-water, and
+final settlement; it does not establish physical memory ownership and does not
+replace RSS or ledger/device ownership evidence. No authoritative dimension
+may exceed its frozen limit. An isolated row must settle exactly to its pre-row
+baseline; M1 shutdown must settle to zero.
 
 For every authoritative dimension, candidate B1 and I2 peaks must be no more
 than 105 percent of the pinned same-environment reference while still meeting
@@ -290,16 +481,43 @@ Every measured row belongs to an `execution-profile-slo-v1` bundle. The bundle
 contains all frozen provenance, raw samples/events, eligibility windows,
 drop/gap counters, output/artifact/trace/golden digests and commit receipts,
 transfer/copy/residency evidence, high-water samples, aggregate inputs and
-results, independent verdicts, and the selected reference bundle digest.
+results, independent verdicts, and typed comparison/pairing references.
 Eligibility means the offered-demand intervals defined above. Units, formulas,
 denominator definitions, and invalidation reasons are schema fields rather
 than prose-only labels.
 
-Reference and candidate must have the same schema, workload id, environment
-class, resource limits, and fixture hashes. The reference is immutable and
-selected by digest. An unrecorded rerun of a “known good” build and a Markdown
-summary are not normative references. Raw evidence must reproduce every
-aggregate and verdict.
+Every bundle records `subject_role=candidate|reference`. A candidate's
+`comparison_reference_bundle_digest` selects the immutable external baseline
+used for candidate/reference regression; it is not an M1 isolated denominator.
+Candidate and comparison reference must have the same evidence schema,
+workload id, environment class, resource configuration, and fixture hashes.
+Their repository/build identity may differ and is recorded because that is the
+subject of the comparison.
+
+Every M1 replicate ordinal `1..3` additionally records two same-subject pairs:
+`paired_isolated_i1={row_digest,bundle_digest,replicate_ordinal}` and
+`paired_isolated_b1_cap8={row_digest,bundle_digest,replicate_ordinal}`. A
+candidate M1 row pairs with candidate isolated rows; a reference M1 row pairs
+with reference isolated rows. The I1 pair supplies the relative latency
+denominator, and the B1 cap-8 pair supplies every one-second throughput
+denominator. Neither pair may be replaced by the generic comparison reference
+or by one ambiguous “reference bundle digest”.
+
+The paired row and M1 row must have the same replicate ordinal, evidence schema
+version, subject build/provider/plugin identities, environment-class digest,
+worker count, resource limits/headroom, cache/residency preconditions, and
+power/thermal eligibility policy. The paired I1 fixture hash must equal the I1
+component embedded by M1; the paired B1 fixture/corpus/golden hashes and Run cap
+8 must equal M1's B1 component. The environment-class digest binds OS/kernel,
+architecture, CPU/GPU/device inventory, compiler/build mode and flags, worker
+count, provider/plugin generations, and frozen resources, but intentionally
+does not bind repository commit so candidate/reference builds can differ.
+Missing, zero, wrong-ordinal, cross-subject, or incompatible pair evidence makes
+the affected M1 relative verdict `invalid`.
+
+All referenced bundles and rows are immutable and selected by content digest.
+An unrecorded rerun of a “known good” build and a Markdown summary are not
+normative references. Raw evidence must reproduce every aggregate and verdict.
 
 ### Downstream issues own fixed evidence rows
 
@@ -307,7 +525,7 @@ aggregate and verdict.
 | --- | --- |
 | #93 | Implement I1 request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
 | #94 | Implement I2 on the exact I1 lineage; publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
-| #95 | Implement B1 immutable manifests, reservations, canonical trace, artifact commit, and goldens; publish isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
+| #95 | Implement B1 immutable manifests, reservations, canonical semantic trace, crash-durable artifact commit, and logical/raw goldens; publish isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
 | #96 | Compose the exact I1 and B1 fixtures into M1; publish mixed latency, throughput progress, fairness, waste, and memory rows. |
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but

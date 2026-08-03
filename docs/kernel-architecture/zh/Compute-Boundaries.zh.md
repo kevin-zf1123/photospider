@@ -429,6 +429,22 @@ dimension verdict。
 completed-service 与 resource-lifetime 边界增加 collector。任何 placeholder zero
 value 都不能替代缺失的 observation source。
 
+这些目标 collector 具有精确 boundary 义务。Edit ordinal `1..12` 映射为
+`edit_index=0..11`；nominal monotonic admission start 与其 bounded lateness 是不同
+timestamp。I2 使用合法 RT-preview/HP-final child descriptor，记录 preview
+admission/visible、final trigger/admission/visible 与 generation-current check。Logical
+equality 是 typed available `ContentDigest`。B1 记录每个 `ComputeIoExecutor` task
+charge、accepted admission/settlement snapshot、planned-byte high-water、ADR 0009
+requested/achieved durability、完整 output receipt、raw payload/manifest hash，以及
+独立 canonical semantic trace。M1 除 candidate/reference comparison provenance 外，
+还记录两个 same-ordinal isolated pair reference。
+
+这些仍是目标 harness/evidence 语义。精确 per-job planned-byte charge 及其 event-
+aligned snapshot 是 Compute I/O admission、planned-byte high-water 与 final settlement
+的强制性权威证据。它们不会向当前 `BenchmarkResult` 增加 field、改变 `ComputeRun`、
+证明 physical memory ownership、替代 diagnostic RSS 或 ledger/device ownership
+evidence，也不会把当前 IPC delivery store 提升为 durable output authority。
+
 Ready store 对每次 dispatch 按
 `work_units + ceil(complete_ready_grant_bytes / 4096)` 计费。每个 Graph 都在已选 service class
 各自独立的 accumulator 中累加原始 cost；每个 Run 只有一个不可变 class，并在其中累加

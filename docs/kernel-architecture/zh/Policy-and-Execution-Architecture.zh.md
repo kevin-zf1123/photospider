@@ -414,13 +414,31 @@ window、output/artifact/trace digest、独立判定或不可变 reference compa
 生命周期 telemetry 可以证明有界 transition 与当前 object count，但没有
 queue-wait、completed-work、Host/device-byte 或 result-digest 字段。Ring cursor
 gap 会阻止无损重建。`ResourceLedger` snapshot 对其已配置 dimension 具有权威性，
-但当前 benchmark 路径不会保留逐 row high-water sample。RSS 不属于该权威。
+但当前 benchmark 路径不会保留逐 row high-water sample。RSS 只是在该权威之外的
+diagnostic。
 
 [ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
 因此把 latency、throughput、fairness、determinism、waste 与 memory 定义为四个
 不可变 workload 上的六项独立目标判定。Issues #93 至 #96 负责缺失的 fixture、
 collector 以及 isolated/mixed 证据。在其分配的有效证据行存在之前，本文不声明
 Interactive、batch/render/testbench 或 mixed-profile 符合要求。
+
+目标契约有意复用合法的当前 descriptor value，而不是虚构 execution-profile enum。
+I1 使用 `GlobalHighPrecision`/`Full`；I2 的 realtime request lineage 携带
+`Interactive` quality 的 `RealTimeUpdate` preview child 与 `Full` quality 的
+`GlobalHighPrecision` final child，二者都使用显式 Interactive QoS。#94 必须提供
+目标 progressive trigger/publication observer；该 state machine 不是当前 public API。
+必需 logical equality 使用 `compute_content_digest(Value)` 与 typed
+`Sha256CanonicalV1` `ContentDigest`，而不是 raw storage byte。
+
+同样，当前 `ComputeIoExecutor` 只提供 bounded task/planned-byte mechanism 与精确
+settlement snapshot。#95 必须把它与 ADR 0009 的唯一目标 `OutputStore` authority、
+typed crash-durability receipt、canonical semantic-trace encoder，以及分离的 raw-
+payload/manifest/golden identity 组合。在该目标 evidence contract 中，精确 per-job
+planned-byte charge 与 snapshot 是 Compute I/O admission、planned-byte high-water 与
+final settlement 的强制性权威证据。Planned byte 与 atomic manifest visibility 都
+不能证明 physical memory ownership 或 crash durability；planned byte 也不能替代
+diagnostic RSS 或 ledger/device ownership evidence。
 
 ## 实现与验证入口
 

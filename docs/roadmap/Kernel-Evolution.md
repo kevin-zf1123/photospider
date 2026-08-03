@@ -1087,9 +1087,9 @@ immutable workload ids:
 
 | Workload | Target role |
 | --- | --- |
-| `I1-edit-storm-v1` | Twelve exact parameter/256x256-Region edits under one latest-wins key, Interactive QoS, fixed cadence/deadline, and final-generation visibility. |
-| `I2-progressive-v1` | The exact I1 lineage with an edit-12 512x512 preview followed by the 2048x2048 final, exact Host/conditional-Metal residency reuse, and zero hidden I/O/copy. |
-| `B1-immutable-v1` | Thirty job-indexed immutable full-frame jobs offered in order across two Graphs, with bounded admission, reservations, canonical raw artifacts/manifests, traces, and goldens at Run caps 1 and 8. |
+| `I1-edit-storm-v1` | Natural edit ordinals `1..12` map to `edit_index=0..11`; twelve exact parameter/256x256-Region edits use one latest-wins key, Interactive QoS, a monotonic nominal cadence with bounded start lateness, and twelfth-edit (`edit_index=11`) visibility. |
+| `I2-progressive-v1` | The exact I1 Graph/target/revision and edit mapping uses its separate legal realtime request key with RT-preview and HP-final child contracts; the twelfth edit (`edit_index=11`) publishes a 512x512 preview followed by the 2048x2048 final, with exact Host/conditional-Metal residency reuse and zero hidden I/O/copy. |
+| `B1-immutable-v1` | Thirty job-indexed immutable full-frame jobs are offered in order across two Graphs, with bounded Compute I/O task/planned-byte admission, canonical raw artifacts/manifests and semantic traces, crash-durable receipts, and logical/raw goldens at Run caps 1 and 8. |
 | `M1-shared-v1` | Forty exact I1 starts and continuously offered cap-8 B1 cycles sharing one process execution authority for 30 measured seconds. |
 
 Latency, throughput, fairness, determinism, waste, and memory are six
@@ -1102,6 +1102,15 @@ Exact output/artifact/semantic-trace/golden digests, bounded discarded service,
 absolute resource limits, and exact quiescent settlement cannot be traded for
 speed in another dimension.
 
+The frozen protocol does not claim nanosecond-exact operating-system wakes.
+It fixes nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum admission-
+start lateness, exact 750,000,000 ns episode origins, and fail-closed
+miss/drop/gap handling. Logical results use the typed canonical
+`ContentDigest`; raw little-endian payload, canonical manifest, semantic trace,
+and golden identities remain separate. M1 records distinct same-ordinal
+isolated-I1 and isolated-B1-cap-8 pair digests in addition to the ordinary
+candidate/reference baseline digest.
+
 The delivery rows are fixed:
 
 | Issue | Required target evidence |
@@ -1111,8 +1120,9 @@ The delivery rows are fixed:
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, and memory at caps 1 and 8. |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures. |
 
-The accepted decision is current, but the workloads, missing collectors, and
-valid evidence rows remain downstream target work. Existing policy-order tests,
+ADR 0010 is the current accepted decision record, not a statement of current
+runtime capability. The workloads, missing collectors, and valid evidence rows
+remain downstream target work. Existing policy-order tests,
 `BenchmarkService`, lifecycle telemetry, ledger snapshots, and the manual
 OpenCV scaling tool do not by themselves establish profile conformance. The
 maintained manual/release protocol and test-ownership boundary are documented

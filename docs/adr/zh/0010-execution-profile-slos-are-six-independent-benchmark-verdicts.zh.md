@@ -70,9 +70,9 @@ payload 都在 workload manifest 中按内容寻址。
 
 | Workload | 冻结行为 |
 | --- | --- |
-| `I1-edit-storm-v1` | 使用 seed zero。从零开始的 edit `i` 从 `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` 取值设置第一个 node 的 `k`，并标记 Region `(256*(i mod 4), 256*floor(i/4), 256, 256)`。12 次 edit 在精确的 `(Graph, target node four, GlobalHighPrecision)` supersession key 下以 16,666,667 ns 间隔提交，采用 Interactive QoS、weight 1、Run cap 8，并为每次 edit 使用相对 150 ms monotonic deadline。只有第 12 次 edit 必须发布；它获得 500 ms drain。Episode 开始间隔至少为 750,000,000 ns。每个 episode 前都把第一个 node 重置为 `0.80`，并在 latency sample 外物化、结算 baseline target。 |
-| `I2-progressive-v1` | 复用精确的 I1 source、graph、seed、edit、source-space Region 与 generation lineage。512x512 preview source 是对 2048 source 逐 channel 执行 4x4 box average、只舍入一次到 binary32 后，再经过相同四个 transform；I1 Region 在 preview coordinate 中映射为 `(64*(i mod 4), 64*floor(i/4), 64, 64)`。Final 计算 2048 source。只有第 12 次 edit 的 preview 与 final 是必需 latency result，且必须按此顺序出现；stale output 不得发布。 |
-| `B1-immutable-v1` | 包含 immutable job `0..29`；job `n` 使用 source seed `n`、baseline graph、Throughput QoS、weight 1、无 deadline 或 supersession、精确 reservation 证据、canonical trace、已提交 artifact 与按 job index 区分的 golden digest。偶数 job 属于 Graph A，奇数 job 属于 Graph B。测量边界上 harness 同时提供两个有序的 15-job queue，且不会暂停非空 queue；由有界 Host admission 而非 harness 决定驻留多少个 Run。Run cap 1 与 8 是两行独立的必需证据。 |
+| `I1-edit-storm-v1` | 使用 seed zero 与自然序号为 `1..12` 的十二次 edit。对 `0..11` 中的 `edit_index = edit_ordinal - 1`，第一个 node 的 `k` 从 `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` 取值，source Region 为 `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`。每个 Run 使用 `ComputeIntent::GlobalHighPrecision`、`ComputeRunQuality::Full`、Interactive QoS、weight 1、Run cap 8、相对 150 ms monotonic deadline，以及精确的 `(Graph, target node four, GlobalHighPrecision)` supersession key。只有第十二次 edit（`edit_index=11`、`k=1.04`、Region `(768,512,256,256)`）必须发布；它获得 500 ms drain。 |
+| `I2-progressive-v1` | 复用精确的 I1 source、graph、seed、edit ordinal、source-space Region 与 realtime request lineage。512x512 preview source 是对 2048 source 逐 channel 执行 4x4 box average、只舍入一次到 binary32 后，再经过相同四个 transform；preview Region `edit_index` 为 `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`。Final 计算 2048 source。只有第十二次 edit（`edit_index=11`、preview Region `(192,128,64,64)`）具有必需的 preview 与 final latency result，且必须按此顺序出现；stale output 不得发布。 |
+| `B1-immutable-v1` | 包含 immutable job `0..29`；job `n` 使用 source seed `n`、baseline graph、Throughput QoS、weight 1、无 deadline 或 supersession、精确 reservation 证据、canonical semantic trace、crash-durable committed artifact 与按 job index 区分的 logical/raw golden。偶数 job 属于 Graph A，奇数 job 属于 Graph B。测量边界上 harness 同时提供两个有序的 15-job queue，且不会暂停非空 queue；由有界 Host admission 而非 harness 决定驻留多少个 Run。Run cap 1 与 8 是两行独立的必需证据。 |
 | `M1-shared-v1` | 在 measured time zero 启动 I1，此后每 750,000,000 ns 重复一次，共精确启动 40 个 episode；同时循环执行精确的 B1 corpus，保留偶数/奇数 Graph 分配、Run cap 8 与持续 offered backlog，共测量 30 秒。两条 stream 共用一个 `ExecutionService`、worker set、ready store、policy binding set 与 `ResourceLedger`；不得用隐藏 pool、重复 ledger 或独立进程承接任一 stream。 |
 
 对 fairness 而言，只要某个 Graph 的 producer 仍有未消费的 offered demand 且没有
@@ -80,6 +80,68 @@ payload 都在 workload manifest 中按内容寻址。
 admission 的时间；它不声明全部 30 个 B1 Run 同时被准入。每个 Graph 内部按递增
 job index 提供工作，前一个 job terminal 时 producer 同步提供下一个。M1 启动新的
 `0..29` cycle 时不得产生 producer-side gap。
+
+#### Edit ordinal 与 monotonic cadence 均为精确契约
+
+自然语言中的 edit 编号始终表示 `1..12` 中的 `edit_ordinal`；公式、数组、Region、
+lineage record 与 evidence 使用 `0..11` 中从零开始的 `edit_index`，并满足
+`edit_index = edit_ordinal - 1`。诸如“edit 12”这样的裸短语不是 v1 identity。
+必需 final 始终写作“第十二次 edit（`edit_index=11`）”。其 coefficient、source
+Region、preview Region、lineage、logical digest、metric sample 与 evidence
+record 都携带同一个 index。
+
+对一个 episode，harness 只有在 reset baseline 已物化并结算后，才选择 monotonic
+origin `E`。`edit_index=i` 的名义 admission-call start 为：
+
+```text
+S_i = E + i * 16,666,667 ns,  i in 0..11
+```
+
+Harness 禁止在 `S_i` 之前启动 Host admission call。记录的实际 start `A_i` 必须
+满足 `S_i <= A_i <= S_i + 2,000,000 ns`；这是有界 start-lateness 规则，并不声称
+操作系统会在精确纳秒醒来。提前启动、迟于 2 ms 启动、admission failure、dropped
+edit 或 cadence-event gap 都会使 replicate 无效。Missed edit 不会迟到补交：harness
+取消该 episode 的剩余部分，记录 missed/drop/gap 事实，并且绝不追赶、回填或移动
+后续名义时刻。
+
+在每个 cold、warmup 或 measured phase 内，episode origin 精确为
+`E_r = E_0 + r * 750,000,000 ns`。Reset/baseline 准备必须在 `E_r` 前完成；否则
+该 episode 无效，不能滑动 schedule 或插入未记录的 cooling delay。M1 对
+`r=0..39` 使用 `E_r = M_0 + r * 750,000,000 ns`。因此，配对的 isolated 与 mixed
+证据共享相同 v1 schedule、start-lateness bound 与 miss/drop/gap 规则，但不声称
+具有相同 physical wake time。
+
+#### I2 冻结一个目标 progressive state machine
+
+该 state machine 是分配给 #94 的目标 benchmark-harness 语义。它不宣称 #92
+新增了当前 public API，也不宣称当前 caller 已暴露 progressive publication。“相同
+I1 lineage”表示相同 Graph/target/revision 与 ordinal-to-generation mapping；它不会
+复用 I1 的 `GlobalHighPrecision` canonical request key。对每个
+`edit_index`，目标 harness 在合法 realtime request key
+`(Graph, target node four, ComputeIntent::RealTimeUpdate)` 下生成下一个非零
+generation。它立即启动一个 preview child，使用 `ComputeIntent::RealTimeUpdate`、
+`ComputeRunQuality::Interactive`、Interactive QoS、weight 1、Run cap 8，以及该
+edit 记录的 Host admission start 后 100 ms 的 absolute steady-clock deadline。
+它同时 arm 一个 final child，使用 `ComputeIntent::GlobalHighPrecision`、
+`ComputeRunQuality::Full`、Interactive QoS、weight 1、Run cap 8，以及同一起点后
+1,000 ms 的 absolute deadline。两个 child 都携带 realtime request
+`SupersessionIdentity`，因此 HP child 的 compute intent 仍与其 canonical request
+key 分离，符合当前 `ComputeRunSubmission` 契约。
+
+Final child 只在该 edit 的 preview 首次可见、且其 generation 仍为 current 时精确
+提交。若更新的 edit 先被接受，armed final 不经提交即被丢弃；已经提交的 preview
+或 final 被 supersede，且只能 drain。新 generation 会撤销两个较旧 child 的
+publication permission。Stale terminal event 可以更新 cleanup、waste 与 quiescence
+证据，但不能发布 `Value`、digest、receipt 或必需 latency result。第十二次 edit
+（`edit_index=11`）必须先发布 preview、再发布 final；failure、deadline expiry、
+反序、重复 publication，或在两个 endpoint 完成前出现更新 generation，都会使
+episode 无效。较早 generation 只能在仍为 current 时发布，并不属于必需 result。
+
+Preview latency 从 preview Host admission call 前立即开始，到 current preview
+可见时结束。Final end-to-end latency 使用同一起点，到 current final 可见时结束；
+较晚的 final Host admission time 作为 diagnostic trigger timestamp 单独保留。因此
+final 门禁包含 preview、trigger、admission、execution 与 publication，不会隐藏
+preview interval。
 
 I2 具有必需的 Host-local output path 与条件式 Metal residency 组件。Preview 与
 final 都向同一个本地 consumer 两次暴露各自不可变的 CPU `ValueRevisionId`、Host
@@ -90,8 +152,17 @@ transfer，第二次必须复用同一个
 device-local residency，且 transfer 与 allocation 都为零。禁止 Metal-to-Host
 transfer、filesystem/codec I/O，以及上述两个条件式首次 access 之外的任何 transfer。
 没有 Metal 时，只有 device-specific 组件属于预定义 `not-applicable`；Host reuse
-与 no-I/O 门禁仍然适用。第 12 次 edit 的 final logical digest 必须等于 I1 edit-12
-digest，preview digest 必须等于其自身 fixture golden。
+与 no-I/O 门禁仍然适用。第十二次 edit（`edit_index=11`）的 final logical digest
+必须等于 I1 `edit_index=11` digest，preview logical digest 必须等于其自身 fixture
+golden。
+
+每个必需 logical output digest 都通过调用 `compute_content_digest(Value)` 得到。
+Sample 只有在返回的 `ContentDigestResult.state` 为
+`ContentDigestState::Available`、`digest` 存在，且 `digest->algorithm` 为
+`CanonicalDigestAlgorithm::Sha256CanonicalV1` 时才有效。Evidence 记录 algorithm
+tag 与小写十六进制 `ContentDigest.bytes`。任何其他 state、缺失 digest、provider/
+readiness failure 或不同 algorithm 都会使受影响行成为 `invalid`。这个 canonical
+logical `ContentDigest` 不是 artifact raw byte 的 SHA-256。
 
 每个 B1 job 在全新的可丢弃 job 目录下提交两个文件。Payload
 `output.rgba32le` 是紧密 row-major RGBA，sample 为 little-endian IEEE-754
@@ -111,9 +182,52 @@ payload=output.rgba32le
 payload-sha256=<lowercase 64-hex SHA-256>
 ```
 
-Durable-output owner 必须先写入并结算 payload，最后以 atomic publication 提交
-manifest。Commit receipt、payload 与 manifest hash 都属于证据；payload digest
-必须匹配不可变且按 job index 区分的 golden。
+v1 payload byte count 通过
+`2048 * 2048 * 4 * 4 = 67,108,864` checked computation 得到。对每个有效 job
+`0..255`，精确 manifest 长度为 `242 + decimal_digit_count(job)` byte：job `0..9`
+为 243 byte，job `10..99` 为 244 byte，job `100..255` 为 245 byte。因此 measured
+job `0..29` 使用 243 或 244 byte，cold/warmup job `252..255` 使用 245 byte。每个
+job 的目标 durable-output owner 使用进程自有 `ComputeIoExecutor` 执行两个有序
+task，稳定 charge identity 分别为 `(job, payload-stage, attempt)` 与
+`(job, manifest-commit, attempt)`。Payload-stage task 声明
+`planned_bytes=67,108,864`；manifest-commit task 声明与该 job 精确 manifest 长度
+相等的 `planned_bytes`。每次 `try_submit` 前都必须通过 checked arithmetic 得到这些
+值，同一 identity 的全部 attempt 必须使用相同 charge。64-task 与
+268,435,456-byte summed-planned-byte limit 适用于每次 accepted admission。
+
+`planned_bytes` 是 task-retained byte 的稳定 admission estimate。它不是 physical
+allocation measurement、memory ownership 证明；同时，它是 Compute I/O admission、
+snapshot high-water 与 final settlement 的强制性权威证据。它不能替代 process RSS
+或 ledger/device ownership evidence。Capacity rejection 让已 offered job 保持
+eligible、同一个 task 保持 pending；所有 admission attempt 与 typed status 都会
+保留。在无故障 B1 中，每个 task 只能被接受并启动一次，不允许 output retry、
+duplicate task 或改变 charge identity。
+
+Payload-stage task 在结算前必须完整写入、hash、同步并重新验证 private payload
+stage。只有这样，manifest-commit 才可以写入并同步 private canonical manifest，
+以 no-replace 方式 atomically publish，重新验证 published identity，并执行所有
+leaf-to-root directory barrier。B1 请求 typed `crash-durable` durability，并且只接受
+typed achieved `crash-durable`；只有 atomic visibility 并不成功。不支持 file
+synchronization、directory barrier 或 atomic no-replace publication、achieved class
+较弱，或者任一 transaction failure，都会使 job 无效，且不得生成成功的
+crash-durable receipt。
+
+`OutputCommitReceipt` evidence 至少绑定稳定 `OutputCommitId`、rooted namespace/
+output slot、job index、descriptor 与 logical content identity、committed version/
+generation、payload 与 manifest 名称、精确 byte count 与 raw SHA-256、requested 与
+achieved durability，以及 published manifest identity。只有所有请求的 barrier
+成功后才能返回 receipt。这是 ADR 0009 的目标 `OutputStore` authority，不是当前
+private IPC delivery store，也不是 #92 对 runtime behavior 的扩展。
+
+Raw payload SHA-256 hash 精确的 67,108,864 个 little-endian byte；manifest
+SHA-256 hash 该 job 的精确 `242 + decimal_digit_count(job)` 个 canonical byte（在
+有效范围内为 243、244 或 245 byte）。按 job index 区分的
+golden fixture 分别绑定 expected typed logical `ContentDigest`、expected raw-payload
+SHA-256 与其自身 content-addressed golden identity。这三类 identity 绝不能互相
+替代。一个 B1 job 只有在 Run success、有效 crash-durable receipt，以及两个
+golden comparison 均成功后，才到达唯一 throughput completion endpoint。Isolated
+interval 在最后一个 job 的 golden-verification completion 结束，而不是 provider
+return、Run terminal、payload close、manifest rename 或 atomic visibility。
 
 第一次下游 fixture 实现只能物化上述选择并计算 hash。改变 source 公式、operation、
 coefficient、edit、preview filter、Graph 分配、cadence、必需 output 或 semantic
@@ -136,6 +250,15 @@ headroom 为 1 个 CPU slot、64 MiB retained memory、32 MiB scratch、1,024 �
 ready entry 与 16 MiB ready byte。Compute I/O 准入上限为 64 个 task 与 256 MiB
 计划字节总量。配置 Metal 时，其 device-memory 与 scratch limit 分别为 512 MiB
 与 256 MiB。Metal 缺失属于预定义 `not-applicable`，不是零观测。
+
+B1 evidence 在每次 accepted task admission 与每次 task settlement 后立即采样
+`ComputeIoExecutor::snapshot()`，并保留一个 pre-row 初始 sample 与一个
+post-quiescent 最终 sample。它记录 task charge identity、planned byte、admission
+status、completion status、active-task count 与 active-planned-byte count。每个
+active-planned-byte total 都是对真实 per-job charge 的 checked sum，其 high-water
+是这条完整 event-aligned stream 的最大值；缺少任一 sample、算术不一致、值超过
+冻结 limit 或最终 count 非零，都会使该行无效。最终 snapshot 的 active task 与
+active planned byte 必须都精确为零。
 
 Cold、warmup 与 measured work 都禁用 disk-cache/codec I/O 和跨 episode/job 的
 result reuse。I1/I2 只保留显式重新计算的 baseline、当前 episode target，以及 I2
@@ -167,13 +290,14 @@ score、平均值、start count、RSS sample 或更快的维度都不能替代�
 
 #### Latency
 
-Latency 从 Host admission 前立即开始，到匹配的 current generation 可见时结束。
+I1 latency 从 final edit 的 Host admission 前立即开始，到匹配的 current
+generation 可见时结束。I2 使用上面 state machine 中两组显式 start/end boundary。
 
 - I1 final-generation p50/p95/p99 必须分别不超过 50/100/150 ms，且每个 measured
   episode 都必须发布 final generation。
-- I2 edit-12 first-preview p50/p95/p99 必须分别不超过 50/75/100 ms；edit-12
-  final p95/p99 必须分别不超过 500/1000 ms。两个 endpoint 都必须匹配各自必需的
-  logical digest。
+- I2 第十二次 edit（`edit_index=11`）first-preview p50/p95/p99 必须分别不超过
+  50/75/100 ms；第十二次 edit 的 final p95/p99 必须分别不超过 500/1000 ms。
+  两个 endpoint 都必须匹配各自必需的 logical `ContentDigest`。
 - M1 必须满足 I1 绝对 limit，且其 p99 不得超过配对 isolated I1 p99 的 2.0 倍。
 
 被取消的中间 generation 不进入成功 percentile。Accepted-cancel-to-physical-
@@ -182,9 +306,10 @@ quiescence duration 作为独立观测保留。
 #### Throughput
 
 Throughput 是每秒成功的 logical site-operation，以 MPix-op/s 报告。一个 B1 job
-只有在 Run success、所需 artifact commit 与 golden verification 完成后才精确贡献
-16,777,216 个 site-operation。其 isolated interval 从两个 measured queue 被提供
-前立即开始，到最后一个 manifest commit 与 golden verification 后结束。Candidate
+只有在 Run success、crash-durable output receipt 与 logical/raw 两种 golden
+verification 完成后才精确贡献 16,777,216 个 site-operation。其 isolated interval
+从两个 measured queue 被提供前立即开始，到最后一个 job 的 golden-verification
+completion 结束。Candidate
 与 reference replicate 按 ordinal 配对：三个 candidate/reference ratio 的中位数
 必须至少为 0.95，且每个 ratio 至少为 0.90。
 
@@ -216,15 +341,48 @@ latency 是彼此独立的证据。
 对全部三个 replicate、fresh-process restart 和 Run cap 1 与 8 中相同的 B1 job
 index，下列每一项 mismatch count 都必须为零：
 
-- logical output SHA-256；
+- typed logical output `ContentDigest`；
+- raw little-endian payload SHA-256；
 - canonical artifact-manifest SHA-256；
-- 按 job index 区分的 golden SHA-256；以及
-- semantic trace fingerprint。
+- immutable 且按 job index 区分的 logical/raw golden identity；以及
+- `execution-profile-semantic-trace-v1` fingerprint。
 
-Semantic fingerprint 排除 timestamp、physical worker id、全局 mint 的 id 与原始
-sequence number，但保留 run-relative task、action、dependency、terminal-outcome
-与必需 resource 事实。Raw physical trace 仍作为证据保留。跨环境带容差比较是
-兼容性证据，不能满足这项同环境精确判定。
+Semantic trace 对 deterministic plan 中的每个 logical task 精确包含一条 `ready`、
+一条 `start` 和一条 `terminal` record。`task` 是 deterministic plan traversal
+分配的从零开始且连续的 plan ordinal，不是 physical start order。每条 record 包含
+`job`、Graph role、`task`、`action`、按数值排序的 dependency ordinal、terminal
+outcome，以及 task 声明的 `work_units`、ready entry/byte、CPU slot、Host
+retained/scratch byte 与 device-memory/scratch byte。无故障 B1 要求 terminal
+outcome 为 `succeeded`；非 terminal record 使用 outcome `-`。
+
+Canonical byte 以以下精确 ASCII header 与 LF 开始：
+
+```text
+execution-profile-semantic-trace-v1
+```
+
+其后每条 record 都是使用以下字段顺序的一行精确 ASCII：
+
+```text
+job=<u>;graph=<A|B>;task=<u>;action=<ready|start|terminal>;deps=<u,...|->;outcome=<succeeded|->;work=<u>;ready-entries=<u>;ready-bytes=<u>;cpu=<u>;host-retained=<u>;host-scratch=<u>;device-memory=<u>;device-scratch=<u>\n
+```
+
+显示的 `\n` 表示一个 LF byte（`0x0a`），不是 backslash 与 `n` 两个 byte。
+全部 unsigned integer 都使用不补零的 decimal（`0` 是零的唯一写法），不存在
+whitespace 或 BOM，dependency 使用逗号分隔的递增 ordinal 或 `-`，每一行（包括
+末行）均以 LF 结束。Record 按 numeric job、Graph `A` 在 `B` 之前、numeric task，
+然后按 `ready < start < terminal` 的 action rank 排序。Fingerprint 是这些精确 byte
+的 lowercase hexadecimal SHA-256。
+
+缺少或重复必需 record、task ordinal 不连续、dependency target 缺失、未知/额外
+field 或 action、非法 outcome、encoding violation 或 event-collector gap，都会让
+trace 无效，而不仅是不同。Timestamp、duration、physical worker/thread/device
+queue identity、全局 mint 的 Run/task id、raw sequence number、queue position、
+retry 与 physical start/completion order 都被排除。未 canonicalize 的 physical
+trace（包括上述 diagnostic）仍单独保留。因此，semantic record set 可以比较 cap
+1、cap 8 与 fresh replicate，而不会编码它们允许不同的 physical completion order。
+
+跨环境带容差比较是兼容性证据，不能满足这项同环境精确判定。
 
 #### Waste
 
@@ -249,7 +407,11 @@ mixed B1 的 discarded、duplicate 与 retry service 必须为零。
 
 Memory 证据保留 Host retained memory、Host scratch、ready byte 以及每个已配置
 device 的 memory 与 scratch 的 byte high-water mark，并保留 row-owned
-post-quiescent reservation/grant delta。任何权威 dimension 都不得超过冻结 limit。
+post-quiescent reservation/grant delta。B1 还保留 event-aligned
+`ComputeIoExecutor` active-task 与 active-planned-byte high-water 及其精确零结算。
+B1 planned-byte stream 是 Compute I/O admission、planned-byte high-water 与 final
+settlement 的强制性权威证据；它不证明 physical memory ownership，也不能替代 RSS
+或 ledger/device ownership evidence。任何权威 dimension 都不得超过冻结 limit。
 Isolated 行必须精确结算到 row 前 baseline；M1 shutdown 必须结算到零。
 
 对每个权威 dimension，candidate B1 与 I2 peak 必须不超过已固定同环境 reference
@@ -261,12 +423,36 @@ authority 之外的 allocation；它不能替代 ledger/device 证据，也不�
 每个 measured row 都属于一个 `execution-profile-slo-v1` bundle。Bundle 包含全部
 冻结来源、raw sample/event、eligibility window、drop/gap counter、output/artifact/
 trace/golden digest 与 commit receipt、transfer/copy/residency 证据、high-water
-sample、aggregate input 与 result、独立 verdict，以及所选 reference bundle
-digest。Eligibility 表示上文定义的 offered-demand interval。单位、公式、
+sample、aggregate input 与 result、独立 verdict，以及 typed comparison/pairing
+reference。Eligibility 表示上文定义的 offered-demand interval。单位、公式、
 denominator 定义和 invalidation reason 是 schema field，不能只写在说明文字中。
 
-Reference 与 candidate 必须具有相同 schema、workload id、environment class、
-resource limit 与 fixture hash。Reference 不可变且按 digest 选择。未记录的“known
+每个 bundle 记录 `subject_role=candidate|reference`。Candidate 的
+`comparison_reference_bundle_digest` 选择用于 candidate/reference regression 的
+immutable external baseline；它不是 M1 isolated denominator。Candidate 与 comparison
+reference 必须具有相同 evidence schema、workload id、environment class、resource
+configuration 与 fixture hash。二者的 repository/build identity 可以不同，并且必须
+记录，因为这正是 comparison 的 subject。
+
+每个 ordinal 为 `1..3` 的 M1 replicate 还要记录两个 same-subject pair：
+`paired_isolated_i1={row_digest,bundle_digest,replicate_ordinal}` 与
+`paired_isolated_b1_cap8={row_digest,bundle_digest,replicate_ordinal}`。Candidate M1
+row 与 candidate isolated row 配对；reference M1 row 与 reference isolated row
+配对。I1 pair 提供 relative latency denominator，B1 cap-8 pair 提供每个一秒
+throughput denominator。二者都不能由 generic comparison reference 或一个含义
+模糊的“reference bundle digest”替代。
+
+Paired row 与 M1 row 必须具有相同 replicate ordinal、evidence schema version、
+subject build/provider/plugin identity、environment-class digest、worker count、
+resource limit/headroom、cache/residency precondition 与 power/thermal eligibility
+policy。Paired I1 fixture hash 必须等于 M1 内嵌的 I1 component；paired B1 fixture/
+corpus/golden hash 与 Run cap 8 必须等于 M1 的 B1 component。Environment-class
+digest 绑定 OS/kernel、architecture、CPU/GPU/device inventory、compiler/build mode
+与 flag、worker count、provider/plugin generation 及冻结 resource，但有意不绑定
+repository commit，使 candidate/reference build 可以不同。Pair 缺失、为零、ordinal
+错误、跨 subject 或不兼容，都会使受影响的 M1 relative verdict 成为 `invalid`。
+
+所有被引用 bundle 与 row 都不可变，并按 content digest 选择。未记录的“known
 good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidence 必须能够
 复算每个 aggregate 与 verdict。
 
@@ -276,7 +462,7 @@ good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidenc
 | --- | --- |
 | #93 | 实现 I1 request/current-generation 与 cancellation/quiescence 观测；发布 isolated latency、waste 与 memory 行，以及必需的 output-correctness 证据。 |
 | #94 | 在精确 I1 lineage 上实现 I2；发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
-| #95 | 实现 B1 immutable manifest、reservation、canonical trace、artifact commit 与 golden；在 Run cap 1 与 8 下发布 isolated throughput、determinism、zero-fault waste 与 memory 行。 |
+| #95 | 实现 B1 immutable manifest、reservation、canonical semantic trace、crash-durable artifact commit 与 logical/raw golden；在 Run cap 1 与 8 下发布 isolated throughput、determinism、zero-fault waste 与 memory 行。 |
 | #96 | 把精确 I1 与 B1 fixture 组合为 M1；发布 mixed latency、throughput progress、fairness、waste 与 memory 行。 |
 
 每个 Issue 可以为其机制新增长期确定性行为测试，但不能重定义 workload，也不能

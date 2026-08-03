@@ -876,9 +876,9 @@ ordering、policy 与 receipt ownership。
 
 | Workload | 目标职责 |
 | --- | --- |
-| `I1-edit-storm-v1` | 在一个 latest-wins key 下执行十二次精确 parameter/256x256-Region edit，采用 Interactive QoS、固定 cadence/deadline，并观察 final-generation visibility。 |
-| `I2-progressive-v1` | 使用精确 I1 lineage，先产生 edit-12 512x512 preview，再产生 2048x2048 final；精确复用 Host/条件式 Metal residency，且 hidden I/O/copy 为零。 |
-| `B1-immutable-v1` | 三十个按 job index 区分的 immutable full-frame job 按顺序提供给两个 Graph，并在 Run cap 1 与 8 下保留 bounded admission、reservation、canonical raw artifact/manifest、trace 与 golden。 |
+| `I1-edit-storm-v1` | 自然 edit ordinal `1..12` 映射为 `edit_index=0..11`；在一个 latest-wins key 下执行十二次精确 parameter/256x256-Region edit，采用 Interactive QoS、具有有界 start lateness 的 monotonic nominal cadence，并观察第十二次 edit（`edit_index=11`）visibility。 |
+| `I2-progressive-v1` | 精确 I1 Graph/target/revision 与 edit mapping 使用独立的合法 realtime request key 及 RT-preview/HP-final child 契约；第十二次 edit（`edit_index=11`）先发布 512x512 preview，再发布 2048x2048 final；精确复用 Host/条件式 Metal residency，且 hidden I/O/copy 为零。 |
+| `B1-immutable-v1` | 三十个按 job index 区分的 immutable full-frame job 按顺序提供给两个 Graph，并在 Run cap 1 与 8 下保留 bounded Compute I/O task/planned-byte admission、canonical raw artifact/manifest 与 semantic trace、crash-durable receipt，以及 logical/raw golden。 |
 | `M1-shared-v1` | 四十次精确 I1 start 与持续提供的 cap-8 B1 cycle 共用一个进程执行权威，共测量 30 秒。 |
 
 Latency、throughput、fairness、determinism、waste 与 memory 是六项独立判定。
@@ -889,6 +889,14 @@ Interactive admission failure 为零，以及相对 isolated latency。精确 ou
 semantic-trace/golden digest、有界 discarded service、绝对 resource limit 与精确
 quiescent settlement 都不能用另一维更快的速度交换。
 
+冻结 protocol 不声称操作系统会精确到纳秒醒来。它固定相隔 16,666,667 ns 的
+nominal monotonic start、最大 2 ms admission-start lateness、精确 750,000,000 ns
+episode origin，以及 fail-closed miss/drop/gap 处理。Logical result 使用 typed
+canonical `ContentDigest`；raw little-endian payload、canonical manifest、semantic
+trace 与 golden identity 始终彼此分离。M1 除普通 candidate/reference baseline
+digest 外，还要记录不同且 same-ordinal 的 isolated-I1 与 isolated-B1-cap-8 pair
+digest。
+
 交付证据行已经冻结：
 
 | Issue | 必需目标证据 |
@@ -898,8 +906,9 @@ quiescent settlement 都不能用另一维更快的速度交换。
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste 与 memory。 |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 使用精确 I1/B1 fixture 生成 M1 mixed latency、Throughput progress、fairness、waste 与 memory。 |
 
-已接受决策是当前事实，但 workload、缺失 collector 与有效证据行仍属于下游目标
-工作。既有 policy-order test、`BenchmarkService`、lifecycle telemetry、ledger
+ADR 0010 是当前已接受的决策记录，不是当前 runtime capability 的事实陈述。
+Workload、缺失 collector 与有效证据行仍属于下游目标工作。既有 policy-order
+test、`BenchmarkService`、lifecycle telemetry、ledger
 snapshot 与手工 OpenCV scaling tool 本身不能建立画像 conformance。长期手工/
 release protocol 与测试归属边界记录在
 [测试与验证](../../development/zh/Testing-and-Validation.zh.md#执行画像-slo-手工release-protocol)。

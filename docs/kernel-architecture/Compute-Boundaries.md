@@ -546,6 +546,24 @@ at the actual admission, visibility, cancellation/quiescence, artifact, trace,
 completed-service, and resource-lifetime boundaries. No placeholder zero value
 is a substitute for a missing observation source.
 
+Those target collectors have precise boundary obligations. Edit ordinals
+`1..12` map to `edit_index=0..11`; nominal monotonic admission starts and their
+bounded lateness are distinct timestamps. I2 records preview admission/visible,
+final trigger/admission/visible, and generation-current checks using the legal
+RT-preview/HP-final child descriptors. Logical equality is a typed available
+`ContentDigest`. B1 records every `ComputeIoExecutor` task charge, accepted
+admission/settlement snapshot, planned-byte high-water, ADR 0009 requested and
+achieved durability, complete output receipt, raw payload/manifest hashes, and
+the separate canonical semantic trace. M1 records two same-ordinal isolated
+pair references in addition to candidate/reference comparison provenance.
+
+These remain target harness/evidence semantics. Exact per-job planned-byte
+charges and their event-aligned snapshots are mandatory, authoritative evidence
+for Compute I/O admission, planned-byte high-water, and final settlement. They
+do not add fields to the current `BenchmarkResult`, change `ComputeRun`, prove
+physical memory ownership, replace diagnostic RSS or ledger/device ownership
+evidence, or promote the current IPC delivery store to durable output authority.
+
 The ready store charges each dispatch
 `work_units + ceil(complete_ready_grant_bytes / 4096)`. Each Graph accrues raw
 cost in a separate accumulator for the selected service class; each Run has one

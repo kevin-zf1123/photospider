@@ -1635,15 +1635,27 @@ in ADR 0010; a convenient substitute graph is not a v1 row.
 | Row | Required workload and evidence | Cold | Warmup | Measured window |
 | --- | --- | ---: | ---: | ---: |
 | I1 isolated | `I1-edit-storm-v1`; latency, waste, memory, output correctness | 1 episode | 20 episodes | 200 episodes |
-| I2 isolated | `I2-progressive-v1`; edit-12 preview/final latency, Host/conditional-Metal residency and copy waste, memory, output correctness | 1 episode | 10 episodes | 100 episodes |
+| I2 isolated | `I2-progressive-v1`; twelfth-edit (`edit_index=11`) preview/final latency, Host/conditional-Metal residency and copy waste, memory, output correctness | 1 episode | 10 episodes | 100 episodes |
 | B1 cap 1 | `B1-immutable-v1`; throughput, determinism, fault-free waste, memory | seed 252 | seeds 253/254/255 | jobs `0..29` |
 | B1 cap 8 | The same B1 corpus and environment except Run cap | seed 252 | seeds 253/254/255 | jobs `0..29` |
 | M1 shared | `M1-shared-v1`; latency, progress, fairness, waste, memory | 1 second | 5 seconds | 30 non-overlapping one-second windows |
 
 Every row uses three fresh process/execution-domain replicates. Cold first-use
-is captured separately and excluded from steady-state aggregates. I1 episodes
-start at least 750,000,000 ns apart. M1 restarts its cadence with I1 at measured
-time zero, starts exactly 40 episodes, and keeps cap-8 B1 offered continuously.
+is captured separately and excluded from steady-state aggregates. Natural edit
+ordinals `1..12` map to `edit_index=0..11`; the required final is the twelfth
+edit (`edit_index=11`, `k=1.04`, source Region `(768,512,256,256)`, preview
+Region `(192,128,64,64)`). A bare “edit 12” is not a v1 evidence identity.
+
+After baseline settlement, an episode chooses monotonic origin `E` and uses
+`S_i=E+i*16,666,667 ns`. Host admission-call start `A_i` must be in
+`[S_i,S_i+2,000,000 ns]`; early start, more than 2 ms lateness, missed/drop/gap,
+or admission failure invalidates the replicate. The runner does not submit a
+missed edit late, catch up, backfill, or shift later times. Episode origins are
+exactly 750,000,000 ns apart; baseline preparation must finish before each
+origin. M1 restarts this schedule at measured time zero, starts exactly 40
+episodes, and keeps cap-8 B1 offered continuously. These are reproducible
+nominal monotonic times and lateness bounds, not exact OS wake claims.
+
 Disk-cache/codec I/O and cross-episode/job result reuse remain disabled. I1/I2
 retain only their explicitly recomputed baseline/current episode target and
 declared I2 output residency; every B1 job starts without a reusable fixture
@@ -1668,12 +1680,46 @@ boundary, advances each Graph in ascending job order, and begins a new M1 cycle
 without a producer gap; it does not admit all 30 Runs outside normal bounds.
 
 Every B1 job writes the exact ADR 0010 `output.rgba32le` payload and fixed-order
-`manifest.txt` in a fresh disposable directory, settles the payload, and
-atomically publishes the manifest last. Every I2 edit-12 preview/final is
+`manifest.txt` in a fresh disposable directory. Its two ordered
+`ComputeIoExecutor` tasks use stable charge identities: payload-stage has
+`planned_bytes=67,108,864`, while manifest-commit has that job's exact
+`242 + decimal_digit_count(job)` manifest length: 243 bytes for jobs `0..9`,
+244 bytes for jobs `10..99`, and 245 bytes for jobs `100..255`. Thus measured
+jobs `0..29` use 243 or 244 bytes and cold/warmup jobs `252..255` use 245 bytes.
+Samples immediately after every accepted admission/settlement must prove <=64
+active tasks, <=268,435,456 active planned bytes, both high-water marks, and
+exact zero final settlement. Every active planned-byte total is the checked sum
+of the true per-job charges. Planned bytes are mandatory, authoritative
+evidence for Compute I/O admission, planned-byte high-water, and final
+settlement, but are estimates rather than physical memory ownership evidence;
+they do not replace RSS or ledger/device ownership evidence.
+
+The target `OutputStore` requests and must achieve typed `crash-durable`; it
+settles the payload, publishes the canonical manifest no-replace and last,
+completes all leaf-to-root barriers, then returns the ADR 0009 receipt. Weaker,
+unsupported, or failed durability is invalid. A B1 job contributes throughput
+only after that receipt and both logical/raw golden checks. Every I2
+twelfth-edit (`edit_index=11`) preview/final is
 acquired twice through the same Host binding. A configured Metal device permits
 one exact-size first upload per distinct preview/final revision; the second
 access must hit the same residency. No CPU copy, readback, disk/codec access, or
 additional transfer is permitted.
+
+I2 uses the ADR 0010 target state machine, not an invented current API: every
+edit mints a realtime request generation, immediately submits the legal
+`RealTimeUpdate`/`Interactive` preview child, and arms the legal
+`GlobalHighPrecision`/`Full` final child under the shared realtime request
+identity. The final submits only when its preview becomes visible while still
+current. A newer generation revokes both older publication permissions. Preview
+latency starts immediately before preview admission and ends at preview
+visibility; final latency uses the same start and ends at final visibility.
+Only `edit_index=11` must publish both, in order.
+
+Required logical values call `compute_content_digest(Value)` and require
+`Available`, a present `ContentDigest`, and
+`CanonicalDigestAlgorithm::Sha256CanonicalV1`. Logical digest, raw little-endian
+payload SHA-256, canonical manifest SHA-256, semantic-trace SHA-256, and the
+logical/raw golden identity remain separate evidence families.
 
 ### Run procedure
 
@@ -1688,18 +1734,22 @@ For each candidate or reference bundle:
    cache/residency preconditions;
 3. require candidate and reference to have the same evidence schema, workload
    id, environment class, limits, and fixture hashes;
-4. retain cold first use, run the exact non-measured warmup, reset measurement
+4. for M1 replicate ordinal `1..3`, pin same-subject, same-ordinal isolated I1
+   and isolated B1 cap-8 row/bundle digests; require compatible environment,
+   resources, fixtures, build/providers, and preconditions, while retaining the
+   separate candidate `comparison_reference_bundle_digest` semantics;
+5. retain cold first use, run the exact non-measured warmup, reset measurement
    counters without replacing the frozen environment, then execute the exact
    measured window;
-5. capture raw admission, visibility, cancellation/quiescence, start,
+6. capture raw admission, visibility, cancellation/quiescence, start,
    completion, offered-demand eligibility, artifact/receipt, trace, digest,
    transfer/copy/residency, and resource-lifetime observations at their owning
    boundaries;
-6. reject any required telemetry cursor gap/drop rather than estimating lost
+7. reject any required telemetry cursor gap/drop rather than estimating lost
    observations;
-7. compute every replicate aggregate and independent dimension verdict from
+8. compute every replicate aggregate and independent dimension verdict from
    raw evidence using checked arithmetic; and
-8. seal the canonical bundle, compute its digest, and independently recompute
+9. seal the canonical bundle, compute its digest, and independently recompute
    every aggregate/verdict before reporting conformance.
 
 All durations use a monotonic clock. Percentiles use nearest rank: sort `N`
@@ -1710,12 +1760,12 @@ samples and a median summary cannot hide a failed process.
 
 | Dimension | Required calculation and pass rule |
 | --- | --- |
-| Latency | From submission immediately before Host admission to matching current-generation visibility. I1 p50/p95/p99 <=50/100/150 ms and 100% final success; I2 edit-12 preview p50/p95/p99 <=50/75/100 ms and edit-12 final p95/p99 <=500/1000 ms, with required digest matches; M1 also satisfies I1 absolute bounds and p99 <=2.0x paired isolated I1. Cancelled intermediates are excluded; accepted-cancel-to-quiescence is separate. |
-| Throughput | Successful logical RGBA pixel-site transforms per second, reported as MPix-op/s; one B1 job contributes 16,777,216 site-operations only after Run success + artifact commit + golden verification. Pair replicate ordinals: median candidate/reference ratio >=0.95 and every ratio >=0.90. M1 one-second B1 rate divided by paired isolated cap-8 B1 rate has p05 >=0.20; missing/zero denominator is invalid. |
+| Latency | I1 starts immediately before final Host admission and ends at matching current visibility. I2 twelfth-edit (`edit_index=11`) preview starts before preview admission and ends at preview visibility; final uses that same start and ends at final visibility. I1 p50/p95/p99 <=50/100/150 ms and 100% final success; I2 preview p50/p95/p99 <=50/75/100 ms and final p95/p99 <=500/1000 ms, with required `ContentDigest` matches; M1 also satisfies I1 absolute bounds and p99 <=2.0x its same-ordinal paired isolated I1. Cancelled intermediates are excluded; accepted-cancel-to-quiescence is separate. |
+| Throughput | Successful logical RGBA pixel-site transforms per second, reported as MPix-op/s; one B1 job contributes 16,777,216 site-operations only after Run success + crash-durable receipt + logical/raw golden verification. The interval ends at final golden verification. Pair candidate/reference replicate ordinals: median ratio >=0.95 and every ratio >=0.90. Each M1 one-second B1 rate uses its same-subject, same-ordinal paired isolated cap-8 B1 rate; p05 >=0.20, and a missing/zero/incompatible denominator is invalid. |
 | Fairness | For a complete one-second window where both B1 Graphs retain unconsumed offered demand without a producer pause, `J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`, where `x` is completed `work_units + ceil(ready_bytes/4096)`. Zero total service is invalid; p05 Jain >=0.95. While both classes remain startable, at most three Interactive starts precede Throughput. M1 also has zero headroom-caused Interactive admission failures and independently passes latency/progress. |
-| Determinism | For the same B1 job index across three replicates, fresh-process restart, and Run caps 1/8, output, canonical artifact-manifest, semantic-trace, and job-indexed golden SHA-256 mismatch counts are all zero. The semantic trace excludes timestamps, physical workers, global ids, and raw sequence numbers, while retaining run-relative task/action/dependency/outcome/resource facts. |
+| Determinism | For the same B1 job index across three replicates, fresh-process restart, and Run caps 1/8, typed logical `ContentDigest`, raw payload SHA-256, canonical manifest SHA-256, `execution-profile-semantic-trace-v1` SHA-256, and job-indexed logical/raw golden mismatch counts are all zero. |
 | Waste | `discarded_started_service / all_started_service`, using `work_units + ceil(ready_bytes/4096)`. Every started callback whose result cannot commit is charged; entered non-preemptible work drains honestly. I1/I2 Interactive <=0.25 per replicate, and M1 applies that bound to Interactive service alone; work starting after accepted cancellation/supersession is exactly zero. I2 extra filesystem/codec, CPU-copy, readback, transfer, and allocation bytes are zero under its permitted first-transfer rule. Fault-free isolated/mixed B1 discarded/duplicate/retry service is zero. |
-| Memory | Independent high-water bytes for Host retained, Host scratch, ready bytes, and configured-device memory/scratch. No absolute limit exceed; isolated row-owned deltas return to the pre-row baseline and M1 shutdown returns to zero. Candidate B1/I2 peaks are <=105% of the pinned same-environment reference. RSS is diagnostic only. |
+| Memory | Independent high-water bytes for Host retained, Host scratch, ready bytes, and configured-device memory/scratch, plus B1 active Compute I/O tasks/planned bytes. No absolute limit exceed; isolated row-owned deltas and B1 I/O counts return to the pre-row baseline/zero, and M1 shutdown returns to zero. Candidate B1/I2 peaks are <=105% of the pinned same-environment reference. Process RSS is diagnostic only. B1 planned-byte charge and event-aligned samples are mandatory, authoritative evidence for Compute I/O admission, planned-byte high-water, and final settlement; they do not establish physical memory ownership or replace RSS or ledger/device ownership evidence. |
 
 Each required dimension emits `pass`, `fail`, `invalid`, or a schema-defined
 `not-applicable`; there is no composite score. Missing source evidence,
@@ -1723,6 +1773,16 @@ arithmetic overflow, monotonic-clock failure, cursor/drop gaps, fixture or
 environment drift, an unpinned/incompatible reference, a zero required
 denominator, or an unapproved `not-applicable` makes the affected row invalid
 and non-conformant.
+
+The semantic trace uses exactly three records per deterministic plan task:
+`ready`, `start`, and `terminal`. Records carry job/Graph, contiguous
+plan-relative task ordinal, sorted dependency ordinals, action/outcome, and the
+declared resource vector. The exact ADR 0010 ASCII header/field order, unpadded
+decimals, LF termination, numeric job/task and action-rank sort, and lowercase
+SHA-256 are mandatory. Duplicate/missing/unknown records or fields, invalid
+dependencies/outcomes/encoding, or collector gaps are invalid. Physical time,
+worker/queue/global identities, raw sequence, retry, and completion order are
+excluded from the canonical bytes but retained in the separate raw trace.
 
 ### Evidence bundle
 
@@ -1733,13 +1793,17 @@ An `execution-profile-slo-v1` bundle contains:
 - warmup, cold, and measured counts/windows kept separately;
 - raw samples/events, offered-demand eligibility intervals, and drop/gap
   counters;
-- output, artifact-manifest, semantic-trace, golden digests, and commit
-  receipts;
+- typed logical output, raw payload, artifact-manifest, semantic-trace, and
+  logical/raw golden digests, plus typed requested/achieved durability and
+  complete commit receipts;
 - transfer/copy/residency identities, bytes, and reuse outcomes;
-- authoritative resource samples and high-water/settlement deltas;
+- authoritative resource samples and high-water/settlement deltas, including
+  event-aligned Compute I/O task/planned-byte samples and charge identities;
 - units, formulas, denominators, aggregates, invalidation reasons, and one
   verdict per required dimension; and
-- the immutable reference bundle digest.
+- `subject_role`, the candidate's immutable
+  `comparison_reference_bundle_digest`, and for every M1 replicate the separate
+  same-subject/same-ordinal isolated-I1 and isolated-B1-cap-8 row/bundle digests.
 
 A prose summary, an unrecorded rerun of a “known good” build, or current
 `BenchmarkResult` output is not a normative reference. The raw bundle must be
