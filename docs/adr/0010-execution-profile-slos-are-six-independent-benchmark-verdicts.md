@@ -78,10 +78,10 @@ The canonical workload matrix is:
 
 | Workload | Frozen behavior |
 | --- | --- |
-| `I1-edit-storm-v1` | Uses seed zero and the twelve natural edit ordinals `1..12`. For `edit_index = edit_ordinal - 1` in `0..11`, node one's `k` is selected from `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`, and the source Region is `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`. Every Run uses `ComputeIntent::GlobalHighPrecision`, `ComputeRunQuality::Full`, Interactive QoS, weight 1, Run cap 8, the checked absolute monotonic deadline `D_i=A_i+150,000,000 ns`, and the exact `(Graph, target node four, GlobalHighPrecision)` supersession key. The twelfth edit (`edit_index=11`, `k=1.04`, Region `(768,512,256,256)`) is the only required publication and must publish no later than `D_11`; a separate 500 ms quiescence drain follows the cadence. |
+| `I1-edit-storm-v1` | Uses seed zero and the twelve natural edit ordinals `1..12`. For `edit_index = edit_ordinal - 1` in `0..11`, node one's `k` is selected from `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`, and the source Region is `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`. Every Run uses `ComputeIntent::GlobalHighPrecision`, `ComputeRunQuality::Full`, Interactive QoS, weight 1, Run cap 8, the checked absolute monotonic deadline `D_i=A_i+150,000,000 ns`, and the exact `(Graph, target node four, GlobalHighPrecision)` supersession key. The twelfth edit (`edit_index=11`, `k=1.04`, Region `(768,512,256,256)`) is the only required publication and must publish no later than `D_11`. One continuous 221-slot cold/warmup/measured grid fixes every isolated episode origin; each episode's 500 ms settlement-observation window starts at its twelfth nominal start `S_11` and ends before the next origin. |
 | `I2-progressive-v1` | Reuses the exact I1 source, graph, seed, edit ordinals, source-space Regions, realtime request lineage, and complete node-one coefficient sequence `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` under the same `edit_index=edit_ordinal-1` mapping. One continuous 111-slot steady-clock grid links the cold, warmup, and measured phase origins; episodes are exactly 1,500,000,000 ns apart and contain twelve nominal preview-admission starts 16,666,667 ns apart with at most 2,000,000 ns lateness. At each index it updates node one to that coefficient, then executes nodes one through four in order with `k` values `[coefficient, 1.00, 1.20, 1.40]`. The 512x512 preview source is a per-channel 4x4 box average of the original 2048 source, rounded once to binary32 before that update/transform sequence; preview Region `edit_index` is `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`. The final starts from the original 2048 source and uses the same I1 full-resolution update/transform path; it is never derived from preview pixels. Only the twelfth edit (`edit_index=11`, preview Region `(192,128,64,64)`) has required preview and final latency results, in that order; stale output cannot publish. |
 | `B1-immutable-v1` | Contains immutable jobs `0..29`; job `n` uses source seed `n`, the baseline graph, Throughput QoS, weight 1, no deadline or supersession, exact reservation evidence, a canonical semantic trace, a crash-durable committed artifact, and job-indexed logical/raw goldens. Even jobs belong to Graph A and odd jobs to Graph B. At the measurement boundary the harness offers both ordered 15-job queues and never pauses a nonempty queue; bounded Host admission, rather than the harness, decides how many Runs are resident. Run caps 1 and 8 are separate required rows. |
-| `M1-shared-v1` | At measured time zero, starts I1 and then repeats it every 750,000,000 ns, giving exactly 40 episode starts, while cycling the exact B1 corpus with its even/odd Graph assignment, Run cap 8, and continuous offered backlog for 30 measured seconds. Both streams use one `ExecutionService`, worker set, ready store, policy binding set, and `ResourceLedger`; no hidden pool, duplicate ledger, or separate process may absorb either stream. |
+| `M1-shared-v1` | At the exact warmup-cutoff/measurement-origin boundary, starts measured I1 and then repeats it every 750,000,000 ns, giving exactly 40 episode starts, while cycling the exact B1 corpus with its even/odd Graph assignment, Run cap 8, and continuous offered backlog for 30 measured seconds. The boundary neither pauses nor drains the shared domain: already offered warmup work retains its phase identity and resource authority ahead of newly offered measured B1 work. Both streams use one `ExecutionService`, worker set, ready store, policy binding set, and `ResourceLedger`; no hidden pool, duplicate ledger, or separate process may absorb either stream. |
 
 Every workload-bearing field or fixed-record component uses the dedicated,
 case-sensitive scalar type `workload-id-v1`. Its complete domain is exactly
@@ -191,18 +191,56 @@ latency sample.
 Expiry at `D_i` uses the same monotonic clock, requests cancellation of that
 Run, and records its acceptance. Queued work is removed, dependent re-entry is
 denied, and entered non-preemptible work drains without commit authority. A
-deadline-expired result
-cannot become current even if execution later succeeds. These rules apply to
-every isolated and M1 I1 episode, including the twelfth edit; the separate
-500 ms drain is only a quiescence observation window and never extends `D_i`.
+deadline-expired result cannot become current even if execution later succeeds.
+These rules apply to every isolated and M1 I1 episode, including the twelfth
+edit. The settlement-observation window uses the nominal twelfth start rather
+than the variable admission or deadline as its independent anchor:
 
-For isolated I1, within each cold, warmup, or measured phase, episode origins are exactly
-`E_r = E_0 + r * 750,000,000 ns`. Reset/baseline preparation must finish before
-`E_r`; failure to do so invalidates that episode rather than sliding the
-schedule or inserting an unrecorded cooling delay. M1 uses
-`E_r = M_0 + r * 750,000,000 ns` for `r=0..39`. Paired isolated and mixed
-evidence therefore share the same v1 schedule, start-lateness bound, and
-miss/drop/gap rules without claiming identical physical wake times.
+```text
+Q^I1_start(E) = S_11 = E + 11 * 16,666,667 ns
+                = E + 183,333,337 ns
+Q^I1_end(E) = Q^I1_start(E) + 500,000,000 ns
+              = E + 683,333,337 ns
+```
+
+The window includes events at both boundaries. At `Q^I1_start`, the nominal
+schedule marker orders before an actual admission with the same timestamp. At
+`Q^I1_end`, all lifecycle events with an equal timestamp are applied in their
+retained causal order before the quiescence snapshot. A start that leaves work
+active at that snapshot, or any terminal/settlement event after the boundary,
+invalidates the replicate. The window may observe an active final Run; it does
+not cancel work, delay the next origin, or extend any `D_i`. At the latest legal
+admission, `D_11 <= E + 335,333,337 ns`, leaving exactly 348,000,000 ns from
+that deadline to `Q^I1_end` and 66,666,663 ns from `Q^I1_end` to the next
+750,000,000 ns origin. Reset/baseline preparation must use that fixed remaining
+guard and finish before the next origin rather than slide it. Every grid,
+nominal-start, admission, deadline, and drain computation uses checked
+arithmetic; overflow is invalid.
+
+One retained isolated-I1 replicate-grid origin `G^I1` fixes every phase rather
+than allowing three independent origins:
+
+```text
+E^I1_g = G^I1 + g * 750,000,000 ns
+E^I1_cold,0 = E^I1_0
+E^I1_warmup,r = E^I1_(1+r),       r in 0..19
+E^I1_measured,r = E^I1_(21+r),    r in 0..199
+T^I1 = G^I1 + 221 * 750,000,000 ns
+```
+
+Natural episode ordinal maps to zero-based `r` within its phase. Cold occupies
+slot zero, warmup slots `1..20`, and measured slots `21..220`; `T^I1` is a
+terminal non-start boundary. Counter reset completes before the already fixed
+measured origin. No phase may choose another origin, insert a cooling delay, or
+shift a later slot. Each episode must be quiescent at its `Q^I1_end`; the last
+measured episode must therefore settle before `T^I1` with the same exact
+66,666,663 ns guard.
+
+M1 separately uses `E_r = M_0 + r * 750,000,000 ns` for `r=0..39`, where
+`M_0` is the exact mixed-load warmup cutoff and measurement origin described
+below. Paired isolated and mixed evidence therefore share the same per-episode
+schedule, start-lateness, drain, and miss/drop/gap rules without claiming
+identical physical wake times.
 
 #### I2 freezes one target progressive state machine
 
@@ -1071,13 +1109,107 @@ observations are exact rather than harness choices:
 
 Warmup B1 jobs use the same graph and full artifact path but warmup-only
 identities and directories. Warmup and cold output is removed after its owner
-settles; process/provider/JIT state remains. Measurement counters reset at the
-boundary without restarting the process, and M1 restarts its cadence with the
-first episode at measured time zero. Cold first use is retained separately and
-never pooled into steady-state aggregates. All durations use a monotonic
-clock. Percentiles use nearest rank: sort `N` samples and select one-based rank
-`ceil(p*N)`. Every replicate must pass independently; pooling cannot hide a bad
-process. A summary may report the median of the three replicate aggregates.
+settles; process/provider/JIT state remains.
+
+#### The M1 measurement boundary preserves warmup carryover
+
+M1 retains one boundary event with exact monotonic timestamp `B^M1=M_0` and
+row-local sequence `b^M1`, plus one terminal-cutoff event at checked timestamp
+`U^M1=B^M1+30,000,000,000 ns` and sequence `u^M1`. Every raw boundary and
+lifecycle event has a unique, strictly increasing row-local sequence. Event
+coordinates are ordered as `(monotonic_timestamp,event_sequence)`, so
+concurrent lifecycle events with the same clock value remain unambiguous. The
+30 one-second windows occupy the ordered interval
+`[(B^M1,b^M1),(U^M1,u^M1))`. Checked addition failure is invalid.
+
+At `B^M1`, one zero-duration boundary transaction performs the following
+logical steps in order without stopping the shared execution domain:
+
+1. close every warmup offer source--the warmup I1 cadence and both B1 Graph
+   producers--so no warmup occurrence is offered at or after the boundary
+   event;
+2. snapshot every warmup occurrence offered before the boundary whose unique
+   completion endpoint has not yet ordered before it, including complete
+   `job_instance_id` or I1 episode/generation identity, offered-waiting,
+   accepted, queued, or running state, queue predecessor, reservation/grant,
+   and owner-settlement state;
+3. reset only measured logical accumulators while preserving raw events,
+   occurrence identities, queues, policy state, resource authority, and the
+   carryover snapshot;
+4. establish the first measured I1 nominal origin at `M_0`;
+5. offer measured B1 Graph A job zero followed by Graph B job one, both at
+   timestamp `B^M1`, with sequence values satisfying
+   `b^M1 < sequence(Graph A job zero) < sequence(Graph B job one)`.
+
+Steps one through four form one atomic logical transition at the boundary
+coordinate: no other row-local lifecycle event interleaves with their snapshot
+or counter reset. A lifecycle event at timestamp `B^M1` with sequence below
+`b^M1` orders before the whole transition; one with sequence above `b^M1`
+orders after its snapshot/reset and then relative to the two measured B1 offers
+by sequence.
+
+If a same-timestamp lifecycle event orders before the boundary, the snapshot
+reflects its new state; if it orders after, it is a cross-boundary event. A
+terminal warmup event at the same timestamp never creates a new warmup
+successor after step one. There is no phase-boundary wait, cooling interval,
+drain, cancellation, process restart, worker/policy/queue reconstruction, or
+resource release. Ordinary measured-I1 admissions may supersede older I1
+generations under the frozen latest-wins rules, but the harness adds no
+boundary-only cancellation.
+
+Every outstanding warmup B1 occurrence retains its immutable `phase=warmup`,
+cycle, job, and attempt identity and its existing per-Graph FIFO position. The
+new measured offers use `phase=measured`, `cycle_ordinal=0`, job zero or one,
+and `attempt=0`; they follow the complete already-offered warmup prefix for
+their Graph even when that prefix is queued or running. This exact transition
+is the sole exception to waiting for the predecessor to become terminal before
+an offer. Afterward each measured producer again offers its next ascending job
+synchronously on predecessor terminal, starts the next complete `0..29` cycle
+without a gap, and never completes or increments an unfinished warmup cycle.
+The cap-eight admission bound, active backlog, queue order, and resource
+ownership span the boundary unchanged.
+
+Occurrence-owned results are attributed by immutable phase, never by completion
+timestamp. A warmup occurrence's terminal result, completed service, output
+bytes, latency, receipt, golden/digest result, duplicate/retry/discarded service,
+and owner settlement remain warmup evidence even when observed after `B^M1`;
+they do not enter measured throughput, completed-service fairness `x`, latency,
+determinism, or waste numerators or denominators. Measured occurrence endpoints
+contribute only when their ordered event coordinate lies inside the measured
+interval. In contrast, scheduler and resource observations are time-windowed:
+actual class-start ordering, headroom failures, queue contention, active
+reservations/grants, Compute I/O counts, and Host/device/ready-memory high-water
+after `B^M1` include physical effects from every phase. Thus carryover cannot be
+hidden from contention or memory evidence. The class-start bound observes every
+actual Throughput start in the measured interval, including a warmup start,
+while Jain completed service remains measured-occurrence service only.
+
+Warmup evidence remains required: a carryover failure, missing event evidence,
+duplicate event sequence, non-total event coordinate, illegal phase rewrite,
+boundary-only cancellation, queue reorder, snapshot mismatch, or unproved
+settlement invalidates the replicate even though its occurrence-owned
+quantities are excluded from measured aggregates. At `(U^M1,u^M1)`, the
+ordered cutoff stops new measured B1 offers without cancelling already offered
+work. An endpoint ordered at or after that cutoff is retained but does not
+enter a 30-second numerator. Teardown must drain all phases and reach the
+existing exact-zero resource/Compute-I/O settlement; quiescence is deliberately
+not required at `B^M1`.
+
+The workload manifest retains `B^M1`, `U^M1`, the event-order/tie rule, boundary
+step order, queue/carryover policy, and phase-attribution rules. Measurement
+evidence retains both boundary events, the full carryover snapshot, every tied
+event coordinate and state transition, the first measured offers, queue/start/
+terminal/receipt joins, counter epochs, resource samples, failures, and final
+settlement. Existing section and verdict digests cover these bytes; the closed
+15-field row and five-field bundle do not change. Any boundary, ordering,
+carryover, attribution, or evidence drift while retaining `M1-shared-v1` is
+invalid and requires a new workload id if intentional.
+
+Cold first use is retained separately and never pooled into steady-state
+aggregates. All durations use a monotonic clock. Percentiles use nearest rank:
+sort `N` samples and select one-based rank `ceil(p*N)`. Every replicate must
+pass independently; pooling cannot hide a bad process. A summary may report the
+median of the three replicate aggregates.
 
 ### Each SLO dimension has a non-substitutable verdict
 
@@ -1523,10 +1655,10 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 
 | Issue | Required v1 delivery |
 | --- | --- |
-| #93 | Implement I1 request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
+| #93 | Implement the continuous 221-slot isolated-I1 grid, exact `S_11` drain/tie/guard behavior, request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
 | #94 | Implement I2 on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-before-next-edit ordering, and I1 coefficient/index/update/full-resolution-final lineage frozen here; it cannot redefine those schedules or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
 | #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
-| #96 | Compose the exact I1 and B1 fixtures into M1, assign a distinct `cycle_ordinal` to every repeated B1 corpus without treating it as retry, reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
+| #96 | Compose the exact I1 and B1 fixtures into M1, implement the exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary, assign a distinct `cycle_ordinal` to every repeated B1 corpus without treating it as retry, reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

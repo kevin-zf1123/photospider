@@ -1368,7 +1368,7 @@ upsample、复用或其他方式从 preview 派生的 Value。
 | 既有 envelope evidence | 在既有 workload-manifest section 中保留 clock/replicate-grid/派生 phase-origin/index/schedule/tie rule，在 measurement evidence 中保留全部 actual admission/deadline/visibility/cancel/drop/gap/quiescence event。复算其 section/verdict digest，同时保持封闭 15-field row 与五 field bundle。 |
 | Manifest/golden drift | 即使 image golden 匹配，也拒绝 `I2-progressive-v1` 下的任何 origin/stride/cadence/order/lateness/anchor/tie-rule 漂移；有意改变必须使用新的 workload id 与 manifest/digest/golden lineage。 |
 
-对 isolated I1，baseline 结算后，episode 选择 monotonic origin `E`，并使用
+对 I1，baseline 结算后，位于 monotonic origin `E` 的 episode 使用
 `S_i=E+i*16,666,667 ns`。`A_i` 是 final Host admission 前立即取得的唯一
 monotonic-clock sample；它启动 latency sample，并通过 checked addition 得到唯一
 absolute Run deadline `D_i=A_i+150,000,000 ns`。`A_i` 必须处于
@@ -1377,20 +1377,42 @@ absolute Run deadline `D_i=A_i+150,000,000 ns`。`A_i` 必须处于
 admission failure 都会使 replicate 无效。Runner 在任何迟到 Host call 前请求
 cancellation/supersession 并记录其被接受、撤销 publication，并且不会追赶、回填或
 移动后续时刻。已进入的 non-preemptible work 按 waste drain；post-cancel start
-为零，missed/expired work 不能发布 output、receipt 或 successful latency。Final
-500 ms drain 只观察 quiescence，绝不延长 `D_i`。Episode origin 精确间隔
-750,000,000 ns；
-baseline 准备必须在每个 origin 前完成。M1 在 measured time zero 重启该
-schedule，共精确启动 40 个 episode，并
-持续提供 cap-8 B1。这是可复现的 nominal monotonic time 与 lateness bound，不是
-精确 OS wake 的声称。
+为零，missed/expired work 不能发布 output、receipt 或 successful latency。
+
+强制 I1 phase/drain scenario oracle 如下：
+
+| 场景 | Oracle |
+| --- | --- |
+| 连续 isolated phase grid | 保留唯一 `G^I1`；派生 cold slot zero、warmup slot `1..20`、measured slot `21..220`，并且只把 `T^I1=G^I1+221*750,000,000 ns` 作为 terminal non-start boundary。把每个 phase 的自然 ordinal 映射为从零开始的 `r`；拒绝 fresh phase origin、cooling delay、shifted slot 或迟到的 counter reset。 |
+| 精确 drain anchor | 每个 episode 要求 `Q_start=S_11=E+183,333,337 ns` 与 `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`，不受 actual admission 或 deadline 变化影响。Window 可以与 active final Run 重叠，但不会取消它或延长 `D_i`。 |
+| Deadline 与 next-origin guard | 在最晚合法 admission 下，要求 `D_11<=E+335,333,337 ns`、从该 deadline 到 `Q_end` 精确 348,000,000 ns，以及从 `Q_end` 到下一 origin 精确 66,666,663 ns。Reset/baseline preparation 必须容纳在该 guard 中；最后一个 measured episode 在 `T^I1` 前使用相同 guard。 |
+| Boundary tie 与 settlement | 在 `Q_start`，nominal marker 先于同 timestamp admission；在 `Q_end`，同 timestamp lifecycle event 先按保留 causal order 应用，再取得 quiescence snapshot。Snapshot 仍有 active work 或之后仍有 terminal/settlement 都是 invalid。 |
+| Fail-closed arithmetic/evidence | 拒绝 grid/slot/start/admission/deadline/drain checked overflow、boundary/event evidence 缺失或重复、moved origin、nonquiescence，或同 workload id 下的 manifest rule drift。既有 section/verdict digest 绑定 evidence，不改变 15/5-field envelope。 |
+
+M1 对 `r=0..39` 使用相同逐 episode drain 规则
+`E_r=M_0+r*750,000,000 ns`，共精确启动 40 个 measured episode，并持续提供
+cap-eight B1。这是可复现的 nominal monotonic time 与 lateness bound，不是精确
+OS wake 的声称。
 
 Disk-cache/codec I/O 与跨 episode/job result
 reuse 保持禁用。I1/I2 只保留显式重新计算的 baseline/current episode target 与
 已声明的 I2 output residency；每个 B1 job 开始时都没有可复用 fixture result。
 Warmup B1 job 用独立 identity/directory 执行完整 artifact path；owner 结算后
-移除 output，同时保留 process/provider/JIT state。Warmup observation 绝不进入
-measured aggregate；测量边界在不重启进程的情况下重置 counter。
+移除 output，同时保留 process/provider/JIT state。Warmup occurrence-owned
+observation 绝不进入 measured aggregate；M1 boundary 在不重启进程或重置 state 的
+情况下重置 logical counter。
+
+强制 M1 phase-boundary scenario oracle 如下：
+
+| 场景 | Oracle |
+| --- | --- |
+| 精确 boundary 与 interval | 保留 boundary coordinate `(B^M1=M_0,b^M1)`、经过 checked arithmetic 的 terminal-cutoff coordinate `(U^M1=B^M1+30,000,000,000 ns,u^M1)`，以及唯一且严格递增的 row-local event sequence。按 `(monotonic_timestamp,event_sequence)` 排列相等 timestamp；measured interval 是 `[(B^M1,b^M1),(U^M1,u^M1))`。 |
+| 有序零时长 transition | 在 `(B^M1,b^M1)`，以 atomic transition 关闭 warmup I1 cadence 与两个 B1 Graph producer，对此前已经 offered 但未完成的每个 warmup I1/B1 occurrence/state 取得 snapshot，只重置 logical measured accumulator，并建立 measured I1 origin。随后在 timestamp `B^M1` 依次 offer measured Graph A job zero 与 Graph B job one，sequence 均严格大于 `b^M1`。Snapshot/reset 中不得插入其他 event，也不得 pause/wait/cooling/drain/boundary cancellation/restart/queue rebuild/resource release。 |
+| Carryover identity 与 FIFO | 保留 warmup phase/cycle/job/attempt、queue predecessor、admission state、reservation/grant 与 owner settlement。即使仍 queued/running，measured cycle-zero offer 也排在每个 Graph 已经 offered 的 warmup prefix 之后；只有该 transition 可以绕过 predecessor-terminal offer timing。后续 measured offer 恢复普通规则，绝不推进未完成的 warmup cycle。 |
+| Occurrence attribution | 按不可变 phase 归属 terminal/completed service、output byte、latency、receipt/golden/digest、determinism、retry/duplicate/discarded service、waste 与 settlement。把 `B^M1` 后的 warmup occurrence-owned quantity 从 measured throughput、Jain service `x`、latency、determinism 与 waste aggregate 排除。 |
+| Temporal scheduler/resource effect | 包含 boundary 后每个 phase 的 actual class start、headroom failure、queue contention、reservation/grant、Compute I/O state 与 Host/device/ready-memory high-water。Measured class-start rule 计算 warmup Throughput start，而 Jain completed service 只使用 measured occurrence。 |
+| Failure 与 terminal settlement | Warmup carryover failure、event evidence 缺失、event sequence 重复或 coordinate 无法形成全序、phase/identity/FIFO rewrite、boundary-only cancellation、snapshot mismatch 或无法证明 settlement 都是 invalid。在 `(U^M1,u^M1)` 停止新的 measured offer，但不取消 outstanding work；保留排在 cutoff 或其后的 endpoint，但从 30-second numerator 排除，随后要求 exact-zero teardown。`B^M1` 不要求 quiescence。 |
+| 既有 envelope evidence | 在既有 manifest/measurement section 与 digest 中保留两个 boundary、tie/step order、carryover snapshot、phase join、首批 measured offer、counter epoch、queue/start/terminal/receipt event、resource effect、failure 与 final settlement。任何有意规则变化都需要新 workload id；outer row/bundle field 保持 15/5。 |
 
 v1 resource profile 是 32 个 CPU slot、1 GiB Host retained memory、512 MiB
 Host scratch、65,536 个 ready entry 与 256 MiB ready byte；Interactive headroom
@@ -1400,9 +1422,11 @@ Host scratch、65,536 个 ready entry 与 256 MiB ready byte；Interactive headr
 256 MiB；Metal 缺失属于预定义 `not-applicable`。
 
 对 B1 fairness 证据，只要 Graph producer 仍有未消费 offered demand 且没有暂停
-提交，该 Graph 就是 eligible，其中包括 bounded-admission wait。Harness 在测量
-边界同时提供两个有序的 15-job queue，按递增 job index 推进每个 Graph，并在 M1
-中无 producer gap 地开始新 cycle；它不会绕过正常 bound 准入全部 30 个 Run。
+提交，该 Graph 就是 eligible，其中包括 bounded-admission wait。Isolated B1 在其
+measured boundary 提供两个有序的 15-job queue。M1 使用上面的 boundary oracle：
+首批逐 Graph measured offer 排在保留的 warmup prefix 之后，随后按递增 job index
+推进每个 Graph，并无 producer gap 地开始完整新 cycle。两条路径都不会绕过正常
+bound 准入全部 30 个 Run。
 
 每个 B1 occurrence 都通过 canonical `job-instance-v1`
 `(row_workload_id:workload-id-v1,replicate_ordinal:uint64,
@@ -1762,14 +1786,17 @@ Issue #92 不新增当前 test binary、serializer、probe、runner、API 或 ru
    的完整 environment-class 匹配，同时要求 resource、fixture、build/provider 与
    precondition 兼容，并保留
    独立的 candidate `comparison_reference_bundle_digest` 语义；
-5. 保留 cold first-use，执行精确且不参与测量的 warmup，在不替换冻结环境的情况下
-   重置测量 counter，然后执行精确 measured window；
+5. 保留 cold first-use 并执行精确且不参与测量的 warmup；对 isolated I1 保持已经
+   固定的 221-slot grid，对 M1 则在不替换或暂停冻结环境的情况下执行精确有序的
+   `B^M1` cutoff/carryover snapshot/counter reset/首批 offer transaction，随后执行到
+   `U^M1` 与 final settlement 的精确 measured interval；
 6. 在包含 B1 的 work 前分配并保留 canonical job-instance index，拒绝重复 phase/
    cycle/job coordinate，并验证每个 charge、admission、commit、receipt 与 evidence
    join 使用 occurrence identity 而不是 retry identity；
-7. 在各自 owner 边界采集 raw admission、visibility、cancellation/quiescence、
-   start、completion、offered-demand eligibility、artifact/receipt、trace、digest、
-   transfer/copy/residency 与 resource-lifetime observation；
+7. 在各自 owner 边界采集 raw origin/drain/boundary sequence、carryover/FIFO/phase
+   attribution、admission、visibility、cancellation/quiescence、start、completion、
+   offered-demand eligibility、artifact/receipt、trace、digest、transfer/copy/
+   residency 与 resource-lifetime observation；
 8. 拒绝任何必需的 telemetry cursor gap/drop，不估算缺失 observation；
 9. 使用 checked arithmetic 从 raw evidence 计算每个 replicate aggregate 与各项
    独立 dimension verdict；以及
@@ -1821,8 +1848,11 @@ completion order 不进入 canonical byte，但保留在独立 raw trace 中。
   observation、eligibility/reason，以及 claimed 和复算的
   `storage_environment_digest`；
 - workload/fixture/source/graph/payload hash 与全部 seed；
-- 相互分离的 warmup、cold 与 measured count/window；
-- raw sample/event、offered-demand eligibility interval 与 drop/gap counter；
+- 相互分离的 warmup、cold 与 measured count/window，包括 I1 grid/drain boundary 与
+  M1 cutoff/terminal coordinate、event order、carryover snapshot、counter epoch 及
+  phase attribution；
+- raw sample/event、offered-demand eligibility interval、queue/carryover transition 与
+  drop/gap counter；
 - typed logical output、raw payload、artifact-manifest、semantic-trace 与 logical/raw
   golden digest，加上 typed requested/achieved durability 与完整 commit receipt；
 - transfer/copy/residency identity、byte 与 reuse outcome；
@@ -1909,12 +1939,14 @@ resource-limit 或 settlement invariant 时，应注册长期确定性产品行�
 任何 Issue 专属 replay、provenance/result orchestrator、phase-completion scan 或
 performance-result file 都不得注册到 CTest/CI，也不得作为仓库内容长期保留。
 
-Issue #95 负责 B1 `OutputStore` 固定 raw probe-to-schema mapping、backend 到固定
+Issue #93 负责连续 isolated-I1 grid 与精确 drain/tie/guard collector 行为。Issue #95
+负责 B1 `OutputStore` 固定 raw probe-to-schema mapping、backend 到固定
 schema 的 adapter、mount normalizer、performance-configuration mapping/proof、唯一
 canonical encoder/digest、eligibility 与 root-containment evidence，以及 cap-1/
 cap-8 和 candidate/reference check。Issue #96 为 M1 原样复用精确 manifest byte，
-并强制执行其 same-ordinal 完整 B1 pair，同时让 I1-only pair 只比较 base。两个
-Issue 都不能重定义 v1 grammar、field 或 sentinel。Issue #92 只定义本 evidence
+实现冻结的 cutoff/carryover/phase-attribution boundary，并强制执行其 same-ordinal
+完整 B1 pair，同时让 I1-only pair 只比较 base。上述 Issue 都不能重定义 v1 grammar、
+field 或 sentinel。Issue #92 只定义本 evidence
 contract；它不新增当前 probe、serializer、public API、runner 或 runtime result
 field。
 

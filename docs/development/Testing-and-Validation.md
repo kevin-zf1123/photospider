@@ -1712,24 +1712,33 @@ The mandatory I2 cadence scenario oracle is:
 | Existing-envelope evidence | Retain clock/replicate-grid/derived-phase-origin/index/schedule/tie rules in the existing workload-manifest section and all actual admission/deadline/visibility/cancel/drop/gap/quiescence events in measurement evidence. Recompute their section/verdict digests while preserving the closed 15-field row and five-field bundle. |
 | Manifest/golden drift | Reject any origin/stride/cadence/order/lateness/anchor/tie-rule drift under `I2-progressive-v1` even when image goldens match; a deliberate change needs a new workload id and manifest/digest/golden lineage. |
 
-For isolated I1, after baseline settlement, an episode chooses monotonic origin `E` and uses
+For I1, after baseline settlement, an episode at monotonic origin `E` uses
 `S_i=E+i*16,666,667 ns`. `A_i` is the one monotonic-clock sample immediately
-before final Host admission; it starts the latency sample and checked-adds the
-sole absolute Run deadline `D_i=A_i+150,000,000 ns`. `A_i` must be in
-`[S_i,S_i+2,000,000 ns]`; nominal `S_i` never anchors the deadline and permitted
-wake lateness never consumes the 150 ms budget. Overflow, early start, more
-than 2 ms lateness, missed/drop/gap, or admission failure invalidates the
-replicate. The runner requests cancellation/supersession and records its
-acceptance before any late Host call, revokes publication, and does not catch
-up, backfill, or shift later times. Entered non-preemptible work drains as
-waste; post-cancel starts are zero, and missed/expired work cannot publish
-output, receipt, or successful latency. The final 500 ms drain only observes
-quiescence and never extends
-`D_i`. Episode origins are exactly 750,000,000 ns apart; baseline preparation
-must finish before each origin. M1 restarts this schedule at measured time zero,
-starts exactly 40
-episodes, and keeps cap-8 B1 offered continuously. These are reproducible
-nominal monotonic times and lateness bounds, not exact OS wake claims.
+before final Host admission; it starts latency and checked-adds the sole
+absolute deadline `D_i=A_i+150,000,000 ns`. `A_i` must be in
+`[S_i,S_i+2,000,000 ns]`; `S_i` never anchors the deadline and permitted wake
+lateness never consumes the 150 ms budget. Overflow, early start, more than
+2 ms lateness, missed/drop/gap, or admission failure invalidates the replicate.
+The runner records accepted cancellation/supersession before any late Host
+call, revokes publication, and never catches up, backfills, or shifts later
+times. Entered non-preemptible work drains as waste; post-cancel starts are
+zero, and missed/expired work cannot publish output, receipt, or successful
+latency.
+
+The mandatory I1 phase/drain scenario oracle is:
+
+| Scenario | Oracle |
+| --- | --- |
+| Continuous isolated phase grid | Retain one `G^I1`; derive cold slot zero, warmup slots `1..20`, measured slots `21..220`, and only `T^I1=G^I1+221*750,000,000 ns` as a terminal non-start boundary. Map each phase's natural ordinal to zero-based `r`; reject a fresh phase origin, cooling delay, shifted slot, or late counter reset. |
+| Exact drain anchor | For every episode require `Q_start=S_11=E+183,333,337 ns` and `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`, independent of actual admission and deadline. The window may overlap an active final Run but does not cancel it or extend `D_i`. |
+| Deadline and next-origin guards | With latest legal admission, require `D_11<=E+335,333,337 ns`, exactly 348,000,000 ns from that deadline to `Q_end`, and exactly 66,666,663 ns from `Q_end` to the next origin. Reset/baseline preparation must fit that guard; the last measured episode uses the same guard before `T^I1`. |
+| Boundary tie and settlement | At `Q_start`, nominal marker precedes equal-time admission. At `Q_end`, equal-time lifecycle events apply in retained causal order before the quiescence snapshot. Active work at the snapshot or later terminal/settlement is invalid. |
+| Fail-closed arithmetic/evidence | Reject checked overflow in grid/slot/start/admission/deadline/drain arithmetic, missing or duplicate boundary/event evidence, a moved origin, nonquiescence, or a workload-manifest rule drift under the same id. Existing section/verdict digests bind the evidence without changing the 15/5-field envelope. |
+
+M1 uses the same per-episode drain rule for
+`E_r=M_0+r*750,000,000 ns`, `r=0..39`, starts exactly 40 measured episodes,
+and keeps cap-eight B1 offered continuously. These are reproducible nominal
+monotonic times and lateness bounds, not exact OS wake claims.
 
 Disk-cache/codec I/O and cross-episode/job result reuse remain disabled. I1/I2
 retain only their explicitly recomputed baseline/current episode target and
@@ -1737,8 +1746,20 @@ declared I2 output residency; every B1 job starts without a reusable fixture
 result. Warmup B1 jobs execute the complete artifact path under separate
 identities/directories; their output is removed after owner settlement while
 process/provider/JIT state remains.
-Warmup observations never enter measured aggregates, and counters reset at the
-boundary without a process restart.
+Warmup occurrence-owned observations never enter measured aggregates; the M1
+boundary resets logical counters without a process restart or state reset.
+
+The mandatory M1 phase-boundary scenario oracle is:
+
+| Scenario | Oracle |
+| --- | --- |
+| Exact boundary and interval | Retain boundary coordinate `(B^M1=M_0,b^M1)`, checked terminal-cutoff coordinate `(U^M1=B^M1+30,000,000,000 ns,u^M1)`, and unique strictly increasing row-local event sequences. Order equal timestamps by `(monotonic_timestamp,event_sequence)`; the measured interval is `[(B^M1,b^M1),(U^M1,u^M1))`. |
+| Ordered zero-duration transition | At `(B^M1,b^M1)`, atomically close the warmup I1 cadence and both B1 Graph producers, snapshot every previously offered incomplete warmup I1/B1 occurrence and state, reset only logical measured accumulators, and establish measured I1 origin. Then offer measured Graph A job zero followed by Graph B job one at timestamp `B^M1` with sequence values strictly greater than `b^M1`. Require no event interleaving in the snapshot/reset and no pause/wait/cooling/drain/boundary cancellation/restart/queue rebuild/resource release. |
+| Carryover identity and FIFO | Preserve warmup phase/cycle/job/attempt, queue predecessor, admission state, reservation/grant, and owner settlement. Measured cycle-zero offers follow each Graph's already-offered warmup prefix even when queued/running; this transition alone bypasses predecessor-terminal offer timing. Subsequent measured offers resume the normal rule and never advance an incomplete warmup cycle. |
+| Occurrence attribution | Attribute terminal/completed service, output bytes, latency, receipt/golden/digest, determinism, retry/duplicate/discarded service, waste, and settlement by immutable phase. Exclude warmup occurrence-owned quantities after `B^M1` from measured throughput, Jain service `x`, latency, determinism, and waste aggregates. |
+| Temporal scheduler/resource effects | Include every post-boundary phase's actual class starts, headroom failures, queue contention, reservations/grants, Compute I/O state, and Host/device/ready-memory high-water. Count a warmup Throughput start in the measured class-start rule while retaining measured-only Jain completed service. |
+| Failure and terminal settlement | Invalidate on warmup carryover failure, missing event evidence, a duplicate event sequence or non-total coordinate, phase/identity/FIFO rewrite, boundary-only cancellation, snapshot mismatch, or unproved settlement. At `(U^M1,u^M1)`, stop new measured offers without cancelling outstanding work; retain endpoints at or after the cutoff but exclude them from 30-second numerators, then require exact-zero teardown. Quiescence is not required at `B^M1`. |
+| Existing-envelope evidence | Retain both boundaries, tie/step order, carryover snapshot, phase joins, first measured offers, counter epochs, queue/start/terminal/receipt events, resource effects, failures, and final settlement in existing manifest/measurement sections and digests. Any deliberate rule change needs a new workload id; outer row/bundle fields remain 15/5. |
 
 The v1 resource profile is 32 CPU slots, 1 GiB Host retained memory, 512 MiB
 Host scratch, 65,536 ready entries, 256 MiB ready bytes, and Interactive
@@ -1750,9 +1771,11 @@ device memory and 256 MiB device scratch; absent Metal is predefined
 
 For B1 fairness evidence, a Graph is eligible while its producer has
 unconsumed offered demand and has not paused submission, including bounded-
-admission wait. The harness offers both ordered 15-job queues at the measured
-boundary, advances each Graph in ascending job order, and begins a new M1 cycle
-without a producer gap; it does not admit all 30 Runs outside normal bounds.
+admission wait. Isolated B1 offers both ordered 15-job queues at its measured
+boundary. M1 uses the boundary oracle above: its first measured per-Graph offers
+follow any retained warmup prefix, then each Graph advances in ascending job
+order and begins a complete new M1 cycle without a producer gap. Neither path
+admits all 30 Runs outside normal bounds.
 
 Every B1 occurrence is indexed by canonical `job-instance-v1`
 `(row_workload_id:workload-id-v1,replicate_ordinal:uint64,
@@ -2152,17 +2175,19 @@ For each candidate or reference bundle:
    compatible resources, fixtures,
    build/providers, and preconditions, while retaining the separate candidate
    `comparison_reference_bundle_digest` semantics;
-5. retain cold first use, run the exact non-measured warmup, reset measurement
-   counters without replacing the frozen environment, then execute the exact
-   measured window;
+5. retain cold first use and run the exact non-measured warmup; for isolated I1
+   keep its already fixed 221-slot grid, and for M1 execute the exact ordered
+   `B^M1` cutoff/carryover snapshot/counter reset/first-offer transaction without
+   replacing or pausing the frozen environment, then execute the exact measured
+   interval through `U^M1` and final settlement;
 6. assign and retain the canonical job-instance index before B1-bearing work,
    reject repeated phase/cycle/job coordinates, and verify that every charge,
    admission, commit, receipt, and evidence join uses occurrence rather than
    retry identity;
-7. capture raw admission, visibility, cancellation/quiescence, start,
-   completion, offered-demand eligibility, artifact/receipt, trace, digest,
-   transfer/copy/residency, and resource-lifetime observations at their owning
-   boundaries;
+7. capture raw origin/drain/boundary sequence, carryover/FIFO/phase attribution,
+   admission, visibility, cancellation/quiescence, start, completion,
+   offered-demand eligibility, artifact/receipt, trace, digest, transfer/copy/
+   residency, and resource-lifetime observations at their owning boundaries;
 8. reject any required telemetry cursor gap/drop rather than estimating lost
    observations;
 9. compute every replicate aggregate and independent dimension verdict from
@@ -2220,9 +2245,11 @@ An `execution-profile-slo-v1` bundle contains:
   eligibility/reasons, and both claimed and recomputed
   `storage_environment_digest`;
 - workload/fixture/source/graph/payload hashes and all seeds;
-- warmup, cold, and measured counts/windows kept separately;
-- raw samples/events, offered-demand eligibility intervals, and drop/gap
-  counters;
+- warmup, cold, and measured counts/windows kept separately, including I1 grid/
+  drain boundaries and M1 cutoff/terminal coordinates, event order, carryover
+  snapshot, counter epochs, and phase attribution;
+- raw samples/events, offered-demand eligibility intervals, queue/carryover
+  transitions, and drop/gap counters;
 - typed logical output, raw payload, artifact-manifest, semantic-trace, and
   logical/raw golden digests, plus typed requested/achieved durability and
   complete commit receipts;
@@ -2324,13 +2351,16 @@ workflow. No issue-specific replay, provenance/result orchestrator, phase-
 completion scan, or performance-result file may be registered with CTest or CI
 or retained as repository content.
 
-Issue #95 owns the B1 `OutputStore` fixed raw probe-to-schema mappings,
+Issue #93 owns the continuous isolated-I1 grid and exact drain/tie/guard
+collector behavior. Issue #95 owns the B1 `OutputStore` fixed raw probe-to-
+schema mappings,
 backend-to-fixed-schema adapters, mount normalizer, performance-configuration
 mapping/proof, the single canonical encoder/digests, eligibility and
 root-containment evidence, and cap-1/cap-8 plus candidate/reference checks.
-Issue #96 reuses the exact manifest bytes for M1 and enforces its same-ordinal
-full B1 pair while keeping the I1-only pair base-only. Neither may redefine v1
-grammar, fields, or sentinels. Issue #92 defines only this evidence contract;
+Issue #96 reuses the exact manifest bytes for M1, implements the frozen
+cutoff/carryover/phase-attribution boundary, and enforces its same-ordinal full
+B1 pair while keeping the I1-only pair base-only. None may redefine v1 grammar,
+fields, or sentinels. Issue #92 defines only this evidence contract;
 it adds no current probe, serializer, public API, runner, or runtime result
 field.
 

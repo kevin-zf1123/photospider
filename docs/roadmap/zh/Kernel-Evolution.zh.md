@@ -876,10 +876,10 @@ ordering、policy 与 receipt ownership。
 
 | Workload | 目标职责 |
 | --- | --- |
-| `I1-edit-storm-v1` | 自然 edit ordinal `1..12` 映射为 `edit_index=0..11`；在一个 latest-wins key 下执行十二次精确 parameter/256x256-Region edit，采用 Interactive QoS、具有有界 start lateness 的 monotonic nominal cadence，并观察第十二次 edit（`edit_index=11`）visibility。 |
+| `I1-edit-storm-v1` | 自然 edit ordinal `1..12` 映射为 `edit_index=0..11`；在一个 latest-wins key 下执行十二次精确 parameter/256x256-Region edit，采用 Interactive QoS、具有有界 start lateness 的 monotonic nominal cadence，并观察第十二次 edit（`edit_index=11`）visibility。单一连续的 221-slot grid 固定 cold/warmup/measured origin 与 terminal boundary；每个 episode 以精确 `S_11` 为 anchor 的 500 ms settlement window 都会在下一 origin 前结束。 |
 | `I2-progressive-v1` | 一个保留的 steady-clock replicate-grid origin 派生连续的 111-slot cold/warmup/measured grid，其中包含 100 个 measured episode index，相邻 origin 精确相隔 1,500,000,000 ns，且 terminal quiescence boundary 位于 stride 111；每个 episode 有十二个相隔 16,666,667 ns 且最多迟到 2,000,000 ns 的 nominal preview admission。精确的 I1 Graph/target/revision、`edit_index` mapping、完整 12-value 第一个 node coefficient/update sequence，以及 node one 至 node four transform order，使用独立的合法 realtime request key 与 RT-preview/HP-final child 契约。Preview 在该 sequence 前执行 4x4 source average 与一次 binary32 rounding；final 使用原始 2048 source 及相同 I1 full-resolution path。第十二次 edit（`edit_index=11`）在锚定到同一个 actual preview admission 的 absolute 100/1,000 ms deadline 前依次发布 preview 与 final，精确复用 Host/条件式 Metal residency，且 hidden I/O/copy 为零。 |
 | `B1-immutable-v1` | 三十个按 job index 区分的 immutable full-frame job 按顺序提供给两个 Graph，并在 Run cap 1 与 8 下保留 bounded Compute I/O task/planned-byte admission、canonical raw artifact/manifest 与 semantic trace、crash-durable receipt，以及 logical/raw golden。 |
-| `M1-shared-v1` | 四十次精确 I1 start 与持续提供的 cap-8 B1 cycle 共用一个进程执行权威，共测量 30 秒。 |
+| `M1-shared-v1` | 四十次精确 I1 start 与持续提供的 cap-8 B1 cycle 共用一个进程执行权威，共测量 30 秒。一个精确 warmup-cutoff/measurement-origin boundary 会在 measured occurrence 无 pause/drain 地开始时，保留已经 offered 的 warmup identity、FIFO position、resource authority 与 temporal effect。 |
 
 每个携带 workload 的 row、bundle、job-instance 与 row-reference component 都
 使用封闭且区分大小写的 `workload-id-v1` scalar，其 domain 精确为上述四个 token。
@@ -919,7 +919,26 @@ nominal monotonic start、最大 2 ms admission-start lateness、精确 750,000,
 episode origin，以及 fail-closed miss/drop/gap 处理。唯一 actual-admission sample
 `A_i` 会启动 latency，并通过 checked addition 得到 absolute I1 Run deadline
 `D_i=A_i+150,000,000 ns`；nominal `S_i` 与 quiescence drain 绝不会延长该 budget，
-missed 或 expired work 也不能发布。I2 单独冻结一个连续 replicate-grid origin、无
+missed 或 expired work 也不能发布。Isolated I1 从唯一 `G^I1` 派生 cold slot zero、
+warmup slot `1..20`、measured slot `21..220` 与 terminal stride 221；任何 phase 都
+不能另选 origin 或插入 cooling delay。每个 episode 固定
+`Q_start=S_11=E+183,333,337 ns` 与 `Q_end=E+683,333,337 ns`。同 timestamp
+lifecycle event 先于 end snapshot 完成 settlement；nonquiescence 是 invalid。最晚合法
+deadline 到该 snapshot 精确保留 348,000,000 ns，随后到下一 origin 保留
+66,666,663 ns，因此 drain 可以与 active work 重叠，但不会与下一 episode 重叠。
+
+M1 使用一个精确 `B^M1=M_0` warmup cutoff 与 measurement origin。有序、零时长的
+transaction 会关闭 warmup offer、对全部已经 offered 但未完成的 warmup work 取得
+snapshot、只重置 logical measured accumulator、建立 measured I1，并把 measured B1
+Graph A job zero、Graph B job one 依次 offer 到每个保留的 per-Graph prefix 之后。它
+不会 pause、drain、cancel、restart、重建 queue 或 release resource。Occurrence-owned
+completion/service/byte/latency/receipt/waste 按不可变 phase 归属；measured-window
+scheduler start、contention、headroom、Compute I/O 与 memory observation 则包含每个
+phase 的物理影响。Event sequence 解析 boundary tie；terminal cutoff 停止新 offer、
+保留之后的 settlement evidence，并要求 exact-zero teardown。这些 inner evidence
+fact 不改变封闭 15/5-field envelope。
+
+I2 单独冻结一个连续 replicate-grid origin、无
 transition delay 的 cold/warmup/measured 零/一/十一 stride phase offset 与 stride 111
 terminal boundary、精确
 1,500,000,000 ns episode spacing、100 个 measured episode index、相同十二个 nominal
@@ -955,10 +974,10 @@ self、enclosing、later-stage、comparison 或 M1 cycle 都会 fail closed。#9
 
 | Issue | 必需目标证据 |
 | --- | --- |
-| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency、waste、memory 与必需 output correctness。 |
+| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 连续 221-slot isolated grid、精确 `S_11` drain/tie/guard 行为、latency、waste、memory 与必需 output correctness。 |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-next-edit ordering、I1 coefficient/index/update lineage 与 full-resolution final path 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness；#94 不得重新定义该 cadence，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。 |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory，以及固定 storage/performance probe-to-schema、encoder、eligibility 与 compatibility 证据。 |
-| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 M1 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 生成 M1 精确 phase-boundary/carryover/FIFO/attribution evidence，并使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
 
 ADR 0010 是当前已接受的决策记录，不是当前 runtime capability 的事实陈述。
 Workload、缺失 collector 与有效证据行仍属于下游目标工作。既有 policy-order
