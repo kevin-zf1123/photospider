@@ -945,9 +945,16 @@ occurrence/generation settlement，不要求并发活跃的 measured work 或整
 取得 snapshot、只重置 logical measured accumulator、建立 measured I1，并把 measured
 B1 Graph A job zero、Graph B job one 依次 offer 到每个保留的 per-Graph prefix 之后。
 若第一次 measured-I1 actual admission 与 `B^M1` 同 timestamp，则它排在两次 offer
-之后；其普通 latest-wins supersession 不能改写 snapshot，之后的旧 generation settlement
-仍归属 warmup。该 boundary 不会 pause、drain、cancel、restart、重建 queue 或 release
-resource。
+之后。最后一个 warmup I1 的第十二次 edit publication 在 boundary snapshot 中仍为
+current，并持续 current 到该第一次 measured admission 在
+`[B^M1,B^M1+2,000,000 ns]` 内被接受；missing、failed、early 或 late acceptance 都是
+invalid。只有该 acceptance 可以用普通 latest-wins supersede 它。禁止任何更早
+supersession、phase-only cancellation 或 snapshot rewrite。旧 generation 保留未改变的
+`Q_end=B^M1+183,333,337 ns`，因此 acceptance 后剩余
+`[181,333,337 ns,183,333,337 ns]` 的 settlement 时间；之后的旧 generation
+cancellation/terminal/settlement 仍归属 warmup，而 boundary 后的物理 effect 仍属于
+measured-window evidence。该 boundary 不会 pause、drain、cancel、restart、重建 queue
+或 release resource。
 
 Measured Graph A 重复 `0,2,...,28`，Graph B 重复 `1,3,...,29`。既有
 `cycle_ordinal` wire component 存储每条 lane 的 producer-local counter：Graph A 在
@@ -1000,7 +1007,7 @@ self、enclosing、later-stage、comparison 或 M1 cycle 都会 fail closed。#9
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 连续 221-slot isolated grid、精确 `S_11` drain/tie/guard 行为、latency、waste、memory 与必需 output correctness。 |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-next-edit ordering、I1 coefficient/index/update lineage 与 full-resolution final path 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness；#94 不得重新定义该 cadence，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。 |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory，以及固定 storage/performance probe-to-schema、encoder、eligibility 与 compatibility 证据。 |
-| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 生成 M1 精确 `C^M1`/`W^M1` input grid、固定 B1 offer protocol、跨 boundary I1 settlement、独立 producer-local cycle 与 phase-boundary/carryover/FIFO/attribution evidence，并使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 生成 M1 精确 `C^M1`/`W^M1` input grid、固定 B1 offer protocol、跨 boundary I1 settlement、不得重新定义的 final-warmup current-hold 直到 accepted measured-I1 admission 这一冻结例外、独立 producer-local cycle 与 phase-boundary/carryover/FIFO/attribution evidence，并使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
 
 ADR 0010 是当前已接受的决策记录，不是当前 runtime capability 的事实陈述。
 Workload、缺失 collector 与有效证据行仍属于下游目标工作。既有 policy-order

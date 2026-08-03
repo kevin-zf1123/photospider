@@ -227,6 +227,13 @@ guard and finish before the next origin rather than slide it. Every grid,
 nominal-start, admission, deadline, and drain computation uses checked
 arithmetic; overflow is invalid.
 
+Except solely for M1's final warmup occurrence at `k=6`, the twelfth-edit
+publication remains current through `Q^I1_end`. That one exception keeps the
+same publication current at the `B^M1` carryover snapshot and until the first
+measured-I1 actual admission is accepted; the exact acceptance and
+supersession rules are frozen in the M1 boundary below. The exception does not
+move `Q^I1_end` or weaken its occurrence-local quiescence requirement.
+
 One retained isolated-I1 replicate-grid origin `G^I1` fixes every phase rather
 than allowing three independent origins:
 
@@ -1218,20 +1225,31 @@ by sequence.
 
 The actual first measured-I1 admission is not part of the atomic snapshot. If
 its timestamp equals `B^M1`, its sequence must order after both measured B1
-offers. Its accepted latest-wins supersession therefore also orders after the
-frozen carryover snapshot and cannot remove or rewrite the warmup generation
-recorded there. Any cancellation, terminal, or settlement causally produced
-for that old generation retains its later event sequence and warmup phase.
+offers. The final warmup I1 twelfth-edit publication must still be current in
+the `B^M1` snapshot and immediately before that measured admission's accepted
+event coordinate. The first measured-I1 actual admission must be accepted in
+the closed interval `[B^M1,B^M1+2,000,000 ns]`; a missing, failed, early, or
+late admission invalidates the replicate. Acceptance of that admission is the
+sole event permitted to trigger the ordinary latest-wins supersession of the
+old warmup generation. No earlier event--including the phase cutoff, nominal
+measured origin, carryover snapshot, or either measured B1 offer--may revoke
+its current status, cancel it, or rewrite the snapshot. If acceptance occurs
+at `B^M1`, its sequence follows both B1 offers. The old generation still
+settles and quiesces at its unchanged
+`Q_end=B^M1+183,333,337 ns`; after acceptance, the remaining settlement time is
+therefore within `[181,333,337 ns,183,333,337 ns]`. Any cancellation, terminal,
+or settlement causally produced for that old generation retains its later
+event sequence and immutable warmup phase, while its post-boundary physical
+effects remain measured-window evidence.
 
 If a same-timestamp lifecycle event orders before the boundary, the snapshot
 reflects its new state; if it orders after, it is a cross-boundary event. A
 terminal warmup event at the same timestamp never creates a new warmup
 successor after step one. There is no phase-boundary wait, cooling interval,
 drain, cancellation, process restart, worker/policy/queue reconstruction, or
-resource release. Ordinary measured-I1 admissions may supersede the retained
-warmup I1 generation under the frozen latest-wins rules, but only after the
-cutoff/snapshot and with the ordering above; the harness adds no boundary-only
-cancellation.
+resource release. Only the accepted first measured-I1 admission described
+above may supersede the retained final warmup I1 generation under the frozen
+latest-wins rules; the harness adds no boundary-only cancellation.
 
 Every outstanding warmup B1 occurrence retains its immutable `phase=warmup`,
 cycle, job, and attempt identity and its existing per-Graph FIFO position. The
@@ -1740,7 +1758,7 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 | #93 | Implement the continuous 221-slot isolated-I1 grid, exact `S_11` drain/tie/guard behavior, request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
 | #94 | Implement I2 on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-before-next-edit ordering, and I1 coefficient/index/update/full-resolution-final lineage frozen here; it cannot redefine those schedules or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
 | #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
-| #96 | Compose the exact I1 and B1 fixtures into M1; implement the fixed `C^M1`/`W^M1` cold/warmup origins, counts, B1 offer protocol, cross-`B^M1` I1 settlement, and exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary; interpret the existing `cycle_ordinal` component as an independent producer-local counter for each measured B1 Graph without treating it as retry or adding a field; reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
+| #96 | Compose the exact I1 and B1 fixtures into M1; implement the fixed `C^M1`/`W^M1` cold/warmup origins, counts, B1 offer protocol, cross-`B^M1` I1 settlement, and the frozen final-warmup current-hold exception through the accepted first measured-I1 admission in `[B^M1,B^M1+2,000,000 ns]`, without redefining it; implement the exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary; interpret the existing `cycle_ordinal` component as an independent producer-local counter for each measured B1 Graph without treating it as retry or adding a field; reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

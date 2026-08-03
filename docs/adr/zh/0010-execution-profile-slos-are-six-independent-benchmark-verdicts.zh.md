@@ -201,6 +201,12 @@ lifecycle event 会先按保留的 causal order 应用，随后才取得 quiesce
 origin 前完成，不能移动 origin。每项 grid、nominal-start、admission、deadline 与
 drain 计算都使用 checked arithmetic；overflow 使结果无效。
 
+除 M1 最后一个 `k=6` warmup occurrence 这一处例外外，第十二次 edit publication
+必须持续 current 到 `Q^I1_end`。这一处例外要求同一 publication 在 `B^M1`
+carryover snapshot 中仍为 current，并持续到第一次 measured-I1 actual admission 被
+接受；精确 acceptance 与 supersession 规则由下文 M1 boundary 冻结。该例外不移动
+`Q^I1_end`，也不削弱其 occurrence-local quiescence 要求。
+
 一个保留的 isolated-I1 replicate-grid origin `G^I1` 固定全部 phase，不允许使用
 三个彼此独立的 origin：
 
@@ -1083,18 +1089,27 @@ row-local lifecycle event 都不能插入其 snapshot 或 counter reset。Timest
 offer 排序。
 
 第一次 measured-I1 actual admission 不属于 atomic snapshot。若其 timestamp 等于
-`B^M1`，其 sequence 必须排在两次 measured B1 offer 之后。因此，其被接受的
-latest-wins supersession 也排在冻结的 carryover snapshot 之后，不能移除或改写其中
-记录的 warmup generation。由该旧 generation 因果产生的 cancellation、terminal 或
-settlement event 都保留更晚的 event sequence 与 warmup phase。
+`B^M1`，其 sequence 必须排在两次 measured B1 offer 之后。最后一个 warmup I1 的
+第十二次 edit publication 必须在 `B^M1` snapshot 中仍为 current，并在该 measured
+admission 被接受的 event coordinate 之前一直保持 current。第一次 measured-I1 actual
+admission 必须在闭区间 `[B^M1,B^M1+2,000,000 ns]` 内被接受；missing、failed、early
+或 late admission 都使 replicate invalid。只有该 admission 的 acceptance 可以触发对旧
+warmup generation 的普通 latest-wins supersession。任何更早 event，包括 phase cutoff、
+nominal measured origin、carryover snapshot 或任一次 measured B1 offer，都不得撤销其
+current 状态、取消它或改写 snapshot。若 acceptance 发生在 `B^M1`，其 sequence 排在
+两次 B1 offer 之后。旧 generation 仍必须在未改变的
+`Q_end=B^M1+183,333,337 ns` settle 并 quiesce；因此 acceptance 后剩余 settlement
+时间位于 `[181,333,337 ns,183,333,337 ns]`。由该旧 generation 因果产生的
+cancellation、terminal 或 settlement event 都保留更晚的 event sequence 与不可变 warmup
+phase，而它在 boundary 后产生的物理 effect 仍属于 measured-window evidence。
 
 同 timestamp 的 lifecycle event 排在 boundary 前时，snapshot 反映其新 state；排在
 其后时，它是 cross-boundary event。同 timestamp 的 terminal warmup event 绝不会在
 步骤一之后创建新的 warmup successor。Phase boundary 不包含 wait、cooling interval、
 drain、cancellation、process restart、worker/policy/queue reconstruction 或 resource
-release。普通 measured-I1 admission 可以按冻结的 latest-wins 规则 supersede 保留的
-warmup I1 generation，但只能发生在 cutoff/snapshot 之后，并遵循上述顺序；harness
-不会增加只在 boundary 执行的 cancellation。
+release。只有上文被接受的第一次 measured-I1 admission 可以按冻结的 latest-wins 规则
+supersede 保留的最后一个 warmup I1 generation；harness 不会增加只在 boundary 执行的
+cancellation。
 
 每个 outstanding warmup B1 occurrence 保留不可变的 `phase=warmup`、cycle、job、
 attempt identity 及现有 per-Graph FIFO 位置。新的 measured offer 即使面对仍 queued
@@ -1532,7 +1547,7 @@ good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidenc
 | #93 | 实现连续 221-slot isolated-I1 grid、精确 `S_11` drain/tie/guard 行为、I1 request/current-generation 与 cancellation/quiescence 观测；发布 isolated latency、waste 与 memory 行，以及必需的 output-correctness 证据。 |
 | #94 | 在此处冻结的精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-before-next-edit ordering，以及 I1 coefficient/index/update/full-resolution-final lineage 上实现 I2；不得重新定义这些 schedule，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
 | #95 | 实现 B1 immutable manifest、occurrence-scoped job/task identity、reservation、canonical semantic trace、crash-durable artifact commit、固定 storage/performance probe-to-schema adapter、mount normalization、唯一 encoder/digest、eligibility/B1 check 与 logical/raw golden；在 Run cap 1 与 8 下发布 closed-schema isolated throughput、determinism、zero-fault waste 与 memory 行。 |
-| #96 | 把精确 I1 与 B1 fixture 组合为 M1；实现固定的 `C^M1`/`W^M1` cold/warmup origin、count、B1 offer protocol、跨 `B^M1` I1 settlement，以及精确 cutoff/carryover/FIFO/phase-attribution 与 temporal-resource boundary；把既有 `cycle_ordinal` component 解释为每个 measured B1 Graph 的独立 producer-local counter，且绝不把它当作 retry 或新增 field；原样复用精确 v1 manifest byte，强制执行 same-ordinal 完整 M1/B1 environment pair，同时让 I1-only pair 只比较 base，并发布 closed-schema mixed latency、throughput progress、fairness、waste 与 memory 行。 |
+| #96 | 把精确 I1 与 B1 fixture 组合为 M1；实现固定的 `C^M1`/`W^M1` cold/warmup origin、count、B1 offer protocol、跨 `B^M1` I1 settlement，以及最后一个 warmup publication 持续 current 到 `[B^M1,B^M1+2,000,000 ns]` 内第一次 measured-I1 admission 被接受这一冻结例外，且不得重新定义该例外；实现精确 cutoff/carryover/FIFO/phase-attribution 与 temporal-resource boundary；把既有 `cycle_ordinal` component 解释为每个 measured B1 Graph 的独立 producer-local counter，且绝不把它当作 retry 或新增 field；原样复用精确 v1 manifest byte，强制执行 same-ordinal 完整 M1/B1 environment pair，同时让 I1-only pair 只比较 base，并发布 closed-schema mixed latency、throughput progress、fairness、waste 与 memory 行。 |
 
 每个 Issue 可以为其机制新增长期确定性行为测试，但不能重定义 workload，也不能
 用缺失、invalid 或不同版本的行提升目标。与机器相关的 latency、throughput 与

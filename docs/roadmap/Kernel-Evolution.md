@@ -1166,10 +1166,19 @@ zero-duration transaction closes warmup offers, snapshots the fixed offered
 prefix's terminal-derived incomplete subset, resets only logical measured
 accumulators, establishes measured I1, and offers measured B1 Graph A job zero
 then Graph B job one behind each retained per-Graph prefix. If the first actual
-measured-I1 admission shares timestamp `B^M1`, it orders after both offers; its
-ordinary latest-wins supersession cannot rewrite the snapshot, and all later
-old-generation settlement remains warmup-attributed. The boundary does not
-pause, drain, cancel, restart, rebuild queues, or release resources.
+measured-I1 admission shares timestamp `B^M1`, it orders after both offers. The
+final warmup I1 twelfth-edit publication is still current in the boundary
+snapshot and remains current until that first measured admission is accepted
+within `[B^M1,B^M1+2,000,000 ns]`; missing, failed, early, or late acceptance is
+invalid. Only that acceptance may ordinarily latest-wins supersede it. No
+earlier supersession, phase-only cancellation, or snapshot rewrite is allowed.
+The old generation retains its unchanged
+`Q_end=B^M1+183,333,337 ns`, leaving
+`[181,333,337 ns,183,333,337 ns]` of settlement time after acceptance; all
+later old-generation cancellation/terminal/settlement remains warmup-
+attributed, while post-boundary physical effects remain measured-window
+evidence. The boundary does not pause, drain, cancel, restart, rebuild queues,
+or release resources.
 
 Measured Graph A repeats `0,2,...,28` and Graph B repeats `1,3,...,29`. The
 existing `cycle_ordinal` wire component stores each lane's producer-local
@@ -1231,7 +1240,7 @@ The delivery rows are fixed:
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 continuous 221-slot isolated grid, exact `S_11` drain/tie/guard behavior, latency, waste, memory, and required output correctness. |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-next-edit ordering, I1 coefficient/index/update lineage, and full-resolution final path; #94 cannot redefine that cadence or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and fixed storage/performance probe-to-schema, encoder, eligibility, and compatibility evidence at caps 1 and 8. |
-| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact `C^M1`/`W^M1` input grid, fixed B1 offer protocol, cross-boundary I1 settlement, independent producer-local cycles, phase-boundary/carryover/FIFO/attribution evidence, plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact `C^M1`/`W^M1` input grid, fixed B1 offer protocol, cross-boundary I1 settlement, the frozen final-warmup current-hold exception through accepted measured-I1 admission without redefining it, independent producer-local cycles, phase-boundary/carryover/FIFO/attribution evidence, plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
 
 ADR 0010 is the current accepted decision record, not a statement of current
 runtime capability. The workloads, missing collectors, and valid evidence rows
