@@ -491,6 +491,37 @@ transition failure is fail-stop because that gate cannot reopen. General-data
 heterogeneous execution belongs to Issue #77;
 process-isolated plugin supervision belongs to Issue #91.
 
+## Current Execution-Profile Evidence and Limitations
+
+Current policy behavior is not an execution-profile SLO. The built-in paths
+have deterministic weighted ordering, eight-dispatch aging, a three-to-one
+class-start bound, and Interactive headroom. Maintained tests prove those
+mechanisms and exact resource release, but they do not measure end-to-end tail
+latency, completed-progress fairness, discarded service, or workload memory
+high-water marks.
+
+`BenchmarkService` currently reports mean wall time, a trimmed operation-time
+mean, mean I/O time, and the resolved per-Run cap. The manual
+`opencv_operation_concurrency_benchmark` adds warmups, raw wall samples,
+median MPix/s, speedup, and maximum callback overlap for one synthetic graph.
+Neither path implements the canonical execution-profile workloads, percentile
+windows, output/artifact/trace digests, independent verdicts, or immutable
+reference comparison.
+
+Lifecycle telemetry can prove bounded transitions and current object counts,
+but it has no queue-wait, completed-work, Host/device-byte, or result-digest
+fields. A ring cursor gap prevents lossless reconstruction. `ResourceLedger`
+snapshots are authoritative for their configured dimensions, but the current
+benchmark path does not retain per-row high-water samples. RSS remains outside
+that authority.
+
+[ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
+therefore defines latency, throughput, fairness, determinism, waste, and
+memory as six independent target verdicts over four immutable workloads.
+Issues #93 through #96 own the missing fixtures, collectors, and isolated/mixed
+evidence. Until their assigned valid rows exist, this document makes no
+Interactive, batch/render/testbench, or mixed-profile conformance claim.
+
 ## Implementation and Validation Entry Points
 
 - `include/photospider/plugin/op_contract.hpp`

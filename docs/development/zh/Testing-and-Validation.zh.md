@@ -1273,6 +1273,132 @@ cmake --build build --target opencv_operation_concurrency_benchmark -j
 永久性能 baseline 或 pass/fail threshold。在评估另一台机器、compiler、OpenCV version 或
 operation-concurrency 变更时，应重新运行准确命令，并解释新输出的原始 sample。
 
+## 执行画像 SLO 手工/Release Protocol
+
+[ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
+定义规范的 `execution-profile-slo-v1` 契约。Issue #92 会冻结本 protocol，但不
+实现 runner 或 collector。在 Issues #93 至 #96 交付各自负责的证据行之前，
+当前仓库没有任何命令能够生成符合要求的 bundle，也不暗示当前画像已经达标。
+
+最终长期维护的 runner 是手工 developer/release 工具。由于本节定义其长期产品
+测量职责，它可以留在 primary repository；但与机器相关的 latency、throughput
+与 reference ratio 必须始终不进入普通 CTest 和默认 CI correctness gate。Runner
+只能写入 checkout 外的显式可丢弃路径或 release-artifact storage；生成的 bundle
+不得提交到 primary 或 personal-overlay repository。
+
+### 冻结的证据行与采样窗口
+
+Runner 必须使用 ADR 0010 中精确的 graph/source/edit/preview/job/cadence 选择；
+方便的替代 graph 不是 v1 证据行。
+
+| 证据行 | 必需 workload 与证据 | Cold | Warmup | Measured window |
+| --- | --- | ---: | ---: | ---: |
+| I1 isolated | `I1-edit-storm-v1`；latency、waste、memory、output correctness | 1 个 episode | 20 个 episode | 200 个 episode |
+| I2 isolated | `I2-progressive-v1`；edit-12 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory、output correctness | 1 个 episode | 10 个 episode | 100 个 episode |
+| B1 cap 1 | `B1-immutable-v1`；throughput、determinism、fault-free waste、memory | seed 252 | seed 253/254/255 | job `0..29` |
+| B1 cap 8 | 相同 B1 corpus 与环境，仅 Run cap 不同 | seed 252 | seed 253/254/255 | job `0..29` |
+| M1 shared | `M1-shared-v1`；latency、progress、fairness、waste、memory | 1 秒 | 5 秒 | 30 个互不重叠的一秒 window |
+
+每一行使用三个全新的 process/execution-domain replicate。Cold first-use 单独
+采集，并排除在 steady-state aggregate 之外。I1 episode 开始间隔至少为
+750,000,000 ns。M1 在 measured time zero 以 I1 重启 cadence，共精确启动 40 个
+episode，并持续提供 cap-8 B1。Disk-cache/codec I/O 与跨 episode/job result
+reuse 保持禁用。I1/I2 只保留显式重新计算的 baseline/current episode target 与
+已声明的 I2 output residency；每个 B1 job 开始时都没有可复用 fixture result。
+Warmup B1 job 用独立 identity/directory 执行完整 artifact path；owner 结算后
+移除 output，同时保留 process/provider/JIT state。Warmup observation 绝不进入
+measured aggregate；测量边界在不重启进程的情况下重置 counter。
+
+v1 resource profile 是 32 个 CPU slot、1 GiB Host retained memory、512 MiB
+Host scratch、65,536 个 ready entry 与 256 MiB ready byte；Interactive headroom
+为 1 个 CPU slot、64 MiB retained memory、32 MiB scratch、1,024 个 ready entry
+与 16 MiB ready byte。Compute I/O 准入上限为 64 个 task 与 256 MiB 计划字节总量。
+配置 Metal executor 时，device memory 与 device scratch 分别为 512 MiB 与
+256 MiB；Metal 缺失属于预定义 `not-applicable`。
+
+对 B1 fairness 证据，只要 Graph producer 仍有未消费 offered demand 且没有暂停
+提交，该 Graph 就是 eligible，其中包括 bounded-admission wait。Harness 在测量
+边界同时提供两个有序的 15-job queue，按递增 job index 推进每个 Graph，并在 M1
+中无 producer gap 地开始新 cycle；它不会绕过正常 bound 准入全部 30 个 Run。
+
+每个 B1 job 在全新的可丢弃目录中写入 ADR 0010 规定的精确
+`output.rgba32le` payload 与固定顺序 `manifest.txt`，先结算 payload，最后以
+atomic publication 提交 manifest。每个 I2 edit-12 preview/final 都通过相同 Host
+binding 获取两次。已配置 Metal device 允许每个不同 preview/final revision 的
+首次 access 执行一次精确大小的 upload；第二次必须命中相同 residency。禁止
+CPU copy、readback、disk/codec access 或额外 transfer。
+
+### 运行流程
+
+对每个 candidate 或 reference bundle：
+
+1. 在评估依赖 reference 的行之前，按 content digest 选择一个 immutable
+   reference；
+2. 每个 replicate 启动一个 fresh process，并记录 repository commit、dirty
+   state、build/compiler/flag、OS/kernel、CPU/GPU/device inventory、power/thermal
+   eligibility、provider/plugin binary 与 generation、process worker、Run cap、
+   全部 limit/headroom、fixture hash、seed 和 cache/residency precondition；
+3. 要求 candidate 与 reference 的 evidence schema、workload id、environment
+   class、limit 与 fixture hash 相同；
+4. 保留 cold first-use，执行精确且不参与测量的 warmup，在不替换冻结环境的情况下
+   重置测量 counter，然后执行精确 measured window；
+5. 在各自 owner 边界采集 raw admission、visibility、cancellation/quiescence、
+   start、completion、offered-demand eligibility、artifact/receipt、trace、digest、
+   transfer/copy/residency 与 resource-lifetime observation；
+6. 拒绝任何必需的 telemetry cursor gap/drop，不估算缺失 observation；
+7. 使用 checked arithmetic 从 raw evidence 计算每个 replicate aggregate 与各项
+   独立 dimension verdict；以及
+8. 封存 canonical bundle、计算其 digest，并在报告 conformance 前独立复算每个
+   aggregate/verdict。
+
+全部 duration 使用 monotonic clock。Percentile 使用 nearest rank：排序 `N` 个
+sample，并选择从一开始的 rank `ceil(p*N)`。每个 replicate 必须通过；pooling
+sample 或 median summary 不能隐藏失败进程。
+
+### 公式与门禁
+
+| 维度 | 必需计算与通过规则 |
+| --- | --- |
+| Latency | 从 Host admission 前立即提交开始，到匹配的 current generation 可见为止。I1 p50/p95/p99 <=50/100/150 ms 且 final success 为 100%；I2 edit-12 preview p50/p95/p99 <=50/75/100 ms，edit-12 final p95/p99 <=500/1000 ms，且匹配必需 digest；M1 还要满足 I1 绝对上界，且 p99 <=配对 isolated I1 的 2.0 倍。被取消的 intermediate 不进入 percentile；accepted-cancel-to-quiescence 单独报告。 |
+| Throughput | 每秒成功的 logical RGBA pixel-site transform，以 MPix-op/s 报告；一个 B1 job 只有在 Run success + artifact commit + golden verification 后才贡献 16,777,216 个 site-operation。按 ordinal 配对 replicate：candidate/reference ratio 中位数 >=0.95，且每个 ratio >=0.90。M1 一秒 B1 rate 除以配对 isolated cap-8 B1 rate 后的 p05 >=0.20；denominator 缺失或为零时 invalid。 |
+| Fairness | 对两个 B1 Graph 整个一秒 window 都保有未消费 offered demand、且 producer 均未暂停的窗口，`J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`，其中 `x` 是 completed `work_units + ceil(ready_bytes/4096)`。总 service 为零时 invalid；Jain p05 >=0.95。两个 class 都保持 startable 时，最多三次 Interactive start 后出现 Throughput。M1 还要求 headroom 导致的 Interactive admission failure 为零，并独立通过 latency/progress。 |
+| Determinism | 对三个 replicate、fresh-process restart 与 Run cap 1/8 中相同的 B1 job index，output、canonical artifact-manifest、semantic-trace 与按 job index 区分的 golden SHA-256 mismatch count 全部为零。Semantic trace 排除 timestamp、physical worker、global id 与 raw sequence number，但保留 run-relative task/action/dependency/outcome/resource 事实。 |
+| Waste | `discarded_started_service / all_started_service`，使用 `work_units + ceil(ready_bytes/4096)`。每个无法 commit 结果的已启动 callback 都会被计费；已经进入的不可抢占 work 如实 drain。I1/I2 Interactive 每个 replicate <=0.25，M1 对 Interactive service 单独应用该上限；accepted cancellation/supersession 后才启动的 work 精确为零。I2 在允许的首次 transfer 规则下，额外 filesystem/codec、CPU-copy、readback、transfer 与 allocation byte 为零。无故障 isolated/mixed B1 的 discarded/duplicate/retry service 为零。 |
+| Memory | Host retained、Host scratch、ready byte 与已配置 device memory/scratch 的独立 high-water byte。不得超过绝对 limit；isolated row-owned delta 回到 row 前 baseline，M1 shutdown 回到零。Candidate B1/I2 peak <=固定同环境 reference 的 105%。RSS 只作为 diagnostic。 |
+
+每个必需维度输出 `pass`、`fail`、`invalid` 或 schema 预定义的
+`not-applicable`；不存在 composite score。缺少源证据、算术 overflow、monotonic-
+clock failure、cursor/drop gap、fixture 或 environment drift、未固定/不兼容的
+reference、必需 denominator 为零，或未经批准的 `not-applicable`，都会使受影响
+行成为 invalid 且不符合要求。
+
+### Evidence Bundle
+
+一个 `execution-profile-slo-v1` bundle 包含：
+
+- 上述全部 provenance 与冻结环境值；
+- workload/fixture/source/graph/payload hash 与全部 seed；
+- 相互分离的 warmup、cold 与 measured count/window；
+- raw sample/event、offered-demand eligibility interval 与 drop/gap counter；
+- output、artifact-manifest、semantic-trace、golden digest 与 commit receipt；
+- transfer/copy/residency identity、byte 与 reuse outcome；
+- 权威 resource sample 与 high-water/settlement delta；
+- 单位、公式、denominator、aggregate、invalidation reason 与每个必需维度的一项
+  verdict；以及
+- immutable reference bundle digest。
+
+Prose summary、未记录的“known good” build 重跑或当前 `BenchmarkResult` output
+都不是规范 reference。Raw bundle 必须足以让独立 reader 复算每个 aggregate 与
+verdict。
+
+### 测试归属
+
+Issues #93 至 #96 在新增 workload 语义、精确 start、cancellation、digest、
+resource-limit 或 settlement invariant 时，应注册长期确定性产品行为。与机器相关
+的性能 threshold 与 candidate/reference ratio 保留在本手工/release workflow。
+任何 Issue 专属 replay、provenance/result orchestrator、phase-completion scan 或
+performance-result file 都不得注册到 CTest/CI，也不得作为仓库内容长期保留。
+
 ## CTest 注册
 
 所有预期 GoogleTest 二进制都应注册到 CTest。这包括当前可能低置信度的里程碑测试和 `test_propagation_contracts`。

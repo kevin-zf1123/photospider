@@ -846,6 +846,16 @@ block, corrupt memory, allocate outside accounting, or create unreported
 threads. It simply receives no legitimate execution capability through the
 ABI.
 
+Execution-profile evidence does not strengthen that trust boundary. A valid
+`execution-profile-slo-v1` row freezes and hashes the exact in-process
+operation/provider and policy generations, rejects unreported worker pools or
+resource authorities, and treats allocations outside current ledger/device
+authority as diagnostic rather than silently accounted memory. Its latency,
+throughput, fairness, determinism, waste, and memory verdicts say nothing about
+sandboxing or hostile-code containment. [ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
+defines that evidence boundary; process supervision and isolated invocation
+remain the separate server/plugin-isolation target.
+
 Shadow publication prevents partial operation-registry or policy-type-map
 visibility. DSO leases keep callback state and plugin-owned values or contexts
 inside the lifetime of their defining library. Matching operation restoration

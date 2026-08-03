@@ -408,6 +408,27 @@ thread 范围，也不会运行这些 session；它还会记录和跳过无效 e
 交换为 CPU/memory/scratch 执行权。Completion、failure 与所有异常路径都恰好释放一次精确 vector。
 独立 Run 仍相互隔离。
 
+### 当前 benchmark 边界
+
+当前 `BenchmarkResult` 是 diagnostic aggregate，不是 SLO record。它保留 total
+wall duration、从所选 operation event 得到的 trimmed typical duration、平均 I/O
+duration、原始 operation execution duration、image dimension 与解析后的 Run cap。
+`BenchmarkService` 不拥有 warmup、nearest-rank percentile 契约、current-generation
+visibility timestamp、completed service window、discarded-work accounting、权威
+high-water sampling、稳定 result/artifact/trace digest、reference digest 或独立
+dimension verdict。
+
+长期维护的手工 OpenCV concurrency 工具会针对一个固定合成 graph 增加 warmup 与
+原始 wall sample。长期测试还证明 Run cap 1/2/4/8 下的精确 callback overlap，
+以及一个 cap-1/cap-8 fixture 的逐位 output equality。这些观测证明机制可达和一台
+机器的 scaling，不构成 Interactive、batch 或 mixed-load SLO。
+
+[ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
+冻结目标 workload、六项 metric 公式、失效规则与下游证据归属。Issues #93 至
+#96 必须在真实 admission、visibility、cancellation/quiescence、artifact、trace、
+completed-service 与 resource-lifetime 边界增加 collector。任何 placeholder zero
+value 都不能替代缺失的 observation source。
+
 Ready store 对每次 dispatch 按
 `work_units + ceil(complete_ready_grant_bytes / 4096)` 计费。每个 Graph 都在已选 service class
 各自独立的 accumulator 中累加原始 cost；每个 Run 只有一个不可变 class，并在其中累加

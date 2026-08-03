@@ -1611,6 +1611,150 @@ It is not a permanent performance baseline or pass/fail threshold. Rerun the
 exact command when evaluating another machine, compiler, OpenCV version, or
 operation-concurrency change, and interpret the newly printed raw samples.
 
+## Execution-Profile SLO Manual/Release Protocol
+
+[ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
+defines the normative `execution-profile-slo-v1` contract. Issue #92 freezes
+this protocol but does not implement a runner or collector. Until Issues #93
+through #96 deliver their assigned rows, no command in the current repository
+can produce a conformant bundle and no current profile claim is implied.
+
+The eventual maintained runner is a manual developer/release tool. It may live
+in the primary repository because this section defines a lasting product-
+measurement role, but machine-dependent latency, throughput, and reference
+ratios must remain absent from ordinary CTest and default CI correctness gates.
+The runner writes only to an explicit disposable path outside the checkout or
+to release-artifact storage; generated bundles are not committed to the primary
+or personal-overlay repository.
+
+### Frozen rows and sample windows
+
+The runner must consume the exact graph/source/edit/preview/job/cadence choices
+in ADR 0010; a convenient substitute graph is not a v1 row.
+
+| Row | Required workload and evidence | Cold | Warmup | Measured window |
+| --- | --- | ---: | ---: | ---: |
+| I1 isolated | `I1-edit-storm-v1`; latency, waste, memory, output correctness | 1 episode | 20 episodes | 200 episodes |
+| I2 isolated | `I2-progressive-v1`; edit-12 preview/final latency, Host/conditional-Metal residency and copy waste, memory, output correctness | 1 episode | 10 episodes | 100 episodes |
+| B1 cap 1 | `B1-immutable-v1`; throughput, determinism, fault-free waste, memory | seed 252 | seeds 253/254/255 | jobs `0..29` |
+| B1 cap 8 | The same B1 corpus and environment except Run cap | seed 252 | seeds 253/254/255 | jobs `0..29` |
+| M1 shared | `M1-shared-v1`; latency, progress, fairness, waste, memory | 1 second | 5 seconds | 30 non-overlapping one-second windows |
+
+Every row uses three fresh process/execution-domain replicates. Cold first-use
+is captured separately and excluded from steady-state aggregates. I1 episodes
+start at least 750,000,000 ns apart. M1 restarts its cadence with I1 at measured
+time zero, starts exactly 40 episodes, and keeps cap-8 B1 offered continuously.
+Disk-cache/codec I/O and cross-episode/job result reuse remain disabled. I1/I2
+retain only their explicitly recomputed baseline/current episode target and
+declared I2 output residency; every B1 job starts without a reusable fixture
+result. Warmup B1 jobs execute the complete artifact path under separate
+identities/directories; their output is removed after owner settlement while
+process/provider/JIT state remains.
+Warmup observations never enter measured aggregates, and counters reset at the
+boundary without a process restart.
+
+The v1 resource profile is 32 CPU slots, 1 GiB Host retained memory, 512 MiB
+Host scratch, 65,536 ready entries, 256 MiB ready bytes, and Interactive
+headroom of one CPU slot, 64 MiB retained memory, 32 MiB scratch, 1,024 ready
+entries, and 16 MiB ready bytes. Compute I/O admission is limited to 64 tasks
+and 256 MiB of summed planned bytes. A configured Metal executor uses 512 MiB
+device memory and 256 MiB device scratch; absent Metal is predefined
+`not-applicable`.
+
+For B1 fairness evidence, a Graph is eligible while its producer has
+unconsumed offered demand and has not paused submission, including bounded-
+admission wait. The harness offers both ordered 15-job queues at the measured
+boundary, advances each Graph in ascending job order, and begins a new M1 cycle
+without a producer gap; it does not admit all 30 Runs outside normal bounds.
+
+Every B1 job writes the exact ADR 0010 `output.rgba32le` payload and fixed-order
+`manifest.txt` in a fresh disposable directory, settles the payload, and
+atomically publishes the manifest last. Every I2 edit-12 preview/final is
+acquired twice through the same Host binding. A configured Metal device permits
+one exact-size first upload per distinct preview/final revision; the second
+access must hit the same residency. No CPU copy, readback, disk/codec access, or
+additional transfer is permitted.
+
+### Run procedure
+
+For each candidate or reference bundle:
+
+1. select an immutable reference by content digest before evaluating a
+   reference-relative row;
+2. start a fresh process for each replicate and record repository commit,
+   dirty state, build/compiler/flags, OS/kernel, CPU/GPU/device inventory,
+   power/thermal eligibility, provider/plugin binaries and generations,
+   process workers, Run caps, all limits/headroom, fixture hashes, seeds, and
+   cache/residency preconditions;
+3. require candidate and reference to have the same evidence schema, workload
+   id, environment class, limits, and fixture hashes;
+4. retain cold first use, run the exact non-measured warmup, reset measurement
+   counters without replacing the frozen environment, then execute the exact
+   measured window;
+5. capture raw admission, visibility, cancellation/quiescence, start,
+   completion, offered-demand eligibility, artifact/receipt, trace, digest,
+   transfer/copy/residency, and resource-lifetime observations at their owning
+   boundaries;
+6. reject any required telemetry cursor gap/drop rather than estimating lost
+   observations;
+7. compute every replicate aggregate and independent dimension verdict from
+   raw evidence using checked arithmetic; and
+8. seal the canonical bundle, compute its digest, and independently recompute
+   every aggregate/verdict before reporting conformance.
+
+All durations use a monotonic clock. Percentiles use nearest rank: sort `N`
+samples and select one-based rank `ceil(p*N)`. Every replicate must pass; pooled
+samples and a median summary cannot hide a failed process.
+
+### Formulas and gates
+
+| Dimension | Required calculation and pass rule |
+| --- | --- |
+| Latency | From submission immediately before Host admission to matching current-generation visibility. I1 p50/p95/p99 <=50/100/150 ms and 100% final success; I2 edit-12 preview p50/p95/p99 <=50/75/100 ms and edit-12 final p95/p99 <=500/1000 ms, with required digest matches; M1 also satisfies I1 absolute bounds and p99 <=2.0x paired isolated I1. Cancelled intermediates are excluded; accepted-cancel-to-quiescence is separate. |
+| Throughput | Successful logical RGBA pixel-site transforms per second, reported as MPix-op/s; one B1 job contributes 16,777,216 site-operations only after Run success + artifact commit + golden verification. Pair replicate ordinals: median candidate/reference ratio >=0.95 and every ratio >=0.90. M1 one-second B1 rate divided by paired isolated cap-8 B1 rate has p05 >=0.20; missing/zero denominator is invalid. |
+| Fairness | For a complete one-second window where both B1 Graphs retain unconsumed offered demand without a producer pause, `J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`, where `x` is completed `work_units + ceil(ready_bytes/4096)`. Zero total service is invalid; p05 Jain >=0.95. While both classes remain startable, at most three Interactive starts precede Throughput. M1 also has zero headroom-caused Interactive admission failures and independently passes latency/progress. |
+| Determinism | For the same B1 job index across three replicates, fresh-process restart, and Run caps 1/8, output, canonical artifact-manifest, semantic-trace, and job-indexed golden SHA-256 mismatch counts are all zero. The semantic trace excludes timestamps, physical workers, global ids, and raw sequence numbers, while retaining run-relative task/action/dependency/outcome/resource facts. |
+| Waste | `discarded_started_service / all_started_service`, using `work_units + ceil(ready_bytes/4096)`. Every started callback whose result cannot commit is charged; entered non-preemptible work drains honestly. I1/I2 Interactive <=0.25 per replicate, and M1 applies that bound to Interactive service alone; work starting after accepted cancellation/supersession is exactly zero. I2 extra filesystem/codec, CPU-copy, readback, transfer, and allocation bytes are zero under its permitted first-transfer rule. Fault-free isolated/mixed B1 discarded/duplicate/retry service is zero. |
+| Memory | Independent high-water bytes for Host retained, Host scratch, ready bytes, and configured-device memory/scratch. No absolute limit exceed; isolated row-owned deltas return to the pre-row baseline and M1 shutdown returns to zero. Candidate B1/I2 peaks are <=105% of the pinned same-environment reference. RSS is diagnostic only. |
+
+Each required dimension emits `pass`, `fail`, `invalid`, or a schema-defined
+`not-applicable`; there is no composite score. Missing source evidence,
+arithmetic overflow, monotonic-clock failure, cursor/drop gaps, fixture or
+environment drift, an unpinned/incompatible reference, a zero required
+denominator, or an unapproved `not-applicable` makes the affected row invalid
+and non-conformant.
+
+### Evidence bundle
+
+An `execution-profile-slo-v1` bundle contains:
+
+- all provenance and frozen environment values listed above;
+- workload/fixture/source/graph/payload hashes and all seeds;
+- warmup, cold, and measured counts/windows kept separately;
+- raw samples/events, offered-demand eligibility intervals, and drop/gap
+  counters;
+- output, artifact-manifest, semantic-trace, golden digests, and commit
+  receipts;
+- transfer/copy/residency identities, bytes, and reuse outcomes;
+- authoritative resource samples and high-water/settlement deltas;
+- units, formulas, denominators, aggregates, invalidation reasons, and one
+  verdict per required dimension; and
+- the immutable reference bundle digest.
+
+A prose summary, an unrecorded rerun of a “known good” build, or current
+`BenchmarkResult` output is not a normative reference. The raw bundle must be
+sufficient for an independent reader to reproduce every aggregate and verdict.
+
+### Test ownership
+
+Issues #93 through #96 should register lasting deterministic product behavior
+when they add workload semantics, exact starts, cancellation, digest,
+resource-limit, or settlement invariants. Machine-dependent performance
+thresholds and candidate/reference ratios remain in this manual/release
+workflow. No issue-specific replay, provenance/result orchestrator, phase-
+completion scan, or performance-result file may be registered with CTest or CI
+or retained as repository content.
+
 ## CTest Registration
 
 All intended GoogleTest binaries should be registered with CTest. This includes

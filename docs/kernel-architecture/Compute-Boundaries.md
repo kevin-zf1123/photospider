@@ -521,6 +521,31 @@ exchanges that grant for CPU/memory/scratch execution authority. Completion,
 failure, and exceptional paths release the exact vector once. Independent Runs
 remain isolated.
 
+### Current benchmark boundary
+
+The current `BenchmarkResult` is a diagnostic aggregate, not an SLO record. It
+retains total wall duration, a trimmed typical duration from selected operation
+events, mean I/O duration, raw operation execution durations, image dimensions,
+and the resolved Run cap. `BenchmarkService` has no warmup ownership,
+nearest-rank percentile contract, current-generation visibility timestamp,
+completed service window, discarded-work accounting, authoritative high-water
+sampling, stable result/artifact/trace digest, reference digest, or independent
+dimension verdict.
+
+The maintained manual OpenCV concurrency tool adds warmups and raw wall samples
+for one fixed synthetic graph. Long-lived tests additionally prove exact
+callback overlap at Run caps 1/2/4/8 and bitwise output equality for one cap-1/
+cap-8 fixture. Those observations demonstrate mechanism reachability and one
+machine's scaling; they do not establish an Interactive, batch, or mixed-load
+SLO.
+
+[ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
+freezes the target workloads, six metric formulas, invalidation rules, and
+downstream evidence ownership. Issues #93 through #96 must add their collectors
+at the actual admission, visibility, cancellation/quiescence, artifact, trace,
+completed-service, and resource-lifetime boundaries. No placeholder zero value
+is a substitute for a missing observation source.
+
 The ready store charges each dispatch
 `work_units + ceil(complete_ready_grant_bytes / 4096)`. Each Graph accrues raw
 cost in a separate accumulator for the selected service class; each Run has one

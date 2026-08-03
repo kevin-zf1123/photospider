@@ -398,6 +398,30 @@ caller 会被 mutation-free preflight 拒绝；Kernel 一旦关闭 publication g
 failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执行属于 Issue #77；
 进程隔离的插件监管属于 Issue #91。
 
+## 当前执行画像证据与限制
+
+当前 policy 行为不是执行画像 SLO。内建路径具有确定性 weighted ordering、八次
+dispatch aging、3:1 class-start 上界与 Interactive headroom。长期测试证明这些
+机制和精确资源释放，但不会测量端到端 tail latency、completed-progress fairness、
+discarded service 或逐 workload memory high-water mark。
+
+`BenchmarkService` 当前报告平均 wall time、operation time 截尾平均、平均 I/O
+time 和解析后的逐 Run cap。手工 `opencv_operation_concurrency_benchmark` 还会
+针对一个合成 graph 提供 warmup、原始 wall sample、MPix/s 中位数、speedup 和
+最大 callback overlap。两条路径都没有实现规范执行画像 workload、percentile
+window、output/artifact/trace digest、独立判定或不可变 reference comparison。
+
+生命周期 telemetry 可以证明有界 transition 与当前 object count，但没有
+queue-wait、completed-work、Host/device-byte 或 result-digest 字段。Ring cursor
+gap 会阻止无损重建。`ResourceLedger` snapshot 对其已配置 dimension 具有权威性，
+但当前 benchmark 路径不会保留逐 row high-water sample。RSS 不属于该权威。
+
+[ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
+因此把 latency、throughput、fairness、determinism、waste 与 memory 定义为四个
+不可变 workload 上的六项独立目标判定。Issues #93 至 #96 负责缺失的 fixture、
+collector 以及 isolated/mixed 证据。在其分配的有效证据行存在之前，本文不声明
+Interactive、batch/render/testbench 或 mixed-profile 符合要求。
+
 ## 实现与验证入口
 
 - `include/photospider/plugin/op_contract.hpp`

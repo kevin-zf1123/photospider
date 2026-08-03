@@ -1080,21 +1080,43 @@ above retain identity, ordering, policy, and receipt ownership.
 
 ## Execution Profiles
 
-Interactive and throughput workloads share physical resources but use distinct
-profiles.
+[ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
+freezes the `execution-profile-slo-v1` target. It defines one exact generated
+RGBA FP32 source and four-node `curve_transform` graph family, then four
+immutable workload ids:
 
-Interactive behavior prioritizes bounded p50/p95/p99 response, latest-wins
-supersession, small/adaptive regions, progressive quality, cooperative
-cancellation, device residency, and low-copy local output.
+| Workload | Target role |
+| --- | --- |
+| `I1-edit-storm-v1` | Twelve exact parameter/256x256-Region edits under one latest-wins key, Interactive QoS, fixed cadence/deadline, and final-generation visibility. |
+| `I2-progressive-v1` | The exact I1 lineage with an edit-12 512x512 preview followed by the 2048x2048 final, exact Host/conditional-Metal residency reuse, and zero hidden I/O/copy. |
+| `B1-immutable-v1` | Thirty job-indexed immutable full-frame jobs offered in order across two Graphs, with bounded admission, reservations, canonical raw artifacts/manifests, traces, and goldens at Run caps 1 and 8. |
+| `M1-shared-v1` | Forty exact I1 starts and continuously offered cap-8 B1 cycles sharing one process execution authority for 30 measured seconds. |
 
-Batch, render, and testbench behavior prioritizes throughput, deterministic
-execution, resource reservation, large/adaptive partitions, artifact
-durability, retries/checkpoints, traceability, and golden comparison.
+Latency, throughput, fairness, determinism, waste, and memory are six
+independent verdicts. Interactive latency has absolute p50/p95/p99 gates;
+batch throughput and B1/I2 memory have immutable same-environment reference
+gates; mixed load additionally has a 0.20 p05 Throughput-progress floor, a
+0.95 p05 two-Graph Jain index, the three-to-one class-start bound, zero
+headroom-caused Interactive admission failures, and isolated-relative latency.
+Exact output/artifact/semantic-trace/golden digests, bounded discarded service,
+absolute resource limits, and exact quiescent settlement cannot be traded for
+speed in another dimension.
 
-Neither profile may starve the other. Interactive headroom is reserved at
-admission; batch receives a minimum progress guarantee under continuous
-interactive traffic. Fairness is charged by estimated work, bytes, or bounded
-quanta rather than raw task count.
+The delivery rows are fixed:
+
+| Issue | Required target evidence |
+| --- | --- |
+| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency, waste, memory, and required output correctness. |
+| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact I1 lineage. |
+| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, and memory at caps 1 and 8. |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures. |
+
+The accepted decision is current, but the workloads, missing collectors, and
+valid evidence rows remain downstream target work. Existing policy-order tests,
+`BenchmarkService`, lifecycle telemetry, ledger snapshots, and the manual
+OpenCV scaling tool do not by themselves establish profile conformance. The
+maintained manual/release protocol and test-ownership boundary are documented
+in [Testing and Validation](../development/Testing-and-Validation.md#execution-profile-slo-manualrelease-protocol).
 
 ## Server and Plugin Isolation
 

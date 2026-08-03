@@ -649,6 +649,15 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 插件仍在 Host 进程内执行受信任的原生代码，可能阻塞、破坏内存、在计账外分配
 或创建未申报线程；它只是无法通过 ABI 合法获得执行能力。
 
+执行画像证据不会加强这条信任边界。有效的 `execution-profile-slo-v1` 行会冻结并
+hash 精确的进程内 operation/provider 与 policy generation，拒绝未申报的 worker
+pool 或 resource authority，并把当前 ledger/device authority 之外的 allocation
+作为 diagnostic，而不是静默算入 memory。其 latency、throughput、fairness、
+determinism、waste 与 memory 判定不声明 sandbox 或 hostile-code containment。
+[ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
+定义这项证据边界；process supervision 与 isolated invocation 仍属于独立的
+server/plugin-isolation 目标。
+
 影子发布阻止操作注册表或策略类型 map 局部可见。DSO 租约让回调状态和插件拥有
 的值或上下文保持在其定义库的生命周期内。匹配的操作恢复 token 和策略绑定代次
 可防止已移除或替换的插件静默夺回当前所有权。

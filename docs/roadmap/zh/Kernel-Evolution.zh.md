@@ -870,16 +870,39 @@ ordering、policy 与 receipt ownership。
 
 ## 执行画像
 
-交互和吞吐工作负载共享物理资源，但使用不同 profile。
+[ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
+冻结 `execution-profile-slo-v1` 目标。它定义一个精确生成的 RGBA FP32 source
+与四 node `curve_transform` graph family，随后定义四个不可变 workload id：
 
-交互行为优先保证有界 p50/p95/p99 response、latest-wins supersession、小型/自适应 region、
-progressive quality、cooperative cancellation、device residency 和低复制本地输出。
+| Workload | 目标职责 |
+| --- | --- |
+| `I1-edit-storm-v1` | 在一个 latest-wins key 下执行十二次精确 parameter/256x256-Region edit，采用 Interactive QoS、固定 cadence/deadline，并观察 final-generation visibility。 |
+| `I2-progressive-v1` | 使用精确 I1 lineage，先产生 edit-12 512x512 preview，再产生 2048x2048 final；精确复用 Host/条件式 Metal residency，且 hidden I/O/copy 为零。 |
+| `B1-immutable-v1` | 三十个按 job index 区分的 immutable full-frame job 按顺序提供给两个 Graph，并在 Run cap 1 与 8 下保留 bounded admission、reservation、canonical raw artifact/manifest、trace 与 golden。 |
+| `M1-shared-v1` | 四十次精确 I1 start 与持续提供的 cap-8 B1 cycle 共用一个进程执行权威，共测量 30 秒。 |
 
-Batch、render 和 testbench 行为优先保证 throughput、deterministic execution、resource reservation、
-大型/自适应 partition、artifact durability、retry/checkpoint、traceability 和 golden comparison。
+Latency、throughput、fairness、determinism、waste 与 memory 是六项独立判定。
+Interactive latency 具有绝对 p50/p95/p99 门禁；batch throughput 与 B1/I2 memory
+使用不可变同环境 reference 门禁；mixed load 还要求 0.20 p05 Throughput-progress
+floor、0.95 p05 双 Graph Jain index、3:1 class-start 上界、因 headroom 导致的
+Interactive admission failure 为零，以及相对 isolated latency。精确 output/artifact/
+semantic-trace/golden digest、有界 discarded service、绝对 resource limit 与精确
+quiescent settlement 都不能用另一维更快的速度交换。
 
-两类 profile 都不能饿死另一方。Admission 会预留 interactive headroom；持续交互流量下 batch 仍有
-minimum progress guarantee。公平性按 estimated work、byte 或有界 quantum 计费，而不是原始 task 数。
+交付证据行已经冻结：
+
+| Issue | 必需目标证据 |
+| --- | --- |
+| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 isolated latency、waste、memory 与必需 output correctness。 |
+| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 I1 lineage 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness。 |
+| [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste 与 memory。 |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 使用精确 I1/B1 fixture 生成 M1 mixed latency、Throughput progress、fairness、waste 与 memory。 |
+
+已接受决策是当前事实，但 workload、缺失 collector 与有效证据行仍属于下游目标
+工作。既有 policy-order test、`BenchmarkService`、lifecycle telemetry、ledger
+snapshot 与手工 OpenCV scaling tool 本身不能建立画像 conformance。长期手工/
+release protocol 与测试归属边界记录在
+[测试与验证](../../development/zh/Testing-and-Validation.zh.md#执行画像-slo-手工release-protocol)。
 
 ## 服务器与插件隔离
 
