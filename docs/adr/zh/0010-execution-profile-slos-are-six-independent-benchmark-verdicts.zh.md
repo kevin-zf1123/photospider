@@ -1090,6 +1090,13 @@ Row 存储该值。Retained section byte 是强制证据，且必须能够复算
 替代 section。#93 至 #96 拥有各自 collector 对应的 versioned inner record，但不能
 改变本 envelope、domain separator、section-name binding 或 occurrence join。
 
+每个 versioned retained-section schema 与 bundle-provenance schema 都必须封闭其
+address-bearing dependency。只要 canonical byte 复制、命名或以其他方式派生自另一
+object 的 content address，就存在该 dependency；不要求最终十六进制 digest 以字面形式
+出现。Schema 必须标识每个 typed address-bearing field，以及生成 canonical byte 时使用的
+每个 address input。存在 opaque 或未分类的 address-bearing field、遗漏 dependency，或
+producer 无法证明完整 dependency set 时，该 section 与所有依赖 verdict 都成为 `invalid`。
+
 Evidence bundle 以精确 ASCII header
 `execution-profile-evidence-bundle-v1\n` 开始，随后包含且只包含以下五个 record：
 
@@ -1107,11 +1114,23 @@ Evidence bundle 以精确 ASCII header
 `row-reference-v1` 是 fixed record，component 按精确顺序排列为
 `(workload_id:identifier,run_cap:uint64,replicate_ordinal:uint64,row_digest:sha256)`。
 `row-reference-list-v1` 使用 generic list grammar，在每个完整 row-reference payload
-外加一个 frame。该 list 非空、unique，并按数值 run cap、数值 replicate ordinal，
-最后按完整 payload byte 排序；每个 item 的
-workload id 必须等于 enclosing bundle 的 `workload_id`。Candidate
-编码 known external `comparison_reference_bundle_digest`；reference 则编码
-`not-applicable/reference-has-no-comparison-baseline` 与 zero-byte payload。
+外加一个 frame。其功能行 key 精确为
+`(workload_id,run_cap,replicate_ordinal)`。该 list 非空，并按此 key 保持功能唯一；
+即使 `row_digest` 不同，具有相同 key 的两个 item 也无效。完整 payload 重复同样无效。
+List 按数值 run cap、数值 replicate ordinal，最后按完整 payload byte 排序；每个 item
+的 workload id 必须等于 enclosing bundle 的 `workload_id`。
+
+对每个 item，verifier 必须把 `row_digest` 解析到恰好一个 retained canonical row，
+复算 row digest，解析全部 15 个 field，并要求 parsed row 的 `workload_id`、`run_cap`
+和 `replicate_ordinal` 等于 item，且其 `subject_role` 等于 enclosing bundle。解析出零个
+或多个 row、digest mismatch，或任一 item/row/bundle mismatch 都会使 bundle 无效。
+Candidate 编码 known external `comparison_reference_bundle_digest`；reference 则编码
+`not-applicable/reference-has-no-comparison-baseline` 与 zero-byte payload。Candidate
+target 必须是 workload 相同的 `reference` bundle。对每个用于 reference-relative
+verdict 的 candidate row，其 target row 是功能行 key 相同的恰好一个 reference row。
+Bundle digest 只标识 target bundle，绝不负责选择 row。Key 缺失或重复，或解析出的
+target row 未通过相同 item/row/bundle 检查时，reference-relative verdict 成为
+`invalid`。
 
 令 `row_manifest_bytes` 和 `bundle_manifest_bytes` 表示从 header 到 final LF 的完整
 canonical byte。其 content address 精确为：
@@ -1128,15 +1147,41 @@ bundle_digest = lowerhex(SHA-256(
 这些 formula 中的 quotation mark 只是记法：二者之间的 byte（包括显示的 LF）进入
 输入，quote character 本身不进入。
 
-Claimed `row_digest` 与 `bundle_digest` 存储在对应 canonical object 旁边，并刻意不
-进入自身 manifest byte。Bundle 包含 row digest，但绝不包含自己的 digest。
-Comparison reference 或 M1 pair 必须命名一个已经物化的 external bundle，不能命名
-当前 bundle，也不能形成 reference cycle。对每个 known pair，命名 external bundle
-的 canonical `row_references` 必须包含指定 row digest，并匹配必需 workload、cap 与
-replicate ordinal。这样，独立 verifier 无需信任 producer-assigned id，即可复算
-section、row、bundle、comparison 与 pairing identity。缺少 canonical object、retained
-section、claimed/recomputed match、list member 或 acyclic external reference 中任一项，
-都会使全部依赖 verdict 成为 `invalid`。
+Content address 按以下单向顺序封存：
+
+1. 递归解析并验证每个 immutable external prerequisite row 与 bundle；
+2. 按 dependency 拓扑顺序冻结每个 local retained section 与 bundle-provenance byte，
+   随后计算各自 section digest；
+3. 从已封存 section digest 与允许的已封存 external pair address 构造并冻结每个 row
+   manifest，随后计算其 row digest；
+4. 从已封存 provenance、已封存 row 与允许的已封存 comparison reference 构造并冻结
+   bundle manifest，随后计算其 bundle digest；以及
+5. 把 claimed row/bundle digest 发布在 immutable canonical object 旁边，绝不放入其中。
+
+任何阶段都不得使用 fixed-point search、改写已经封存的 object，或使用晚于依赖 object
+才封存的 address。Address-dependency graph 为每个 retained section、provenance object、
+row 与 bundle 建立一个 node。Edge `X -> Y` 表示 `X` 的 canonical byte 或 content
+address 依赖 `Y` 的 content address。该 graph 必须有限且无环，并且每条 edge 的 target
+都必须在 sealing order 中先于 source。Section 或 provenance node 只能依赖已封存
+prerequisite；不得直接或传递可达其 enclosing row、enclosing bundle，或任何尚未封存/
+较晚 stage node。Row 可以依赖自身已封存 section 与已封存 external pair target，但不能
+依赖 enclosing bundle。Bundle 可以依赖自身已封存 provenance、已封存 row 与已封存
+comparison target。任何从 node 直接或传递回到自身的 path 都无效。
+
+Claimed `row_digest` 与 `bundle_digest` 刻意不进入自身 manifest byte。Bundle 包含 row
+digest，但绝不包含自己的 digest。External bundle graph 从 enclosing bundle 指向其
+`comparison_reference_bundle_digest` 或任一自有 row 中 M1 pair 命名的每个 bundle。
+每个 target 都必须已经物化并封存，完整 comparison/M1 graph 必须全局无环；只检查直接
+target 不充分。
+
+每个 known M1 pair 都必须解析其 bundle 与精确命名的 row digest，随后通过相同 canonical
+item/row/bundle 一致性检查。Target bundle 与 row 的 `subject_role` 必须等于 enclosing
+M1 bundle role；pair 与 target row ordinal 必须等于 M1 row ordinal；对应 pair 的 target
+功能 key 必须使用 cap 8 的 `I1-edit-storm-v1` 或 cap 8 的 `B1-immutable-v1`。缺少或
+存在多个 canonical object、功能 key 缺失或重复、任何 claimed/recomputed mismatch、
+未声明 address dependency、later-stage/enclosing dependency，或任一直接/传递 cycle，
+都会使全部依赖 verdict 成为 `invalid`。这样，独立 verifier 无需信任 producer-assigned
+id，即可复算 section、row、bundle、comparison 与 pairing identity。
 
 每个 ordinal 为 `1..3` 的 M1 replicate 还要记录两个 same-subject pair：
 `paired_isolated_i1={row_digest,bundle_digest,replicate_ordinal}` 与

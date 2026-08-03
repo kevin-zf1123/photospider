@@ -922,9 +922,12 @@ digest。
 
 Evidence row 与 bundle 也具有封闭 ASCII length-framed manifest。固定 field order/
 type、显式 known-empty 与 N/A encoding、section/row/bundle SHA-256 domain
-separator、digest self-exclusion、canonical row list 与 external acyclic comparison/
-pair resolution，使独立 reader 可以复算每个 content address。#93 至 #96 可以新增
-各自负责的 inner collector record，但不能重新定义 v1 envelope 或 identity join。
+separator、digest self-exclusion、具有功能唯一性的 canonical row key 与精确 item/row/
+bundle 匹配，以及每个 comparison/pair 恰好一个 target-row 选择，使独立 reader 可以
+复算每个 content address。External prerequisite、retained section/provenance、row 与
+bundle 按 address-dependency 拓扑顺序封存；直接或传递的 self、enclosing、later-stage、
+comparison 或 M1 cycle 都会 fail closed。#93 至 #96 可以新增各自负责的 inner
+collector record，但不能重新定义 v1 envelope、identity join 或 address DAG。
 
 交付证据行已经冻结：
 

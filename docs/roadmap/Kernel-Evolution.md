@@ -1141,10 +1141,14 @@ candidate/reference baseline digest.
 
 Evidence rows and bundles also have closed ASCII length-framed manifests. Their
 fixed field order/types, explicit known-empty and N/A encodings, section/row/
-bundle SHA-256 domain separators, digest self-exclusion, canonical row lists,
-and external acyclic comparison/pair resolution let an independent reader
-recompute every content address. #93 through #96 may add their assigned inner
-collector records but cannot redefine this v1 envelope or identity join.
+bundle SHA-256 domain separators, digest self-exclusion, functionally unique
+canonical row keys with exact item/row/bundle matching, and one exact target-row
+selection per comparison/pair let an independent reader recompute every content
+address. External prerequisites, retained sections/provenance, rows, and bundles
+seal in address-dependency topological order; direct or transitive self,
+enclosing, later-stage, comparison, or M1 cycles fail closed. #93 through #96
+may add their assigned inner collector records but cannot redefine this v1
+envelope, identity join, or address DAG.
 
 The delivery rows are fixed:
 

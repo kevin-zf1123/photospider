@@ -2086,10 +2086,12 @@ For each candidate or reference bundle:
    observations;
 9. compute every replicate aggregate and independent dimension verdict from
    raw evidence using checked arithmetic; and
-10. seal the exact canonical row and bundle manifests, compute their distinct
-    domain-separated digests without self-reference, resolve every external
-    row/bundle pair, and independently recompute every section, aggregate, and
-    verdict before reporting conformance.
+10. seal external prerequisites, retained sections/provenance, rows, and the
+    enclosing bundle in address-dependency topological order; compute their
+    distinct domain-separated digests without direct or transitive
+    self-reference; enforce functional row-key uniqueness and exact row
+    selection for every comparison/pair; and independently recompute every
+    section, aggregate, and verdict before reporting conformance.
 
 All durations use a monotonic clock. Percentiles use nearest rank: sort `N`
 samples and select one-based rank `ceil(p*N)`. Every replicate must pass; pooled
@@ -2172,11 +2174,33 @@ workload id. Reference bundles use
 omitted or represented by an empty digest. `row_digest` and `bundle_digest`
 hash their distinct ADR 0010 domain tags plus one frame around the complete
 canonical manifest bytes. The claim is stored beside its object and excluded
-from the hashed bytes. Comparison and M1 pair references are external,
-pre-existing, acyclic, and must resolve the named row/workload/cap/replicate in
-the target bundle's canonical row list. The validator rejects missing retained
-bytes, self-reference, cycles, unresolved membership, unknown/extra/reordered
-fields, or any claimed/recomputed mismatch.
+from the hashed bytes.
+
+The functional key of every row-reference item is exactly
+`(workload_id,run_cap,replicate_ordinal)`. The list rejects two items with the
+same key even if they name different row digests. For every item, the validator
+resolves exactly one retained canonical row, recomputes its digest, parses all
+15 fields, and matches workload, cap, and replicate to the item and subject
+role to the enclosing bundle. A candidate comparison target must be a
+same-workload `reference` bundle; the exact target row is the one and only row
+with the candidate row's functional key. The comparison bundle digest does not
+select a row. Each M1 pair instead names its exact row digest and must resolve a
+same-role, same-ordinal target at the required isolated workload and cap 8.
+Missing, duplicate, or mismatched item, row, bundle, role, or key evidence is
+invalid.
+
+Address sealing is also normative. First validate immutable external targets;
+then freeze retained sections and bundle provenance in dependency order;
+then freeze rows; then freeze the enclosing bundle; finally publish claimed
+digests beside the objects. Every versioned section/provenance schema must
+expose every address-bearing field or derivation input. With edge `X -> Y`
+meaning that `X` depends on `Y`'s address, the complete section/provenance/row/
+bundle graph and the external comparison/M1 bundle graph must be finite DAGs,
+and every target must be sealed before its source. The validator rejects an
+opaque or undeclared address dependency, fixed-point construction, post-seal
+rewrite, direct or transitive self/enclosing/later-stage dependency, external
+cycle, missing retained bytes, unknown/extra/reordered fields, or any claimed/
+recomputed mismatch.
 
 A prose summary, an unrecorded rerun of a “known good” build, or current
 `BenchmarkResult` output is not a normative reference. The raw bundle must be

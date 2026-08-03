@@ -1222,6 +1222,16 @@ own the versioned inner records for their assigned collectors, but may not
 change this envelope, domain separator, section-name binding, or occurrence
 join.
 
+Every versioned retained-section schema and the bundle-provenance schema is
+closed over its address-bearing dependencies. Such a dependency exists when
+canonical bytes are copied from, name, or are otherwise derived from another
+object's content address; literal inclusion of the final hexadecimal digest is
+not required. The schema must identify every typed address-bearing field and
+every address input used to derive its canonical bytes. An opaque or
+unclassified address-bearing field, an omitted dependency, or a producer that
+cannot prove the complete dependency set makes that section and every
+dependent verdict `invalid`.
+
 An evidence bundle begins with the exact ASCII header
 `execution-profile-evidence-bundle-v1\n` and then has exactly these five
 records:
@@ -1240,12 +1250,28 @@ records:
 `row-reference-v1` is a fixed record with components in the exact order
 `(workload_id:identifier,run_cap:uint64,replicate_ordinal:uint64,row_digest:sha256)`.
 `row-reference-list-v1` uses the generic list grammar with one frame around
-each complete row-reference payload. It is nonempty, unique, and sorted by
-numeric run cap, numeric replicate ordinal, then the complete payload bytes;
-every item workload id must equal the enclosing bundle `workload_id`. A
-candidate encodes a known external
+each complete row-reference payload. Its functional row key is exactly
+`(workload_id,run_cap,replicate_ordinal)`. The list is nonempty and functionally
+unique by that key; two items with the same key are invalid even when their
+`row_digest` values differ. Complete-payload duplicates are also invalid. The
+list is sorted by numeric run cap, numeric replicate ordinal, then the complete
+payload bytes, and every item workload id must equal the enclosing bundle
+`workload_id`.
+
+For every item, the verifier resolves the `row_digest` to exactly one retained
+canonical row, recomputes the row digest, parses all 15 fields, and requires
+the parsed row's `workload_id`, `run_cap`, and `replicate_ordinal` to equal the
+item and its `subject_role` to equal the enclosing bundle. Zero or multiple
+resolved rows, a digest mismatch, or any item/row/bundle mismatch invalidates
+the bundle. A candidate encodes a known external
 `comparison_reference_bundle_digest`; a reference encodes
 `not-applicable/reference-has-no-comparison-baseline` with a zero-byte payload.
+The candidate target must be a `reference` bundle with the same workload. For
+each candidate row used by a reference-relative verdict, its target row is the
+exactly one reference row with the same functional row key. The bundle digest
+identifies only the target bundle; it never selects a row. A missing or
+duplicate key, or a resolved target row that fails the same item/row/bundle
+checks, makes the reference-relative verdict `invalid`.
 
 Let `row_manifest_bytes` and `bundle_manifest_bytes` be the complete canonical
 bytes from header through final LF. Their content addresses are exactly:
@@ -1262,17 +1288,53 @@ bundle_digest = lowerhex(SHA-256(
 In these formulas, quotation marks are notation: the bytes between them,
 including the displayed LF, are input, and the quote characters are not.
 
-The claimed `row_digest` and `bundle_digest` are stored beside their canonical
-objects and are deliberately absent from their own manifest bytes. A bundle
-contains row digests but never its own digest. A comparison reference or M1
-pair must name an already materialized external bundle, cannot name the current
-bundle, and cannot create a reference cycle. For every known pair, the named
-external bundle's canonical `row_references` must contain the named row digest
-with the required workload, cap, and replicate ordinal. These rules let an
+Content addresses are sealed in this one-way order:
+
+1. recursively resolve and validate every immutable external prerequisite row
+   and bundle;
+2. freeze each local retained section and the bundle-provenance bytes in
+   dependency-topological order, then compute its section digest;
+3. construct and freeze each row manifest from sealed section digests and
+   allowed already-sealed external pair addresses, then compute its row digest;
+4. construct and freeze the bundle manifest from its sealed provenance, sealed
+   rows, and allowed already-sealed comparison reference, then compute its
+   bundle digest; and
+5. publish the claimed row and bundle digests beside, never inside, their
+   immutable canonical objects.
+
+No stage may use a fixed-point search, rewrite an already sealed object, or use
+an address that is not sealed before the object that depends on it. The
+address-dependency graph has one node for every retained section, provenance
+object, row, and bundle. An edge `X -> Y` means that `X`'s canonical bytes or
+content address depend on `Y`'s content address. The graph must be finite and
+acyclic, and every edge target must precede its source in the sealing order. A
+section or provenance node may depend only on already sealed prerequisites; it
+must not directly or transitively reach its enclosing row, its enclosing
+bundle, or any unsealed or later-stage node. A row may depend on its sealed
+sections and already sealed external pair targets, but not on its enclosing
+bundle. A bundle may depend on its sealed provenance, its sealed rows, and an
+already sealed comparison target. Any direct or transitive path from a node
+back to itself is invalid.
+
+The claimed `row_digest` and `bundle_digest` are deliberately absent from their
+own manifest bytes. A bundle contains row digests but never its own digest. The
+external bundle graph contains an edge from an enclosing bundle to every
+bundle named by its `comparison_reference_bundle_digest` or by an M1 pair in
+one of its rows. Every target must already be materialized and sealed, and this
+complete comparison/M1 graph must be globally acyclic; checking only the
+direct target is insufficient.
+
+Every known M1 pair must resolve its bundle and exact named row digest, then
+pass the same canonical item/row/bundle consistency checks. The target bundle
+and row `subject_role` must equal the enclosing M1 bundle role, the pair and
+target row ordinals must equal the M1 row ordinal, and the target functional
+key must use `I1-edit-storm-v1` at cap 8 or `B1-immutable-v1` at cap 8 for the
+corresponding pair. Missing or multiple canonical objects, a missing or
+duplicate functional key, any claimed/recomputed mismatch, an undeclared
+address dependency, a later-stage/enclosing dependency, or any direct or
+transitive cycle makes every dependent verdict `invalid`. These rules let an
 independent verifier recompute section, row, bundle, comparison, and pairing
-identities without trusting producer-assigned ids. A missing canonical object,
-retained section, claimed/recomputed match, list member, or acyclic external
-reference makes every dependent verdict `invalid`.
+identities without trusting producer-assigned ids.
 
 Every M1 replicate ordinal `1..3` additionally records two same-subject pairs:
 `paired_isolated_i1={row_digest,bundle_digest,replicate_ordinal}` and

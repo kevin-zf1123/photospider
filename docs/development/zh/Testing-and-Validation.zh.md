@@ -1698,9 +1698,11 @@ Issue #92 不新增当前 test binary、serializer、probe、runner、API 或 ru
 8. 拒绝任何必需的 telemetry cursor gap/drop，不估算缺失 observation；
 9. 使用 checked arithmetic 从 raw evidence 计算每个 replicate aggregate 与各项
    独立 dimension verdict；以及
-10. 封存精确 canonical row 与 bundle manifest，在不自引用的情况下计算其彼此不同
-    的 domain-separated digest，解析每个 external row/bundle pair，并在报告
-    conformance 前独立复算每个 section、aggregate 与 verdict。
+10. 按 address-dependency 拓扑顺序封存 external prerequisite、retained section/
+    provenance、row 与 enclosing bundle；在不存在直接或传递 self-reference 的情况下
+    计算彼此不同的 domain-separated digest；对每个 comparison/pair 强制执行功能行 key
+    唯一与精确 row 选择；并在报告 conformance 前独立复算每个 section、aggregate 与
+    verdict。
 
 全部 duration 使用 monotonic clock。Percentile 使用 nearest rank：排序 `N` 个
 sample，并选择从一开始的 rank `ceil(p*N)`。每个 replicate 必须通过；pooling
@@ -1775,11 +1777,27 @@ bundle 使用
 `not-applicable/reference-has-no-comparison-baseline`；任何 optional field 都不能省略
 或使用空 digest 表示。`row_digest` 与 `bundle_digest` 对各自不同的 ADR 0010 domain
 tag 加上完整 canonical manifest byte 的一个 frame 计算 hash。Claim 存储在 object
-旁边，并排除在 hashed byte 之外。Comparison 与 M1 pair reference 必须是 external、
-pre-existing、acyclic，并在 target bundle 的 canonical row list 中解析出指定 row/
-workload/cap/replicate。Validator 会拒绝 missing retained byte、self-reference、cycle、
-unresolved membership、unknown/extra/reordered field 或任何 claimed/recomputed
-mismatch。
+旁边，并排除在 hashed byte 之外。
+
+每个 row-reference item 的功能 key 精确为
+`(workload_id,run_cap,replicate_ordinal)`。即使两个 item 命名不同 row digest，list
+也必须拒绝相同 key。对每个 item，validator 必须解析出恰好一个 retained canonical
+row，复算其 digest，解析全部 15 个 field，并让 workload、cap、replicate 与 item
+匹配，让 subject role 与 enclosing bundle 匹配。Candidate comparison target 必须是
+workload 相同的 `reference` bundle；精确 target row 是与 candidate row 功能 key
+相同的唯一 row。Comparison bundle digest 本身不选择 row。每个 M1 pair 则命名精确
+row digest，并必须在必需 isolated workload 与 cap 8 下解析到 same-role、same-ordinal
+target。Item、row、bundle、role 或 key 证据缺失、重复或不匹配时均为 invalid。
+
+Address sealing 同样是规范规则。首先验证 immutable external target；随后按 dependency
+顺序冻结 retained section 与 bundle provenance；再冻结 row；再冻结 enclosing bundle；
+最后把 claimed digest 发布在 object 旁边。每个 versioned section/provenance schema 必须
+暴露每个 address-bearing field 或 derivation input。Edge `X -> Y` 表示 `X` 依赖 `Y`
+的 address；完整 section/provenance/row/bundle graph 与 external comparison/M1 bundle
+graph 都必须是有限 DAG，且每个 target 必须先于 source 封存。Validator 会拒绝 opaque
+或 undeclared address dependency、fixed-point construction、post-seal rewrite、直接或
+传递的 self/enclosing/later-stage dependency、external cycle、missing retained byte、
+unknown/extra/reordered field，或任何 claimed/recomputed mismatch。
 
 Prose summary、未记录的“known good” build 重跑或当前 `BenchmarkResult` output
 都不是规范 reference。Raw bundle 必须足以让独立 reader 复算每个 aggregate 与
