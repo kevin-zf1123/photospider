@@ -1144,11 +1144,17 @@ fixed field order/types, explicit known-empty and N/A encodings, section/row/
 bundle SHA-256 domain separators, digest self-exclusion, functionally unique
 canonical row keys with exact item/row/bundle matching, and one exact target-row
 selection per comparison/pair let an independent reader recompute every content
-address. External prerequisites, retained sections/provenance, rows, and bundles
-seal in address-dependency topological order; direct or transitive self,
-enclosing, later-stage, comparison, or M1 cycles fail closed. #93 through #96
-may add their assigned inner collector records but cannot redefine this v1
-envelope, identity join, or address DAG.
+address. A candidate comparison digest first resolves exactly one retained
+canonical five-field reference bundle, whose digest is independently rehashed,
+whose workload matches, and whose complete functionally unique row list passes
+canonical row resolution. Zero or multiple objects, five-field parse/schema or
+rehash failure, wrong role/workload, or missing, duplicate, or mismatched target
+rows invalidate every related reference-relative verdict. External
+prerequisites, retained sections/provenance, rows, and bundles seal in address-
+dependency topological order; direct or transitive self, enclosing, later-stage,
+comparison, or M1 cycles fail closed. #93 through #96 may add their assigned
+inner collector records but cannot redefine this v1 envelope, identity join, or
+address DAG.
 
 The delivery rows are fixed:
 

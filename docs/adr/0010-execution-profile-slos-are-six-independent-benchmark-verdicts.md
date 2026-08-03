@@ -1266,12 +1266,26 @@ resolved rows, a digest mismatch, or any item/row/bundle mismatch invalidates
 the bundle. A candidate encodes a known external
 `comparison_reference_bundle_digest`; a reference encodes
 `not-applicable/reference-has-no-comparison-baseline` with a zero-byte payload.
-The candidate target must be a `reference` bundle with the same workload. For
-each candidate row used by a reference-relative verdict, its target row is the
-exactly one reference row with the same functional row key. The bundle digest
-identifies only the target bundle; it never selects a row. A missing or
-duplicate key, or a resolved target row that fails the same item/row/bundle
-checks, makes the reference-relative verdict `invalid`.
+Before any target-row lookup, the verifier resolves the candidate's comparison
+digest to exactly one retained bundle object. It parses that object as the
+exact canonical header and five records above, independently recomputes its
+`bundle_digest`, and requires the result to equal the candidate's claim. The
+resolved object must have `subject_role=reference` and the same `workload_id`
+as the candidate, and its complete nonempty row-reference list must pass
+canonical ordering, functional-key uniqueness, and every exact-one row,
+15-field parse, rehash, and item/row/bundle check. Zero or multiple retained
+objects, including multiple objects carrying the same digest claim, a five-
+record parse/schema failure, claimed/recomputed digest mismatch, wrong role or
+workload, or an invalid row list make every related reference-relative
+verdict `invalid`; the verifier cannot choose one object by path, insertion
+order, or byte equality.
+
+Only after that bundle resolution succeeds, each candidate row used by a
+reference-relative verdict selects exactly one reference row with the same
+functional row key. The comparison bundle digest identifies only the target
+bundle; it never selects a row. A missing or duplicate key, or a resolved
+target row that fails the same item/row/bundle checks, makes the related
+reference-relative verdict `invalid`.
 
 Let `row_manifest_bytes` and `bundle_manifest_bytes` be the complete canonical
 bytes from header through final LF. Their content addresses are exactly:

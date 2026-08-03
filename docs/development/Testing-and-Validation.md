@@ -2047,8 +2047,11 @@ binary, serializer, probe, runner, API, or runtime field.
 
 For each candidate or reference bundle:
 
-1. select an immutable reference by content digest before evaluating a
-   reference-relative row;
+1. for a candidate, resolve `comparison_reference_bundle_digest` to exactly
+   one retained canonical five-field bundle before evaluating any reference-
+   relative row; independently recompute its bundle digest, require a same-
+   workload `reference` role, and validate its complete canonical row list;
+   a reference instead uses the closed N/A encoding;
 2. start a fresh process for each replicate and record repository commit,
    dirty state, build/compiler/flags, OS/kernel, CPU/GPU/device inventory,
    power/thermal eligibility, provider/plugin binaries and generations,
@@ -2181,13 +2184,38 @@ The functional key of every row-reference item is exactly
 same key even if they name different row digests. For every item, the validator
 resolves exactly one retained canonical row, recomputes its digest, parses all
 15 fields, and matches workload, cap, and replicate to the item and subject
-role to the enclosing bundle. A candidate comparison target must be a
-same-workload `reference` bundle; the exact target row is the one and only row
-with the candidate row's functional key. The comparison bundle digest does not
-select a row. Each M1 pair instead names its exact row digest and must resolve a
-same-role, same-ordinal target at the required isolated workload and cap 8.
-Missing, duplicate, or mismatched item, row, bundle, role, or key evidence is
-invalid.
+role to the enclosing bundle.
+
+For a candidate, the validator first resolves
+`comparison_reference_bundle_digest` to exactly one retained bundle object. It
+parses the exact canonical header and five fields, independently recomputes the
+bundle digest and matches the claim, requires `subject_role=reference` and the
+same workload as the candidate, and validates the complete nonempty row list's
+ordering, functional-key uniqueness, and item-to-canonical-row resolutions.
+Zero or multiple retained objects, including multiple objects carrying the
+same digest claim, a five-field parse/schema failure, claimed/recomputed
+mismatch, wrong role/workload, or any invalid target row list make every
+related reference-relative verdict invalid. Only then is the exact target row
+the one and only row with the candidate row's functional key; the comparison
+bundle digest does not select a row. Each M1 pair instead names its exact row
+digest and must resolve a same-role, same-ordinal target at the required
+isolated workload and cap 8. Missing, duplicate, or mismatched item, row,
+bundle, role, or key evidence is invalid.
+
+The comparison-bundle resolver has this mandatory scenario/oracle matrix:
+
+| Scenario | Oracle |
+| --- | --- |
+| Exact-one valid | One retained object parses as the exact canonical five-field bundle, its independent rehash equals the claim, role is `reference`, workload matches, its full row list is canonical and functionally unique, and the candidate key selects exactly one valid target row; resolution may proceed to the remaining compatibility checks. |
+| Zero object | No retained bundle object resolves from the claim; every related reference-relative verdict is `invalid`. |
+| Multiple objects with the same claim | Two or more retained objects resolve from the same digest claim, even if their bytes are equal; the validator does not choose by path, insertion order, or bytes, and every related verdict is `invalid`. |
+| Five-field schema failure | The target has a wrong header, field count/order/type/state/reason, malformed frame, missing final LF, or extra byte; it is not a canonical bundle and every related verdict is `invalid`. |
+| Independent rehash mismatch | The canonical target bytes recompute to a bundle digest different from the candidate claim; every related verdict is `invalid`. |
+| Wrong role | The resolved bundle has `subject_role=candidate`; every related verdict is `invalid`. |
+| Wrong workload | The resolved `reference` bundle workload differs from the candidate workload; every related verdict is `invalid`. |
+| Target key missing | No target row-reference item has the candidate row's functional key; the related verdict is `invalid`. |
+| Target key duplicated | More than one target row-reference item has that key, including different row digests; the related verdict is `invalid`. |
+| Target row mismatch | The selected item resolves zero or multiple rows, fails row rehash or 15-field parsing, or mismatches item/bundle workload, cap, replicate, or role; the related verdict is `invalid`. |
 
 Address sealing is also normative. First validate immutable external targets;
 then freeze retained sections and bundle provenance in dependency order;

@@ -1125,12 +1125,22 @@ List 按数值 run cap、数值 replicate ordinal，最后按完整 payload byte
 和 `replicate_ordinal` 等于 item，且其 `subject_role` 等于 enclosing bundle。解析出零个
 或多个 row、digest mismatch，或任一 item/row/bundle mismatch 都会使 bundle 无效。
 Candidate 编码 known external `comparison_reference_bundle_digest`；reference 则编码
-`not-applicable/reference-has-no-comparison-baseline` 与 zero-byte payload。Candidate
-target 必须是 workload 相同的 `reference` bundle。对每个用于 reference-relative
-verdict 的 candidate row，其 target row 是功能行 key 相同的恰好一个 reference row。
-Bundle digest 只标识 target bundle，绝不负责选择 row。Key 缺失或重复，或解析出的
-target row 未通过相同 item/row/bundle 检查时，reference-relative verdict 成为
-`invalid`。
+`not-applicable/reference-has-no-comparison-baseline` 与 zero-byte payload。对 candidate，
+在查找任何 target row 之前，verifier 必须把其 comparison digest 解析到
+恰好一个 retained bundle object。它必须把该 object 解析为上文精确 canonical header
+与五个 record，独立复算其 `bundle_digest`，并要求结果等于 candidate 的 claim。解析出的
+object 必须具有 `subject_role=reference`，且 `workload_id` 与 candidate 相同；其完整非空
+row-reference list 必须通过 canonical ordering、功能 key 唯一性，以及每个 exact-one
+row、15-field parse、rehash 与 item/row/bundle 检查。解析出零个或多个 retained object
+（包括多个 object 携带相同 digest claim）、五 record parse/schema failure、claimed/
+recomputed digest mismatch、role 或 workload 错误，或 row list 无效，都会使全部相关
+reference-relative verdict 成为 `invalid`；verifier 不得按 path、insertion order 或 byte
+相等从中选择一个 object。
+
+只有 bundle resolution 成功后，每个用于 reference-relative verdict 的 candidate row
+才选择功能行 key 相同的恰好一个 reference row。Comparison bundle digest 只标识 target
+bundle，绝不负责选择 row。Key 缺失或重复，或解析出的 target row 未通过相同 item/row/
+bundle 检查时，相关 reference-relative verdict 成为 `invalid`。
 
 令 `row_manifest_bytes` 和 `bundle_manifest_bytes` 表示从 header 到 final LF 的完整
 canonical byte。其 content address 精确为：

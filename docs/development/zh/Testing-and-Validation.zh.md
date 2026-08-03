@@ -1667,8 +1667,10 @@ Issue #92 不新增当前 test binary、serializer、probe、runner、API 或 ru
 
 对每个 candidate 或 reference bundle：
 
-1. 在评估依赖 reference 的行之前，按 content digest 选择一个 immutable
-   reference；
+1. 对 candidate，在评估任何 reference-relative row 之前，把
+   `comparison_reference_bundle_digest` 解析到恰好一个 retained canonical 五 field
+   bundle；独立复算其 bundle digest，要求 workload 相同且 role 为 `reference`，并验证
+   其完整 canonical row list；reference 则使用封闭的 N/A encoding；
 2. 每个 replicate 启动一个 fresh process，并记录 repository commit、dirty
    state、build/compiler/flag、OS/kernel、CPU/GPU/device inventory、power/thermal
    eligibility、provider/plugin binary 与 generation、process worker、Run cap、
@@ -1783,11 +1785,34 @@ tag 加上完整 canonical manifest byte 的一个 frame 计算 hash。Claim 存
 `(workload_id,run_cap,replicate_ordinal)`。即使两个 item 命名不同 row digest，list
 也必须拒绝相同 key。对每个 item，validator 必须解析出恰好一个 retained canonical
 row，复算其 digest，解析全部 15 个 field，并让 workload、cap、replicate 与 item
-匹配，让 subject role 与 enclosing bundle 匹配。Candidate comparison target 必须是
-workload 相同的 `reference` bundle；精确 target row 是与 candidate row 功能 key
-相同的唯一 row。Comparison bundle digest 本身不选择 row。每个 M1 pair 则命名精确
-row digest，并必须在必需 isolated workload 与 cap 8 下解析到 same-role、same-ordinal
-target。Item、row、bundle、role 或 key 证据缺失、重复或不匹配时均为 invalid。
+匹配，让 subject role 与 enclosing bundle 匹配。
+
+对 candidate，validator 首先把 `comparison_reference_bundle_digest` 解析到恰好一个
+retained bundle object。它必须解析精确 canonical header 与五个 field，独立复算 bundle
+digest 并匹配 claim，要求 `subject_role=reference` 且 workload 与 candidate 相同，并验证
+完整非空 row list 的 ordering、功能 key 唯一性及 item 到 canonical row 的解析。解析出
+零个或多个 retained object（包括多个 object 携带相同 digest claim）、五 field parse/
+schema failure、claimed/recomputed mismatch、role/workload 错误，或任一 target row list
+无效，都会使全部相关 reference-relative verdict invalid。只有通过这些检查后，精确 target
+row 才是与 candidate row 功能 key 相同的唯一 row；comparison bundle digest 本身不选择
+row。每个 M1 pair 则命名精确 row digest，并必须在必需 isolated workload 与 cap 8 下
+解析到 same-role、same-ordinal target。Item、row、bundle、role 或 key 证据缺失、重复
+或不匹配时均为 invalid。
+
+Comparison-bundle resolver 必须覆盖以下 scenario/oracle 矩阵：
+
+| 场景 | Oracle |
+| --- | --- |
+| Exact-one valid | 一个 retained object 解析为精确 canonical 五 field bundle，其独立 rehash 等于 claim，role 为 `reference`、workload 匹配、完整 row list canonical 且功能唯一，candidate key 选择恰好一个有效 target row；随后可以继续其他 compatibility check。 |
+| Zero object | Claim 没有解析出 retained bundle object；全部相关 reference-relative verdict 为 `invalid`。 |
+| Multiple objects with the same claim | 同一 digest claim 解析出两个或更多 retained object，即使其 byte 相同；validator 不按 path、insertion order 或 byte 选择，全部相关 verdict 为 `invalid`。 |
+| Five-field schema failure | Target 的 header、field count/order/type/state/reason 错误、frame malformed、缺少 final LF 或有 extra byte；它不是 canonical bundle，全部相关 verdict 为 `invalid`。 |
+| Independent rehash mismatch | Canonical target byte 复算出的 bundle digest 与 candidate claim 不同；全部相关 verdict 为 `invalid`。 |
+| Wrong role | 解析出的 bundle 具有 `subject_role=candidate`；全部相关 verdict 为 `invalid`。 |
+| Wrong workload | 解析出的 `reference` bundle workload 与 candidate workload 不同；全部相关 verdict 为 `invalid`。 |
+| Target key missing | 没有 target row-reference item 具有 candidate row 的功能 key；相关 verdict 为 `invalid`。 |
+| Target key duplicated | 多个 target row-reference item 具有该 key，包括命名不同 row digest 的情形；相关 verdict 为 `invalid`。 |
+| Target row mismatch | Selected item 解析出零个或多个 row、row rehash 或 15-field parsing 失败，或 item/bundle workload、cap、replicate、role 不匹配；相关 verdict 为 `invalid`。 |
 
 Address sealing 同样是规范规则。首先验证 immutable external target；随后按 dependency
 顺序冻结 retained section 与 bundle provenance；再冻结 row；再冻结 enclosing bundle；

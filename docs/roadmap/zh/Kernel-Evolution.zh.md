@@ -924,10 +924,15 @@ Evidence row 与 bundle 也具有封闭 ASCII length-framed manifest。固定 fi
 type、显式 known-empty 与 N/A encoding、section/row/bundle SHA-256 domain
 separator、digest self-exclusion、具有功能唯一性的 canonical row key 与精确 item/row/
 bundle 匹配，以及每个 comparison/pair 恰好一个 target-row 选择，使独立 reader 可以
-复算每个 content address。External prerequisite、retained section/provenance、row 与
-bundle 按 address-dependency 拓扑顺序封存；直接或传递的 self、enclosing、later-stage、
-comparison 或 M1 cycle 都会 fail closed。#93 至 #96 可以新增各自负责的 inner
-collector record，但不能重新定义 v1 envelope、identity join 或 address DAG。
+复算每个 content address。Candidate comparison digest 首先解析出恰好一个 retained
+canonical 五 field reference bundle；必须独立复算其 digest、匹配其 workload，并让其完整
+且功能唯一的 row list 通过 canonical row resolution。解析出零个或多个 object、五 field
+parse/schema 或 rehash failure、role/workload 错误，或 target row 缺失、重复、不匹配，
+都会使全部相关 reference-relative verdict invalid。External prerequisite、retained
+section/provenance、row 与 bundle 按 address-dependency 拓扑顺序封存；直接或传递的
+self、enclosing、later-stage、comparison 或 M1 cycle 都会 fail closed。#93 至 #96
+可以新增各自负责的 inner collector record，但不能重新定义 v1 envelope、identity join
+或 address DAG。
 
 交付证据行已经冻结：
 
