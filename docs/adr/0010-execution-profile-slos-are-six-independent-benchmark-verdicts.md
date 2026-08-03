@@ -81,7 +81,7 @@ The canonical workload matrix is:
 | `I1-edit-storm-v1` | Uses seed zero and the twelve natural edit ordinals `1..12`. For `edit_index = edit_ordinal - 1` in `0..11`, node one's `k` is selected from `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`, and the source Region is `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`. Every Run uses `ComputeIntent::GlobalHighPrecision`, `ComputeRunQuality::Full`, Interactive QoS, weight 1, Run cap 8, the checked absolute monotonic deadline `D_i=A_i+150,000,000 ns`, and the exact `(Graph, target node four, GlobalHighPrecision)` supersession key. The twelfth edit (`edit_index=11`, `k=1.04`, Region `(768,512,256,256)`) is the only required publication and must publish no later than `D_11`. One continuous 221-slot cold/warmup/measured grid fixes every isolated episode origin; each episode's 500 ms settlement-observation window starts at its twelfth nominal start `S_11` and ends before the next origin. |
 | `I2-progressive-v1` | Reuses the exact I1 source, graph, seed, edit ordinals, source-space Regions, realtime request lineage, and complete node-one coefficient sequence `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` under the same `edit_index=edit_ordinal-1` mapping. One continuous 111-slot steady-clock grid links the cold, warmup, and measured phase origins; episodes are exactly 1,500,000,000 ns apart and contain twelve nominal preview-admission starts 16,666,667 ns apart with at most 2,000,000 ns lateness. At each index it updates node one to that coefficient, then executes nodes one through four in order with `k` values `[coefficient, 1.00, 1.20, 1.40]`. The 512x512 preview source is a per-channel 4x4 box average of the original 2048 source, rounded once to binary32 before that update/transform sequence; preview Region `edit_index` is `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`. The final starts from the original 2048 source and uses the same I1 full-resolution update/transform path; it is never derived from preview pixels. Only the twelfth edit (`edit_index=11`, preview Region `(192,128,64,64)`) has required preview and final latency results, in that order; stale output cannot publish. |
 | `B1-immutable-v1` | Contains immutable jobs `0..29`; job `n` uses source seed `n`, the baseline graph, Throughput QoS, weight 1, no deadline or supersession, exact reservation evidence, a canonical semantic trace, a crash-durable committed artifact, and job-indexed logical/raw goldens. Even jobs belong to Graph A and odd jobs to Graph B. At the measurement boundary the harness offers both ordered 15-job queues and never pauses a nonempty queue; bounded Host admission, rather than the harness, decides how many Runs are resident. Run caps 1 and 8 are separate required rows. |
-| `M1-shared-v1` | At the exact warmup-cutoff/measurement-origin boundary, starts measured I1 and then repeats it every 750,000,000 ns, giving exactly 40 episode starts, while cycling the exact B1 corpus with its even/odd Graph assignment, Run cap 8, and continuous offered backlog for 30 measured seconds. The boundary neither pauses nor drains the shared domain: already offered warmup work retains its phase identity and resource authority ahead of newly offered measured B1 work. Both streams use one `ExecutionService`, worker set, ready store, policy binding set, and `ResourceLedger`; no hidden pool, duplicate ledger, or separate process may absorb either stream. |
+| `M1-shared-v1` | Derives exact cold and warmup boundaries `C^M1=B^M1-6,000,000,000 ns` and `W^M1=B^M1-5,000,000,000 ns`, runs one cold I1 origin plus the fixed B1 seed-252 job, then seven warmup I1 origins plus the fixed seed-253/254/255 B1 protocol. At the exact warmup-cutoff/measurement-origin boundary, it starts measured I1 and repeats it every 750,000,000 ns for exactly 40 episode starts. The even Graph A and odd Graph B producers then repeat their own 15-job subsequences under independent producer-local cycles, Run cap 8, and continuous offered backlog for 30 measured seconds; neither waits for the other producer to finish the same local ordinal. The boundary neither pauses nor drains the shared domain: already offered warmup work retains its phase identity and resource authority ahead of newly offered measured B1 work. Both streams use one `ExecutionService`, worker set, ready store, policy binding set, and `ResourceLedger`; no hidden pool, duplicate ledger, or separate process may absorb either stream. |
 
 Every workload-bearing field or fixed-record component uses the dedicated,
 case-sensitive scalar type `workload-id-v1`. Its complete domain is exactly
@@ -98,7 +98,11 @@ demand and has not paused submission. This workload-level interval includes
 time awaiting bounded admission; it does not claim that all 30 B1 Runs are
 admitted simultaneously. Within each Graph the producer offers jobs in
 ascending index order and synchronously offers the next job when the prior one
-becomes terminal. M1 starts a new `0..29` cycle without a producer-side gap.
+becomes terminal. In measured M1, Graph A repeats `0,2,...,28` and Graph B
+repeats `1,3,...,29`. Each producer starts its own next 15-job local cycle
+immediately after its own final job becomes terminal; a fast producer may be
+in local cycle `c+1` while the other remains in `c`. A shared cross-Graph
+cycle barrier or a gap waiting for the other producer is invalid.
 
 #### B1 job occurrence identity is distinct from retry identity
 
@@ -120,11 +124,17 @@ components in this exact order:
 The canonical payload is the concatenation of one `frame(component-payload)`
 per component under the fixed-record grammar below. `replicate_ordinal` is
 `1..3`; `job_index` is `0..255`; `run_cap` is the row's frozen cap. In every
-phase, `cycle_ordinal` starts at zero. It advances only after the preceding
-complete `0..29` M1 corpus in that same phase and is never used for a partial
-retry. B1 cold/warmup seed jobs and isolated measured jobs use cycle zero; M1
-jobs in every phase use the current repeated-corpus cycle. The coordinate
-`(phase,cycle_ordinal,job_index)` cannot repeat within one B1-bearing row.
+phase, `cycle_ordinal` starts at zero. B1 cold/warmup seed jobs and isolated
+measured jobs use cycle zero. For measured M1, the unchanged wire component
+stores the `producer_cycle_ordinal`: the producer lane is derived without a new
+field from even Graph A versus odd Graph B `job_index`. Graph A increments its
+counter only after job 28 of its current local cycle becomes terminal, and
+Graph B independently increments only after job 29; each immediately offers
+its own job zero or one in the new local cycle. A producer never waits for,
+increments, or completes the other producer's cycle. The coordinate
+`(phase,cycle_ordinal,job_index)` remains unique within one B1-bearing row, and
+the existing six-component record, outer schema, and retry semantics do not
+change.
 
 The logical Compute I/O task is `(job_instance_id,stage)`, where `stage` is
 `payload-stage` or `manifest-commit`; its full attempt identity is
@@ -1111,6 +1121,63 @@ Warmup B1 jobs use the same graph and full artifact path but warmup-only
 identities and directories. Warmup and cold output is removed after its owner
 settles; process/provider/JIT state remains.
 
+#### The M1 cold and warmup input grid is exact
+
+M1 derives two additional checked monotonic boundaries from the already
+retained measurement boundary:
+
+```text
+C^M1 = B^M1 - 6,000,000,000 ns
+W^M1 = B^M1 - 5,000,000,000 ns = C^M1 + 1,000,000,000 ns
+```
+
+Their row-local event sequences are `c^M1` and `w^M1`, with
+`(C^M1,c^M1) < (W^M1,w^M1) < (B^M1,b^M1)`. Checked subtraction/addition
+failure is invalid. Cold, warmup, and measured intervals are exactly
+`[(C^M1,c^M1),(W^M1,w^M1))`,
+`[(W^M1,w^M1),(B^M1,b^M1))`, and
+`[(B^M1,b^M1),(U^M1,u^M1))`; the runner cannot choose a different origin or
+length.
+
+At `(C^M1,c^M1)`, a zero-duration start transaction establishes the sole cold
+I1 nominal origin `E^M1_cold=C^M1` and offers exactly B1 Graph A seed 252 with
+`phase=cold`, `cycle_ordinal=0`, and `attempt=0`. The B1 offer orders after
+`c^M1`; a cold I1 admission at the same timestamp orders after that offer. The
+cold I1 occurrence uses the existing I1 offsets and closes its own settlement
+window at `C^M1+683,333,337 ns`, leaving a fixed 316,666,663 ns guard before
+`W^M1`. Its generation must be quiescent at that endpoint. Seed 252's unique
+terminal endpoint, artifact owner settlement, and output removal must all
+order before `(W^M1,w^M1)`. A miss does not move `W^M1` or insert a drain; it
+invalidates the replicate.
+
+At `(W^M1,w^M1)`, a second zero-duration transaction verifies that cold work
+has already met those endpoints, closes the cold sources, establishes warmup
+I1 origin `E^M1_warmup,0=W^M1`, and activates the finite warmup B1 protocol.
+It then offers seed 253 to Graph B followed by seed 254 to Graph A, both with
+`phase=warmup`, `cycle_ordinal=0`, and `attempt=0`, satisfying
+`w^M1 < sequence(B253) < sequence(A254)`. A first warmup I1 admission at the
+same timestamp orders after both offers. When B253 becomes terminal, and only
+then, the Graph B producer synchronously offers B255 at the same timestamp with
+a greater sequence and the same warmup cycle/attempt. B255 must be offered
+before `(B^M1,b^M1)`; otherwise the fixed warmup fixture is incomplete and the
+replicate is invalid. Graph A has no warmup successor after A254. Thus the
+complete offered warmup prefix is fixed by protocol, while the incomplete
+subset at `B^M1` is determined only by the retained terminal history, never by
+runner choice.
+
+Warmup I1 has exactly seven nominal origins
+`E^M1_warmup,k=W^M1+k*750,000,000 ns` for `k=0..6`. Origins `k=0..5` close
+their per-occurrence settlement windows before the next origin. Origin `k=6`
+is exactly `B^M1-500,000,000 ns`; its fixed
+`Q_end=B^M1+183,333,337 ns` makes that occurrence/generation settlement-pending
+at the measurement boundary. It remains immutable `phase=warmup` and appears
+in the `B^M1` carryover snapshot. At its `Q_end`, the endpoint snapshot applies
+only to that warmup occurrence/generation: it must be quiescent and settled,
+but concurrently active measured generations and the shared execution service
+need not be globally empty. Cold and warmup transitions never restart the
+process, cool providers, rebuild queues, release shared resources, or shift a
+boundary.
+
 #### The M1 measurement boundary preserves warmup carryover
 
 M1 retains one boundary event with exact monotonic timestamp `B^M1=M_0` and
@@ -1139,7 +1206,8 @@ logical steps in order without stopping the shared execution domain:
 4. establish the first measured I1 nominal origin at `M_0`;
 5. offer measured B1 Graph A job zero followed by Graph B job one, both at
    timestamp `B^M1`, with sequence values satisfying
-   `b^M1 < sequence(Graph A job zero) < sequence(Graph B job one)`.
+   `b^M1 < sequence(Graph A job zero) < sequence(Graph B job one)`, each with
+   `phase=measured`, producer-local `cycle_ordinal=0`, and `attempt=0`.
 
 Steps one through four form one atomic logical transition at the boundary
 coordinate: no other row-local lifecycle event interleaves with their snapshot
@@ -1148,26 +1216,35 @@ or counter reset. A lifecycle event at timestamp `B^M1` with sequence below
 orders after its snapshot/reset and then relative to the two measured B1 offers
 by sequence.
 
+The actual first measured-I1 admission is not part of the atomic snapshot. If
+its timestamp equals `B^M1`, its sequence must order after both measured B1
+offers. Its accepted latest-wins supersession therefore also orders after the
+frozen carryover snapshot and cannot remove or rewrite the warmup generation
+recorded there. Any cancellation, terminal, or settlement causally produced
+for that old generation retains its later event sequence and warmup phase.
+
 If a same-timestamp lifecycle event orders before the boundary, the snapshot
 reflects its new state; if it orders after, it is a cross-boundary event. A
 terminal warmup event at the same timestamp never creates a new warmup
 successor after step one. There is no phase-boundary wait, cooling interval,
 drain, cancellation, process restart, worker/policy/queue reconstruction, or
-resource release. Ordinary measured-I1 admissions may supersede older I1
-generations under the frozen latest-wins rules, but the harness adds no
-boundary-only cancellation.
+resource release. Ordinary measured-I1 admissions may supersede the retained
+warmup I1 generation under the frozen latest-wins rules, but only after the
+cutoff/snapshot and with the ordering above; the harness adds no boundary-only
+cancellation.
 
 Every outstanding warmup B1 occurrence retains its immutable `phase=warmup`,
 cycle, job, and attempt identity and its existing per-Graph FIFO position. The
-new measured offers use `phase=measured`, `cycle_ordinal=0`, job zero or one,
-and `attempt=0`; they follow the complete already-offered warmup prefix for
-their Graph even when that prefix is queued or running. This exact transition
-is the sole exception to waiting for the predecessor to become terminal before
-an offer. Afterward each measured producer again offers its next ascending job
-synchronously on predecessor terminal, starts the next complete `0..29` cycle
-without a gap, and never completes or increments an unfinished warmup cycle.
-The cap-eight admission bound, active backlog, queue order, and resource
-ownership span the boundary unchanged.
+new measured offers follow the complete already-offered warmup prefix for their
+Graph even when that prefix is queued or running. This exact transition is the
+sole exception to waiting for the predecessor to become terminal before an
+offer. Afterward Graph A offers the next even job on its measured predecessor's
+terminal and advances from job 28 directly to job zero of its next
+producer-local cycle; Graph B independently does the same from job 29 to job
+one. Neither producer waits for the other, and neither completes, increments,
+or rewrites an unfinished warmup identity. The cap-eight admission bound,
+active backlog, queue order, and resource ownership span the boundary
+unchanged.
 
 Occurrence-owned results are attributed by immutable phase, never by completion
 timestamp. A warmup occurrence's terminal result, completed service, output
@@ -1195,14 +1272,19 @@ enter a 30-second numerator. Teardown must drain all phases and reach the
 existing exact-zero resource/Compute-I/O settlement; quiescence is deliberately
 not required at `B^M1`.
 
-The workload manifest retains `B^M1`, `U^M1`, the event-order/tie rule, boundary
-step order, queue/carryover policy, and phase-attribution rules. Measurement
-evidence retains both boundary events, the full carryover snapshot, every tied
-event coordinate and state transition, the first measured offers, queue/start/
-terminal/receipt joins, counter epochs, resource samples, failures, and final
-settlement. Existing section and verdict digests cover these bytes; the closed
-15-field row and five-field bundle do not change. Any boundary, ordering,
-carryover, attribution, or evidence drift while retaining `M1-shared-v1` is
+The workload manifest retains `C^M1`, `W^M1`, `B^M1`, `U^M1`, exact phase
+intervals, I1 origin/count/index and `Q_end` arithmetic, the cold/warmup B1
+offer protocol, the event-order/tie rule, boundary step order, queue/carryover
+policy, producer-local cycle rule, and phase-attribution rules. Measurement
+evidence retains all four boundary events, every fixed cold/warmup offer and
+actual terminal-derived prefix transition, the full carryover snapshot, every
+tied event coordinate and state transition, the first measured offers,
+per-Graph predecessor and next-cycle counters, queue/start/terminal/receipt
+joins, counter epochs, resource samples, failures, and final settlement.
+Existing section and verdict digests cover these bytes; the closed 15-field row
+and five-field bundle do not change. Any origin, offer, cycle, boundary,
+ordering, carryover, attribution, or evidence drift while retaining
+`M1-shared-v1` is
 invalid and requires a new workload id if intentional.
 
 Cold first use is retained separately and never pooled into steady-state
@@ -1658,7 +1740,7 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 | #93 | Implement the continuous 221-slot isolated-I1 grid, exact `S_11` drain/tie/guard behavior, request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
 | #94 | Implement I2 on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-before-next-edit ordering, and I1 coefficient/index/update/full-resolution-final lineage frozen here; it cannot redefine those schedules or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
 | #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
-| #96 | Compose the exact I1 and B1 fixtures into M1, implement the exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary, assign a distinct `cycle_ordinal` to every repeated B1 corpus without treating it as retry, reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
+| #96 | Compose the exact I1 and B1 fixtures into M1; implement the fixed `C^M1`/`W^M1` cold/warmup origins, counts, B1 offer protocol, cross-`B^M1` I1 settlement, and exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary; interpret the existing `cycle_ordinal` component as an independent producer-local counter for each measured B1 Graph without treating it as retry or adding a field; reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

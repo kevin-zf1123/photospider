@@ -1402,17 +1402,30 @@ Warmup B1 job 用独立 identity/directory 执行完整 artifact path；owner �
 observation 绝不进入 measured aggregate；M1 boundary 在不重启进程或重置 state 的
 情况下重置 logical counter。
 
+强制 M1 pre-boundary input-grid scenario oracle 如下：
+
+| 场景 | Oracle |
+| --- | --- |
+| 精确 phase origin 与 interval | 经过 checked arithmetic 派生 `C^M1=B^M1-6,000,000,000 ns` 与 `W^M1=B^M1-5,000,000,000 ns=C^M1+1,000,000,000 ns`，保留 sequence `c^M1<w^M1<b^M1`，并精确使用 `[(C,c),(W,w))`、`[(W,w),(B,b))` 与 `[(B,b),(U,u))`。Underflow、overflow、boundary 移动、phase 时长不同或 runner 自选 origin 都是 invalid。 |
+| Cold origin 与 settlement | 在 `(C^M1,c^M1)` 建立唯一 cold I1 origin，并在 boundary marker 后 offer Graph A seed 252，identity 为 `(phase=cold,cycle=0,attempt=0)`；同 timestamp 的 I1 admission 排在该 offer 之后。要求 I1 `Q_end=C^M1+683,333,337 ns` quiescence snapshot，以及 B252 terminal/owner settlement/output removal 全部位于 `W^M1` 前；固定 316,666,663 ns I1 guard 不移动 `W^M1`，miss 直接 invalid，而不是执行 drain。 |
+| Warmup origin 与 count | 在 `(W^M1,w^M1)` 验证 cold 已经 settled，并建立精确 `E^M1_warmup,k=W^M1+k*750,000,000 ns`，其中 `k=0..6`。遗漏/重复 origin、不同 count/index、从 `C^M1` 倒推的跨 phase 连续 grid 或 delayed transition 都应拒绝。 |
+| 固定 warmup B1 offer protocol | 在 `W^M1` 先 offer B253、再 offer A254，满足 `w^M1<sequence(B253)<sequence(A254)`，并使用 warmup cycle/attempt zero；同 timestamp 的第一个 I1 admission 排在两者之后。只有 B253 terminal 时才同步 offer B255，并使用更大的 same-time sequence；B255 必须在 `(B^M1,b^M1)` 前已经 offered。Graph A 在 A254 后没有 warmup successor。Offered prefix 由 protocol 固定，只有 incomplete subset 由 terminal history 派生。 |
+| 确定性跨 `B^M1` I1 | Warmup origin `k=6` 精确为 `B^M1-500,000,000 ns`，且 `Q_end=B^M1+183,333,337 ns`；要求该 settlement-pending warmup occurrence/generation 出现在 `B^M1` snapshot。其 `Q_end` 只要求该 occurrence/generation 达到 quiescence 并 settled，不要求并发 measured generation 或整个 shared service 为空。 |
+| 不可变 attribution 与 temporal effect | 最后一个 warmup generation 拥有的每个 event/result 都保持 `phase=warmup`，包括 measured latest-wins supersession 后产生的 cancellation 或 settlement。其 occurrence-owned value 不进入 measured aggregate，但 `B^M1` 后每个 start、contention、reservation/grant、Compute I/O 与 high-water effect 都进入按时间 window 归属的 evidence。 |
+| 无隐藏 transition | Cold/warmup transition 不得 pause、wait、cool、restart、rebuild queue、release shared resource 或移动 boundary。把全部 origin/count/index、固定 offer、由 terminal 派生的 B255 transition、phase endpoint 与 failure 保留在既有 workload-manifest/measurement section 中并复算 digest，不新增 outer field。 |
+
 强制 M1 phase-boundary scenario oracle 如下：
 
 | 场景 | Oracle |
 | --- | --- |
 | 精确 boundary 与 interval | 保留 boundary coordinate `(B^M1=M_0,b^M1)`、经过 checked arithmetic 的 terminal-cutoff coordinate `(U^M1=B^M1+30,000,000,000 ns,u^M1)`，以及唯一且严格递增的 row-local event sequence。按 `(monotonic_timestamp,event_sequence)` 排列相等 timestamp；measured interval 是 `[(B^M1,b^M1),(U^M1,u^M1))`。 |
-| 有序零时长 transition | 在 `(B^M1,b^M1)`，以 atomic transition 关闭 warmup I1 cadence 与两个 B1 Graph producer，对此前已经 offered 但未完成的每个 warmup I1/B1 occurrence/state 取得 snapshot，只重置 logical measured accumulator，并建立 measured I1 origin。随后在 timestamp `B^M1` 依次 offer measured Graph A job zero 与 Graph B job one，sequence 均严格大于 `b^M1`。Snapshot/reset 中不得插入其他 event，也不得 pause/wait/cooling/drain/boundary cancellation/restart/queue rebuild/resource release。 |
-| Carryover identity 与 FIFO | 保留 warmup phase/cycle/job/attempt、queue predecessor、admission state、reservation/grant 与 owner settlement。即使仍 queued/running，measured cycle-zero offer 也排在每个 Graph 已经 offered 的 warmup prefix 之后；只有该 transition 可以绕过 predecessor-terminal offer timing。后续 measured offer 恢复普通规则，绝不推进未完成的 warmup cycle。 |
+| 有序零时长 transition | 在 `(B^M1,b^M1)`，以 atomic transition 关闭 warmup I1 cadence 与两个 B1 Graph producer，对此前已经 offered 但未完成的每个 warmup I1/B1 occurrence/state 取得 snapshot，只重置 logical measured accumulator，并建立 measured I1 origin。随后在 timestamp `B^M1` 依次 offer measured Graph A job zero 与 Graph B job one；二者均为 producer-local cycle zero，sequence 严格大于 `b^M1`。Snapshot/reset 中不得插入其他 event，也不得 pause/wait/cooling/drain/boundary cancellation/restart/queue rebuild/resource release。 |
+| Supersession 顺序 | 如果第一次 measured-I1 actual admission 的 timestamp 为 `B^M1`，要求其 sequence 排在两次 measured B1 offer 之后。因此其 accepted latest-wins supersession 位于冻结 snapshot 之后；它不能删除或改写 warmup generation，且每个因果上更晚的 cancellation/terminal/settlement event 都保持 warmup attribution。 |
+| Carryover identity 与 FIFO | 保留 warmup phase/cycle/job/attempt、queue predecessor、admission state、reservation/grant 与 owner settlement。即使仍 queued/running，measured cycle-zero offer 也排在每个 Graph 已经 offered 的 warmup prefix 之后；只有该 transition 可以绕过 predecessor-terminal offer timing。后续 measured offer 恢复普通 per-Graph 规则，绝不推进或改写未完成的 warmup identity。 |
 | Occurrence attribution | 按不可变 phase 归属 terminal/completed service、output byte、latency、receipt/golden/digest、determinism、retry/duplicate/discarded service、waste 与 settlement。把 `B^M1` 后的 warmup occurrence-owned quantity 从 measured throughput、Jain service `x`、latency、determinism 与 waste aggregate 排除。 |
 | Temporal scheduler/resource effect | 包含 boundary 后每个 phase 的 actual class start、headroom failure、queue contention、reservation/grant、Compute I/O state 与 Host/device/ready-memory high-water。Measured class-start rule 计算 warmup Throughput start，而 Jain completed service 只使用 measured occurrence。 |
 | Failure 与 terminal settlement | Warmup carryover failure、event evidence 缺失、event sequence 重复或 coordinate 无法形成全序、phase/identity/FIFO rewrite、boundary-only cancellation、snapshot mismatch 或无法证明 settlement 都是 invalid。在 `(U^M1,u^M1)` 停止新的 measured offer，但不取消 outstanding work；保留排在 cutoff 或其后的 endpoint，但从 30-second numerator 排除，随后要求 exact-zero teardown。`B^M1` 不要求 quiescence。 |
-| 既有 envelope evidence | 在既有 manifest/measurement section 与 digest 中保留两个 boundary、tie/step order、carryover snapshot、phase join、首批 measured offer、counter epoch、queue/start/terminal/receipt event、resource effect、failure 与 final settlement。任何有意规则变化都需要新 workload id；outer row/bundle field 保持 15/5。 |
+| 既有 envelope evidence | 在既有 manifest/measurement section 与 digest 中保留 `C^M1`、`W^M1`、`B^M1`、`U^M1`、全部 phase interval/origin/count/index、固定 pre-boundary offer、由 actual terminal 派生的 transition、tie/step order、carryover snapshot、phase join、首批 measured offer、per-Graph predecessor/next-cycle counter、counter epoch、queue/start/terminal/receipt event、resource effect、failure 与 final settlement。任何有意规则变化都需要新 workload id；outer row/bundle field 保持 15/5。 |
 
 v1 resource profile 是 32 个 CPU slot、1 GiB Host retained memory、512 MiB
 Host scratch、65,536 个 ready entry 与 256 MiB ready byte；Interactive headroom
@@ -1424,16 +1437,19 @@ Host scratch、65,536 个 ready entry 与 256 MiB ready byte；Interactive headr
 对 B1 fairness 证据，只要 Graph producer 仍有未消费 offered demand 且没有暂停
 提交，该 Graph 就是 eligible，其中包括 bounded-admission wait。Isolated B1 在其
 measured boundary 提供两个有序的 15-job queue。M1 使用上面的 boundary oracle：
-首批逐 Graph measured offer 排在保留的 warmup prefix 之后，随后按递增 job index
-推进每个 Graph，并无 producer gap 地开始完整新 cycle。两条路径都不会绕过正常
-bound 准入全部 30 个 Run。
+首批逐 Graph measured offer 排在保留的 warmup prefix 之后，Graph A 随后重复
+`0,2,...,28`，Graph B 重复 `1,3,...,29`。每个 producer 在自己的最后一个 job
+terminal 后立即开始自己的下一轮 local cycle，即使另一个仍在上一轮 local cycle。
+Cross-Graph barrier 或 producer gap 都是 invalid。两条路径都不会绕过正常 bound
+准入全部 30 个 Run。
 
 每个 B1 occurrence 都通过 canonical `job-instance-v1`
 `(row_workload_id:workload-id-v1,replicate_ordinal:uint64,
 phase:enum(cold|warmup|measured),cycle_ordinal:uint64,job_index:uint64,
 run_cap:uint64)` 建立 index。Phase-local cycle zero 覆盖 cold/warmup 与 isolated
-measured B1；M1 使用
-当前 phase-local cycle，并且只在同 phase 的完整 `0..29` corpus 后增加 cycle。
+measured B1。对 measured M1，未改变的 `cycle_ordinal` component 存储 producer-local
+counter，并由 job parity 推导 lane：Graph A 在 job 28 terminal 后递增并立即 offer
+下一 local cycle 的 job zero；Graph B 则独立地在 job 29 后递增并 offer job one。
 Logical I/O task 增加 stage，完整 task
 identity 再增加 `attempt`。Capacity rejection 或幂等 duplicate 保持 attempt zero
 与相同 charge；只有 terminal failure 后的显式 retry 才增加 attempt。Cycle 绝不
@@ -1787,9 +1803,11 @@ Issue #92 不新增当前 test binary、serializer、probe、runner、API 或 ru
    precondition 兼容，并保留
    独立的 candidate `comparison_reference_bundle_digest` 语义；
 5. 保留 cold first-use 并执行精确且不参与测量的 warmup；对 isolated I1 保持已经
-   固定的 221-slot grid，对 M1 则在不替换或暂停冻结环境的情况下执行精确有序的
-   `B^M1` cutoff/carryover snapshot/counter reset/首批 offer transaction，随后执行到
-   `U^M1` 与 final settlement 的精确 measured interval；
+   固定的 221-slot grid；对 M1 则执行精确 `C^M1`/`W^M1` I1-origin 与 B1-offer
+   protocol，证明固定 cold settlement 与跨 `B^M1` warmup occurrence，再在不替换或
+   暂停冻结环境的情况下执行有序 `B^M1` cutoff/carryover snapshot/counter reset/
+   首批 offer/supersession transaction，随后执行到 `U^M1` 与 final settlement 的
+   精确 measured interval；
 6. 在包含 B1 的 work 前分配并保留 canonical job-instance index，拒绝重复 phase/
    cycle/job coordinate，并验证每个 charge、admission、commit、receipt 与 evidence
    join 使用 occurrence identity 而不是 retry identity；
@@ -1849,8 +1867,9 @@ completion order 不进入 canonical byte，但保留在独立 raw trace 中。
   `storage_environment_digest`；
 - workload/fixture/source/graph/payload hash 与全部 seed；
 - 相互分离的 warmup、cold 与 measured count/window，包括 I1 grid/drain boundary 与
-  M1 cutoff/terminal coordinate、event order、carryover snapshot、counter epoch 及
-  phase attribution；
+  全部 M1 cold/warmup/cutoff/terminal coordinate、精确 pre-boundary origin/count/
+  offer、event order、carryover snapshot、per-Graph producer-cycle counter、counter
+  epoch 及 phase attribution；
 - raw sample/event、offered-demand eligibility interval、queue/carryover transition 与
   drop/gap counter；
 - typed logical output、raw payload、artifact-manifest、semantic-trace 与 logical/raw
@@ -1944,8 +1963,9 @@ Issue #93 负责连续 isolated-I1 grid 与精确 drain/tie/guard collector 行�
 schema 的 adapter、mount normalizer、performance-configuration mapping/proof、唯一
 canonical encoder/digest、eligibility 与 root-containment evidence，以及 cap-1/
 cap-8 和 candidate/reference check。Issue #96 为 M1 原样复用精确 manifest byte，
-实现冻结的 cutoff/carryover/phase-attribution boundary，并强制执行其 same-ordinal
-完整 B1 pair，同时让 I1-only pair 只比较 base。上述 Issue 都不能重定义 v1 grammar、
+实现冻结的 `C^M1`/`W^M1` pre-boundary protocol、独立 producer-local cycle 与
+cutoff/carryover/phase-attribution boundary，并强制执行其 same-ordinal 完整 B1 pair，
+同时让 I1-only pair 只比较 base。上述 Issue 都不能重定义 v1 grammar、
 field 或 sentinel。Issue #92 只定义本 evidence
 contract；它不新增当前 probe、serializer、public API、runner 或 runtime result
 field。

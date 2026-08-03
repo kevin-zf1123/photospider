@@ -1090,7 +1090,7 @@ immutable workload ids:
 | `I1-edit-storm-v1` | Natural edit ordinals `1..12` map to `edit_index=0..11`; twelve exact parameter/256x256-Region edits use one latest-wins key, Interactive QoS, a monotonic nominal cadence with bounded start lateness, and twelfth-edit (`edit_index=11`) visibility. One continuous 221-slot grid fixes cold/warmup/measured origins and the terminal boundary; each episode's exact `S_11`-anchored 500 ms settlement window ends before the next origin. |
 | `I2-progressive-v1` | One retained steady-clock replicate-grid origin derives a continuous 111-slot cold/warmup/measured grid, with 100 measured episode indices, every origin exactly 1,500,000,000 ns apart, and a terminal quiescence boundary at stride 111; every episode has twelve nominal preview admissions 16,666,667 ns apart with at most 2,000,000 ns lateness. The exact I1 Graph/target/revision, `edit_index` mapping, complete 12-value node-one coefficient/update sequence, and node-one-through-node-four transform order use a separate legal realtime request key with RT-preview and HP-final child contracts. Preview performs the 4x4 source average and one binary32 rounding before that sequence; final uses the original 2048 source and the same I1 full-resolution path. The twelfth edit (`edit_index=11`) publishes preview then final by absolute 100/1,000 ms deadlines anchored to the same actual preview admission, with exact Host/conditional-Metal residency reuse and zero hidden I/O/copy. |
 | `B1-immutable-v1` | Thirty job-indexed immutable full-frame jobs are offered in order across two Graphs, with bounded Compute I/O task/planned-byte admission, canonical raw artifacts/manifests and semantic traces, crash-durable receipts, and logical/raw goldens at Run caps 1 and 8. |
-| `M1-shared-v1` | Forty exact I1 starts and continuously offered cap-8 B1 cycles sharing one process execution authority for 30 measured seconds. One exact warmup-cutoff/measurement-origin boundary preserves offered warmup identity, FIFO position, resource authority, and temporal effects while measured occurrences begin without a pause or drain. |
+| `M1-shared-v1` | One exact cold I1 origin/B1 seed-252 second, seven exact warmup I1 origins plus the fixed seed-253/254/255 offer protocol, then forty measured I1 starts and continuously offered cap-8 B1 work sharing one process execution authority for 30 measured seconds. Graph A and Graph B advance independent producer-local cycles without a cross-Graph barrier. The exact warmup-cutoff/measurement-origin boundary preserves offered warmup identity, FIFO position, resource authority, and temporal effects while measured occurrences begin without a pause or drain. |
 
 Every workload-bearing row, bundle, job-instance, and row-reference component
 uses the closed, case-sensitive `workload-id-v1` scalar whose domain is exactly
@@ -1147,18 +1147,43 @@ invalid. The latest legal deadline leaves exactly 348,000,000 ns to that
 snapshot and then 66,666,663 ns before the next origin, so the drain can overlap
 active work without overlapping the next episode.
 
-M1 uses one exact `B^M1=M_0` warmup cutoff and measurement origin. An ordered,
-zero-duration transaction closes warmup offers, snapshots all offered but
-incomplete warmup work, resets only logical measured accumulators, establishes
-measured I1, and offers measured B1 Graph A job zero then Graph B job one behind
-each retained per-Graph prefix. It does not pause, drain, cancel, restart, rebuild
-queues, or release resources. Occurrence-owned completion/service/bytes/latency/
-receipt/waste remain attributed by immutable phase, while measured-window
-scheduler starts, contention, headroom, Compute I/O, and memory observations
-include every phase's physical effect. Event sequence resolves boundary ties;
-the terminal cutoff stops new offers, retains later settlement evidence, and
-requires exact-zero teardown. These inner evidence facts do not change the
-closed 15/5-field envelope.
+M1 checked-derives `C^M1=B^M1-6,000,000,000 ns` and
+`W^M1=B^M1-5,000,000,000 ns`. Cold has the sole I1 origin `C^M1` and B1 Graph A
+seed 252; its I1 occurrence has settlement endpoint
+`C^M1+683,333,337 ns`, and both that generation plus the B1 terminal/owner/
+output removal must settle before fixed
+`W^M1` without moving the boundary. Warmup establishes exactly seven I1 origins
+`W^M1+k*750,000,000 ns`, `k=0..6`, initially offers B253 then A254, and offers
+B255 synchronously on B253 terminal. B255 must be offered before boundary
+coordinate `(B^M1,b^M1)`. The last warmup origin is
+`B^M1-500,000,000 ns`; its own settlement endpoint is
+`B^M1+183,333,337 ns`, so it is a deterministic warmup carryover. That endpoint
+requires only the old occurrence/generation to settle, not concurrently active
+measured work or the whole service.
+
+At the exact `B^M1=M_0` warmup cutoff and measurement origin, an ordered,
+zero-duration transaction closes warmup offers, snapshots the fixed offered
+prefix's terminal-derived incomplete subset, resets only logical measured
+accumulators, establishes measured I1, and offers measured B1 Graph A job zero
+then Graph B job one behind each retained per-Graph prefix. If the first actual
+measured-I1 admission shares timestamp `B^M1`, it orders after both offers; its
+ordinary latest-wins supersession cannot rewrite the snapshot, and all later
+old-generation settlement remains warmup-attributed. The boundary does not
+pause, drain, cancel, restart, rebuild queues, or release resources.
+
+Measured Graph A repeats `0,2,...,28` and Graph B repeats `1,3,...,29`. The
+existing `cycle_ordinal` wire component stores each lane's producer-local
+counter: Graph A advances immediately after its job 28 terminal and Graph B
+independently after job 29, so a fast lane may enter local cycle `c+1` while the
+other remains in `c`. A shared barrier is invalid. Occurrence-owned completion/
+service/bytes/latency/receipt/waste remain attributed by immutable phase, while
+measured-window scheduler starts, contention, headroom, Compute I/O, and memory
+observations include every phase's physical effect. Event sequence resolves
+boundary ties; the terminal cutoff stops new offers, retains later settlement
+evidence, and requires exact-zero teardown. The existing inner manifest and
+measurement sections retain all four boundaries, origins/counts/offers,
+terminal-derived prefixes, per-lane counters, carryover, supersession order,
+and attribution; the closed 15/5-field envelope does not change.
 
 I2 separately fixes
 one continuous replicate-grid origin, cold/warmup/measured phase offsets of
@@ -1176,7 +1201,8 @@ changing the closed row/bundle fields. Logical results use the typed canonical
 `ContentDigest`; raw little-endian payload, canonical manifest, semantic trace,
 and golden identities remain separate. Every repeated M1 B1 occurrence carries
 a distinct phase/cycle/job identity through charge, admission, output commit,
-receipt, and evidence; corpus cycle never masquerades as retry attempt. M1
+receipt, and evidence; producer-local cycle never masquerades as retry attempt.
+M1
 records distinct same-ordinal
 isolated-I1 and isolated-B1-cap-8 pair digests in addition to the ordinary
 candidate/reference baseline digest.
@@ -1205,7 +1231,7 @@ The delivery rows are fixed:
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | I1 continuous 221-slot isolated grid, exact `S_11` drain/tie/guard behavior, latency, waste, memory, and required output correctness. |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-next-edit ordering, I1 coefficient/index/update lineage, and full-resolution final path; #94 cannot redefine that cadence or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and fixed storage/performance probe-to-schema, encoder, eligibility, and compatibility evidence at caps 1 and 8. |
-| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact phase-boundary/carryover/FIFO/attribution evidence plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
+| [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact `C^M1`/`W^M1` input grid, fixed B1 offer protocol, cross-boundary I1 settlement, independent producer-local cycles, phase-boundary/carryover/FIFO/attribution evidence, plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
 
 ADR 0010 is the current accepted decision record, not a statement of current
 runtime capability. The workloads, missing collectors, and valid evidence rows

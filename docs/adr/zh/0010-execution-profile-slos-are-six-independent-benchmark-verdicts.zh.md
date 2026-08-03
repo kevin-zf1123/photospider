@@ -73,7 +73,7 @@ payload 都在 workload manifest 中按内容寻址。
 | `I1-edit-storm-v1` | 使用 seed zero 与自然序号为 `1..12` 的十二次 edit。对 `0..11` 中的 `edit_index = edit_ordinal - 1`，第一个 node 的 `k` 从 `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]` 取值，source Region 为 `(256*(edit_index mod 4), 256*floor(edit_index/4), 256, 256)`。每个 Run 使用 `ComputeIntent::GlobalHighPrecision`、`ComputeRunQuality::Full`、Interactive QoS、weight 1、Run cap 8、经过 checked arithmetic 的 absolute monotonic deadline `D_i=A_i+150,000,000 ns`，以及精确的 `(Graph, target node four, GlobalHighPrecision)` supersession key。第十二次 edit（`edit_index=11`、`k=1.04`、Region `(768,512,256,256)`）是唯一必需 publication，且必须不晚于 `D_11` 发布。单一连续的 221-slot cold/warmup/measured grid 固定全部 isolated episode origin；每个 episode 的 500 ms settlement-observation window 从其第十二次 nominal start `S_11` 开始，并在下一 origin 前结束。 |
 | `I2-progressive-v1` | 复用精确的 I1 source、graph、seed、edit ordinal、source-space Region、realtime request lineage，以及完整的第一个 node coefficient 序列 `[0.82, 1.18, 0.86, 1.14, 0.90, 1.10, 0.94, 1.06, 0.98, 1.02, 0.96, 1.04]`，并使用相同的 `edit_index=edit_ordinal-1` 映射。一个连续的 111-slot steady-clock grid 连接 cold、warmup 与 measured phase origin；episode 精确相隔 1,500,000,000 ns，并包含十二个相隔 16,666,667 ns、最多迟到 2,000,000 ns 的 nominal preview-admission start。每个 index 都先把第一个 node 更新为对应 coefficient，再按顺序执行 node one 至 node four，其 `k` 值为 `[coefficient, 1.00, 1.20, 1.40]`。512x512 preview source 是对原始 2048 source 逐 channel 执行 4x4 box average、只舍入一次到 binary32 后，再执行该 update/transform 序列；preview Region `edit_index` 为 `(64*(edit_index mod 4), 64*floor(edit_index/4), 64, 64)`。Final 从原始 2048 source 开始，使用与 I1 相同的 full-resolution update/transform path，绝不从 preview pixel 派生。只有第十二次 edit（`edit_index=11`、preview Region `(192,128,64,64)`）具有必需的 preview 与 final latency result，且必须按此顺序出现；stale output 不得发布。 |
 | `B1-immutable-v1` | 包含 immutable job `0..29`；job `n` 使用 source seed `n`、baseline graph、Throughput QoS、weight 1、无 deadline 或 supersession、精确 reservation 证据、canonical semantic trace、crash-durable committed artifact 与按 job index 区分的 logical/raw golden。偶数 job 属于 Graph A，奇数 job 属于 Graph B。测量边界上 harness 同时提供两个有序的 15-job queue，且不会暂停非空 queue；由有界 Host admission 而非 harness 决定驻留多少个 Run。Run cap 1 与 8 是两行独立的必需证据。 |
-| `M1-shared-v1` | 在精确的 warmup-cutoff/measurement-origin boundary 启动 measured I1，此后每 750,000,000 ns 重复一次，共精确启动 40 个 episode；同时循环执行精确的 B1 corpus，保留偶数/奇数 Graph 分配、Run cap 8 与持续 offered backlog，共测量 30 秒。该 boundary 既不暂停也不排空 shared domain：已经 offered 的 warmup work 会保留其 phase identity 与 resource authority，并位于新 offered 的 measured B1 work 之前。两条 stream 共用一个 `ExecutionService`、worker set、ready store、policy binding set 与 `ResourceLedger`；不得用隐藏 pool、重复 ledger 或独立进程承接任一 stream。 |
+| `M1-shared-v1` | 从测量边界精确派生 cold/warmup boundary `C^M1=B^M1-6,000,000,000 ns` 与 `W^M1=B^M1-5,000,000,000 ns`，先运行一个 cold I1 origin 和固定 B1 seed-252 job，再运行七个 warmup I1 origin 与固定 seed-253/254/255 B1 protocol。在精确 warmup-cutoff/measurement-origin boundary 启动 measured I1，此后每 750,000,000 ns 重复一次，共精确启动 40 个 episode。偶数 Graph A 与奇数 Graph B producer 随后各自在独立 producer-local cycle 中重复自己的 15-job 子序列，保持 Run cap 8 与持续 offered backlog，共测量 30 秒；任一 producer 都不等待另一个完成相同 local ordinal。该 boundary 既不暂停也不排空 shared domain：已经 offered 的 warmup work 会保留其 phase identity 与 resource authority，并位于新 offered 的 measured B1 work 之前。两条 stream 共用一个 `ExecutionService`、worker set、ready store、policy binding set 与 `ResourceLedger`；不得用隐藏 pool、重复 ledger 或独立进程承接任一 stream。 |
 
 每个携带 workload 的 field 或 fixed-record component 都使用专用、区分大小写的
 scalar type `workload-id-v1`。其完整 domain 精确且仅包含
@@ -87,8 +87,11 @@ lowercase-only，并继续用于所有声明为该类型的非 workload field。
 对 fairness 而言，只要某个 Graph 的 producer 仍有未消费的 offered demand 且没有
 暂停提交，该 Graph 就是 *eligible*。这段 workload-level interval 包含等待有界
 admission 的时间；它不声明全部 30 个 B1 Run 同时被准入。每个 Graph 内部按递增
-job index 提供工作，前一个 job terminal 时 producer 同步提供下一个。M1 启动新的
-`0..29` cycle 时不得产生 producer-side gap。
+job index 提供工作，前一个 job terminal 时 producer 同步提供下一个。Measured M1
+中，Graph A 重复 `0,2,...,28`，Graph B 重复 `1,3,...,29`。每个 producer 在自己的
+最后一个 job terminal 后立即开始自己的下一轮 15-job local cycle；较快 producer
+可以已经位于 local cycle `c+1`，而另一个仍在 `c`。共享 cross-Graph cycle barrier
+或等待另一个 producer 形成的 gap 都是 invalid。
 
 #### B1 job occurrence identity 与 retry identity 相互独立
 
@@ -109,10 +112,14 @@ B1 的 cold、warmup 或 measured row 都要为每个 offered job 分配一个 c
 Canonical payload 按下文 fixed-record grammar，为每个 component payload 依次拼接
 一个 `frame(component-payload)`。`replicate_ordinal` 为 `1..3`；`job_index` 为
 `0..255`；`run_cap` 是该 row 冻结的 cap。每个 phase 中的 `cycle_ordinal` 都从零
-开始。它只会在同一个 phase 的前一个完整 M1 `0..29` corpus 结束后增加，绝不能
-用于表示局部 retry。B1 cold/warmup seed job 和 isolated measured job 使用 cycle
-zero；M1 在每个 phase 中都使用当前 repeated-corpus cycle。同一个包含 B1 的 row
-中，`(phase,cycle_ordinal,job_index)` 不得重复。
+开始。B1 cold/warmup seed job 和 isolated measured job 使用 cycle zero。对于
+measured M1，未改变的 wire component 存储 `producer_cycle_ordinal`；producer lane
+无需新增 field，而是由偶数 Graph A 与奇数 Graph B `job_index` 推导。Graph A 只在
+当前 local cycle 的 job 28 terminal 后递增自己的 counter，Graph B 则独立地只在
+job 29 terminal 后递增；二者随后分别立即 offer 新 local cycle 的 job zero 或 one。
+任一 producer 都不等待、递增或完成另一个 producer 的 cycle。同一个包含 B1 的 row
+中，`(phase,cycle_ordinal,job_index)` 仍不得重复；既有六 component record、outer
+schema 与 retry 语义均不改变。
 
 Logical Compute I/O task 是 `(job_instance_id,stage)`，其中 `stage` 为
 `payload-stage` 或 `manifest-commit`；完整 attempt identity 为
@@ -992,6 +999,56 @@ result。Cold 与 warmup 观测也是精确契约，不由 harness 自行选择�
 Warmup B1 job 使用相同 graph 与完整 artifact path，但采用 warmup-only identity
 与目录。其 owner 结算后移除 warmup/cold output；保留 process/provider/JIT state。
 
+#### M1 cold 与 warmup input grid 是精确合同
+
+M1 从已经保留的测量边界派生两个额外且经过 checked arithmetic 的 monotonic
+boundary：
+
+```text
+C^M1 = B^M1 - 6,000,000,000 ns
+W^M1 = B^M1 - 5,000,000,000 ns = C^M1 + 1,000,000,000 ns
+```
+
+对应 row-local event sequence 为 `c^M1` 与 `w^M1`，并满足
+`(C^M1,c^M1) < (W^M1,w^M1) < (B^M1,b^M1)`。Checked subtraction/
+addition 失败会使结果无效。Cold、warmup 与 measured interval 精确为
+`[(C^M1,c^M1),(W^M1,w^M1))`、
+`[(W^M1,w^M1),(B^M1,b^M1))` 与
+`[(B^M1,b^M1),(U^M1,u^M1))`；runner 不能另选 origin 或时长。
+
+在 `(C^M1,c^M1)`，一个零时长 start transaction 建立唯一 cold I1 nominal
+origin `E^M1_cold=C^M1`，并精确 offer B1 Graph A seed 252；其
+`phase=cold`、`cycle_ordinal=0`、`attempt=0`。该 B1 offer 排在 `c^M1`
+之后；同 timestamp 的 cold I1 admission 排在该 offer 之后。Cold I1 occurrence
+使用既有 I1 offset，并在 `C^M1+683,333,337 ns` 关闭自身 settlement window，
+因此在 `W^M1` 前保留固定 316,666,663 ns guard。其 generation 必须在该 endpoint
+达到 quiescence。Seed 252 的唯一 terminal endpoint、artifact owner settlement 与
+output removal 必须全部排在 `(W^M1,w^M1)` 前。Miss 不会移动 `W^M1` 或插入
+drain，而是令 replicate invalid。
+
+在 `(W^M1,w^M1)`，第二个零时长 transaction 验证 cold work 已经满足上述
+endpoint，关闭 cold source，建立 warmup I1 origin `E^M1_warmup,0=W^M1`，并
+启用有限的 warmup B1 protocol。随后先向 Graph B offer seed 253，再向 Graph A
+offer seed 254；二者均使用 `phase=warmup`、`cycle_ordinal=0`、`attempt=0`，且
+满足 `w^M1 < sequence(B253) < sequence(A254)`。同 timestamp 的第一次 warmup
+I1 admission 排在两次 offer 之后。当且仅当 B253 terminal 时，Graph B producer
+才在同一 timestamp、以更大的 sequence 同步 offer B255，并沿用同一 warmup cycle/
+attempt。B255 必须在 `(B^M1,b^M1)` 前已经 offered；否则固定 warmup fixture 不
+完整，replicate invalid。Graph A 在 A254 后没有 warmup successor。因此，完整
+offered warmup prefix 由 protocol 固定，而 `B^M1` 处 incomplete subset 只由保留的
+terminal history 决定，绝不能由 runner 选择。
+
+Warmup I1 精确具有七个 nominal origin：
+`E^M1_warmup,k=W^M1+k*750,000,000 ns`，其中 `k=0..6`。Origin `k=0..5`
+的 per-occurrence settlement window 均在下一 origin 前关闭。Origin `k=6` 精确为
+`B^M1-500,000,000 ns`；其固定 `Q_end=B^M1+183,333,337 ns`，所以该
+occurrence/generation 在测量边界仍处于 settlement-pending 状态。它保持不可变的
+`phase=warmup`，并进入 `B^M1` carryover snapshot。在其 `Q_end`，endpoint snapshot
+只适用于该 warmup occurrence/generation：它必须达到 quiescence 并完成 settlement，
+但并发活跃的 measured generation 与 shared execution service 无需全局为空。Cold 与
+warmup transition 都不得 restart process、cool provider、rebuild queue、release shared
+resource 或移动 boundary。
+
 #### M1 测量边界保留 warmup carryover
 
 M1 保留一个 exact monotonic timestamp 为 `B^M1=M_0`、row-local sequence 为
@@ -1016,7 +1073,8 @@ shared execution domain：
 4. 把第一个 measured I1 nominal origin 建立在 `M_0`；
 5. offer measured B1 Graph A job zero，随后 offer Graph B job one；二者 timestamp
    都是 `B^M1`，且 sequence value 满足
-   `b^M1 < sequence(Graph A job zero) < sequence(Graph B job one)`。
+   `b^M1 < sequence(Graph A job zero) < sequence(Graph B job one)`；二者均使用
+   `phase=measured`、producer-local `cycle_ordinal=0` 与 `attempt=0`。
 
 步骤一至四在 boundary coordinate 形成一个 atomic logical transition；任何其他
 row-local lifecycle event 都不能插入其 snapshot 或 counter reset。Timestamp 为
@@ -1024,22 +1082,29 @@ row-local lifecycle event 都不能插入其 snapshot 或 counter reset。Timest
 大于 `b^M1` 的 event 排在其 snapshot/reset 后，再按 sequence 与两个 measured B1
 offer 排序。
 
+第一次 measured-I1 actual admission 不属于 atomic snapshot。若其 timestamp 等于
+`B^M1`，其 sequence 必须排在两次 measured B1 offer 之后。因此，其被接受的
+latest-wins supersession 也排在冻结的 carryover snapshot 之后，不能移除或改写其中
+记录的 warmup generation。由该旧 generation 因果产生的 cancellation、terminal 或
+settlement event 都保留更晚的 event sequence 与 warmup phase。
+
 同 timestamp 的 lifecycle event 排在 boundary 前时，snapshot 反映其新 state；排在
 其后时，它是 cross-boundary event。同 timestamp 的 terminal warmup event 绝不会在
 步骤一之后创建新的 warmup successor。Phase boundary 不包含 wait、cooling interval、
 drain、cancellation、process restart、worker/policy/queue reconstruction 或 resource
-release。普通 measured-I1 admission 可以按冻结的 latest-wins 规则 supersede 较旧 I1
-generation，但 harness 不会增加只在 boundary 执行的 cancellation。
+release。普通 measured-I1 admission 可以按冻结的 latest-wins 规则 supersede 保留的
+warmup I1 generation，但只能发生在 cutoff/snapshot 之后，并遵循上述顺序；harness
+不会增加只在 boundary 执行的 cancellation。
 
 每个 outstanding warmup B1 occurrence 保留不可变的 `phase=warmup`、cycle、job、
-attempt identity 及现有 per-Graph FIFO 位置。新的 measured offer 使用
-`phase=measured`、`cycle_ordinal=0`、job zero 或 one 及 `attempt=0`；即使已经
-offered 的完整 warmup prefix 仍 queued 或 running，它们也排在该 Graph 的 prefix
-之后。这个精确 transition 是唯一无需等待 predecessor terminal 即可 offer 的例外。
-随后，每个 measured producer 重新在 predecessor terminal 时同步 offer 下一个递增 job，
-在没有 gap 的情况下启动下一份完整 `0..29` cycle，并且绝不完成或递增未完成的
-warmup cycle。Cap-eight admission bound、active backlog、queue order 与 resource
-ownership 跨 boundary 保持不变。
+attempt identity 及现有 per-Graph FIFO 位置。新的 measured offer 即使面对仍 queued
+或 running 的完整 warmup prefix，也排在该 Graph prefix 之后。这个精确 transition
+是唯一无需等待 predecessor terminal 即可 offer 的例外。随后，Graph A 在 measured
+predecessor terminal 时 offer 下一个偶数 job，并从 job 28 直接进入自己下一轮
+producer-local cycle 的 job zero；Graph B 则独立地从 job 29 进入 job one。任一
+producer 都不等待另一个，也不完成、递增或改写未完成的 warmup identity。Cap-eight
+admission bound、active backlog、queue order 与 resource ownership 跨 boundary 保持
+不变。
 
 Occurrence-owned result 按不可变 phase 归因，绝不按 completion timestamp 归因。
 即使在 `B^M1` 后观察到，warmup occurrence 的 terminal result、completed service、
@@ -1063,14 +1128,17 @@ work。排在该 cutoff 或其后的 endpoint 会被保留，但不进入 30-sec
 Teardown 必须 drain 全部 phase，并达到既有 resource/Compute-I/O exact-zero
 settlement；`B^M1` 刻意不要求 quiescence。
 
-Workload manifest 保留 `B^M1`、`U^M1`、event-order/tie rule、boundary step order、
-queue/carryover policy 与 phase-attribution rule。Measurement evidence 保留两个
-boundary event、完整 carryover snapshot、每个 tied event coordinate/state transition、
-首批 measured offer、queue/start/terminal/receipt join、counter epoch、resource sample、
+Workload manifest 保留 `C^M1`、`W^M1`、`B^M1`、`U^M1`、精确 phase interval、
+I1 origin/count/index 与 `Q_end` 算术、cold/warmup B1 offer protocol、event-order/tie
+rule、boundary step order、queue/carryover policy、producer-local cycle rule 与 phase-
+attribution rule。Measurement evidence 保留四个 boundary event、每次固定 cold/
+warmup offer 及由 actual terminal 派生的 prefix transition、完整 carryover snapshot、
+每个 tied event coordinate/state transition、首批 measured offer、per-Graph predecessor
+与 next-cycle counter、queue/start/terminal/receipt join、counter epoch、resource sample、
 failure 与最终 settlement。既有 section 与 verdict digest 覆盖这些 byte；封闭的
-15-field row 与五 field bundle 不变。在继续使用 `M1-shared-v1` 时，任何 boundary、
-ordering、carryover、attribution 或 evidence drift 都会使结果无效；有意改变时必须
-创建新 workload id。
+15-field row 与五 field bundle 不变。在继续使用 `M1-shared-v1` 时，任何 origin、
+offer、cycle、boundary、ordering、carryover、attribution 或 evidence drift 都会使结果
+无效；有意改变时必须创建新 workload id。
 
 Cold first use 单独保留，绝不混入 steady-state aggregate。全部 duration 使用
 monotonic clock。Percentile 使用 nearest rank：排序 `N` 个 sample，并选择从一开始的
@@ -1464,7 +1532,7 @@ good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidenc
 | #93 | 实现连续 221-slot isolated-I1 grid、精确 `S_11` drain/tie/guard 行为、I1 request/current-generation 与 cancellation/quiescence 观测；发布 isolated latency、waste 与 memory 行，以及必需的 output-correctness 证据。 |
 | #94 | 在此处冻结的精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-before-next-edit ordering，以及 I1 coefficient/index/update/full-resolution-final lineage 上实现 I2；不得重新定义这些 schedule，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
 | #95 | 实现 B1 immutable manifest、occurrence-scoped job/task identity、reservation、canonical semantic trace、crash-durable artifact commit、固定 storage/performance probe-to-schema adapter、mount normalization、唯一 encoder/digest、eligibility/B1 check 与 logical/raw golden；在 Run cap 1 与 8 下发布 closed-schema isolated throughput、determinism、zero-fault waste 与 memory 行。 |
-| #96 | 把精确 I1 与 B1 fixture 组合为 M1，实现精确 cutoff/carryover/FIFO/phase-attribution 与 temporal-resource boundary，为每个重复 B1 corpus 分配独立 `cycle_ordinal` 且绝不把它当作 retry，原样复用精确 v1 manifest byte，强制执行 same-ordinal 完整 M1/B1 environment pair，同时让 I1-only pair 只比较 base，并发布 closed-schema mixed latency、throughput progress、fairness、waste 与 memory 行。 |
+| #96 | 把精确 I1 与 B1 fixture 组合为 M1；实现固定的 `C^M1`/`W^M1` cold/warmup origin、count、B1 offer protocol、跨 `B^M1` I1 settlement，以及精确 cutoff/carryover/FIFO/phase-attribution 与 temporal-resource boundary；把既有 `cycle_ordinal` component 解释为每个 measured B1 Graph 的独立 producer-local counter，且绝不把它当作 retry 或新增 field；原样复用精确 v1 manifest byte，强制执行 same-ordinal 完整 M1/B1 environment pair，同时让 I1-only pair 只比较 base，并发布 closed-schema mixed latency、throughput progress、fairness、waste 与 memory 行。 |
 
 每个 Issue 可以为其机制新增长期确定性行为测试，但不能重定义 workload，也不能
 用缺失、invalid 或不同版本的行提升目标。与机器相关的 latency、throughput 与

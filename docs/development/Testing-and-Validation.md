@@ -1749,17 +1749,30 @@ process/provider/JIT state remains.
 Warmup occurrence-owned observations never enter measured aggregates; the M1
 boundary resets logical counters without a process restart or state reset.
 
+The mandatory M1 pre-boundary input-grid oracle is:
+
+| Scenario | Oracle |
+| --- | --- |
+| Exact phase origins and intervals | Checked-derive `C^M1=B^M1-6,000,000,000 ns` and `W^M1=B^M1-5,000,000,000 ns=C^M1+1,000,000,000 ns`, retain sequences `c^M1<w^M1<b^M1`, and use exactly `[(C,c),(W,w))`, `[(W,w),(B,b))`, and `[(B,b),(U,u))`. Underflow, overflow, a shifted boundary, a different phase length, or a runner-selected origin is invalid. |
+| Cold origin and settlement | At `(C^M1,c^M1)`, establish the sole cold I1 origin and offer Graph A seed 252 with `(phase=cold,cycle=0,attempt=0)` after the boundary marker; an equal-time I1 admission follows that offer. Require the I1 `Q_end=C^M1+683,333,337 ns` quiescence snapshot and B252 terminal/owner settlement/output removal before `W^M1`; the fixed 316,666,663 ns I1 guard does not move `W^M1`, and a miss is invalid rather than a drain. |
+| Warmup origins and count | At `(W^M1,w^M1)`, verify cold already settled and establish exactly `E^M1_warmup,k=W^M1+k*750,000,000 ns`, `k=0..6`. Reject an omitted/duplicate origin, another count/index, a phase-continuous grid back-derived from `C^M1`, or a delayed transition. |
+| Fixed warmup B1 offer protocol | At `W^M1`, offer B253 then A254 with `w^M1<sequence(B253)<sequence(A254)` and warmup cycle/attempt zero; an equal-time first I1 admission follows both. Offer B255 synchronously only when B253 becomes terminal, with a greater same-time sequence, and require B255 to have been offered before `(B^M1,b^M1)`. Graph A has no warmup successor. The offered prefix is protocol-fixed; only its incomplete subset is terminal-history-derived. |
+| Deterministic cross-`B^M1` I1 | Warmup origin `k=6` is exactly `B^M1-500,000,000 ns` and has `Q_end=B^M1+183,333,337 ns`; require that settlement-pending warmup occurrence/generation in the `B^M1` snapshot. At its `Q_end`, require only that occurrence/generation to be quiescent and settled, not the concurrent measured generation or the whole shared service. |
+| Immutable attribution and temporal effect | Keep every event/result owned by the last warmup generation in `phase=warmup`, including cancellation or settlement caused after measured latest-wins supersession. Exclude its occurrence-owned values from measured aggregates, but include every post-`B^M1` start, contention, reservation/grant, Compute I/O, and high-water effect in time-windowed evidence. |
+| No hidden transition | Cold/warmup transitions do not pause, wait, cool, restart, rebuild queues, release shared resources, or shift a boundary. Retain all origins/counts/indexes, fixed offers, terminal-derived B255 transition, phase endpoints, and failures in the existing workload-manifest/measurement sections and recompute their digests without adding an outer field. |
+
 The mandatory M1 phase-boundary scenario oracle is:
 
 | Scenario | Oracle |
 | --- | --- |
 | Exact boundary and interval | Retain boundary coordinate `(B^M1=M_0,b^M1)`, checked terminal-cutoff coordinate `(U^M1=B^M1+30,000,000,000 ns,u^M1)`, and unique strictly increasing row-local event sequences. Order equal timestamps by `(monotonic_timestamp,event_sequence)`; the measured interval is `[(B^M1,b^M1),(U^M1,u^M1))`. |
-| Ordered zero-duration transition | At `(B^M1,b^M1)`, atomically close the warmup I1 cadence and both B1 Graph producers, snapshot every previously offered incomplete warmup I1/B1 occurrence and state, reset only logical measured accumulators, and establish measured I1 origin. Then offer measured Graph A job zero followed by Graph B job one at timestamp `B^M1` with sequence values strictly greater than `b^M1`. Require no event interleaving in the snapshot/reset and no pause/wait/cooling/drain/boundary cancellation/restart/queue rebuild/resource release. |
-| Carryover identity and FIFO | Preserve warmup phase/cycle/job/attempt, queue predecessor, admission state, reservation/grant, and owner settlement. Measured cycle-zero offers follow each Graph's already-offered warmup prefix even when queued/running; this transition alone bypasses predecessor-terminal offer timing. Subsequent measured offers resume the normal rule and never advance an incomplete warmup cycle. |
+| Ordered zero-duration transition | At `(B^M1,b^M1)`, atomically close the warmup I1 cadence and both B1 Graph producers, snapshot every previously offered incomplete warmup I1/B1 occurrence and state, reset only logical measured accumulators, and establish measured I1 origin. Then offer measured Graph A job zero followed by Graph B job one at timestamp `B^M1`, both at producer-local cycle zero and with sequence values strictly greater than `b^M1`. Require no event interleaving in the snapshot/reset and no pause/wait/cooling/drain/boundary cancellation/restart/queue rebuild/resource release. |
+| Supersession order | If the first measured-I1 actual admission has timestamp `B^M1`, require its sequence after both measured B1 offers. Its accepted latest-wins supersession therefore follows the frozen snapshot; it cannot delete or rewrite the warmup generation, and every causally later cancellation/terminal/settlement event keeps warmup attribution. |
+| Carryover identity and FIFO | Preserve warmup phase/cycle/job/attempt, queue predecessor, admission state, reservation/grant, and owner settlement. Measured cycle-zero offers follow each Graph's already-offered warmup prefix even when queued/running; this transition alone bypasses predecessor-terminal offer timing. Subsequent measured offers resume the normal per-Graph rule and never advance or rewrite an incomplete warmup identity. |
 | Occurrence attribution | Attribute terminal/completed service, output bytes, latency, receipt/golden/digest, determinism, retry/duplicate/discarded service, waste, and settlement by immutable phase. Exclude warmup occurrence-owned quantities after `B^M1` from measured throughput, Jain service `x`, latency, determinism, and waste aggregates. |
 | Temporal scheduler/resource effects | Include every post-boundary phase's actual class starts, headroom failures, queue contention, reservations/grants, Compute I/O state, and Host/device/ready-memory high-water. Count a warmup Throughput start in the measured class-start rule while retaining measured-only Jain completed service. |
 | Failure and terminal settlement | Invalidate on warmup carryover failure, missing event evidence, a duplicate event sequence or non-total coordinate, phase/identity/FIFO rewrite, boundary-only cancellation, snapshot mismatch, or unproved settlement. At `(U^M1,u^M1)`, stop new measured offers without cancelling outstanding work; retain endpoints at or after the cutoff but exclude them from 30-second numerators, then require exact-zero teardown. Quiescence is not required at `B^M1`. |
-| Existing-envelope evidence | Retain both boundaries, tie/step order, carryover snapshot, phase joins, first measured offers, counter epochs, queue/start/terminal/receipt events, resource effects, failures, and final settlement in existing manifest/measurement sections and digests. Any deliberate rule change needs a new workload id; outer row/bundle fields remain 15/5. |
+| Existing-envelope evidence | Retain `C^M1`, `W^M1`, `B^M1`, `U^M1`, all phase intervals/origins/counts/indexes, fixed pre-boundary offers, actual terminal-derived transitions, tie/step order, carryover snapshot, phase joins, first measured offers, per-Graph predecessor/next-cycle counters, counter epochs, queue/start/terminal/receipt events, resource effects, failures, and final settlement in existing manifest/measurement sections and digests. Any deliberate rule change needs a new workload id; outer row/bundle fields remain 15/5. |
 
 The v1 resource profile is 32 CPU slots, 1 GiB Host retained memory, 512 MiB
 Host scratch, 65,536 ready entries, 256 MiB ready bytes, and Interactive
@@ -1773,17 +1786,21 @@ For B1 fairness evidence, a Graph is eligible while its producer has
 unconsumed offered demand and has not paused submission, including bounded-
 admission wait. Isolated B1 offers both ordered 15-job queues at its measured
 boundary. M1 uses the boundary oracle above: its first measured per-Graph offers
-follow any retained warmup prefix, then each Graph advances in ascending job
-order and begins a complete new M1 cycle without a producer gap. Neither path
-admits all 30 Runs outside normal bounds.
+follow any retained warmup prefix, Graph A then repeats `0,2,...,28`, and Graph
+B repeats `1,3,...,29`. Each producer starts its own next local cycle
+immediately after its own final job becomes terminal, even if the other remains
+in the prior local cycle. A cross-Graph barrier or producer gap is invalid.
+Neither path admits all 30 Runs outside normal bounds.
 
 Every B1 occurrence is indexed by canonical `job-instance-v1`
 `(row_workload_id:workload-id-v1,replicate_ordinal:uint64,
 phase:enum(cold|warmup|measured),cycle_ordinal:uint64,job_index:uint64,
 run_cap:uint64)`.
-Phase-local cycle zero covers cold/warmup and isolated measured B1; M1 uses the
-current phase-local cycle and increments it only after a complete `0..29`
-corpus in that phase. The logical I/O task
+Phase-local cycle zero covers cold/warmup and isolated measured B1. For
+measured M1, the unchanged `cycle_ordinal` component stores the producer-local
+counter, with lane derived from job parity: Graph A increments after its job 28
+terminal and immediately offers job zero of the next local cycle; Graph B
+independently increments after job 29 and offers job one. The logical I/O task
 adds stage and the full task identity adds `attempt`. Capacity rejection or an
 idempotent duplicate keeps attempt zero and the same charge; only an explicit
 retry after terminal failure increments it. Cycle is never retry. Charge,
@@ -2176,10 +2193,12 @@ For each candidate or reference bundle:
    build/providers, and preconditions, while retaining the separate candidate
    `comparison_reference_bundle_digest` semantics;
 5. retain cold first use and run the exact non-measured warmup; for isolated I1
-   keep its already fixed 221-slot grid, and for M1 execute the exact ordered
-   `B^M1` cutoff/carryover snapshot/counter reset/first-offer transaction without
-   replacing or pausing the frozen environment, then execute the exact measured
-   interval through `U^M1` and final settlement;
+   keep its already fixed 221-slot grid, and for M1 execute the exact
+   `C^M1`/`W^M1` I1-origin and B1-offer protocol, prove the fixed cold
+   settlement and cross-`B^M1` warmup occurrence, then execute the ordered
+   `B^M1` cutoff/carryover snapshot/counter reset/first-offer/supersession
+   transaction without replacing or pausing the frozen environment, followed
+   by the exact measured interval through `U^M1` and final settlement;
 6. assign and retain the canonical job-instance index before B1-bearing work,
    reject repeated phase/cycle/job coordinates, and verify that every charge,
    admission, commit, receipt, and evidence join uses occurrence rather than
@@ -2246,8 +2265,9 @@ An `execution-profile-slo-v1` bundle contains:
   `storage_environment_digest`;
 - workload/fixture/source/graph/payload hashes and all seeds;
 - warmup, cold, and measured counts/windows kept separately, including I1 grid/
-  drain boundaries and M1 cutoff/terminal coordinates, event order, carryover
-  snapshot, counter epochs, and phase attribution;
+  drain boundaries and all M1 cold/warmup/cutoff/terminal coordinates, exact
+  pre-boundary origins/counts/offers, event order, carryover snapshot,
+  per-Graph producer-cycle counters, counter epochs, and phase attribution;
 - raw samples/events, offered-demand eligibility intervals, queue/carryover
   transitions, and drop/gap counters;
 - typed logical output, raw payload, artifact-manifest, semantic-trace, and
@@ -2358,6 +2378,7 @@ backend-to-fixed-schema adapters, mount normalizer, performance-configuration
 mapping/proof, the single canonical encoder/digests, eligibility and
 root-containment evidence, and cap-1/cap-8 plus candidate/reference checks.
 Issue #96 reuses the exact manifest bytes for M1, implements the frozen
+`C^M1`/`W^M1` pre-boundary protocol, independent producer-local cycles, and
 cutoff/carryover/phase-attribution boundary, and enforces its same-ordinal full
 B1 pair while keeping the I1-only pair base-only. None may redefine v1 grammar,
 fields, or sentinels. Issue #92 defines only this evidence contract;
