@@ -1149,10 +1149,15 @@ cold slot zero, warmup slots `1..20`, measured slots `21..220`, and terminal
 stride 221 from one `G^I1`; phases cannot choose fresh origins or cooling
 delays. Every episode fixes
 `Q_start=S_11=E+183,333,337 ns` and `Q_end=E+683,333,337 ns`.
-Equal-time lifecycle events settle before the end snapshot; nonquiescence is
-invalid. The latest legal deadline leaves exactly 348,000,000 ns to that
-snapshot and then 66,666,663 ns before the next origin, so the drain can overlap
-active work without overlapping the next episode.
+At `Q_end`, the runner reserves the first excluded causal coordinate; the
+timestamp boundary is inclusive and the sequence cut exclusive, so later
+evidence cannot be backdated and nonquiescence at the cut is invalid. The latest
+legal deadline leaves exactly 348,000,000 ns to that history cut and then
+66,666,663 ns before the next origin, so the drain can overlap active work
+without overlapping the next episode. Irreversible service-start commit and
+cancellation acceptance share the Run-owned terminal arbiter; every retained
+start lies after generation and before terminal, and the lossless collector
+capacity is derived as `12 * (1 + 4 * 64) = 3,084` starts.
 
 M1 checked-derives `C^M1=B^M1-6,000,000,000 ns` and
 `W^M1=B^M1-5,000,000,000 ns`. Cold has the sole I1 origin `C^M1` and B1 Graph A

@@ -928,10 +928,14 @@ Nominal `S_i` 与 quiescence drain 绝不会延长该 budget，missed 或 expire
 发布。Isolated I1 从唯一 `G^I1` 派生 cold slot zero、
 warmup slot `1..20`、measured slot `21..220` 与 terminal stride 221；任何 phase 都
 不能另选 origin 或插入 cooling delay。每个 episode 固定
-`Q_start=S_11=E+183,333,337 ns` 与 `Q_end=E+683,333,337 ns`。同 timestamp
-lifecycle event 先于 end snapshot 完成 settlement；nonquiescence 是 invalid。最晚合法
-deadline 到该 snapshot 精确保留 348,000,000 ns，随后到下一 origin 保留
-66,666,663 ns，因此 drain 可以与 active work 重叠，但不会与下一 episode 重叠。
+`Q_start=S_11=E+183,333,337 ns` 与 `Q_end=E+683,333,337 ns`。在 `Q_end`，runner
+会预留首个被排除的 causal coordinate；timestamp boundary 含端点，而 sequence cut
+排除端点，因此较晚证据不能回填，cut 处 nonquiescence 是 invalid。最晚合法 deadline
+到该 history cut 精确保留 348,000,000 ns，随后到下一 origin 保留 66,666,663 ns，
+因此 drain 可以与 active work 重叠，但不会与下一 episode 重叠。不可逆 service-start
+commit 与 cancellation acceptance 共用 Run-owned terminal arbiter；每个保留的 start
+都晚于 generation 且早于 terminal，无缺口 collector capacity 派生为
+`12 * (1 + 4 * 64) = 3,084` 个 start。
 
 M1 经过 checked arithmetic 派生 `C^M1=B^M1-6,000,000,000 ns` 与
 `W^M1=B^M1-5,000,000,000 ns`。Cold 只有一个 I1 origin `C^M1` 与 B1 Graph A

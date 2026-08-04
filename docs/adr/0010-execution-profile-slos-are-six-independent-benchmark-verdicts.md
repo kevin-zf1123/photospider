@@ -215,6 +215,20 @@ entered non-preemptible work may drain and is charged as waste; work starting
 after accepted cancellation must remain zero. No invalid or expired edit may
 publish output, receipt, or a successful latency sample.
 
+Irreversible physical service-start commitment and cancellation acceptance use
+one Run-owned terminal arbiter. Cancellation accepted first prevents route
+commit; a route commit that wins first reserves the lower causal coordinate.
+The service publishes the start observation only after releasing its pool,
+Run-state, and terminal-arbiter locks. For each materialized Run, generation
+precedes every service start, every service start precedes terminal, and
+terminal precedes quiescence, root-resource return, and Host settlement. The
+evaluator therefore treats synthetic `cancellation < start < terminal` evidence
+as structurally ordered but fails the independent waste verdict; the product
+contract still requires zero such starts. The lossless fixed collector bound is
+derived from one monolithic source plus four 64-tile curve nodes: at most
+`1 + 4 * 64 = 257` starts per complete Run and
+`12 * 257 = 3,084` per episode. Start 3,085 fails closed.
+
 Expiry at `D_i` uses the same monotonic clock, requests cancellation of that
 Run, and records its acceptance. Queued work is removed, dependent re-entry is
 denied, and entered non-preemptible work drains without commit authority. A

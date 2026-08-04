@@ -485,7 +485,13 @@ drainage 会退役精确的 Host、device 与 Run state。
 每个 operation ready submission 还会携带精确 implementation identity，以及 `reentrant`、
 `maximum_parallelism` 与 `exclusive_key`。Candidate startability 会在 process execution domain
 内检查 implementation counter 与非空 key。Reserved start 会把这些 gate 与 resource child
-grant、physical route、ready removal、fairness charge 及 in-flight ownership 一起提交。Worker
+grant、physical route、ready removal、fairness charge 及 in-flight ownership 一起提交。在 route
+commit 前，service 持有 `pool -> RunState`；用于暂存 grant 的 resource-reservation mutex 会在
+进入 Run-owned terminal arbiter 前释放。该 arbiter 在与 cancellation acceptance 相同的权威下
+完成不可逆 route commit。Cancellation 先发生会阻止 route commit，并回滚暂存 grant 与 operation
+gate；route commit 先发生则固定更小的 causal coordinate。Cancellation cleanup 仅在释放
+terminal arbiter 后进入 service pool，因此两个方向都不会反转 lock order。Worker 会在释放
+pool、Run-state 与 terminal-arbiter lock 后投递 service-start observation。Worker
 retirement 会在 provider exit 或 callback skip 后释放 resource grant 与两类 operation gate，
 随后唤醒被阻塞的 work。不在 physical-service worker 内运行的 provider entry 仍使用同一权威。
 Sequential compute、nonparallel dirty HP/RT 与 connected-parameter preflight 会在精确 provider

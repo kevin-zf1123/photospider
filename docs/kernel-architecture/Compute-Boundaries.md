@@ -619,7 +619,16 @@ identity plus `reentrant`, `maximum_parallelism`, and `exclusive_key`.
 Candidate startability checks the implementation counter and nonempty key in
 the process execution domain. Reserved start commits those gates with the
 resource child grant, physical route, ready removal, fairness charge, and
-in-flight ownership. Worker retirement releases the resource grant and both
+in-flight ownership. Before route commitment, the service holds
+`pool -> RunState`; the resource-reservation mutex used to stage the grant is
+released before entering the Run-owned terminal arbiter. That arbiter performs
+the irreversible route commit under the same authority as cancellation
+acceptance. Cancellation first prevents route commitment and rolls back the
+staged grant and operation gate; route commitment first fixes the lower causal
+coordinate. Cancellation cleanup enters the service pool only after releasing
+the terminal arbiter, so neither direction inverts the lock order. The worker
+delivers service-start observation after releasing the pool, Run-state, and
+terminal-arbiter locks. Worker retirement releases the resource grant and both
 operation gates after provider exit or callback skip, then wakes blocked work.
 Provider entry that does not run inside a physical-service worker still uses
 the same authority. Sequential compute, nonparallel dirty HP/RT, and

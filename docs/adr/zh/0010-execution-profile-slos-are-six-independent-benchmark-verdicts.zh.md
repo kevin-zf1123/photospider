@@ -188,6 +188,17 @@ gap 都会使 replicate 无效。Missed edit 不会迟到补交：在为该 edit
 waste 计费；accepted cancellation 之后启动的 work 必须保持为零。任何无效或
 expired edit 都不得发布 output、receipt 或 successful latency sample。
 
+不可逆 physical service-start commit 与 cancellation acceptance 使用同一个 Run-owned
+terminal arbiter。Cancellation 先被接受会阻止 route commit；route commit 先获胜时会
+预留更小的 causal coordinate。Service 仅在释放 pool、Run-state 与 terminal-arbiter lock
+后投递 start observation。对每个 materialized Run，generation 早于每个 service start，
+每个 service start 早于 terminal，随后依次为 quiescence、root-resource return 与 Host
+settlement。因此 evaluator 会把合成的 `cancellation < start < terminal` 证据视为结构上
+有序，但让独立 waste verdict 失败；产品契约仍要求此类 start 为零。无缺口固定 collector
+上限由一个 monolithic source 与四个各含 64 tile 的 curve node 派生：每个完整 Run 最多
+`1 + 4 * 64 = 257` 个 start，每个 episode 最多 `12 * 257 = 3,084` 个；第 3,085 个
+start 会 fail closed。
+
 在 `D_i` 过期时使用相同 monotonic clock，请求该 Run 的 cancellation 并记录其被接受。
 Queued work 会被移除，dependent re-entry 会被拒绝，已经进入的 non-preemptible work
 会在没有 commit authority 的情况下 drain。即使 execution 后来成功，
