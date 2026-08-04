@@ -257,6 +257,14 @@ class Kernel {
     std::optional<PixelRect> dirty_roi;
 
     /**
+     * @brief Optional source-private ordered preview/final execution contract.
+     * @note Embedded public Host conversion and I1 leave this empty. The I2
+     * private Host seam supplies it together with preview QoS, accepted
+     * coordinate, and observation sink; it never enters installed or wire ABI.
+     */
+    std::optional<compute::ProgressiveComputeOptions> progressive_options;
+
+    /**
      * @brief Optional private current-request cancellation authority.
      * @note Internal backend tests and future private launch owners may retain
      * this source while compute is active. Embedded Host conversion leaves it

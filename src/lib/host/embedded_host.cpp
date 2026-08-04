@@ -6,6 +6,7 @@
 #include <exception>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -18,9 +19,11 @@
 #include <vector>
 
 #include "benchmark/i1_host.hpp"
+#include "benchmark/i2_host.hpp"
 #include "compute/dirty_region_snapshot.hpp"
 #include "compute/execution_service.hpp"
 #include "core/parameter_value_text.hpp"
+#include "execution/device_completion.hpp"
 #include "host/embedded_host_dependencies.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
@@ -2263,6 +2266,96 @@ bool valid_compute_execution_options(
 }
 
 /**
+ * @brief Tests the frozen I1/I2 private Interactive child QoS shape.
+ * @param qos Complete child scheduling value to inspect.
+ * @return True for Interactive, a present deadline, weight one, and cap eight.
+ * @throws Nothing.
+ * @note The helper validates only the common child shape. I2 deadline anchors
+ * are checked separately against the accepted pre-Host coordinate.
+ */
+bool valid_private_interactive_qos(const compute::ComputeRunQos& qos) noexcept {
+  return qos.service_class == compute::ComputeRunQosClass::Interactive &&
+         qos.deadline.has_value() && qos.weight == 1U &&
+         qos.maximum_parallelism == std::optional<std::uint32_t>{8U};
+}
+
+/**
+ * @brief Derives checked logical image dimensions from one I2 output Value.
+ * @param value Ready CPU RGBA FP32 Value published by a progressive child.
+ * @return Width then height as the native Metal upload contract requires.
+ * @throws std::invalid_argument for invalid, non-dense, non-RGBA-FP32, or
+ * malformed image metadata.
+ * @throws std::overflow_error when an image extent exceeds uint32_t.
+ * @note The operation inspects immutable metadata only and grants no payload,
+ * mapping, native-resource, residency, or execution authority.
+ */
+std::pair<std::uint32_t, std::uint32_t> i2_value_image_dimensions(
+    const Value& value) {
+  if (!value.valid() ||
+      value.representation_kind() != ValueRepresentationKind::DenseTensor ||
+      value.storage_layout_kind() != StorageLayoutKind::Strided) {
+    throw std::invalid_argument(
+        "I2 acquisition requires a valid strided DenseTensor Value.");
+  }
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  const std::optional<ImageFacet>& facet = value.image_facet();
+  if (descriptor.shape.size() != 3U || !facet.has_value() ||
+      facet->x_axis >= descriptor.shape.size() ||
+      facet->y_axis >= descriptor.shape.size() ||
+      !facet->channel_axis.has_value() ||
+      *facet->channel_axis >= descriptor.shape.size() ||
+      descriptor.shape[*facet->channel_axis] != 4U ||
+      descriptor.element_semantics != ElementSemantics::FloatingPoint ||
+      !(descriptor.storage_encoding == StorageEncoding{32U}) ||
+      descriptor.quantization.has_value()) {
+    throw std::invalid_argument(
+        "I2 acquisition requires rank-three RGBA FP32 image metadata.");
+  }
+  const std::size_t width = descriptor.shape[facet->x_axis];
+  const std::size_t height = descriptor.shape[facet->y_axis];
+  if (width == 0U || height == 0U ||
+      width > std::numeric_limits<std::uint32_t>::max() ||
+      height > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::overflow_error(
+        "I2 image dimensions exceed the native upload domain.");
+  }
+  return {static_cast<std::uint32_t>(width),
+          static_cast<std::uint32_t>(height)};
+}
+
+/**
+ * @brief Executes and records one explicit direct Host read acquisition.
+ * @param value Ready host-visible I2 child Value to acquire.
+ * @return Closed plan, revision, binding, allocation, and byte evidence.
+ * @throws std::invalid_argument or std::logic_error for invalid/non-direct
+ * access facts.
+ * @throws ReadyFenceAccessError or BufferAccessError when payload visibility
+ * is not ready and host-readable.
+ * @note The local ReadLease is destroyed before return. The record retains no
+ * pointer, payload owner, lease, transfer task, or execution authority.
+ */
+benchmark::I2ValueAccessEvidence observe_i2_host_access(const Value& value) {
+  const AccessPlan plan = value.plan_access(AccessTarget{
+      DeviceId(DeviceBackend::CPU), MemoryDomain::Host, true, false});
+  if (plan.kind() != AccessPlanKind::Direct || plan.transfer_bytes() != 0U ||
+      plan.source_revision() != value.revision_id().value() ||
+      plan.source_binding() != value.storage_binding()) {
+    throw std::logic_error(
+        "I2 Host acquisition did not classify as exact direct reuse.");
+  }
+  const StorageBinding binding = value.storage_binding();
+  const ReadLease read = value.buffer_handle().acquire_read();
+  if (!read.valid() || read.size() != binding.byte_size ||
+      read.allocation_identity() != binding.allocation) {
+    throw std::logic_error(
+        "I2 Host ReadLease does not match the Value binding.");
+  }
+  return benchmark::I2ValueAccessEvidence{plan,        value.revision_id(),
+                                          binding,     binding.allocation,
+                                          read.size(), false};
+}
+
+/**
  * @brief Converts backend plugin load report into a public report.
  *
  * @param report Backend plugin load report.
@@ -2294,7 +2387,9 @@ HostPluginLoadReport to_public_plugin_report(const PluginLoadResult& report) {
  *       unit. Per-adapter graph state is independent, while operation plugin
  *       state comes from the one process owner shared by every adapter.
  */
-class EmbeddedHost final : public Host, public benchmark::I1Host {
+class EmbeddedHost final : public Host,
+                           public benchmark::I1Host,
+                           public benchmark::I2Host {
  public:
   /**
    * @brief Creates a Host with a fresh explicitly composed backend state.
@@ -2624,7 +2719,7 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
   Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) override {
     return compute_async_internal(std::move(request), std::nullopt, nullptr,
-                                  std::nullopt);
+                                  std::nullopt, std::nullopt);
   }
 
   /** @copydoc benchmark::I1Host::compute_i1_async */
@@ -2632,7 +2727,16 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
       benchmark::I1HostComputeRequest request) override {
     return compute_async_internal(std::move(request.request), request.qos,
                                   std::move(request.observation_sink),
-                                  request.accepted_coordinate);
+                                  request.accepted_coordinate, std::nullopt);
+  }
+
+  /** @copydoc benchmark::I2Host::compute_i2_async */
+  Result<std::future<OperationStatus>> compute_i2_async(
+      benchmark::I2HostComputeRequest request) override {
+    return compute_async_internal(
+        std::move(request.request), request.preview_qos,
+        std::move(request.observation_sink), request.accepted_coordinate,
+        compute::ProgressiveComputeOptions{request.final_qos});
   }
 
   /** @copydoc benchmark::I1Host::i1_execution_snapshot */
@@ -2647,6 +2751,141 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
         state_->execution_service->device_resource_snapshots(),
         state_->execution_service->lifecycle_snapshot(
             after_cursor, static_cast<std::uint32_t>(limit))};
+  }
+
+  /** @copydoc benchmark::I2Host::i2_execution_snapshot */
+  benchmark::I1ExecutionSnapshot i2_execution_snapshot(
+      std::uint64_t after_cursor, std::size_t limit) const override {
+    if (limit > compute::kExecutionLifecycleTelemetryMaxPageSize) {
+      throw std::invalid_argument(
+          "I2 lifecycle snapshot limit exceeds the maintained maximum.");
+    }
+    return benchmark::I1ExecutionSnapshot{
+        state_->execution_service->resource_snapshot(),
+        state_->execution_service->device_resource_snapshots(),
+        state_->execution_service->lifecycle_snapshot(
+            after_cursor, static_cast<std::uint32_t>(limit))};
+  }
+
+  /** @copydoc benchmark::I2Host::acquire_i2_value */
+  benchmark::I2ValueAcquisitionEvidence acquire_i2_value(
+      Value value, const benchmark::I2ValueLineage& lineage) override {
+    if (!value.valid()) {
+      throw std::invalid_argument(
+          "I2 acquisition requires a valid visible Value.");
+    }
+    if (lineage.graph_instance_id == 0U || lineage.target_node_id < 0 ||
+        lineage.request_intent != ComputeIntent::RealTimeUpdate ||
+        lineage.supersession_generation == 0U || lineage.run_id == 0U) {
+      throw std::invalid_argument(
+          "I2 acquisition requires complete realtime child lineage.");
+    }
+    const ReadyFenceSnapshot ready = value.ready_fence().poll();
+    if (!ready.ready()) {
+      throw ReadyFenceAccessError(ready);
+    }
+    const StorageBinding source_binding = value.storage_binding();
+    if (source_binding.device != DeviceId(DeviceBackend::CPU) ||
+        source_binding.memory_domain != MemoryDomain::Host ||
+        !source_binding.host_visible) {
+      throw std::invalid_argument(
+          "I2 acquisition requires a host-visible CPU Value.");
+    }
+    const auto [width, height] = i2_value_image_dimensions(value);
+
+    benchmark::I2ValueAcquisitionEvidence evidence;
+    evidence.io_before =
+        state_->execution_service->compute_io_executor().snapshot();
+    evidence.host_first = observe_i2_host_access(value);
+    evidence.host_second = observe_i2_host_access(value);
+
+    if (!state_->execution_service->has_device_executor(Device::GPU_METAL)) {
+      evidence.metal.available = false;
+      evidence.metal.unavailable_reason =
+          "not-applicable: process Metal executor unavailable";
+      evidence.io_after =
+          state_->execution_service->compute_io_executor().snapshot();
+      return evidence;
+    }
+
+    evidence.metal.available = true;
+    evidence.metal.before =
+        state_->execution_service->device_executor_diagnostics(
+            Device::GPU_METAL);
+    const DeviceId metal_device(DeviceBackend::Metal);
+    evidence.metal.resources_before =
+        state_->execution_service->device_resource_snapshot(metal_device);
+    if (!evidence.metal.resources_before.has_value()) {
+      throw std::logic_error(
+          "I2 Metal executor has no matching resource account.");
+    }
+
+    const execution::DeviceCompletionSeed completion_seed(
+        lineage.graph_instance_id, lineage.target_node_id,
+        lineage.request_intent, lineage.supersession_generation, lineage.run_id,
+        0U);
+    const AccessPlan first_plan = value.plan_access(
+        AccessTarget{metal_device, MemoryDomain::DeviceLocal, false, true});
+    if (first_plan.kind() != AccessPlanKind::Transfer ||
+        first_plan.transfer_bytes() != value.storage_size()) {
+      throw std::logic_error(
+          "I2 first Metal access did not require one exact transfer.");
+    }
+    compute::DeviceResidentValueAcquisition first =
+        state_->execution_service->acquire_metal_resident_value(
+            value, width, height, completion_seed);
+    const StorageBinding first_binding = first.value.storage_binding();
+    if (!first.value.valid() ||
+        first.value.revision_id() != value.revision_id() ||
+        first_binding.device != metal_device ||
+        first_binding.memory_domain != MemoryDomain::DeviceLocal ||
+        first_binding == source_binding ||
+        first_binding.byte_size != source_binding.byte_size) {
+      throw std::logic_error(
+          "I2 first Metal acquisition returned inconsistent residency.");
+    }
+    evidence.metal.first =
+        benchmark::I2ValueAccessEvidence{first_plan,
+                                         first.value.revision_id(),
+                                         first_binding,
+                                         first_binding.allocation,
+                                         first_binding.byte_size,
+                                         first.executor_submitted};
+    evidence.metal.after_first =
+        state_->execution_service->device_executor_diagnostics(
+            Device::GPU_METAL);
+    evidence.metal.resources_after_first =
+        state_->execution_service->device_resource_snapshot(metal_device);
+
+    compute::DeviceResidentValueAcquisition second =
+        state_->execution_service->acquire_metal_resident_value(
+            value, width, height, completion_seed);
+    const StorageBinding second_binding = second.value.storage_binding();
+    const AccessPlan second_plan = second.value.plan_access(
+        AccessTarget{metal_device, MemoryDomain::DeviceLocal, false, false});
+    if (!second.value.valid() ||
+        second.value.revision_id() != value.revision_id() ||
+        second_binding != first_binding ||
+        second_plan.kind() != AccessPlanKind::Direct ||
+        second_plan.transfer_bytes() != 0U) {
+      throw std::logic_error(
+          "I2 second Metal acquisition did not reuse exact residency.");
+    }
+    evidence.metal.second =
+        benchmark::I2ValueAccessEvidence{second_plan,
+                                         second.value.revision_id(),
+                                         second_binding,
+                                         second_binding.allocation,
+                                         second_binding.byte_size,
+                                         second.executor_submitted};
+    evidence.metal.after_second =
+        state_->execution_service->device_executor_diagnostics(
+            Device::GPU_METAL);
+    evidence.metal.resources_after_second =
+        state_->execution_service->device_resource_snapshot(metal_device);
+    evidence.io_after =
+        state_->execution_service->compute_io_executor().snapshot();
+    return evidence;
   }
 
   /**
@@ -3873,25 +4112,27 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
 
  private:
   /**
-   * @brief Shares asynchronous Host admission/tracking across public and I1
-   * callers.
+   * @brief Shares asynchronous Host admission/tracking across public, I1, and
+   * I2 callers.
    *
    * The method first validates installed execution controls and the optional
-   * all-or-none private I1 QoS/observer/accepted-coordinate tuple. It then
-   * translates the ordinary Host request, attaches the private fields, and
-   * prepares caller publication, backend delivery, the joined status worker,
-   * the success Result envelope, and close-visible tracking before entering
-   * InteractionService. Kernel acceptance then crosses only a no-fail bridge to
-   * the prepared worker, which publishes the exact outcome before notifying
-   * close.
+   * all-or-none private QoS/observer/accepted-coordinate tuple and the optional
+   * I2 progressive final-child policy. It then translates the ordinary Host
+   * request, attaches the private fields, and prepares caller publication,
+   * backend delivery, the joined status worker, the success Result envelope,
+   * and close-visible tracking before entering InteractionService. Kernel
+   * acceptance then crosses only a no-fail bridge to the prepared worker,
+   * which publishes the exact outcome before notifying close.
    *
    * @param request Ordinary Host request transferred into tracking ownership.
-   * @param run_qos Optional complete private I1 QoS; absence selects the
-   * established public Throughput default.
+   * @param run_qos Optional complete private preview/final Run QoS; absence
+   * selects the established public Throughput default.
    * @param observation_sink Optional observation-only sink paired with
    * `run_qos`.
    * @param accepted_coordinate Optional pre-call row-local coordinate paired
    * with `run_qos` and `observation_sink`.
+   * @param progressive_options Optional I2 final-child QoS and ordered-trigger
+   * selector, legal only with the complete private tuple and RT request.
    * @return Scheduling status and a future for the exact product outcome.
    * @throws std::bad_alloc when request, future, worker, result, or tracking
    * ownership cannot allocate before Kernel entry.
@@ -3903,15 +4144,16 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
    * no-throw boundaries. Rejection or a pre-publication Kernel exception first
    * sends the bridge's empty sentinel, joins the worker outside the lifecycle
    * mutex, and removes tracking. Later compute cancellation or failure is
-   * reported only by the returned future. For an I1 observer, the status worker
-   * reserves Host-settlement evidence only after making that future ready and
-   * publishing the matching tracking state. Private fields never enter the
-   * installed Host request or any IPC value.
+   * reported only by the returned future. For an I1/I2 observer, the status
+   * worker reserves Host-settlement evidence only after making that future
+   * ready and publishing the matching tracking state. Private fields never
+   * enter the installed Host request or any IPC value.
    */
   Result<std::future<OperationStatus>> compute_async_internal(
       HostComputeRequest request, std::optional<compute::ComputeRunQos> run_qos,
       std::shared_ptr<compute::ComputeRunObservationSink> observation_sink,
-      std::optional<compute::AcceptedBoundaryCoordinate> accepted_coordinate) {
+      std::optional<compute::AcceptedBoundaryCoordinate> accepted_coordinate,
+      std::optional<compute::ProgressiveComputeOptions> progressive_options) {
     return guarded_result<std::future<OperationStatus>>(
         "compute_async", GraphErrc::ComputeError, [&] {
           if (!valid_compute_execution_options(request.execution)) {
@@ -3926,25 +4168,52 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
               has_private_qos != has_private_coordinate) {
             return failure_result<std::future<OperationStatus>>(
                 GraphErrc::InvalidParameter,
-                "private I1 QoS, observation sink, and accepted coordinate "
+                "private QoS, observation sink, and accepted coordinate "
                 "must be supplied together");
           }
-          if (has_private_qos &&
-              (run_qos->service_class !=
-                   compute::ComputeRunQosClass::Interactive ||
-               !run_qos->deadline.has_value() || run_qos->weight != 1U ||
-               run_qos->maximum_parallelism !=
-                   std::optional<std::uint32_t>{8U})) {
+          if (has_private_qos && !valid_private_interactive_qos(*run_qos)) {
             return failure_result<std::future<OperationStatus>>(
                 GraphErrc::InvalidParameter,
-                "private I1 QoS requires Interactive, deadline, weight one, "
+                "private QoS requires Interactive, deadline, weight one, "
                 "and cap eight");
+          }
+          if (progressive_options.has_value()) {
+            if (!has_private_qos ||
+                !valid_private_interactive_qos(
+                    progressive_options->final_qos) ||
+                request.intent != ComputeIntent::RealTimeUpdate ||
+                !request.dirty_roi.has_value() || !request.execution.parallel ||
+                !request.execution.quiet ||
+                request.execution.maximum_parallelism !=
+                    std::optional<std::uint32_t>{8U} ||
+                request.cache.precision != "fp32" ||
+                !request.cache.force_recache ||
+                !request.cache.disable_disk_cache || !request.cache.nosave) {
+              return failure_result<std::future<OperationStatus>>(
+                  GraphErrc::InvalidParameter,
+                  "private I2 request requires the frozen RT, dirty, fp32, "
+                  "no-I/O, parallel, quiet, and child QoS contract");
+            }
+            const std::chrono::steady_clock::time_point admission =
+                accepted_coordinate->admission_time();
+            if (admission > std::chrono::steady_clock::time_point::max() -
+                                std::chrono::seconds(1) ||
+                run_qos->deadline !=
+                    admission + std::chrono::milliseconds(100) ||
+                progressive_options->final_qos.deadline !=
+                    admission + std::chrono::seconds(1)) {
+              return failure_result<std::future<OperationStatus>>(
+                  GraphErrc::InvalidParameter,
+                  "private I2 child deadlines must remain anchored at the "
+                  "accepted coordinate plus 100 ms and 1,000 ms");
+            }
           }
 
           Kernel::ComputeRequest kernel_request =
               to_kernel_compute_request(request);
           kernel_request.accepted_coordinate = std::move(accepted_coordinate);
           kernel_request.run_qos = std::move(run_qos);
+          kernel_request.progressive_options = std::move(progressive_options);
           std::shared_ptr<compute::ComputeRunObservationSink>
               status_observation_sink = observation_sink;
           kernel_request.observation_sink = std::move(observation_sink);

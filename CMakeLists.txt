@@ -492,6 +492,7 @@ endif()
 # Module: dependency-neutral private core values, display formatting, and the
 # build-selected image-processing/image-artifact implementations.
 set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
+    src/lib/core/exact_box_downsample.cpp
     src/lib/core/ps_types.cpp
     src/lib/core/parameter_value_text.cpp
 )
@@ -692,6 +693,8 @@ target_link_libraries(photospider_graph_internal PRIVATE
 set(KERNEL_FACADE_SOURCES
     src/lib/benchmark/i1_evidence.cpp
     src/lib/benchmark/i1_profile.cpp
+    src/lib/benchmark/i2_evidence.cpp
+    src/lib/benchmark/i2_profile.cpp
     src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp
@@ -715,6 +718,7 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_task_submission.cpp
     src/lib/compute/execution_lifecycle_telemetry.cpp
     src/lib/compute/execution_service.cpp
+    src/lib/compute/progressive_compute.cpp
     src/lib/compute/run_lifecycle_registry.cpp
     src/lib/compute/task_graph_planning.cpp
     src/lib/compute/task_population_strategy.cpp
@@ -1997,6 +2001,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_compile_definitions(test_i1_product_path PRIVATE
             PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
             PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+        add_ps_test(test_i2_product_path
+            tests/integration/test_i2_product_path.cpp
+            photospider_internal_test_product)
+        target_compile_definitions(test_i2_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         add_ps_test(test_opencv_operation_concurrency
             tests/integration/test_opencv_operation_concurrency.cpp)
         target_compile_definitions(test_opencv_operation_concurrency PRIVATE
@@ -2045,6 +2054,25 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             nlohmann_json::nlohmann_json
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
+        add_executable(i2_progressive_benchmark EXCLUDE_FROM_ALL
+            tests/verification/i2_progressive_benchmark.cpp
+            tests/verification/i2_evidence_json.cpp)
+        set_target_properties(i2_progressive_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(i2_progressive_benchmark PRIVATE cxx_std_17)
+        target_include_directories(i2_progressive_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(i2_progressive_benchmark PRIVATE
+            PHOTOSPIDER_I2_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(i2_progressive_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
     endif()
     add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
     add_ps_test(test_i1_evidence tests/unit/test_i1_evidence.cpp)
@@ -2054,6 +2082,14 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_link_libraries(test_i1_evidence PRIVATE
         nlohmann_json::nlohmann_json)
     add_ps_test(test_i1_profile tests/unit/test_i1_profile.cpp)
+    add_ps_test(test_i2_evidence tests/unit/test_i2_evidence.cpp)
+    target_sources(test_i2_evidence PRIVATE
+        tests/verification/i2_evidence_json.cpp)
+    target_link_libraries(test_i2_evidence PRIVATE
+        nlohmann_json::nlohmann_json)
+    add_ps_test(test_i2_profile tests/unit/test_i2_profile.cpp)
+    add_ps_test(test_progressive_compute
+        tests/unit/test_progressive_compute.cpp)
     add_ps_test(test_dense_tensor_content_digest
         tests/unit/test_dense_tensor_content_digest.cpp)
     add_ps_test(test_physical_execution_routes
@@ -2430,11 +2466,25 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_i1_profile
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i2_evidence
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i2_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_progressive_compute
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_dense_tensor_content_digest
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         gtest_discover_tests(test_i1_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+        gtest_discover_tests(test_i2_product_path
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS kernel-concurrency
@@ -2560,6 +2610,7 @@ if(TARGET photospider_internal_test_product)
         test_bad_alloc_boundaries
         test_host_adapter
         test_i1_product_path
+        test_i2_product_path
         test_kernel_contracts
         test_policy_execution)
     set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS "")

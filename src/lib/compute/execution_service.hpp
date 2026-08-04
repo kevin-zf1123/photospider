@@ -850,6 +850,22 @@ class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
 };
 
 /**
+ * @brief Result of one source-private process residency acquisition.
+ *
+ * @throws Nothing for destruction; Value copying retains immutable state.
+ * @note `executor_submitted` distinguishes an initial explicit transfer from a
+ * process-resident lookup. The value owns no executor, ledger token, native
+ * handle, Run lease, or currentness authority.
+ */
+struct DeviceResidentValueAcquisition final {
+  /** @brief Ready revision-preserving device-local Value. */
+  Value value;
+
+  /** @brief True only when this call entered the concrete device executor. */
+  bool executor_submitted = false;
+};
+
+/**
  * @brief Owns one fixed Host execution domain for concurrent Runs.
  *
  * The service owns a fixed CPU worker pool, one private Metal worker lane, one
@@ -1173,6 +1189,33 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   execution::DeviceExecutorDiagnostics device_executor_diagnostics(
       Device device) const;
+
+  /**
+   * @brief Acquires or explicitly uploads one Ready Value to process Metal.
+   * @param source Ready host-visible rank-two FP32 or tightly strided HWC FP32
+   * Value.
+   * @param width Positive logical image width.
+   * @param height Positive logical image height.
+   * @param completion_seed Exact current Graph/request/Run lineage attached to
+   * a real native transfer.
+   * @return Ready resident Value plus whether executor submission occurred.
+   * @throws std::invalid_argument for missing Metal, invalid source geometry,
+   * or malformed lineage.
+   * @throws ReadyFenceAccessError when native completion settles
+   * unsuccessfully.
+   * @throws std::runtime_error when service shutdown starts or a bounded native
+   * completion wait expires.
+   * @throws Native executor, resource, allocation, and synchronization failures
+   * unchanged.
+   * @note The method first consults the process-owned ResidencyManager. A miss
+   * enters exactly one registered Metal executor invocation using the service
+   * ResourceLedger; a hit performs no executor submission, allocation, or
+   * transfer. This source-private verification seam exposes no native handle or
+   * registry mutation and performs no device-to-Host readback.
+   */
+  DeviceResidentValueAcquisition acquire_metal_resident_value(
+      Value source, std::uint32_t width, std::uint32_t height,
+      const execution::DeviceCompletionSeed& completion_seed);
 
   /**
    * @brief Preallocates native freshness state before Graph publication.

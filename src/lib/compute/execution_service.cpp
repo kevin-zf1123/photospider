@@ -26,6 +26,7 @@
 #include "compute/execution_service_test_probe.hpp"
 #endif
 #include "execution/compute_io_executor.hpp"
+#include "execution/device_execution_context.hpp"
 #include "execution/device_executor_registry.hpp"
 #include "execution/physical_execution_routes.hpp"
 #include "photospider/core/graph_error.hpp"
@@ -298,6 +299,85 @@ class ReadySubmissionDeviceInvocation final
   /** @brief Service-owned ledger borrowed through synchronous executor entry.
    */
   ResourceLedger& resource_ledger_;
+};
+
+/**
+ * @brief Adapts one explicit Host-to-Metal Value upload to executor entry.
+ *
+ * @throws Native publication and allocation failures unchanged from `run()`.
+ * @note The invocation is stack-bounded, borrows the service ledger, and
+ * retains the source/seed only through synchronous executor callback return.
+ * Native completion ownership moves into the published pending Value.
+ */
+class HostToMetalValueInvocation final
+    : public execution::DeviceExecutorInvocation {
+ public:
+  /**
+   * @brief Captures one exact upload request and its output destination.
+   * @param source Ready source Value retained by copy.
+   * @param width Positive logical image width.
+   * @param height Positive logical image height.
+   * @param seed Exact current request/Run lineage.
+   * @param resource_ledger Process ResourceLedger borrowed through entry.
+   * @throws Nothing beyond Value copying.
+   */
+  HostToMetalValueInvocation(Value source, std::uint32_t width,
+                             std::uint32_t height,
+                             execution::DeviceCompletionSeed seed,
+                             ResourceLedger& resource_ledger) noexcept
+      : source_(std::move(source)),
+        width_(width),
+        height_(height),
+        seed_(std::move(seed)),
+        resource_ledger_(resource_ledger) {}
+
+  /** @copydoc execution::DeviceExecutorInvocation::run */
+  void run() override {
+    execution::MetalExecutionContext& context =
+        execution::require_current_metal_execution_context();
+    context.publish_float32_host_to_texture(source_, width_, height_);
+    published_value_ = context.take_published_value();
+    if (!published_value_.valid()) {
+      throw std::logic_error(
+          "Metal upload returned without a pending resident Value.");
+    }
+  }
+
+  /** @copydoc execution::DeviceExecutorInvocation::resource_ledger */
+  ResourceLedger& resource_ledger() noexcept override {
+    return resource_ledger_;
+  }
+
+  /** @copydoc execution::DeviceExecutorInvocation::completion_seed */
+  std::optional<execution::DeviceCompletionSeed> completion_seed()
+      const override {
+    return seed_;
+  }
+
+  /**
+   * @brief Takes the pending device Value published by `run()`.
+   * @return Published Value, or invalid sentinel before/after the sole take.
+   * @throws Nothing.
+   */
+  Value take_published_value() noexcept {
+    Value result;
+    std::swap(result, published_value_);
+    return result;
+  }
+
+ private:
+  /** @brief Ready host-visible source retained through executor return. */
+  Value source_;
+  /** @brief Logical image width forwarded to Metal translation. */
+  std::uint32_t width_ = 0U;
+  /** @brief Logical image height forwarded to Metal translation. */
+  std::uint32_t height_ = 0U;
+  /** @brief Exact native-completion request and Run lineage. */
+  execution::DeviceCompletionSeed seed_;
+  /** @brief Process resource authority borrowed through this invocation. */
+  ResourceLedger& resource_ledger_;
+  /** @brief Pending device Value taken after synchronous executor return. */
+  Value published_value_;
 };
 
 /**
@@ -5313,6 +5393,84 @@ bool ExecutionService::has_device_executor(Device device) const noexcept {
 execution::DeviceExecutorDiagnostics
 ExecutionService::device_executor_diagnostics(Device device) const {
   return pool_->device_executors.diagnostics(device);
+}
+
+/** @copydoc ExecutionService::acquire_metal_resident_value */
+DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
+    Value source, std::uint32_t width, std::uint32_t height,
+    const execution::DeviceCompletionSeed& completion_seed) {
+  if (!source.valid() || width == 0U || height == 0U) {
+    throw std::invalid_argument(
+        "Metal residency acquisition requires a valid Value and positive "
+        "dimensions.");
+  }
+  if (!pool_->device_executors.contains(Device::GPU_METAL)) {
+    throw std::invalid_argument(
+        "Metal residency acquisition requires a registered executor.");
+  }
+  const ReadyFenceSnapshot source_state = source.ready_fence().poll();
+  if (!source_state.ready()) {
+    throw ReadyFenceAccessError(source_state);
+  }
+
+  const std::shared_ptr<execution::ResidencyManager> residency =
+      pool_->device_executors.residency_manager();
+  if (!residency) {
+    throw std::logic_error(
+        "Metal executor registry has no process residency manager.");
+  }
+  const DeviceId metal_device(DeviceBackend::Metal);
+  std::optional<Value> resident = residency->find(
+      source.revision_id(), metal_device, MemoryDomain::DeviceLocal);
+  if (resident.has_value()) {
+    const ReadyFenceSnapshot resident_state = resident->ready_fence().poll();
+    if (!resident_state.ready()) {
+      throw ReadyFenceAccessError(resident_state);
+    }
+    return DeviceResidentValueAcquisition{std::move(*resident), false};
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(pool_->mutex);
+    if (pool_->stopping || pool_->shutdown_in_progress ||
+        pool_->shutdown_complete) {
+      throw std::runtime_error(
+          "ExecutionService cannot acquire Metal residency during shutdown.");
+    }
+  }
+  HostToMetalValueInvocation invocation(source, width, height, completion_seed,
+                                        pool_->ledger);
+  pool_->device_executors.execute(Device::GPU_METAL, invocation);
+  Value pending = invocation.take_published_value();
+  if (!pending.valid()) {
+    throw std::logic_error(
+        "Metal executor completed without a published resident Value.");
+  }
+
+  const std::chrono::steady_clock::time_point completion_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  ReadyFenceSnapshot terminal = pending.ready_fence().poll();
+  while (!terminal.terminal() &&
+         std::chrono::steady_clock::now() < completion_deadline) {
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+    terminal = pending.ready_fence().poll();
+  }
+  if (!terminal.terminal()) {
+    throw std::runtime_error(
+        "Metal residency acquisition timed out waiting for native "
+        "completion.");
+  }
+  if (!terminal.ready()) {
+    throw ReadyFenceAccessError(terminal);
+  }
+  resident = residency->find(source.revision_id(), metal_device,
+                             MemoryDomain::DeviceLocal);
+  if (!resident.has_value() ||
+      resident->storage_binding() != pending.storage_binding()) {
+    throw std::logic_error(
+        "Metal completion did not publish the exact resident binding.");
+  }
+  return DeviceResidentValueAcquisition{std::move(*resident), true};
 }
 
 /** @copydoc ExecutionService::submit_initial_task_handles */

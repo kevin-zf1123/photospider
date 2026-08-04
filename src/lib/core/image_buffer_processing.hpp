@@ -85,4 +85,30 @@ void resize_cpu_image_buffer_region(const ImageBuffer& source,
                                     const ImageBuffer& destination,
                                     const PixelRect& destination_roi);
 
+/**
+ * @brief Writes an exact aligned factor-four box average into one output ROI.
+ *
+ * @param source Valid CPU FP32 source whose extent is exactly four times the
+ * destination extent on both axes.
+ * @param destination Valid writable CPU FP32 destination with matching channel
+ * count.
+ * @param destination_roi Nonempty destination rectangle. Each output
+ * coordinate samples the aligned source block beginning at `(4*x, 4*y)`.
+ * @return Nothing.
+ * @throws std::invalid_argument for malformed/non-CPU/non-FP32 descriptors,
+ * mismatched channels or factor-four extents, or aliased source/destination.
+ * @throws std::out_of_range when `destination_roi` is empty or outside the
+ * destination extent.
+ * @throws std::runtime_error when the host floating-point environment cannot
+ * be captured or switched to round-to-nearest.
+ * @note The sixteen binary32 samples are accumulated in binary64, multiplied
+ * by exact `1/16`, then rounded exactly once to binary32. The complete caller
+ * floating-point environment, including exception flags and rounding mode, is
+ * restored on every return or exception. Pixels and row padding outside the
+ * destination ROI remain unchanged.
+ */
+void exact_box_average_factor_four_region(const ImageBuffer& source,
+                                          const ImageBuffer& destination,
+                                          const PixelRect& destination_roi);
+
 }  // namespace ps::image_processing

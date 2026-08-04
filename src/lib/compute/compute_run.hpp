@@ -438,20 +438,39 @@ class ComputeRunObservationSink {
       ComputeRunObservationCoordinate coordinate) noexcept = 0;
 
   /**
-   * @brief Observes one current HP publication and retains its immutable Value.
+   * @brief Observes one current domain publication and retains its Value.
    * @param descriptor Immutable identity of the Run whose contender committed.
    * @param output Copy of the exact immutable image Value published visibly.
    * @param coordinate Coordinate reserved at visible publication.
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.
    * @note Value copying retains immutable shared state and grants no mutation
-   * or graph ownership. The commit contender emits this callback and its
-   * succeeding terminal callback in one Run-arbiter resolution, so a stale,
-   * failed, empty, or already-resolved contender produces no visibility.
+   * or graph ownership. HP emits the full result and progressive RT emits the
+   * preview result. The commit contender emits this callback and its succeeding
+   * terminal callback in one Run-arbiter resolution, so a stale, failed,
+   * empty, or already-resolved contender produces no visibility.
    */
   virtual void on_current_visible(
       const ComputeRunDescriptor& descriptor, Value output,
       ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes consumption of progressive final permission.
+   * @param descriptor Immutable HP Full child descriptor about to be entered.
+   * @param coordinate Coordinate reserved immediately before HP submission.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The default no-op preserves existing source-private observers. The
+   * event grants no authority and is emitted only after current RT preview
+   * success wins against cancellation, immediately before HP provider or
+   * ExecutionService entry.
+   */
+  virtual void on_progressive_final_triggered(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept {
+    (void)descriptor;
+    (void)coordinate;
+  }
 
   /**
    * @brief Observes physical Run quiescence selected by lifecycle finalization.

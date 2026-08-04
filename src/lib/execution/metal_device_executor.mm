@@ -1025,23 +1025,60 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       }
       std::optional<ResourceLedger::DeviceLeasePair> lease_guard;
       std::shared_ptr<MetalUploadCompletion> completion;
-      const Float32TransferGeometry geometry =
-          checked_float32_transfer_geometry(width, height);
       const DenseTensorDescriptor& descriptor =
           source.dense_tensor_descriptor();
       const StridedLayout& source_layout = source.strided_layout();
-      if (descriptor.shape.size() != 2U ||
-          descriptor.shape[0] != static_cast<std::size_t>(height) ||
-          descriptor.shape[1] != static_cast<std::size_t>(width) ||
-          descriptor.element_semantics != ElementSemantics::FloatingPoint ||
-          descriptor.storage_encoding.bit_width != 32U ||
-          source_layout.byte_strides.size() != 2U ||
-          source_layout.byte_strides[0] <
-              static_cast<std::ptrdiff_t>(geometry.bytes_per_row) ||
-          source_layout.byte_strides[1] !=
-              static_cast<std::ptrdiff_t>(sizeof(float))) {
+      const bool common_descriptor_valid =
+          descriptor.element_semantics == ElementSemantics::FloatingPoint &&
+          descriptor.storage_encoding.bit_width == 32U &&
+          descriptor.storage_encoding.kind ==
+              StorageEncodingKind::NativeScalar &&
+          !descriptor.quantization.has_value();
+      const bool rank_two =
+          descriptor.shape.size() == 2U &&
+          descriptor.shape[0] == static_cast<std::size_t>(height) &&
+          descriptor.shape[1] == static_cast<std::size_t>(width) &&
+          source_layout.byte_strides.size() == 2U &&
+          source_layout.byte_strides[1] ==
+              static_cast<std::ptrdiff_t>(sizeof(float));
+      std::uint32_t native_width = width;
+      bool rank_three_hwc = false;
+      if (width != 0U && descriptor.shape.size() == 3U &&
+          descriptor.shape[0] == static_cast<std::size_t>(height) &&
+          descriptor.shape[1] == static_cast<std::size_t>(width) &&
+          descriptor.shape[2] > 0U && source.image_facet().has_value() &&
+          *source.image_facet() == ImageFacet{1U, 0U, 2U} &&
+          source_layout.byte_strides.size() == 3U &&
+          descriptor.shape[2] <=
+              std::numeric_limits<std::uint32_t>::max() / width) {
+        native_width = width * static_cast<std::uint32_t>(descriptor.shape[2]);
+        const std::size_t active_row_bytes =
+            static_cast<std::size_t>(native_width) * sizeof(float);
+        const std::uint64_t channel_bytes =
+            static_cast<std::uint64_t>(descriptor.shape[2]) * sizeof(float);
+        rank_three_hwc =
+            active_row_bytes <=
+                static_cast<std::size_t>(
+                    std::numeric_limits<std::ptrdiff_t>::max()) &&
+            channel_bytes <= static_cast<std::uint64_t>(
+                                 std::numeric_limits<std::ptrdiff_t>::max()) &&
+            source_layout.byte_strides[0] ==
+                static_cast<std::ptrdiff_t>(active_row_bytes) &&
+            source_layout.byte_strides[1] ==
+                static_cast<std::ptrdiff_t>(channel_bytes) &&
+            source_layout.byte_strides[2] ==
+                static_cast<std::ptrdiff_t>(sizeof(float));
+      }
+      const Float32TransferGeometry geometry =
+          checked_float32_transfer_geometry(native_width, height);
+      if (!common_descriptor_valid || (!rank_two && !rank_three_hwc) ||
+          (rank_two &&
+           source_layout.byte_strides[0] <
+               static_cast<std::ptrdiff_t>(geometry.bytes_per_row)) ||
+          (rank_three_hwc && source.storage_size() != geometry.storage_size)) {
         throw std::invalid_argument(
-            "Metal upload requires a row-major rank-two FLOAT32 source.");
+            "Metal upload requires row-major rank-two FLOAT32 or tightly "
+            "strided rank-three HWC FLOAT32 source.");
       }
       const AccessPlan plan = source.plan_access(
           AccessTarget{DeviceId(DeviceBackend::Metal),
@@ -1053,7 +1090,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
 
       const DenseTensorView source_view(source);
       MTLTextureDescriptor* texture_descriptor =
-          make_float32_texture_descriptor(width, height);
+          make_float32_texture_descriptor(native_width, height);
       const DeviceResourceVector planned{
           planned_texture_bytes(texture_descriptor),
           planned_buffer_bytes(geometry.storage_size)};
@@ -1064,7 +1101,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
             DeviceResourceErrorCode::AdmissionRejected, device_id(), planned,
             {}, "Metal device account rejected the upload allocation plan.");
       }
-      planned_width_ = width;
+      planned_width_ = native_width;
       planned_height_ = height;
       planned_resources_ = planned;
       actual_resources_ = {};
@@ -1118,17 +1155,20 @@ class MetalDeviceExecutor final : public DeviceExecutor {
                  sourceOffset:0
             sourceBytesPerRow:geometry.bytes_per_row
           sourceBytesPerImage:geometry.storage_size
-                   sourceSize:MTLSizeMake(width, height, 1)
+                   sourceSize:MTLSizeMake(native_width, height, 1)
                     toTexture:texture
              destinationSlice:0
              destinationLevel:0
             destinationOrigin:MTLOriginMake(0, 0, 0)];
       [blit endEncoding];
 
-      const StridedLayout destination_layout{
-          {static_cast<std::ptrdiff_t>(geometry.bytes_per_row),
-           static_cast<std::ptrdiff_t>(sizeof(float))},
-          0U};
+      const StridedLayout destination_layout =
+          rank_three_hwc
+              ? source_layout
+              : StridedLayout{
+                    {static_cast<std::ptrdiff_t>(geometry.bytes_per_row),
+                     static_cast<std::ptrdiff_t>(sizeof(float))},
+                    0U};
       NSArray<id<MTLResource>>* completion_scratch_resources =
           [scratch_resources_ copy];
       if (completion_scratch_resources == nil) {

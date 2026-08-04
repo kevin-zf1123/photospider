@@ -115,6 +115,13 @@ struct DirtyNodeExecutionContext {
    * task-runtime paths supply it together with run_lease.
    */
   ExecutionService* direct_execution_service = nullptr;
+
+  /**
+   * @brief Whether RT dirty sources use exact factor-four box averaging.
+   * @note HP execution ignores this value. It is true only for the private
+   * progressive request path and never changes downstream operation kernels.
+   */
+  bool exact_factor_four_preview = false;
 };
 
 /**
@@ -397,6 +404,8 @@ class RealTimeDirtyNodeExecutor {
    * @param entry RT dirty ROI and extent metadata.
    * @param image_inputs_ready Resolved RT image inputs.
    * @param rt_buffer Destination RT proxy buffer.
+   * @param exact_factor_four_source Whether to use the frozen aligned box
+   * average instead of ordinary build-selected resize.
    * @param operation Selected operation and metadata snapshot.
    * @return Nothing.
    * @throws std::bad_alloc when RT operation execution exhausts memory.
@@ -439,7 +448,8 @@ class RealTimeDirtyNodeExecutor {
    */
   void copy_monolithic_image_roi(const NodeOutput& result,
                                  const RtPlanEntry& entry,
-                                 ImageBuffer& rt_buffer) const;
+                                 ImageBuffer& rt_buffer,
+                                 bool exact_factor_four_source) const;
 
   /**
    * @brief Runs a tiled operation into the selected RT ROI.
@@ -531,6 +541,9 @@ class RealTimeDirtyNodeExecutor {
 
   /** @brief Optional process authority for direct provider admission. */
   ExecutionService* direct_execution_service_ = nullptr;
+
+  /** @brief Frozen exact RT source-normalization selector. */
+  bool exact_factor_four_preview_ = false;
 };
 
 }  // namespace ps::compute

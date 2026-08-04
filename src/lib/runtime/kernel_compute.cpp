@@ -354,6 +354,7 @@ ComputeService::Request make_service_compute_request(
                                        request.telemetry.benchmark_events},
       request.intent,
       request.dirty_roi,
+      request.progressive_options,
       request.name,
       select_compute_run_qos(request),
       std::move(commit_policy),
@@ -408,7 +409,8 @@ class KernelGraphRevisionCommitPolicy final
         staged_proxy_(staged_proxy),
         graph_label_(request.name),
         cache_precision_(request.cache.precision),
-        save_cache_(!request.cache.nosave) {}
+        save_cache_(!request.cache.nosave),
+        observe_realtime_value_(request.progressive_options.has_value()) {}
 
   /** @copydoc compute::ComputeCommitPolicy::commit_high_precision */
   void commit_high_precision(
@@ -500,7 +502,17 @@ class KernelGraphRevisionCommitPolicy final
                         compute::RealtimeProxyGraph& staged_proxy) override {
     validate_staged_run(run_lease, ComputeIntent::RealTimeUpdate, staged_graph,
                         &staged_proxy, true);
-    (void)staged_proxy.require_output(run_lease.descriptor().target_node_id());
+    const NodeOutput& target_output =
+        staged_proxy.require_output(run_lease.descriptor().target_node_id());
+    Value current_output;
+    if (observe_realtime_value_) {
+      current_output = target_output.image_value;
+      if (!current_output.valid()) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "Progressive RT commit requires a sealed target Value.");
+      }
+    }
     std::unique_ptr<compute::RealtimeProxyGraph> proxy_publication =
         staged_proxy.clone_for_compute();
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
@@ -514,6 +526,7 @@ class KernelGraphRevisionCommitPolicy final
     runtime_.graph_state()
         .submit([this, instance_id, revision,
                  commit_lease = std::move(commit_lease),
+                 current_output = std::move(current_output),
                  proxy_publication = std::move(proxy_publication)](
                     GraphModel& live_graph) mutable {
           std::optional<compute::ComputeRunCommitContender> contender =
@@ -536,7 +549,11 @@ class KernelGraphRevisionCommitPolicy final
             testing::notify_kernel_compute_commit_test_hook(
                 testing::KernelComputeCommitTestEvent::RealTimePublished);
 #endif
-            if (!contender->publish_succeeded()) {
+            const bool published = observe_realtime_value_
+                                       ? contender->publish_visible_succeeded(
+                                             std::move(current_output))
+                                       : contender->publish_succeeded();
+            if (!published) {
               throw std::logic_error(
                   "RT commit contender failed to resolve success.");
             }
@@ -700,6 +717,9 @@ class KernelGraphRevisionCommitPolicy final
 
   /** @brief Whether request policy permits deferred disk-cache writes. */
   bool save_cache_ = false;
+
+  /** @brief Whether RT publication retains and observes its immutable Value. */
+  bool observe_realtime_value_ = false;
 };
 
 }  // namespace

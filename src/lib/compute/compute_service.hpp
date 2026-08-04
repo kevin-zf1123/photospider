@@ -11,6 +11,7 @@
 #include "compute/compute_commit_policy.hpp"
 #include "compute/compute_run.hpp"
 #include "compute/compute_supersession.hpp"
+#include "compute/progressive_compute.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -124,6 +125,14 @@ class ComputeService {
 
     /** @brief Optional HP-space dirty ROI for dirty HP or RT updates. */
     std::optional<PixelRect> dirty_roi;
+
+    /**
+     * @brief Optional private ordered preview/final execution contract.
+     * @note Presence is legal only for a RealTimeUpdate request. The ordinary
+     * `qos` field describes the RT preview child and this value supplies the
+     * HP final child QoS. It is source-private and changes no installed ABI.
+     */
+    std::optional<compute::ProgressiveComputeOptions> progressive_options;
 
     /**
      * @brief Stable graph/session identity captured in every created Run.
