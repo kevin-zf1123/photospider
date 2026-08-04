@@ -800,7 +800,8 @@ bool Kernel::compute(const ComputeRequest& request) {
  *       serialization. Snapshot capture and commit use graph-state, while
  *       operation work does not hold that lane. Before publication, the
  *       native-completion lineage is pretracked; accepted current publication
- *       advances its process freshness before execution. Other compute
+ *       assigns its exact managed current generation before execution,
+ *       including coordinate-authorized numeric decreases. Other compute
  *       exceptions map to false and LastError.
  */
 bool Kernel::compute_request(const ComputeRequest& request) {
@@ -889,8 +890,9 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image(
  * following committed output copy. Other compute, selected image-processing,
  * and clone exceptions become nullopt; successful empty output clears stale
  * LastError state. Native-completion lineage pretracking precedes publication,
- * and accepted current publication advances process freshness before physical
- * execution.
+ * and accepted current publication assigns the exact managed current
+ * generation before physical execution, including coordinate-authorized
+ * numeric decreases.
  */
 std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
     const ComputeRequest& request) {
@@ -992,7 +994,8 @@ std::optional<std::future<Kernel::AsyncComputeResult>> Kernel::compute_async(
  * publication. Recoverable exceptions are captured in the exact result and
  * mirrored into LastError; future get() rethrows std::bad_alloc. Fallible
  * native-lineage pretracking precedes coordinator publication, whose accepted
- * current callback advances process freshness before physical execution.
+ * current callback assigns the exact managed current generation before
+ * physical execution, including coordinate-authorized numeric decreases.
  */
 std::optional<std::future<Kernel::AsyncComputeResult>>
 Kernel::compute_async_request(ComputeRequest request) {

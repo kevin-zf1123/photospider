@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 namespace ps::benchmark {
@@ -40,6 +41,22 @@ Json optional_monotonic_json(
     const std::optional<std::chrono::steady_clock::time_point>& value) {
   return value.has_value() ? Json(monotonic_nanoseconds(*value))
                            : Json(nullptr);
+}
+
+/**
+ * @brief Encodes an optional unsigned integer without optional conversion.
+ * @tparam Integer Unsigned integral payload type accepted by JSON.
+ * @param value Optional unsigned integer evidence.
+ * @return JSON unsigned integer when present or JSON null when absent.
+ * @throws nlohmann allocation errors unchanged.
+ * @note Explicit value/null construction preserves the repository's
+ * nlohmann_json 3.9 compatibility contract.
+ */
+template <typename Integer>
+Json optional_unsigned_json(const std::optional<Integer>& value) {
+  static_assert(std::is_integral_v<Integer> && std::is_unsigned_v<Integer>,
+                "optional_unsigned_json requires an unsigned integer");
+  return value.has_value() ? Json(*value) : Json(nullptr);
 }
 
 /**
@@ -350,7 +367,8 @@ Json edit_evidence_json(const I1EditEvidence& edit) {
       {"admission_attempted", edit.admission_attempted},
       {"admission_sample_ns", admission_sample},
       {"admission_window_valid", edit.admission_window_valid},
-      {"reserved_event_sequence", edit.reserved_event_sequence},
+      {"reserved_event_sequence",
+       optional_unsigned_json(edit.reserved_event_sequence)},
       {"deadline_ns", optional_monotonic_json(edit.deadline)},
       {"host_return", std::move(host_return)},
       {"accepted_coordinate", std::move(accepted)},
@@ -399,7 +417,8 @@ Json observations_json(const I1EpisodeObservationSnapshot& observations) {
              : "throughput"},
         {"deadline_ns", optional_monotonic_json(event.qos.deadline)},
         {"weight", event.qos.weight},
-        {"maximum_parallelism", event.qos.maximum_parallelism},
+        {"maximum_parallelism",
+         optional_unsigned_json(event.qos.maximum_parallelism)},
         {"service_charge", event.service_charge},
         {"observed_at_ns", monotonic_nanoseconds(event.observed_at)},
         {"causal_sequence", event.causal_sequence},

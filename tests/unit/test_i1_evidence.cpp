@@ -529,6 +529,39 @@ TEST(I1Evidence, FailedAdmissionSerializesRawEvidenceWithoutAcceptedProduct) {
 }
 
 /**
+ * @brief Proves optional unsigned evidence serializes as a value or null.
+ * @throws Nothing when evaluation and JSON inspection remain deterministic.
+ * @note Absent cases are applied after evaluation so this test isolates the
+ * encoder shape from I1 evaluator validity and QoS requirements.
+ */
+TEST(I1Evidence, OptionalUnsignedEvidenceSerializesAsValueOrNull) {
+  I1EpisodeInnerRow row = evaluate_i1_episode(make_valid_input(0U));
+  ASSERT_TRUE(row.validity_reasons.empty());
+  ASSERT_GE(row.evidence.observations.service_starts.size(), 2U);
+  row.evidence.edits[1U].reserved_event_sequence.reset();
+  row.evidence.observations.service_starts[1U].qos.maximum_parallelism.reset();
+
+  const nlohmann::json encoded = i1_inner_row_json(row);
+  const nlohmann::json& present_sequence =
+      encoded.at("edits").at(0U).at("reserved_event_sequence");
+  const nlohmann::json& absent_sequence =
+      encoded.at("edits").at(1U).at("reserved_event_sequence");
+  EXPECT_TRUE(present_sequence.is_number_unsigned());
+  EXPECT_EQ(present_sequence.get<std::uint64_t>(), 1U);
+  EXPECT_TRUE(absent_sequence.is_null());
+
+  const nlohmann::json& service_starts =
+      encoded.at("observations").at("service_starts");
+  const nlohmann::json& present_parallelism =
+      service_starts.at(0U).at("maximum_parallelism");
+  const nlohmann::json& absent_parallelism =
+      service_starts.at(1U).at("maximum_parallelism");
+  EXPECT_TRUE(present_parallelism.is_number_unsigned());
+  EXPECT_EQ(present_parallelism.get<std::uint32_t>(), 8U);
+  EXPECT_TRUE(absent_parallelism.is_null());
+}
+
+/**
  * @brief Proves noncommitting and post-cancel starts remain separate waste.
  * @throws Nothing when complete synthetic evidence is classified correctly.
  */
