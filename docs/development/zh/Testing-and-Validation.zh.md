@@ -1377,8 +1377,10 @@ admission/acceptance timestamp。Runner 在校验 `A_i` 后、调用 Host 前预
 `(A_i,event_sequence_i)`。Runner 会在 Host invocation 前通过 private Host/Kernel request
 传递 typed proposed coordinate；Kernel 会在 current publication 前把它绑定进 product
 `SupersessionIdentity`，current observation 会复制精确 binding。已绑定 replacement 要求
-generation 与 accepted coordinate 都推进。Accepted-row 与 observer-causal sequence
-allocator 相互独立，并各自从一开始。Host return timestamp/status 绝不替代该 coordinate。
+只由 accepted coordinate 推进；generation 保持非零且唯一，但因为记录 preparation 顺序，
+其数值可以向后移动。任一侧未绑定的 traffic 仍按 generation 排序。Accepted-row 与
+observer-causal sequence allocator 相互独立，并各自从一开始。Host return
+timestamp/status 绝不替代该 coordinate。
 Failure 不产生 accepted event、current observation 或 accepted product binding，会使
 replicate invalid，也不能合成或回填其他 timestamp；proposed coordinate 与 failure/return
 事实保留在既有 inner evidence 中，不改变 15/5-field envelope。`A_i` 必须处于
@@ -1405,6 +1407,7 @@ test，不是模拟 I1 collector return。
 | --- | --- |
 | 连续 isolated phase grid | 保留唯一 `G^I1`；派生 cold slot zero、warmup slot `1..20`、measured slot `21..220`，并且只把 `T^I1=G^I1+221*750,000,000 ns` 作为 terminal non-start boundary。把每个 phase 的自然 ordinal 映射为从零开始的 `r`；拒绝 fresh phase origin、cooling delay、shifted slot 或迟到的 counter reset。 |
 | 成功的 accepted-boundary coordinate | 校验每个 `A_i` 后，在 Host invocation 前预留其唯一 row-local `event_sequence_i`，并通过 private Host/Kernel request seam 传递 `(A_i,event_sequence_i)`。成功时要求 product supersession identity 与 current-generation observation 包含这一精确 coordinate；拒绝把 Host return timestamp/status 或 observer callback time/sequence 用作 deadline、current-generation、supersession、tie-order 或替代 binding coordinate。 |
+| 反向 preparation 与 accepted 顺序 | 使用确定性的 Kernel barrier，让较新的 accepted coordinate 准备 generation one 后暂停，较旧的 coordinate 准备 generation two 并先发布 current，然后恢复 generation one。要求较新的 coordinate 成为 current、取消 generation two、保持为唯一 visible output，并保留同 timestamp 的 row-sequence 排序。重复执行反向逻辑断言，证明较旧 coordinate 即使拥有更高 generation 也不能替换 current。要求 coordinator-managed native freshness 保留精确发布的 generation 并拒绝数值更高的 stale transfer；要求 unbound 与 bound/unbound 两个 mixed 方向都保留 generation ordering。 |
 | Accepted 与 causal sequence domain | Row-local accepted sequence allocator 与 observation sink causal sequence allocator 各自从一开始。要求二者只在各自 domain 内严格有序；绝不能通过两个 sequence 的数值相等推断 row/product binding。 |
 | 失败的 admission 不产生 accepted event | Host failure 时，把预留的 proposed coordinate 与 failure/return observation 保留为 raw inner evidence，使 replicate invalid，并要求不存在 accepted-admission event、current-generation observation、product binding、替代 timestamp、backfill 或 outer schema field。 |
 | 已准备的 Host resource failure 不能进入 Kernel | 在所有 caller-side async resource 与 close tracking 已完成 preparation、但即将进入 Kernel 前注入失败。要求 public request 不调用 source callback；要求 I1 request 不暴露 current、cancellation、start、terminal、quiescence、resource-return、visibility 或 Host-settlement observation。关闭 injection 后，要求下一次 request 以 generation one 成功。 |

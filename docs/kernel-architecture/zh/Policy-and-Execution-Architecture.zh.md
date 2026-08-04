@@ -424,10 +424,14 @@ Live HP Graph swap 完成后，唯一 commit contender 会在同一次 Run-arbit
 `(A_i, event_sequence_i)`，并通过 source-private Host/Kernel request seam 传递它。Kernel 会把
 这一精确 coordinate 绑定进 `SupersessionIdentity`，`ComputeRequestCoordinator` 会发布并观察
 完整 current identity，而不是通过较晚 callback 重建 identity。对于已绑定 coordinate 的 I1
-lineage，replacement 要求 generation 与 accepted coordinate 都严格更新；timestamp 相等时由
-row-local accepted sequence 排序。Observation sink 的 causal sequence 属于独立的 allocator 与
-ordering domain，同样从一开始。Current-generation evidence 会复制 product-bound accepted
-coordinate，evaluator 要求 row 与 product 精确绑定，并要求 product coordinate 严格有序。
+lineage，replacement 只要求 accepted coordinate 严格更新；timestamp 相等时由 row-local
+accepted sequence 排序。Generation 保持非零且唯一，但它记录 preparation arrival，因此 coordinate
+授权的 publication 可以携带更低 generation。Mixed 或 unbound traffic 仍按 generation 排序。
+Native freshness manager 会采用 coordinator 精确发布的 generation，并阻止数值更高的 stale Run
+observation 恢复自身。Observation sink 的 causal sequence 属于独立的 allocator 与 ordering
+domain，同样从一开始。Current-generation evidence 会复制 product-bound accepted coordinate，
+evaluator 要求 row 与 product 精确绑定、generation 非零且唯一，并要求 product coordinate 严格
+有序。
 失败的 Host call 可以为诊断保留 proposed coordinate，但不能产生 accepted row、current
 observation 或 product binding。
 

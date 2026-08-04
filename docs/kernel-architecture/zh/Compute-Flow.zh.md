@@ -336,9 +336,12 @@ realtime request 的两个 child Run；immutable deadline 会在有界 observati
 `DeadlineExceeded`，Run-owned terminal arbiter 则会排列 cancellation、failure 与 visible commit。
 每个 Graph 的 latest-wins publication 会让精确 key 的最新完整 identity 成为权威、请求取消旧的
 active owner、合并一个 pending owner，并在 cancellation 迟到时仍拒绝 stale commit。对于两个
-携带 accepted coordinate 的 source-private identity，generation 与 coordinate 都必须向前推进；
-accepted timestamp 相同时按 row-local event sequence 排序。没有 binding 的 traffic 保持既有
-generation rule。这是
+携带 accepted coordinate 的 source-private identity，currentness 只按 accepted coordinate 推进；
+accepted timestamp 相同时按 row-local event sequence 排序。Generation 是唯一 preparation
+identity 与 Run join key，而不是已绑定的逻辑 admission 顺序，因此较新 coordinate 可以用更低
+generation 成为 current，较旧 coordinate 也不能凭更高 generation 获胜。任一侧没有 binding 的
+traffic 保持既有 generation rule。Coordinator-managed native freshness 跟随精确发布的 generation，
+而不是数值最大值。这是
 process-owned `RunLifecycleRegistry` 现在会在 capture 或 planning 前开始 candidate、保留 Graph
 lifetime lease，并原子安装一个 standalone Run 或包含两个 realtime child 的完整 bundle。
 Empty/no-op 与 connected-preflight 路径使用相同的 admission/finalization 边界。connected
@@ -476,8 +479,9 @@ subscription surface 都不属于当前软件契约。
 I1 evidence path 与 public graph-event ring 分离。其有界 request-scoped collector 会为十二次
 edit 预分配 observation slot，并为每次产品 transition 分配一个 collector-local causal
 sequence。Evaluator 会独立要求每个 current generation 的 product-bound accepted coordinate
-精确等于该 edit 调用前的 `(A_i,event_sequence_i)`，并要求 generation order 与 accepted-
-coordinate order 一致。Overflow 会使 row invalid，而不会静默丢弃 evidence。在冻结的 `Q_end`，runner 会先
+精确等于该 edit 调用前的 `(A_i,event_sequence_i)`，并要求 product generation 非零且唯一，
+但不按数值对其排序。对于这些已绑定 identity，currentness 只由 accepted-coordinate order 定义。
+Overflow 会使 row invalid，而不会静默丢弃 evidence。在冻结的 `Q_end`，runner 会先
 预留首个被排除 event 的 sequence。只有 monotonic sample 不晚于 `Q_end` 且 sequence 位于 cut
 之前的 product event 才属于 boundary history。随后 runner 可以消费已经产生的 future，并取得
 eventual Host/device `ResourceLedger` 与 `ExecutionLifecycleTelemetry` snapshot；但该较晚 snapshot

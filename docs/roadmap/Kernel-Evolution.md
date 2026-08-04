@@ -1141,9 +1141,12 @@ reserves a unique row-local `event_sequence_i` before that call; success creates
 exact coordinate `(A_i,event_sequence_i)`. The proposed coordinate travels
 through the private Host/Kernel request and is bound into product
 `SupersessionIdentity` before current publication; the current observation
-copies that exact binding. Coordinate-bound replacement requires generation
-and accepted coordinate to advance, while accepted-row and observer-causal
-sequences remain independent domains. Host return time/status never replace
+copies that exact binding. Coordinate-bound replacement requires only the
+accepted coordinate to advance; generation remains a unique preparation
+identity and may move numerically backward at a bound publication. Mixed and
+unbound traffic remains generation-ordered, while coordinator-managed native
+freshness follows the exact published generation. Accepted-row and observer-
+causal sequences remain independent domains. Host return time/status never replace
 the coordinate. Failure creates no accepted event, current observation, or
 product binding, invalidates the replicate, and cannot backfill an alternate
 timestamp. These facts use existing inner manifest/measurement evidence

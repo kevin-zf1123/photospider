@@ -433,9 +433,13 @@ Per-Graph latest-wins publication makes the newest complete identity
 authoritative for that exact key, requests cancellation of an older active
 owner, coalesces one pending owner, and still denies stale commit if
 cancellation arrives late. For two source-private identities carrying accepted
-coordinates, both generation and coordinate must advance; equal accepted
-timestamps are ordered by row-local event sequence. Traffic without a binding
-retains the established generation rule.
+coordinates, currentness advances solely by the accepted coordinate; equal
+accepted timestamps are ordered by row-local event sequence. Generation is a
+unique preparation identity and Run join key, not the bound logical admission
+order, so a newer coordinate can become current with a lower generation and an
+older coordinate cannot win with a higher one. Traffic with either side
+unbound retains the established generation rule. Coordinator-managed native
+freshness follows the exact published generation rather than a numeric maximum.
 The process-owned `RunLifecycleRegistry` now begins a candidate before capture
 or planning, retains a Graph lifetime lease, and atomically installs either one
 standalone Run or both realtime children as a complete bundle. Empty/no-op and
@@ -608,7 +612,9 @@ request-scoped collector preallocates observation slots for the twelve edits
 and assigns one collector-local causal sequence to every product transition.
 The evaluator separately requires each current generation's product-bound
 accepted coordinate to equal that edit's pre-call `(A_i,event_sequence_i)` and
-requires generation order to agree with accepted-coordinate order.
+requires product generations to be nonzero and unique without ordering them
+numerically. Accepted-coordinate order alone defines currentness for these
+bound identities.
 Overflow invalidates the row rather than dropping evidence silently. At the
 frozen `Q_end`, the runner first reserves the sequence of the first excluded
 event. A product event belongs to the boundary history only when its monotonic

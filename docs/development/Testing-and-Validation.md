@@ -1722,8 +1722,10 @@ Host, the runner reserves one unique, strictly increasing row-local
 `(A_i,event_sequence_i)`. Before Host invocation, the runner carries the typed
 proposed coordinate through the private Host/Kernel request; Kernel binds it
 into product `SupersessionIdentity` before current publication, and the current
-observation copies the exact binding. Bound replacement requires both
-generation and accepted coordinate to advance. The accepted-row and observer-
+observation copies the exact binding. Bound replacement requires only the
+accepted coordinate to advance; generation remains nonzero and unique but may
+move numerically backward because it records preparation order. Either-side-
+unbound traffic remains generation-ordered. The accepted-row and observer-
 causal sequence allocators are independent and each starts at one. Host return
 timestamp/status never replace the coordinate. Failure creates no accepted
 event, current observation, or accepted product binding, invalidates the
@@ -1759,6 +1761,7 @@ The mandatory I1 phase/drain scenario oracle is:
 | --- | --- |
 | Continuous isolated phase grid | Retain one `G^I1`; derive cold slot zero, warmup slots `1..20`, measured slots `21..220`, and only `T^I1=G^I1+221*750,000,000 ns` as a terminal non-start boundary. Map each phase's natural ordinal to zero-based `r`; reject a fresh phase origin, cooling delay, shifted slot, or late counter reset. |
 | Successful accepted-boundary coordinate | After validating each `A_i`, reserve its unique row-local `event_sequence_i` before Host invocation and carry `(A_i,event_sequence_i)` through the private Host/Kernel request seam. On success require the product supersession identity and current-generation observation to contain that exact coordinate; reject a Host return timestamp/status or observer callback time/sequence as a deadline, current-generation, supersession, tie-order, or substitute binding coordinate. |
+| Inverse preparation and accepted order | Use a deterministic Kernel barrier so the later accepted coordinate prepares generation one and pauses, the earlier coordinate prepares generation two and publishes current, then generation one resumes. Require the later coordinate to become current, cancel generation two, remain the sole visible output, and preserve equal-time row-sequence ordering. Repeat the inverse logical assertion to prove an older coordinate cannot replace current despite a higher generation. Require coordinator-managed native freshness to retain the exact published generation and reject a stale numerically higher transfer; require unbound and both mixed bound/unbound directions to retain generation ordering. |
 | Accepted and causal sequence domains | Start the row-local accepted sequence allocator and the observation sink's causal sequence allocator independently at one. Require each to be strictly ordered only within its own domain; never infer a row/product binding by numeric equality between the two sequences. |
 | Failed admission has no accepted event | On Host failure retain the reserved proposed coordinate and failure/return observations as raw inner evidence, invalidate the replicate, and require no accepted-admission event, current-generation observation, product binding, alternate timestamp, backfill, or outer schema field. |
 | Prepared Host resource failure cannot enter Kernel | Inject failure after all caller-side async resources and close tracking are prepared but immediately before Kernel entry. Require the public request to invoke no source callback, and require the I1 request to expose no current, cancellation, start, terminal, quiescence, resource-return, visibility, or Host-settlement observation. Disable the injection and require the next request to succeed as generation one. |

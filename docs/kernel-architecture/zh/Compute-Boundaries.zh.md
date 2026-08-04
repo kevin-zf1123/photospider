@@ -72,10 +72,15 @@ reserved-ticket turn 最多 materialize 一个 generation，并运行既有 Kern
 
 I1 request 可以通过 Host 与 Kernel 把一个可选的 source-private accepted-boundary coordinate
 带入 coordinator。Coordinator 会保存完整 current `SupersessionIdentity`。一个已绑定 coordinate
-的 candidate 只有在 generation 与 accepted coordinate 都严格推进时，才能替换另一个已绑定
-coordinate 的 current identity；admission timestamp 相等时，使用 row-local accepted sequence
-打破平局。两端都没有 binding 的旧 caller 保持仅按 generation 排序；bound/unbound 混合 identity
-同样保持 generation ordering，因此这条私有 evidence seam 不会改变 public 或非 I1 行为。
+的 candidate 只有在其 accepted coordinate 严格推进时，才能替换另一个已绑定 coordinate 的
+current identity；admission timestamp 相等时，使用 row-local accepted sequence 打破平局。
+Generation 仍是唯一 preparation identity 与 Run join key，因此在已绑定 current publication 时
+数值可以向后移动，不能否决较新的 coordinate。较旧 coordinate 即使拥有更高 generation 也不能
+替换 current。两端都没有 binding 的旧 caller 保持仅按 generation 排序；bound/unbound 混合
+identity 同样保持 generation ordering，因此这条私有 evidence seam 不会改变 public 或非 I1
+行为。进程 residency registry 会存储 coordinator-managed current generation 的精确值，而不是
+取数值最大值，因此数值更高的 stale generation 所产生的迟到 native work 无法在 coordinate
+授权 replacement 后恢复自身。
 
 Public 与 I1 asynchronous request 也会共享同一个 embedded-Host admission transaction。
 Host 在进入 Kernel 前构造所有可能失败的 caller-side resource：caller promise/future、成功

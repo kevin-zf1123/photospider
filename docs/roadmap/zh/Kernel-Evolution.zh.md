@@ -923,8 +923,10 @@ admission/acceptance timestamp。Harness 在该 call 前预留唯一 row-local
 `event_sequence_i`；成功时产生精确 coordinate `(A_i,event_sequence_i)`。Proposed
 coordinate 会通过 private Host/Kernel request 传递，并在 current publication 前绑定进
 product `SupersessionIdentity`；current observation 会复制该精确 binding。已绑定
-coordinate 的 replacement 要求 generation 与 accepted coordinate 都推进，而 accepted-row
-与 observer-causal sequence 保持为独立 domain。Host return time/status 保持为 raw
+coordinate 的 replacement 只要求 accepted coordinate 推进；generation 仍是唯一 preparation
+identity，并且可以在已绑定 publication 时数值向后移动。Mixed 与 unbound traffic 仍按
+generation 排序，coordinator-managed native freshness 则跟随精确发布的 generation。
+Accepted-row 与 observer-causal sequence 保持为独立 domain。Host return time/status 保持为 raw
 evidence，绝不替代该 coordinate。Failure 不产生 accepted event、current observation 或
 product binding，使 replicate invalid，也不能回填替代 timestamp。这些事实使用既有 inner
 manifest/measurement evidence，不新增 outer field。

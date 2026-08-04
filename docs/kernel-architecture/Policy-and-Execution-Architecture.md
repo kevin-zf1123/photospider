@@ -523,15 +523,19 @@ coordinate `(A_i, event_sequence_i)` and carries it through the source-private
 Host/Kernel request seam. Kernel binds that exact coordinate into
 `SupersessionIdentity`, and `ComputeRequestCoordinator` publishes and observes
 the complete current identity rather than reconstructing it from a later
-callback. For coordinate-bound I1 lineage, replacement requires both a
-strictly newer generation and a strictly newer accepted coordinate; equal
-timestamps are ordered by the row-local accepted sequence. The observation
-sink's causal sequence is a separate allocator and ordering domain that also
-starts at one. Current-generation evidence copies the product-bound accepted
-coordinate, and the evaluator requires an exact row-to-product binding plus
-strict product-coordinate order. A failed Host call may retain the proposed
-coordinate for diagnostics, but it cannot create an accepted row, current
-observation, or product binding.
+callback. For coordinate-bound I1 lineage, replacement requires only a
+strictly newer accepted coordinate; equal timestamps are ordered by the
+row-local accepted sequence. Generation remains nonzero and unique but records
+preparation arrival, so a coordinate-authorized publication may carry a lower
+generation. Mixed or unbound traffic remains generation-ordered. The native
+freshness manager adopts the exact coordinator-published generation and does
+not let a stale numerically higher Run observation restore itself. The
+observation sink's causal sequence is a separate allocator and ordering domain
+that also starts at one. Current-generation evidence copies the product-bound
+accepted coordinate, and the evaluator requires an exact row-to-product
+binding, unique nonzero generations, and strict product-coordinate order. A
+failed Host call may retain the proposed coordinate for diagnostics, but it
+cannot create an accepted row, current observation, or product binding.
 
 The ordinary public request and the source-private I1 request use the same
 embedded-Host preparation transaction. Caller promise/future ownership, the

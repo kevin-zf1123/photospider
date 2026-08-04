@@ -85,12 +85,18 @@ per-generation thread is created.
 An optional source-private accepted-boundary coordinate may accompany an I1
 request through Host and Kernel into this coordinator. The coordinator stores
 the complete current `SupersessionIdentity`. A coordinate-bound candidate may
-replace another coordinate-bound current identity only when both generation
-and accepted coordinate advance strictly; equal admission timestamps use the
-row-local accepted sequence as the tie-breaker. Legacy callers without either
-binding retain generation-only ordering. Mixed bound/unbound identities also
-retain generation ordering so this private evidence seam does not alter public
-or non-I1 behavior.
+replace another coordinate-bound current identity exactly when its accepted
+coordinate advances strictly; equal admission timestamps use the row-local
+accepted sequence as the tie-breaker. Generation remains a unique preparation
+identity and Run join key, so it may move numerically backward at a bound
+current publication and cannot veto the newer coordinate. An older coordinate
+cannot replace current even with a higher generation. Legacy callers without
+either binding retain generation-only ordering. Mixed bound/unbound identities
+also retain generation ordering so this private evidence seam does not alter
+public or non-I1 behavior. The process residency registry stores the exact
+coordinator-managed current generation instead of applying a numeric maximum,
+so late native work from a numerically higher stale generation cannot restore
+itself after coordinate-authorized replacement.
 
 Public and I1 asynchronous requests also share one embedded-Host admission
 transaction. Before entering Kernel, Host constructs every fallible caller-side

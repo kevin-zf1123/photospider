@@ -174,11 +174,18 @@ Host admission 成功时，accepted-admission 逻辑 event 的精确 coordinate 
 current-generation、latest-wins、supersession 与同 timestamp 排序都使用该
 coordinate。Collector 会把这个调用前预留的 coordinate 经 source-private I1 Host 与
 Kernel request 传递，并在 coordinator publication 前绑定到产品
-`SupersessionIdentity`。在带 binding 的 lineage 内，只有 graph-wide generation 与
-accepted coordinate 都向前推进时才能 replacement；timestamp 相同时使用 row-local
-sequence。独立的 observation `causal_sequence` 仍从一开始，并且只排列 lifecycle
-事实。Current-generation observation 与 evaluator 必须复现精确 identity binding，绝不能
-根据 callback/edit 顺序推断。之后的 Host return timestamp 与 status 只能保留为 raw
+`SupersessionIdentity`。Coordinator 持有 lineage lock 发布完整 identity 时，currentness
+完成线性化。当 current 与 candidate 都携带 accepted coordinate 时，该 coordinate 是唯一的
+replacement 顺序：即使 generation 数值更低，严格更新的 coordinate 也会替换 current；即使
+generation 更高，较旧或相同的 coordinate 也不能替换 current。Timestamp 相同时使用 row-local
+sequence。Generation 仍是非零且唯一的 preparation identity 与 Run join key，不编码已绑定
+admission 的顺序。只要任一 identity 未绑定，既有 generation 规则仍然具有权威性，因此 legacy
+与 mixed traffic 保持不变。Native freshness registry 会跟随 coordinator 精确发布的 managed
+current generation，而不是取数值最大值，防止数值更高的 stale generation 在 coordinate 授权
+replacement 后复活。独立的 observation `causal_sequence` 仍从一开始，并且只排列 lifecycle
+事实。Current-generation observation 与 evaluator 必须复现精确 identity binding，要求 generation
+非零且唯一、accepted coordinate 严格推进，并且绝不能根据 callback/edit 顺序推断 binding 或
+currentness。之后的 Host return timestamp 与 status 只能保留为 raw
 measurement evidence，不得替代或重新锚定该 coordinate；即使只在 return 时获知成功，
 也不会移动逻辑 boundary。Admission 失败时不存在 accepted-admission 逻辑 event；
 预留的 sequence 与 failure/return 事实保持为 raw evidence，replicate 无效，Harness

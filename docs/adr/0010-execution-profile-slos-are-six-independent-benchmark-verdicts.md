@@ -198,12 +198,23 @@ coordinate, and every current-generation, latest-wins, supersession, and
 same-timestamp ordering decision uses it. The collector carries that
 pre-reserved coordinate through the source-private I1 Host and Kernel request
 and binds it into the product `SupersessionIdentity` before coordinator
-publication. Within a bound lineage, replacement requires both the graph-wide
-generation and accepted coordinate to advance; equal timestamps use the
-row-local sequence. The independent observation `causal_sequence` still starts
-at one and orders lifecycle facts only. The current-generation observation and
-evaluator must reproduce the exact identity binding, never infer it from
-callback/edit order. The later Host return timestamp and status remain raw
+publication. Currentness linearizes when the coordinator publishes the complete
+identity under its lineage lock. When both current and candidate carry accepted
+coordinates, that coordinate is the sole replacement order: a strictly newer
+coordinate replaces current even when its generation is numerically lower, and
+an older or equal coordinate cannot replace current even when its generation is
+higher. Equal timestamps use the row-local sequence. Generation remains a
+nonzero unique preparation identity and Run join key; it does not encode bound
+admission order. If either identity is unbound, the established generation rule
+remains authoritative so legacy and mixed traffic are unchanged. The native
+freshness registry follows the coordinator's exact managed current generation
+rather than taking a numeric maximum, preventing a stale higher generation from
+reviving after coordinate-authorized replacement. The independent observation
+`causal_sequence` still starts at one and orders lifecycle facts only. The
+current-generation observation and evaluator must reproduce the exact identity
+binding, require nonzero unique generations plus strictly advancing accepted
+coordinates, and never infer binding or currentness from callback/edit order.
+The later Host return timestamp and status remain raw
 measurement evidence only; neither may replace or reanchor that coordinate,
 and learning success only on return does not move the logical boundary. On
 admission failure, no accepted-admission logical event
