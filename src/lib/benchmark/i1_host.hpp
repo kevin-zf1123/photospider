@@ -91,7 +91,11 @@ class I1Host {
    * @return Public-style scheduling result and future exact operation status.
    * @throws std::bad_alloc when admission/tracking ownership cannot allocate.
    * @note Returning a successful scheduling result is the I1 Host-acceptance
-   * boundary. The future reports later product execution settlement only.
+   * boundary. Caller publication, success-result ownership, status worker, and
+   * close tracking are prepared before Kernel can bind the proposed coordinate;
+   * a failed return therefore creates no current product identity. After Kernel
+   * acceptance, only a no-fail delivery publishes the prebuilt result. The
+   * future reports later product execution settlement only.
    */
   virtual Result<std::future<OperationStatus>> compute_i1_async(
       I1HostComputeRequest request) = 0;

@@ -21,10 +21,64 @@
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+namespace ps {
+
+/**
+ * @brief Enables or clears deterministic prepared async-admission failure.
+ * @param enabled True to fail after complete Host setup and before Kernel
+ * entry.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void set_embedded_host_async_admission_failure_for_testing(
+    bool enabled) noexcept;
+
+}  // namespace ps
+#endif
+
 namespace ps::benchmark {
 namespace {
 
 using std::chrono_literals::operator""s;
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+/**
+ * @brief Owns one lexical prepared-admission failure injection.
+ * @throws Nothing.
+ * @note Destruction restores the process-local switch before another I1 call or
+ * embedded Host teardown.
+ */
+class ScopedEmbeddedAsyncAdmissionFailure final {
+ public:
+  /** @brief Enables deterministic pre-Kernel failure. @throws Nothing. */
+  ScopedEmbeddedAsyncAdmissionFailure() noexcept {
+    ps::set_embedded_host_async_admission_failure_for_testing(true);
+  }
+
+  /** @brief Clears deterministic pre-Kernel failure. @throws Nothing. */
+  ~ScopedEmbeddedAsyncAdmissionFailure() noexcept {
+    ps::set_embedded_host_async_admission_failure_for_testing(false);
+  }
+
+  /**
+   * @brief Prevents duplicate switch ownership.
+   * @param other Guard that retains the installed switch.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedEmbeddedAsyncAdmissionFailure(
+      const ScopedEmbeddedAsyncAdmissionFailure& other) = delete;
+
+  /**
+   * @brief Prevents replacing switch ownership.
+   * @param other Guard that retains the installed switch.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedEmbeddedAsyncAdmissionFailure& operator=(
+      const ScopedEmbeddedAsyncAdmissionFailure& other) = delete;
+};
+#endif
 
 /**
  * @brief Owns one isolated filesystem root for the embedded I1 integration.
@@ -348,6 +402,128 @@ bool host_high_water_advanced(
          final_snapshot.high_water.ready_bytes >
              baseline.high_water.ready_bytes;
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+/**
+ * @brief Proves failed prepared I1 admission binds no product identity or
+ * output.
+ *
+ * @return Nothing; GoogleTest assertions report admission, observation, or
+ * recovery mismatches.
+ * @throws std::bad_alloc, filesystem, or synchronization exceptions from the
+ * real embedded product fixture.
+ * @note The first call fails after every Host-side resource is prepared but
+ * before Kernel entry. The second call then proves the same common path remains
+ * usable and receives generation one with only its own accepted coordinate.
+ */
+TEST(I1ProductPath, PreparedAdmissionFailureLeavesNoProductBindingAndRecovers) {
+  ScopedI1TempDirectory temp;
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const VoidResult seeded = host->seed_builtin_ops();
+  ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+  HostExecutionConfig execution_config;
+  execution_config.worker_count = 8U;
+  const VoidResult configured =
+      host->configure_execution_defaults(execution_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+
+  const std::filesystem::path yaml_path = temp.root() / "i1-rejection.yaml";
+  write_reduced_i1_graph(yaml_path);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"i1-prepared-admission-rejection"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = yaml_path.string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  const Result<GraphSessionId> loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  I1Host* const i1_host = as_i1_host(*host);
+  ASSERT_NE(i1_host, nullptr);
+  I1EpisodeObservationCollector observations;
+  const auto shared_admission_time = std::chrono::steady_clock::now();
+
+  Result<std::future<OperationStatus>> rejected;
+  {
+    ScopedEmbeddedAsyncAdmissionFailure injected_failure;
+    rejected = i1_host->compute_i1_async(I1HostComputeRequest{
+        make_reduced_request(load.session, 0U),
+        compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                               std::chrono::steady_clock::now() + 5s, 1U, 8U},
+        observations.make_edit_sink(0U),
+        I1AcceptedCoordinate{shared_admission_time, 1U}});
+  }
+  EXPECT_FALSE(rejected.status.ok);
+  EXPECT_EQ(checked_graph_error_code(rejected.status), GraphErrc::ComputeError);
+  EXPECT_NE(rejected.status.message.find(
+                "injected embedded Host async admission preparation failure"),
+            std::string::npos);
+  EXPECT_FALSE(rejected.value.valid());
+
+  const I1EpisodeObservationSnapshot rejected_snapshot =
+      observations.snapshot();
+  EXPECT_FALSE(rejected_snapshot.overflowed);
+  EXPECT_TRUE(rejected_snapshot.current_generations.empty());
+  EXPECT_TRUE(rejected_snapshot.service_starts.empty());
+  EXPECT_TRUE(rejected_snapshot.cancellations.empty());
+  EXPECT_TRUE(rejected_snapshot.terminals.empty());
+  EXPECT_TRUE(rejected_snapshot.visible_outputs.empty());
+  EXPECT_TRUE(rejected_snapshot.run_quiescences.empty());
+  EXPECT_TRUE(rejected_snapshot.resource_settlements.empty());
+  EXPECT_TRUE(rejected_snapshot.host_settlements.empty());
+
+  Result<std::future<OperationStatus>> recovered =
+      i1_host->compute_i1_async(I1HostComputeRequest{
+          make_reduced_request(load.session, 1U),
+          compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                                 std::chrono::steady_clock::now() + 5s, 1U, 8U},
+          observations.make_edit_sink(1U),
+          I1AcceptedCoordinate{shared_admission_time, 2U}});
+  ASSERT_TRUE(recovered.status.ok) << recovered.status.message;
+  ASSERT_TRUE(recovered.value.valid());
+  ASSERT_EQ(recovered.value.wait_for(5s), std::future_status::ready);
+  const OperationStatus recovered_status = recovered.value.get();
+  EXPECT_TRUE(recovered_status.ok) << recovered_status.message;
+
+  const VoidResult closed = host->close_graph(load.session);
+  ASSERT_TRUE(closed.status.ok) << closed.status.message;
+  const I1EpisodeObservationSnapshot recovered_snapshot =
+      observations.snapshot();
+  ASSERT_FALSE(recovered_snapshot.overflowed);
+  ASSERT_EQ(recovered_snapshot.current_generations.size(), 1U);
+  const I1ObservedCurrentGeneration& current =
+      recovered_snapshot.current_generations.front();
+  EXPECT_EQ(current.edit_index, 1U);
+  EXPECT_EQ(current.generation, 1U);
+  ASSERT_TRUE(current.accepted_coordinate.has_value());
+  EXPECT_EQ(current.accepted_coordinate->admission_time(),
+            shared_admission_time);
+  EXPECT_EQ(current.accepted_coordinate->event_sequence(), 2U);
+  EXPECT_TRUE(recovered_snapshot.cancellations.empty());
+  ASSERT_EQ(recovered_snapshot.terminals.size(), 1U);
+  EXPECT_EQ(recovered_snapshot.terminals.front().edit_index, 1U);
+  EXPECT_EQ(recovered_snapshot.terminals.front().kind,
+            compute::ComputeRunTerminalKind::Succeeded);
+  ASSERT_EQ(recovered_snapshot.visible_outputs.size(), 1U);
+  EXPECT_EQ(recovered_snapshot.visible_outputs.front().edit_index, 1U);
+  ASSERT_EQ(recovered_snapshot.host_settlements.size(), 1U);
+  EXPECT_EQ(recovered_snapshot.host_settlements.front().edit_index, 1U);
+  ASSERT_FALSE(recovered_snapshot.service_starts.empty());
+  for (const I1ObservedServiceStart& start :
+       recovered_snapshot.service_starts) {
+    EXPECT_EQ(start.edit_index, 1U);
+  }
+  for (const I1ObservedRunLifecycleTransition& transition :
+       recovered_snapshot.run_quiescences) {
+    EXPECT_EQ(transition.edit_index, 1U);
+  }
+  for (const I1ObservedRunLifecycleTransition& transition :
+       recovered_snapshot.resource_settlements) {
+    EXPECT_EQ(transition.edit_index, 1U);
+  }
+}
+#endif
 
 /**
  * @brief Exercises the full embedded latest-wins path with deterministic

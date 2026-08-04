@@ -517,18 +517,23 @@ class PHOTOSPIDER_API Host {
    *         to-status translation, or copied result construction exhausts
    *         memory.
    * @throws std::system_error if local worker creation or a worker-join
-   *         system/lifecycle invariant fails. The IPC worker is created before
-   *         submission, so creation failure has no remote side effect.
+   *         system/lifecycle invariant fails. Embedded and IPC workers are
+   *         created before submission, so creation failure has no backend side
+   *         effect.
    * @note The embedded backend work item owns its exact failure category and
    *       message; the wrapper never reconstructs the result from mutable
    *       LastError state. Embedded scheduling pre-registers a close-visible
-   *       placeholder, releases the Host lifecycle mutex before bounded-lane
-   *       submission, and either publishes the accepted backend future or
-   *       removes the rejected placeholder. Close first stops lane admission,
-   *       then waits until every accepted caller-visible promise is ready
-   *       before releasing the runtime. Consuming the returned future may
-   *       rethrow `std::bad_alloc` from backend compute/result translation or
-   *       `std::system_error` from IPC polling synchronization.
+   *       placeholder and prepares its caller future, success Result, backend
+   *       delivery bridge, and joined status worker before Kernel entry. It
+   *       releases the Host lifecycle mutex before bounded-lane submission and
+   *       either crosses a no-fail delivery boundary for the accepted backend
+   *       future or joins the worker and removes rejected tracking. Thus a
+   *       scheduling failure exposes no product acceptance/current binding,
+   *       while no fallible Host setup follows product publication. Close first
+   *       stops lane admission, then waits until every accepted caller-visible
+   *       promise is ready before releasing the runtime. Consuming the returned
+   *       future may rethrow `std::bad_alloc` from backend compute/result
+   *       translation or `std::system_error` from IPC polling synchronization.
    */
   virtual Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) = 0;

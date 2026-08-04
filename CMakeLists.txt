@@ -818,12 +818,12 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-# These eight translation units own the Issue #72, Issue #75, Issue #76, and
-# Issue #82 deterministic observation seams. The installable archive always
-# receives their production objects; focused tests receive a non-installed
-# variant while reusing every common object. Keeping the split at
-# translation-unit granularity avoids compiling a second copy of the complete
-# embedded product.
+# These nine translation units own the Issue #72, Issue #75, Issue #76,
+# Issue #82, and Issue #93 deterministic observation/failure seams. The
+# installable archive always receives their production objects; focused tests
+# receive a non-installed variant while reusing every common object. Keeping
+# the split at translation-unit granularity avoids compiling a second copy of
+# the complete embedded product.
 set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
     src/lib/compute/compute_task_submission.cpp
     src/lib/compute/dirty_update_executor.cpp
@@ -831,6 +831,7 @@ set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
     src/lib/compute/resource_demand_estimator.cpp
     src/lib/graph/graph_cache_service.cpp
     src/lib/graph/graph_state_executor.cpp
+    src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp)
 foreach(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE
@@ -847,7 +848,7 @@ list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
 
 # Apply the private compile environment shared by production and test-only
 # product object variants. Test-seam definitions are intentionally added by
-# the caller only to the eight-source test object target.
+# the caller only to the nine-source test object target.
 function(configure_photospider_product_objects TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
@@ -935,6 +936,7 @@ set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
     PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+    PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
@@ -948,6 +950,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_compile_definitions(
             photospider_internal_test_product_seam_objects PRIVATE
+            PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
+            PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
             PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
     endif()
 
@@ -959,8 +963,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 endif()
 
 # Fail configuration if a future refactor accidentally restores an Issue #72,
-# Issue #75, Issue #76, or Issue #82 test definition on any production product
-# target.
+# Issue #75, Issue #76, Issue #82, or Issue #93 test definition on any
+# production product target.
 function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
     get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
         ${TARGET_NAME} COMPILE_DEFINITIONS)
@@ -1965,6 +1969,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+        PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING
     )
@@ -1982,8 +1987,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         add_ps_test(test_i1_product_path
-            tests/integration/test_i1_product_path.cpp)
+            tests/integration/test_i1_product_path.cpp
+            photospider_internal_test_product)
         target_compile_definitions(test_i1_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
             PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         add_ps_test(test_opencv_operation_concurrency
             tests/integration/test_opencv_operation_concurrency.cpp)
@@ -2536,6 +2543,7 @@ if(TARGET photospider_internal_test_product)
         test_compute_run
         test_compute_service_split
         test_host_adapter
+        test_i1_product_path
         test_kernel_contracts
         test_policy_execution)
     set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS "")

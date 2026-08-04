@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,39 @@
 #include "runtime/kernel.hpp"
 
 namespace ps {
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+namespace {
+
+/**
+ * @brief Enables one deterministic failure after async Host preparation.
+ *
+ * @throws Nothing for atomic initialization and access.
+ * @note The source-private switch exists only in the non-installed test
+ * product. Tests serialize mutation and restore `false` before product
+ * teardown.
+ */
+std::atomic<bool> g_embedded_async_admission_failure_enabled{false};
+
+/**
+ * @brief Throws the deterministic prepared-admission failure when enabled.
+ * @return Nothing when injection is disabled.
+ * @throws std::system_error when the test switch is enabled.
+ * @note The checkpoint runs only after caller publication, backend delivery,
+ * status-worker, and close-tracking ownership are fully prepared, but before
+ * any InteractionService or Kernel call can publish product identity.
+ */
+void inject_embedded_async_admission_failure() {
+  if (g_embedded_async_admission_failure_enabled.load(
+          std::memory_order_acquire)) {
+    throw std::system_error(
+        std::make_error_code(std::errc::resource_unavailable_try_again),
+        "injected embedded Host async admission preparation failure");
+  }
+}
+
+}  // namespace
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
@@ -210,8 +244,10 @@ struct EmbeddedHostState {
    * @brief Tracked async compute submitted through the Host adapter.
    *
    * @throws Nothing for destruction.
-   * @note The shared future is copied into this table so graph close can wait
-   *       for backend work before releasing the graph runtime.
+   * @note The joined status worker receives backend ownership through a
+   *       preallocated delivery bridge. Graph close waits that worker before
+   *       releasing the graph runtime, so no second shared-future copy is
+   *       required in this table.
    */
   struct TrackedAsyncCompute {
     /** @brief Adapter-local tracking id. */
@@ -219,16 +255,6 @@ struct EmbeddedHostState {
 
     /** @brief Session whose runtime is used by the async compute. */
     GraphSessionId session;
-
-    /**
-     * @brief Shared backend completion future for the compute request.
-     *
-     * @note The entry stays in outstanding_async_ until the Host wrapper has
-     *       converted the backend-owned exact result into OperationStatus. A
-     *       ready backend future alone is not enough to close the session
-     *       because status publication is part of the accepted operation.
-     */
-    std::shared_future<Kernel::AsyncComputeResult> future;
 
     /**
      * @brief Joined worker that publishes the public OperationStatus future.
@@ -426,24 +452,6 @@ struct EmbeddedHostState {
 
     /** @brief Registered admission id, or zero for an empty token. */
     uint64_t id_ = 0;
-  };
-
-  /**
-   * @brief Result of scheduling backend async compute under Host tracking lock.
-   *
-   * @throws Nothing for destruction.
-   * @note `scheduled=false` means no backend task was queued, either because
-   *       the backend rejected the request or because the session is closing.
-   */
-  struct AsyncComputeRegistration {
-    /** @brief True when backend work was scheduled and tracked atomically. */
-    bool scheduled = false;
-
-    /** @brief Adapter-local tracking id for the scheduled backend future. */
-    uint64_t tracking_id = 0;
-
-    /** @brief Shared exact backend result consumed by the Host wrapper. */
-    std::shared_future<Kernel::AsyncComputeResult> future;
   };
 
   /**
@@ -657,135 +665,73 @@ struct EmbeddedHostState {
 #endif
 
   /**
-   * @brief Pre-registers and schedules backend async compute for close safety.
+   * @brief Reserves close-visible ownership before preparing async admission.
    *
-   * @tparam Submitter Callable returning an optional future with the exact
-   *         backend async result.
-   * @param session Session whose runtime will be captured by backend work.
-   * @param submitter Backend submission callable executed without the Host
-   *        lifecycle mutex.
-   * @return Registration containing a tracked shared future, or
-   * `scheduled=false`.
-   * @throws std::bad_alloc if placeholder, task, or future-state allocation
-   *         fails.
-   * @throws std::system_error if Host or graph-state synchronization fails.
-   * @throws Any non-close backend submission exception unchanged after the
-   *         placeholder is removed. A lane `std::runtime_error` caused by this
-   *         session's published close marker becomes `scheduled=false`.
-   * @note Phase one reserves a placeholder under `lifecycle_mutex_`; phase two
-   *       releases that mutex before entering the bounded graph-state lane.
-   *       Close therefore observes every in-flight submitter, can publish its
-   *       marker, and can stop lane admission to wake a full-queue producer.
-   *       The placeholder remains incomplete until scheduling either publishes
-   *       the shared future or removes the entry. No post-submit Host
-   * allocation is required to establish runtime ownership.
+   * @param session Session whose runtime may later be captured by backend work.
+   * @return Adapter-local tracking id, or nullopt when close already owns the
+   *         session edge.
+   * @throws std::bad_alloc if session or table ownership cannot allocate.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note The placeholder is installed before caller-promise, worker, or Kernel
+   *       publication can race with close. The caller must either attach its
+   *       fully prepared worker or roll the id back without entering Kernel.
    */
-  template <typename Submitter>
-  AsyncComputeRegistration schedule_and_track_async_compute(
-      const GraphSessionId& session, Submitter&& submitter) {
-    static_assert(
-        noexcept(
-            std::declval<std::future<Kernel::AsyncComputeResult>&>().share()),
-        "future::share must not allocate after backend scheduling");
-
+  std::optional<uint64_t> reserve_async_compute_tracking(
+      const GraphSessionId& session) {
     reap_published_async_compute();
     const uint64_t id = next_async_id_.fetch_add(1, std::memory_order_relaxed);
-    {
-      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-      if (session_close_in_progress_locked(session)) {
-        return AsyncComputeRegistration{};
-      }
-      TrackedAsyncCompute placeholder;
-      placeholder.id = id;
-      placeholder.session = session;
-      outstanding_async_.push_back(std::move(placeholder));
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (session_close_in_progress_locked(session)) {
+      return std::nullopt;
     }
+    TrackedAsyncCompute placeholder;
+    placeholder.id = id;
+    placeholder.session = session;
+    outstanding_async_.push_back(std::move(placeholder));
+    return id;
+  }
 
-    std::shared_future<Kernel::AsyncComputeResult> shared_future;
-    try {
-      auto future = submitter();
-      if (!future) {
-        remove_async_compute_tracking(id);
-        return AsyncComputeRegistration{};
-      }
-      shared_future = future->share();
-    } catch (const std::system_error&) {
-      remove_async_compute_tracking(id);
-      throw;
-    } catch (const std::runtime_error&) {
-      bool close_in_progress = false;
-      {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-        close_in_progress = session_close_in_progress_locked(session);
-        outstanding_async_.erase(
-            std::remove_if(outstanding_async_.begin(), outstanding_async_.end(),
-                           [id](const TrackedAsyncCompute& tracked) {
-                             return tracked.id == id;
-                           }),
-            outstanding_async_.end());
-      }
-      lifecycle_cv_.notify_all();
-      if (close_in_progress) {
-        return AsyncComputeRegistration{};
-      }
-      throw;
-    } catch (...) {
-      remove_async_compute_tracking(id);
-      throw;
-    }
-
-    {
-      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-      auto tracked = std::find_if(
-          outstanding_async_.begin(), outstanding_async_.end(),
-          [id](const TrackedAsyncCompute& entry) { return entry.id == id; });
-      if (tracked != outstanding_async_.end()) {
-        tracked->future = shared_future;
-      }
-    }
-    lifecycle_cv_.notify_all();
-
-    AsyncComputeRegistration registration;
-    registration.scheduled = true;
-    registration.tracking_id = id;
-    registration.future = std::move(shared_future);
-    return registration;
+  /**
+   * @brief Tests whether close claimed a session after async pre-registration.
+   * @param session Session whose Kernel lane rejected asynchronous submission.
+   * @return True only when this Host has published the matching close marker.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note This method is consulted only while translating a backend
+   *       `std::runtime_error`; unrelated runtime errors remain unchanged.
+   */
+  bool async_compute_close_in_progress(const GraphSessionId& session) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return session_close_in_progress_locked(session);
   }
 
   /**
    * @brief Attaches the joined public-status worker to a tracked compute.
    *
-   * @param id Tracking id returned by schedule_and_track_async_compute().
+   * @param id Tracking id returned by reserve_async_compute_tracking().
    * @param worker Joinable worker that owns the status promise.
    * @return Nothing.
    * @throws Nothing.
-   * @note Attachment uses the preallocated placeholder and cannot allocate.
-   * Close treats an unattached worker as unfinished, covering the interval
-   * between backend acceptance and wrapper-worker publication.
+   * @note Attachment uses the preallocated placeholder and cannot allocate. A
+   * missing id or synchronization failure is a fatal structural invariant:
+   * waiting an unowned worker here could deadlock on its undelivered bridge.
    */
   void attach_async_status_worker(uint64_t id,
                                   std::future<void> worker) noexcept {
-    bool attached = false;
-    {
+    try {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
       const auto tracked = std::find_if(
           outstanding_async_.begin(), outstanding_async_.end(),
           [id](const TrackedAsyncCompute& entry) { return entry.id == id; });
-      if (tracked != outstanding_async_.end()) {
-        tracked->status_worker = std::move(worker);
-        tracked->status_worker_attached = true;
-        attached = true;
+      if (tracked == outstanding_async_.end() ||
+          tracked->status_worker_attached) {
+        std::terminate();
       }
+      tracked->status_worker = std::move(worker);
+      tracked->status_worker_attached = true;
+    } catch (...) {
+      std::terminate();
     }
     lifecycle_cv_.notify_all();
-    if (!attached) {
-      try {
-        if (worker.valid()) {
-          worker.wait();
-        }
-      } catch (...) {
-      }
-    }
   }
 
   /**
@@ -811,27 +757,38 @@ struct EmbeddedHostState {
   }
 
   /**
-   * @brief Removes one async placeholder or completed tracking entry.
+   * @brief Rolls back one prepared but backend-unaccepted async admission.
    *
-   * @param id Tracking id whose backend/runtime ownership is no longer pending.
+   * @param id Tracking id whose delivery bridge has already received rejection.
    * @return Nothing.
    * @throws Nothing.
-   * @note Before backend acceptance this rolls back the pre-registration. After
-   *       acceptance, callers must first wait the backend future so removal
-   *       cannot let close destroy a runtime still captured by untracked work.
-   *       Every removal notifies close waiters.
+   * @note The worker future is moved out before erasing its entry, then joined
+   *       without `lifecycle_mutex_`. The delivery sentinel must be published
+   *       first so an attached worker cannot block this rollback indefinitely.
+   *       Calling this method after backend acceptance is a contract violation.
    */
-  void remove_async_compute_tracking(uint64_t id) noexcept {
-    {
+  void rollback_prepared_async_compute(uint64_t id) noexcept {
+    std::future<void> worker;
+    try {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-      outstanding_async_.erase(
-          std::remove_if(outstanding_async_.begin(), outstanding_async_.end(),
-                         [id](const TrackedAsyncCompute& tracked) {
-                           return tracked.id == id;
-                         }),
-          outstanding_async_.end());
+      const auto tracked = std::find_if(
+          outstanding_async_.begin(), outstanding_async_.end(),
+          [id](const TrackedAsyncCompute& entry) { return entry.id == id; });
+      if (tracked == outstanding_async_.end()) {
+        std::terminate();
+      }
+      worker = std::move(tracked->status_worker);
+      outstanding_async_.erase(tracked);
+    } catch (...) {
+      std::terminate();
     }
     lifecycle_cv_.notify_all();
+    try {
+      if (worker.valid()) {
+        worker.wait();
+      }
+    } catch (...) {
+    }
   }
 
   /**
@@ -1374,6 +1331,37 @@ OperationStatus await_async_compute_status(
   } catch (...) {
     return status_from_unknown_exception("compute_async",
                                          GraphErrc::ComputeError);
+  }
+}
+
+/** @brief Optional backend ownership delivered to one prepared status worker.
+ */
+// NOLINTBEGIN(whitespace/indent_namespace)
+using AsyncBackendDelivery =
+    std::optional<std::shared_future<Kernel::AsyncComputeResult>>;
+// NOLINTEND
+
+/**
+ * @brief Satisfies one preallocated backend-delivery bridge without failure.
+ *
+ * @param publication Sole producer for the worker's bridge shared state.
+ * @param delivery Accepted shared backend future, or nullopt for rollback.
+ * @return Nothing.
+ * @throws Nothing; a broken single-producer/one-settlement invariant
+ * terminates.
+ * @note Every potentially allocating bridge operation, including construction
+ * and `get_future()`, occurs before Kernel entry. `set_value()` can then fail
+ * only for invalid/already-satisfied shared state or a throwing payload move;
+ * both are excluded here and checked as structural invariants.
+ */
+void publish_async_backend_delivery(
+    std::promise<AsyncBackendDelivery>& publication,
+    AsyncBackendDelivery delivery) noexcept {
+  static_assert(std::is_nothrow_move_constructible_v<AsyncBackendDelivery>);
+  try {
+    publication.set_value(std::move(delivery));
+  } catch (...) {
+    std::terminate();
   }
 }
 
@@ -3890,10 +3878,12 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
    *
    * The method first validates installed execution controls and the optional
    * all-or-none private I1 QoS/observer/accepted-coordinate tuple. It then
-   * translates the ordinary Host request, attaches the private fields,
-   * pre-registers lifecycle
-   * tracking, submits through InteractionService, and joins one status worker
-   * that publishes the exact backend outcome before notifying close.
+   * translates the ordinary Host request, attaches the private fields, and
+   * prepares caller publication, backend delivery, the joined status worker,
+   * the success Result envelope, and close-visible tracking before entering
+   * InteractionService. Kernel acceptance then crosses only a no-fail bridge to
+   * the prepared worker, which publishes the exact outcome before notifying
+   * close.
    *
    * @param request Ordinary Host request transferred into tracking ownership.
    * @param run_qos Optional complete private I1 QoS; absence selects the
@@ -3903,14 +3893,20 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
    * @param accepted_coordinate Optional pre-call row-local coordinate paired
    * with `run_qos` and `observation_sink`.
    * @return Scheduling status and a future for the exact product outcome.
-   * @throws std::bad_alloc when request, future, or tracking ownership cannot
-   * allocate.
+   * @throws std::bad_alloc when request, future, worker, result, or tracking
+   * ownership cannot allocate before Kernel entry.
    * @throws std::system_error from Host/backend synchronization.
-   * @note A successful return is the Host acceptance boundary. Later compute
-   * cancellation or failure is reported only by the returned future. For an I1
-   * observer, the status worker reserves Host-settlement evidence only after
-   * making that future ready and publishing the matching tracking state.
-   * Private fields never enter the installed Host request or any IPC value.
+   * @note A successful return is the Host acceptance boundary. The Kernel call
+   * may publish current product identity concurrently before it returns, so no
+   * fallible Host setup remains after that call succeeds: `future::share`, the
+   * single-producer bridge delivery, and the prebuilt Result move are all
+   * no-throw boundaries. Rejection or a pre-publication Kernel exception first
+   * sends the bridge's empty sentinel, joins the worker outside the lifecycle
+   * mutex, and removes tracking. Later compute cancellation or failure is
+   * reported only by the returned future. For an I1 observer, the status worker
+   * reserves Host-settlement evidence only after making that future ready and
+   * publishing the matching tracking state. Private fields never enter the
+   * installed Host request or any IPC value.
    */
   Result<std::future<OperationStatus>> compute_async_internal(
       HostComputeRequest request, std::optional<compute::ComputeRunQos> run_qos,
@@ -3952,72 +3948,117 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
           std::shared_ptr<compute::ComputeRunObservationSink>
               status_observation_sink = observation_sink;
           kernel_request.observation_sink = std::move(observation_sink);
-          GraphSessionId session = request.session;
+          GraphSessionId status_session = request.session;
           std::shared_ptr<EmbeddedHostState> state = state_;
-          EmbeddedHostState::AsyncComputeRegistration registration =
-              state->schedule_and_track_async_compute(
-                  request.session, [state, kernel_request = std::move(
-                                               kernel_request)]() mutable {
-                    return state->interaction.cmd_compute_async(
-                        std::move(kernel_request));
-                  });
-          if (!registration.scheduled) {
+
+          std::optional<std::promise<OperationStatus>> status_publication(
+              std::in_place);
+          std::future<OperationStatus> caller_future =
+              status_publication->get_future();
+          Result<std::future<OperationStatus>> accepted_result =
+              success_result(std::move(caller_future));
+          std::promise<AsyncBackendDelivery> backend_publication;
+          std::future<AsyncBackendDelivery> backend_delivery =
+              backend_publication.get_future();
+
+          const std::optional<uint64_t> tracking_id =
+              state->reserve_async_compute_tracking(request.session);
+          if (!tracking_id.has_value()) {
             return failure_result<std::future<OperationStatus>>(
                 GraphErrc::NotFound,
                 "failed to schedule compute for graph session: " +
                     request.session.value);
           }
 
-          std::shared_future<Kernel::AsyncComputeResult> shared_future =
-              std::move(registration.future);
-          const uint64_t tracking_id = registration.tracking_id;
-          std::future<OperationStatus> wrapped;
+          bool admission_finalized = false;
+          auto rollback_prepared_admission = [&]() noexcept {
+            if (admission_finalized) {
+              return;
+            }
+            publish_async_backend_delivery(backend_publication, std::nullopt);
+            state->rollback_prepared_async_compute(*tracking_id);
+            admission_finalized = true;
+          };
+
           try {
-            // After backend acceptance, every allocating setup stage is covered
-            // by the catch path until the joined worker is attached.
-            std::optional<std::promise<OperationStatus>> publication(
-                std::in_place);
-            wrapped = publication->get_future();
             EmbeddedHostState* const state_ptr = state.get();
             std::future<void> status_worker = std::async(
                 std::launch::async,
-                [state_ptr, session, tracking_id, shared_future,
+                [state_ptr, session = std::move(status_session),
+                 tracking_id = *tracking_id,
                  status_observation_sink = std::move(status_observation_sink),
-                 publication = std::move(publication)]() mutable {
-                  // set_value/set_exception (or reset as the defensive
-                  // fallback) makes the caller-visible future ready before
-                  // close is notified.
+                 backend_delivery = std::move(backend_delivery),
+                 publication = std::move(status_publication)]() mutable {
+                  bool backend_accepted = false;
                   try {
-                    publication->set_value(
-                        await_async_compute_status(shared_future, session));
+                    AsyncBackendDelivery delivered = backend_delivery.get();
+                    if (delivered.has_value()) {
+                      backend_accepted = true;
+                      publication->set_value(
+                          await_async_compute_status(*delivered, session));
+                    } else {
+                      publication.reset();
+                    }
                   } catch (...) {
                     const std::exception_ptr failure = std::current_exception();
                     try {
-                      publication->set_exception(failure);
+                      if (publication.has_value()) {
+                        publication->set_exception(failure);
+                      }
                     } catch (...) {
                       publication.reset();
                     }
                   }
                   state_ptr->mark_async_status_published(tracking_id);
-                  if (status_observation_sink != nullptr) {
+                  if (backend_accepted && status_observation_sink != nullptr) {
                     const compute::ComputeRunObservationCoordinate coordinate =
                         status_observation_sink->reserve_causal_coordinate();
                     status_observation_sink->on_host_settled(coordinate);
                   }
                 });
-            state->attach_async_status_worker(tracking_id,
+            state->attach_async_status_worker(*tracking_id,
                                               std::move(status_worker));
-          } catch (...) {
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+            inject_embedded_async_admission_failure();
+#endif
+
+            std::optional<std::future<Kernel::AsyncComputeResult>>
+                backend_future;
             try {
-              if (shared_future.valid()) {
-                shared_future.wait();
+              backend_future = state->interaction.cmd_compute_async(
+                  std::move(kernel_request));
+            } catch (const std::system_error&) {
+              throw;
+            } catch (const std::runtime_error&) {
+              if (!state->async_compute_close_in_progress(request.session)) {
+                throw;
               }
-            } catch (...) {
             }
-            state->remove_async_compute_tracking(tracking_id);
+            if (!backend_future.has_value()) {
+              rollback_prepared_admission();
+              return failure_result<std::future<OperationStatus>>(
+                  GraphErrc::NotFound,
+                  "failed to schedule compute for graph session: " +
+                      request.session.value);
+            }
+
+            static_assert(
+                noexcept(backend_future->share()),
+                "future::share must not fail after Kernel acceptance");
+            std::shared_future<Kernel::AsyncComputeResult> shared_future =
+                backend_future->share();
+            publish_async_backend_delivery(
+                backend_publication,
+                AsyncBackendDelivery{std::move(shared_future)});
+            admission_finalized = true;
+            static_assert(std::is_nothrow_move_constructible_v<
+                          Result<std::future<OperationStatus>>>);
+            return accepted_result;
+          } catch (...) {
+            rollback_prepared_admission();
             throw;
           }
-          return success_result(std::move(wrapped));
         });
   }
 
@@ -4026,6 +4067,23 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
 };
 
 }  // namespace
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+/**
+ * @brief Enables or clears deterministic prepared async-admission failure.
+ * @param enabled True to fail after complete Host preparation and before
+ * Kernel.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Tests serialize calls and restore false before destroying their Host.
+ * Production builds contain neither this symbol nor its checkpoint.
+ */
+void set_embedded_host_async_admission_failure_for_testing(
+    bool enabled) noexcept {
+  g_embedded_async_admission_failure_enabled.store(enabled,
+                                                   std::memory_order_release);
+}
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
