@@ -1,3 +1,4 @@
+#include <fenv.h>  // NOLINT(build/c++11)
 #include <gtest/gtest.h>
 
 #include <array>
@@ -5,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <future>
 #include <limits>
 #include <memory>
@@ -18,6 +20,133 @@
 
 namespace ps::benchmark {
 namespace {
+
+/**
+ * @brief Restores the calling test thread's complete floating-point state.
+ *
+ * @throws std::runtime_error when the initial environment cannot be captured.
+ * @note This owner does not modify the environment after capture. Destruction
+ * restores rounding, sticky exception flags, and every other environment
+ * control; restoration failure terminates because contaminating a later test
+ * would make suite behavior order-dependent.
+ */
+class ScopedTestFloatingPointEnvironment final {
+ public:
+  /**
+   * @brief Captures the complete environment of the current test thread.
+   * @throws std::runtime_error when `fegetenv` cannot capture that state.
+   */
+  ScopedTestFloatingPointEnvironment() {
+    if (fegetenv(&initial_environment_) != 0) {
+      throw std::runtime_error(
+          "cannot capture the test thread floating-point environment");
+    }
+  }
+
+  /**
+   * @brief Restores the complete environment captured at construction.
+   * @throws Nothing; restoration failure terminates the process.
+   */
+  ~ScopedTestFloatingPointEnvironment() noexcept {
+    if (fesetenv(&initial_environment_) != 0) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of test-thread restoration.
+   * @param other Guard retaining restoration responsibility.
+   * @throws Nothing because copying is unavailable.
+   */
+  ScopedTestFloatingPointEnvironment(
+      const ScopedTestFloatingPointEnvironment& other) = delete;
+
+  /**
+   * @brief Prevents replacing test-thread restoration ownership.
+   * @param other Guard that remains responsible for its captured environment.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedTestFloatingPointEnvironment& operator=(
+      const ScopedTestFloatingPointEnvironment& other) = delete;
+
+ private:
+  /** @brief Complete calling-thread environment restored after the test. */
+  fenv_t initial_environment_{};
+};
+
+/**
+ * @brief Owns one RNE scope for the independent mathematical oracle.
+ *
+ * @throws std::runtime_error when the platform cannot capture the complete
+ * calling-thread environment, install RNE, or restore the captured environment
+ * after installation fails.
+ * @note The complete prior environment, including rounding and sticky
+ * exception flags, is restored on every normal or exceptional exit.
+ * Destruction-time restoration failure terminates because leaking oracle state
+ * would contaminate later tests on the reused thread.
+ */
+class ScopedReferenceBinary32RoundToNearest final {
+ public:
+  /**
+   * @brief Captures the complete caller environment and installs RNE.
+   * @throws std::runtime_error when capture or installation fails. After a
+   * successful capture, installation failure first attempts complete
+   * restoration and reports separately if that recovery also fails.
+   */
+  ScopedReferenceBinary32RoundToNearest() {
+    if (fegetenv(&previous_environment_) != 0) {
+      throw std::runtime_error(
+          "I1 oracle cannot capture the floating-point environment");
+    }
+    if (fesetround(FE_TONEAREST) != 0) {
+      if (fesetenv(&previous_environment_) != 0) {
+        throw std::runtime_error(
+            "I1 oracle cannot install binary32 RNE rounding or restore the "
+            "floating-point environment");
+      }
+      throw std::runtime_error(
+          "I1 oracle cannot install binary32 RNE rounding");
+    }
+  }
+
+  /**
+   * @brief Restores the caller's complete prior floating-point environment.
+   * @throws Nothing; restoration failure terminates the process.
+   * @note Full restoration removes exceptions raised by oracle arithmetic while
+   * preserving every flag and control value present on scope entry.
+   */
+  ~ScopedReferenceBinary32RoundToNearest() noexcept {
+    if (fesetenv(&previous_environment_) != 0) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of one oracle rounding scope.
+   * @param other Guard retaining restoration responsibility.
+   * @throws Nothing because copying is unavailable.
+   */
+  ScopedReferenceBinary32RoundToNearest(
+      const ScopedReferenceBinary32RoundToNearest& other) = delete;
+
+  /**
+   * @brief Prevents replacing one oracle rounding scope.
+   * @param other Guard retaining restoration responsibility.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedReferenceBinary32RoundToNearest& operator=(
+      const ScopedReferenceBinary32RoundToNearest& other) = delete;
+
+ private:
+  /**
+   * @brief Complete environment restored before returning to the caller.
+   * @note The value becomes valid only after successful `fegetenv`; a failed
+   * constructor never reaches destruction.
+   */
+  fenv_t previous_environment_{};
+};
 
 /**
  * @brief Independently rounds one exact byte fraction to IEEE binary32.
@@ -70,7 +199,8 @@ float reference_byte_fraction(std::uint8_t numerator) noexcept {
  * @return Binary32 result of `1 / (1 + input * coefficient)`.
  * @throws Nothing.
  * @note Volatile intermediates forbid contraction and retain the three
- * contract rounding boundaries without calling candidate provider code.
+ * contract rounding boundaries without calling candidate provider code. The
+ * caller owns an active `ScopedReferenceBinary32RoundToNearest`.
  */
 float reference_curve_stage(float input, float coefficient) noexcept {
   volatile float product = input * coefficient;
@@ -82,11 +212,22 @@ float reference_curve_stage(float input, float coefficient) noexcept {
 /**
  * @brief Recomputes the frozen final digest from the mathematical contract.
  * @return Canonical-v1 logical-content digest of the exact edit-eleven image.
- * @throws Value/digest allocation and descriptor validation failures unchanged.
+ * @throws std::runtime_error when the complete caller environment cannot be
+ * captured, RNE cannot be installed, failed installation cannot restore the
+ * captured environment, or the canonical digest is unavailable.
+ * @throws std::invalid_argument when the fixed tensor descriptor, image facet,
+ * layout, or storage envelope is rejected.
+ * @throws std::overflow_error when the fixed Value address envelope cannot be
+ * represented.
+ * @throws std::bad_alloc when oracle storage, immutable Value state, or digest
+ * metadata cannot allocate.
  * @note The oracle constructs HWC bytes directly and never loads the frozen
- * YAML, Host, Kernel, scheduler, cache, or OpenCV provider implementation.
+ * YAML, Host, Kernel, scheduler, cache, or OpenCV provider implementation. It
+ * restores the complete caller environment on normal and exceptional exit;
+ * destruction-time restoration failure is fail-stop.
  */
 ContentDigest recompute_i1_golden_from_reference_contract() {
+  ScopedReferenceBinary32RoundToNearest rounding_scope;
   constexpr std::size_t kChannels = 4U;
   constexpr std::size_t kElementBytes = sizeof(float);
   constexpr std::array<float, kI1FrozenCurveNodeCount> kCoefficients{
@@ -169,6 +310,33 @@ Value make_collector_test_output() {
 TEST(I1Profile, FrozenGoldenMatchesIndependentReferenceContract) {
   EXPECT_EQ(recompute_i1_golden_from_reference_contract(),
             i1_frozen_final_content_digest());
+}
+
+/**
+ * @brief Proves the independent golden ignores and preserves ambient fenv.
+ * @throws Floating-point setup, allocation, descriptor, and digest failures
+ * unchanged to GoogleTest.
+ * @note The test installs upward rounding and two sticky exceptions before the
+ * full source, four-stage, and digest calculation. The oracle must still reach
+ * the frozen RNE golden and restore both rounding and every `FE_ALL_EXCEPT`
+ * flag. The outer owner restores the test thread's original environment after
+ * any assertion or exception.
+ */
+TEST(I1Profile, FrozenGoldenRestoresNonDefaultCallerEnvironment) {
+  ScopedTestFloatingPointEnvironment restore_initial_environment;
+  ASSERT_EQ(fesetenv(FE_DFL_ENV), 0);
+  ASSERT_EQ(fesetround(FE_UPWARD), 0);
+  ASSERT_EQ(feclearexcept(FE_ALL_EXCEPT), 0);
+  constexpr int kPresetExceptions = FE_INVALID | FE_DIVBYZERO;
+  ASSERT_EQ(feraiseexcept(kPresetExceptions), 0);
+  ASSERT_EQ(fegetround(), FE_UPWARD);
+  ASSERT_EQ(fetestexcept(FE_ALL_EXCEPT), kPresetExceptions);
+
+  EXPECT_EQ(recompute_i1_golden_from_reference_contract(),
+            i1_frozen_final_content_digest());
+
+  EXPECT_EQ(fegetround(), FE_UPWARD);
+  EXPECT_EQ(fetestexcept(FE_ALL_EXCEPT), kPresetExceptions);
 }
 
 /**
