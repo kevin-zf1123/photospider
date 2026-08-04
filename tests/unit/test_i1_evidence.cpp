@@ -2,18 +2,25 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
+#include <new>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "benchmark/i1_evidence.hpp"
 #include "photospider/data/value.hpp"
 #include "verification/i1_evidence_json.hpp"
+#include "verification/i1_evidence_workflow.hpp"
 
 namespace ps::benchmark {
 namespace {
@@ -291,6 +298,266 @@ void erase_events_for_edit(std::vector<Event>* events,
                                  return event.edit_index == edit_index;
                                }),
                 events->end());
+}
+
+/**
+ * @brief Deterministically rejects one async launch as resource exhaustion.
+ * @param task Unscheduled task destroyed on exceptional return.
+ * @return Never returns.
+ * @throws std::system_error with a stable injected resource diagnostic.
+ */
+std::future<I1EpisodeInnerRow> throw_system_error_launcher(
+    I1EpisodeEvaluationTask task) {
+  (void)task;
+  throw std::system_error(
+      std::make_error_code(std::errc::resource_unavailable_try_again),
+      "injected I1 async launcher failure");
+}
+
+/**
+ * @brief Deterministically rejects one async launch as allocation failure.
+ * @param task Unscheduled task destroyed on exceptional return.
+ * @return Never returns.
+ * @throws std::bad_alloc unconditionally.
+ */
+std::future<I1EpisodeInnerRow> throw_bad_alloc_launcher(
+    I1EpisodeEvaluationTask task) {
+  (void)task;
+  throw std::bad_alloc();
+}
+
+/**
+ * @brief Deterministically rejects synchronous recovery evaluation.
+ * @param input Recovered closed evidence consumed by value.
+ * @return Never returns.
+ * @throws std::runtime_error with a stable injected evaluation diagnostic.
+ */
+I1EpisodeInnerRow throw_recovery_evaluator(I1EpisodeEvidenceInput input) {
+  (void)input;
+  throw std::runtime_error("injected I1 synchronous evaluation failure");
+}
+
+/** @brief True after a controlled worker reaches the internal commit gate. */
+std::atomic<bool> gate_worker_arrived{false};
+
+/** @brief True after the controlled evaluator is allowed to consume input. */
+std::atomic<bool> gate_evaluator_entered{false};
+
+/** @brief Whether the launcher observed evaluation before returning. */
+std::atomic<bool> gate_launcher_saw_evaluator{false};
+
+/**
+ * @brief Records that a controlled worker reached the prepared launch gate.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void observe_worker_at_launch_gate() noexcept {
+  gate_worker_arrived.store(true, std::memory_order_release);
+}
+
+/**
+ * @brief Launches a worker and waits until it reaches the prepared gate.
+ * @param task Gated task whose evaluator must remain blocked before return.
+ * @return Sole valid async future.
+ * @throws std::system_error or std::bad_alloc from `std::async` unchanged.
+ * @note A one-second observation guard avoids an unbounded test hang; the
+ * future is still returned so the workflow can commit/join before assertions.
+ */
+std::future<I1EpisodeInnerRow> launch_worker_before_return(
+    I1EpisodeEvaluationTask task) {
+  std::future<I1EpisodeInnerRow> future =
+      std::async(std::launch::async, std::move(task));
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (!gate_worker_arrived.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  gate_launcher_saw_evaluator.store(
+      gate_evaluator_entered.load(std::memory_order_acquire),
+      std::memory_order_release);
+  return future;
+}
+
+/**
+ * @brief Records evaluator entry before applying the real I1 evaluation.
+ * @param input Recovered or asynchronously committed closed evidence.
+ * @return Real evaluated row.
+ * @throws Evaluator allocation and structural exceptions unchanged.
+ */
+I1EpisodeInnerRow observe_then_evaluate(I1EpisodeEvidenceInput input) {
+  gate_evaluator_entered.store(true, std::memory_order_release);
+  return evaluate_i1_episode(std::move(input));
+}
+
+/**
+ * @brief Decodes exact slot order from verification NDJSON text.
+ * @param content Complete newline-delimited row text.
+ * @return Slot values in physical line order.
+ * @throws JSON parsing/type and allocation failures unchanged.
+ */
+std::vector<std::size_t> ndjson_slots(const std::string& content) {
+  std::vector<std::size_t> slots;
+  std::istringstream input(content);
+  std::string line;
+  while (std::getline(input, line)) {
+    if (!line.empty()) {
+      slots.push_back(
+          nlohmann::json::parse(line).at("grid").at("slot").get<std::size_t>());
+    }
+  }
+  return slots;
+}
+
+/**
+ * @brief Proves a launcher `system_error` closes and drains the current slot.
+ * @throws Nothing when recovery, exact ordering, and propagation are stable.
+ * @note The statement following the throwing workflow models later slot
+ * submission and must remain unreachable. A second drain proves cursor-based
+ * retry does not duplicate either the prior or recovered row.
+ */
+TEST(I1Evidence, AsyncSystemErrorRecoversCurrentRowBeforeFailurePropagation) {
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  rows.push_back(evaluate_i1_episode(make_valid_input(0U)));
+  std::optional<std::future<I1EpisodeInnerRow>> pending_evaluation;
+  std::size_t later_submission_count = 0U;
+  bool failure_propagated = false;
+
+  try {
+    start_i1_episode_evaluation(make_valid_input(1U), &pending_evaluation,
+                                &rows, &throw_system_error_launcher,
+                                &evaluate_i1_episode);
+    ++later_submission_count;
+  } catch (const std::system_error& error) {
+    failure_propagated = true;
+    EXPECT_EQ(error.code(),
+              std::make_error_code(std::errc::resource_unavailable_try_again));
+    EXPECT_NE(
+        std::string(error.what()).find("injected I1 async launcher failure"),
+        std::string::npos);
+  }
+
+  EXPECT_TRUE(failure_propagated);
+  EXPECT_EQ(later_submission_count, 0U);
+  EXPECT_FALSE(pending_evaluation.has_value());
+  ASSERT_EQ(rows.size(), 2U);
+  EXPECT_EQ(rows[0U].evidence.slot, 0U);
+  EXPECT_EQ(rows[1U].evidence.slot, 1U);
+  EXPECT_EQ(
+      std::count_if(rows.begin(), rows.end(),
+                    [](const auto& row) { return row.evidence.slot == 1U; }),
+      1);
+
+  std::ostringstream output;
+  std::size_t written = 0U;
+  flush_i1_episode_rows(&output, rows, &written);
+  flush_i1_episode_rows(&output, rows, &written);
+  EXPECT_EQ(written, 2U);
+  EXPECT_EQ(ndjson_slots(output.str()), (std::vector<std::size_t>{0U, 1U}));
+}
+
+/**
+ * @brief Proves allocation-like launcher failure uses the same recovery path.
+ * @throws Nothing when the original `bad_alloc` propagates after one row.
+ */
+TEST(I1Evidence, AsyncBadAllocRecoversCurrentRowBeforeFailurePropagation) {
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  std::optional<std::future<I1EpisodeInnerRow>> pending_evaluation;
+
+  EXPECT_THROW(start_i1_episode_evaluation(
+                   make_valid_input(0U), &pending_evaluation, &rows,
+                   &throw_bad_alloc_launcher, &evaluate_i1_episode),
+               std::bad_alloc);
+  EXPECT_FALSE(pending_evaluation.has_value());
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().evidence.slot, 0U);
+}
+
+/**
+ * @brief Proves dual launch/evaluation failure retains both exact exceptions.
+ * @throws Nothing when both diagnostics survive and prior rows remain
+ * drainable.
+ */
+TEST(I1Evidence, AsyncLaunchAndRecoveryFailureRetainBothDiagnostics) {
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  rows.push_back(evaluate_i1_episode(make_valid_input(0U)));
+  std::optional<std::future<I1EpisodeInnerRow>> pending_evaluation;
+
+  try {
+    start_i1_episode_evaluation(make_valid_input(1U), &pending_evaluation,
+                                &rows, &throw_system_error_launcher,
+                                &throw_recovery_evaluator);
+    FAIL() << "expected combined I1 launch/recovery failure";
+  } catch (const I1EpisodeEvaluationRecoveryError& error) {
+    EXPECT_NE(
+        std::string(error.what()).find("injected I1 async launcher failure"),
+        std::string::npos);
+    EXPECT_NE(std::string(error.what())
+                  .find("injected I1 synchronous evaluation failure"),
+              std::string::npos);
+    EXPECT_THROW(std::rethrow_exception(error.launch_failure()),
+                 std::system_error);
+    EXPECT_THROW(std::rethrow_exception(error.evaluation_failure()),
+                 std::runtime_error);
+  }
+
+  EXPECT_FALSE(pending_evaluation.has_value());
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().evidence.slot, 0U);
+  std::ostringstream output;
+  std::size_t written = 0U;
+  flush_i1_episode_rows(&output, rows, &written);
+  EXPECT_EQ(ndjson_slots(output.str()), (std::vector<std::size_t>{0U}));
+}
+
+/**
+ * @brief Proves successful launch installs exactly one future and no fallback.
+ * @throws Nothing when the production async boundary transfers ownership once.
+ */
+TEST(I1Evidence, AsyncSuccessInstallsSoleFutureWithoutSynchronousFallback) {
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  std::optional<std::future<I1EpisodeInnerRow>> pending_evaluation;
+
+  start_i1_episode_evaluation(make_valid_input(0U), &pending_evaluation, &rows);
+  ASSERT_TRUE(pending_evaluation.has_value());
+  EXPECT_TRUE(pending_evaluation->valid());
+  EXPECT_TRUE(rows.empty());
+
+  rows.push_back(pending_evaluation->get());
+  pending_evaluation.reset();
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().evidence.slot, 0U);
+}
+
+/**
+ * @brief Proves a worker entering before launcher return cannot consume input.
+ * @throws Nothing when the atomic commit gate enforces the handoff order.
+ */
+TEST(I1Evidence, AsyncWorkerWaitsForFutureInstallationBeforeEvaluation) {
+  gate_worker_arrived.store(false, std::memory_order_relaxed);
+  gate_evaluator_entered.store(false, std::memory_order_relaxed);
+  gate_launcher_saw_evaluator.store(false, std::memory_order_relaxed);
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  std::optional<std::future<I1EpisodeInnerRow>> pending_evaluation;
+
+  start_i1_episode_evaluation(make_valid_input(0U), &pending_evaluation, &rows,
+                              &launch_worker_before_return,
+                              &observe_then_evaluate,
+                              &observe_worker_at_launch_gate);
+
+  EXPECT_TRUE(gate_worker_arrived.load(std::memory_order_acquire));
+  EXPECT_FALSE(gate_launcher_saw_evaluator.load(std::memory_order_acquire));
+  ASSERT_TRUE(pending_evaluation.has_value());
+  rows.push_back(pending_evaluation->get());
+  pending_evaluation.reset();
+  EXPECT_TRUE(gate_evaluator_entered.load(std::memory_order_acquire));
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().evidence.slot, 0U);
 }
 
 /**

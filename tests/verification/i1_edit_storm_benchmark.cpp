@@ -27,6 +27,7 @@
 #include "benchmark/i1_evidence.hpp"
 #include "photospider/host/host.hpp"
 #include "verification/i1_evidence_json.hpp"
+#include "verification/i1_evidence_workflow.hpp"
 
 #ifndef PHOTOSPIDER_I1_PROJECT_SOURCE_DIR
 #error "PHOTOSPIDER_I1_PROJECT_SOURCE_DIR must name the project checkout"
@@ -374,50 +375,6 @@ void freeze_visible_outputs_until(
 }
 
 /**
- * @brief Starts payload-free episode evaluation on one owned worker future.
- * @param input Closed raw evidence whose visible Values have been released.
- * @return Sole future owning evaluation completion or exception transport.
- * @throws std::system_error when the async worker cannot be launched.
- * @throws std::bad_alloc when callable/future ownership cannot allocate.
- * @note The worker owns all moved input. It performs no JSON or file I/O and
- * cannot access collector, Host, Graph, or runner-local references.
- */
-std::future<I1EpisodeInnerRow> evaluate_episode_async(
-    I1EpisodeEvidenceInput input) {
-  return std::async(std::launch::async, [input = std::move(input)]() mutable {
-    return evaluate_i1_episode(std::move(input));
-  });
-}
-
-/**
- * @brief Appends all not-yet-written rows in deterministic slot order.
- * @param output Open binary NDJSON destination.
- * @param rows Closed rows ordered by exact grid slot.
- * @param written In/out number of durably flushed rows.
- * @return Nothing after each appended line has been flushed and checked.
- * @throws std::invalid_argument when either mutable pointer is null.
- * @throws std::runtime_error when stream output fails.
- * @throws nlohmann/std allocation or encoding failures unchanged.
- * @note The cursor advances only after a successful flush, so normal and
- * exceptional drains never duplicate an already durable row.
- */
-void flush_episode_rows(std::ofstream* output,
-                        const std::vector<I1EpisodeInnerRow>& rows,
-                        std::size_t* written) {
-  if (output == nullptr || written == nullptr) {
-    throw std::invalid_argument("I1 episode output state is null.");
-  }
-  while (*written < rows.size()) {
-    *output << i1_inner_row_json(rows[*written]).dump() << '\n';
-    output->flush();
-    if (!*output) {
-      throw std::runtime_error("failed to append episodes.ndjson");
-    }
-    ++*written;
-  }
-}
-
-/**
  * @brief Reports whether one episode has any incomplete evidence dimension.
  * @param row Evaluated inner row.
  * @return True when at least one independent verdict is Invalid.
@@ -730,11 +687,11 @@ I1ReplicateSummary run_exact_replicate(
           failed_admission_diagnostic +=
               "; failed admission did not produce four Invalid verdicts";
         }
-        flush_episode_rows(&episode_output, rows, &written_rows);
+        flush_i1_episode_rows(&episode_output, rows, &written_rows);
         throw std::runtime_error(failed_admission_diagnostic);
       }
 
-      pending_evaluation.emplace(evaluate_episode_async(std::move(input)));
+      start_i1_episode_evaluation(std::move(input), &pending_evaluation, &rows);
       if (slot + 1U == kI1GridSlotCount) {
         if (pending_evaluation->wait_until(terminal_boundary) !=
             std::future_status::ready) {
@@ -752,7 +709,7 @@ I1ReplicateSummary run_exact_replicate(
       }
     }
 
-    flush_episode_rows(&episode_output, rows, &written_rows);
+    flush_i1_episode_rows(&episode_output, rows, &written_rows);
   } catch (...) {
     const std::exception_ptr primary_failure = std::current_exception();
     if (pending_evaluation.has_value() && pending_evaluation->valid()) {
@@ -763,7 +720,7 @@ I1ReplicateSummary run_exact_replicate(
       pending_evaluation.reset();
     }
     try {
-      flush_episode_rows(&episode_output, rows, &written_rows);
+      flush_i1_episode_rows(&episode_output, rows, &written_rows);
     } catch (const std::exception& flush_error) {
       try {
         std::rethrow_exception(primary_failure);

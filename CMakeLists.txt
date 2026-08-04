@@ -2027,7 +2027,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             ${OpenCV_LIBS})
         add_executable(i1_edit_storm_benchmark EXCLUDE_FROM_ALL
             tests/verification/i1_edit_storm_benchmark.cpp
-            tests/verification/i1_evidence_json.cpp)
+            tests/verification/i1_evidence_json.cpp
+            tests/verification/i1_evidence_workflow.cpp)
         set_target_properties(i1_edit_storm_benchmark PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
             BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
@@ -2048,7 +2049,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
     add_ps_test(test_i1_evidence tests/unit/test_i1_evidence.cpp)
     target_sources(test_i1_evidence PRIVATE
-        tests/verification/i1_evidence_json.cpp)
+        tests/verification/i1_evidence_json.cpp
+        tests/verification/i1_evidence_workflow.cpp)
     target_link_libraries(test_i1_evidence PRIVATE
         nlohmann_json::nlohmann_json)
     add_ps_test(test_i1_profile tests/unit/test_i1_profile.cpp)
