@@ -537,6 +537,22 @@ item 的一部分，因此 codec/filesystem error 可能让 Run 失败且不发�
 成功返回。Graph 文档保存仍是拥有自身 status 的独立 graph-state operation，绝不会改写 Run
 terminal state。
 
+Issue #94 在既有 realtime request flow 上增加一条可选的 source-private progressive branch。
+Embedded Host 与 Kernel 只有在私有 I2 caller 提供时才转发 `ProgressiveComputeOptions`。
+ComputeService 随后保持 RT 与 HP child descriptor 彼此独立，强制 progressive RT dirty path
+顺序执行，并暂缓 HP submission。Current RT preview commit 后，graph-state lane 会把其不可变
+Value 发布给 observation sink；接着消费 progressive gate、发出 final-trigger coordinate，并
+立即提交 HP child。若 cancellation 或 supersession 在 gate consumption 前获胜，则会抑制 final
+submission。Gate 已消费后，普通 generation/currentness commit check 仍会阻止 stale HP
+result 成为 visible。
+
+只有这条 progressive RT branch 会要求 dirty-source execution 执行精确对齐的 factor-four
+RGBA FP32 box average。它把每个 4x4 channel mean 只舍入一次到 binary32，将 proxy output
+封装为不可变 rank-three HWC Value，再执行相同的四个 curve stage。HP child 始终从原始
+2048x2048 source 进入未改变的 I1 full-resolution path，绝不从 preview pixel 派生。
+`ProgressiveComputeOptions` 缺失时，普通 realtime request 保留原先的并发 RT/HP planning、
+submission 与 publication 行为。
+
 ## 边界与原理
 
 - 同一份 request plan 同时提供顺序与并行执行语义；execution strategy 只改变机制，不改变
@@ -583,12 +599,16 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/benchmark/i1_host.hpp`
 - `src/lib/benchmark/i1_profile.*`
 - `src/lib/benchmark/i1_evidence.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/compute_io_executor.*`
 - `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/progressive_compute.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/compute/compute_supersession.*`
@@ -599,6 +619,7 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/compute/compute_task_dispatcher.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/compute/dirty_update_executor.*`
+- `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_compute_io_executor.cpp`
@@ -608,6 +629,10 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`
 - `tests/unit/test_i1_profile.cpp`
 - `tests/unit/test_i1_evidence.cpp`
 - `tests/integration/test_i1_product_path.cpp`

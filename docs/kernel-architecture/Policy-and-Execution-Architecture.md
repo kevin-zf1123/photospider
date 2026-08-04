@@ -603,11 +603,28 @@ The target contract deliberately reuses legal current descriptor values rather
 than inventing an execution-profile enum. I1 is
 `GlobalHighPrecision`/`Full`; I2's realtime request lineage carries an
 `Interactive`-quality `RealTimeUpdate` preview child and a `Full`-quality
-`GlobalHighPrecision` final child, each with explicit Interactive QoS. #94 must
-provide the target progressive trigger/publication observer; that state machine
-is not a current public API. Required logical equality uses
+`GlobalHighPrecision` final child, each with explicit Interactive QoS. The
+current #94 implementation carries optional source-private progressive options
+through embedded Host, Kernel, and ComputeService. A successful current RT
+preview publication arms one cancellation-ordered gate, emits the observation-
+only final-trigger coordinate, and submits the HP child immediately afterward;
+supersession or cancellation can deny that gate, and ordinary realtime requests
+retain the previous concurrent behavior when the option is absent. This state
+machine is not a public Host, IPC, CLI, or plugin API. Required logical equality
+uses
 `compute_content_digest(Value)` and the typed
 `Sha256CanonicalV1` `ContentDigest`, not raw storage bytes.
+
+The source-private I2 profile and evidence evaluator implement the frozen
+111-slot grid, twelve-edit admissions, child descriptors, publication ordering,
+Host acquisition, conditional real-Metal residency, lifecycle/resource
+settlement, and four independent inner verdicts. The manual
+`i2_progressive_benchmark` target is `EXCLUDE_FROM_ALL`, is absent from CTest,
+and writes `execution-profile-i2-inner-row-v1` evidence only to a caller-selected
+directory. That inner record is not the canonical ADR 0010 15-field outer row,
+bundle, or reference comparison. Building it or passing deterministic tests is
+therefore not an I2 machine-conformance claim; the exact 111-slot workload must
+be invoked explicitly and retained before any such claim.
 
 Likewise, current `ComputeIoExecutor` supplies only bounded task/planned-byte
 mechanism and exact settlement snapshots. #95 must compose it with ADR 0009's
@@ -633,6 +650,11 @@ bytes do not replace diagnostic RSS or ledger/device ownership evidence.
 - `src/lib/benchmark/i1_host.hpp`
 - `src/lib/benchmark/i1_profile.*`
 - `src/lib/benchmark/i1_evidence.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
+- `src/lib/compute/progressive_compute.*`
+- `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/resource_ledger.*`
 - `src/lib/execution/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
@@ -652,6 +674,11 @@ bytes do not replace diagnostic RSS or ledger/device ownership evidence.
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/verification/i2_progressive_benchmark.cpp`
 - `tests/unit/test_i1_profile.cpp`
 - `tests/unit/test_i1_evidence.cpp`
 - `tests/integration/test_i1_product_path.cpp`

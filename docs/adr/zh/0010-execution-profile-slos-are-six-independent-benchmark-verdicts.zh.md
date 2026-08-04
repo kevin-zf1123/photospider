@@ -1631,6 +1631,13 @@ good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidenc
 | #95 | 实现 B1 immutable manifest、occurrence-scoped job/task identity、reservation、canonical semantic trace、crash-durable artifact commit、固定 storage/performance probe-to-schema adapter、mount normalization、唯一 encoder/digest、eligibility/B1 check 与 logical/raw golden；在 Run cap 1 与 8 下发布 closed-schema isolated throughput、determinism、zero-fault waste 与 memory 行。 |
 | #96 | 把精确 I1 与 B1 fixture 组合为 M1；复用 #93 的 I1 accepted-boundary collector 且不得重新定义，将第一次 measured edit 精确绑定到 `edit_index=0`、`A_0` 与其 call 前预留的 sequence；实现固定的 `C^M1`/`W^M1` cold/warmup origin、count、B1 offer protocol、跨 `B^M1` I1 settlement，以及通过 `[B^M1,B^M1+2,000,000 ns]` 内该成功 coordinate 实现的 final-warmup current-hold 冻结例外；实现精确 cutoff/carryover/FIFO/phase-attribution 与 temporal-resource boundary；把既有 `cycle_ordinal` component 解释为每个 measured B1 Graph 的独立 producer-local counter，且绝不把它当作 retry 或新增 field；原样复用精确 v1 manifest byte，强制执行 same-ordinal 完整 M1/B1 environment pair，同时让 I1-only pair 只比较 base，并发布 closed-schema mixed latency、throughput progress、fairness、waste 与 memory 行。 |
 
+当前 #94 源码树已实现其私有 preview-then-final 产品协调、精确 preview/final arithmetic、
+Host 与条件式真实 Metal acquisition evidence、连续 grid profile、fail-closed inner evaluator，
+以及显式手工 runner。其输出的 `execution-profile-i2-inner-row-v1` record 有意窄于本 ADR
+冻结的 canonical outer row、bundle 与 reference composition。Runner 被排除在默认 build
+与 CTest 之外，本文也不声明已经产生精确 111-slot 机器结果。因此，该实现状态完成了负责的
+mechanism 与 inner-evidence surface，但不会提升缺失的机器运行，也不声称完成 #95/#96。
+
 每个 Issue 可以为其机制新增长期确定性行为测试，但不能重定义 workload，也不能
 用缺失、invalid 或不同版本的行提升目标。与机器相关的 latency、throughput 与
 reference ratio 保持为长期手工/release benchmark，不是普通 CTest 或默认 CI

@@ -486,10 +486,23 @@ execution-profile evidence。
 目标契约有意复用合法的当前 descriptor value，而不是虚构 execution-profile enum。
 I1 使用 `GlobalHighPrecision`/`Full`；I2 的 realtime request lineage 携带
 `Interactive` quality 的 `RealTimeUpdate` preview child 与 `Full` quality 的
-`GlobalHighPrecision` final child，二者都使用显式 Interactive QoS。#94 必须提供
-目标 progressive trigger/publication observer；该 state machine 不是当前 public API。
+`GlobalHighPrecision` final child，二者都使用显式 Interactive QoS。当前 #94 实现通过
+embedded Host、Kernel 与 ComputeService 贯通可选的 source-private progressive options。
+成功且仍为 current 的 RT preview publication 会 arm 一个按取消顺序裁决的 gate，发出仅用于
+观测的 final-trigger coordinate，并紧接着提交 HP child；supersession 或 cancellation 可以
+deny 该 gate，而未提供该 option 的普通 realtime request 保留原先的并发行为。该 state
+machine 不是 public Host、IPC、CLI 或 plugin API。
 必需 logical equality 使用 `compute_content_digest(Value)` 与 typed
 `Sha256CanonicalV1` `ContentDigest`，而不是 raw storage byte。
+
+Source-private I2 profile 与 evidence evaluator 已实现冻结的 111-slot grid、十二次 edit
+admission、child descriptor、publication ordering、Host acquisition、条件式真实 Metal
+residency、lifecycle/resource settlement，以及四项相互独立的 inner verdict。手工
+`i2_progressive_benchmark` target 为 `EXCLUDE_FROM_ALL`，不属于 CTest，并且只向调用者选择的
+目录写入 `execution-profile-i2-inner-row-v1` evidence。该 inner record 不是 ADR 0010
+canonical 15-field outer row、bundle 或 reference comparison。因此，仅构建它或通过
+deterministic test 不构成 I2 机器符合性声明；任何此类声明都必须显式运行并保留完整精确的
+111-slot workload 证据。
 
 同样，当前 `ComputeIoExecutor` 只提供 bounded task/planned-byte mechanism 与精确
 settlement snapshot。#95 必须把它与 ADR 0009 的唯一目标 `OutputStore` authority、
@@ -514,6 +527,11 @@ diagnostic RSS 或 ledger/device ownership evidence。
 - `src/lib/benchmark/i1_host.hpp`
 - `src/lib/benchmark/i1_profile.*`
 - `src/lib/benchmark/i1_evidence.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
+- `src/lib/compute/progressive_compute.*`
+- `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/resource_ledger.*`
 - `src/lib/execution/compute_io_executor.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
@@ -533,6 +551,11 @@ diagnostic RSS 或 ledger/device ownership evidence。
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/verification/i2_progressive_benchmark.cpp`
 - `tests/unit/test_i1_profile.cpp`
 - `tests/unit/test_i1_evidence.cpp`
 - `tests/integration/test_i1_product_path.cpp`

@@ -854,6 +854,18 @@ data-provider v3 records, policy-plugin v1 records, SDK targets, IPC, and CLI.
 The observer receives copied facts and an immutable final Value only; it is not
 a fourth extension boundary and exposes no callback to a DSO.
 
+Issue #94 likewise changes none of the installed ABI inventories, layouts,
+symbols, or package components. `ProgressiveComputeOptions`,
+`ProgressiveFinalGate`, I2 Host/profile/evidence types, and their observation
+callbacks remain under `src/lib`; no field enters the installed Host request,
+IPC or CLI grammar, operation registrar, data-provider v3 table, or policy-
+plugin v1 table. The exact preview primitive is an internal CPU helper. The
+rank-three HWC Metal upload is an internal generalization of the existing
+process-owned executor and publishes through unchanged `Value`, `AccessPlan`,
+residency, and ledger contracts; it exports neither native handles nor a new
+provider callback. The manual runner and deterministic tests are consumers of
+these private seams, not SDK or extension surfaces.
+
 The installed `compute_content_digest(Value)` now handles built-in DenseTensor
 values through a Host/runtime canonical-v1 implementation in addition to the
 existing provider-defined traversal. The built-in path uses reserved
@@ -942,6 +954,11 @@ record the follow-up direction.
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `src/lib/compute/progressive_compute.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
@@ -963,4 +980,6 @@ record the follow-up direction.
 - `tests/integration/openexr_deep_provider_option_off_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/unit/test_progressive_compute.cpp`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

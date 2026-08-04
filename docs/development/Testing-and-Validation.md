@@ -1907,6 +1907,20 @@ sequence and full-resolution final path; it cannot redefine the cadence or
 select a different coefficient for edits `0..10` while retaining
 `I2-progressive-v1`.
 
+The current deterministic validation surface consists of focused progressive-
+gate, profile/arithmetic, fail-closed evidence, real product-path, and
+conditional native-Metal tests. The product-path tests exercise preview
+visibility before final trigger and HP service, cancellation before trigger,
+post-trigger stale-final denial, equal-time newer-edit ordering, exact child
+QoS/deadlines, immutable Value acquisition reuse, and lifecycle/resource/Host
+settlement. `i2_progressive_benchmark` is an explicit `EXCLUDE_FROM_ALL`
+manual target and is not registered with CTest. It writes only the closed
+`execution-profile-i2-inner-row-v1` raw records and summary to an absolute,
+caller-selected empty output directory. The inner schema is not the canonical
+15-field outer row, bundle, or reference resolver, and neither compilation nor
+the deterministic tests establish a machine SLO result. The exact 111-slot run
+remains an explicit manual/release action; no such run is claimed here.
+
 Required logical values call `compute_content_digest(Value)` and require
 `Available`, a present `ContentDigest`, and
 `CanonicalDigestAlgorithm::Sha256CanonicalV1`. Logical digest, raw little-endian

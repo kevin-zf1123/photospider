@@ -1865,6 +1865,16 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 | #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
 | #96 | Compose the exact I1 and B1 fixtures into M1; reuse #93's I1 accepted-boundary collector without redefining it, binding the first measured edit exactly to `edit_index=0`, `A_0`, and its pre-call reserved sequence; implement the fixed `C^M1`/`W^M1` cold/warmup origins, counts, B1 offer protocol, cross-`B^M1` I1 settlement, and the frozen final-warmup current-hold exception through that successful coordinate in `[B^M1,B^M1+2,000,000 ns]`; implement the exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary; interpret the existing `cycle_ordinal` component as an independent producer-local counter for each measured B1 Graph without treating it as retry or adding a field; reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
 
+The current #94 source tree implements its private preview-then-final product
+coordination, exact preview/final arithmetic, Host and conditional real-Metal
+acquisition evidence, continuous-grid profile, fail-closed inner evaluator, and
+explicit manual runner. Its emitted `execution-profile-i2-inner-row-v1` record
+is deliberately narrower than the canonical outer row, bundle, and reference
+composition frozen by this ADR. The runner is excluded from the default build
+and CTest, and no exact 111-slot machine result is asserted here. Thus this
+implementation status completes the assigned mechanism and inner-evidence
+surface without promoting an absent machine run or claiming #95/#96 delivery.
+
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or
 different-version row. Machine-dependent latency, throughput, and reference

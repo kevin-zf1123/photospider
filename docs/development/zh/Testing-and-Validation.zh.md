@@ -1539,6 +1539,17 @@ actual preview admission；final trigger/admission 被保留，但不能重置 1
 重新定义 cadence，也不能为 edit `0..10` 选择不同 coefficient 后仍保留
 `I2-progressive-v1`。
 
+当前确定性验证面由聚焦的 progressive-gate、profile/arithmetic、fail-closed evidence、
+真实 product-path 与条件式 native-Metal test 构成。Product-path test 覆盖 preview
+visibility 先于 final trigger 与 HP service、trigger 前取消、trigger 后 stale-final 拒绝、
+相同时刻较新 edit ordering、精确 child QoS/deadline、不可变 Value acquisition 复用，以及
+lifecycle/resource/Host settlement。`i2_progressive_benchmark` 是显式
+`EXCLUDE_FROM_ALL` 的手工 target，不注册到 CTest。它只向 absolute、由调用者选择且为空的
+output directory 写入闭合的 `execution-profile-i2-inner-row-v1` raw record 与 summary。
+该 inner schema 不是 canonical 15-field outer row、bundle 或 reference resolver；仅编译或
+通过 deterministic test 都不能建立机器 SLO 结果。精确 111-slot run 仍是显式的手工/release
+动作；本文不声明已经执行该运行。
+
 必需 logical value 调用 `compute_content_digest(Value)`，并且要求 `Available`、
 存在 `ContentDigest`，以及 `CanonicalDigestAlgorithm::Sha256CanonicalV1`。Logical
 digest、raw little-endian payload SHA-256、canonical manifest SHA-256、semantic-

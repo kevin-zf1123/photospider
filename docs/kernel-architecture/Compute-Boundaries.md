@@ -961,6 +961,19 @@ bounds staged HP cache-save mechanism by task count and estimated retained
 bytes; graph-state policy waits for its typed completion, while CPU workers
 cannot.
 
+Issue #94 composes these existing authorities through optional source-private
+request state only. The accepted coordinate remains the product supersession
+identity; RT preview and HP final are distinct child Runs with exact descriptors
+and Interactive QoS; the graph-state/currentness gate remains the only visible-
+commit authority. `ProgressiveFinalGate` adds a request-scoped atomic decision
+between current-preview publication and final submission, while cancellation
+and supersession continue through the existing Run and generation authorities.
+The observation callbacks copy facts and freeze immutable Values but provide no
+control capability. I2 Host/conditional-Metal acquisition uses the existing
+AccessPlan, process residency manager, device registry, and resource ledger.
+None of these private seams adds an installed Host field, IPC message, CLI
+command, plugin callback, scheduler route, or second resource/residency owner.
+
 ## Implementation and Validation Entry Points
 
 - `include/photospider/data/value.hpp`
@@ -970,12 +983,16 @@ cannot.
 - `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/progressive_compute.*`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_supersession.*`
 - `src/lib/compute/compute_request_coordinator.*`
 - `src/lib/compute/compute_run.*`
 - `src/lib/compute/run_group.*`
 - `src/lib/compute/execution_service.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/execution/compute_io_executor.*`
@@ -991,6 +1008,7 @@ cannot.
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/ipc/output_store.*`
 - `plugins/ops/save_op.cpp`
@@ -1023,3 +1041,7 @@ cannot.
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
 - `tests/unit/test_region_contracts.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`

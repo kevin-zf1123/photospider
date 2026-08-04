@@ -737,6 +737,16 @@ cancellation entry point 仍是未来行为。此外，唯一独立 process I/O 
 estimated retained bytes 限制 staged HP cache-save mechanism；graph-state policy 等待其 typed
 completion，CPU worker 则不能等待。
 
+Issue #94 只通过可选的 source-private request state 组合这些既有 authority。Accepted
+coordinate 仍是产品 supersession identity；RT preview 与 HP final 是具有精确 descriptor 与
+Interactive QoS 的不同 child Run；graph-state/currentness gate 仍是唯一 visible-commit
+authority。`ProgressiveFinalGate` 在 current-preview publication 与 final submission 之间增加
+request-scoped atomic decision，而 cancellation 与 supersession 继续使用既有 Run 与 generation
+authority。Observation callback 只复制 fact 并冻结 immutable Value，不提供控制能力。I2
+Host/条件式 Metal acquisition 复用既有 AccessPlan、进程 residency manager、device registry
+与 resource ledger。这些私有 seam 都不会新增 installed Host field、IPC message、CLI command、
+plugin callback、scheduler route 或第二个 resource/residency owner。
+
 ## 实现与验证入口
 
 - `include/photospider/data/value.hpp`
@@ -746,12 +756,16 @@ completion，CPU worker 则不能等待。
 - `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/progressive_compute.*`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_supersession.*`
 - `src/lib/compute/compute_request_coordinator.*`
 - `src/lib/compute/compute_run.*`
 - `src/lib/compute/run_group.*`
 - `src/lib/compute/execution_service.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/execution/compute_io_executor.*`
@@ -767,6 +781,7 @@ completion，CPU worker 则不能等待。
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/ipc/output_store.*`
 - `plugins/ops/save_op.cpp`
@@ -799,3 +814,7 @@ completion，CPU worker 则不能等待。
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
 - `tests/unit/test_region_contracts.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`

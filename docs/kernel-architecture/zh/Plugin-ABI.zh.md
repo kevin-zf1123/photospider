@@ -656,6 +656,15 @@ registrar record、data-provider v3 record、policy-plugin v1 record、SDK targe
 Observer 只接收 copied fact 与 immutable final Value；它不是第四条 extension boundary，也不向
 DSO 暴露 callback。
 
+Issue #94 同样不会改变 installed ABI inventory、layout、symbol 或 package component。
+`ProgressiveComputeOptions`、`ProgressiveFinalGate`、I2 Host/profile/evidence type 及其
+observation callback 都保留在 `src/lib` 下；installed Host request、IPC 或 CLI grammar、
+operation registrar、data-provider v3 table 与 policy-plugin v1 table 都不会新增 field。精确
+preview primitive 是内部 CPU helper。Rank-three HWC Metal upload 是既有进程自有 executor 的
+内部泛化，并通过未改变的 `Value`、`AccessPlan`、residency 与 ledger contract 发布；它既不
+export native handle，也不新增 provider callback。手工 runner 与 deterministic test 只是这些
+私有 seam 的 consumer，不是 SDK 或 extension surface。
+
 已安装的 `compute_content_digest(Value)` 现在除既有 provider-defined traversal 外，也会通过
 Host/runtime canonical-v1 实现处理内建 DenseTensor value。内建路径使用保留的
 Schema/ImageFacet identity、descriptor metadata 与 logical payload byte；它不会调用或新增
@@ -731,6 +740,11 @@ server/plugin-isolation 目标。
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `src/lib/compute/progressive_compute.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
@@ -752,4 +766,6 @@ server/plugin-isolation 目标。
 - `tests/integration/test_value_identity_dso.cpp`
 - `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/unit/test_progressive_compute.cpp`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

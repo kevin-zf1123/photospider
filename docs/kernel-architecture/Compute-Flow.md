@@ -688,6 +688,27 @@ compute may already have returned successfully. Graph-document save remains a
 separate graph-state operation with its own status and never rewrites a Run
 terminal state.
 
+Issue #94 adds one optional source-private progressive branch to the existing
+realtime request flow. Embedded Host and Kernel forward
+`ProgressiveComputeOptions` only when the private I2 caller supplies it.
+ComputeService then keeps the RT and HP child descriptors distinct, forces the
+progressive RT dirty path to sequential execution, and withholds HP submission.
+After a current RT preview commits, the graph-state lane publishes its immutable
+Value to the observation sink; the progressive gate is then consumed, the
+final-trigger coordinate is emitted, and the HP child is submitted immediately.
+Cancellation or supersession that wins before gate consumption suppresses the
+final submission. After consumption, ordinary generation/currentness commit
+checks still prevent a stale HP result from becoming visible.
+
+Only that progressive RT branch asks dirty-source execution to perform the
+exact aligned factor-four RGBA FP32 box average. It rounds each 4x4 channel mean
+once to binary32, seals the proxy output as an immutable rank-three HWC Value,
+and then executes the same four curve stages. The HP child continues from the
+original 2048x2048 source through the unchanged full-resolution I1 path; it is
+never derived from preview pixels. When `ProgressiveComputeOptions` is absent,
+ordinary realtime requests retain their previous concurrent RT/HP planning,
+submission, and publication behavior.
+
 ## Boundaries and Rationale
 
 - One request plan supplies both sequential and parallel execution semantics;
@@ -743,12 +764,16 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/benchmark/i1_host.hpp`
 - `src/lib/benchmark/i1_profile.*`
 - `src/lib/benchmark/i1_evidence.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/compute_io_executor.*`
 - `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/progressive_compute.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/compute/compute_supersession.*`
@@ -759,6 +784,7 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/compute/compute_task_dispatcher.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/compute/dirty_update_executor.*`
+- `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_compute_io_executor.cpp`
@@ -768,6 +794,10 @@ retains the durable ownership direction without changing these current facts.
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`
 - `tests/unit/test_i1_profile.cpp`
 - `tests/unit/test_i1_evidence.cpp`
 - `tests/integration/test_i1_product_path.cpp`
