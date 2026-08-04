@@ -116,9 +116,47 @@ class ExecutionServiceTestAccess final {
   }
 
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+  /** @brief Test-product start-arbitration checkpoint. */
+  using ServiceStartArbitrationPoint =
+      compute::testing::ServiceStartArbitrationPoint;
+
+  /** @brief Test-product callback for one start-arbitration checkpoint. */
+  using ServiceStartArbitrationObserver =
+      compute::testing::ServiceStartArbitrationObserver;
+
   /** @brief Test-product callback for one denied operation-gate start. */
   using OperationAdmissionWaitObserver =
       compute::testing::OperationAdmissionWaitObserver;
+
+  /**
+   * @brief Installs the start-arbitration checkpoint observer.
+   * @param service Isolated service used only to document test ownership.
+   * @param observer Allocation-free callback, or null to disable observation.
+   * @param context Opaque callback context, or null when disabling.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The observer may coordinate a bounded fixture but must not re-enter
+   * service code while production locks are held.
+   */
+  static void set_service_start_arbitration_observer(
+      compute::ExecutionService& service,
+      ServiceStartArbitrationObserver observer, void* context) noexcept {
+    (void)service;
+    compute::testing::set_service_start_arbitration_observer_for_testing(
+        observer, context);
+  }
+
+  /**
+   * @brief Clears the start-arbitration observer after work settles.
+   * @param service Isolated service whose test ownership is ending.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void clear_service_start_arbitration_observer(
+      compute::ExecutionService& service) noexcept {
+    (void)service;
+    compute::testing::clear_service_start_arbitration_observer_for_testing();
+  }
 
   /** @brief Test-product retained operation-string owner category. */
   using RetainedOperationStringOwner =

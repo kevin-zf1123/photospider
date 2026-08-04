@@ -321,19 +321,70 @@ TEST(I1FrozenArithmetic, GridRegionsAndTieOrderRemainExact) {
       kI1AdmissionLateness);
   EXPECT_EQ(checked_i1_time_add(latest_final_admission, kI1DeadlineBudget),
             checked_i1_time_add(grid_origin, kI1LatestFinalDeadlineOffset));
-  EXPECT_EQ(i1_measurement_start_tie_rank(I1BoundaryEventKind::NominalMarker),
-            0);
   EXPECT_EQ(
-      i1_measurement_start_tie_rank(I1BoundaryEventKind::AcceptedAdmission), 1);
-  EXPECT_EQ(i1_measurement_end_tie_rank(I1BoundaryEventKind::LifecycleEvent),
-            0);
-  EXPECT_EQ(
-      i1_measurement_end_tie_rank(I1BoundaryEventKind::QuiescenceSnapshot), 1);
+      i1_measurement_start_tie_rank(I1MeasurementStartEventKind::NominalMarker),
+      0);
+  EXPECT_EQ(i1_measurement_start_tie_rank(
+                I1MeasurementStartEventKind::AcceptedAdmission),
+            1);
   EXPECT_THROW(i1_episode_origin(grid_origin, kI1GridSlotCount),
                std::out_of_range);
   EXPECT_THROW(checked_i1_time_add(std::chrono::steady_clock::time_point::max(),
                                    std::chrono::nanoseconds(1)),
                std::overflow_error);
+}
+
+/**
+ * @brief Proves the derived service-start store is lossless at its exact bound.
+ * @throws Allocation and ComputeRun construction failures unchanged.
+ * @note Synthetic callbacks exercise only the fixed collector slots; this is
+ * not the 221-slot benchmark workload and performs no product computation.
+ */
+TEST(I1EpisodeObservationCollector,
+     DerivedServiceStartCapacityFailsClosedOnlyAfterBoundary) {
+  EXPECT_EQ(kI1FrozenTilesPerCurveNode, 64U);
+  EXPECT_EQ(kI1MaximumServiceStartsPerRun, 257U);
+  EXPECT_EQ(kI1EpisodeServiceStartCapacity, 3084U);
+
+  I1EpisodeObservationCollector collector;
+  std::shared_ptr<compute::ComputeRunObservationSink> sink =
+      collector.make_edit_sink(0U);
+  compute::ComputeRunSubmission submission{
+      "i1-service-start-capacity",
+      GraphInstanceId{7001U},
+      GraphRevision{7001U},
+      kI1TargetNodeId,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                             std::nullopt, 1U, 8U},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey(kI1TargetNodeId,
+                                   ComputeIntent::GlobalHighPrecision),
+          compute::SupersessionGeneration(1U)},
+      nullptr};
+  compute::ComputeRun run(std::move(submission));
+  compute::ComputeRunLease lease = run.acquire_lease();
+
+  for (std::size_t index = 0U; index < kI1EpisodeServiceStartCapacity;
+       ++index) {
+    const compute::ComputeRunObservationCoordinate coordinate =
+        sink->reserve_causal_coordinate();
+    sink->on_service_start(lease.descriptor(), lease.task_identity(index), 1U,
+                           coordinate);
+  }
+  const I1EpisodeObservationSnapshot at_capacity = collector.snapshot();
+  EXPECT_FALSE(at_capacity.overflowed);
+  EXPECT_EQ(at_capacity.service_starts.size(), kI1EpisodeServiceStartCapacity);
+
+  const compute::ComputeRunObservationCoordinate overflow_coordinate =
+      sink->reserve_causal_coordinate();
+  sink->on_service_start(lease.descriptor(),
+                         lease.task_identity(kI1EpisodeServiceStartCapacity),
+                         1U, overflow_coordinate);
+  const I1EpisodeObservationSnapshot overflowed = collector.snapshot();
+  EXPECT_TRUE(overflowed.overflowed);
+  EXPECT_EQ(overflowed.service_starts.size(), kI1EpisodeServiceStartCapacity);
 }
 
 /**

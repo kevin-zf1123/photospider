@@ -63,6 +63,54 @@ reserved_start_rollback_probe_snapshot_for_testing() noexcept;
 void disarm_reserved_start_rollback_probe_for_testing() noexcept;
 
 /**
+ * @brief Test-product checkpoints around Run-owned start arbitration.
+ * @throws Nothing for value construction and comparison.
+ * @note The production execution-service translation unit contains neither
+ * these values nor a corresponding callback branch.
+ */
+enum class ServiceStartArbitrationPoint : std::uint8_t {
+  /** @brief Gate/grant staged but Run terminal arbiter not yet acquired. */
+  BeforeRunArbitration,
+  /** @brief Run arbiter held immediately before irreversible route commit. */
+  BeforeRouteCommit,
+};
+
+/**
+ * @brief Observes one internal start-arbitration checkpoint in test products.
+ * @param context Opaque fixture state installed before isolated execution.
+ * @param point Exact checkpoint reached by the service worker.
+ * @return Nothing.
+ * @throws Nothing; callbacks must contain every failure.
+ * @note The callback runs while service pool and Run-state locks are held; the
+ * second point also holds the Run terminal-arbiter mutex. It may synchronize
+ * with a bounded test fixture but must not re-enter product service code.
+ */
+// NOLINTBEGIN(whitespace/indent_namespace)
+using ServiceStartArbitrationObserver =
+    void (*)(void* context, ServiceStartArbitrationPoint point) noexcept;
+// NOLINTEND
+
+/**
+ * @brief Installs one process-local start-arbitration observer.
+ * @param observer Allocation-free callback, or null to disable observation.
+ * @param context Opaque callback context, or null when disabling.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Only one isolated test-product service may execute while installed.
+ */
+void set_service_start_arbitration_observer_for_testing(
+    ServiceStartArbitrationObserver observer, void* context) noexcept;
+
+/**
+ * @brief Clears the process-local start-arbitration observer.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The owning test releases and settles every potentially blocked worker
+ * before clearing the observer.
+ */
+void clear_service_start_arbitration_observer_for_testing() noexcept;
+
+/**
  * @brief Observes one operation gate denial in the non-installed test product.
  * @param context Opaque fixture state installed before isolated execution.
  * @param implementation_identity Exact denied implementation identity.

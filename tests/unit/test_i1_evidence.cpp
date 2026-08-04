@@ -177,6 +177,48 @@ Event& event_for_edit(std::vector<Event>* events, std::size_t edit_index) {
 }
 
 /**
+ * @brief Shifts every sequence at or after one insertion coordinate.
+ * @tparam Event Observation type carrying `causal_sequence`.
+ * @param events Mutable event vector.
+ * @param first_shifted First sequence moved forward by one.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+template <typename Event>
+void shift_event_sequences(std::vector<Event>* events,
+                           std::uint64_t first_shifted) noexcept {
+  for (Event& event : *events) {
+    if (event.causal_sequence >= first_shifted) {
+      ++event.causal_sequence;
+    }
+  }
+}
+
+/**
+ * @brief Opens one sequence gap across a complete synthetic observation set.
+ * @param observations Mutable episode observation vectors.
+ * @param cut Mutable first-excluded history coordinate.
+ * @param first_shifted First existing sequence moved forward by one.
+ * @return Nothing.
+ * @throws Nothing while the bounded synthetic sequence is below UINT64_MAX.
+ */
+void open_observation_sequence_gap(I1EpisodeObservationSnapshot* observations,
+                                   I1ObservationHistoryCut* cut,
+                                   std::uint64_t first_shifted) noexcept {
+  shift_event_sequences(&observations->current_generations, first_shifted);
+  shift_event_sequences(&observations->service_starts, first_shifted);
+  shift_event_sequences(&observations->cancellations, first_shifted);
+  shift_event_sequences(&observations->terminals, first_shifted);
+  shift_event_sequences(&observations->visible_outputs, first_shifted);
+  shift_event_sequences(&observations->run_quiescences, first_shifted);
+  shift_event_sequences(&observations->resource_settlements, first_shifted);
+  shift_event_sequences(&observations->host_settlements, first_shifted);
+  if (cut->causal_sequence >= first_shifted) {
+    ++cut->causal_sequence;
+  }
+}
+
+/**
  * @brief Proves nearest rank uses one-based `ceil(p*N)` selection.
  * @throws Nothing when exact percentile selection remains stable.
  */
@@ -209,7 +251,10 @@ TEST(I1Evidence, CountsDiscardedAndPostCancelServiceIndependently) {
   I1ObservedTerminal& terminal =
       event_for_edit(&input.observations.terminals, 0U);
   terminal.kind = compute::ComputeRunTerminalKind::Cancelled;
-  const std::uint64_t cancellation_sequence = terminal.causal_sequence - 1U;
+  const std::uint64_t post_cancel_sequence = terminal.causal_sequence;
+  const std::uint64_t cancellation_sequence = post_cancel_sequence - 1U;
+  open_observation_sequence_gap(&input.observations, &input.observation_cut,
+                                post_cancel_sequence);
   input.observations.cancellations.push_back(I1ObservedCancellation{
       0U, terminal.run_id, terminal.generation,
       compute::ComputeRunCancellationReason::Superseded,
@@ -220,9 +265,9 @@ TEST(I1Evidence, CountsDiscardedAndPostCancelServiceIndependently) {
       event_for_edit(&input.observations.service_starts, 0U);
   I1ObservedServiceStart post_cancel = original_start;
   post_cancel.local_task_id = 1U;
-  post_cancel.causal_sequence = input.observation_cut.causal_sequence++;
+  post_cancel.causal_sequence = post_cancel_sequence;
   post_cancel.observed_at =
-      checked_i1_time_add(input.edits[0].admission_sample, 3ms);
+      checked_i1_time_add(input.edits[0].admission_sample, 2ms);
   input.observations.service_starts.push_back(post_cancel);
 
   const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
@@ -231,6 +276,31 @@ TEST(I1Evidence, CountsDiscardedAndPostCancelServiceIndependently) {
   EXPECT_EQ(row.service.post_cancel_started_service, 100U);
   EXPECT_EQ(row.waste_verdict, I1Verdict::Fail);
   EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves an in-cut start after Host settlement is structurally invalid.
+ * @throws Nothing when the evaluator rejects the per-Run order violation.
+ */
+TEST(I1Evidence, ServiceStartAfterHostSettlementInvalidatesTheRow) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  I1ObservedServiceStart& start =
+      event_for_edit(&input.observations.service_starts, kI1EditCount - 1U);
+  const I1ObservedHostSettlement& host =
+      event_for_edit(&input.observations.host_settlements, kI1EditCount - 1U);
+  start.observed_at = checked_i1_time_add(host.observed_at, 1us);
+  start.causal_sequence = input.observation_cut.causal_sequence++;
+  ASSERT_LE(start.observed_at, input.measurement_end);
+  ASSERT_LT(start.causal_sequence, input.observation_cut.causal_sequence);
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "service start does not precede Run terminal"),
+            row.validity_reasons.end());
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
 }
 
 /**

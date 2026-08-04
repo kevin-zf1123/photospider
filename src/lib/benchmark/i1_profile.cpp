@@ -20,9 +20,10 @@
 namespace ps::benchmark {
 namespace {
 
-/** @brief Maximum retained service starts per edit before evidence invalidates.
- */
-constexpr std::size_t kServiceStartsPerEditCapacity = 128U;
+/** @brief Freezes the derived lossless collector bounds for workload v1. */
+static_assert(kI1FrozenTilesPerCurveNode == 64U);
+static_assert(kI1MaximumServiceStartsPerRun == 257U);
+static_assert(kI1EpisodeServiceStartCapacity == 3084U);
 
 /** @brief Maximum retained cancellations per edit before evidence invalidates.
  */
@@ -334,7 +335,7 @@ class I1EpisodeObservationCollector::Impl final {
 
   /** @brief Fixed physical service-start storage. */
   std::array<PublishedObservationSlot<I1ObservedServiceStart>,
-             kI1EditCount * kServiceStartsPerEditCapacity>
+             kI1EpisodeServiceStartCapacity>
       service_starts_;
 
   /** @brief Fixed accepted-cancellation storage. */
@@ -569,31 +570,14 @@ PixelRect i1_edit_region(std::size_t edit_index) {
 }
 
 /** @copydoc i1_measurement_start_tie_rank */
-int i1_measurement_start_tie_rank(I1BoundaryEventKind kind) {
+int i1_measurement_start_tie_rank(I1MeasurementStartEventKind kind) {
   switch (kind) {
-    case I1BoundaryEventKind::NominalMarker:
+    case I1MeasurementStartEventKind::NominalMarker:
       return 0;
-    case I1BoundaryEventKind::AcceptedAdmission:
+    case I1MeasurementStartEventKind::AcceptedAdmission:
       return 1;
-    case I1BoundaryEventKind::LifecycleEvent:
-    case I1BoundaryEventKind::QuiescenceSnapshot:
-      break;
   }
   throw std::invalid_argument("Event kind is not valid at I1 Q_start.");
-}
-
-/** @copydoc i1_measurement_end_tie_rank */
-int i1_measurement_end_tie_rank(I1BoundaryEventKind kind) {
-  switch (kind) {
-    case I1BoundaryEventKind::LifecycleEvent:
-      return 0;
-    case I1BoundaryEventKind::QuiescenceSnapshot:
-      return 1;
-    case I1BoundaryEventKind::NominalMarker:
-    case I1BoundaryEventKind::AcceptedAdmission:
-      break;
-  }
-  throw std::invalid_argument("Event kind is not valid at I1 Q_end.");
 }
 
 /** @copydoc i1_frozen_graph_yaml */

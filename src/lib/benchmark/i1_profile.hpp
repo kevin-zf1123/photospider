@@ -34,6 +34,49 @@ inline constexpr std::size_t kI1WarmupSlotCount = 20U;
 /** @brief Exact number of measured I1 grid slots. */
 inline constexpr std::size_t kI1MeasuredSlotCount = 200U;
 
+/** @brief Frozen square source-image edge in pixels. */
+inline constexpr std::size_t kI1FrozenImageEdge = 2048U;
+
+/** @brief Frozen Macro tile edge selected by every curve operation. */
+inline constexpr std::size_t kI1FrozenCurveTileEdge = 256U;
+
+/** @brief Exact number of tiled curve nodes in the frozen graph. */
+inline constexpr std::size_t kI1FrozenCurveNodeCount = 4U;
+
+/** @brief Exact monolithic source tasks in one complete frozen Run. */
+inline constexpr std::size_t kI1FrozenSourceTaskCount = 1U;
+
+// NOLINTBEGIN(whitespace/indent_namespace)
+/** @brief Macro tiles populated for each frozen curve node. */
+inline constexpr std::size_t kI1FrozenTilesPerCurveNode =
+    ((kI1FrozenImageEdge + kI1FrozenCurveTileEdge - 1U) /
+     kI1FrozenCurveTileEdge) *
+    ((kI1FrozenImageEdge + kI1FrozenCurveTileEdge - 1U) /
+     kI1FrozenCurveTileEdge);
+
+/**
+ * @brief Maximum physical service starts for one planned I1 task.
+ * @note Initial-ready identities are deduplicated and dependency publication
+ * occurs only on the one counter transition to zero. Pending-Value completion
+ * resumes inside the task plan rather than creating another service start.
+ */
+inline constexpr std::size_t kI1MaximumServiceStartsPerTask = 1U;
+
+/** @brief Maximum physical service starts in one complete frozen I1 Run. */
+inline constexpr std::size_t kI1MaximumServiceStartsPerRun =
+    (kI1FrozenSourceTaskCount +
+     kI1FrozenCurveNodeCount * kI1FrozenTilesPerCurveNode) *
+    kI1MaximumServiceStartsPerTask;
+
+/**
+ * @brief Lossless preallocated service-start capacity for one I1 episode.
+ * @note The bound covers all twelve edits materializing complete frozen Runs;
+ * timed product callbacks never grow storage.
+ */
+inline constexpr std::size_t kI1EpisodeServiceStartCapacity =
+    kI1EditCount * kI1MaximumServiceStartsPerRun;
+// NOLINTEND
+
 /** @brief Exact frozen nominal spacing between I1 edit admissions. */
 inline constexpr std::chrono::nanoseconds kI1EditStride{16666667};
 
@@ -49,13 +92,13 @@ inline constexpr std::chrono::nanoseconds kI1EpisodeStride{750000000};
 /** @brief Exact offset of the twelfth nominal marker and measurement start. */
 inline constexpr std::chrono::nanoseconds kI1MeasurementStartOffset{183333337};
 
-/** @brief Exact half-open I1 settlement observation duration. */
+/** @brief Exact elapsed duration from inclusive `Q_start` to `Q_end`. */
 inline constexpr std::chrono::nanoseconds kI1MeasurementDuration{500000000};
 
-/** @brief Exact offset of the I1 quiescence snapshot from episode origin. */
+/** @brief Exact offset of the I1 causal history cut from episode origin. */
 inline constexpr std::chrono::nanoseconds kI1MeasurementEndOffset{683333337};
 
-/** @brief Exact guard from I1 quiescence snapshot to the next grid origin. */
+/** @brief Exact guard from the I1 history cut to the next grid origin. */
 inline constexpr std::chrono::nanoseconds kI1NextOriginGuard{66666663};
 
 /** @brief Exact latest legal twelfth-edit deadline offset. */
@@ -105,18 +148,14 @@ enum class I1EpisodePhase : std::uint8_t {
 };
 
 /**
- * @brief Frozen equal-time boundary event vocabulary.
+ * @brief Frozen equal-time `Q_start` event vocabulary.
  * @throws Nothing for value construction and comparison.
  */
-enum class I1BoundaryEventKind : std::uint8_t {
+enum class I1MeasurementStartEventKind : std::uint8_t {
   /** @brief Nominal `Q_start=S_11` marker. */
   NominalMarker,
   /** @brief Actual accepted admission at the same timestamp. */
   AcceptedAdmission,
-  /** @brief Causally retained lifecycle event at `Q_end`. */
-  LifecycleEvent,
-  /** @brief Quiescence snapshot taken after equal-time lifecycle events. */
-  QuiescenceSnapshot,
 };
 
 /**
@@ -554,15 +593,7 @@ PixelRect i1_edit_region(std::size_t edit_index);
  * @return Zero for nominal marker and one for actual admission.
  * @throws std::invalid_argument for a non-`Q_start` event kind.
  */
-int i1_measurement_start_tie_rank(I1BoundaryEventKind kind);
-
-/**
- * @brief Returns the frozen tie rank at the quiescence boundary `Q_end`.
- * @param kind LifecycleEvent or QuiescenceSnapshot.
- * @return Zero for causally retained lifecycle event and one for snapshot.
- * @throws std::invalid_argument for a non-`Q_end` event kind.
- */
-int i1_measurement_end_tie_rank(I1BoundaryEventKind kind);
+int i1_measurement_start_tie_rank(I1MeasurementStartEventKind kind);
 
 /**
  * @brief Builds the exact normative I1 source and four-transform graph YAML.

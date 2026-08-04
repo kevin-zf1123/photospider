@@ -639,11 +639,17 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
         }
         for (const I1ObservedServiceStart& start :
              row.evidence.observations.service_starts) {
-          if (start.run_id == *product.run_id &&
-              (start.causal_sequence <= generation->causal_sequence ||
-               start.observed_at < generation->observed_at)) {
+          if (start.run_id != *product.run_id) {
+            continue;
+          }
+          if (start.causal_sequence <= generation->causal_sequence ||
+              start.observed_at < generation->observed_at) {
             global_invalidate(
                 "service start does not follow current generation");
+          }
+          if (start.causal_sequence >= terminal_event->causal_sequence ||
+              start.observed_at > terminal_event->observed_at) {
+            global_invalidate("service start does not precede Run terminal");
           }
         }
       }

@@ -282,6 +282,22 @@ class ComputeRunControl {
       std::atomic<bool>* request_child_cancellation_won = nullptr);
 
   /**
+   * @brief Serializes irreversible service start with terminal arbitration.
+   * @param commit_callback Non-null no-throw physical route commit callback.
+   * @param context Borrowed callback context valid until return.
+   * @param committed_coordinate Output coordinate published only on success.
+   * @return True only after an open Run commits the physical route start.
+   * @throws std::invalid_argument for null callback or output storage.
+   * @throws std::system_error when Run synchronization fails.
+   * @note The coordinate is reserved immediately before callback invocation
+   * while `mutex` excludes cancellation acceptance. A rejected callback leaves
+   * an unpublished sequence gap; no observer callback runs under this lock.
+   */
+  bool try_commit_service_start(
+      ComputeRunServiceStartCommitCallback commit_callback, void* context,
+      std::optional<ComputeRunObservationCoordinate>* committed_coordinate);
+
+  /**
    * @brief Observes the immutable deadline and current cancellation outcome.
    * @return Stable cancellation reason when Cancelled, otherwise nullopt.
    * @throws Clock callback or synchronization exceptions.
@@ -595,6 +611,31 @@ ComputeRunControl::request_cancellation_containing_callbacks(
     }
   }
   return ComputeRunCancellationDispatchResult{true, first_callback_failure};
+}
+
+/** @copydoc ComputeRunControl::try_commit_service_start */
+bool ComputeRunControl::try_commit_service_start(
+    ComputeRunServiceStartCommitCallback commit_callback, void* context,
+    std::optional<ComputeRunObservationCoordinate>* committed_coordinate) {
+  if (commit_callback == nullptr || committed_coordinate == nullptr) {
+    throw std::invalid_argument(
+        "ComputeRun service start requires callback and coordinate output.");
+  }
+  committed_coordinate->reset();
+  std::lock_guard<std::mutex> lock(mutex);
+  if (arbiter_state != ComputeRunArbiterState::Open) {
+    return false;
+  }
+  std::optional<ComputeRunObservationCoordinate> staged_coordinate;
+  if (descriptor.observation_sink() != nullptr) {
+    staged_coordinate =
+        descriptor.observation_sink()->reserve_causal_coordinate();
+  }
+  if (!commit_callback(context)) {
+    return false;
+  }
+  *committed_coordinate = staged_coordinate;
+  return true;
 }
 
 /** @copydoc ComputeRunControl::observe_cancellation */
@@ -1685,6 +1726,15 @@ bool ComputeRunLease::accepts_task_identity(
   std::lock_guard<std::mutex> lock(control_->mutex);
   return control_->submission_plan != nullptr &&
          control_->submission_plan->contains_task_identity(identity);
+}
+
+/** @copydoc ComputeRunLease::try_commit_service_start */
+bool ComputeRunLease::try_commit_service_start(
+    ComputeRunServiceStartCommitCallback commit_callback, void* context,
+    std::optional<ComputeRunObservationCoordinate>* committed_coordinate)
+    const {
+  return control_->try_commit_service_start(commit_callback, context,
+                                            committed_coordinate);
 }
 
 /**

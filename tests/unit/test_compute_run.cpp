@@ -236,16 +236,15 @@ class VisibleCommitObservationSink final : public ComputeRunObservationSink {
 };
 
 /**
- * @brief Forces callback delivery to lag an already-committed service start.
+ * @brief Records causal order for concurrently arbitrated start/cancellation.
  *
- * The sink reserves coordinates with one atomic authority. Its service-start
- * callback publishes the pre-reserved coordinate and waits on a test-only
- * atomic gate while cancellation concurrently reserves and publishes its own
- * coordinate. Every callback remains allocation-free and exception-free.
+ * The sink reserves coordinates with one atomic authority and release-publishes
+ * start/cancellation callback facts for deterministic barrier assertions.
+ * Every callback remains allocation-free and exception-free.
  *
  * @throws Nothing for construction, callbacks, and scalar inspection.
- * @note Waiting is confined to one deterministic regression and is released by
- * ScopedStartObservationRelease on every assertion/exception exit.
+ * @note Product callback scheduling may differ from coordinate order; tests
+ * therefore assert the coordinates reserved at the shared Run arbiter.
  */
 class StartCancellationOrderObservationSink final
     : public ComputeRunObservationSink {
@@ -277,9 +276,6 @@ class StartCancellationOrderObservationSink final
     start_sequence_.store(coordinate.causal_sequence,
                           std::memory_order_relaxed);
     start_callback_entered_.store(1, std::memory_order_release);
-    while (release_start_callback_.load(std::memory_order_acquire) == 0) {
-      std::this_thread::yield();
-    }
   }
 
   /** @copydoc ComputeRunObservationSink::on_cancellation */
@@ -335,16 +331,7 @@ class StartCancellationOrderObservationSink final
   }
 
   /**
-   * @brief Opens the delayed service-start callback gate exactly once.
-   * @return Nothing.
-   * @throws Nothing.
-   */
-  void release_start_callback() noexcept {
-    release_start_callback_.store(1, std::memory_order_release);
-  }
-
-  /**
-   * @brief Returns the atomic delayed-start entry flag for bounded polling.
+   * @brief Returns the service-start callback entry flag for bounded polling.
    * @return Borrowed flag that remains valid with this sink.
    * @throws Nothing.
    */
@@ -382,52 +369,141 @@ class StartCancellationOrderObservationSink final
  private:
   /** @brief Shared strictly increasing callback coordinate authority. */
   std::atomic<std::uint64_t> next_sequence_{1U};
-  /** @brief Test-only gate opened by the recovery owner. */
-  std::atomic_int release_start_callback_{0};
-  /** @brief Whether the delayed start callback entered. */
+  /** @brief Whether the service-start observation callback entered. */
   std::atomic_int start_callback_entered_{0};
   /** @brief Whether accepted cancellation callback entered. */
   std::atomic_int cancellation_callback_entered_{0};
-  /** @brief Pre-reserved service-start causal sequence. */
+  /** @brief Committed service-start causal sequence. */
   std::atomic<std::uint64_t> start_sequence_{0U};
   /** @brief Cancellation-acceptance causal sequence. */
   std::atomic<std::uint64_t> cancellation_sequence_{0U};
 };
 
 /**
- * @brief Releases a delayed start callback during every test exit path.
- * @throws Nothing for construction and destruction.
+ * @brief Blocks one exact test-product start-arbitration checkpoint.
+ * @throws Nothing for construction, observation, and scalar inspection.
+ * @note The gate is used by one isolated service and never re-enters product
+ * code while service locks are held.
  */
-class ScopedStartObservationRelease final {
+class ServiceStartArbitrationGate final {
  public:
   /**
-   * @brief Binds one delayed observation sink.
-   * @param sink Sink that outlives this guard.
+   * @brief Selects the one checkpoint that must block.
+   * @param point Before Run arbitration or immediately before route commit.
    * @throws Nothing.
    */
-  explicit ScopedStartObservationRelease(
-      StartCancellationOrderObservationSink& sink) noexcept
-      : sink_(sink) {}
-
-  /** @brief Opens the callback gate during stack unwinding. @throws Nothing. */
-  ~ScopedStartObservationRelease() noexcept { sink_.release_start_callback(); }
-
-  /** @brief Prevents duplicate gate-release ownership. */
-  ScopedStartObservationRelease(const ScopedStartObservationRelease&) = delete;
-  /** @brief Prevents replacing gate-release ownership. */
-  ScopedStartObservationRelease& operator=(
-      const ScopedStartObservationRelease&) = delete;
+  explicit ServiceStartArbitrationGate(
+      testing::ServiceStartArbitrationPoint point) noexcept
+      : point_(point) {}
 
   /**
-   * @brief Opens the callback gate before ordinary future joins.
+   * @brief Waits at the selected checkpoint until the fixture releases it.
+   * @param context Borrowed ServiceStartArbitrationGate pointer.
+   * @param point Checkpoint reached by the service worker.
    * @return Nothing.
    * @throws Nothing.
    */
-  void release() noexcept { sink_.release_start_callback(); }
+  static void observe(void* context,
+                      testing::ServiceStartArbitrationPoint point) noexcept {
+    auto* gate = static_cast<ServiceStartArbitrationGate*>(context);
+    if (point != gate->point_) {
+      return;
+    }
+    gate->entered_.store(1, std::memory_order_release);
+    while (gate->release_.load(std::memory_order_acquire) == 0) {
+      std::this_thread::yield();
+    }
+    gate->exited_.store(1, std::memory_order_release);
+  }
+
+  /** @brief Prevents copying synchronization ownership. */
+  ServiceStartArbitrationGate(const ServiceStartArbitrationGate&) = delete;
+  /** @brief Prevents replacing synchronization ownership. */
+  ServiceStartArbitrationGate& operator=(const ServiceStartArbitrationGate&) =
+      delete;
+
+  /**
+   * @brief Releases the selected checkpoint.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void release() noexcept { release_.store(1, std::memory_order_release); }
+
+  /**
+   * @brief Returns the checkpoint-entry flag for bounded polling.
+   * @return Borrowed flag valid for this gate's lifetime.
+   * @throws Nothing.
+   */
+  const std::atomic_int& entered() const noexcept { return entered_; }
+
+  /**
+   * @brief Waits until an entered checkpoint has returned.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void release_and_wait() noexcept {
+    release();
+    if (entered_.load(std::memory_order_acquire) == 0) {
+      return;
+    }
+    while (exited_.load(std::memory_order_acquire) == 0) {
+      std::this_thread::yield();
+    }
+  }
 
  private:
-  /** @brief Borrowed delayed observation sink. */
-  StartCancellationOrderObservationSink& sink_;
+  /** @brief Exact checkpoint selected by the fixture. */
+  testing::ServiceStartArbitrationPoint point_;
+  /** @brief Whether the selected checkpoint entered. */
+  std::atomic_int entered_{0};
+  /** @brief Fixture-owned release gate. */
+  std::atomic_int release_{0};
+  /** @brief Whether the selected checkpoint returned. */
+  std::atomic_int exited_{0};
+};
+
+/**
+ * @brief Owns one installed start-arbitration observer through settlement.
+ * @throws Nothing for construction and destruction.
+ */
+class ScopedServiceStartArbitrationObserver final {
+ public:
+  /**
+   * @brief Installs one isolated service checkpoint gate.
+   * @param service Service whose test-product seam is owned by this scope.
+   * @param gate Gate that outlives this observer.
+   * @throws Nothing.
+   */
+  ScopedServiceStartArbitrationObserver(
+      ExecutionService& service, ServiceStartArbitrationGate& gate) noexcept
+      : service_(service), gate_(gate) {
+    ::ps::testing::ExecutionServiceTestAccess::
+        set_service_start_arbitration_observer(
+            service_, &ServiceStartArbitrationGate::observe, &gate_);
+  }
+
+  /**
+   * @brief Releases a blocked worker and clears the process-local observer.
+   * @throws Nothing.
+   */
+  ~ScopedServiceStartArbitrationObserver() noexcept {
+    gate_.release_and_wait();
+    ::ps::testing::ExecutionServiceTestAccess::
+        clear_service_start_arbitration_observer(service_);
+  }
+
+  /** @brief Prevents duplicate observer ownership. */
+  ScopedServiceStartArbitrationObserver(
+      const ScopedServiceStartArbitrationObserver&) = delete;
+  /** @brief Prevents replacing observer ownership. */
+  ScopedServiceStartArbitrationObserver& operator=(
+      const ScopedServiceStartArbitrationObserver&) = delete;
+
+ private:
+  /** @brief Isolated service carrying the test-product seam. */
+  ExecutionService& service_;
+  /** @brief Gate released before observer removal. */
+  ServiceStartArbitrationGate& gate_;
 };
 
 /**
@@ -9499,49 +9575,140 @@ TEST(ExecutionServiceCancellation,
 }
 
 /**
- * @brief Proves committed service start keeps its earlier causal sequence when
- * callback delivery overlaps cancellation acceptance.
+ * @brief Proves accepted cancellation defeats a staged but uncommitted start.
  *
- * @return Nothing; GoogleTest reports coordinate inversion, callback entry,
- * cancellation failure, or resource leakage.
+ * @return Nothing; GoogleTest reports a route/start leak, callback entry,
+ * unreleased gate/grant authority, or cancellation failure.
  * @throws Allocation, future, service, or synchronization exceptions from
  * setup and settlement.
- * @note The service-start callback is deliberately held after the service has
- * reserved its coordinate and committed the start. Cancellation then reserves
- * from the same sink authority before delayed start delivery is released.
+ * @note The worker blocks after gate/grant staging but before acquiring the Run
+ * terminal arbiter. Cancellation publishes under that arbiter first and then
+ * waits for service cleanup, proving the resumed worker cannot commit route.
  */
 TEST(ExecutionServiceCancellation,
-     CommittedStartSequencePrecedesConcurrentCancellation) {
+     AcceptedCancellationPreventsStagedRouteStartCommit) {
   ExecutionService service(1);
   ExecutionServiceHost host;
   auto sink = std::make_shared<StartCancellationOrderObservationSink>();
   ComputeRunSubmission submission =
-      make_test_submission("start-cancel-causal-order", 611U, 711);
+      make_test_submission("cancel-wins-start-arbiter", 611U, 711);
+  submission.observation_sink = sink;
+  ComputeRun run(std::move(submission));
+  const ComputeRunCancellationSource source = run.cancellation_source();
+  std::atomic_int entered{0};
+  const OperationExecutionConstraints constraints{
+      7611U, false, 0U, "cancel-wins-start-arbiter-key"};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(make_counted_ready_submission(
+      run.acquire_lease(), 0U, 711, entered, ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(), constraints));
+
+  ServiceStartArbitrationGate gate(
+      testing::ServiceStartArbitrationPoint::BeforeRunArbitration);
+  ScopedServiceStartArbitrationObserver observer(service, gate);
+  std::future<void> run_future =
+      std::async(std::launch::async,
+                 [&service, &host, ready = std::move(ready)]() mutable {
+                   service.execute_run(host, "cpu", std::move(ready), 1);
+                 });
+  const bool start_staged = wait_for_atomic_count(gate.entered(), 1);
+  if (!start_staged) {
+    gate.release();
+    EXPECT_TRUE(start_staged);
+    run_future.wait();
+    return;
+  }
+
+  std::future<bool> cancellation = std::async(std::launch::async, [source]() {
+    return source.request_cancellation(
+        ComputeRunCancellationReason::ExplicitRequest);
+  });
+  const bool cancellation_accepted =
+      wait_for_atomic_count(sink->cancellation_callback_entered(), 1);
+  EXPECT_EQ(sink->start_sequence(), 0U);
+
+  gate.release();
+  EXPECT_TRUE(cancellation_accepted);
+  ASSERT_EQ(cancellation.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_TRUE(cancellation.get());
+  ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run_future.get());
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  ComputeRun reuse_run(
+      make_test_submission("cancel-wins-gate-reuse", 612U, 712));
+  std::atomic_int reuse_entered{0};
+  std::vector<ReadyTaskSubmission> reuse_ready;
+  reuse_ready.push_back(make_counted_ready_submission(
+      reuse_run.acquire_lease(), 0U, 712, reuse_entered,
+      ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(), constraints));
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(reuse_ready), 1));
+  EXPECT_EQ(reuse_entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves a route commit holding the Run arbiter orders before cancel.
+ *
+ * @return Nothing; GoogleTest reports coordinate inversion, missing callbacks,
+ * executable entry, cancellation failure, or resource leakage.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and settlement.
+ * @note The worker blocks with the Run terminal arbiter held immediately before
+ * irreversible route commit. A concurrent cancellation call cannot publish
+ * until the route commits and the start coordinate is fixed.
+ */
+TEST(ExecutionServiceCancellation,
+     RouteCommitHoldingRunArbiterPrecedesConcurrentCancellation) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  auto sink = std::make_shared<StartCancellationOrderObservationSink>();
+  ComputeRunSubmission submission =
+      make_test_submission("start-wins-run-arbiter", 613U, 713);
   submission.observation_sink = sink;
   ComputeRun run(std::move(submission));
   const ComputeRunCancellationSource source = run.cancellation_source();
   std::atomic_int entered{0};
   std::vector<ReadyTaskSubmission> ready;
   ready.push_back(
-      make_counted_ready_submission(run.acquire_lease(), 0U, 711, entered));
+      make_counted_ready_submission(run.acquire_lease(), 0U, 713, entered));
 
-  ScopedStartObservationRelease release_guard(*sink);
+  ServiceStartArbitrationGate gate(
+      testing::ServiceStartArbitrationPoint::BeforeRouteCommit);
+  ScopedServiceStartArbitrationObserver observer(service, gate);
   std::future<void> run_future =
       std::async(std::launch::async,
                  [&service, &host, ready = std::move(ready)]() mutable {
                    service.execute_run(host, "cpu", std::move(ready), 1);
                  });
-  ASSERT_TRUE(wait_for_atomic_count(sink->start_callback_entered(), 1));
+  const bool route_commit_staged = wait_for_atomic_count(gate.entered(), 1);
+  if (!route_commit_staged) {
+    gate.release();
+    EXPECT_TRUE(route_commit_staged);
+    run_future.wait();
+    return;
+  }
 
-  std::future<bool> cancellation = std::async(std::launch::async, [source]() {
-    return source.request_cancellation(
-        ComputeRunCancellationReason::ExplicitRequest);
-  });
+  std::atomic_int cancellation_called{0};
+  std::future<bool> cancellation =
+      std::async(std::launch::async, [source, &cancellation_called]() {
+        cancellation_called.store(1, std::memory_order_release);
+        return source.request_cancellation(
+            ComputeRunCancellationReason::ExplicitRequest);
+      });
+  const bool cancellation_started =
+      wait_for_atomic_count(cancellation_called, 1);
+  gate.release();
+  EXPECT_TRUE(cancellation_started);
+
+  ASSERT_TRUE(wait_for_atomic_count(sink->start_callback_entered(), 1));
   ASSERT_TRUE(wait_for_atomic_count(sink->cancellation_callback_entered(), 1));
   EXPECT_NE(sink->start_sequence(), 0U);
   EXPECT_LT(sink->start_sequence(), sink->cancellation_sequence());
-
-  release_guard.release();
   ASSERT_EQ(cancellation.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_TRUE(cancellation.get());

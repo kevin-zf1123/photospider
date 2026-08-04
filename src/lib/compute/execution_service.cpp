@@ -585,6 +585,13 @@ struct ExecutionService::QueueEntry final {
   /** @brief Whether reserved start acquired operation-gate ownership. */
   bool operation_gate_started = false;
 
+  /**
+   * @brief Coordinate committed with the physical route start, when observed.
+   * @note The worker publishes this immutable fact only after releasing the
+   * service pool, service Run-state, and Run terminal-arbiter mutexes.
+   */
+  std::optional<ComputeRunObservationCoordinate> service_start_coordinate;
+
   /** @brief Checked work plus ready-byte quanta used only for ordering. */
   const std::uint64_t policy_service_cost;
 
@@ -1022,6 +1029,19 @@ struct ReservedStartProbeState final {
 };
 
 /**
+ * @brief Process-local start-arbitration observer state for test products.
+ * @throws Nothing for atomic initialization and access.
+ * @note The callback may coordinate a bounded fixture but owns no service,
+ * Run, route, gate, grant, or cancellation authority.
+ */
+struct ServiceStartArbitrationProbeState final {
+  /** @brief Borrowed opaque fixture context. */
+  std::atomic<void*> context{nullptr};
+  /** @brief Optional allocation-free checkpoint callback. */
+  std::atomic<testing::ServiceStartArbitrationObserver> observer{nullptr};
+};
+
+/**
  * @brief Process-local operation-admission observer state for test products.
  * @throws Nothing for atomic initialization and access.
  * @note The callback publishes fixture state only. It never owns service,
@@ -1054,6 +1074,17 @@ struct RetainedOperationStringChargeProbeState final {
  */
 ReservedStartProbeState& reserved_start_probe_state() noexcept {
   static ReservedStartProbeState state;
+  return state;
+}
+
+/**
+ * @brief Returns the unique test-product start-arbitration observer state.
+ * @return Process-lifetime allocation-free observer storage.
+ * @throws Nothing.
+ */
+ServiceStartArbitrationProbeState&
+service_start_arbitration_probe_state() noexcept {
+  static ServiceStartArbitrationProbeState state;
   return state;
 }
 
@@ -1134,6 +1165,25 @@ bool record_reserved_start_attempt_for_testing(
     attempt.ready_bytes.store(resources.ready_bytes, std::memory_order_release);
   }
   return index == 0U;
+}
+
+/**
+ * @brief Notifies one deterministic start-arbitration checkpoint.
+ * @param point Exact checkpoint reached by the service worker.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The callback is test-product-only and must not re-enter service code
+ * while the documented production locks remain held.
+ */
+void notify_service_start_arbitration_for_testing(
+    testing::ServiceStartArbitrationPoint point) noexcept {
+  ServiceStartArbitrationProbeState& state =
+      service_start_arbitration_probe_state();
+  const testing::ServiceStartArbitrationObserver observer =
+      state.observer.load(std::memory_order_acquire);
+  if (observer != nullptr) {
+    observer(state.context.load(std::memory_order_relaxed), point);
+  }
 }
 
 }  // namespace
@@ -1687,13 +1737,16 @@ class ExecutionService::BoundedReadyStore final {
    * @return Started, obsolete, unavailable grant, or identity exhaustion.
    * @throws std::bad_alloc, std::logic_error, or std::overflow_error while
    * staging operation-gate ownership.
-   * @throws std::system_error while staging the reservation child grant.
+   * @throws std::system_error while staging the reservation child grant or
+   * entering the Run-owned terminal arbiter.
    * @note Exceptional exits precede every ready/fairness/in-flight mutation.
-   * An observation coordinate reserved after grant/gate staging and before the
-   * route commit is the logical start-commit point only when that commit
-   * succeeds; a rejected route leaves an unpublished sequence gap.
-   * @note Caller holds the service/store mutex. This method locks the Run and
-   * then its reservation through `try_grant`, preserving the frozen order.
+   * After grant/gate staging, the Run terminal arbiter reserves an observation
+   * coordinate and performs the irreversible route commit under one critical
+   * section shared with cancellation acceptance. A rejected route leaves an
+   * unpublished sequence gap, and every staged owner rolls back.
+   * @note Caller holds `pool -> RunState`. `try_grant` acquires and releases
+   * the reservation mutex before this method enters the Run terminal arbiter;
+   * no path holds reservation and terminal-arbiter mutexes together.
    */
   StartResult commit_start(SelectionPin& pin, int worker_id,
                            execution::PhysicalExecutionLane lane,
@@ -1758,14 +1811,48 @@ class ExecutionService::BoundedReadyStore final {
             pin.entry->submission.operation_constraints())) {
       return StartResult::Obsolete;
     }
-    const std::shared_ptr<ComputeRunObservationSink>& observation_sink =
-        pin.entry->submission.lease_.descriptor().observation_sink();
-    std::optional<ComputeRunObservationCoordinate> start_coordinate;
-    if (observation_sink != nullptr) {
-      start_coordinate = observation_sink->reserve_causal_coordinate();
-    }
     const Device device = pin.entry->submission.metadata().device();
-    if (!routes.commit_start(run.route, device)) {
+    /**
+     * @brief Carries borrowed operands through synchronous Run arbitration.
+     * @throws Nothing for aggregate initialization.
+     * @note Every pointer remains valid until the local callback returns.
+     */
+    struct RouteCommitContext final {
+      /** @brief Borrowed route inventory serialized by the service mutex. */
+      execution::PhysicalExecutionRoutes* routes = nullptr;
+      /** @brief Borrowed immutable route name retained by RunState. */
+      const std::string* route = nullptr;
+      /** @brief Immutable selected device for this callback. */
+      Device device = Device::CPU;
+    } route_context{&routes, &run.route, device};
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    notify_service_start_arbitration_for_testing(
+        testing::ServiceStartArbitrationPoint::BeforeRunArbitration);
+#endif
+    /**
+     * @brief Commits one already-validated physical route irreversibly.
+     * @param opaque_context Borrowed `RouteCommitContext` pointer.
+     * @return True only when the route inventory accepts the start.
+     * @throws Nothing; route commitment and the test checkpoint are no-throw.
+     * @note The matching Run terminal arbiter is held for the complete call.
+     */
+    const auto commit_route = [](void* opaque_context) noexcept {
+      auto* context = static_cast<RouteCommitContext*>(opaque_context);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+      notify_service_start_arbitration_for_testing(
+          testing::ServiceStartArbitrationPoint::BeforeRouteCommit);
+#endif
+      return context->routes->commit_start(*context->route, context->device);
+    };
+    bool route_committed = false;
+    try {
+      route_committed = pin.entry->submission.lease_.try_commit_service_start(
+          commit_route, &route_context, &pin.entry->service_start_coordinate);
+    } catch (...) {
+      operation_gate_.finish(pin.entry->submission.operation_constraints());
+      throw;
+    }
+    if (!route_committed) {
       operation_gate_.finish(pin.entry->submission.operation_constraints());
       return StartResult::Obsolete;
     }
@@ -1779,12 +1866,6 @@ class ExecutionService::BoundedReadyStore final {
     ++class_dispatch_count(pin.service_class);
     ++run.committed_starts;
     ++run.in_flight;
-    if (start_coordinate.has_value()) {
-      observation_sink->on_service_start(
-          pin.entry->submission.lease_.descriptor(),
-          pin.entry->submission.identity(), pin.entry->policy_service_cost,
-          *start_coordinate);
-    }
     if (pin.service_class == ComputeRunQosClass::Interactive &&
         throughput_ready) {
       ++consecutive_interactive_;
@@ -3805,6 +3886,23 @@ void disarm_reserved_start_rollback_probe_for_testing() noexcept {
   reserved_start_probe_state().armed.store(false, std::memory_order_release);
 }
 
+/** @copydoc set_service_start_arbitration_observer_for_testing */
+void set_service_start_arbitration_observer_for_testing(
+    ServiceStartArbitrationObserver observer, void* context) noexcept {
+  ServiceStartArbitrationProbeState& state =
+      service_start_arbitration_probe_state();
+  state.context.store(context, std::memory_order_relaxed);
+  state.observer.store(observer, std::memory_order_release);
+}
+
+/** @copydoc clear_service_start_arbitration_observer_for_testing */
+void clear_service_start_arbitration_observer_for_testing() noexcept {
+  ServiceStartArbitrationProbeState& state =
+      service_start_arbitration_probe_state();
+  state.observer.store(nullptr, std::memory_order_release);
+  state.context.store(nullptr, std::memory_order_relaxed);
+}
+
 /** @copydoc estimate_direct_operation_resources_for_testing */
 ResourceVector estimate_direct_operation_resources_for_testing(
     const OperationExecutionConstraints& constraints,
@@ -5660,6 +5758,16 @@ void ExecutionService::worker_loop(
     }
 
     const std::shared_ptr<RunState> run = entry->run;
+    const std::shared_ptr<ComputeRunObservationSink>& observation_sink =
+        entry->submission.lease_.descriptor().observation_sink();
+    if (entry->service_start_coordinate.has_value()) {
+      if (observation_sink == nullptr) {
+        std::terminate();
+      }
+      observation_sink->on_service_start(
+          entry->submission.lease_.descriptor(), entry->submission.identity(),
+          entry->policy_service_cost, *entry->service_start_coordinate);
+    }
     try {
       const std::optional<ComputeRunCancellationReason> cancellation =
           entry->submission.lease_.observe_cancellation();

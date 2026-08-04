@@ -323,6 +323,18 @@ struct ComputeRunObservationCoordinate final {
 };
 
 /**
+ * @brief Allocation-free irreversible service-start commit callback.
+ * @param context Borrowed caller-owned context valid for the complete call.
+ * @return True only after the physical route start commits irreversibly.
+ * @throws Nothing; implementations must contain every failure.
+ * @note `ExecutionService` supplies this callback while holding its pool and
+ * Run-state locks. `ComputeRunControl` invokes it under the matching Run's
+ * terminal-arbiter mutex so cancellation acceptance and route commitment share
+ * one linearization authority.
+ */
+using ComputeRunServiceStartCommitCallback = bool (*)(void* context) noexcept;
+
+/**
  * @brief Source-private, observation-only sink for one product compute request.
  *
  * The sink receives immutable identities, scalar service facts, terminal
@@ -384,10 +396,12 @@ class ComputeRunObservationSink {
    * @param coordinate Coordinate reserved at reserved-start commitment.
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.
-   * @note The service reserves `coordinate` immediately before route-start
-   * commitment, then invokes this after ready removal, grant/gate commitment,
-   * and start counters become authoritative. The shared sink sequence, rather
-   * than callback scheduling order, total-orders start and cancellation.
+   * @note The service reserves `coordinate` and commits the route under the
+   * Run terminal arbiter, then invokes this after ready removal,
+   * grant/gate commitment, and start counters become authoritative. Callback
+   * delivery occurs without the service pool, service Run-state, or terminal
+   * arbiter mutex held. The shared sink sequence, rather than callback
+   * scheduling order, total-orders start and cancellation.
    */
   virtual void on_service_start(
       const ComputeRunDescriptor& descriptor,
@@ -1622,6 +1636,28 @@ class ComputeRunLease {
    * @throws Nothing; missing telemetry or counter underflow terminates.
    */
   static void observe_child_released(void* context) noexcept;
+
+  /**
+   * @brief Arbitrates one irreversible physical start against Run terminal.
+   * @param commit_callback Non-null allocation-free route commit operation.
+   * @param context Borrowed callback context valid until return.
+   * @param committed_coordinate Output coordinate present only when the sink
+   * exists and the route commit succeeds.
+   * @return True only when the Run remained open and the callback committed.
+   * @throws std::invalid_argument when callback or output storage is null.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @note ExecutionService already holds `pool -> RunState` locks after
+   * releasing the resource-reservation mutex. This method then takes the Run
+   * terminal-arbiter mutex, reserves the observation coordinate, and invokes
+   * the irreversible callback. Cancellation accepted first prevents the
+   * callback; a callback that returns false leaves only an unpublished
+   * coordinate gap. No service-start observation callback runs under this
+   * lock.
+   */
+  bool try_commit_service_start(
+      ComputeRunServiceStartCommitCallback commit_callback, void* context,
+      std::optional<ComputeRunObservationCoordinate>* committed_coordinate)
+      const;
 
   /** @brief Shared Run control retained independently from observers. */
   std::shared_ptr<ComputeRunControl> control_;
