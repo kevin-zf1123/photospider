@@ -1238,8 +1238,11 @@ if(PHOTOSPIDER_BUILD_GRAPH_CLI)
     target_compile_definitions(photospider_cli_common PRIVATE
         PHOTOSPIDER_GRAPH_CLI_HELP_DIR=\"${PROJECT_SOURCE_DIR}/apps/graph_cli/resources/help\")
 
+    # Keep reusable frontend logic independent of the embedded product
+    # variant. Final executables and tests select exactly one production or
+    # internal-test archive, which prevents test-seam consumers from also
+    # inheriting the installable product through this helper.
     target_link_libraries(photospider_cli_common PUBLIC
-        photospider
         ${FTXUI_TARGETS}
     )
     target_link_libraries(photospider_cli_common PRIVATE
@@ -1260,7 +1263,9 @@ if(PHOTOSPIDER_BUILD_GRAPH_CLI)
         "${PROJECT_SOURCE_DIR}/src/lib"
         ${OpenCV_INCLUDE_DIRS}
     )
-    target_link_libraries(graph_cli PRIVATE photospider_cli_common)
+    target_link_libraries(graph_cli PRIVATE
+        photospider_cli_common
+        photospider)
 
     if(UNIX AND NOT APPLE)
         target_link_libraries(graph_cli PRIVATE dl pthread)
@@ -2017,6 +2022,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         target_link_libraries(opencv_operation_concurrency_benchmark PRIVATE
             photospider_cli_common
+            photospider
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
         add_executable(i1_edit_storm_benchmark EXCLUDE_FROM_ALL
@@ -2078,7 +2084,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_compute_supersession
         tests/unit/test_compute_supersession.cpp)
     add_ps_test(test_bad_alloc_boundaries
-        tests/integration/test_bad_alloc_boundaries.cpp)
+        tests/integration/test_bad_alloc_boundaries.cpp
+        photospider_internal_test_product)
     target_sources(test_bad_alloc_boundaries PRIVATE
         plugins/ops/threshold_op.cpp)
     target_include_directories(test_bad_alloc_boundaries PRIVATE
@@ -2542,6 +2549,7 @@ if(TARGET photospider_internal_test_product)
     set(PHOTOSPIDER_ALLOWED_INTERNAL_TEST_PRODUCT_CONSUMERS
         test_compute_run
         test_compute_service_split
+        test_bad_alloc_boundaries
         test_host_adapter
         test_i1_product_path
         test_kernel_contracts
