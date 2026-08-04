@@ -314,11 +314,13 @@ Host access 仍同时要求 producer Ready 与 host-visible binding；否则会�
 map、import、transfer 或 readback。显式 CPU/Metal transfer 会发布独立 binding，同时保留同一
 逻辑 `ValueRevisionId`。进程级 `ResidencyManager` 只索引精确 Ready replica，并以完整
 completion identity 加 current supersession generation 原子门控 destination readiness。
-一个可失败的 prepublication 步骤会创建 lineage row 而不推进它；accepted coordinator
-publication 随后会在暴露 currentness 前推进该行，因此晚启动的较旧 Run observation
-不能让 freshness 倒退。已结算 replica 可以比 producing Run 活得更久，但 manager 默认
+一个可失败的 prepublication 步骤会创建 lineage row，但不会指派 managed current identity；
+accepted coordinator publication 随后会在暴露 currentness 前指派精确 generation，包括
+coordinate 授权的数值下降。之后的 stale Run observation 或 transfer admission 不能替换该
+exact managed identity；standalone lineage 另行保持 numeric-maximum ordering。已结算
+replica 可以比 producing Run 活得更久，但 manager 默认
 最多保留 64 个 entry，从而限制强 native/provider ownership；publication pressure 会释放
-revision 最低的 entry。Generation 推进本身不会清除 residency，而且这个 entry 数量不是
+revision 最低的 entry。Managed-current 指派本身不会清除 residency，而且这个 entry 数量不是
 device-byte 或 scratch admission。在精确 Graph close 排空全部 Run 与 pending native
 completion 后，manager 会退役该不复用 `GraphInstanceId` 的全部 generation row。Close tail
 还会在本次退役前 join compute-request lane：prepared candidate 会在执行其可失败 lineage

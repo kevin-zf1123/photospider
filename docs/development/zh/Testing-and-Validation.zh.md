@@ -1391,7 +1391,12 @@ cancellation/supersession 并记录其被接受、撤销 publication，并且不
 移动后续时刻。已进入的 non-preemptible work 按 waste drain；post-cancel start
 为零，missed/expired work 不能发布 output、receipt 或 successful latency。具体而言，
 无效 admission result 会同步关闭 Graph，以撤销该 episode 的 publication 并取消、drain
-较早 generation，然后 runner 才中止全部后续 edit 与 grid slot。
+较早 generation。随后 runner 会采集关闭后的 observation/lifecycle/resource 状态，消费
+此前已接纳且 ready 的 settlement，并先 flush 一条四项 verdict 均为 Invalid 的 inner row，
+再中止全部后续 edit 与 grid slot。如果发生过 Host call，失败 edit 会保留真实 pre-call
+sample、reserved sequence、deadline 与 raw Host return，但没有 accepted coordinate、
+current observation 或 accepted product。Abort 后未到达的 fixed-width edit 使用
+`admission_attempted=false`、null admission sample，且不携带 call facts。
 
 Embedded Host 会在这条 success-only boundary 前关闭更窄的 resource-admission race。Public
 与 I1 call 都会在进入 Kernel 前预构造 caller promise/future、成功 result envelope、backend-
@@ -2033,9 +2038,11 @@ cmake --build build --target i1_edit_storm_benchmark -j
 ```
 
 Runner 会把产品 worker count 固定为 eight，保留唯一连续的 221-slot cold/warmup/measured
-grid，绝不移动或 backfill 已错过的 slot，并在 evidence invalid 后停止后续 submission。每个目录
-包含冻结的 `i1-graph.yaml`、`invocation.json`、raw `episodes.ndjson` 与 `summary.json`；setup/
-cadence/evidence failure 后则包含 `failure.json`。这些是封闭的 Issue #93 inner artifact，并明确
+grid，绝不移动或 backfill 已错过的 slot，并在 evidence invalid 后停止后续 submission。完整运行
+会写出冻结的 `i1-graph.yaml`、`invocation.json`、raw `episodes.ndjson` 与 `summary.json`；
+异常会在此前已安全完成的 artifact 之外写出 `failure.json`。特别是 failed/invalid admission
+会先向 `episodes.ndjson` 追加并 flush 对应 Invalid inner row，保留 raw admission 事实和关闭后的
+observer/resource 状态，然后才写 `failure.json`。这些是封闭的 Issue #93 inner artifact，并明确
 不声明 canonical outer row/section/bundle。Exit zero 表示四项 I1 inner verdict 全部通过；exit two
 表示完整 evidence 至少有一项 threshold 失败；exit one 表示 parsing、setup、cadence 或 evidence
 invalid。仅构建 target 或运行 `--help` 只是 harness smoke，不是 performance evidence。

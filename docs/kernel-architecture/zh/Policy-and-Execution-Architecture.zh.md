@@ -277,7 +277,7 @@ destination。Run settlement 会保留 executor 与 continuation，直至每个 
 都退役。V-8 不新增第二套 ready store、Graph authority、persistence path 或 device-memory
 capacity authority。已结算 replica 可在 Run 释放后继续复用，但 manager 默认的 64-entry
 上限会在 publication pressure 下释放 revision 最低的 entry，从而限制强
-native/provider retention；generation 推进本身不会批量清除它们。这个 entry 数量既不
+native/provider retention；generation 指派本身不会批量清除它们。这个 entry 数量既不
 测量也不准入 bytes。
 
 V-9 把权威 device-memory 与 scratch admission 放入既有 service `ResourceLedger`，而不是
@@ -288,13 +288,13 @@ command completion 延续。Policy 看不到 native handle 或 token，不排列
 获得第二套 waiting/fairness queue。
 
 Freshness publication 分为两个阶段。Kernel 先要求 `ExecutionService` 预跟踪 lineage，
-但不改变其 current generation；该可失败 allocation 会在 coordinator submission 前完成。
+但不指派 managed current identity；该可失败 allocation 会在 coordinator submission 前完成。
 Candidate 被接受为 current 时，coordinator 会在持有自身 mutex 且发布自身 current row 前，
 调用一个 no-throw、no-allocation 的 service callback。该 callback 会在 manager mutex 下把
-精确的 accepted current generation 赋给 manager。失败、被 close 拒绝或 born-stale 的
-candidate 绝不调用它。之后才启动的 stale Run 不能覆盖这个由 coordinator 发布的 current
-identity，无论 generation 数值向哪个方向变化。未使用该 callback 的 standalone manager
-lineage 则另行保留 numeric-maximum generation order。
+精确的 accepted generation 指派给 manager，包括 coordinate 授权的数值下降。失败、被 close
+拒绝或 born-stale 的 candidate 绝不调用它。之后才启动的 stale Run 不能替换这个由
+coordinator 发布的 exact identity。未使用该 callback 的 standalone manager lineage 则另行
+保留 numeric-maximum generation order。
 
 ## Compute I/O 执行边界
 

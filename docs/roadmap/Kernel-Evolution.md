@@ -737,9 +737,12 @@ The implemented V-2 through V-15 subset is deliberately narrower:
   producer/binding completion identity, publishes readiness, and inserts
   residency, so late, duplicate, or mismatched completions cannot release
   dependency work or regain a stale commit right. Kernel pretracks each
-  lineage before coordinator submission, and only accepted current publication
-  advances that row before currentness becomes observable, preventing a later
-  older Run start from regressing freshness;
+  lineage before coordinator submission without assigning a managed current
+  identity. Accepted current publication assigns the exact generation,
+  including a coordinate-authorized numeric decrease, before currentness
+  becomes observable; later stale Run observations and transfer admission
+  cannot replace that exact identity, while standalone lineages retain
+  numeric-maximum ordering;
 - source-private `DeviceExecutorRegistry` composition owns fixed non-CPU
   executors under `ExecutionService`; in the enabled Apple repository-plugin
   profile, the Metal executor owns one reusable native device/queue and

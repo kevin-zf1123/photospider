@@ -105,11 +105,13 @@ scratch lease 移入精确的 command-completion owner。Perlin 会发布 pendin
 编码 texture-to-buffer readback，并且不等待 command buffer 就返回。Completion freshness、
 适用的 producer Ready publication、destination Ready publication 与 resident insertion 是一个
 由 manager lock 保护的事务。Kernel 会先在可失败的 coordinator submission 前预跟踪 lineage，
-但不推进它。Accepted current publication 随后会在 coordinator 仍排除 currentness observation
-时执行无 allocation 的 manager 推进；被拒绝和 born-stale 的 candidate 不会执行该推进。
-这会阻止晚启动的较旧 Run 让 manager generation 倒退。由于 prepared candidate 会在可失败
-pretrack 前拥有 compute-request-lane admission，Graph close 会先 join 该 lane，再退役精确
-Graph 的 generation row；无需永久 closed-identity tombstone。Pending-Value continuation 复用既有
+但不指派 managed current identity。Accepted current publication 随后会在 coordinator 仍排除
+currentness observation 时无 allocation 地指派精确 generation；accepted-coordinate 顺序可以授权
+数值更低的 generation。被拒绝和 born-stale 的 candidate 不会指派任何 identity，之后的 stale
+Run observation 也不能替换 exact managed identity。Standalone lineage 另行保持
+numeric-maximum ordering。由于 prepared candidate 会在可失败 pretrack 前拥有
+compute-request-lane admission，Graph close 会先 join 该 lane，再退役精确 Graph 的 generation
+row；无需永久 closed-identity tombstone。Pending-Value continuation 复用既有
 Run 与 ready store。该切片不增加 public device-executor API、Graph/cache authority 或第二套
 device-capacity ledger。由 service 拥有的 `ResourceLedger` 仍是唯一权威：Host dimension
 保持既有含义，而每个已配置的非 CPU `DeviceId` 都拥有隔离且 immutable 的 memory/scratch

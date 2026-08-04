@@ -333,8 +333,11 @@ implicit transfer. CPU/Metal transfer produces a distinct binding for the same
 logical revision. Exact current-generation completion publishes Ready and
 process residency atomically; stale completion publishes typed failure before
 dependants can observe Ready. The lineage row is pretracked before coordinator
-submission and advanced only by accepted current publication, so an older Run
-that starts after a newer publication remains stale. Run settlement does not
+submission without a managed current identity. Accepted current publication
+assigns the exact generation, including a coordinate-authorized numeric
+decrease, before currentness becomes observable; a stale Run that starts later
+cannot replace that exact identity. Standalone lineages separately retain
+numeric-maximum ordering. Run settlement does not
 itself invalidate an eligible replica, while the manager's 64-entry default
 releases the lowest-revision strong native/provider owner under publication
 pressure. This entry count is not device-byte or scratch admission. The current

@@ -98,15 +98,18 @@ lane 会串行化同一 Graph 的 compute 与 execution-route access。
 structural、document、cache、dirty 与 lifecycle mutation 会推进该值；compute snapshot 与成功的
 compute publication 会保留该值。当前 commit compatibility 规则要求 identity 与 revision 精确
 相等。Topology generation 仍是独立的 planning cache key。
-产品 compute 还要求 Run 捕获的 supersession key 与 generation 精确保持 current。
+产品 compute 还要求 Run 捕获的完整 supersession identity 精确保持 current。
 
-**`SupersessionKey` / `SupersessionGeneration`**
+**`SupersessionKey` / `SupersessionGeneration` / `SupersessionIdentity`**
 一个 live Graph 内部的私有 latest-wins identity。Key 由 target node 与 canonical request intent
 组成：缺失 intent 与显式 HP 属于同一 lineage，realtime 则保持独立。Checked nonzero graph-wide
-allocator 为每个 prepared candidate 分配严格递增且永不 wrap/reuse 的 generation。Allocation 只是
-准备；graph-state publication 才是 current-generation linearization point。每个 admitted key
-至多拥有一个 reserved compute-lane ticket、一个 active/draining candidate 与一个 latest pending
-mailbox value。
+allocator 为每个 prepared candidate 分配严格递增且永不 wrap/reuse 的 generation。完整 identity
+由该 key、generation 与可选的源码私有 `AcceptedBoundaryCoordinate` 组成。Allocation 只负责
+preparation；graph-state publication 会指派完整 current identity。两个 identity 都绑定 coordinate
+时，由 accepted coordinate 排列 replacement，并可授权数值更低的 generation；mixed 与 unbound
+identity 继续按 generation 排序。Exact currentness 要求 generation 与可选 coordinate 都相等，
+而不是选择数值最大的 generation。每个 admitted key 至多拥有一个 reserved compute-lane ticket、
+一个 active/draining candidate 与一个 latest pending mailbox value。
 
 **`GraphLifetimeAnchor` / Graph lifetime lease**
 仅在完整 `GraphRuntime` 可发布后注册的稳定逐 Graph lifetime root。Candidate 会从第一次

@@ -120,18 +120,23 @@ Graph instance. Scoped structural, document, cache, dirty, and lifecycle
 mutations advance it; compute snapshots and successful compute publication
 preserve it. Exact identity and revision equality is the current commit
 compatibility rule. Product compute additionally requires the Run-captured
-supersession key and generation to remain exactly current. Topology generation
+complete supersession identity to remain exactly current. Topology generation
 remains a separate planning cache key.
 
-**`SupersessionKey` / `SupersessionGeneration`**
+**`SupersessionKey` / `SupersessionGeneration` / `SupersessionIdentity`**
 The private latest-wins identity inside one live Graph. The key is target node
 plus canonical request intent: missing intent and explicit HP are the same
 lineage, while realtime is distinct. A checked nonzero graph-wide allocator
 gives every prepared candidate a strictly increasing generation and never
-wraps or reuses a value. Allocation is preparatory; graph-state publication is
-the current-generation linearization point. Each admitted key owns at most one
-reserved compute-lane ticket, one active/draining candidate, and one latest
-pending mailbox value.
+wraps or reuses a value. The complete identity contains that key and generation
+plus an optional source-private `AcceptedBoundaryCoordinate`. Allocation is
+preparatory; graph-state publication assigns the complete current identity. For
+two coordinate-bound identities, the accepted coordinate orders replacement
+and may authorize a numerically lower generation; mixed and unbound identities
+remain generation-ordered. Exact currentness requires equality of generation
+and optional coordinate, not numeric-maximum generation. Each admitted key owns
+at most one reserved compute-lane ticket, one active/draining candidate, and
+one latest pending mailbox value.
 
 **`GraphLifetimeAnchor` / graph lifetime lease**
 The stable per-Graph lifetime root registered only after a complete

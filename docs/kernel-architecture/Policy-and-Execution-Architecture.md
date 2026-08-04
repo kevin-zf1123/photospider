@@ -337,8 +337,8 @@ second ready store, Graph authority, persistence path, or device-memory
 capacity authority. Settled replicas may remain reusable after Run release,
 but the manager's 64-entry default bounds strong native/provider retention by
 releasing the lowest-revision entry under publication pressure; generation
-advance alone does not bulk-clear them. This entry count neither measures nor
-admits bytes.
+assignment alone does not bulk-clear them. This entry count neither measures
+nor admits bytes.
 
 V-9 places authoritative device-memory and scratch admission in the existing
 service `ResourceLedger`, not in policy or residency. Each configured
@@ -350,14 +350,15 @@ Policy sees no native handle or token, does not rank byte owners, and gains no
 second waiting/fairness queue.
 
 Freshness publication uses two phases. Kernel first asks `ExecutionService` to
-pretrack the lineage without changing its current generation; this fallible
-allocation completes before coordinator submission. When the candidate is
-accepted as current, the coordinator invokes a no-throw, no-allocation service
-callback while holding its mutex and before publishing its own current row.
-That callback assigns the manager's exact accepted current generation under the
-manager mutex. Failed, close-rejected, and born-stale candidates never invoke
-it. A stale Run that starts afterward cannot overwrite this coordinator-
-published current identity, regardless of numeric generation direction.
+pretrack the lineage without assigning a managed current identity; this
+fallible allocation completes before coordinator submission. When the
+candidate is accepted as current, the coordinator invokes a no-throw,
+no-allocation service callback while holding its mutex and before publishing
+its own current row. That callback assigns the manager's exact accepted
+generation under the manager mutex, including a coordinate-authorized numeric
+decrease. Failed, close-rejected, and born-stale candidates never invoke it. A
+stale Run that starts afterward cannot replace this coordinator-published exact
+identity.
 Standalone manager lineages, which do not use this callback, separately retain
 numeric-maximum generation order.
 

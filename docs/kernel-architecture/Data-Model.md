@@ -383,12 +383,15 @@ or readback. Explicit CPU/Metal transfers publish distinct bindings while
 preserving one logical `ValueRevisionId`. The process `ResidencyManager` indexes
 only exact Ready replicas and atomically gates destination readiness on complete
 completion identity plus current supersession generation. A fallible
-prepublication step creates the lineage row without advancing it; accepted
-coordinator publication then advances that row before exposing currentness, so
-a late older Run observation cannot regress freshness. Settled replicas may
+prepublication step creates the lineage row without assigning a managed current
+identity. Accepted coordinator publication assigns the exact generation,
+including a coordinate-authorized numeric decrease, before exposing
+currentness. A later stale Run observation or transfer admission cannot replace
+that exact managed identity; standalone lineages separately retain
+numeric-maximum ordering. Settled replicas may
 outlive their producing Run, but strong native/provider ownership is bounded by
 the manager's 64-entry default: publication pressure releases the
-lowest-revision entry. Generation advance alone does not clear residency, and
+lowest-revision entry. A managed-current assignment alone does not clear residency, and
 the entry count is not device-byte or scratch admission. After exact Graph
 close has drained every Run and pending native completion, the manager retires
 all generation rows for that nonreused `GraphInstanceId`. The close tail also

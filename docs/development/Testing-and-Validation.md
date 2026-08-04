@@ -1741,8 +1741,14 @@ call, revokes publication, and never catches up, backfills, or shifts later
 times. Entered non-preemptible work drains as waste; post-cancel starts are
 zero, and missed/expired work cannot publish output, receipt, or successful
 latency. Concretely, an invalid admission result synchronously closes the Graph
-to revoke episode publication and cancel/drain earlier generations before the
-runner aborts every later edit and grid slot.
+to revoke episode publication and cancel/drain earlier generations. The runner
+then captures the closed observation/lifecycle/resource state, consumes any
+already accepted ready settlements, and flushes one inner row whose four
+verdicts are Invalid before aborting every later edit and grid slot. The failed
+edit retains its actual pre-call sample, reserved sequence, deadline, and raw
+Host return when a call occurred; it has no accepted coordinate, current
+observation, or accepted product. Fixed-width edits not reached after the abort
+carry `admission_attempted=false`, a null admission sample, and no call facts.
 
 The embedded Host closes the narrower resource-admission race before this
 success-only boundary. Both the public and I1 calls prebuild the caller
@@ -2463,11 +2469,15 @@ cmake --build build --target i1_edit_storm_benchmark -j
 
 The runner fixes the product worker count at eight, keeps one continuous
 221-slot cold/warmup/measured grid, never shifts or backfills a missed slot,
-and aborts later submissions on invalid evidence. Each directory contains the
+and aborts later submissions on invalid evidence. A complete run writes the
 frozen `i1-graph.yaml`, `invocation.json`, raw `episodes.ndjson`, and
-`summary.json`, or `failure.json` after a setup/cadence/evidence failure. These
-are closed Issue #93 inner artifacts and explicitly carry no canonical outer
-row/section/bundle claim. Exit zero means all four I1 inner verdicts passed;
+`summary.json`; an exception writes `failure.json` in addition to whatever
+earlier artifacts were safely completed. In particular, a failed/invalid
+admission first appends and flushes its Invalid inner row to `episodes.ndjson`,
+preserving raw admission facts and closed observer/resource state, and then
+writes `failure.json`. These are closed Issue #93 inner artifacts and
+explicitly carry no canonical outer row/section/bundle claim. Exit zero means
+all four I1 inner verdicts passed;
 exit two means complete evidence failed at least one threshold; exit one means
 parsing, setup, cadence, or evidence invalidation. Building the target or
 running `--help` is only a harness smoke, not performance evidence.

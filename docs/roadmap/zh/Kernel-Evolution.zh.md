@@ -588,8 +588,10 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   Graph/Run/generation/task/producer/binding completion identity、发布 readiness 并插入
   residency，因此晚到、重复或 identity 不匹配的 completion 不能释放 dependency work，也不能
   重新获得 stale commit right。Kernel 会在 coordinator submission 前预跟踪每条 lineage，
-  而且只有 accepted current publication 才会在 currentness 可观察前推进该行，从而阻止之后
-  才启动的较旧 Run 让 freshness 倒退；
+  但不指派 managed current identity。Accepted current publication 会在 currentness 可观察前
+  指派精确 generation，包括 coordinate 授权的数值下降；之后的 stale Run observation 与
+  transfer admission 不能替换该 exact identity，而 standalone lineage 保持
+  numeric-maximum ordering；
 - source-private `DeviceExecutorRegistry` composition 会在 `ExecutionService` 下拥有固定的非 CPU
   executor；在仓库 plugin 已启用的 Apple profile 中，Metal executor 拥有一个可复用 native
   device/queue 与经过校验的 pipeline cache，通过 invocation allocator 把 callback-scoped
