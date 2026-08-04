@@ -390,15 +390,19 @@ Run success only after that transaction succeeds.
 
 For an observed Run, the product path emits source-private read-only boundaries
 without changing publication order: current-generation assignment, physically
-committed callback start, accepted cancellation, terminal outcome, and
-current-visible output. Service start is reported only after the reserved-start
-transaction commits and carries the exact `(RunId, RunLocalTaskId)`,
-generation, QoS, and policy charge. Current-visible output is reported only
-after the ordinary live Graph swap succeeds; terminal success remains ordered
-after that observation. The sole HP contender resolves both observations under
-one Run-arbiter claim, so a rejected or already-resolved contender emits
-neither. These callbacks retain scalar facts or an immutable Value only and
-cannot start, cancel, prioritize, settle, or publish work.
+committed callback start, accepted cancellation, current-visible output,
+terminal outcome, physical Run quiescence, exact root-resource return, and
+caller-visible future plus Host-tracking settlement. Every boundary reserves an
+immutable coordinate from one request-scoped causal sequence at its product
+linearization point, before callback delivery. The logical service-start commit
+and cancellation acceptance therefore share the same ordering authority even
+when their callbacks run on different threads. Service start carries the exact
+`(RunId, RunLocalTaskId)`, generation, QoS, and policy charge. Current-visible
+output is reported only after the ordinary live Graph swap succeeds; terminal
+success remains ordered after that observation. The sole HP contender resolves
+both observations under one Run-arbiter claim, so a rejected or already-resolved
+contender emits neither. These callbacks retain scalar facts or an immutable
+Value only and cannot start, cancel, prioritize, settle, or publish work.
 
 This is the current baseline through issue #76. A private request source can
 cooperatively cancel one HP Run or both current realtime child Runs; immutable
@@ -576,12 +580,18 @@ These constants are not permanent ABI.
 
 The I1 evidence path is separate from the public graph-event ring. Its bounded
 request-scoped collector preallocates observation slots for the twelve edits
-and assigns one collector-local causal sequence to every product callback.
+and assigns one collector-local causal sequence to every product transition.
 Overflow invalidates the row rather than dropping evidence silently. At the
-frozen `Q_end` cut, the private Host also copies Host/device
-`ResourceLedger` current, limit, and lifetime-high-water values plus one
-`ExecutionLifecycleTelemetry` page. The snapshot is observation only: it does
-not wait for quiescence, reset counters, or mint a Run/ledger/queue capability.
+frozen `Q_end`, the runner first reserves the sequence of the first excluded
+event. A product event belongs to the boundary history only when its monotonic
+sample is no later than `Q_end` and its sequence precedes that cut. The runner
+may then consume already-produced futures and take an eventual Host/device
+`ResourceLedger` plus `ExecutionLifecycleTelemetry` snapshot, but that later
+snapshot cannot backdate terminal, quiescence, root-resource return, or Host
+settlement across the cut. The evaluator requires one causally coherent Run
+state machine and matching Host status for each edit. All snapshots and
+callbacks remain observation only: they wait for no product transition, reset
+no counter, and mint no Run/ledger/queue capability.
 
 `GraphEventService` publishes per-node compute events into a thread-safe,
 fixed-capacity ring. The production capacity is 8,192 events per graph. Each

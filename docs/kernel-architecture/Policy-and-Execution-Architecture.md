@@ -506,10 +506,14 @@ the ordinary embedded asynchronous Host, InteractionService, Kernel,
 supersession, and `ExecutionService` path while supplying explicit Interactive
 QoS, weight one, cap eight, and the immutable per-edit deadline. A read-only
 `ComputeRunObservationSink` records current generation, physically committed
-service start with `(RunId, RunLocalTaskId)` and charge, accepted
-cancellation, terminal outcome, and current-visible output. It grants no
-scheduling, cancellation, ledger, graph, or commit authority and is not an
-installed Host, IPC, CLI, policy-plugin, or operation-plugin contract.
+service start with `(RunId, RunLocalTaskId)` and charge, accepted cancellation,
+current-visible output, terminal outcome, Run quiescence, exact root-resource
+return, and caller-visible future plus Host-tracking settlement. Each product
+transition reserves a coordinate from the same request-scoped causal sequence
+at its linearization point. In particular, logical service-start commit and
+cancellation acceptance are ordered before either callback delivery. The sink
+grants no scheduling, cancellation, ledger, graph, or commit authority and is
+not an installed Host, IPC, CLI, policy-plugin, or operation-plugin contract.
 After the live HP Graph swap, the sole commit contender emits current-visible
 output and the succeeding terminal-success observation in one Run-arbiter
 resolution; a rejected or already-resolved contender emits neither event.
@@ -519,9 +523,12 @@ coordinate collector, continuous cold/warmup/measured 221-slot grid, tie and
 guard rules, canonical DenseTensor output digest, resource snapshots, and
 fail-closed episode/replicate evaluator are current. `ResourceLedger` Host and
 device snapshots now retain lifetime high-water values for successful
-reservations as well as current/limit values; the I1 boundary snapshot combines
-those values with lifecycle counters and cursor/drop facts. The closed
-`execution-profile-i1-inner-row-v1` evidence independently evaluates latency,
+reservations as well as current/limit values. At `Q_end`, I1 first captures the
+first-excluded causal coordinate; required terminal/quiescence/resource/Host
+settlement belongs only when its timestamp is no later than the boundary and
+its sequence precedes the cut. A later resource/lifecycle snapshot proves
+eventual exact return but cannot backdate settlement into that history. The
+closed `execution-profile-i1-inner-row-v1` evidence independently evaluates latency,
 waste, memory settlement, and output correctness. It does not claim the ADR
 0010 canonical 15-field outer row, section, bundle, reference comparison, or
 the profiles assigned to Issues #94 through #96.

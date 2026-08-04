@@ -203,11 +203,15 @@ Q^I1_end(E) = Q^I1_start(E) + 500,000,000 ns
 ```
 
 该 window 包含两个 boundary 上的事件。在 `Q^I1_start`，nominal schedule marker
-先于同 timestamp 的 actual admission 排序。在 `Q^I1_end`，所有 timestamp 相等的
-lifecycle event 会先按保留的 causal order 应用，随后才取得 quiescence snapshot。
-如果某次 start 使该 snapshot 仍有 active work，或任一 terminal/settlement event
-位于 boundary 之后，则 replicate 无效。该 window 可以观察仍 active 的 final Run；
-它不会取消 work、延迟下一 origin 或延长任何 `D_i`。在最晚合法 admission 下，
+先于同 timestamp 的 actual admission 排序。在 `Q^I1_end`，runner 会从所有产品
+transition 共用的同一 request-scoped causal sequence 中预留首个被排除的 coordinate。
+只有 monotonic timestamp 不晚于 `Q^I1_end` 且 sequence 位于该 cut 之前的 event
+才属于 boundary history；因此同 timestamp lifecycle event 仍保留其权威顺序。每个
+materialized Run 都必须在该 history 中包含 terminal、quiescence、精确 root-resource
+return 与 Host settlement。缺失 transition 或仍 active/更晚的 settlement 都会使
+replicate 无效。较晚的 eventual resource/lifecycle snapshot 不能把 event 回填到 cut
+之前。该 window 可以观察仍 active 的 final Run；它不会取消 work、延迟下一 origin
+或延长任何 `D_i`。在最晚合法 admission 下，
 `D_11 <= E + 335,333,337 ns`，因此从该 deadline 到 `Q^I1_end` 精确保留
 348,000,000 ns，从 `Q^I1_end` 到下一 750,000,000 ns origin 精确保留
 66,666,663 ns。Reset/baseline preparation 必须使用这段固定剩余 guard，并在下一

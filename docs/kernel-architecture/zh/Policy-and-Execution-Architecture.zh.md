@@ -410,9 +410,12 @@ Source-private `I1Host` 会经过普通 embedded asynchronous Host、Interaction
 supersession 与 `ExecutionService` path 提交精确 HP request，同时提供显式 Interactive QoS、
 weight one、cap eight 与每次 edit 的 immutable deadline。只读
 `ComputeRunObservationSink` 会记录 current generation、带 `(RunId, RunLocalTaskId)` 与 charge
-的 physically committed service start、accepted cancellation、terminal outcome，以及
-current-visible output。它不授予 scheduling、cancellation、ledger、graph 或 commit authority，
-也不是 installed Host、IPC、CLI、policy-plugin 或 operation-plugin contract。
+的 physically committed service start、accepted cancellation、current-visible output、terminal
+outcome、Run quiescence、精确 root-resource return，以及 caller-visible future 与 Host-tracking
+settlement。每个产品 transition 都会在自己的 linearization point 从同一个 request-scoped causal
+sequence 预留 coordinate；尤其是逻辑 service-start commit 与 cancellation acceptance 会在任一
+callback delivery 之前完成排序。该 sink 不授予 scheduling、cancellation、ledger、graph 或
+commit authority，也不是 installed Host、IPC、CLI、policy-plugin 或 operation-plugin contract。
 Live HP Graph swap 完成后，唯一 commit contender 会在同一次 Run-arbiter resolution 中依次
 发出 current-visible output 与 terminal-success observation；被拒绝或已经解析的 contender
 不会发出其中任何一个 event。
@@ -421,8 +424,11 @@ Live HP Graph swap 完成后，唯一 commit contender 会在同一次 Run-arbit
 连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor output digest、
 resource snapshot，以及 fail-closed episode/replicate evaluator 均已成为当前实现。
 `ResourceLedger` 的 Host/device snapshot 现在除 current/limit 外，还保留 successful reservation
-的 lifetime high-water value；I1 boundary snapshot 会把这些值与 lifecycle counter、cursor/drop
-fact 组合。封闭的 `execution-profile-i1-inner-row-v1` evidence 会分别判定 latency、waste、
+的 lifetime high-water value。在 `Q_end`，I1 会先捕获首个被排除的 causal coordinate；必需的
+terminal/quiescence/resource/Host settlement 只有在 timestamp 不晚于 boundary 且 sequence 位于
+cut 之前时才属于该 history。较晚的 resource/lifecycle snapshot 可以证明最终精确归还，却不能把
+settlement 回填到该 history。封闭的 `execution-profile-i1-inner-row-v1` evidence 会分别判定
+latency、waste、
 memory settlement 与 output correctness。它不声称实现 ADR 0010 canonical 15-field outer row、
 section、bundle、reference comparison，也不覆盖 Issues #94 至 #96 负责的 profile。
 

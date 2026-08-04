@@ -232,11 +232,16 @@ Q^I1_end(E) = Q^I1_start(E) + 500,000,000 ns
 
 The window includes events at both boundaries. At `Q^I1_start`, the nominal
 schedule marker orders before an actual admission with the same timestamp. At
-`Q^I1_end`, all lifecycle events with an equal timestamp are applied in their
-retained causal order before the quiescence snapshot. A start that leaves work
-active at that snapshot, or any terminal/settlement event after the boundary,
-invalidates the replicate. The window may observe an active final Run; it does
-not cancel work, delay the next origin, or extend any `D_i`. At the latest legal
+`Q^I1_end`, the runner reserves the first excluded coordinate from the same
+request-scoped causal sequence used at every product transition. An event
+belongs to the boundary history only when its monotonic timestamp is no later
+than `Q^I1_end` and its sequence precedes that cut; equal-time lifecycle events
+therefore retain their authoritative order. Every materialized Run requires its
+terminal, quiescence, exact root-resource return, and Host settlement in that
+history. A missing transition or any active/later settlement invalidates the
+replicate. A later eventual resource/lifecycle snapshot cannot backdate an
+event across the cut. The window may observe an active final Run; it does not
+cancel work, delay the next origin, or extend any `D_i`. At the latest legal
 admission, `D_11 <= E + 335,333,337 ns`, leaving exactly 348,000,000 ns from
 that deadline to `Q^I1_end` and 66,666,663 ns from `Q^I1_end` to the next
 750,000,000 ns origin. Reset/baseline preparation must use that fixed remaining

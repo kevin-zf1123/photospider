@@ -303,12 +303,16 @@ revision 与 current supersession key/generation，执行符合条件的延迟 H
 
 对于被观察的 Run，产品路径会在不改变 publication order 的前提下发出 source-private
 只读 boundary：current-generation assignment、physically committed callback start、accepted
-cancellation、terminal outcome 与 current-visible output。Service start 只在 reserved-start
-transaction commit 后报告，并携带精确 `(RunId, RunLocalTaskId)`、generation、QoS 与 policy
-charge。Current-visible output 只在普通 live Graph swap 成功后报告；terminal success 仍排在
-该 observation 之后。唯一 HP contender 会在同一个 Run-arbiter claim 下解析这两个
-observation，因此被拒绝或已经解析的 contender 不会发出其中任何一个。这些 callback 只保留
-scalar fact 或 immutable Value，不能启动、取消、提高优先级、settle 或发布 work。
+cancellation、current-visible output、terminal outcome、Run physical quiescence、精确 root-resource
+return，以及 caller-visible future 与 Host-tracking settlement。每个 boundary 都会在自己的产品
+linearization point、callback delivery 之前，从同一个 request-scoped causal sequence 预留不可变
+coordinate。因此，即使 service-start 与 cancellation callback 位于不同 thread，逻辑 service-start
+commit 和 cancellation acceptance 仍共享同一个 ordering authority。Service start 会携带精确
+`(RunId, RunLocalTaskId)`、generation、QoS 与 policy charge。Current-visible output 只在普通 live
+Graph swap 成功后报告；terminal success 仍排在该 observation 之后。唯一 HP contender 会在同一个
+Run-arbiter claim 下解析这两个 observation，因此被拒绝或已经解析的 contender 不会发出其中任何
+一个。这些 callback 只保留 scalar fact 或 immutable Value，不能启动、取消、提高优先级、settle
+或发布 work。
 
 这是截至 issue #76 的当前基线。私有 request source 可以 cooperative cancel 一个 HP Run，或当前
 realtime request 的两个 child Run；immutable deadline 会在有界 observation point 提议
@@ -450,11 +454,15 @@ subscription surface 都不属于当前软件契约。
 ## 事件和计时
 
 I1 evidence path 与 public graph-event ring 分离。其有界 request-scoped collector 会为十二次
-edit 预分配 observation slot，并为每次 product callback 分配一个 collector-local causal
-sequence。Overflow 会使 row invalid，而不会静默丢弃 evidence。在冻结的 `Q_end` cut，private
-Host 还会复制 Host/device `ResourceLedger` 的 current、limit 与 lifetime-high-water value，
-以及一页 `ExecutionLifecycleTelemetry`。Snapshot 只用于 observation：它不会等待 quiescence、
-重置 counter，也不会 mint Run/ledger/queue capability。
+edit 预分配 observation slot，并为每次产品 transition 分配一个 collector-local causal
+sequence。Overflow 会使 row invalid，而不会静默丢弃 evidence。在冻结的 `Q_end`，runner 会先
+预留首个被排除 event 的 sequence。只有 monotonic sample 不晚于 `Q_end` 且 sequence 位于 cut
+之前的 product event 才属于 boundary history。随后 runner 可以消费已经产生的 future，并取得
+eventual Host/device `ResourceLedger` 与 `ExecutionLifecycleTelemetry` snapshot；但该较晚 snapshot
+不能把 terminal、quiescence、root-resource return 或 Host settlement 回填到 cut 之前。Evaluator
+会为每次 edit 要求一条因果一致的 Run state machine 和匹配的 Host status。所有 snapshot 与
+callback 仍只用于 observation：它们不等待任何产品 transition、不重置 counter，也不 mint
+Run/ledger/queue capability。
 
 `GraphEventService` 把每节点计算事件发布到线程安全、固定容量的 ring。Production 容量是每图
 8,192 个事件。每条被接纳的 publication 都会获得 `1..UINT64_MAX-1` 范围内单调递增的
