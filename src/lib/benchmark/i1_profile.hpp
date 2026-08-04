@@ -107,6 +107,14 @@ inline constexpr std::chrono::nanoseconds kI1MeasurementDuration{500000000};
 /** @brief Exact offset of the I1 causal history cut from episode origin. */
 inline constexpr std::chrono::nanoseconds kI1MeasurementEndOffset{683333337};
 
+/**
+ * @brief Frozen interval before `Q_end` with no new digest traversal.
+ * @note A passing final publication has at least 165 ms of contract headroom;
+ * this margin leaves the final 100 ms free of newly started payload traversal.
+ */
+inline constexpr std::chrono::nanoseconds kI1DigestFreezeSafetyMargin{
+    100000000};  // NOLINT(whitespace/indent_namespace)
+
 /** @brief Exact guard from the I1 history cut to the next grid origin. */
 inline constexpr std::chrono::nanoseconds kI1NextOriginGuard{66666663};
 
@@ -606,6 +614,18 @@ class I1AcceptedBoundaryCollector final {
 std::chrono::steady_clock::time_point checked_i1_time_add(
     std::chrono::steady_clock::time_point origin,
     std::chrono::nanoseconds offset);
+
+/**
+ * @brief Checked-subtracts an exact nanosecond magnitude from a steady time.
+ * @param origin Base monotonic time point.
+ * @param magnitude Nonnegative exact nanosecond magnitude to subtract.
+ * @return Exactly representable derived time point.
+ * @throws std::invalid_argument for a negative magnitude.
+ * @throws std::overflow_error when conversion or subtraction is not exact.
+ */
+std::chrono::steady_clock::time_point checked_i1_time_subtract(
+    std::chrono::steady_clock::time_point origin,
+    std::chrono::nanoseconds magnitude);
 
 /**
  * @brief Derives one isolated I1 episode origin from the single grid origin.

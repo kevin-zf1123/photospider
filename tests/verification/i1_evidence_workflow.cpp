@@ -183,6 +183,12 @@ const char* exception_diagnostic(const std::exception_ptr& failure) noexcept {
 
 }  // namespace
 
+/** @copydoc i1_pre_cut_digest_policy */
+I1PreCutDigestPolicy i1_pre_cut_digest_policy(bool admission_failed) noexcept {
+  return admission_failed ? I1PreCutDigestPolicy::SkipPayloadTraversal
+                          : I1PreCutDigestPolicy::FreezePublishedOutputs;
+}
+
 /** @copydoc I1EpisodeEvaluationRecoveryError::I1EpisodeEvaluationRecoveryError
  */
 I1EpisodeEvaluationRecoveryError::I1EpisodeEvaluationRecoveryError(

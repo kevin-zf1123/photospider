@@ -97,6 +97,34 @@ std::chrono::nanoseconds checked_i1_time_multiply(
 }
 
 /**
+ * @brief Converts one nonnegative nanosecond magnitude to the steady duration.
+ * @param magnitude Nonnegative exact nanosecond magnitude.
+ * @return Exactly representable steady-clock duration.
+ * @throws std::invalid_argument for a negative magnitude.
+ * @throws std::overflow_error when the clock cannot represent it exactly.
+ * @note Callers still own checked addition or subtraction against an epoch.
+ */
+std::chrono::steady_clock::duration checked_i1_clock_duration(
+    std::chrono::nanoseconds magnitude) {
+  if (magnitude.count() < 0) {
+    throw std::invalid_argument("I1 time magnitude must be nonnegative.");
+  }
+  using ClockDuration = std::chrono::steady_clock::duration;
+  using ClockRep = ClockDuration::rep;
+  static_assert(std::is_integral_v<ClockRep>,
+                "I1 checked time requires an integral steady-clock rep");
+  const ClockDuration converted =
+      std::chrono::duration_cast<ClockDuration>(magnitude);
+  if (std::chrono::duration_cast<std::chrono::nanoseconds>(converted) !=
+      magnitude) {
+    throw std::overflow_error(
+        "I1 nanosecond magnitude is not exactly representable by "
+        "steady_clock.");
+  }
+  return converted;
+}
+
+/**
  * @brief Appends all release-published fixed slots to one result vector.
  * @tparam Record Observation record type.
  * @tparam Capacity Compile-time fixed slot count.
@@ -548,20 +576,9 @@ I1EditAdmissionResult I1AcceptedBoundaryCollector::admit_edit(
 std::chrono::steady_clock::time_point checked_i1_time_add(
     std::chrono::steady_clock::time_point origin,
     std::chrono::nanoseconds offset) {
-  if (offset.count() < 0) {
-    throw std::invalid_argument("I1 time offset must be nonnegative.");
-  }
   using ClockDuration = std::chrono::steady_clock::duration;
   using ClockRep = ClockDuration::rep;
-  static_assert(std::is_integral_v<ClockRep>,
-                "I1 checked time requires an integral steady-clock rep");
-  const ClockDuration converted =
-      std::chrono::duration_cast<ClockDuration>(offset);
-  if (std::chrono::duration_cast<std::chrono::nanoseconds>(converted) !=
-      offset) {
-    throw std::overflow_error(
-        "I1 nanosecond offset is not exactly representable by steady_clock.");
-  }
+  const ClockDuration converted = checked_i1_clock_duration(offset);
   const __int128 sum =
       static_cast<__int128>(origin.time_since_epoch().count()) +
       static_cast<__int128>(converted.count());
@@ -571,6 +588,26 @@ std::chrono::steady_clock::time_point checked_i1_time_add(
   }
   return std::chrono::steady_clock::time_point(
       ClockDuration(static_cast<ClockRep>(sum)));
+}
+
+/** @copydoc checked_i1_time_subtract */
+std::chrono::steady_clock::time_point checked_i1_time_subtract(
+    std::chrono::steady_clock::time_point origin,
+    std::chrono::nanoseconds magnitude) {
+  using ClockDuration = std::chrono::steady_clock::duration;
+  using ClockRep = ClockDuration::rep;
+  const ClockDuration converted = checked_i1_clock_duration(magnitude);
+  const __int128 difference =
+      static_cast<__int128>(origin.time_since_epoch().count()) -
+      static_cast<__int128>(converted.count());
+  if (difference <
+          static_cast<__int128>(std::numeric_limits<ClockRep>::lowest()) ||
+      difference >
+          static_cast<__int128>(std::numeric_limits<ClockRep>::max())) {
+    throw std::overflow_error("I1 steady-clock subtraction overflowed.");
+  }
+  return std::chrono::steady_clock::time_point(
+      ClockDuration(static_cast<ClockRep>(difference)));
 }
 
 /** @copydoc i1_episode_origin */

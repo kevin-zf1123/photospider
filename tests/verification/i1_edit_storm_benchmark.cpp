@@ -39,13 +39,6 @@ namespace {
 using Json = nlohmann::json;
 
 /**
- * @brief Payload-digest work stops this far before the immutable `Q_end` cut.
- * @note A passing final publication has at least 165 ms of contract headroom;
- * this margin leaves the final 100 ms free of newly started payload traversal.
- */
-constexpr std::chrono::nanoseconds kI1DigestFreezeSafetyMargin{100000000};
-
-/**
  * @brief Parsed explicit controls for one manual exact I1 replicate.
  * @throws Nothing for default construction.
  */
@@ -503,9 +496,8 @@ I1ReplicateSummary run_exact_replicate(
       }
 
       if (pending_evaluation.has_value()) {
-        const auto handoff_deadline = checked_i1_time_add(
-            episode_origin,
-            std::chrono::nanoseconds(-kI1AdmissionLateness.count()));
+        const auto handoff_deadline =
+            checked_i1_time_subtract(episode_origin, kI1AdmissionLateness);
         if (pending_evaluation->wait_until(handoff_deadline) !=
             std::future_status::ready) {
           throw std::runtime_error(
@@ -581,6 +573,8 @@ I1ReplicateSummary run_exact_replicate(
         }
       }
 
+      const I1PreCutDigestPolicy digest_policy =
+          i1_pre_cut_digest_policy(failed_admission_edit.has_value());
       if (failed_admission_edit.has_value()) {
         const VoidResult revoked = graph_close.close_now();
         if (!revoked.status.ok) {
@@ -588,10 +582,10 @@ I1ReplicateSummary run_exact_replicate(
               "; graph-close publication revocation failed: " +
               revoked.status.message;
         }
-      } else {
-        const auto digest_freeze_deadline = checked_i1_time_add(
-            measurement_end,
-            std::chrono::nanoseconds(-kI1DigestFreezeSafetyMargin.count()));
+      }
+      if (digest_policy == I1PreCutDigestPolicy::FreezePublishedOutputs) {
+        const auto digest_freeze_deadline = checked_i1_time_subtract(
+            measurement_end, kI1DigestFreezeSafetyMargin);
         freeze_visible_outputs_until(&observations, digest_freeze_deadline,
                                      measurement_end);
         std::this_thread::sleep_until(measurement_end);
@@ -649,9 +643,6 @@ I1ReplicateSummary run_exact_replicate(
               "I1 Host settlement evidence missed the terminal guard at slot " +
               std::to_string(slot));
         }
-      }
-      if (failed_admission_edit.has_value()) {
-        observations.freeze_visible_output_digests();
       }
       observations.release_unfrozen_visible_outputs();
       const I1ExecutionSnapshot final_snapshot = i1_host->i1_execution_snapshot(

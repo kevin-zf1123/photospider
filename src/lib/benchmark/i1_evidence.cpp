@@ -1002,8 +1002,7 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
 
   if (!waste_evidence_valid || !row.service.discarded_ratio.has_value()) {
     row.waste_verdict = I1Verdict::Invalid;
-  } else if (*row.service.discarded_ratio > kI1DiscardedServiceRatioLimit ||
-             row.service.post_cancel_started_service != 0U) {
+  } else if (row.service.post_cancel_started_service != 0U) {
     row.waste_verdict = I1Verdict::Fail;
   } else {
     row.waste_verdict = I1Verdict::Pass;

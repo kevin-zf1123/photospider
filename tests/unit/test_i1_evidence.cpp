@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <memory>
 #include <new>
 #include <optional>
 #include <sstream>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "benchmark/i1_evidence.hpp"
+#include "compute/compute_run.hpp"
 #include "photospider/data/value.hpp"
 #include "verification/i1_evidence_json.hpp"
 #include "verification/i1_evidence_workflow.hpp"
@@ -801,6 +803,94 @@ TEST(I1Evidence, FailedAdmissionSerializesRawEvidenceWithoutAcceptedProduct) {
 }
 
 /**
+ * @brief Proves failed-admission selection never hashes after the history cut.
+ * @throws Allocation, ComputeRun, evaluation, JSON, and stream failures
+ * unchanged to GoogleTest.
+ * @note The test follows the runner's selected digest policy, captures the cut,
+ * releases the still-unfrozen Value, evaluates the failed row, and exercises
+ * the ordered NDJSON flush. A regression to failed-path hashing would replace
+ * the required explicit missing-digest fact and fail the assertions below.
+ */
+TEST(I1Evidence, FailedAdmissionSkipsHashAndFlushesFullyInvalidRow) {
+  I1EpisodeObservationCollector collector;
+  std::shared_ptr<compute::ComputeRunObservationSink> sink =
+      collector.make_edit_sink(0U);
+  compute::ComputeRunSubmission submission{
+      "i1-failed-admission-digest-policy",
+      GraphInstanceId{8101U},
+      GraphRevision{8101U},
+      kI1TargetNodeId,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                             std::nullopt, 1U, 8U},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey(kI1TargetNodeId,
+                                   ComputeIntent::GlobalHighPrecision),
+          compute::SupersessionGeneration(1U)},
+      nullptr};
+  compute::ComputeRun run(std::move(submission));
+  compute::ComputeRunLease lease = run.acquire_lease();
+  sink->on_current_visible(lease.descriptor(), make_test_output(),
+                           sink->reserve_causal_coordinate());
+
+  const I1PreCutDigestPolicy digest_policy = i1_pre_cut_digest_policy(true);
+  if (digest_policy == I1PreCutDigestPolicy::FreezePublishedOutputs) {
+    collector.freeze_visible_output_digests();
+  }
+  const I1ObservationHistoryCut history_cut = collector.capture_history_cut();
+  collector.release_unfrozen_visible_outputs();
+  I1EpisodeObservationSnapshot observations = collector.snapshot();
+
+  EXPECT_EQ(digest_policy, I1PreCutDigestPolicy::SkipPayloadTraversal);
+  ASSERT_EQ(observations.visible_outputs.size(), 1U);
+  EXPECT_FALSE(observations.visible_outputs.front().output.valid());
+  EXPECT_TRUE(observations.visible_outputs.front().value_valid_at_capture);
+  EXPECT_FALSE(observations.visible_outputs.front().content_digest.has_value());
+
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  input.observation_cut = history_cut;
+  input.observations = std::move(observations);
+  input.final_snapshot_sample = history_cut.captured_at;
+  I1EditEvidence& failed_edit = input.edits[1U];
+  failed_edit.host_return = I1HostReturnEvidence{
+      checked_i1_time_add(failed_edit.admission_sample, 100us),
+      OperationStatus{false, OperationErrorDomain::Graph,
+                      static_cast<std::int32_t>(GraphErrc::ComputeError),
+                      graph_error_stable_name(GraphErrc::ComputeError),
+                      "injected failed admission after visible publication"},
+      false};
+  failed_edit.accepted_coordinate.reset();
+  failed_edit.settlement_status.reset();
+
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  rows.push_back(evaluate_i1_episode(std::move(input)));
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(rows.front().waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(rows.front().memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(rows.front().output_verdict, I1Verdict::Invalid);
+
+  std::ostringstream output;
+  std::size_t written = 0U;
+  flush_i1_episode_rows(&output, rows, &written);
+  ASSERT_EQ(written, 1U);
+  const nlohmann::json encoded = nlohmann::json::parse(output.str());
+  EXPECT_EQ(encoded.at("verdicts").at("latency").get<std::string>(), "invalid");
+  EXPECT_EQ(encoded.at("verdicts").at("waste").get<std::string>(), "invalid");
+  EXPECT_EQ(encoded.at("verdicts").at("memory").get<std::string>(), "invalid");
+  EXPECT_EQ(encoded.at("verdicts").at("output").get<std::string>(), "invalid");
+  EXPECT_EQ(encoded.at("observations")
+                .at("visible_outputs")
+                .front()
+                .at("content_digest")
+                .at("state")
+                .get<std::string>(),
+            "invalid-descriptor");
+}
+
+/**
  * @brief Proves optional unsigned evidence serializes as a value or null.
  * @throws Nothing when evaluation and JSON inspection remain deterministic.
  * @note Absent cases are applied after evaluation so this test isolates the
@@ -873,6 +963,45 @@ TEST(I1Evidence, CountsDiscardedAndPostCancelServiceIndependently) {
   EXPECT_EQ(row.service.discarded_started_service, 200U);
   EXPECT_EQ(row.service.post_cancel_started_service, 100U);
   EXPECT_EQ(row.waste_verdict, I1Verdict::Fail);
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Defers the discarded-ratio threshold to replicate aggregation.
+ * @throws Nothing when complete episode evidence with no post-cancel start
+ * remains valid; allocation failures are reported by GoogleTest.
+ */
+TEST(I1Evidence, EpisodeDiscardedRatioDoesNotApplyReplicateThreshold) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  input.observations.visible_outputs.erase(
+      std::remove_if(input.observations.visible_outputs.begin(),
+                     input.observations.visible_outputs.end(),
+                     [](const I1ObservedVisibleOutput& event) {
+                       return event.edit_index == 0U;
+                     }),
+      input.observations.visible_outputs.end());
+  I1ObservedServiceStart& discarded_start =
+      event_for_edit(&input.observations.service_starts, 0U);
+  discarded_start.service_charge = 500U;
+  I1ObservedTerminal& terminal =
+      event_for_edit(&input.observations.terminals, 0U);
+  terminal.kind = compute::ComputeRunTerminalKind::Cancelled;
+  input.observations.cancellations.push_back(I1ObservedCancellation{
+      0U, terminal.run_id, terminal.generation,
+      compute::ComputeRunCancellationReason::Superseded,
+      checked_i1_time_add(input.edits[0].admission_sample, 1500us),
+      terminal.causal_sequence - 1U});
+  input.edits[0].settlement_status->ok = false;
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_EQ(row.service.all_started_service, 1600U);
+  EXPECT_EQ(row.service.discarded_started_service, 500U);
+  EXPECT_EQ(row.service.post_cancel_started_service, 0U);
+  ASSERT_TRUE(row.service.discarded_ratio.has_value());
+  EXPECT_DOUBLE_EQ(*row.service.discarded_ratio, 0.3125);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
@@ -1127,7 +1256,7 @@ TEST(I1Evidence, ResourceNonSettlementIsMemoryFailure) {
 }
 
 /**
- * @brief Proves the exact 221-slot aggregate excludes warmup and uses p-ranks.
+ * @brief Proves exact measured latency and replicate-level Waste aggregation.
  * @throws Nothing when small deterministic Values and rows evaluate exactly.
  */
 TEST(I1Evidence, AggregatesExactlyTwoHundredMeasuredRows) {
@@ -1142,7 +1271,17 @@ TEST(I1Evidence, AggregatesExactlyTwoHundredMeasuredRows) {
     } else if (slot >= 211U) {
       latency = 120ms;
     }
-    rows.push_back(evaluate_i1_episode(make_valid_input(slot, latency)));
+    I1EpisodeInnerRow row =
+        evaluate_i1_episode(make_valid_input(slot, latency));
+    if (classify_i1_slot(slot).first == I1EpisodePhase::Measured) {
+      row.service.all_started_service = 100U;
+      row.service.discarded_started_service =
+          slot == kI1WarmupSlotCount + 1U ? 26U : 0U;
+      row.service.post_cancel_started_service = 0U;
+      row.service.discarded_ratio =
+          static_cast<double>(row.service.discarded_started_service) / 100.0;
+    }
+    rows.push_back(std::move(row));
   }
 
   const I1ReplicateSummary summary = evaluate_i1_replicate(rows);
@@ -1151,6 +1290,11 @@ TEST(I1Evidence, AggregatesExactlyTwoHundredMeasuredRows) {
   EXPECT_EQ(summary.latency->p50, 40ms);
   EXPECT_EQ(summary.latency->p95, 80ms);
   EXPECT_EQ(summary.latency->p99, 120ms);
+  EXPECT_EQ(summary.measured_service.all_started_service, 20000U);
+  EXPECT_EQ(summary.measured_service.discarded_started_service, 26U);
+  EXPECT_EQ(summary.measured_service.post_cancel_started_service, 0U);
+  ASSERT_TRUE(summary.measured_service.discarded_ratio.has_value());
+  EXPECT_DOUBLE_EQ(*summary.measured_service.discarded_ratio, 0.0013);
   EXPECT_EQ(summary.latency_verdict, I1Verdict::Pass);
   EXPECT_EQ(summary.waste_verdict, I1Verdict::Pass);
   EXPECT_EQ(summary.memory_verdict, I1Verdict::Pass);

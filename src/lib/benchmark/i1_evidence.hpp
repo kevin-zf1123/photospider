@@ -192,7 +192,7 @@ struct I1EpisodeInnerRow final {
   std::vector<std::string> validity_reasons;
   /** @brief Independent final-generation latency result for this episode. */
   I1Verdict latency_verdict = I1Verdict::Invalid;
-  /** @brief Independent discarded/post-cancel service result. */
+  /** @brief Independent evidence-completeness/post-cancel service result. */
   I1Verdict waste_verdict = I1Verdict::Invalid;
   /** @brief Independent authoritative resource/settlement result. */
   I1Verdict memory_verdict = I1Verdict::Invalid;
@@ -273,11 +273,13 @@ std::chrono::nanoseconds i1_nearest_rank(
  * @param input Complete raw evidence captured at the frozen boundaries.
  * @return Closed row with matched identities, derived sums, and verdicts.
  * @throws std::bad_alloc when copied evidence/diagnostics allocate.
- * @note Threshold failure yields `Fail`; missing, contradictory, overflowed,
- * lossy, unfrozen-output, or missing-golden evidence yields `Invalid`
- * independently per affected dimension. Product generations must be nonzero
- * and unique, but need not increase with edit order because bound currentness
- * linearizes by accepted coordinate. This function never traverses a Value.
+ * @note The discarded-service ratio is retained but its 0.25 gate belongs only
+ * to `evaluate_i1_replicate`; one episode fails Waste only for nonzero
+ * post-cancel service. Missing, contradictory, overflowed, lossy,
+ * unfrozen-output, or missing-golden evidence yields `Invalid` independently
+ * per affected dimension. Product generations must be nonzero and unique, but
+ * need not increase with edit order because bound currentness linearizes by
+ * accepted coordinate. This function never traverses a Value.
  */
 I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input);
 
@@ -288,7 +290,8 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input);
  * @throws std::bad_alloc when rows are indexed, samples sorted, or reasons
  * allocate.
  * @note Cold/warmup rows are excluded from steady-state latency/waste numbers
- * but remain mandatory validity, memory, and output evidence.
+ * but remain mandatory validity, memory, and output evidence. The 0.25
+ * discarded-service gate applies once to the measured aggregate.
  */
 I1ReplicateSummary evaluate_i1_replicate(
     const std::vector<I1EpisodeInnerRow>& rows);

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <future>
@@ -15,6 +16,28 @@
 #include "benchmark/i1_evidence.hpp"
 
 namespace ps::benchmark {
+
+/**
+ * @brief Pre-history-cut digest traversal selected for one episode outcome.
+ * @throws Nothing for value construction or comparison.
+ */
+enum class I1PreCutDigestPolicy : std::uint8_t {
+  /** @brief Freeze outputs during the normal pre-cut measurement window. */
+  FreezePublishedOutputs,
+  /** @brief Preserve missing digests after a failed admission and Graph close.
+   */
+  SkipPayloadTraversal,
+};
+
+/**
+ * @brief Selects whether an episode may traverse visible payloads before cut.
+ * @param admission_failed True when failed admission selects Graph close.
+ * @return Freeze for a normal episode, otherwise skip payload traversal.
+ * @throws Nothing.
+ * @note After the history cut, both paths may only release unfrozen Values;
+ * neither path may compute a digest.
+ */
+I1PreCutDigestPolicy i1_pre_cut_digest_policy(bool admission_failed) noexcept;
 
 /**
  * @brief Owned nullary work item for one payload-free episode evaluation.

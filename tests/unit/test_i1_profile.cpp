@@ -631,7 +631,7 @@ TEST(I1AcceptedBoundaryCollector, SequenceExhaustionPreventsSecondHostCall) {
 }
 
 /**
- * @brief Derives the sole grid, Regions, guard, and frozen equal-time order.
+ * @brief Derives the grid, runner deadlines, guard, and equal-time order.
  * @throws Nothing when all exact constants and checked boundaries agree.
  */
 TEST(I1FrozenArithmetic, GridRegionsAndTieOrderRemainExact) {
@@ -655,6 +655,16 @@ TEST(I1FrozenArithmetic, GridRegionsAndTieOrderRemainExact) {
   EXPECT_EQ(i1_edit_region(0U), (PixelRect{0, 0, 256, 256}));
   EXPECT_EQ(i1_edit_region(11U), (PixelRect{768, 512, 256, 256}));
   EXPECT_EQ(kI1MeasurementEndOffset + kI1NextOriginGuard, kI1EpisodeStride);
+  const auto next_episode_origin = i1_episode_origin(grid_origin, 1U);
+  EXPECT_EQ(checked_i1_time_subtract(next_episode_origin, kI1AdmissionLateness),
+            checked_i1_time_add(grid_origin,
+                                kI1EpisodeStride - kI1AdmissionLateness));
+  const auto measurement_end =
+      checked_i1_time_add(grid_origin, kI1MeasurementEndOffset);
+  EXPECT_EQ(
+      checked_i1_time_subtract(measurement_end, kI1DigestFreezeSafetyMargin),
+      checked_i1_time_add(
+          grid_origin, kI1MeasurementEndOffset - kI1DigestFreezeSafetyMargin));
   const auto latest_final_admission = checked_i1_time_add(
       checked_i1_time_add(grid_origin, kI1MeasurementStartOffset),
       kI1AdmissionLateness);
@@ -671,6 +681,13 @@ TEST(I1FrozenArithmetic, GridRegionsAndTieOrderRemainExact) {
   EXPECT_THROW(checked_i1_time_add(std::chrono::steady_clock::time_point::max(),
                                    std::chrono::nanoseconds(1)),
                std::overflow_error);
+  EXPECT_THROW(
+      checked_i1_time_subtract(std::chrono::steady_clock::time_point::min(),
+                               std::chrono::nanoseconds(1)),
+      std::overflow_error);
+  EXPECT_THROW(
+      checked_i1_time_subtract(grid_origin, std::chrono::nanoseconds(-1)),
+      std::invalid_argument);
 }
 
 /**
