@@ -473,6 +473,7 @@ bool row_is_invalid(const I1EpisodeInnerRow& row) noexcept {
  * @brief Executes one exact continuous-grid I1 replicate and writes evidence.
  * @param options Validated runner options.
  * @param output_directory Fresh explicit result root.
+ * @param ownership_gate Main-owned no-throw exceptional-persistence authority.
  * @return Evaluated replicate summary after normal product close.
  * @throws std::runtime_error for setup, cadence, admission, settlement, I/O,
  * or invalid-evidence aborts; lower-level allocation/system errors propagate.
@@ -488,11 +489,14 @@ bool row_is_invalid(const I1EpisodeInnerRow& row) noexcept {
  * terminal boundary, or performed synchronously before an exceptional return.
  * Only product lifecycle and Host-settlement coordinates preceding the cut
  * prove boundary membership. At most one evaluation and 221 Value-free rows
- * are retained, so ownership and memory remain bounded and race-free.
+ * are retained, so ownership and memory remain bounded and race-free. Failed
+ * admission claims `ownership_gate` before fallible diagnostic/input work;
+ * subsequent generic cleanup never retries its inner or outer persistence.
  */
 I1ReplicateSummary run_exact_replicate(
     const I1RunnerOptions& options,
-    const std::filesystem::path& output_directory) {
+    const std::filesystem::path& output_directory,
+    I1OuterPersistenceOwnershipGate& ownership_gate) {
   const std::filesystem::path graph_path = output_directory / "i1-graph.yaml";
   write_text_file(graph_path, i1_frozen_graph_yaml());
 
@@ -630,7 +634,7 @@ I1ReplicateSummary run_exact_replicate(
             make_i1_host_compute_request(loaded.value, edit_index),
             observations.make_edit_sink(edit_index));
         const I1EditAdmissionResult& admission = admission_results[edit_index];
-        if (!admission.accepted_coordinate.has_value()) {
+        if (claim_i1_failed_admission_if_needed(admission, ownership_gate)) {
           failed_admission_edit = edit_index;
           failed_admission_diagnostic =
               "I1 admission invalid/failed without backfill at slot " +
@@ -664,8 +668,8 @@ I1ReplicateSummary run_exact_replicate(
                                                 output_directory);
         finalize_i1_failed_admission(
             std::move(failed_admission_diagnostic), std::move(input),
-            std::move(admission_results), &observations, &failed_port,
-            &episode_output, &rows, &written_rows);
+            std::move(admission_results), ownership_gate, &observations,
+            &failed_port, &episode_output, &rows, &written_rows);
       }
 
       const auto digest_freeze_deadline = checked_i1_time_subtract(
@@ -737,27 +741,9 @@ I1ReplicateSummary run_exact_replicate(
     flush_i1_episode_rows(&episode_output, rows, &written_rows);
   } catch (...) {
     const std::exception_ptr primary_failure = std::current_exception();
-    if (pending_evaluation.has_value() && pending_evaluation->valid()) {
-      try {
-        rows.push_back(pending_evaluation->get());
-      } catch (...) {
-      }
-      pending_evaluation.reset();
-    }
-    try {
-      flush_i1_episode_rows(&episode_output, rows, &written_rows);
-    } catch (const std::exception& flush_error) {
-      try {
-        std::rethrow_exception(primary_failure);
-      } catch (const std::exception& primary_error) {
-        throw std::runtime_error(
-            std::string(primary_error.what()) +
-            "; evidence flush failed: " + flush_error.what());
-      } catch (...) {
-        throw;
-      }
-    }
-    std::rethrow_exception(primary_failure);
+    rethrow_i1_runner_failure_after_generic_drain(
+        primary_failure, ownership_gate, &pending_evaluation, &rows,
+        &episode_output, &written_rows);
   }
   episode_output.close();
   if (!episode_output) {
@@ -783,12 +769,14 @@ I1ReplicateSummary run_exact_replicate(
  * @param argv Command-line argument vector.
  * @return Zero only when all four independent verdicts pass, two for a
  * complete failing replicate, and one for parsing/setup/invalid evidence.
- * @throws Nothing; all standard exceptions are converted to stderr/failure
- * JSON when a safe explicit output directory was already prepared.
+ * @throws Nothing; all exceptions are converted to stderr and, only while the
+ * no-throw ownership gate permits it, additive failure JSON after a safe
+ * explicit output directory was already prepared.
  * @note This executable is EXCLUDE_FROM_ALL and absent from CTest/default CI.
  */
 int main(int argc, char** argv) {
   std::optional<std::filesystem::path> output_directory;
+  ps::benchmark::I1OuterPersistenceOwnershipGate ownership_gate;
   try {
     const ps::benchmark::I1RunnerOptions options =
         ps::benchmark::parse_options(argc, argv);
@@ -799,7 +787,8 @@ int main(int argc, char** argv) {
     output_directory =
         ps::benchmark::prepare_output_directory(options.output_directory);
     const ps::benchmark::I1ReplicateSummary summary =
-        ps::benchmark::run_exact_replicate(options, *output_directory);
+        ps::benchmark::run_exact_replicate(options, *output_directory,
+                                           ownership_gate);
     const bool passed =
         summary.latency_verdict == ps::benchmark::I1Verdict::Pass &&
         summary.waste_verdict == ps::benchmark::I1Verdict::Pass &&
@@ -808,14 +797,34 @@ int main(int argc, char** argv) {
     return passed ? 0 : 2;
   } catch (const ps::benchmark::I1FailedAdmissionFinalizationError& error) {
     std::cerr << "i1_edit_storm_benchmark: " << error.what() << '\n';
+    if (output_directory.has_value()) {
+      ps::benchmark::try_i1_generic_outer_failure_persistence(
+          ownership_gate, [&] {
+            ps::benchmark::write_failure_artifact(*output_directory,
+                                                  error.what());
+          });
+    }
     return 1;
   } catch (const std::exception& error) {
     std::cerr << "i1_edit_storm_benchmark: " << error.what() << '\n';
     if (output_directory.has_value()) {
-      try {
-        ps::benchmark::write_failure_artifact(*output_directory, error.what());
-      } catch (...) {
-      }
+      ps::benchmark::try_i1_generic_outer_failure_persistence(
+          ownership_gate, [&] {
+            ps::benchmark::write_failure_artifact(*output_directory,
+                                                  error.what());
+          });
+    }
+    return 1;
+  } catch (...) {
+    constexpr std::string_view kDiagnostic =
+        "runner raised a non-standard exception";
+    std::cerr << "i1_edit_storm_benchmark: " << kDiagnostic << '\n';
+    if (output_directory.has_value()) {
+      ps::benchmark::try_i1_generic_outer_failure_persistence(
+          ownership_gate, [&] {
+            ps::benchmark::write_failure_artifact(*output_directory,
+                                                  kDiagnostic);
+          });
     }
     return 1;
   }

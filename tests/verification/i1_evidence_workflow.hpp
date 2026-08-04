@@ -16,11 +16,112 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "benchmark/i1_evidence.hpp"
 
 namespace ps::benchmark {
+
+/**
+ * @brief Runner-owned one-way authority for failed-admission persistence.
+ *
+ * The gate begins in the generic runner state. Detecting a failed or invalid
+ * admission permanently transfers inner-drain and outer-failure persistence
+ * ownership to the shared failed-admission finalizer. The transfer is a plain
+ * bounded state update: it performs no allocation, cannot throw, and does not
+ * depend on the dynamic type of a later exception.
+ *
+ * @throws Nothing for construction, claim, or inspection.
+ * @note One runner invocation owns one gate on its main thread. The state is
+ * monotonic and intentionally has no reset or compatibility fallback.
+ */
+class I1OuterPersistenceOwnershipGate final {
+ public:
+  /** @brief Creates one unclaimed runner-owned gate. @throws Nothing. */
+  I1OuterPersistenceOwnershipGate() noexcept = default;
+
+  /** @brief Prevents duplicating one runner's persistence authority. */
+  I1OuterPersistenceOwnershipGate(const I1OuterPersistenceOwnershipGate&) =
+      delete;
+  /** @brief Prevents replacing one runner's persistence authority. */
+  I1OuterPersistenceOwnershipGate& operator=(
+      const I1OuterPersistenceOwnershipGate&) = delete;
+
+  /**
+   * @brief Permanently assigns persistence to failed-admission finalization.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Repeated claims are harmless, but runner detection claims exactly
+   * once before diagnostic or evidence-input construction can fail.
+   */
+  void claim_failed_admission_finalizer() noexcept;
+
+  /**
+   * @brief Reports whether failed-admission finalization owns persistence.
+   * @return True after the monotonic claim, otherwise false.
+   * @throws Nothing.
+   */
+  bool failed_admission_finalizer_owns_persistence() const noexcept;
+
+  /**
+   * @brief Reports whether the runner's generic exceptional drain may run.
+   * @return False after failed-admission ownership is claimed.
+   * @throws Nothing.
+   * @note A false result forbids pending-evaluation consumption and every
+   * generic `episodes.ndjson` flush, including retries of a failed stream.
+   */
+  bool generic_inner_drain_is_permitted() const noexcept;
+
+  /**
+   * @brief Reports whether `main` may attempt generic outer persistence.
+   * @return False after failed-admission ownership is claimed.
+   * @throws Nothing.
+   */
+  bool generic_outer_persistence_is_permitted() const noexcept;
+
+ private:
+  /** @brief Monotonic no-allocation failed-admission ownership bit. */
+  bool failed_admission_finalizer_owns_persistence_ = false;
+};
+
+/**
+ * @brief Detects absent acceptance and immediately claims finalizer ownership.
+ * @param admission Complete attempted or invalid-window admission evidence.
+ * @param ownership_gate Runner-owned monotonic persistence gate.
+ * @return True when the admission has no accepted coordinate.
+ * @throws Nothing.
+ * @note This function is the runner's first executable classification step
+ * after `admit_edit()` returns. On failure/invalid admission, the claim occurs
+ * before the caller constructs diagnostics, evidence input, or a finalizer
+ * port, so allocation failure cannot restore generic ownership.
+ */
+bool claim_i1_failed_admission_if_needed(
+    const I1EditAdmissionResult& admission,
+    I1OuterPersistenceOwnershipGate& ownership_gate) noexcept;
+
+/**
+ * @brief Runs one best-effort generic outer writer only while still permitted.
+ * @tparam Persistence No-argument callable performing the concrete write.
+ * @param ownership_gate Runner-owned monotonic persistence gate.
+ * @param persistence Concrete generic outer-persistence operation.
+ * @return Nothing after one permitted attempt or a claimed-path suppression.
+ * @throws Nothing; standard and non-standard writer failures are suppressed.
+ * @note Failed-admission ownership is checked before invoking the callable.
+ * This is the exact gate used by manual-runner `main` and deterministic tests.
+ */
+template <typename Persistence>
+void try_i1_generic_outer_failure_persistence(
+    const I1OuterPersistenceOwnershipGate& ownership_gate,
+    Persistence&& persistence) noexcept {
+  if (!ownership_gate.generic_outer_persistence_is_permitted()) {
+    return;
+  }
+  try {
+    std::forward<Persistence>(persistence)();
+  } catch (...) {
+  }
+}
 
 /**
  * @brief Observable milestones in the runner-owned failed-admission terminator.
@@ -107,11 +208,11 @@ class I1FailedAdmissionFinalizationPort {
 };
 
 /**
- * @brief Signals that failed admission has already owned outer persistence.
+ * @brief Diagnoses terminal failed-admission finalization.
  * @throws std::bad_alloc when diagnostic ownership cannot allocate.
- * @note The manual `main` catches this type separately and must not write
- * `failure.json` again. The artifact was either written after the inner row, or
- * deliberately withheld because the inner row could not be flushed first.
+ * @note Outer ownership never depends on this dynamic type. The no-throw gate
+ * already suppresses generic `failure.json` writes even if constructing this
+ * exception, or a later diagnostic append, fails with another exception type.
  */
 class I1FailedAdmissionFinalizationError final : public std::runtime_error {
  public:
@@ -136,6 +237,9 @@ class I1FailedAdmissionFinalizationError final : public std::runtime_error {
  * @param input Prepopulated immutable grid/baseline/golden row facts.
  * @param admissions All fixed-width admission results, including untouched
  * suffix positions and any earlier accepted settlement futures.
+ * @param ownership_gate Runner-owned persistence authority already claimed at
+ * admission classification; the finalizer idempotently claims it again before
+ * any of its own fallible work.
  * @param observations Episode collector that outlives every attached sink.
  * @param port Concrete close/snapshot/failure-persistence authorities.
  * @param episode_output Open ordered inner-row stream.
@@ -146,15 +250,48 @@ class I1FailedAdmissionFinalizationError final : public std::runtime_error {
  * failure artifact are ordered, or when finalization cannot safely permit the
  * outer artifact. Lower-level diagnostics are retained in `what()` when
  * possible.
+ * @throws std::bad_alloc or another lower-level exception if terminal
+ * diagnostic/exception construction itself fails after ownership is claimed.
  * @note The function requires at least one attempted admission without an
  * accepted coordinate and forbids later edit/slot submission by construction.
+ * Every exceptional exit retains the no-throw ownership claim.
  */
 [[noreturn]] void finalize_i1_failed_admission(
     std::string diagnostic, I1EpisodeEvidenceInput input,
     std::array<I1EditAdmissionResult, kI1EditCount> admissions,
+    I1OuterPersistenceOwnershipGate& ownership_gate,
     I1EpisodeObservationCollector* observations,
     I1FailedAdmissionFinalizationPort* port, std::ostream* episode_output,
     std::vector<I1EpisodeInnerRow>* completed_rows, std::size_t* written_rows);
+
+/**
+ * @brief Rethrows one runner failure after any permitted generic row drain.
+ *
+ * Failed-admission ownership takes the immediate fail-closed branch: the
+ * primary exception is rethrown without consuming a pending evaluator or
+ * touching `episodes.ndjson`. Otherwise this function performs the runner's
+ * legacy generic pending-row collection and ordered flush, preserving the
+ * primary failure or combining a standard primary/flush diagnostic.
+ *
+ * @param primary_failure Non-null exception captured by the runner catch.
+ * @param ownership_gate Runner-owned monotonic persistence authority.
+ * @param pending_evaluation Optional sole payload-free evaluator future.
+ * @param completed_rows Pre-reserved exact-slot row sequence.
+ * @param episode_output Open ordered inner-row stream.
+ * @param written_rows Durable in/out row cursor for `episode_output`.
+ * @return Never returns.
+ * @throws The exact primary exception when failed-admission ownership is
+ * claimed, the original generic failure after a successful drain, or
+ * std::runtime_error when standard primary and flush failures are combined.
+ * @note The claimed branch queries no dynamic exception type and performs no
+ * allocation before rethrowing. It is shared by the runner and regressions.
+ */
+[[noreturn]] void rethrow_i1_runner_failure_after_generic_drain(
+    std::exception_ptr primary_failure,
+    const I1OuterPersistenceOwnershipGate& ownership_gate,
+    std::optional<std::future<I1EpisodeInnerRow>>* pending_evaluation,
+    std::vector<I1EpisodeInnerRow>* completed_rows,
+    std::ostream* episode_output, std::size_t* written_rows);
 
 /**
  * @brief Owned nullary work item for one payload-free episode evaluation.

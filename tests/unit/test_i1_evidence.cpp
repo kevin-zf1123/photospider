@@ -12,6 +12,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -413,6 +414,64 @@ std::vector<std::size_t> ndjson_slots(const std::string& content) {
 }
 
 /**
+ * @brief Rejects every inner-row byte and records physical stream attempts.
+ * @throws Nothing for construction, destruction, or counter inspection.
+ * @note Tests may clear only the owning `std::ostream` state after a failure so
+ * a prohibited second flush would become visible as another buffer call; the
+ * buffer itself continues to reject all output.
+ */
+class RejectingI1EpisodeStreamBuffer final : public std::streambuf {
+ public:
+  /**
+   * @brief Returns the number of bulk, scalar, and sync attempts.
+   * @return Monotonic physical call count.
+   * @throws Nothing.
+   */
+  std::size_t attempt_count() const noexcept { return attempt_count_; }
+
+ protected:
+  /**
+   * @brief Rejects one bulk write without consuming a byte.
+   * @param source Borrowed bytes ignored by the rejecting fixture.
+   * @param count Requested byte count.
+   * @return Zero bytes consumed.
+   * @throws Nothing.
+   */
+  std::streamsize xsputn(const char* source, std::streamsize count) override {
+    static_cast<void>(source);
+    static_cast<void>(count);
+    ++attempt_count_;
+    return 0;
+  }
+
+  /**
+   * @brief Rejects one scalar write.
+   * @param value Requested character.
+   * @return End-of-file to signal failure.
+   * @throws Nothing.
+   */
+  int_type overflow(int_type value) override {
+    static_cast<void>(value);
+    ++attempt_count_;
+    return traits_type::eof();
+  }
+
+  /**
+   * @brief Rejects one explicit stream synchronization.
+   * @return Negative failure result.
+   * @throws Nothing.
+   */
+  int sync() override {
+    ++attempt_count_;
+    return -1;
+  }
+
+ private:
+  /** @brief Monotonic physical output/synchronization attempt count. */
+  std::size_t attempt_count_ = 0U;
+};
+
+/**
  * @brief Proves a launcher `system_error` closes and drains the current slot.
  * @throws Nothing when recovery, exact ordering, and propagation are stable.
  * @note The statement following the throwing workflow models later slot
@@ -804,6 +863,19 @@ TEST(I1Evidence, FailedAdmissionSerializesRawEvidenceWithoutAcceptedProduct) {
 }
 
 /**
+ * @brief Deterministic additive outer-persistence outcome for workflow tests.
+ * @throws Nothing for construction, copying, or comparison.
+ */
+enum class I1OuterPersistenceFailureMode : std::uint8_t {
+  /** @brief Outer persistence completes normally. */
+  None,
+  /** @brief Outer persistence throws a standard runtime exception. */
+  Standard,
+  /** @brief Outer persistence throws a non-standard integer exception. */
+  NonStandard,
+};
+
+/**
  * @brief Deterministic failed-admission Host and runner-finalization port.
  *
  * The first Host call succeeds with an immediately ready settlement so the
@@ -828,21 +900,25 @@ class FailedAdmissionWorkflowHost final
    * @param episode_output Inner-row stream inspected by outer persistence.
    * @param completed_rows Shared exact-slot row sequence.
    * @param written_rows Shared durable inner-row cursor.
+   * @param failure_mode Optional deterministic outer-persistence exception.
    * @throws std::bad_alloc when snapshot ownership cannot allocate.
    * @note Every borrowed object outlives the finalizer call.
    */
   FailedAdmissionWorkflowHost(
       I1ExecutionSnapshot closed_snapshot,
       std::chrono::steady_clock::time_point final_sample,
-      std::uint64_t lifecycle_cursor, const std::ostringstream& episode_output,
+      std::uint64_t lifecycle_cursor, const std::ostream& episode_output,
       const std::vector<I1EpisodeInnerRow>& completed_rows,
-      const std::size_t& written_rows)
+      const std::size_t& written_rows,
+      I1OuterPersistenceFailureMode failure_mode =
+          I1OuterPersistenceFailureMode::None)
       : closed_snapshot_(std::move(closed_snapshot)),
         final_sample_(final_sample),
         lifecycle_cursor_(lifecycle_cursor),
         episode_output_(episode_output),
         completed_rows_(completed_rows),
-        written_rows_(written_rows) {}
+        written_rows_(written_rows),
+        failure_mode_(failure_mode) {}
 
   /** @copydoc I1Host::compute_i1_async */
   Result<std::future<OperationStatus>> compute_i1_async(
@@ -900,13 +976,28 @@ class FailedAdmissionWorkflowHost final
     return final_sample_;
   }
 
-  /** @copydoc I1FailedAdmissionFinalizationPort::persist_outer_failure */
+  /**
+   * @brief Records one outer attempt and injects the configured outcome.
+   * @param diagnostic Complete finalizer diagnostic retained by the fixture.
+   * @return Nothing when `failure_mode_` is `None`.
+   * @throws std::runtime_error in `Standard` mode.
+   * @throws The integer `93` in `NonStandard` mode.
+   * @throws std::bad_alloc when diagnostic ownership cannot allocate.
+   * @note The call records whether the inner row was already durable before
+   * injecting either exception.
+   */
   void persist_outer_failure(std::string_view diagnostic) override {
     ++outer_persistence_call_count;
     persisted_diagnostic = std::string(diagnostic);
-    outer_persistence_saw_flushed_inner_row =
-        written_rows_ == 1U && completed_rows_.size() == 1U &&
-        episode_output_.good() && !episode_output_.str().empty();
+    outer_persistence_saw_flushed_inner_row = written_rows_ == 1U &&
+                                              completed_rows_.size() == 1U &&
+                                              episode_output_.good();
+    if (failure_mode_ == I1OuterPersistenceFailureMode::Standard) {
+      throw std::runtime_error("injected outer persistence failure");
+    }
+    if (failure_mode_ == I1OuterPersistenceFailureMode::NonStandard) {
+      throw 93;
+    }
   }
 
   /** @copydoc I1FailedAdmissionFinalizationPort::observe_stage */
@@ -960,11 +1051,14 @@ class FailedAdmissionWorkflowHost final
   /** @brief Baseline lifecycle cursor preceding the failed episode. */
   std::uint64_t lifecycle_cursor_ = 0U;
   /** @brief Borrowed ordered inner-row stream. */
-  const std::ostringstream& episode_output_;
+  const std::ostream& episode_output_;
   /** @brief Borrowed exact-slot row sequence. */
   const std::vector<I1EpisodeInnerRow>& completed_rows_;
   /** @brief Borrowed durable inner-row cursor. */
   const std::size_t& written_rows_;
+  /** @brief Deterministic outer-persistence exception selection. */
+  I1OuterPersistenceFailureMode failure_mode_ =
+      I1OuterPersistenceFailureMode::None;
 };
 
 /**
@@ -979,6 +1073,57 @@ HostComputeRequest make_failed_admission_request(std::size_t edit_index) {
   request.node = NodeId{kI1TargetNodeId};
   request.dirty_roi = i1_edit_region(edit_index);
   return request;
+}
+
+/**
+ * @brief Creates fixed-width evidence with one attempted failed admission.
+ * @param episode_origin Exact episode origin used for nominal times.
+ * @return Twelve records whose first entry retains raw Host failure facts and
+ * whose suffix entries remain explicitly unattempted.
+ * @throws Checked-time or status-allocation failures unchanged.
+ */
+std::array<I1EditAdmissionResult, kI1EditCount>
+make_failed_finalization_admissions(
+    std::chrono::steady_clock::time_point episode_origin) {
+  std::array<I1EditAdmissionResult, kI1EditCount> admissions;
+  for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
+    admissions[edit_index].edit_index = edit_index;
+    admissions[edit_index].nominal_time = checked_i1_time_add(
+        episode_origin,
+        std::chrono::nanoseconds(kI1EditStride.count() *
+                                 static_cast<std::int64_t>(edit_index)));
+  }
+
+  I1EditAdmissionResult& failed = admissions.front();
+  failed.admission_attempted = true;
+  failed.admission_sample = episode_origin;
+  failed.admission_window_valid = true;
+  failed.reserved_event_sequence = 1U;
+  failed.deadline = checked_i1_time_add(episode_origin, kI1DeadlineBudget);
+  failed.host_return = I1HostReturnEvidence{
+      checked_i1_time_add(episode_origin, 100us),
+      OperationStatus{false, OperationErrorDomain::Graph,
+                      static_cast<std::int32_t>(GraphErrc::ComputeError),
+                      graph_error_stable_name(GraphErrc::ComputeError),
+                      "injected failed-finalization admission"},
+      false};
+  return admissions;
+}
+
+/**
+ * @brief Derives one deterministic post-close snapshot for finalizer tests.
+ * @param input Complete episode input supplying baseline coordinates.
+ * @return Snapshot with no live resources or Graph lifecycle ownership.
+ * @throws Snapshot copy allocation failures unchanged.
+ */
+I1ExecutionSnapshot make_failed_finalization_closed_snapshot(
+    const I1EpisodeEvidenceInput& input) {
+  I1ExecutionSnapshot snapshot = input.final_snapshot;
+  snapshot.host_resources.reserved = ResourceVector{};
+  snapshot.lifecycle.counters = compute::ExecutionLifecycleCounters{};
+  snapshot.lifecycle.snapshot_cut = input.baseline.lifecycle.snapshot_cut + 3U;
+  snapshot.lifecycle.next_cursor = snapshot.lifecycle.snapshot_cut;
+  return snapshot;
 }
 
 /**
@@ -1064,6 +1209,8 @@ TEST(I1Evidence, FailedAdmissionUsesSharedRunnerFinalizationFlow) {
 
   I1EditAdmissionResult failed = admissions.admit_edit(
       input.episode_origin, 1U, make_failed_admission_request(1U), failed_sink);
+  I1OuterPersistenceOwnershipGate ownership_gate;
+  ASSERT_TRUE(claim_i1_failed_admission_if_needed(failed, ownership_gate));
   ASSERT_TRUE(failed.admission_attempted);
   ASSERT_TRUE(failed.admission_window_valid);
   ASSERT_TRUE(failed.host_return.has_value());
@@ -1088,7 +1235,7 @@ TEST(I1Evidence, FailedAdmissionUsesSharedRunnerFinalizationFlow) {
   try {
     finalize_i1_failed_admission(
         "Host admission failed at edit 1", std::move(input), std::move(results),
-        &observations, &host, &output, &rows, &written);
+        ownership_gate, &observations, &host, &output, &rows, &written);
   } catch (const I1FailedAdmissionFinalizationError& error) {
     saw_terminal_error = true;
     terminal_diagnostic = error.what();
@@ -1131,6 +1278,8 @@ TEST(I1Evidence, FailedAdmissionUsesSharedRunnerFinalizationFlow) {
   EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
   EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
   EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+  ASSERT_TRUE(row.evidence.edits[0U].settlement_status.has_value());
+  EXPECT_TRUE(row.evidence.edits[0U].settlement_status->ok);
   ASSERT_TRUE(row.evidence.edits[1U].host_return.has_value());
   EXPECT_FALSE(row.evidence.edits[1U].host_return->status.ok);
   EXPECT_FALSE(row.evidence.edits[1U].accepted_coordinate.has_value());
@@ -1163,6 +1312,234 @@ TEST(I1Evidence, FailedAdmissionUsesSharedRunnerFinalizationFlow) {
                 .at("state")
                 .get<std::string>(),
             "invalid-descriptor");
+}
+
+/**
+ * @brief Observable result of one outer-persistence exception exercise.
+ * @throws Nothing for default construction and scalar movement.
+ */
+struct I1OuterPersistenceExerciseResult final {
+  /** @brief Whether the no-throw failed-admission claim remained visible. */
+  bool ownership_claimed = false;
+  /** @brief Whether the shared terminal exception crossed runner drain. */
+  bool terminal_failure_rethrown = false;
+  /** @brief Number of shared-finalizer outer-port calls. */
+  std::size_t finalizer_outer_calls = 0U;
+  /** @brief Number of main-like generic outer-writer calls. */
+  std::size_t generic_outer_calls = 0U;
+  /** @brief Durable inner-row cursor after finalization. */
+  std::size_t written_rows = 0U;
+  /** @brief Whether the finalizer port observed durable inner evidence. */
+  bool outer_saw_flushed_inner_row = false;
+  /** @brief Terminal diagnostic retained after the injected port failure. */
+  std::string terminal_diagnostic;
+};
+
+/**
+ * @brief Exercises one throwing outer port through shared finalizer/runner
+ * ownership.
+ * @param failure_mode Standard or non-standard deterministic exception mode.
+ * @return Counts and terminal facts after the main-like generic writer gate.
+ * @throws Setup/evaluation failures unrelated to the injected outer exception.
+ * @note The helper invokes the same classifier, finalizer, generic-drain, and
+ * generic-outer functions as the manual runner; it does not reproduce their
+ * branching policy.
+ */
+I1OuterPersistenceExerciseResult exercise_outer_persistence_failure(
+    I1OuterPersistenceFailureMode failure_mode) {
+  std::ostringstream output;
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  std::size_t written = 0U;
+  std::optional<std::future<I1EpisodeInnerRow>> pending_evaluation;
+
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  const auto final_sample = checked_i1_time_add(input.measurement_end, 2ms);
+  I1ExecutionSnapshot closed_snapshot =
+      make_failed_finalization_closed_snapshot(input);
+  FailedAdmissionWorkflowHost host(std::move(closed_snapshot), final_sample,
+                                   input.baseline.lifecycle.snapshot_cut,
+                                   output, rows, written, failure_mode);
+  I1EpisodeObservationCollector observations;
+  auto admissions = make_failed_finalization_admissions(input.episode_origin);
+  I1OuterPersistenceOwnershipGate ownership_gate;
+  if (!claim_i1_failed_admission_if_needed(admissions.front(),
+                                           ownership_gate)) {
+    throw std::logic_error("failed-admission exercise was not classified");
+  }
+
+  std::exception_ptr primary_failure;
+  try {
+    finalize_i1_failed_admission(
+        "injected failed admission", std::move(input), std::move(admissions),
+        ownership_gate, &observations, &host, &output, &rows, &written);
+  } catch (...) {
+    primary_failure = std::current_exception();
+  }
+  if (primary_failure == nullptr) {
+    throw std::logic_error("failed-admission finalizer returned unexpectedly");
+  }
+
+  I1OuterPersistenceExerciseResult result;
+  result.ownership_claimed =
+      ownership_gate.failed_admission_finalizer_owns_persistence();
+  result.finalizer_outer_calls = host.outer_persistence_call_count;
+  result.written_rows = written;
+  result.outer_saw_flushed_inner_row =
+      host.outer_persistence_saw_flushed_inner_row;
+  try {
+    rethrow_i1_runner_failure_after_generic_drain(
+        primary_failure, ownership_gate, &pending_evaluation, &rows, &output,
+        &written);
+  } catch (const std::exception& error) {
+    result.terminal_failure_rethrown = true;
+    result.terminal_diagnostic = error.what();
+  } catch (...) {
+    result.terminal_failure_rethrown = true;
+    result.terminal_diagnostic = "non-standard terminal failure";
+  }
+  try_i1_generic_outer_failure_persistence(
+      ownership_gate, [&result] { ++result.generic_outer_calls; });
+  return result;
+}
+
+/**
+ * @brief Proves failed inner flush cannot trigger generic reflush or outer I/O.
+ * @throws Setup/evaluation failures unchanged to GoogleTest.
+ * @note Clearing only `std::ostream` iostate after the first rejection makes a
+ * prohibited generic retry observable; the same stream buffer remains a
+ * rejecting sink for the entire test.
+ */
+TEST(I1Evidence,
+     FailedAdmissionRejectedInnerStreamSuppressesGenericDrainAndOuterWrite) {
+  RejectingI1EpisodeStreamBuffer buffer;
+  std::ostream output(&buffer);
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  std::size_t written = 0U;
+  std::optional<std::future<I1EpisodeInnerRow>> pending_evaluation;
+
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  const auto final_sample = checked_i1_time_add(input.measurement_end, 2ms);
+  I1ExecutionSnapshot closed_snapshot =
+      make_failed_finalization_closed_snapshot(input);
+  FailedAdmissionWorkflowHost host(std::move(closed_snapshot), final_sample,
+                                   input.baseline.lifecycle.snapshot_cut,
+                                   output, rows, written);
+  I1EpisodeObservationCollector observations;
+  auto admissions = make_failed_finalization_admissions(input.episode_origin);
+  I1OuterPersistenceOwnershipGate ownership_gate;
+  ASSERT_TRUE(
+      claim_i1_failed_admission_if_needed(admissions.front(), ownership_gate));
+
+  std::exception_ptr primary_failure;
+  try {
+    finalize_i1_failed_admission(
+        "injected failed admission", std::move(input), std::move(admissions),
+        ownership_gate, &observations, &host, &output, &rows, &written);
+  } catch (...) {
+    primary_failure = std::current_exception();
+  }
+  ASSERT_NE(primary_failure, nullptr);
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(written, 0U);
+  EXPECT_FALSE(output.good());
+  EXPECT_EQ(host.outer_persistence_call_count, 0U);
+  const std::size_t finalizer_stream_attempts = buffer.attempt_count();
+  EXPECT_GT(finalizer_stream_attempts, 0U);
+
+  output.clear();
+  bool runner_rethrew = false;
+  try {
+    rethrow_i1_runner_failure_after_generic_drain(
+        primary_failure, ownership_gate, &pending_evaluation, &rows, &output,
+        &written);
+  } catch (...) {
+    runner_rethrew = true;
+  }
+  EXPECT_TRUE(runner_rethrew);
+  EXPECT_EQ(buffer.attempt_count(), finalizer_stream_attempts);
+  EXPECT_EQ(written, 0U);
+
+  std::size_t main_outer_calls = 0U;
+  try_i1_generic_outer_failure_persistence(
+      ownership_gate, [&main_outer_calls] { ++main_outer_calls; });
+  EXPECT_EQ(main_outer_calls, 0U);
+  EXPECT_EQ(host.outer_persistence_call_count, 0U);
+}
+
+/**
+ * @brief Proves a standard outer exception is attempted once without retry.
+ * @throws Setup/evaluation failures unchanged to GoogleTest.
+ */
+TEST(I1Evidence, FailedAdmissionStandardOuterExceptionIsNotRetriedByMain) {
+  const I1OuterPersistenceExerciseResult result =
+      exercise_outer_persistence_failure(
+          I1OuterPersistenceFailureMode::Standard);
+  EXPECT_TRUE(result.ownership_claimed);
+  EXPECT_TRUE(result.terminal_failure_rethrown);
+  EXPECT_EQ(result.written_rows, 1U);
+  EXPECT_TRUE(result.outer_saw_flushed_inner_row);
+  EXPECT_EQ(result.finalizer_outer_calls, 1U);
+  EXPECT_EQ(result.generic_outer_calls, 0U);
+  EXPECT_NE(result.terminal_diagnostic.find(
+                "failure artifact persistence failed: injected outer "
+                "persistence failure"),
+            std::string::npos);
+}
+
+/**
+ * @brief Proves a non-standard outer exception is attempted once without
+ * retry.
+ * @throws Setup/evaluation failures unchanged to GoogleTest.
+ */
+TEST(I1Evidence, FailedAdmissionNonStandardOuterExceptionIsNotRetriedByMain) {
+  const I1OuterPersistenceExerciseResult result =
+      exercise_outer_persistence_failure(
+          I1OuterPersistenceFailureMode::NonStandard);
+  EXPECT_TRUE(result.ownership_claimed);
+  EXPECT_TRUE(result.terminal_failure_rethrown);
+  EXPECT_EQ(result.written_rows, 1U);
+  EXPECT_TRUE(result.outer_saw_flushed_inner_row);
+  EXPECT_EQ(result.finalizer_outer_calls, 1U);
+  EXPECT_EQ(result.generic_outer_calls, 0U);
+  EXPECT_NE(result.terminal_diagnostic.find(
+                "failure artifact persistence raised a non-standard "
+                "exception"),
+            std::string::npos);
+}
+
+/**
+ * @brief Proves diagnostic allocation failure cannot restore generic outer
+ * ownership.
+ * @throws Nothing when the injected `std::bad_alloc` is caught as intended.
+ * @note The classifier is the exact no-throw operation used immediately after
+ * runner admission detection; the lambda models the first fallible diagnostic
+ * construction that follows it.
+ */
+TEST(I1Evidence, FailedAdmissionClaimPrecedesDiagnosticBadAlloc) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  auto admissions = make_failed_finalization_admissions(input.episode_origin);
+  I1OuterPersistenceOwnershipGate ownership_gate;
+  const auto build_diagnostic = []() -> std::string { throw std::bad_alloc(); };
+
+  bool allocation_failed = false;
+  try {
+    ASSERT_TRUE(claim_i1_failed_admission_if_needed(admissions.front(),
+                                                    ownership_gate));
+    const std::string diagnostic = build_diagnostic();
+    static_cast<void>(diagnostic);
+  } catch (const std::bad_alloc&) {
+    allocation_failed = true;
+  }
+  EXPECT_TRUE(allocation_failed);
+  EXPECT_TRUE(ownership_gate.failed_admission_finalizer_owns_persistence());
+  EXPECT_FALSE(ownership_gate.generic_inner_drain_is_permitted());
+
+  std::size_t generic_outer_calls = 0U;
+  try_i1_generic_outer_failure_persistence(
+      ownership_gate, [&generic_outer_calls] { ++generic_outer_calls; });
+  EXPECT_EQ(generic_outer_calls, 0U);
 }
 
 /**

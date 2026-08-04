@@ -237,6 +237,50 @@ bool contains_failed_admission(
 
 }  // namespace
 
+/** @copydoc I1OuterPersistenceOwnershipGate::claim_failed_admission_finalizer
+ */
+void I1OuterPersistenceOwnershipGate::
+    claim_failed_admission_finalizer() noexcept {  // NOLINT(whitespace/indent_namespace)
+  failed_admission_finalizer_owns_persistence_ = true;
+}
+
+/**
+ * @copydoc
+ * I1OuterPersistenceOwnershipGate::failed_admission_finalizer_owns_persistence
+ */
+bool I1OuterPersistenceOwnershipGate::
+    failed_admission_finalizer_owns_persistence()  // NOLINT(whitespace/indent_namespace)
+    const noexcept {  // NOLINT(whitespace/indent_namespace)
+  return failed_admission_finalizer_owns_persistence_;
+}
+
+/** @copydoc I1OuterPersistenceOwnershipGate::generic_inner_drain_is_permitted
+ */
+bool I1OuterPersistenceOwnershipGate::generic_inner_drain_is_permitted()
+    const noexcept {  // NOLINT(whitespace/indent_namespace)
+  return !failed_admission_finalizer_owns_persistence_;
+}
+
+/**
+ * @copydoc
+ * I1OuterPersistenceOwnershipGate::generic_outer_persistence_is_permitted
+ */
+bool I1OuterPersistenceOwnershipGate::generic_outer_persistence_is_permitted()
+    const noexcept {  // NOLINT(whitespace/indent_namespace)
+  return !failed_admission_finalizer_owns_persistence_;
+}
+
+/** @copydoc claim_i1_failed_admission_if_needed */
+bool claim_i1_failed_admission_if_needed(
+    const I1EditAdmissionResult& admission,
+    I1OuterPersistenceOwnershipGate& ownership_gate) noexcept {
+  if (admission.accepted_coordinate.has_value()) {
+    return false;
+  }
+  ownership_gate.claim_failed_admission_finalizer();
+  return true;
+}
+
 /** @copydoc I1FailedAdmissionFinalizationPort::observe_stage */
 void I1FailedAdmissionFinalizationPort::observe_stage(
     I1FailedAdmissionFinalizationStage stage) noexcept {
@@ -244,9 +288,10 @@ void I1FailedAdmissionFinalizationPort::observe_stage(
 }
 
 /**
- * @brief Owns one terminal diagnostic for the specialized runner catch.
+ * @brief Owns one terminal diagnostic without carrying safety ownership.
  * @param diagnostic Complete failed-admission/finalization diagnostic.
  * @throws std::bad_alloc when base exception storage cannot allocate.
+ * @note The runner-owned no-throw gate was already claimed before construction.
  */
 I1FailedAdmissionFinalizationError::I1FailedAdmissionFinalizationError(
     std::string diagnostic)
@@ -256,9 +301,11 @@ I1FailedAdmissionFinalizationError::I1FailedAdmissionFinalizationError(
 [[noreturn]] void finalize_i1_failed_admission(
     std::string diagnostic, I1EpisodeEvidenceInput input,
     std::array<I1EditAdmissionResult, kI1EditCount> admissions,
+    I1OuterPersistenceOwnershipGate& ownership_gate,
     I1EpisodeObservationCollector* observations,
     I1FailedAdmissionFinalizationPort* port, std::ostream* episode_output,
     std::vector<I1EpisodeInnerRow>* completed_rows, std::size_t* written_rows) {
+  ownership_gate.claim_failed_admission_finalizer();
   try {
     if (observations == nullptr || port == nullptr ||
         episode_output == nullptr || completed_rows == nullptr ||
@@ -370,6 +417,40 @@ I1FailedAdmissionFinalizationError::I1FailedAdmissionFinalizationError(
         "before outer failure persistence");
     throw I1FailedAdmissionFinalizationError(std::move(diagnostic));
   }
+}
+
+/** @copydoc rethrow_i1_runner_failure_after_generic_drain */
+[[noreturn]] void rethrow_i1_runner_failure_after_generic_drain(
+    std::exception_ptr primary_failure,
+    const I1OuterPersistenceOwnershipGate& ownership_gate,
+    std::optional<std::future<I1EpisodeInnerRow>>* pending_evaluation,
+    std::vector<I1EpisodeInnerRow>* completed_rows,
+    std::ostream* episode_output, std::size_t* written_rows) {
+  if (!ownership_gate.generic_inner_drain_is_permitted()) {
+    std::rethrow_exception(primary_failure);
+  }
+
+  if (pending_evaluation->has_value() && (*pending_evaluation)->valid()) {
+    try {
+      completed_rows->push_back((*pending_evaluation)->get());
+    } catch (...) {
+    }
+    pending_evaluation->reset();
+  }
+  try {
+    flush_i1_episode_rows(episode_output, *completed_rows, written_rows);
+  } catch (const std::exception& flush_error) {
+    try {
+      std::rethrow_exception(primary_failure);
+    } catch (const std::exception& primary_error) {
+      throw std::runtime_error(
+          std::string(primary_error.what()) +
+          "; evidence flush failed: " + flush_error.what());
+    } catch (...) {
+      throw;
+    }
+  }
+  std::rethrow_exception(primary_failure);
 }
 
 /** @copydoc I1EpisodeEvaluationRecoveryError::I1EpisodeEvaluationRecoveryError
