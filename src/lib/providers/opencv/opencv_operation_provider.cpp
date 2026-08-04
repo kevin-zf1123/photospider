@@ -1724,29 +1724,47 @@ static NodeOutput op_extract_channel(
 
 /**
  * @brief Owns one thread-local round-to-nearest binary floating-point scope.
- * @throws std::runtime_error when the platform cannot query or install the
- * required floating-point rounding mode.
- * @note The previous mode is restored on every normal or exceptional exit.
- * Restoration failure terminates because leaking a changed mode into a reused
- * execution worker would make later product arithmetic non-deterministic.
+ * @throws std::runtime_error when the platform cannot capture the complete
+ * worker environment, install the required rounding mode, or restore the
+ * captured environment after installation fails.
+ * @note The complete prior environment, including rounding and sticky
+ * exception flags, is restored on every normal or exceptional exit.
+ * Destruction-time restoration failure terminates because leaking changed
+ * floating-point state into a reused execution worker would make later product
+ * arithmetic non-deterministic.
  */
 class ScopedBinary32RoundToNearest final {
  public:
   /**
-   * @brief Installs `FE_TONEAREST` on the current execution worker.
-   * @throws std::runtime_error when the environment operation fails.
+   * @brief Captures the complete worker environment and installs RNE.
+   * @throws std::runtime_error when capture or installation fails. After a
+   * successful capture, installation failure first attempts complete
+   * restoration and reports separately if that recovery also fails.
    */
   ScopedBinary32RoundToNearest() {
-    previous_rounding_ = fegetround();
-    if (previous_rounding_ == -1 || fesetround(FE_TONEAREST) != 0) {
+    if (fegetenv(&previous_environment_) != 0) {
+      throw std::runtime_error(
+          "curve_transform cannot capture worker floating-point environment");
+    }
+    if (fesetround(FE_TONEAREST) != 0) {
+      if (fesetenv(&previous_environment_) != 0) {
+        throw std::runtime_error(
+            "curve_transform cannot install binary32 RNE rounding or restore "
+            "the worker floating-point environment");
+      }
       throw std::runtime_error(
           "curve_transform cannot install binary32 RNE rounding");
     }
   }
 
-  /** @brief Restores the worker's previous rounding mode. @throws Nothing. */
+  /**
+   * @brief Restores the worker's complete prior floating-point environment.
+   * @throws Nothing; restoration failure terminates the process.
+   * @note Full restoration removes sticky exceptions raised by curve arithmetic
+   * while preserving every flag and control value present on scope entry.
+   */
   ~ScopedBinary32RoundToNearest() noexcept {
-    if (fesetround(previous_rounding_) != 0) {
+    if (fesetenv(&previous_environment_) != 0) {
       std::terminate();
     }
   }
@@ -1769,8 +1787,12 @@ class ScopedBinary32RoundToNearest final {
       const ScopedBinary32RoundToNearest& other) = delete;
 
  private:
-  /** @brief Rounding mode restored before the execution worker is reused. */
-  int previous_rounding_ = FE_TONEAREST;
+  /**
+   * @brief Complete environment restored before the worker is reused.
+   * @note The value becomes valid only after successful `fegetenv`; a failed
+   * constructor never reaches destruction.
+   */
+  fenv_t previous_environment_{};
 };
 
 /**
@@ -1798,13 +1820,16 @@ static float curve_transform_binary32(float input, float coefficient) noexcept {
  * @return Nothing.
  * @throws GraphError if the required input tile is missing or the tile pair is
  * not shape/type compatible FP32 storage.
- * @throws std::runtime_error when binary32 RNE cannot be installed.
+ * @throws std::runtime_error when the complete worker environment cannot be
+ * captured, binary32 RNE cannot be installed, or failed installation cannot
+ * restore the captured environment.
  * @throws cv::Exception if OpenCV adapter conversion fails.
  * @note The coefficient conversion and multiply/add/reciprocal cuts all occur
  * under explicit RNE. Scalar volatile cuts intentionally avoid OpenCV bulk
  * division paths whose one-ULP result depends on vector width/architecture.
- * Each task owns disjoint output storage and restores its worker's prior
+ * Each task owns disjoint output storage and restores its worker's complete
  * floating-point environment, so concurrent callbacks remain race-free.
+ * Destruction-time restoration failure is fail-stop.
  */
 static void op_curve_transform_tiled(
     const Node& node, const OutputTile& output_tile,
