@@ -812,6 +812,54 @@ TEST(DeviceResidency, PretrackedCurrentRejectsLateOlderRunAdmission) {
 }
 
 /**
+ * @brief Proves coordinator-managed native freshness accepts an exact current
+ * generation even when its scalar moves backward.
+ * @return Nothing; GoogleTest reports stale admission or currentness drift.
+ * @throws Fake publication, identity, and synchronized manager exceptions.
+ * @note Generation two models the earlier accepted coordinate that publishes
+ * first. Product currentness then selects generation one for a later accepted
+ * coordinate. A late observation from generation two must not restore it.
+ */
+TEST(DeviceResidency,
+     CoordinatorCurrentnessCanMoveToLowerGenerationWithoutStaleRollback) {
+  ResidencyManager manager;
+  PendingReplicaPair stale_pair = make_pending_replica_pair();
+  PendingReplicaPair current_pair = make_pending_replica_pair();
+  const DeviceCompletionIdentity stale_identity(make_seed(2U, 24U),
+                                                stale_pair.source.value,
+                                                stale_pair.destination.value);
+  const DeviceCompletionIdentity current_identity(
+      make_seed(1U, 25U), current_pair.source.value,
+      current_pair.destination.value);
+  const DeviceCompletionSeed& stale_seed = stale_identity.seed();
+
+  manager.track_lineage(stale_seed.graph_instance_id(),
+                        stale_seed.target_node_id(),
+                        stale_seed.request_intent());
+  manager.publish_current_generation(
+      stale_seed.graph_instance_id(), stale_seed.target_node_id(),
+      stale_seed.request_intent(), stale_seed.supersession_generation());
+  manager.observe_generation(stale_seed);
+  manager.publish_current_generation(
+      current_identity.seed().graph_instance_id(),
+      current_identity.seed().target_node_id(),
+      current_identity.seed().request_intent(),
+      current_identity.seed().supersession_generation());
+
+  manager.observe_generation(stale_seed);
+  EXPECT_THROW(manager.register_transfer(stale_identity),
+               std::invalid_argument);
+  manager.observe_generation(current_identity.seed());
+  ASSERT_NO_THROW(manager.register_transfer(current_identity));
+  EXPECT_TRUE(manager.discard_transfer(current_identity));
+
+  EXPECT_TRUE(stale_pair.source.producer.cancel());
+  EXPECT_TRUE(stale_pair.destination.producer.cancel());
+  EXPECT_TRUE(current_pair.source.producer.cancel());
+  EXPECT_TRUE(current_pair.destination.producer.cancel());
+}
+
+/**
  * @brief Proves Failed destinations never enter reusable residency.
  * @return Nothing; GoogleTest reports failure acceptance or lookup failures.
  * @throws Fake publication, diagnostic, identity, and manager exceptions.

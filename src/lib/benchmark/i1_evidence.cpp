@@ -385,7 +385,7 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
   }
 
   std::uint64_t previous_event_sequence = 0U;
-  std::uint64_t previous_generation = 0U;
+  std::set<std::uint64_t> seen_product_generations;
   std::optional<I1AcceptedCoordinate> previous_product_coordinate;
   std::set<std::uint64_t> seen_materialized_run_ids;
   for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
@@ -454,11 +454,10 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
     const std::optional<I1ObservedCurrentGeneration> generation =
         single_generation_for_edit(row.evidence.observations, edit_index);
     if (!generation.has_value() || generation->generation == 0U ||
-        generation->generation <= previous_generation) {
-      global_invalidate("edit has missing, duplicate, or unordered generation");
+        !seen_product_generations.insert(generation->generation).second) {
+      global_invalidate("edit has missing, zero, or duplicate generation");
       continue;
     }
-    previous_generation = generation->generation;
     if (!generation->accepted_coordinate.has_value() ||
         !edit.accepted_coordinate.has_value() ||
         !(*generation->accepted_coordinate == *edit.accepted_coordinate)) {

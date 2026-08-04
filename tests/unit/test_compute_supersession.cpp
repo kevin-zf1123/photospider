@@ -246,6 +246,71 @@ ComputeRunSubmission make_group_submission(
 }
 
 /**
+ * @brief Proves one generation-ordered lineage replacement remains unchanged.
+ * @param target_node_id Distinct canonical lineage for the test invocation.
+ * @param current_coordinate Optional binding for the lower generation.
+ * @param successor_coordinate Optional binding for the higher generation.
+ * @return Nothing; GoogleTest assertions report replacement drift.
+ * @throws Executor, allocation, and synchronization failures unchanged.
+ * @note Callers use either two unbound identities or exactly one bound
+ * identity. Any coordinate deliberately has no authority in those domains.
+ */
+void expect_generation_ordered_replacement(
+    int target_node_id,
+    std::optional<AcceptedBoundaryCoordinate> current_coordinate,
+    std::optional<AcceptedBoundaryCoordinate> successor_coordinate) {
+  ASSERT_FALSE(current_coordinate.has_value() &&
+               successor_coordinate.has_value());
+  GraphModel model(std::filesystem::path{});
+  GraphStateExecutor graph_state(model);
+  GraphStateExecutor compute_lane(
+      model, 1U, GraphStateExecutor::CapacityMode::TotalAdmission);
+  ComputeRequestCoordinator coordinator(graph_state, compute_lane);
+  const SupersessionKey key(target_node_id, ComputeIntent::GlobalHighPrecision);
+
+  auto current = coordinator.prepare(key, std::move(current_coordinate));
+  const SupersessionIdentity current_identity = current.identity();
+  auto current_source = std::make_shared<ComputeRequestCancellationSource>();
+  std::promise<void> current_entered;
+  std::future<void> current_entered_future = current_entered.get_future();
+  std::promise<void> release_current;
+  const std::shared_future<void> current_release =
+      release_current.get_future().share();
+  coordinator.publish(
+      std::move(current), current_source,
+      [&] {
+        current_entered.set_value();
+        current_release.wait();
+      },
+      [] {}, [](std::exception_ptr) {});
+  graph_state.submit([](GraphModel&) {}).get();
+  ASSERT_EQ(current_entered_future.wait_for(kTestTimeout),
+            std::future_status::ready);
+
+  auto successor = coordinator.prepare(key, std::move(successor_coordinate));
+  const SupersessionIdentity successor_identity = successor.identity();
+  ASSERT_LT(current_identity.generation, successor_identity.generation);
+  coordinator.publish(
+      std::move(successor),
+      std::make_shared<ComputeRequestCancellationSource>(), [] {}, [] {},
+      [](std::exception_ptr) {});
+  graph_state.submit([](GraphModel&) {}).get();
+
+  ASSERT_TRUE(current_source->accepted_reason().has_value());
+  EXPECT_EQ(*current_source->accepted_reason(),
+            ComputeRunCancellationReason::Superseded);
+  EXPECT_FALSE(coordinator.is_current(current_identity));
+  EXPECT_TRUE(coordinator.is_current(successor_identity));
+
+  release_current.set_value();
+  ASSERT_TRUE(wait_for_predicate(
+      [&] { return coordinator.snapshot().lineage_rows == 0U; }));
+  coordinator.stop_admission();
+  compute_lane.close_and_drain();
+  graph_state.close_and_drain();
+}
+
+/**
  * @brief Verifies identity validation, coordinate order, and generation limit.
  * @return Nothing; GoogleTest assertions report identity/overflow failures.
  * @throws Standard construction failures unchanged to GoogleTest.
@@ -369,6 +434,22 @@ TEST(ComputeRequestCoordinator,
   coordinator.stop_admission();
   compute_lane.close_and_drain();
   graph_state.close_and_drain();
+}
+
+/**
+ * @brief Proves legacy and both mixed binding directions retain generation
+ * replacement order.
+ * @return Nothing; GoogleTest assertions report public-traffic regressions.
+ * @throws Executor, allocation, and synchronization failures unchanged.
+ */
+TEST(ComputeRequestCoordinator, LegacyAndMixedBindingsRemainGenerationOrdered) {
+  const auto admission_time = std::chrono::steady_clock::time_point(
+      std::chrono::nanoseconds(987654321));
+  expect_generation_ordered_replacement(32, std::nullopt, std::nullopt);
+  expect_generation_ordered_replacement(
+      33, AcceptedBoundaryCoordinate{admission_time, 2U}, std::nullopt);
+  expect_generation_ordered_replacement(
+      34, std::nullopt, AcceptedBoundaryCoordinate{admission_time, 1U});
 }
 
 /**

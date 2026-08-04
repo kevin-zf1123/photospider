@@ -20,6 +20,7 @@
 #include "benchmark/i1_profile.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
+#include "runtime/kernel_compute_test_access.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
 namespace ps {
@@ -284,6 +285,142 @@ class ScopedCurveObserver final {
 };
 
 /**
+ * @brief Blocks only the first Kernel candidate after generation preparation.
+ *
+ * The first caller owns its prepared generation but cannot pretrack or publish
+ * currentness until release. Every later caller passes the same checkpoint,
+ * allowing a higher generation to publish first deterministically.
+ *
+ * @throws Nothing from product callbacks; synchronization failure terminates.
+ * @note The success path acquires both Host result futures before destruction.
+ * Destruction opens provider work and joins any outstanding admission caller
+ * before clearing the borrowed hook; backend result futures are joined later.
+ */
+class FirstPreparedCandidateGate final {
+ public:
+  /**
+   * @brief Installs the borrowed Kernel admission hook.
+   * @param callback_gate Provider gate released during every cleanup path.
+   * @param admission_future Outer Host caller joined before hook removal.
+   * @throws Nothing.
+   */
+  FirstPreparedCandidateGate(CurveCallbackGate& callback_gate,
+                             std::future<Result<std::future<OperationStatus>>>&
+                                 admission_future) noexcept
+      : hook_{this, &FirstPreparedCandidateGate::notify},
+        callback_gate_(callback_gate),
+        admission_future_(admission_future) {
+    testing::set_kernel_compute_admission_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Releases both product barriers and clears the borrowed hook.
+   * @throws Nothing.
+   * @note Provider release precedes async-future cleanup, preventing an
+   * assertion failure from blocking while a caller waits inside real work.
+   */
+  ~FirstPreparedCandidateGate() noexcept {
+    release();
+    callback_gate_.release();
+    try {
+      if (admission_future_.valid()) {
+        admission_future_.wait();
+      }
+    } catch (...) {
+      std::terminate();
+    }
+    testing::set_kernel_compute_admission_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Prevents duplicate hook ownership.
+   * @param other Guard retaining its borrowed hook.
+   * @throws Nothing because copying is unavailable.
+   */
+  FirstPreparedCandidateGate(const FirstPreparedCandidateGate& other) = delete;
+
+  /**
+   * @brief Prevents replacement of hook ownership.
+   * @param other Guard that remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  FirstPreparedCandidateGate& operator=(
+      const FirstPreparedCandidateGate& other) = delete;
+
+  /**
+   * @brief Waits until the first candidate owns its prepared generation.
+   * @param timeout Bounded diagnostic timeout.
+   * @return True when the first hook callback entered.
+   * @throws std::system_error from synchronization.
+   */
+  bool wait_for_first(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout, [this] { return entered_ != 0U; });
+  }
+
+  /**
+   * @brief Releases the first prepared candidate idempotently.
+   * @return Nothing.
+   * @throws Nothing; synchronization failure terminates.
+   */
+  void release() noexcept {
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+      changed_.notify_all();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  /**
+   * @brief Handles one exact post-prepare Kernel checkpoint.
+   * @param context Borrowed gate owner.
+   * @param event Exact candidate-admission checkpoint.
+   * @return Nothing after non-first callers pass or first-caller release.
+   * @throws Nothing; invalid context or synchronization failure terminates.
+   */
+  static void notify(void* context,
+                     testing::KernelComputeAdmissionTestEvent event) noexcept {
+    if (event != testing::KernelComputeAdmissionTestEvent::
+                     ProductCandidatePreparedBeforeLineageTracking) {
+      return;
+    }
+    auto* gate = static_cast<FirstPreparedCandidateGate*>(context);
+    if (gate == nullptr) {
+      std::terminate();
+    }
+    try {
+      std::unique_lock<std::mutex> lock(gate->mutex_);
+      ++gate->entered_;
+      gate->changed_.notify_all();
+      if (gate->entered_ == 1U) {
+        gate->changed_.wait(lock, [gate] { return gate->released_; });
+      }
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+  /** @brief Borrowed callback aggregate published to Kernel. */
+  testing::KernelComputeAdmissionTestHook hook_;
+  /** @brief Provider gate released before any async caller is joined. */
+  CurveCallbackGate& callback_gate_;
+  /** @brief Outer admission caller joined before the hook is cleared. */
+  std::future<Result<std::future<OperationStatus>>>& admission_future_;
+  /** @brief Serializes callback count and release state. */
+  std::mutex mutex_;
+  /** @brief Wakes the harness and the first blocked caller. */
+  std::condition_variable changed_;
+  /** @brief Number of candidate-prepared checkpoints observed. */
+  std::size_t entered_ = 0U;
+  /** @brief True after the first candidate may continue. */
+  bool released_ = false;
+};
+
+/**
  * @brief Writes a reduced source with the exact serial I1 operation topology.
  * @param path YAML destination inside the test-owned temporary directory.
  * @return Nothing after complete flush/close.
@@ -524,6 +661,139 @@ TEST(I1ProductPath, PreparedAdmissionFailureLeavesNoProductBindingAndRecovers) {
   }
 }
 #endif
+
+/**
+ * @brief Reproduces inverse generation/accepted-coordinate publication through
+ * the real Host and Kernel path.
+ *
+ * @return Nothing; GoogleTest reports currentness, cancellation, or settlement
+ * regressions.
+ * @throws Embedded product, filesystem, allocation, and synchronization
+ * failures unchanged to GoogleTest.
+ * @note The later coordinate prepares generation one and pauses at a Kernel
+ * barrier. The earlier coordinate then prepares generation two, becomes
+ * current, and blocks in real provider work. Releasing generation one must
+ * make the later coordinate current despite its lower scalar generation.
+ */
+TEST(I1ProductPath,
+     LaterAcceptedCoordinateWinsWhenGenerationPreparationOrderIsInverse) {
+  ScopedI1TempDirectory temp;
+  CurveCallbackGate curve_gate;
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  ScopedCurveObserver curve_observer(curve_gate);
+
+  const VoidResult seeded = host->seed_builtin_ops();
+  ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+  HostExecutionConfig execution_config;
+  execution_config.worker_count = 8U;
+  const VoidResult configured =
+      host->configure_execution_defaults(execution_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+
+  const std::filesystem::path yaml_path = temp.root() / "i1-inverse.yaml";
+  write_reduced_i1_graph(yaml_path);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"i1-inverse-publication-order"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = yaml_path.string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  const Result<GraphSessionId> loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  I1Host* const i1_host = as_i1_host(*host);
+  ASSERT_NE(i1_host, nullptr);
+  I1EpisodeObservationCollector observations;
+  const auto shared_admission_time = std::chrono::steady_clock::now();
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  std::future<Result<std::future<OperationStatus>>> later_submission;
+
+  const VoidResult final_mutation =
+      host->set_node_yaml(load.session, NodeId{1}, i1_edit_node_one_yaml(11U));
+  ASSERT_TRUE(final_mutation.status.ok) << final_mutation.status.message;
+
+  Result<std::future<OperationStatus>> later_coordinate;
+  Result<std::future<OperationStatus>> earlier_coordinate;
+  {
+    FirstPreparedCandidateGate admission_gate(curve_gate, later_submission);
+    later_submission = std::async(std::launch::async, [&] {
+      return i1_host->compute_i1_async(I1HostComputeRequest{
+          make_reduced_request(load.session, 11U),
+          compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                                 deadline, 1U, 8U},
+          observations.make_edit_sink(11U),
+          I1AcceptedCoordinate{shared_admission_time, 2U}});
+    });
+    ASSERT_TRUE(admission_gate.wait_for_first(std::chrono::seconds(5)));
+
+    const VoidResult earlier_mutation =
+        host->set_node_yaml(load.session, NodeId{1}, i1_edit_node_one_yaml(0U));
+    ASSERT_TRUE(earlier_mutation.status.ok) << earlier_mutation.status.message;
+    earlier_coordinate = i1_host->compute_i1_async(I1HostComputeRequest{
+        make_reduced_request(load.session, 0U),
+        compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                               deadline, 1U, 8U},
+        observations.make_edit_sink(0U),
+        I1AcceptedCoordinate{shared_admission_time, 1U}});
+    ASSERT_TRUE(earlier_coordinate.status.ok)
+        << earlier_coordinate.status.message;
+    ASSERT_TRUE(earlier_coordinate.value.valid());
+    ASSERT_TRUE(curve_gate.wait_for_entry(std::chrono::seconds(5)));
+
+    const VoidResult restored_final = host->set_node_yaml(
+        load.session, NodeId{1}, i1_edit_node_one_yaml(11U));
+    ASSERT_TRUE(restored_final.status.ok) << restored_final.status.message;
+    admission_gate.release();
+    ASSERT_EQ(later_submission.wait_for(std::chrono::seconds(5)),
+              std::future_status::ready);
+    later_coordinate = later_submission.get();
+    ASSERT_TRUE(later_coordinate.status.ok) << later_coordinate.status.message;
+    ASSERT_TRUE(later_coordinate.value.valid());
+    ASSERT_TRUE(wait_for_supersession(observations, std::chrono::seconds(5)));
+  }
+
+  curve_gate.release();
+  ASSERT_EQ(earlier_coordinate.value.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  ASSERT_EQ(later_coordinate.value.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  const OperationStatus earlier_status = earlier_coordinate.value.get();
+  const OperationStatus later_status = later_coordinate.value.get();
+  EXPECT_FALSE(earlier_status.ok);
+  EXPECT_TRUE(later_status.ok) << later_status.message;
+
+  const I1EpisodeObservationSnapshot snapshot = observations.snapshot();
+  ASSERT_FALSE(snapshot.overflowed);
+  ASSERT_EQ(snapshot.current_generations.size(), 2U);
+  const I1ObservedCurrentGeneration& first_current =
+      snapshot.current_generations[0U];
+  const I1ObservedCurrentGeneration& second_current =
+      snapshot.current_generations[1U];
+  EXPECT_EQ(first_current.edit_index, 0U);
+  EXPECT_EQ(first_current.generation, 2U);
+  EXPECT_EQ(second_current.edit_index, 11U);
+  EXPECT_EQ(second_current.generation, 1U);
+  ASSERT_TRUE(first_current.accepted_coordinate.has_value());
+  ASSERT_TRUE(second_current.accepted_coordinate.has_value());
+  EXPECT_EQ(first_current.accepted_coordinate->admission_time(),
+            shared_admission_time);
+  EXPECT_EQ(second_current.accepted_coordinate->admission_time(),
+            shared_admission_time);
+  EXPECT_EQ(first_current.accepted_coordinate->event_sequence(), 1U);
+  EXPECT_EQ(second_current.accepted_coordinate->event_sequence(), 2U);
+  EXPECT_LT(*first_current.accepted_coordinate,
+            *second_current.accepted_coordinate);
+
+  ASSERT_EQ(snapshot.cancellations.size(), 1U);
+  EXPECT_EQ(snapshot.cancellations.front().edit_index, 0U);
+  EXPECT_EQ(snapshot.cancellations.front().generation, 2U);
+  ASSERT_EQ(snapshot.visible_outputs.size(), 1U);
+  EXPECT_EQ(snapshot.visible_outputs.front().edit_index, 11U);
+  EXPECT_EQ(snapshot.visible_outputs.front().generation, 1U);
+
+  const VoidResult closed = host->close_graph(load.session);
+  EXPECT_TRUE(closed.status.ok) << closed.status.message;
+}
 
 /**
  * @brief Exercises the full embedded latest-wins path with deterministic

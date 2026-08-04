@@ -42,13 +42,16 @@ enum class ResidencyCompletionDisposition : std::uint32_t {
 /**
  * @brief Process-owned registry of Ready revision-preserving device replicas.
  *
- * The manager observes canonical supersession generations, admits exact
+ * The manager observes canonical supersession currentness, admits exact
  * transfer identities before native submission, and publishes a destination
- * only after its Ready fence and complete immutable facts match. It does not
- * own native queues, allocations, scratch, cache policy, or visible Graph
- * commit authority. Completed replicas are retained up to a fixed entry-count
- * capacity; publication beyond that bound evicts the oldest logical revision
- * and releases its strong native/provider owners.
+ * only after its Ready fence and complete immutable facts match. Coordinator-
+ * managed lineages retain the exact published current generation rather than
+ * inferring freshness from its scalar magnitude; standalone lineages retain
+ * their established numeric maximum. It does not own native queues,
+ * allocations, scratch, cache policy, or visible Graph commit authority.
+ * Completed replicas are retained up to a fixed entry-count capacity;
+ * publication beyond that bound evicts the oldest logical revision and
+ * releases its strong native/provider owners.
  * Canonical generation rows are Graph-scoped maintenance state and retire
  * after exact Graph close has drained every Run and pending native completion.
  *
@@ -76,12 +79,15 @@ class ResidencyManager final {
   explicit ResidencyManager(std::size_t resident_capacity);
 
   /**
-   * @brief Records the newest observed generation for one canonical lineage.
+   * @brief Records one observed generation for a canonical lineage.
    * @param seed Run/task seed whose Graph/target/request lineage is observed.
    * @return Nothing.
    * @throws std::overflow_error never; generations are supplied, not minted.
    * @throws std::bad_alloc or std::system_error from map synchronization.
-   * @note Older observations never move the lineage backwards.
+   * @note Standalone lineages retain the numeric maximum. A lineage marked as
+   * coordinator-managed retains its exact published current generation, so a
+   * stale Run observation never changes currentness in either numeric
+   * direction.
    */
   void observe_generation(const DeviceCompletionSeed& seed);
 
@@ -94,8 +100,9 @@ class ResidencyManager final {
    * @throws std::invalid_argument for invalid Graph/target/intent facts.
    * @throws std::bad_alloc or std::system_error from map synchronization.
    * @note A fresh row uses internal generation zero until an accepted current
-   * publication or a Run observation advances it. Failed and born-stale
-   * candidates never advance the placeholder.
+   * publication assigns the exact generation. Tracking marks the row as
+   * coordinator-managed; failed and born-stale candidates never advance the
+   * placeholder.
    */
   void track_lineage(std::uint64_t graph_instance_id, int target_node_id,
                      ComputeIntent request_intent);
@@ -105,14 +112,16 @@ class ResidencyManager final {
    * @param graph_instance_id Nonzero live Graph identity scalar.
    * @param target_node_id Canonical nonnegative request target.
    * @param request_intent Canonical request intent.
-   * @param supersession_generation Nonzero newly current generation.
+   * @param supersession_generation Nonzero exact newly current generation.
    * @return Nothing.
    * @throws Nothing; synchronization failure terminates to avoid split
    * coordinator/residency currentness.
-   * @note The method performs no allocation and requires `track_lineage()` to
-   * have completed before coordinator submission. Missing tracking, invalid
-   * facts, or backwards publication terminates. It is called while the Graph
-   * coordinator still excludes `is_current()`.
+   * @note The method performs no allocation and requires `track_lineage()` or
+   * an existing observed row before publication. It marks the row as
+   * coordinator-managed and assigns the exact generation even when accepted-
+   * coordinate currentness makes the scalar move backward. Missing tracking
+   * or invalid facts terminate. It is called while the Graph coordinator still
+   * excludes `is_current()`.
    */
   void publish_current_generation(
       std::uint64_t graph_instance_id, int target_node_id,
@@ -151,12 +160,13 @@ class ResidencyManager final {
    * @brief Admits one exact replica production before native submission.
    * @param identity Complete source/destination completion identity.
    * @return Nothing.
-   * @throws std::invalid_argument when the generation is already stale.
+   * @throws std::invalid_argument when the generation is not current.
    * @throws std::bad_alloc or std::system_error from synchronized ownership.
    * @note Re-admitting the exact identity is idempotent. Reusing the same
-   * destination producer for different facts is rejected. A newer admitted
-   * generation advances its canonical lineage even if the separate
-   * pre-submission observation was omitted.
+   * destination producer for different facts is rejected. Standalone lineages
+   * advance by numeric generation when pre-submission observation was omitted;
+   * coordinator-managed lineages require exact equality with the published
+   * generation and never infer currentness from magnitude.
    */
   void register_transfer(const DeviceCompletionIdentity& identity);
 
@@ -238,6 +248,19 @@ class ResidencyManager final {
   };
 
   /**
+   * @brief Exact native freshness state for one canonical lineage.
+   * @throws Nothing for value construction and copying.
+   * @note `coordinator_managed` changes the generation from a numeric maximum
+   * into an exact current identity selected by product publication.
+   */
+  struct LineageCurrentness final {
+    /** @brief Exact current generation, or zero before first publication. */
+    std::uint64_t generation = 0U;
+    /** @brief Whether coordinator publication is the sole current authority. */
+    bool coordinator_managed = false;
+  };
+
+  /**
    * @brief Ordered reusable-replica key.
    * @throws Nothing for construction and comparison.
    */
@@ -286,13 +309,13 @@ class ResidencyManager final {
 
   /** @brief Positive maximum retained replica-entry count. */
   std::size_t resident_capacity_ = kDefaultResidentCapacity;
-  /** @brief Protects generations, admissions, and resident replicas. */
+  /** @brief Protects currentness, admissions, and resident replicas. */
   mutable std::mutex mutex_;
   /**
-   * @brief Newest generation per lineage, or zero for a pretracked placeholder.
+   * @brief Exact currentness or standalone maximum for each lineage.
    * @note Rows retire together after their exact Graph lifecycle drains.
    */
-  std::map<LineageKey, std::uint64_t> current_generations_;
+  std::map<LineageKey, LineageCurrentness> current_generations_;
   /** @brief Exact admitted identity indexed by destination producer scalar. */
   std::map<std::uint64_t, DeviceCompletionIdentity> pending_transfers_;
   /**

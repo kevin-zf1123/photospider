@@ -13,24 +13,22 @@ namespace {
  * @brief Tests whether one candidate may replace the exact current identity.
  * @param current Complete current identity for the lineage row.
  * @param candidate Prepared candidate proposed for current publication.
- * @return True when generation advances and, when both are bound, the typed
- * accepted-boundary coordinate also advances.
+ * @return True when the authoritative ordering domain advances: accepted
+ * coordinate for two bound identities, otherwise generation.
  * @throws Nothing.
  * @note Mixed bound/unbound product traffic retains established generation
- * ordering. Within the private accepted-boundary domain, equal timestamps are
- * ordered only by row-local event sequence; observation causal sequence is
- * never consulted.
+ * ordering. Generation records preparation order and cannot veto a newer
+ * logical admission when both identities are bound. Within that private
+ * accepted-boundary domain, equal timestamps are ordered only by row-local
+ * event sequence; observation causal sequence is never consulted.
  */
 bool candidate_follows_current(const SupersessionIdentity& current,
                                const SupersessionIdentity& candidate) noexcept {
-  if (!(current.generation < candidate.generation)) {
-    return false;
-  }
   if (current.accepted_coordinate.has_value() &&
       candidate.accepted_coordinate.has_value()) {
     return *current.accepted_coordinate < *candidate.accepted_coordinate;
   }
-  return true;
+  return current.generation < candidate.generation;
 }
 
 /**

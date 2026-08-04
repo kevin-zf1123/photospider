@@ -71,11 +71,14 @@ class SupersessionKey {
 };
 
 /**
- * @brief Checked nonzero graph-wide supersession generation value.
+ * @brief Checked nonzero graph-wide supersession preparation identity.
  * @throws std::invalid_argument when constructed from zero.
- * @note Ordering is meaningful only inside one live Graph supersession domain.
- * It is not GraphRevision, RunId, topology/dirty generation, or execution
- * epoch.
+ * @note Numeric ordering records coordinator preparation arrival inside one
+ * live Graph domain. It remains the replacement order for unbound or mixed
+ * traffic, but two accepted-coordinate-bound identities use their logical
+ * coordinates instead, so a later current publication may carry a numerically
+ * lower generation. This is not GraphRevision, RunId, topology/dirty
+ * generation, or execution epoch.
  */
 class SupersessionGeneration {
  public:
@@ -88,7 +91,7 @@ class SupersessionGeneration {
 
   /**
    * @brief Returns the nonzero scalar representation.
-   * @return Graph-wide monotonic generation value.
+   * @return Graph-wide monotonic preparation-identity scalar.
    * @throws Nothing.
    * @note The value grants authority only after coordinator publication.
    */
@@ -105,17 +108,19 @@ class SupersessionGeneration {
   }
 
   /**
-   * @brief Orders generations allocated by the same live Graph.
+   * @brief Orders preparation identities allocated by the same live Graph.
    * @param other Candidate generation from that domain.
-   * @return True when this value was allocated earlier.
+   * @return True when this value was allocated earlier during preparation.
    * @throws Nothing.
+   * @note This comparison alone does not establish accepted-coordinate-bound
+   * currentness.
    */
   bool operator<(const SupersessionGeneration& other) const noexcept {
     return value_ < other.value_;
   }
 
  private:
-  /** @brief Checked nonzero scalar value. */
+  /** @brief Checked nonzero preparation-identity scalar. */
   std::uint64_t value_ = 0;
 };
 
@@ -206,7 +211,7 @@ struct SupersessionIdentity {
 
   /** @brief Canonical target/request-intent lineage. */
   SupersessionKey key;
-  /** @brief Graph-wide nonzero lineage version. */
+  /** @brief Graph-wide nonzero preparation identity and Run join key. */
   SupersessionGeneration generation;
   /** @brief Exact source-private accepted-boundary ordering binding. */
   std::optional<AcceptedBoundaryCoordinate> accepted_coordinate;

@@ -88,7 +88,11 @@ struct I1EditEvidence final {
  * `accepted_coordinate` to equal the edit's pre-call coordinate exactly.
  */
 struct I1AcceptedProductIdentity final {
-  /** @brief Product generation published for the accepted edit. */
+  /**
+   * @brief Unique product generation assigned during request preparation.
+   * @note Accepted-coordinate order, not numeric generation order, determines
+   * currentness among bound identities.
+   */
   std::uint64_t generation = 0U;
   /** @brief Optional opaque materialized Run identity. */
   std::optional<std::uint64_t> run_id;
@@ -264,6 +268,8 @@ std::chrono::nanoseconds i1_nearest_rank(
  * @throws std::bad_alloc when copied evidence/diagnostics allocate.
  * @note Threshold failure yields `Fail`; missing, contradictory, overflowed,
  * or lossy evidence yields `Invalid` independently per affected dimension.
+ * Product generations must be nonzero and unique, but need not increase with
+ * edit order because bound currentness linearizes by accepted coordinate.
  */
 I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input);
 

@@ -53,9 +53,11 @@ void ResidencyManager::observe_generation(const DeviceCompletionSeed& seed) {
   const LineageKey key = lineage_key(seed);
   auto current = current_generations_.find(key);
   if (current == current_generations_.end()) {
-    current_generations_.emplace(key, seed.supersession_generation());
-  } else if (current->second < seed.supersession_generation()) {
-    current->second = seed.supersession_generation();
+    current_generations_.emplace(
+        key, LineageCurrentness{seed.supersession_generation(), false});
+  } else if (!current->second.coordinator_managed &&
+             current->second.generation < seed.supersession_generation()) {
+    current->second.generation = seed.supersession_generation();
   }
 }
 
@@ -70,8 +72,11 @@ void ResidencyManager::track_lineage(std::uint64_t graph_instance_id,
         "Residency lineage tracking requires canonical request facts.");
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  current_generations_.try_emplace(
-      lineage_key(graph_instance_id, target_node_id, request_intent), 0U);
+  auto [current, inserted] = current_generations_.try_emplace(
+      lineage_key(graph_instance_id, target_node_id, request_intent),
+      LineageCurrentness{});
+  (void)inserted;
+  current->second.coordinator_managed = true;
 }
 
 /** @copydoc ResidencyManager::publish_current_generation */
@@ -90,11 +95,11 @@ void ResidencyManager::publish_current_generation(
     const LineageKey key =
         lineage_key(graph_instance_id, target_node_id, request_intent);
     auto current = current_generations_.find(key);
-    if (current == current_generations_.end() ||
-        current->second > supersession_generation) {
+    if (current == current_generations_.end()) {
       std::terminate();
     }
-    current->second = supersession_generation;
+    current->second.generation = supersession_generation;
+    current->second.coordinator_managed = true;
   } catch (...) {
     std::terminate();
   }
@@ -150,17 +155,22 @@ void ResidencyManager::register_transfer(
     const DeviceCompletionIdentity& identity) {
   std::lock_guard<std::mutex> lock(mutex_);
   const LineageKey key = lineage_key(identity.seed());
-  const auto current = current_generations_.find(key);
-  if (current != current_generations_.end() &&
-      current->second > identity.seed().supersession_generation()) {
-    throw std::invalid_argument(
-        "Cannot register a stale device transfer completion.");
+  auto current = current_generations_.find(key);
+  const std::uint64_t generation = identity.seed().supersession_generation();
+  if (current != current_generations_.end()) {
+    const bool stale = current->second.coordinator_managed
+                           ? current->second.generation != generation
+                           : current->second.generation > generation;
+    if (stale) {
+      throw std::invalid_argument(
+          "Cannot register a non-current device transfer completion.");
+    }
   }
   if (current == current_generations_.end()) {
-    current_generations_.emplace(key,
-                                 identity.seed().supersession_generation());
-  } else if (current->second < identity.seed().supersession_generation()) {
-    current->second = identity.seed().supersession_generation();
+    current_generations_.emplace(key, LineageCurrentness{generation, false});
+  } else if (!current->second.coordinator_managed &&
+             current->second.generation < generation) {
+    current->second.generation = generation;
   }
   const std::uint64_t producer = identity.destination_producer().value();
   const auto pending = pending_transfers_.find(producer);
@@ -216,7 +226,7 @@ ResidencyCompletionDisposition ResidencyManager::publish_ready_transfer(
   const LineageKey key = lineage_key(identity.seed());
   const auto current = current_generations_.find(key);
   if (current == current_generations_.end() ||
-      current->second != identity.seed().supersession_generation()) {
+      current->second.generation != identity.seed().supersession_generation()) {
     pending_transfers_.erase(pending);
     return ResidencyCompletionDisposition::Stale;
   }

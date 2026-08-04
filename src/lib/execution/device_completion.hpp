@@ -33,7 +33,7 @@ class DeviceCompletionSeed final {
    * @param graph_instance_id Nonzero live Graph identity scalar.
    * @param target_node_id Nonnegative canonical request target.
    * @param request_intent Canonical request intent shared by sibling Runs.
-   * @param supersession_generation Nonzero graph-wide request generation.
+   * @param supersession_generation Nonzero graph-wide preparation identity.
    * @param run_id Nonzero opaque Run identity scalar.
    * @param local_task_id Dense Run-local task identity.
    * @throws std::invalid_argument for invalid scalar or enum inputs.
@@ -67,9 +67,12 @@ class DeviceCompletionSeed final {
   ComputeIntent request_intent() const noexcept { return request_intent_; }
 
   /**
-   * @brief Returns the nonzero graph-wide supersession generation.
-   * @return Exact currentness generation captured for this submission.
+   * @brief Returns the nonzero graph-wide preparation identity.
+   * @return Exact supersession generation captured for this submission.
    * @throws Nothing.
+   * @note Coordinator-managed currentness compares this identity for exact
+   * equality after product publication; its numeric magnitude is not bound
+   * accepted-coordinate order.
    */
   std::uint64_t supersession_generation() const noexcept {
     return supersession_generation_;
@@ -104,7 +107,7 @@ class DeviceCompletionSeed final {
   int target_node_id_ = -1;
   /** @brief Canonical request intent. */
   ComputeIntent request_intent_ = ComputeIntent::GlobalHighPrecision;
-  /** @brief Nonzero graph-wide request generation. */
+  /** @brief Nonzero graph-wide preparation identity. */
   std::uint64_t supersession_generation_ = 0U;
   /** @brief Nonzero opaque Run identity scalar. */
   std::uint64_t run_id_ = 0U;

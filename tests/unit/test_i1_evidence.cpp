@@ -178,6 +178,54 @@ Event& event_for_edit(std::vector<Event>* events, std::size_t edit_index) {
 }
 
 /**
+ * @brief Rebinds every synthetic product event for one edit to a generation.
+ * @param input Complete mutable synthetic episode.
+ * @param edit_index Frozen edit whose Run join keys are updated.
+ * @param generation Nonzero unique generation to assign.
+ * @return Nothing.
+ * @throws std::logic_error when the synthetic fixture lacks currentness.
+ * @note The helper changes only the preparation identity. Accepted-coordinate
+ * and observation-causal ordering remain authoritative and unchanged.
+ */
+void rebind_edit_generation(I1EpisodeEvidenceInput* input,
+                            std::size_t edit_index, std::uint64_t generation) {
+  event_for_edit(&input->observations.current_generations, edit_index)
+      .generation = generation;
+  for (I1ObservedServiceStart& event : input->observations.service_starts) {
+    if (event.edit_index == edit_index) {
+      event.generation = generation;
+    }
+  }
+  for (I1ObservedCancellation& event : input->observations.cancellations) {
+    if (event.edit_index == edit_index) {
+      event.generation = generation;
+    }
+  }
+  for (I1ObservedTerminal& event : input->observations.terminals) {
+    if (event.edit_index == edit_index) {
+      event.generation = generation;
+    }
+  }
+  for (I1ObservedVisibleOutput& event : input->observations.visible_outputs) {
+    if (event.edit_index == edit_index) {
+      event.generation = generation;
+    }
+  }
+  for (I1ObservedRunLifecycleTransition& event :
+       input->observations.run_quiescences) {
+    if (event.edit_index == edit_index) {
+      event.generation = generation;
+    }
+  }
+  for (I1ObservedRunLifecycleTransition& event :
+       input->observations.resource_settlements) {
+    if (event.edit_index == edit_index) {
+      event.generation = generation;
+    }
+  }
+}
+
+/**
  * @brief Shifts every sequence at or after one insertion coordinate.
  * @tparam Event Observation type carrying `causal_sequence`.
  * @param events Mutable event vector.
@@ -252,6 +300,47 @@ TEST(I1Evidence, AcceptedAndObservationSequenceDomainsRemainIndependent) {
   const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
   EXPECT_TRUE(row.validity_reasons.empty());
   EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves accepted-coordinate currentness permits inverse generation
+ * allocation order.
+ * @throws Nothing when the complete synthetic row remains valid.
+ * @note Edit zero carries generation two and edit one carries generation one,
+ * reproducing publication after the requests prepared in the opposite order.
+ */
+TEST(I1Evidence, BoundCoordinateOrderDoesNotRequireIncreasingGenerations) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  rebind_edit_generation(&input, 0U, 2U);
+  rebind_edit_generation(&input, 1U, 1U);
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_TRUE(row.validity_reasons.empty());
+  ASSERT_TRUE(row.accepted_products[0U].has_value());
+  ASSERT_TRUE(row.accepted_products[1U].has_value());
+  ASSERT_TRUE(row.accepted_products[0U]->accepted_coordinate.has_value());
+  ASSERT_TRUE(row.accepted_products[1U]->accepted_coordinate.has_value());
+  EXPECT_EQ(row.accepted_products[0U]->generation, 2U);
+  EXPECT_EQ(row.accepted_products[1U]->generation, 1U);
+  EXPECT_LT(*row.accepted_products[0U]->accepted_coordinate,
+            *row.accepted_products[1U]->accepted_coordinate);
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves inverse ordering does not permit duplicate preparation IDs.
+ * @throws Nothing when the evaluator fails closed on the duplicate.
+ */
+TEST(I1Evidence, BoundCoordinateOrderStillRequiresUniqueGenerations) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  rebind_edit_generation(&input, 1U, 1U);
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "edit has missing, zero, or duplicate generation"),
+            row.validity_reasons.end());
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
 }
 
 /**

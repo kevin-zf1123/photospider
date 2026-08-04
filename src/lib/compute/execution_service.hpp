@@ -1190,15 +1190,17 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
                                     const SupersessionIdentity& identity);
 
   /**
-   * @brief Invalidates tracked older native completions before current publish.
+   * @brief Publishes exact managed native freshness before current publish.
    * @param graph_instance_id Exact live Graph identity.
-   * @param identity Newly accepted canonical request lineage and generation.
+   * @param identity Newly accepted canonical request lineage and exact
+   * generation.
    * @return Nothing.
    * @throws Nothing; synchronization or invariant failure terminates because
    * Graph and residency currentness must not split.
    * @note Kernel invokes this from the request coordinator's locked
-   * current-publication callback. The path performs no allocation and must not
-   * re-enter Graph/coordinator state.
+   * current-publication callback. The exact generation can move numerically
+   * backward when accepted-coordinate order authorizes replacement. The path
+   * performs no allocation and must not re-enter Graph/coordinator state.
    */
   void observe_current_supersession(
       GraphInstanceId graph_instance_id,

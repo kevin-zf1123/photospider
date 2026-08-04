@@ -27,10 +27,11 @@ namespace ps::compute {
  *
  * @throws std::bad_alloc when rows, callbacks, or candidate ownership allocate.
  * @throws std::system_error when coordinator/executor synchronization fails.
- * @note Generation publication and currency checks use `graph_state_`; ticket
- * wake is nonblocking and consumes a pre-reserved compute-lane admission.
- * Source-private accepted-boundary candidates additionally require their
- * typed logical coordinate to advance before they may replace current work.
+ * @note Publication and currency checks use `graph_state_`; ticket wake is
+ * nonblocking and consumes a pre-reserved compute-lane admission. Two
+ * source-private accepted-boundary identities use only their typed logical
+ * coordinate for replacement order because generation records preparation
+ * arrival. Unbound or mixed traffic retains generation replacement order.
  */
 class ComputeRequestCoordinator final {
  public:
@@ -204,8 +205,10 @@ class ComputeRequestCoordinator final {
    * current observer runs before the coordinator publishes the complete
    * identity, making external freshness invalidation and `is_current()`
    * observation one ordered transaction. When both current and candidate
-   * identities carry accepted coordinates, both generation and coordinate
-   * order must advance; same timestamps are resolved by row-local sequence.
+   * identities carry accepted coordinates, that coordinate is the sole
+   * replacement order and generation may move numerically backward because it
+   * records preparation arrival; same timestamps are resolved by row-local
+   * sequence. Mixed or unbound identities retain generation ordering.
    */
   void publish(PreparedCandidate prepared,
                std::shared_ptr<ComputeRequestCancellationSource> cancellation,
