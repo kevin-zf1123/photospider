@@ -497,7 +497,11 @@ machine 不是 public Host、IPC、CLI 或 plugin API。
 
 Source-private I2 profile 与 evidence evaluator 已实现冻结的 111-slot grid、十二次 edit
 admission、child descriptor、publication ordering、Host acquisition、条件式真实 Metal
-residency、lifecycle/resource settlement，以及四项相互独立的 inner verdict。手工
+residency、lifecycle/resource settlement，以及四项相互独立的 inner verdict。Evaluator 要求
+唯一 accepted current-generation observation 先于每个匹配的 child event；每个 Cancelled
+terminal 必须恰有一个 descriptor 完全一致且更早的 cancellation，而所有非 Cancelled terminal
+都不得有 cancellation。缺失、重复、迟到、多余或漂移的 evidence 会使四项 verdict 全部
+Invalid。手工
 `i2_progressive_benchmark` target 为 `EXCLUDE_FROM_ALL`，不属于 CTest，并且只向调用者选择的
 目录写入 `execution-profile-i2-inner-row-v1` evidence。该 inner record 不是 ADR 0010
 canonical 15-field outer row、bundle 或 reference comparison。因此，仅构建它或通过

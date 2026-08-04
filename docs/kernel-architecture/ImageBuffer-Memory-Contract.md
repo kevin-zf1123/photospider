@@ -458,10 +458,15 @@ Its source-private progressive RT branch uses
 `exact_box_average_factor_four_region()` to create an aligned 512x512
 RGBA FP32 preview from the original 2048x2048 source. Each 4x4 channel sum is
 accumulated before one binary32 result rounding, and the caller's floating-
-point environment is restored on every exit. The resulting proxy storage is
-sealed as an immutable rank-three HWC `Value` with its own revision, binding,
-allocation, `ImageFacet`, layout, and exact storage-byte envelope. The final
-Value is independently computed from the original full-resolution source.
+point environment is restored on every exit. Before the first write, a shared
+source/destination owner, overlap between their checked active storage-envelope
+half-open `uintptr_t` intervals, or an unrepresentable endpoint is rejected
+fail-closed. This covers offset aliases under one owner and overlapping ranges
+with different owners without relationally comparing unrelated pointers. The
+resulting proxy storage is sealed as an immutable rank-three HWC `Value` with
+its own revision, binding, allocation, `ImageFacet`, layout, and exact storage-
+byte envelope. The final Value is independently computed from the original
+full-resolution source.
 
 The I2 Host records two Direct access plans to each visible preview/final Value
 and requires the same revision, binding, allocation, and byte count with zero
@@ -487,6 +492,7 @@ operation ABI.
 
 - `include/photospider/core/image_buffer.hpp`
 - `src/lib/core/image_buffer_processing.hpp`
+- `src/lib/core/image_buffer_storage.hpp`
 - `src/lib/core/exact_box_downsample.cpp`
 - `include/photospider/core/device.hpp`
 - `include/photospider/memory/access_plan.hpp`

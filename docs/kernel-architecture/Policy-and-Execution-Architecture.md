@@ -618,7 +618,12 @@ uses
 The source-private I2 profile and evidence evaluator implement the frozen
 111-slot grid, twelve-edit admissions, child descriptors, publication ordering,
 Host acquisition, conditional real-Metal residency, lifecycle/resource
-settlement, and four independent inner verdicts. The manual
+settlement, and four independent inner verdicts. Evaluation requires the sole
+accepted current-generation observation to precede every matching child event;
+each Cancelled terminal must have exactly one descriptor-identical earlier
+cancellation, while every non-Cancelled terminal must have none. Missing,
+duplicate, late, extra, or drifted evidence invalidates all four verdicts. The
+manual
 `i2_progressive_benchmark` target is `EXCLUDE_FROM_ALL`, is absent from CTest,
 and writes `execution-profile-i2-inner-row-v1` evidence only to a caller-selected
 directory. That inner record is not the canonical ADR 0010 15-field outer row,

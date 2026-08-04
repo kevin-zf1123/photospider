@@ -368,10 +368,13 @@ representation。
 Issue #94 保持 `ImageBuffer` 与全部 installed memory contract 不变。其 source-private
 progressive RT branch 使用 `exact_box_average_factor_four_region()`，从原始 2048x2048
 source 创建对齐的 512x512 RGBA FP32 preview。每个 4x4 channel sum 先完成累加，再只进行一次
-binary32 result rounding，并在每条退出路径恢复 caller 的 floating-point environment。生成的
-proxy storage 被封装为不可变 rank-three HWC `Value`，具有自身 revision、binding、allocation、
-`ImageFacet`、layout 与精确 storage-byte envelope。Final Value 则从原始 full-resolution source
-独立计算。
+binary32 result rounding，并在每条退出路径恢复 caller 的 floating-point environment。首次
+写入之前，source/destination 共享 owner、二者经检查的 active storage-envelope 半开
+`uintptr_t` 区间重叠，或端点不可表示，都会以 fail-closed 方式被拒绝。这既覆盖同一 owner 下
+起始地址偏移的别名，也覆盖 owner 不同但地址区间重叠的情况，且不会对无关指针进行关系比较。
+生成的 proxy storage 被封装为不可变 rank-three HWC `Value`，具有自身 revision、binding、
+allocation、`ImageFacet`、layout 与精确 storage-byte envelope。Final Value 则从原始 full-
+resolution source 独立计算。
 
 I2 Host 会对每个 visible preview/final Value 记录两次 Direct access plan，并要求复用相同
 revision、binding、allocation 与 byte count，且 transfer 为零。存在已配置 Metal executor 时，
@@ -392,6 +395,7 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 
 - `include/photospider/core/image_buffer.hpp`
 - `src/lib/core/image_buffer_processing.hpp`
+- `src/lib/core/image_buffer_storage.hpp`
 - `src/lib/core/exact_box_downsample.cpp`
 - `include/photospider/core/device.hpp`
 - `include/photospider/memory/access_plan.hpp`
