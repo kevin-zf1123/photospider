@@ -7,9 +7,12 @@
 #if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
 #include <atomic>
 #endif
+#include <fenv.h>  // NOLINT(build/c++11)
+
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -17,6 +20,7 @@
 #include <opencv2/imgproc.hpp>
 #include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1717,17 +1721,90 @@ static NodeOutput op_extract_channel(
 // =============================================================================
 // ==                       类型二: TILED (分块计算) 操作 ==
 // =============================================================================
+
+/**
+ * @brief Owns one thread-local round-to-nearest binary floating-point scope.
+ * @throws std::runtime_error when the platform cannot query or install the
+ * required floating-point rounding mode.
+ * @note The previous mode is restored on every normal or exceptional exit.
+ * Restoration failure terminates because leaking a changed mode into a reused
+ * execution worker would make later product arithmetic non-deterministic.
+ */
+class ScopedBinary32RoundToNearest final {
+ public:
+  /**
+   * @brief Installs `FE_TONEAREST` on the current execution worker.
+   * @throws std::runtime_error when the environment operation fails.
+   */
+  ScopedBinary32RoundToNearest() {
+    previous_rounding_ = fegetround();
+    if (previous_rounding_ == -1 || fesetround(FE_TONEAREST) != 0) {
+      throw std::runtime_error(
+          "curve_transform cannot install binary32 RNE rounding");
+    }
+  }
+
+  /** @brief Restores the worker's previous rounding mode. @throws Nothing. */
+  ~ScopedBinary32RoundToNearest() noexcept {
+    if (fesetround(previous_rounding_) != 0) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of one worker rounding scope.
+   * @param other Guard retaining restoration responsibility.
+   * @throws Nothing because copying is unavailable.
+   */
+  ScopedBinary32RoundToNearest(const ScopedBinary32RoundToNearest& other) =
+      delete;
+
+  /**
+   * @brief Prevents replacing one worker rounding scope.
+   * @param other Guard retaining restoration responsibility.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedBinary32RoundToNearest& operator=(
+      const ScopedBinary32RoundToNearest& other) = delete;
+
+ private:
+  /** @brief Rounding mode restored before the execution worker is reused. */
+  int previous_rounding_ = FE_TONEAREST;
+};
+
+/**
+ * @brief Applies one exact three-cut binary32 curve stage.
+ * @param input One source sample.
+ * @param coefficient Binary32 coefficient frozen for the whole tile.
+ * @return `RNE(1 / RNE(1 + RNE(input * coefficient)))`.
+ * @throws Nothing.
+ * @note Volatile intermediates preserve every specified binary32 rounding cut
+ * and prevent contraction into architecture-dependent bulk approximations.
+ * The caller owns an active `ScopedBinary32RoundToNearest`.
+ */
+static float curve_transform_binary32(float input, float coefficient) noexcept {
+  volatile float product = input * coefficient;
+  volatile float denominator = 1.0F + product;
+  volatile float result = 1.0F / denominator;
+  return result;
+}
+
 /**
  * @brief Applies the pointwise curve transform to one independently owned tile.
  * @param node Effective curve coefficient.
  * @param output_tile Writable destination tile owned by the current task.
  * @param input_tiles One immutable normalized input tile.
  * @return Nothing.
- * @throws std::bad_alloc if parameter or temporary matrix allocation fails.
- * @throws GraphError if the required input tile is missing.
- * @throws cv::Exception if OpenCV arithmetic or adapter conversion fails.
- * @note Local `cv::Mat` headers share only task-owned payloads. Multiple
- *       execution workers may execute this callback concurrently.
+ * @throws GraphError if the required input tile is missing or the tile pair is
+ * not shape/type compatible FP32 storage.
+ * @throws std::runtime_error when binary32 RNE cannot be installed.
+ * @throws cv::Exception if OpenCV adapter conversion fails.
+ * @note The coefficient conversion and multiply/add/reciprocal cuts all occur
+ * under explicit RNE. Scalar volatile cuts intentionally avoid OpenCV bulk
+ * division paths whose one-ULP result depends on vector width/architecture.
+ * Each task owns disjoint output storage and restores its worker's prior
+ * floating-point environment, so concurrent callbacks remain race-free.
  */
 static void op_curve_transform_tiled(
     const Node& node, const OutputTile& output_tile,
@@ -1741,13 +1818,29 @@ static void op_curve_transform_tiled(
   cv::Mat input_mat = toCvMat(input_tiles[0]);
   cv::Mat output_mat = toCvMat(output_tile);
 
-  const auto& P = node.runtime_parameters;
-  double k = as_double_flexible(P, "k", 1.0);
+  if (input_mat.depth() != CV_32F || output_mat.depth() != CV_32F ||
+      input_mat.size() != output_mat.size() ||
+      input_mat.channels() != output_mat.channels()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "curve_transform requires shape-compatible FP32 input/output tiles.");
+  }
 
-  cv::Mat temp;
-  cv::multiply(input_mat, cv::Scalar::all(k), temp);
-  cv::add(cv::Scalar::all(1.0), temp, temp);
-  cv::divide(1.0, temp, output_mat);
+  const auto& P = node.runtime_parameters;
+  const double k = as_double_flexible(P, "k", 1.0);
+  ScopedBinary32RoundToNearest rounding_scope;
+  volatile float rounded_coefficient = static_cast<float>(k);
+  const float coefficient = rounded_coefficient;
+  const std::size_t scalars_per_row =
+      static_cast<std::size_t>(input_mat.cols) *
+      static_cast<std::size_t>(input_mat.channels());
+  for (int row = 0; row < input_mat.rows; ++row) {
+    const float* const input = input_mat.ptr<float>(row);
+    float* const output = output_mat.ptr<float>(row);
+    for (std::size_t index = 0U; index < scalars_per_row; ++index) {
+      output[index] = curve_transform_binary32(input[index], coefficient);
+    }
+  }
 }
 
 /**

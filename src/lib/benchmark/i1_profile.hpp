@@ -43,6 +43,15 @@ inline constexpr std::size_t kI1FrozenCurveTileEdge = 256U;
 /** @brief Exact number of tiled curve nodes in the frozen graph. */
 inline constexpr std::size_t kI1FrozenCurveNodeCount = 4U;
 
+/**
+ * @brief Stable production/encoding version of the independent I1 golden.
+ * @note The version binds the coordinate-pattern integer numerator, exact
+ * binary32 conversion, four curve stages, HWC descriptor, and canonical-v1
+ * logical-content framing documented by the execution-profile contract.
+ */
+inline constexpr char kI1GoldenProductionVersion[] =
+    "i1-coordinate-pattern-curve-chain-fp32-v1";  // NOLINT(whitespace/indent_namespace)
+
 /** @brief Exact monolithic source tasks in one complete frozen Run. */
 inline constexpr std::size_t kI1FrozenSourceTaskCount = 1U;
 
@@ -309,8 +318,11 @@ struct I1ObservedCurrentGeneration final {
 };
 
 /**
- * @brief Current-visible HP publication and retained immutable output Value.
- * @throws Nothing for Value handle copying and value construction.
+ * @brief Current-visible HP publication plus one frozen digest observation.
+ * @throws std::bad_alloc when copied digest diagnostics allocate.
+ * @note Product callbacks populate only `output`. Verification code freezes
+ * `value_valid_at_capture` and `content_digest` before `Q_end`, then releases
+ * `output`; evaluators and serializers never re-traverse the payload.
  */
 struct I1ObservedVisibleOutput final {
   /** @brief Edit whose current contender published visibly. */
@@ -325,7 +337,23 @@ struct I1ObservedVisibleOutput final {
   std::uint64_t causal_sequence = 0U;
   /** @brief Immutable image Value published by the current HP snapshot. */
   Value output;
+  /** @brief Whether the Value was valid at the sole digest capture. */
+  bool value_valid_at_capture = false;
+  /** @brief Sole canonical digest result captured before `Q_end`. */
+  std::optional<ContentDigestResult> content_digest;
 };
+
+/**
+ * @brief Freezes one visible output's canonical digest and releases its Value.
+ * @param output Mutable observation owning the sole immutable Value handle.
+ * @return Nothing after `value_valid_at_capture` and `content_digest` are set.
+ * @throws std::invalid_argument when `output` is null.
+ * @throws std::bad_alloc when digest/provider diagnostics allocate.
+ * @note The first call is the sole payload traversal. Later calls are
+ * idempotent and only ensure the Value handle is released. Callers must invoke
+ * this before `Q_end`; evaluation and JSON serialization never recompute it.
+ */
+void freeze_i1_visible_output_digest(I1ObservedVisibleOutput* output);
 
 /**
  * @brief One Run quiescence or resource-settlement lifecycle transition.
@@ -409,8 +437,10 @@ struct I1EpisodeObservationSnapshot final {
  *
  * @throws std::bad_alloc when shared store or edit sink ownership is created.
  * @note The collector must outlive every edit settlement future. Snapshot is
- * race-safe, but a snapshot taken while work remains active may omit slots not
- * yet published and is therefore only a boundary observation, not settlement.
+ * race-safe against product publication, but the harness must serialize its
+ * own snapshot/freeze/release calls. A snapshot taken while work remains active
+ * may omit slots not yet published and is therefore only a boundary
+ * observation, not settlement.
  */
 class I1EpisodeObservationCollector final {
  public:
@@ -447,6 +477,28 @@ class I1EpisodeObservationCollector final {
    * method never waits or cancels work.
    */
   I1EpisodeObservationSnapshot snapshot() const;
+
+  /**
+   * @brief Freezes every currently published visible digest in collector slots.
+   * @return Number of completely published visible-output slots encountered.
+   * @throws Digest and diagnostic allocation failures unchanged.
+   * @note The harness thread is the sole snapshot/freeze caller. Product
+   * callbacks never revisit a release-published slot, so this method safely
+   * releases the collector's actual Value handles, not temporary copies.
+   * Repeated calls are idempotent and never re-traverse frozen payloads.
+   */
+  std::size_t freeze_visible_output_digests();
+
+  /**
+   * @brief Releases every published Value whose digest missed the frozen cut.
+   * @return Nothing after all currently published output handles are empty.
+   * @throws Nothing.
+   * @note Call after normal episode settlements have joined, or after Graph
+   * close has revoked failed-episode publication. Missing digest evidence
+   * remains explicit and evaluates Invalid; this method never hashes a payload
+   * after `Q_end`.
+   */
+  void release_unfrozen_visible_outputs() noexcept;
 
   /**
    * @brief Reserves the first observation coordinate excluded at `Q_end`.
@@ -608,6 +660,17 @@ int i1_measurement_start_tie_rank(I1MeasurementStartEventKind kind);
  * `curve_transform` nodes and node four is the sole target.
  */
 std::string i1_frozen_graph_yaml();
+
+/**
+ * @brief Returns the independently frozen final I1 logical-content golden.
+ * @return Typed SHA-256 canonical-v1 digest for edit eleven of the exact graph.
+ * @throws Nothing.
+ * @note The bytes are an immutable oracle, not learned from a candidate run.
+ * They are independently recomputable from `kI1GoldenProductionVersion`, the
+ * frozen graph/source formula, IEEE binary32 stage rounding, the HWC
+ * DenseTensor descriptor, and canonical-v1 content framing.
+ */
+ContentDigest i1_frozen_final_content_digest() noexcept;
 
 /**
  * @brief Builds the exact node-one replacement YAML for one frozen edit.

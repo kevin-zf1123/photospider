@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <future>
 #include <limits>
 #include <memory>
@@ -16,6 +18,158 @@
 
 namespace ps::benchmark {
 namespace {
+
+/**
+ * @brief Independently rounds one exact byte fraction to IEEE binary32.
+ * @param numerator Unsigned numerator in `[0,255]`.
+ * @return Round-to-nearest-ties-to-even encoding of `numerator / 255`.
+ * @throws Nothing.
+ * @note This test oracle deliberately duplicates the frozen mathematical
+ * contract and does not invoke the OpenCV operation provider.
+ */
+float reference_byte_fraction(std::uint8_t numerator) noexcept {
+  if (numerator == 0U) {
+    return 0.0F;
+  }
+  if (numerator == 255U) {
+    const std::uint32_t bits = 0x3f800000U;
+    float result = 0.0F;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+  }
+
+  unsigned int highest_bit = 0U;
+  for (std::uint32_t value = numerator; value > 1U; value >>= 1U) {
+    ++highest_bit;
+  }
+  int exponent = static_cast<int>(highest_bit) - 8;
+  const unsigned int shift = static_cast<unsigned int>(23 - exponent);
+  const std::uint64_t scaled = static_cast<std::uint64_t>(numerator) << shift;
+  std::uint64_t significand = scaled / 255U;
+  const std::uint64_t remainder = scaled % 255U;
+  if (remainder * 2U > 255U ||
+      (remainder * 2U == 255U && (significand & 1U) != 0U)) {
+    ++significand;
+  }
+  if (significand == (std::uint64_t{1U} << 24U)) {
+    significand >>= 1U;
+    ++exponent;
+  }
+  const std::uint32_t bits =
+      (static_cast<std::uint32_t>(exponent + 127) << 23U) |
+      static_cast<std::uint32_t>(significand - (std::uint64_t{1U} << 23U));
+  float result = 0.0F;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+/**
+ * @brief Applies one independently specified curve stage with binary32 cuts.
+ * @param input Exact binary32 input sample.
+ * @param coefficient Exact binary32 stage coefficient.
+ * @return Binary32 result of `1 / (1 + input * coefficient)`.
+ * @throws Nothing.
+ * @note Volatile intermediates forbid contraction and retain the three
+ * contract rounding boundaries without calling candidate provider code.
+ */
+float reference_curve_stage(float input, float coefficient) noexcept {
+  volatile float product = input * coefficient;
+  volatile float denominator = 1.0F + product;
+  volatile float result = 1.0F / denominator;
+  return result;
+}
+
+/**
+ * @brief Recomputes the frozen final digest from the mathematical contract.
+ * @return Canonical-v1 logical-content digest of the exact edit-eleven image.
+ * @throws Value/digest allocation and descriptor validation failures unchanged.
+ * @note The oracle constructs HWC bytes directly and never loads the frozen
+ * YAML, Host, Kernel, scheduler, cache, or OpenCV provider implementation.
+ */
+ContentDigest recompute_i1_golden_from_reference_contract() {
+  constexpr std::size_t kChannels = 4U;
+  constexpr std::size_t kElementBytes = sizeof(float);
+  constexpr std::array<float, kI1FrozenCurveNodeCount> kCoefficients{
+      1.04F, 1.00F, 1.20F, 1.40F};
+  const std::size_t element_count =
+      kI1FrozenImageEdge * kI1FrozenImageEdge * kChannels;
+  std::vector<std::byte> storage(element_count * kElementBytes);
+  std::size_t offset = 0U;
+  for (std::size_t y = 0U; y < kI1FrozenImageEdge; ++y) {
+    for (std::size_t x = 0U; x < kI1FrozenImageEdge; ++x) {
+      for (std::size_t channel = 0U; channel < kChannels; ++channel) {
+        const std::uint8_t numerator = static_cast<std::uint8_t>(
+            (17U * x + 31U * y + 47U * channel) & 255U);
+        float sample = reference_byte_fraction(numerator);
+        for (const float coefficient : kCoefficients) {
+          sample = reference_curve_stage(sample, coefficient);
+        }
+        std::memcpy(storage.data() + offset, &sample, sizeof(sample));
+        offset += sizeof(sample);
+      }
+    }
+  }
+
+  DenseTensorDescriptor descriptor;
+  descriptor.shape = {kI1FrozenImageEdge, kI1FrozenImageEdge, kChannels};
+  descriptor.element_semantics = ElementSemantics::FloatingPoint;
+  descriptor.storage_encoding = StorageEncoding{32U};
+  ImageFacet image;
+  image.x_axis = 1U;
+  image.y_axis = 0U;
+  image.channel_axis = 2U;
+  const std::ptrdiff_t row_stride = static_cast<std::ptrdiff_t>(
+      kI1FrozenImageEdge * kChannels * kElementBytes);
+  const std::ptrdiff_t pixel_stride =
+      static_cast<std::ptrdiff_t>(kChannels * kElementBytes);
+  Value value = Value::from_cpu_dense_tensor(
+      std::move(descriptor), image,
+      StridedLayout{{row_stride, pixel_stride,
+                     static_cast<std::ptrdiff_t>(kElementBytes)}},
+      std::move(storage));
+  const ContentDigestResult result = compute_content_digest(value);
+  if (result.state != ContentDigestState::Available ||
+      !result.digest.has_value()) {
+    throw std::runtime_error("independent I1 reference digest unavailable: " +
+                             result.diagnostic);
+  }
+  return *result.digest;
+}
+
+/**
+ * @brief Creates one tiny valid tensor for collector ownership regressions.
+ * @return Immutable one-pixel FP32 Value with a complete HWC descriptor.
+ * @throws Value descriptor, storage, and allocation failures unchanged.
+ */
+Value make_collector_test_output() {
+  DenseTensorDescriptor descriptor;
+  descriptor.shape = {1U, 1U, 1U};
+  descriptor.element_semantics = ElementSemantics::FloatingPoint;
+  descriptor.storage_encoding = StorageEncoding{32U};
+  ImageFacet image;
+  image.x_axis = 1U;
+  image.y_axis = 0U;
+  image.channel_axis = 2U;
+  const float sample = 0.5F;
+  std::vector<std::byte> storage(sizeof(sample));
+  std::memcpy(storage.data(), &sample, sizeof(sample));
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), image,
+      StridedLayout{{static_cast<std::ptrdiff_t>(sizeof(sample)),
+                     static_cast<std::ptrdiff_t>(sizeof(sample)),
+                     static_cast<std::ptrdiff_t>(sizeof(sample))}},
+      std::move(storage));
+}
+
+/**
+ * @brief Proves the literal golden is independently recomputable.
+ * @throws Nothing when the mathematical oracle and frozen bytes agree;
+ * allocation/descriptor failures are reported by GoogleTest as test errors.
+ */
+TEST(I1Profile, FrozenGoldenMatchesIndependentReferenceContract) {
+  EXPECT_EQ(recompute_i1_golden_from_reference_contract(),
+            i1_frozen_final_content_digest());
+}
 
 /**
  * @brief Captures private QoS facts from one fake Host admission.
@@ -402,6 +556,86 @@ TEST(I1EpisodeObservationCollector,
   const I1EpisodeObservationSnapshot overflowed = collector.snapshot();
   EXPECT_TRUE(overflowed.overflowed);
   EXPECT_EQ(overflowed.service_starts.size(), kI1EpisodeServiceStartCapacity);
+}
+
+/**
+ * @brief Proves digest freezing releases the collector's retained Value once.
+ * @throws Allocation, descriptor, digest, and ComputeRun failures unchanged.
+ */
+TEST(I1EpisodeObservationCollector,
+     FrozenVisibleDigestReleasesCollectorSlotAndRemainsIdempotent) {
+  I1EpisodeObservationCollector collector;
+  std::shared_ptr<compute::ComputeRunObservationSink> sink =
+      collector.make_edit_sink(kI1EditCount - 1U);
+  compute::ComputeRunSubmission submission{
+      "i1-visible-freeze",
+      GraphInstanceId{8001U},
+      GraphRevision{8001U},
+      kI1TargetNodeId,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                             std::nullopt, 1U, 8U},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey(kI1TargetNodeId,
+                                   ComputeIntent::GlobalHighPrecision),
+          compute::SupersessionGeneration(1U)},
+      nullptr};
+  compute::ComputeRun run(std::move(submission));
+  compute::ComputeRunLease lease = run.acquire_lease();
+  sink->on_current_visible(lease.descriptor(), make_collector_test_output(),
+                           sink->reserve_causal_coordinate());
+
+  const I1EpisodeObservationSnapshot before = collector.snapshot();
+  ASSERT_EQ(before.visible_outputs.size(), 1U);
+  EXPECT_TRUE(before.visible_outputs.front().output.valid());
+  EXPECT_FALSE(before.visible_outputs.front().content_digest.has_value());
+
+  EXPECT_EQ(collector.freeze_visible_output_digests(), 1U);
+  EXPECT_EQ(collector.freeze_visible_output_digests(), 1U);
+  const I1EpisodeObservationSnapshot frozen = collector.snapshot();
+  ASSERT_EQ(frozen.visible_outputs.size(), 1U);
+  EXPECT_FALSE(frozen.visible_outputs.front().output.valid());
+  EXPECT_TRUE(frozen.visible_outputs.front().value_valid_at_capture);
+  ASSERT_TRUE(frozen.visible_outputs.front().content_digest.has_value());
+  EXPECT_EQ(frozen.visible_outputs.front().content_digest->state,
+            ContentDigestState::Available);
+}
+
+/**
+ * @brief Proves a late publication can be released without post-cut hashing.
+ * @throws Allocation, descriptor, and ComputeRun failures unchanged.
+ */
+TEST(I1EpisodeObservationCollector,
+     UnfrozenVisibleOutputReleasesAsExplicitMissingDigestEvidence) {
+  I1EpisodeObservationCollector collector;
+  std::shared_ptr<compute::ComputeRunObservationSink> sink =
+      collector.make_edit_sink(0U);
+  compute::ComputeRunSubmission submission{
+      "i1-visible-release",
+      GraphInstanceId{8002U},
+      GraphRevision{8002U},
+      kI1TargetNodeId,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                             std::nullopt, 1U, 8U},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey(kI1TargetNodeId,
+                                   ComputeIntent::GlobalHighPrecision),
+          compute::SupersessionGeneration(1U)},
+      nullptr};
+  compute::ComputeRun run(std::move(submission));
+  compute::ComputeRunLease lease = run.acquire_lease();
+  sink->on_current_visible(lease.descriptor(), make_collector_test_output(),
+                           sink->reserve_causal_coordinate());
+
+  collector.release_unfrozen_visible_outputs();
+  const I1EpisodeObservationSnapshot released = collector.snapshot();
+  ASSERT_EQ(released.visible_outputs.size(), 1U);
+  EXPECT_FALSE(released.visible_outputs.front().output.valid());
+  EXPECT_TRUE(released.visible_outputs.front().value_valid_at_capture);
+  EXPECT_FALSE(released.visible_outputs.front().content_digest.has_value());
 }
 
 /**

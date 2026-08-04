@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -35,6 +36,13 @@ namespace ps::benchmark {
 namespace {
 
 using Json = nlohmann::json;
+
+/**
+ * @brief Payload-digest work stops this far before the immutable `Q_end` cut.
+ * @note A passing final publication has at least 165 ms of contract headroom;
+ * this margin leaves the final 100 ms free of newly started payload traversal.
+ */
+constexpr std::chrono::nanoseconds kI1DigestFreezeSafetyMargin{100000000};
 
 /**
  * @brief Parsed explicit controls for one manual exact I1 replicate.
@@ -337,6 +345,79 @@ void compact_row_for_summary(I1EpisodeInnerRow* row) noexcept {
 }
 
 /**
+ * @brief Freezes each newly published visible Value before a safety deadline.
+ * @param collector Episode collector owning the published Value handles.
+ * @param start_deadline Exclusive time after which no new traversal starts.
+ * @param hard_boundary Immutable `Q_end` that no completed digest may cross.
+ * @return Nothing after all timely publications have been frozen in place.
+ * @throws Digest allocation and steady-clock errors unchanged.
+ * @throws std::runtime_error when a traversal crosses `hard_boundary`.
+ * @note The loop starts no traversal after `start_deadline`. A publication not
+ * frozen by then remains explicit missing evidence and makes evaluation
+ * Invalid; an unexpectedly slow traversal fails before any later submission.
+ */
+void freeze_visible_outputs_until(
+    I1EpisodeObservationCollector* collector,
+    std::chrono::steady_clock::time_point start_deadline,
+    std::chrono::steady_clock::time_point hard_boundary) {
+  if (collector == nullptr) {
+    throw std::invalid_argument("I1 digest collector is null.");
+  }
+  while (std::chrono::steady_clock::now() < start_deadline) {
+    collector->freeze_visible_output_digests();
+    if (std::chrono::steady_clock::now() >= hard_boundary) {
+      throw std::runtime_error(
+          "I1 visible digest traversal crossed the immutable Q_end cut");
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+  }
+}
+
+/**
+ * @brief Starts payload-free episode evaluation on one owned worker future.
+ * @param input Closed raw evidence whose visible Values have been released.
+ * @return Sole future owning evaluation completion or exception transport.
+ * @throws std::system_error when the async worker cannot be launched.
+ * @throws std::bad_alloc when callable/future ownership cannot allocate.
+ * @note The worker owns all moved input. It performs no JSON or file I/O and
+ * cannot access collector, Host, Graph, or runner-local references.
+ */
+std::future<I1EpisodeInnerRow> evaluate_episode_async(
+    I1EpisodeEvidenceInput input) {
+  return std::async(std::launch::async, [input = std::move(input)]() mutable {
+    return evaluate_i1_episode(std::move(input));
+  });
+}
+
+/**
+ * @brief Appends all not-yet-written rows in deterministic slot order.
+ * @param output Open binary NDJSON destination.
+ * @param rows Closed rows ordered by exact grid slot.
+ * @param written In/out number of durably flushed rows.
+ * @return Nothing after each appended line has been flushed and checked.
+ * @throws std::invalid_argument when either mutable pointer is null.
+ * @throws std::runtime_error when stream output fails.
+ * @throws nlohmann/std allocation or encoding failures unchanged.
+ * @note The cursor advances only after a successful flush, so normal and
+ * exceptional drains never duplicate an already durable row.
+ */
+void flush_episode_rows(std::ofstream* output,
+                        const std::vector<I1EpisodeInnerRow>& rows,
+                        std::size_t* written) {
+  if (output == nullptr || written == nullptr) {
+    throw std::invalid_argument("I1 episode output state is null.");
+  }
+  while (*written < rows.size()) {
+    *output << i1_inner_row_json(rows[*written]).dump() << '\n';
+    output->flush();
+    if (!*output) {
+      throw std::runtime_error("failed to append episodes.ndjson");
+    }
+    ++*written;
+  }
+}
+
+/**
  * @brief Reports whether one episode has any incomplete evidence dimension.
  * @param row Evaluated inner row.
  * @return True when at least one independent verdict is Invalid.
@@ -375,10 +456,15 @@ bool row_is_fully_invalid(const I1EpisodeInnerRow& row) noexcept {
  * admission synchronously closes the Graph to revoke publication and
  * cancel/drain earlier generations, captures the resulting observation and
  * resource state, flushes one Invalid inner row, and only then throws; no later
- * edit or slot is submitted. At normal `Q_end` it first captures the shared
- * causal-history cut, then consumes futures and an eventual resource snapshot;
- * only product lifecycle and Host-settlement coordinates preceding that cut
- * prove boundary membership.
+ * edit or slot is submitted. During a normal measurement window each visible
+ * Value is digested once and released before `Q_end`. After the cut, a sole
+ * payload-free async evaluator owns the closed input while the main thread
+ * prepares the next baseline; its result is required before the next edit.
+ * JSON construction and ordered per-row flushes are deferred until the
+ * terminal boundary, or performed synchronously before an exceptional return.
+ * Only product lifecycle and Host-settlement coordinates preceding the cut
+ * prove boundary membership. At most one evaluation and 221 Value-free rows
+ * are retained, so ownership and memory remain bounded and race-free.
  */
 I1ReplicateSummary run_exact_replicate(
     const I1RunnerOptions& options,
@@ -435,198 +521,271 @@ I1ReplicateSummary run_exact_replicate(
     throw std::runtime_error("failed to open episodes.ndjson");
   }
 
-  std::optional<ContentDigest> expected_digest;
-  std::vector<I1EpisodeInnerRow> compact_rows;
-  compact_rows.reserve(kI1GridSlotCount);
-  for (std::size_t slot = 0U; slot < kI1GridSlotCount; ++slot) {
-    const auto episode_origin = i1_episode_origin(grid_origin, slot);
-    if (slot != 0U) {
-      prepare_episode_baseline(*host, loaded.value);
-    }
-    if (std::chrono::steady_clock::now() > episode_origin) {
-      throw std::runtime_error(
-          "baseline preparation missed fixed episode origin at slot " +
-          std::to_string(slot));
-    }
-    const I1ExecutionSnapshot baseline =
-        i1_host->i1_execution_snapshot(0U, 4096U);
-    if (std::chrono::steady_clock::now() > episode_origin) {
-      throw std::runtime_error(
-          "baseline evidence missed fixed episode origin at slot " +
-          std::to_string(slot));
-    }
-
-    I1EpisodeObservationCollector observations;
-    I1AcceptedBoundaryCollector admissions(
-        *i1_host, [] { return std::chrono::steady_clock::now(); },
-        [](std::chrono::steady_clock::time_point target) {
-          std::this_thread::sleep_until(target);
-        });
-    const auto measurement_start =
-        checked_i1_time_add(episode_origin, kI1MeasurementStartOffset);
-    const auto measurement_end =
-        checked_i1_time_add(episode_origin, kI1MeasurementEndOffset);
-    std::array<I1EditAdmissionResult, kI1EditCount> admission_results;
-    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-      admission_results[edit_index].edit_index = edit_index;
-      admission_results[edit_index].nominal_time = checked_i1_time_add(
-          episode_origin,
-          std::chrono::nanoseconds(kI1EditStride.count() *
-                                   static_cast<std::int64_t>(edit_index)));
-    }
-    std::optional<std::size_t> failed_admission_edit;
-    std::string failed_admission_diagnostic;
-    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-      const auto nominal = admission_results[edit_index].nominal_time;
-      std::this_thread::sleep_until(nominal);
-      const auto latest_admission =
-          checked_i1_time_add(nominal, kI1AdmissionLateness);
-      if (std::chrono::steady_clock::now() <= latest_admission) {
-        const VoidResult mutated = host->set_node_yaml(
-            loaded.value, NodeId{1}, i1_edit_node_one_yaml(edit_index));
-        require_success("I1 edit mutation", mutated.status);
+  const ContentDigest expected_digest = i1_frozen_final_content_digest();
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  std::size_t written_rows = 0U;
+  std::optional<std::future<I1EpisodeInnerRow>> pending_evaluation;
+  try {
+    for (std::size_t slot = 0U; slot < kI1GridSlotCount; ++slot) {
+      const auto episode_origin = i1_episode_origin(grid_origin, slot);
+      if (slot != 0U) {
+        prepare_episode_baseline(*host, loaded.value);
       }
-      admission_results[edit_index] = admissions.admit_edit(
-          episode_origin, edit_index,
-          make_i1_host_compute_request(loaded.value, edit_index),
-          observations.make_edit_sink(edit_index));
-      const I1EditAdmissionResult& admission = admission_results[edit_index];
-      if (!admission.accepted_coordinate.has_value()) {
-        failed_admission_edit = edit_index;
-        failed_admission_diagnostic =
-            "I1 admission invalid/failed without backfill at slot " +
-            std::to_string(slot) + ", edit " + std::to_string(edit_index);
-        if (admission.host_return.has_value()) {
-          failed_admission_diagnostic +=
-              "; Host status " + admission.host_return->status.name + ": " +
-              admission.host_return->status.message;
-        } else {
-          failed_admission_diagnostic +=
-              "; no Host call was legal at the sampled admission boundary";
-        }
-        break;
-      }
-    }
-
-    if (failed_admission_edit.has_value()) {
-      const VoidResult revoked = graph_close.close_now();
-      if (!revoked.status.ok) {
-        failed_admission_diagnostic +=
-            "; graph-close publication revocation failed: " +
-            revoked.status.message;
-      }
-    } else {
-      std::this_thread::sleep_until(measurement_end);
-    }
-    const I1ObservationHistoryCut observation_cut =
-        observations.capture_history_cut();
-    std::array<std::optional<OperationStatus>, kI1EditCount> settlements;
-    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-      std::future<OperationStatus>& future =
-          admission_results[edit_index].settlement;
-      if (!future.valid()) {
-        if (failed_admission_edit.has_value()) {
-          continue;
-        }
+      if (std::chrono::steady_clock::now() > episode_origin) {
         throw std::runtime_error(
-            "I1 settlement future is absent at Q_end for slot " +
-            std::to_string(slot) + ", edit " + std::to_string(edit_index));
-      }
-      if (future.wait_for(std::chrono::nanoseconds(0)) !=
-          std::future_status::ready) {
-        if (failed_admission_edit.has_value()) {
-          failed_admission_diagnostic += "; accepted edit " +
-                                         std::to_string(edit_index) +
-                                         " remained active after graph close";
-          continue;
-        }
-        throw std::runtime_error(
-            "I1 settlement remained active at Q_end for slot " +
-            std::to_string(slot) + ", edit " + std::to_string(edit_index));
-      }
-      try {
-        settlements[edit_index] = future.get();
-      } catch (const std::exception& error) {
-        if (!failed_admission_edit.has_value()) {
-          throw;
-        }
-        failed_admission_diagnostic += "; accepted edit " +
-                                       std::to_string(edit_index) +
-                                       " settlement raised: " + error.what();
-      }
-    }
-    if (!failed_admission_edit.has_value()) {
-      const auto settlement_publication_guard =
-          slot + 1U < kI1GridSlotCount
-              ? i1_episode_origin(grid_origin, slot + 1U)
-              : terminal_boundary;
-      while (observations.published_host_settlement_count() < kI1EditCount &&
-             std::chrono::steady_clock::now() < settlement_publication_guard) {
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
-      }
-      if (observations.published_host_settlement_count() != kI1EditCount) {
-        throw std::runtime_error(
-            "I1 Host settlement evidence missed the terminal guard at slot " +
+            "baseline preparation missed fixed episode origin at slot " +
             std::to_string(slot));
       }
-    }
-    const I1ExecutionSnapshot final_snapshot =
-        i1_host->i1_execution_snapshot(baseline.lifecycle.snapshot_cut, 4096U);
-    const auto final_snapshot_sample = std::chrono::steady_clock::now();
-    const I1EpisodeObservationSnapshot observation_snapshot =
-        observations.snapshot();
-
-    I1EpisodeEvidenceInput input;
-    input.replicate_ordinal = options.replicate_ordinal;
-    input.slot = slot;
-    input.grid_origin = grid_origin;
-    input.episode_origin = episode_origin;
-    input.terminal_boundary = terminal_boundary;
-    input.measurement_start = measurement_start;
-    input.measurement_end = measurement_end;
-    input.observation_cut = observation_cut;
-    input.observations = observation_snapshot;
-    input.baseline = baseline;
-    input.final_snapshot = final_snapshot;
-    input.final_snapshot_sample = final_snapshot_sample;
-    input.expected_final_digest = expected_digest;
-    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-      input.edits[edit_index] = capture_i1_edit_evidence(
-          admission_results[edit_index], std::move(settlements[edit_index]));
-    }
-
-    I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
-    episode_output << i1_inner_row_json(row).dump() << '\n';
-    episode_output.flush();
-    if (!episode_output) {
-      throw std::runtime_error("failed to append episodes.ndjson");
-    }
-    std::cerr << "I1 slot " << slot + 1U << '/' << kI1GridSlotCount << " ("
-              << i1_phase_text(classify_i1_slot(slot).first) << ") recorded\n";
-
-    if (failed_admission_edit.has_value()) {
-      if (!row_is_fully_invalid(row)) {
-        failed_admission_diagnostic +=
-            "; failed admission did not produce four Invalid verdicts";
+      const I1ExecutionSnapshot baseline =
+          i1_host->i1_execution_snapshot(0U, 4096U);
+      if (std::chrono::steady_clock::now() > episode_origin) {
+        throw std::runtime_error(
+            "baseline evidence missed fixed episode origin at slot " +
+            std::to_string(slot));
       }
-      throw std::runtime_error(failed_admission_diagnostic);
+
+      if (pending_evaluation.has_value()) {
+        const auto handoff_deadline = checked_i1_time_add(
+            episode_origin,
+            std::chrono::nanoseconds(-kI1AdmissionLateness.count()));
+        if (pending_evaluation->wait_until(handoff_deadline) !=
+            std::future_status::ready) {
+          throw std::runtime_error(
+              "prior I1 evidence evaluation missed the payload-free handoff "
+              "before slot " +
+              std::to_string(slot));
+        }
+        I1EpisodeInnerRow completed = pending_evaluation->get();
+        pending_evaluation.reset();
+        rows.push_back(std::move(completed));
+        const I1EpisodeInnerRow& prior = rows.back();
+        std::cerr << "I1 slot " << prior.evidence.slot + 1U << '/'
+                  << kI1GridSlotCount << " ("
+                  << i1_phase_text(classify_i1_slot(prior.evidence.slot).first)
+                  << ") evaluated\n";
+        if (row_is_invalid(prior)) {
+          throw std::runtime_error(
+              "I1 row became invalid; later fixed slots were not submitted");
+        }
+      }
+
+      I1EpisodeObservationCollector observations;
+      I1AcceptedBoundaryCollector admissions(
+          *i1_host, [] { return std::chrono::steady_clock::now(); },
+          [](std::chrono::steady_clock::time_point target) {
+            std::this_thread::sleep_until(target);
+          });
+      const auto measurement_start =
+          checked_i1_time_add(episode_origin, kI1MeasurementStartOffset);
+      const auto measurement_end =
+          checked_i1_time_add(episode_origin, kI1MeasurementEndOffset);
+      std::array<I1EditAdmissionResult, kI1EditCount> admission_results;
+      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
+           ++edit_index) {
+        admission_results[edit_index].edit_index = edit_index;
+        admission_results[edit_index].nominal_time = checked_i1_time_add(
+            episode_origin,
+            std::chrono::nanoseconds(kI1EditStride.count() *
+                                     static_cast<std::int64_t>(edit_index)));
+      }
+      std::optional<std::size_t> failed_admission_edit;
+      std::string failed_admission_diagnostic;
+      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
+           ++edit_index) {
+        const auto nominal = admission_results[edit_index].nominal_time;
+        std::this_thread::sleep_until(nominal);
+        const auto latest_admission =
+            checked_i1_time_add(nominal, kI1AdmissionLateness);
+        if (std::chrono::steady_clock::now() <= latest_admission) {
+          const VoidResult mutated = host->set_node_yaml(
+              loaded.value, NodeId{1}, i1_edit_node_one_yaml(edit_index));
+          require_success("I1 edit mutation", mutated.status);
+        }
+        admission_results[edit_index] = admissions.admit_edit(
+            episode_origin, edit_index,
+            make_i1_host_compute_request(loaded.value, edit_index),
+            observations.make_edit_sink(edit_index));
+        const I1EditAdmissionResult& admission = admission_results[edit_index];
+        if (!admission.accepted_coordinate.has_value()) {
+          failed_admission_edit = edit_index;
+          failed_admission_diagnostic =
+              "I1 admission invalid/failed without backfill at slot " +
+              std::to_string(slot) + ", edit " + std::to_string(edit_index);
+          if (admission.host_return.has_value()) {
+            failed_admission_diagnostic +=
+                "; Host status " + admission.host_return->status.name + ": " +
+                admission.host_return->status.message;
+          } else {
+            failed_admission_diagnostic +=
+                "; no Host call was legal at the sampled admission boundary";
+          }
+          break;
+        }
+      }
+
+      if (failed_admission_edit.has_value()) {
+        const VoidResult revoked = graph_close.close_now();
+        if (!revoked.status.ok) {
+          failed_admission_diagnostic +=
+              "; graph-close publication revocation failed: " +
+              revoked.status.message;
+        }
+      } else {
+        const auto digest_freeze_deadline = checked_i1_time_add(
+            measurement_end,
+            std::chrono::nanoseconds(-kI1DigestFreezeSafetyMargin.count()));
+        freeze_visible_outputs_until(&observations, digest_freeze_deadline,
+                                     measurement_end);
+        std::this_thread::sleep_until(measurement_end);
+      }
+      const I1ObservationHistoryCut observation_cut =
+          observations.capture_history_cut();
+      std::array<std::optional<OperationStatus>, kI1EditCount> settlements;
+      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
+           ++edit_index) {
+        std::future<OperationStatus>& future =
+            admission_results[edit_index].settlement;
+        if (!future.valid()) {
+          if (failed_admission_edit.has_value()) {
+            continue;
+          }
+          throw std::runtime_error(
+              "I1 settlement future is absent at Q_end for slot " +
+              std::to_string(slot) + ", edit " + std::to_string(edit_index));
+        }
+        if (future.wait_for(std::chrono::nanoseconds(0)) !=
+            std::future_status::ready) {
+          if (failed_admission_edit.has_value()) {
+            failed_admission_diagnostic += "; accepted edit " +
+                                           std::to_string(edit_index) +
+                                           " remained active after graph close";
+            continue;
+          }
+          throw std::runtime_error(
+              "I1 settlement remained active at Q_end for slot " +
+              std::to_string(slot) + ", edit " + std::to_string(edit_index));
+        }
+        try {
+          settlements[edit_index] = future.get();
+        } catch (const std::exception& error) {
+          if (!failed_admission_edit.has_value()) {
+            throw;
+          }
+          failed_admission_diagnostic += "; accepted edit " +
+                                         std::to_string(edit_index) +
+                                         " settlement raised: " + error.what();
+        }
+      }
+      if (!failed_admission_edit.has_value()) {
+        const auto settlement_publication_guard =
+            slot + 1U < kI1GridSlotCount
+                ? i1_episode_origin(grid_origin, slot + 1U)
+                : terminal_boundary;
+        while (observations.published_host_settlement_count() < kI1EditCount &&
+               std::chrono::steady_clock::now() <
+                   settlement_publication_guard) {
+          std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+        if (observations.published_host_settlement_count() != kI1EditCount) {
+          throw std::runtime_error(
+              "I1 Host settlement evidence missed the terminal guard at slot " +
+              std::to_string(slot));
+        }
+      }
+      if (failed_admission_edit.has_value()) {
+        observations.freeze_visible_output_digests();
+      }
+      observations.release_unfrozen_visible_outputs();
+      const I1ExecutionSnapshot final_snapshot = i1_host->i1_execution_snapshot(
+          baseline.lifecycle.snapshot_cut, 4096U);
+      const auto final_snapshot_sample = std::chrono::steady_clock::now();
+      const I1EpisodeObservationSnapshot observation_snapshot =
+          observations.snapshot();
+
+      I1EpisodeEvidenceInput input;
+      input.replicate_ordinal = options.replicate_ordinal;
+      input.slot = slot;
+      input.grid_origin = grid_origin;
+      input.episode_origin = episode_origin;
+      input.terminal_boundary = terminal_boundary;
+      input.measurement_start = measurement_start;
+      input.measurement_end = measurement_end;
+      input.observation_cut = observation_cut;
+      input.observations = observation_snapshot;
+      input.baseline = baseline;
+      input.final_snapshot = final_snapshot;
+      input.final_snapshot_sample = final_snapshot_sample;
+      input.expected_final_digest = expected_digest;
+      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
+           ++edit_index) {
+        input.edits[edit_index] = capture_i1_edit_evidence(
+            admission_results[edit_index], std::move(settlements[edit_index]));
+      }
+
+      if (failed_admission_edit.has_value()) {
+        I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+        rows.push_back(std::move(row));
+        if (!row_is_fully_invalid(rows.back())) {
+          failed_admission_diagnostic +=
+              "; failed admission did not produce four Invalid verdicts";
+        }
+        flush_episode_rows(&episode_output, rows, &written_rows);
+        throw std::runtime_error(failed_admission_diagnostic);
+      }
+
+      pending_evaluation.emplace(evaluate_episode_async(std::move(input)));
+      if (slot + 1U == kI1GridSlotCount) {
+        if (pending_evaluation->wait_until(terminal_boundary) !=
+            std::future_status::ready) {
+          throw std::runtime_error(
+              "final I1 evidence evaluation missed the terminal boundary");
+        }
+        I1EpisodeInnerRow completed = pending_evaluation->get();
+        pending_evaluation.reset();
+        rows.push_back(std::move(completed));
+        if (row_is_invalid(rows.back())) {
+          throw std::runtime_error(
+              "final I1 row became invalid at the terminal boundary");
+        }
+        std::this_thread::sleep_until(terminal_boundary);
+      }
     }
-    if (!expected_digest.has_value() && row.final_digest.digest.has_value()) {
-      expected_digest = row.final_digest.digest;
+
+    flush_episode_rows(&episode_output, rows, &written_rows);
+  } catch (...) {
+    const std::exception_ptr primary_failure = std::current_exception();
+    if (pending_evaluation.has_value() && pending_evaluation->valid()) {
+      try {
+        rows.push_back(pending_evaluation->get());
+      } catch (...) {
+      }
+      pending_evaluation.reset();
     }
-    if (row_is_invalid(row)) {
-      throw std::runtime_error(
-          "I1 row became invalid; later fixed slots were not backfilled");
+    try {
+      flush_episode_rows(&episode_output, rows, &written_rows);
+    } catch (const std::exception& flush_error) {
+      try {
+        std::rethrow_exception(primary_failure);
+      } catch (const std::exception& primary_error) {
+        throw std::runtime_error(
+            std::string(primary_error.what()) +
+            "; evidence flush failed: " + flush_error.what());
+      } catch (...) {
+        throw;
+      }
     }
-    compact_row_for_summary(&row);
-    compact_rows.push_back(std::move(row));
+    std::rethrow_exception(primary_failure);
   }
   episode_output.close();
   if (!episode_output) {
     throw std::runtime_error("failed to close episodes.ndjson");
   }
 
-  const I1ReplicateSummary summary = evaluate_i1_replicate(compact_rows);
+  for (I1EpisodeInnerRow& row : rows) {
+    compact_row_for_summary(&row);
+  }
+  const I1ReplicateSummary summary = evaluate_i1_replicate(rows);
   write_text_file(output_directory / "summary.json",
                   i1_replicate_summary_json(summary).dump(2) + "\n");
   require_success("close_graph", graph_close.close_now().status);

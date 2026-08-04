@@ -842,6 +842,16 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
   std::optional<I1ObservedVisibleOutput> final_visible;
   for (const I1ObservedVisibleOutput& visible :
        row.evidence.observations.visible_outputs) {
+    if (!visible.content_digest.has_value()) {
+      output_invalidate("visible output digest was not frozen before Q_end");
+    }
+    if (visible.output.valid()) {
+      output_invalidate(
+          "visible output retained a Value after digest freezing");
+    }
+    if (!visible.value_valid_at_capture) {
+      output_invalidate("visible publication carried an invalid Value");
+    }
     if (visible.edit_index == kI1EditCount - 1U) {
       if (final_visible.has_value()) {
         global_invalidate(
@@ -877,7 +887,13 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
           final_visible->observed_at -
           final_edit.accepted_coordinate->admission_time());
     }
-    row.final_digest = compute_content_digest(final_visible->output);
+    if (final_visible->content_digest.has_value()) {
+      row.final_digest = *final_visible->content_digest;
+    } else {
+      row.final_digest = ContentDigestResult{
+          ContentDigestState::InvalidDescriptor, std::nullopt,
+          "final visible digest was not frozen"};
+    }
     if (row.final_digest.state != ContentDigestState::Available ||
         !row.final_digest.digest.has_value() ||
         row.final_digest.digest->algorithm !=
@@ -1000,10 +1016,22 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
         memory_limit_or_settlement_failure ? I1Verdict::Fail : I1Verdict::Pass;
   }
 
+  if (!row.evidence.expected_final_digest.has_value()) {
+    output_invalidate("independent expected final digest is missing");
+  } else if (row.evidence.expected_final_digest->algorithm !=
+             CanonicalDigestAlgorithm::Sha256CanonicalV1) {
+    output_invalidate(
+        "independent expected final digest uses an unsupported algorithm");
+  } else if (!(*row.evidence.expected_final_digest ==
+               i1_frozen_final_content_digest())) {
+    output_invalidate(
+        "independent expected final digest does not match the frozen I1 "
+        "golden");
+  }
+
   if (!output_evidence_valid || !row.final_digest.digest.has_value()) {
     row.output_verdict = I1Verdict::Invalid;
-  } else if (row.evidence.expected_final_digest.has_value() &&
-             !(*row.final_digest.digest ==
+  } else if (!(*row.final_digest.digest ==
                *row.evidence.expected_final_digest)) {
     row.output_verdict = I1Verdict::Fail;
   } else {

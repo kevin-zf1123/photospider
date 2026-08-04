@@ -89,10 +89,7 @@ I1EpisodeEvidenceInput make_valid_input(
   input.final_snapshot.lifecycle.next_cursor = 1000U;
 
   const Value output = make_test_output();
-  const ContentDigestResult output_digest = compute_content_digest(output);
-  if (output_digest.digest.has_value()) {
-    input.expected_final_digest = output_digest.digest;
-  }
+  input.expected_final_digest = i1_frozen_final_content_digest();
 
   std::uint64_t causal_sequence = 1U;
   for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
@@ -140,7 +137,8 @@ I1EpisodeEvidenceInput make_valid_input(
     const auto visible_at = checked_i1_time_add(
         admission, edit_index == kI1EditCount - 1U ? final_latency : 2ms);
     input.observations.visible_outputs.push_back(I1ObservedVisibleOutput{
-        edit_index, run_id, generation, visible_at, causal_sequence++, output});
+        edit_index, run_id, generation, visible_at, causal_sequence++, output,
+        false, std::nullopt});
     input.observations.terminals.push_back(I1ObservedTerminal{
         edit_index, run_id, generation,
         compute::ComputeRunTerminalKind::Succeeded,
@@ -158,6 +156,13 @@ I1EpisodeEvidenceInput make_valid_input(
   }
   input.observation_cut =
       I1ObservationHistoryCut{input.measurement_end, causal_sequence};
+  for (I1ObservedVisibleOutput& visible : input.observations.visible_outputs) {
+    freeze_i1_visible_output_digest(&visible);
+  }
+  input.observations.visible_outputs.back().content_digest =
+      ContentDigestResult{ContentDigestState::Available,
+                          i1_frozen_final_content_digest(),
+                          {}};
   return input;
 }
 
@@ -630,19 +635,106 @@ TEST(I1Evidence, ServiceStartAfterHostSettlementInvalidatesTheRow) {
 }
 
 /**
- * @brief Proves an invalid final Value cannot produce output correctness.
- * @throws Nothing when digest failure remains typed and fail-closed.
+ * @brief Proves an invalid frozen final digest cannot produce correctness.
+ * @throws Nothing when capture failure remains typed and fail-closed.
  */
-TEST(I1Evidence, InvalidFinalValueMakesOnlyOutputEvidenceInvalid) {
+TEST(I1Evidence, InvalidFrozenFinalDigestMakesOnlyOutputEvidenceInvalid) {
   I1EpisodeEvidenceInput input = make_valid_input(0U);
-  event_for_edit(&input.observations.visible_outputs, kI1EditCount - 1U)
-      .output = Value{};
+  I1ObservedVisibleOutput& final_visible =
+      event_for_edit(&input.observations.visible_outputs, kI1EditCount - 1U);
+  final_visible.content_digest =
+      ContentDigestResult{ContentDigestState::InvalidDescriptor, std::nullopt,
+                          "injected frozen digest failure"};
 
   const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
   EXPECT_EQ(row.final_digest.state, ContentDigestState::InvalidDescriptor);
   EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
   EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves an absent independent golden fails closed instead of passing.
+ * @throws Nothing when only output evidence becomes Invalid.
+ */
+TEST(I1Evidence, MissingExpectedDigestInvalidatesOnlyOutputEvidence) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  input.expected_final_digest.reset();
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "independent expected final digest is missing"),
+            row.validity_reasons.end());
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves a present but non-frozen expected digest is invalid evidence.
+ * @throws Nothing when the candidate cannot redefine its own oracle.
+ */
+TEST(I1Evidence, NonFrozenExpectedDigestInvalidatesOutputEvidence) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  ASSERT_TRUE(input.expected_final_digest.has_value());
+  input.expected_final_digest->bytes[0U] ^= std::byte{0x01};
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "independent expected final digest does not match the "
+                      "frozen I1 golden"),
+            row.validity_reasons.end());
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves candidate output drift fails against the unchanged golden.
+ * @throws Nothing when complete digest evidence produces a negative verdict.
+ */
+TEST(I1Evidence, CandidateDigestMismatchFailsOnlyOutputEvidence) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  I1ObservedVisibleOutput& final_visible =
+      event_for_edit(&input.observations.visible_outputs, kI1EditCount - 1U);
+  ASSERT_TRUE(final_visible.content_digest.has_value());
+  ASSERT_TRUE(final_visible.content_digest->digest.has_value());
+  final_visible.content_digest->digest->bytes[0U] ^= std::byte{0x01};
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_EQ(row.output_verdict, I1Verdict::Fail);
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves evaluation and JSON reuse one digest after Value release.
+ * @throws nlohmann/std allocation errors unchanged.
+ */
+TEST(I1Evidence, FrozenDigestSurvivesValueReleaseAndSerialization) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  for (const I1ObservedVisibleOutput& visible :
+       input.observations.visible_outputs) {
+    EXPECT_FALSE(visible.output.valid());
+    EXPECT_TRUE(visible.value_valid_at_capture);
+    ASSERT_TRUE(visible.content_digest.has_value());
+  }
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  ASSERT_EQ(row.output_verdict, I1Verdict::Pass);
+  const nlohmann::json encoded = i1_inner_row_json(row);
+  const nlohmann::json& visible_outputs =
+      encoded.at("observations").at("visible_outputs");
+  ASSERT_EQ(visible_outputs.size(), kI1EditCount);
+  EXPECT_TRUE(visible_outputs.back().at("value_valid").get<bool>());
+  EXPECT_EQ(visible_outputs.back()
+                .at("content_digest")
+                .at("state")
+                .get<std::string>(),
+            "available");
 }
 
 /**

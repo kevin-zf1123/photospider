@@ -293,6 +293,7 @@ Json workload_contract_json() {
                            {"width", region.width},
                            {"height", region.height}});
   }
+  const ContentDigest golden = i1_frozen_final_content_digest();
   return Json{
       {"source", Json{{"operation", "image_generator:coordinate_pattern"},
                       {"width", 2048},
@@ -321,6 +322,10 @@ Json workload_contract_json() {
       {"measurement_start_offset_ns", kI1MeasurementStartOffset.count()},
       {"measurement_end_offset_ns", kI1MeasurementEndOffset.count()},
       {"next_origin_guard_ns", kI1NextOriginGuard.count()},
+      {"final_output_golden",
+       Json{{"production_version", kI1GoldenProductionVersion},
+            {"algorithm", "sha256-canonical-v1"},
+            {"lowercase_hex", digest_hex(golden)}}},
   };
 }
 
@@ -380,7 +385,9 @@ Json edit_evidence_json(const I1EditEvidence& edit) {
  * @brief Encodes the raw request-scoped product observation categories.
  * @param observations Complete bounded observation snapshot.
  * @return Closed JSON object retaining causal order and per-output digests.
- * @throws Digest and nlohmann/std allocation failures unchanged.
+ * @throws nlohmann/std allocation failures unchanged.
+ * @note Payload traversal is forbidden here; the encoded result is the sole
+ * digest captured and frozen before `Q_end`.
  */
 Json observations_json(const I1EpisodeObservationSnapshot& observations) {
   Json generations = Json::array();
@@ -448,15 +455,17 @@ Json observations_json(const I1EpisodeObservationSnapshot& observations) {
   }
   Json visible_outputs = Json::array();
   for (const I1ObservedVisibleOutput& event : observations.visible_outputs) {
+    const ContentDigestResult digest = event.content_digest.value_or(
+        ContentDigestResult{ContentDigestState::InvalidDescriptor, std::nullopt,
+                            "visible output digest was not frozen"});
     visible_outputs.push_back(Json{
         {"edit_index", event.edit_index},
         {"run_id", event.run_id},
         {"generation", event.generation},
         {"observed_at_ns", monotonic_nanoseconds(event.observed_at)},
         {"causal_sequence", event.causal_sequence},
-        {"value_valid", event.output.valid()},
-        {"content_digest",
-         content_digest_json(compute_content_digest(event.output))},
+        {"value_valid", event.value_valid_at_capture},
+        {"content_digest", content_digest_json(digest)},
     });
   }
   const auto lifecycle_transitions_json = [](const auto& events) {

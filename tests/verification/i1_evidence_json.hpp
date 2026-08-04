@@ -31,9 +31,11 @@ const char* i1_phase_text(I1EpisodePhase phase) noexcept;
  * @brief Encodes one fully evaluated closed Issue #93 inner row.
  * @param row Raw and derived episode evidence.
  * @return Closed version-one JSON object; never an outer canonical row.
- * @throws Digest and nlohmann/std allocation failures unchanged.
+ * @throws nlohmann/std allocation failures unchanged.
  * @note Absent admission, accepted-product, and observation facts remain
  * explicit JSON nulls or empty arrays rather than synthesized success facts.
+ * Visible-output digests must already be frozen; serialization never traverses
+ * retained Value payloads.
  */
 nlohmann::json i1_inner_row_json(const I1EpisodeInnerRow& row);
 

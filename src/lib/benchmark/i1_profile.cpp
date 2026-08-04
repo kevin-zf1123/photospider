@@ -59,8 +59,10 @@ constexpr std::array<std::string_view, kI1EditCount>
  * @tparam Record Complete observation record type.
  * @throws Nothing for default construction when Record is no-throw default
  * constructible.
- * @note Exactly one callback owns `value`; readers copy it only after
- * `published` becomes true with acquire ordering.
+ * @note Exactly one callback owns initial `value`; readers access it only after
+ * `published` becomes true with acquire ordering. For visible-output slots,
+ * the sole harness thread may later replace the retained Value with frozen
+ * digest evidence after every product callback has relinquished that slot.
  */
 template <typename Record>
 struct PublishedObservationSlot final {
@@ -207,7 +209,7 @@ class I1EpisodeObservationCollector::Impl final {
                          edit_index_, descriptor.id().value(),
                          descriptor.supersession().generation.value(),
                          coordinate.observed_at, coordinate.causal_sequence,
-                         std::move(output)});
+                         std::move(output), false, std::nullopt});
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_run_quiescent */
@@ -377,6 +379,18 @@ I1EpisodeObservationCollector::I1EpisodeObservationCollector()
 I1EpisodeObservationCollector::~I1EpisodeObservationCollector() noexcept =
     default;  // NOLINT(whitespace/indent_namespace)
 
+/** @copydoc freeze_i1_visible_output_digest */
+void freeze_i1_visible_output_digest(I1ObservedVisibleOutput* output) {
+  if (output == nullptr) {
+    throw std::invalid_argument("I1 visible output digest target is null.");
+  }
+  if (!output->content_digest.has_value()) {
+    output->value_valid_at_capture = output->output.valid();
+    output->content_digest = compute_content_digest(output->output);
+  }
+  output->output = Value{};
+}
+
 /** @copydoc I1EpisodeObservationCollector::make_edit_sink */
 std::shared_ptr<compute::ComputeRunObservationSink>
 I1EpisodeObservationCollector::make_edit_sink(std::size_t edit_index) {
@@ -404,6 +418,35 @@ I1EpisodeObservationSnapshot I1EpisodeObservationCollector::snapshot() const {
                                 &result.host_settlements);
   result.overflowed = impl_->overflowed_.load(std::memory_order_acquire);
   return result;
+}
+
+/** @copydoc I1EpisodeObservationCollector::freeze_visible_output_digests */
+std::size_t I1EpisodeObservationCollector::freeze_visible_output_digests() {
+  std::size_t published_count = 0U;
+  for (PublishedObservationSlot<I1ObservedVisibleOutput>& slot :
+       impl_->visible_outputs_) {
+    if (!slot.published.load(std::memory_order_acquire)) {
+      continue;
+    }
+    freeze_i1_visible_output_digest(&slot.value);
+    ++published_count;
+  }
+  return published_count;
+}
+
+/** @copydoc I1EpisodeObservationCollector::release_unfrozen_visible_outputs */
+void I1EpisodeObservationCollector::
+    release_unfrozen_visible_outputs() noexcept {  // NOLINT(whitespace/indent_namespace)
+  for (PublishedObservationSlot<I1ObservedVisibleOutput>& slot :
+       impl_->visible_outputs_) {
+    if (!slot.published.load(std::memory_order_acquire)) {
+      continue;
+    }
+    if (!slot.value.content_digest.has_value()) {
+      slot.value.value_valid_at_capture = slot.value.output.valid();
+    }
+    slot.value.output = Value{};
+  }
 }
 
 /** @copydoc I1EpisodeObservationCollector::capture_history_cut */
@@ -626,6 +669,20 @@ std::string i1_frozen_graph_yaml() {
   parameters:
     k: 1.40
 )YAML";
+}
+
+/** @copydoc i1_frozen_final_content_digest */
+ContentDigest i1_frozen_final_content_digest() noexcept {
+  return ContentDigest{
+      CanonicalDigestAlgorithm::Sha256CanonicalV1,
+      {std::byte{0x17}, std::byte{0x26}, std::byte{0x6c}, std::byte{0xf3},
+       std::byte{0x87}, std::byte{0x15}, std::byte{0x44}, std::byte{0xd6},
+       std::byte{0x1d}, std::byte{0xec}, std::byte{0xc0}, std::byte{0x80},
+       std::byte{0x5c}, std::byte{0xe3}, std::byte{0x00}, std::byte{0xde},
+       std::byte{0xd5}, std::byte{0x9a}, std::byte{0x68}, std::byte{0x8e},
+       std::byte{0x75}, std::byte{0xe8}, std::byte{0x26}, std::byte{0xc1},
+       std::byte{0x5c}, std::byte{0xe4}, std::byte{0xb6}, std::byte{0x98},
+       std::byte{0x9d}, std::byte{0xb4}, std::byte{0xc4}, std::byte{0x93}}};
 }
 
 /** @copydoc i1_edit_node_one_yaml */

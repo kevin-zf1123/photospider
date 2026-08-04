@@ -138,7 +138,12 @@ struct I1EpisodeEvidenceInput final {
   /** @brief Actual post-snapshot sample retained for terminal-guard checking.
    */
   std::chrono::steady_clock::time_point final_snapshot_sample;
-  /** @brief Optional externally frozen/cold-established expected output. */
+  /**
+   * @brief Required independently frozen expected logical-content digest.
+   * @note Optional representation preserves source-faithful invalid rows;
+   * evaluation marks an absent, non-canonical, or non-frozen digest Invalid
+   * and never learns this value from the observed candidate output.
+   */
   std::optional<ContentDigest> expected_final_digest;
 };
 
@@ -269,9 +274,10 @@ std::chrono::nanoseconds i1_nearest_rank(
  * @return Closed row with matched identities, derived sums, and verdicts.
  * @throws std::bad_alloc when copied evidence/diagnostics allocate.
  * @note Threshold failure yields `Fail`; missing, contradictory, overflowed,
- * or lossy evidence yields `Invalid` independently per affected dimension.
- * Product generations must be nonzero and unique, but need not increase with
- * edit order because bound currentness linearizes by accepted coordinate.
+ * lossy, unfrozen-output, or missing-golden evidence yields `Invalid`
+ * independently per affected dimension. Product generations must be nonzero
+ * and unique, but need not increase with edit order because bound currentness
+ * linearizes by accepted coordinate. This function never traverses a Value.
  */
 I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input);
 

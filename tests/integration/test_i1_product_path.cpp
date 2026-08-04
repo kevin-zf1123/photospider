@@ -484,6 +484,26 @@ void write_reduced_i1_graph(const std::filesystem::path& path) {
 }
 
 /**
+ * @brief Writes the exact normative I1 graph for golden cross-validation.
+ * @param path YAML destination inside the test-owned temporary directory.
+ * @return Nothing after complete flush/close.
+ * @throws std::filesystem::filesystem_error when parent creation fails.
+ * @throws std::runtime_error when the document cannot be written completely.
+ */
+void write_exact_i1_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream output(path);
+  if (!output) {
+    throw std::runtime_error("failed to open exact I1 graph YAML");
+  }
+  output << i1_frozen_graph_yaml();
+  output.close();
+  if (!output) {
+    throw std::runtime_error("failed to write exact I1 graph YAML");
+  }
+}
+
+/**
  * @brief Builds one reduced real-path request while retaining frozen controls.
  * @param session Loaded reduced session.
  * @param edit_index Frozen edit identity.
@@ -971,6 +991,75 @@ TEST(I1ProductPath, NewerGenerationIsSoleVisibleSettledOutput) {
   EXPECT_EQ(counters.live_root_reservation_count, 0U);
   EXPECT_EQ(counters.live_child_grant_count, 0U);
   EXPECT_EQ(counters.live_policy_invocation_count, 0U);
+
+  const VoidResult closed = host->close_graph(load.session);
+  EXPECT_TRUE(closed.status.ok) << closed.status.message;
+}
+
+/**
+ * @brief Cross-checks the frozen golden against one exact real product output.
+ * @throws Embedded product, filesystem, allocation, and synchronization
+ * failures unchanged to GoogleTest.
+ * @note This is a single 2048x2048 episode, not the forbidden 221-slot
+ * workload. The independent scalar oracle is covered by the unit target; this
+ * case verifies that Host, Kernel, cache, and OpenCV produce the same bytes.
+ */
+TEST(I1ProductPath, ExactFinalOutputMatchesFrozenIndependentGolden) {
+  ScopedI1TempDirectory temp;
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const VoidResult seeded = host->seed_builtin_ops();
+  ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+  HostExecutionConfig execution_config;
+  execution_config.worker_count = 8U;
+  const VoidResult configured =
+      host->configure_execution_defaults(execution_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+
+  const std::filesystem::path yaml_path = temp.root() / "i1-exact.yaml";
+  write_exact_i1_graph(yaml_path);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"i1-exact-golden"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = yaml_path.string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  const Result<GraphSessionId> loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  HostComputeRequest baseline = make_i1_host_compute_request(load.session, 0U);
+  baseline.dirty_roi = PixelRect{0, 0, 2048, 2048};
+  const VoidResult baseline_result = host->compute(baseline);
+  ASSERT_TRUE(baseline_result.status.ok) << baseline_result.status.message;
+
+  const VoidResult mutated = host->set_node_yaml(
+      load.session, NodeId{1}, i1_edit_node_one_yaml(kI1EditCount - 1U));
+  ASSERT_TRUE(mutated.status.ok) << mutated.status.message;
+  I1Host* const i1_host = as_i1_host(*host);
+  ASSERT_NE(i1_host, nullptr);
+  I1EpisodeObservationCollector observations;
+  const auto admission_time = std::chrono::steady_clock::now();
+  Result<std::future<OperationStatus>> final =
+      i1_host->compute_i1_async(I1HostComputeRequest{
+          make_i1_host_compute_request(load.session, kI1EditCount - 1U),
+          compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                                 admission_time + 30s, 1U, 8U},
+          observations.make_edit_sink(kI1EditCount - 1U),
+          I1AcceptedCoordinate{admission_time, 1U}});
+  ASSERT_TRUE(final.status.ok) << final.status.message;
+  ASSERT_TRUE(final.value.valid());
+  ASSERT_EQ(final.value.wait_for(30s), std::future_status::ready);
+  const OperationStatus final_status = final.value.get();
+  ASSERT_TRUE(final_status.ok) << final_status.message;
+
+  const I1EpisodeObservationSnapshot snapshot = observations.snapshot();
+  ASSERT_FALSE(snapshot.overflowed);
+  ASSERT_EQ(snapshot.visible_outputs.size(), 1U);
+  const ContentDigestResult digest =
+      compute_content_digest(snapshot.visible_outputs.front().output);
+  ASSERT_EQ(digest.state, ContentDigestState::Available) << digest.diagnostic;
+  ASSERT_TRUE(digest.digest.has_value());
+  EXPECT_EQ(*digest.digest, i1_frozen_final_content_digest());
 
   const VoidResult closed = host->close_graph(load.session);
   EXPECT_TRUE(closed.status.ok) << closed.status.message;
