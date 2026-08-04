@@ -37,6 +37,15 @@ constexpr std::size_t kCurrentGenerationsPerEditCapacity = 2U;
 /** @brief Maximum retained visible outputs per edit. */
 constexpr std::size_t kVisibleOutputsPerEditCapacity = 2U;
 
+/** @brief Maximum retained quiescence transitions per edit. */
+constexpr std::size_t kRunQuiescencesPerEditCapacity = 2U;
+
+/** @brief Maximum retained resource-settlement transitions per edit. */
+constexpr std::size_t kResourceSettlementsPerEditCapacity = 2U;
+
+/** @brief Exactly one Host-settlement slot is reserved for each edit. */
+constexpr std::size_t kHostSettlementsPerEditCapacity = 1U;
+
 /** @brief Canonical two-decimal spellings of frozen edit coefficients. */
 constexpr std::array<std::string_view, kI1EditCount>
     // NOLINTNEXTLINE(whitespace/indent_namespace)
@@ -131,64 +140,108 @@ class I1EpisodeObservationCollector::Impl final {
     EditSink(std::shared_ptr<Impl> impl, std::size_t edit_index) noexcept
         : impl_(std::move(impl)), edit_index_(edit_index) {}
 
+    /** @copydoc compute::ComputeRunObservationSink::reserve_causal_coordinate
+     */
+    compute::ComputeRunObservationCoordinate
+    reserve_causal_coordinate() noexcept override {
+      return impl_->reserve_causal_coordinate();
+    }
+
     /** @copydoc compute::ComputeRunObservationSink::on_current_generation */
     void on_current_generation(
-        const compute::SupersessionIdentity& identity) noexcept override {
-      const std::uint64_t sequence = impl_->reserve_causal_sequence();
+        const compute::SupersessionIdentity& identity,
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
       impl_->publish(
           impl_->current_generations_, impl_->next_current_generation_,
           I1ObservedCurrentGeneration{edit_index_, identity.generation.value(),
-                                      std::chrono::steady_clock::now(),
-                                      sequence});
+                                      coordinate.observed_at,
+                                      coordinate.causal_sequence});
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_service_start */
-    void on_service_start(const compute::ComputeRunDescriptor& descriptor,
-                          compute::ComputeRunTaskIdentity task_identity,
-                          std::uint64_t service_charge) noexcept override {
-      const std::uint64_t sequence = impl_->reserve_causal_sequence();
+    void on_service_start(
+        const compute::ComputeRunDescriptor& descriptor,
+        compute::ComputeRunTaskIdentity task_identity,
+        std::uint64_t service_charge,
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
       impl_->publish(impl_->service_starts_, impl_->next_service_start_,
                      I1ObservedServiceStart{
                          edit_index_, descriptor.id().value(),
                          descriptor.supersession().generation.value(),
                          task_identity.local_task_id().value(),
                          descriptor.quality(), descriptor.qos(), service_charge,
-                         std::chrono::steady_clock::now(), sequence});
+                         coordinate.observed_at, coordinate.causal_sequence});
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_cancellation */
     void on_cancellation(
         const compute::ComputeRunDescriptor& descriptor,
-        compute::ComputeRunCancellationReason reason) noexcept override {
-      const std::uint64_t sequence = impl_->reserve_causal_sequence();
+        compute::ComputeRunCancellationReason reason,
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
       impl_->publish(impl_->cancellations_, impl_->next_cancellation_,
                      I1ObservedCancellation{
                          edit_index_, descriptor.id().value(),
                          descriptor.supersession().generation.value(), reason,
-                         std::chrono::steady_clock::now(), sequence});
+                         coordinate.observed_at, coordinate.causal_sequence});
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_terminal */
-    void on_terminal(const compute::ComputeRunDescriptor& descriptor,
-                     compute::ComputeRunTerminalKind kind) noexcept override {
-      const std::uint64_t sequence = impl_->reserve_causal_sequence();
-      impl_->publish(
-          impl_->terminals_, impl_->next_terminal_,
-          I1ObservedTerminal{edit_index_, descriptor.id().value(),
-                             descriptor.supersession().generation.value(), kind,
-                             std::chrono::steady_clock::now(), sequence});
+    void on_terminal(
+        const compute::ComputeRunDescriptor& descriptor,
+        compute::ComputeRunTerminalKind kind,
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+      impl_->publish(impl_->terminals_, impl_->next_terminal_,
+                     I1ObservedTerminal{
+                         edit_index_, descriptor.id().value(),
+                         descriptor.supersession().generation.value(), kind,
+                         coordinate.observed_at, coordinate.causal_sequence});
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_current_visible */
-    void on_current_visible(const compute::ComputeRunDescriptor& descriptor,
-                            Value output) noexcept override {
-      const std::uint64_t sequence = impl_->reserve_causal_sequence();
-      impl_->publish(
-          impl_->visible_outputs_, impl_->next_visible_output_,
-          I1ObservedVisibleOutput{edit_index_, descriptor.id().value(),
-                                  descriptor.supersession().generation.value(),
-                                  std::chrono::steady_clock::now(), sequence,
-                                  std::move(output)});
+    void on_current_visible(
+        const compute::ComputeRunDescriptor& descriptor, Value output,
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+      impl_->publish(impl_->visible_outputs_, impl_->next_visible_output_,
+                     I1ObservedVisibleOutput{
+                         edit_index_, descriptor.id().value(),
+                         descriptor.supersession().generation.value(),
+                         coordinate.observed_at, coordinate.causal_sequence,
+                         std::move(output)});
+    }
+
+    /** @copydoc compute::ComputeRunObservationSink::on_run_quiescent */
+    void on_run_quiescent(
+        const compute::ComputeRunDescriptor& descriptor,
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+      impl_->publish(impl_->run_quiescences_, impl_->next_run_quiescence_,
+                     I1ObservedRunLifecycleTransition{
+                         edit_index_, descriptor.id().value(),
+                         descriptor.supersession().generation.value(),
+                         coordinate.observed_at, coordinate.causal_sequence});
+    }
+
+    /** @copydoc compute::ComputeRunObservationSink::on_run_resource_settled */
+    void on_run_resource_settled(
+        const compute::ComputeRunDescriptor& descriptor,
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+      impl_->publish(impl_->resource_settlements_,
+                     impl_->next_resource_settlement_,
+                     I1ObservedRunLifecycleTransition{
+                         edit_index_, descriptor.id().value(),
+                         descriptor.supersession().generation.value(),
+                         coordinate.observed_at, coordinate.causal_sequence});
+    }
+
+    /** @copydoc compute::ComputeRunObservationSink::on_host_settled */
+    void on_host_settled(
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+      if (impl_->publish(
+              impl_->host_settlements_, impl_->next_host_settlement_,
+              I1ObservedHostSettlement{edit_index_, coordinate.observed_at,
+                                       coordinate.causal_sequence})) {
+        impl_->published_host_settlement_count_.fetch_add(
+            1U, std::memory_order_release);
+      }
     }
 
    private:
@@ -200,19 +253,22 @@ class I1EpisodeObservationCollector::Impl final {
   };
 
   /**
-   * @brief Reserves one collector-local nonzero causal callback sequence.
-   * @return Current sequence, including UINT64_MAX on its sole legal use.
+   * @brief Reserves one collector-local causal coordinate at linearization.
+   * @return Current time/sequence, including UINT64_MAX on its sole legal use.
    * @throws Nothing; exhaustion marks evidence overflowed and later callbacks
    * remain non-authoritative diagnostics.
    */
-  std::uint64_t reserve_causal_sequence() noexcept {
+  compute::ComputeRunObservationCoordinate
+  reserve_causal_coordinate() noexcept {
+    const std::chrono::steady_clock::time_point observed_at =
+        std::chrono::steady_clock::now();
     const std::uint64_t sequence =
         next_causal_sequence_.fetch_add(1U, std::memory_order_relaxed);
     if (sequence == 0U ||
         sequence == std::numeric_limits<std::uint64_t>::max()) {
       overflowed_.store(true, std::memory_order_release);
     }
-    return sequence;
+    return compute::ComputeRunObservationCoordinate{observed_at, sequence};
   }
 
   /**
@@ -222,19 +278,20 @@ class I1EpisodeObservationCollector::Impl final {
    * @param slots Complete category storage.
    * @param next Unique category-local slot allocator.
    * @param record Complete callback-local record to publish.
-   * @return Nothing.
+   * @return True after publication, false after capacity exhaustion.
    * @throws Nothing; capacity exhaustion marks evidence invalid.
    */
   template <typename Record, std::size_t Capacity>
-  void publish(std::array<PublishedObservationSlot<Record>, Capacity>& slots,
+  bool publish(std::array<PublishedObservationSlot<Record>, Capacity>& slots,
                std::atomic<std::size_t>& next, Record record) noexcept {
     const std::size_t index = next.fetch_add(1U, std::memory_order_relaxed);
     if (index >= Capacity) {
       overflowed_.store(true, std::memory_order_release);
-      return;
+      return false;
     }
     slots[index].value = std::move(record);
     slots[index].published.store(true, std::memory_order_release);
+    return true;
   }
 
   /** @brief Nonzero collector-local causal sequence allocator. */
@@ -257,6 +314,18 @@ class I1EpisodeObservationCollector::Impl final {
 
   /** @brief Unique current-visible slot allocator. */
   std::atomic<std::size_t> next_visible_output_{0U};
+
+  /** @brief Unique physical-quiescence slot allocator. */
+  std::atomic<std::size_t> next_run_quiescence_{0U};
+
+  /** @brief Unique resource-settlement slot allocator. */
+  std::atomic<std::size_t> next_resource_settlement_{0U};
+
+  /** @brief Unique Host-settlement slot allocator. */
+  std::atomic<std::size_t> next_host_settlement_{0U};
+
+  /** @brief Completely release-published Host-settlement record count. */
+  std::atomic<std::size_t> published_host_settlement_count_{0U};
 
   /** @brief Fixed current-generation storage. */
   std::array<PublishedObservationSlot<I1ObservedCurrentGeneration>,
@@ -282,6 +351,21 @@ class I1EpisodeObservationCollector::Impl final {
   std::array<PublishedObservationSlot<I1ObservedVisibleOutput>,
              kI1EditCount * kVisibleOutputsPerEditCapacity>
       visible_outputs_;
+
+  /** @brief Fixed physical Run-quiescence storage. */
+  std::array<PublishedObservationSlot<I1ObservedRunLifecycleTransition>,
+             kI1EditCount * kRunQuiescencesPerEditCapacity>
+      run_quiescences_;
+
+  /** @brief Fixed exact root-resource settlement storage. */
+  std::array<PublishedObservationSlot<I1ObservedRunLifecycleTransition>,
+             kI1EditCount * kResourceSettlementsPerEditCapacity>
+      resource_settlements_;
+
+  /** @brief Fixed caller-visible Host-settlement storage. */
+  std::array<PublishedObservationSlot<I1ObservedHostSettlement>,
+             kI1EditCount * kHostSettlementsPerEditCapacity>
+      host_settlements_;
 };
 
 /** @copydoc I1EpisodeObservationCollector::I1EpisodeObservationCollector */
@@ -311,8 +395,30 @@ I1EpisodeObservationSnapshot I1EpisodeObservationCollector::snapshot() const {
   append_published_observations(impl_->terminals_, &result.terminals);
   append_published_observations(impl_->visible_outputs_,
                                 &result.visible_outputs);
+  append_published_observations(impl_->run_quiescences_,
+                                &result.run_quiescences);
+  append_published_observations(impl_->resource_settlements_,
+                                &result.resource_settlements);
+  append_published_observations(impl_->host_settlements_,
+                                &result.host_settlements);
   result.overflowed = impl_->overflowed_.load(std::memory_order_acquire);
   return result;
+}
+
+/** @copydoc I1EpisodeObservationCollector::capture_history_cut */
+I1ObservationHistoryCut
+I1EpisodeObservationCollector::capture_history_cut() noexcept {
+  const compute::ComputeRunObservationCoordinate coordinate =
+      impl_->reserve_causal_coordinate();
+  return I1ObservationHistoryCut{coordinate.observed_at,
+                                 coordinate.causal_sequence};
+}
+
+/** @copydoc I1EpisodeObservationCollector::published_host_settlement_count */
+std::size_t I1EpisodeObservationCollector::published_host_settlement_count()
+    const noexcept {  // NOLINT(whitespace/indent_namespace)
+  return impl_->published_host_settlement_count_.load(
+      std::memory_order_acquire);
 }
 
 /** @copydoc I1AcceptedBoundaryCollector::I1AcceptedBoundaryCollector */

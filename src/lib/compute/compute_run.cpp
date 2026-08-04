@@ -504,10 +504,16 @@ bool ComputeRunControl::publish_terminal(ComputeRunTerminalOutcome outcome) {
       return false;
     }
     const ComputeRunTerminalKind terminal_kind = outcome.kind;
+    std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
+    if (descriptor.observation_sink() != nullptr) {
+      terminal_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+    }
     terminal_outcome = std::move(outcome);
     arbiter_state = ComputeRunArbiterState::Terminal;
-    if (descriptor.observation_sink() != nullptr) {
-      descriptor.observation_sink()->on_terminal(descriptor, terminal_kind);
+    if (terminal_coordinate.has_value()) {
+      descriptor.observation_sink()->on_terminal(descriptor, terminal_kind,
+                                                 *terminal_coordinate);
     }
     plan = submission_plan.get();
   }
@@ -541,16 +547,25 @@ ComputeRunControl::request_cancellation_containing_callbacks(
     if (arbiter_state != ComputeRunArbiterState::Open) {
       return {};
     }
+    std::optional<ComputeRunObservationCoordinate> cancellation_coordinate;
+    std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
+    if (descriptor.observation_sink() != nullptr) {
+      cancellation_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+      terminal_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+    }
     terminal_outcome = ComputeRunTerminalOutcome{
         ComputeRunTerminalKind::Cancelled, nullptr, reason};
     if (request_child_cancellation_won != nullptr) {
       request_child_cancellation_won->store(true, std::memory_order_release);
     }
     arbiter_state = ComputeRunArbiterState::Terminal;
-    if (descriptor.observation_sink() != nullptr) {
-      descriptor.observation_sink()->on_cancellation(descriptor, reason);
+    if (cancellation_coordinate.has_value()) {
+      descriptor.observation_sink()->on_cancellation(descriptor, reason,
+                                                     *cancellation_coordinate);
       descriptor.observation_sink()->on_terminal(
-          descriptor, ComputeRunTerminalKind::Cancelled);
+          descriptor, ComputeRunTerminalKind::Cancelled, *terminal_coordinate);
     }
     plan = submission_plan.get();
   }
@@ -617,15 +632,25 @@ bool ComputeRunControl::try_claim_commit() {
     }
     if (descriptor.qos().deadline.has_value() &&
         now >= *descriptor.qos().deadline) {
+      std::optional<ComputeRunObservationCoordinate> cancellation_coordinate;
+      std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
+      if (descriptor.observation_sink() != nullptr) {
+        cancellation_coordinate =
+            descriptor.observation_sink()->reserve_causal_coordinate();
+        terminal_coordinate =
+            descriptor.observation_sink()->reserve_causal_coordinate();
+      }
       terminal_outcome = ComputeRunTerminalOutcome{
           ComputeRunTerminalKind::Cancelled, nullptr,
           ComputeRunCancellationReason::DeadlineExceeded};
       arbiter_state = ComputeRunArbiterState::Terminal;
-      if (descriptor.observation_sink() != nullptr) {
+      if (cancellation_coordinate.has_value()) {
         descriptor.observation_sink()->on_cancellation(
-            descriptor, ComputeRunCancellationReason::DeadlineExceeded);
+            descriptor, ComputeRunCancellationReason::DeadlineExceeded,
+            *cancellation_coordinate);
         descriptor.observation_sink()->on_terminal(
-            descriptor, ComputeRunTerminalKind::Cancelled);
+            descriptor, ComputeRunTerminalKind::Cancelled,
+            *terminal_coordinate);
       }
       plan = submission_plan.get();
       deadline_cancelled = true;
@@ -668,10 +693,16 @@ bool ComputeRunControl::resolve_commit(ComputeRunTerminalOutcome outcome) {
       return false;
     }
     const ComputeRunTerminalKind terminal_kind = outcome.kind;
+    std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
+    if (descriptor.observation_sink() != nullptr) {
+      terminal_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+    }
     terminal_outcome = std::move(outcome);
     arbiter_state = ComputeRunArbiterState::Terminal;
-    if (descriptor.observation_sink() != nullptr) {
-      descriptor.observation_sink()->on_terminal(descriptor, terminal_kind);
+    if (terminal_coordinate.has_value()) {
+      descriptor.observation_sink()->on_terminal(descriptor, terminal_kind,
+                                                 *terminal_coordinate);
     }
     plan = submission_plan.get();
   }
@@ -689,16 +720,24 @@ bool ComputeRunControl::resolve_visible_commit(Value output) {
     if (arbiter_state != ComputeRunArbiterState::CommitClaimed) {
       return false;
     }
+    std::optional<ComputeRunObservationCoordinate> visible_coordinate;
+    std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
     if (descriptor.observation_sink() != nullptr) {
-      descriptor.observation_sink()->on_current_visible(descriptor,
-                                                        std::move(output));
+      visible_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+      terminal_coordinate =
+          descriptor.observation_sink()->reserve_causal_coordinate();
+    }
+    if (visible_coordinate.has_value()) {
+      descriptor.observation_sink()->on_current_visible(
+          descriptor, std::move(output), *visible_coordinate);
     }
     terminal_outcome = ComputeRunTerminalOutcome{
         ComputeRunTerminalKind::Succeeded, nullptr, std::nullopt};
     arbiter_state = ComputeRunArbiterState::Terminal;
-    if (descriptor.observation_sink() != nullptr) {
+    if (terminal_coordinate.has_value()) {
       descriptor.observation_sink()->on_terminal(
-          descriptor, ComputeRunTerminalKind::Succeeded);
+          descriptor, ComputeRunTerminalKind::Succeeded, *terminal_coordinate);
     }
     plan = submission_plan.get();
   }
@@ -1022,6 +1061,39 @@ void ComputeRunSettlementObserver::wait_for_resource_settlement() const {
     return control_->pending_root_reservations == 0U &&
            control_->live_root_reservations == 0U;
   });
+}
+
+/** @copydoc
+ * ComputeRunSettlementObserver::reserve_lifecycle_observation_coordinate */
+std::optional<ComputeRunObservationCoordinate>
+ComputeRunSettlementObserver::reserve_lifecycle_observation_coordinate()
+    const noexcept {
+  if (!control_ || control_->descriptor.observation_sink() == nullptr) {
+    return std::nullopt;
+  }
+  return control_->descriptor.observation_sink()->reserve_causal_coordinate();
+}
+
+/** @copydoc ComputeRunSettlementObserver::observe_run_quiescent */
+void ComputeRunSettlementObserver::observe_run_quiescent(
+    std::optional<ComputeRunObservationCoordinate> coordinate) const noexcept {
+  if (!control_ || !coordinate.has_value() ||
+      control_->descriptor.observation_sink() == nullptr) {
+    return;
+  }
+  control_->descriptor.observation_sink()->on_run_quiescent(
+      control_->descriptor, *coordinate);
+}
+
+/** @copydoc ComputeRunSettlementObserver::observe_run_resource_settled */
+void ComputeRunSettlementObserver::observe_run_resource_settled(
+    std::optional<ComputeRunObservationCoordinate> coordinate) const noexcept {
+  if (!control_ || !coordinate.has_value() ||
+      control_->descriptor.observation_sink() == nullptr) {
+    return;
+  }
+  control_->descriptor.observation_sink()->on_run_resource_settled(
+      control_->descriptor, *coordinate);
 }
 
 /** @copydoc ComputeRequestCancellationSource::accepted_reason */

@@ -3902,8 +3902,10 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
    * allocate.
    * @throws std::system_error from Host/backend synchronization.
    * @note A successful return is the Host acceptance boundary. Later compute
-   * cancellation or failure is reported only by the returned future. Private
-   * fields never enter the installed Host request or any IPC value.
+   * cancellation or failure is reported only by the returned future. For an I1
+   * observer, the status worker reserves Host-settlement evidence only after
+   * making that future ready and publishing the matching tracking state.
+   * Private fields never enter the installed Host request or any IPC value.
    */
   Result<std::future<OperationStatus>> compute_async_internal(
       HostComputeRequest request, std::optional<compute::ComputeRunQos> run_qos,
@@ -3938,6 +3940,8 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
           Kernel::ComputeRequest kernel_request =
               to_kernel_compute_request(request);
           kernel_request.run_qos = std::move(run_qos);
+          std::shared_ptr<compute::ComputeRunObservationSink>
+              status_observation_sink = observation_sink;
           kernel_request.observation_sink = std::move(observation_sink);
           GraphSessionId session = request.session;
           std::shared_ptr<EmbeddedHostState> state = state_;
@@ -3969,6 +3973,7 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
             std::future<void> status_worker = std::async(
                 std::launch::async,
                 [state_ptr, session, tracking_id, shared_future,
+                 status_observation_sink = std::move(status_observation_sink),
                  publication = std::move(publication)]() mutable {
                   // set_value/set_exception (or reset as the defensive
                   // fallback) makes the caller-visible future ready before
@@ -3985,6 +3990,11 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
                     }
                   }
                   state_ptr->mark_async_status_published(tracking_id);
+                  if (status_observation_sink != nullptr) {
+                    const compute::ComputeRunObservationCoordinate coordinate =
+                        status_observation_sink->reserve_causal_coordinate();
+                    status_observation_sink->on_host_settled(coordinate);
+                  }
                 });
             state->attach_async_status_worker(tracking_id,
                                               std::move(status_worker));

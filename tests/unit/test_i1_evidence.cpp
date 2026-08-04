@@ -62,8 +62,7 @@ I1EpisodeEvidenceInput make_valid_input(
       checked_i1_time_add(input.episode_origin, kI1MeasurementStartOffset);
   input.measurement_end =
       checked_i1_time_add(input.episode_origin, kI1MeasurementEndOffset);
-  input.snapshot_sample = input.measurement_end;
-  input.snapshot_at_exact_boundary = true;
+  input.final_snapshot_sample = input.measurement_end;
 
   input.baseline.host_resources.limits.cpu_slots = 8U;
   input.baseline.host_resources.limits.retained_memory_bytes = 1U << 20U;
@@ -142,7 +141,19 @@ I1EpisodeEvidenceInput make_valid_input(
         edit_index, run_id, generation,
         compute::ComputeRunTerminalKind::Succeeded,
         checked_i1_time_add(visible_at, 1us), causal_sequence++});
+    input.observations.run_quiescences.push_back(
+        I1ObservedRunLifecycleTransition{edit_index, run_id, generation,
+                                         checked_i1_time_add(visible_at, 2us),
+                                         causal_sequence++});
+    input.observations.resource_settlements.push_back(
+        I1ObservedRunLifecycleTransition{edit_index, run_id, generation,
+                                         checked_i1_time_add(visible_at, 3us),
+                                         causal_sequence++});
+    input.observations.host_settlements.push_back(I1ObservedHostSettlement{
+        edit_index, checked_i1_time_add(visible_at, 4us), causal_sequence++});
   }
+  input.observation_cut =
+      I1ObservationHistoryCut{input.measurement_end, causal_sequence};
   return input;
 }
 
@@ -205,15 +216,11 @@ TEST(I1Evidence, CountsDiscardedAndPostCancelServiceIndependently) {
       checked_i1_time_add(input.edits[0].admission_sample, 1500us),
       cancellation_sequence});
   input.edits[0].settlement_status->ok = false;
-  std::uint64_t latest_sequence = 0U;
-  for (const I1ObservedTerminal& event : input.observations.terminals) {
-    latest_sequence = std::max(latest_sequence, event.causal_sequence);
-  }
   const auto& original_start =
       event_for_edit(&input.observations.service_starts, 0U);
   I1ObservedServiceStart post_cancel = original_start;
   post_cancel.local_task_id = 1U;
-  post_cancel.causal_sequence = latest_sequence + 1U;
+  post_cancel.causal_sequence = input.observation_cut.causal_sequence++;
   post_cancel.observed_at =
       checked_i1_time_add(input.edits[0].admission_sample, 3ms);
   input.observations.service_starts.push_back(post_cancel);
@@ -266,6 +273,86 @@ TEST(I1Evidence, ExpiredIntermediatePublicationInvalidatesTheRow) {
   EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
                       "an intermediate edit published after its deadline"),
             row.validity_reasons.end());
+}
+
+/**
+ * @brief Proves an equal-time lifecycle return after the `Q_end` causal cut
+ * cannot be hidden by a later settled snapshot.
+ * @throws Nothing when the authoritative time/sequence cut rejects the row.
+ */
+TEST(I1Evidence, ResourceSettlementCrossingQEndInvalidatesTheRow) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  I1ObservedRunLifecycleTransition& resource = event_for_edit(
+      &input.observations.resource_settlements, kI1EditCount - 1U);
+  I1ObservedHostSettlement& host =
+      event_for_edit(&input.observations.host_settlements, kI1EditCount - 1U);
+  const std::uint64_t first_excluded = input.observation_cut.causal_sequence;
+  resource.observed_at = input.measurement_end;
+  resource.causal_sequence = first_excluded;
+  host.observed_at = input.measurement_end;
+  host.causal_sequence = first_excluded + 1U;
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "observation lies after the Q_end history cut"),
+            row.validity_reasons.end());
+}
+
+/**
+ * @brief Proves accepted cancellation cannot coexist with Succeeded terminal.
+ * @throws Nothing when the per-Run state machine rejects the contradiction.
+ */
+TEST(I1Evidence, CancellationWithSucceededTerminalInvalidatesTheRow) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  const I1ObservedTerminal& terminal =
+      event_for_edit(&input.observations.terminals, kI1EditCount - 1U);
+  input.observations.cancellations.push_back(I1ObservedCancellation{
+      kI1EditCount - 1U, terminal.run_id, terminal.generation,
+      compute::ComputeRunCancellationReason::Superseded,
+      checked_i1_time_add(input.edits.back().admission_sample, 5ms),
+      input.observation_cut.causal_sequence++});
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "non-cancelled Run carries accepted cancellation"),
+            row.validity_reasons.end());
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves a Succeeded terminal cannot causally precede visibility.
+ * @throws Nothing when sequence order, not vector insertion, is authoritative.
+ */
+TEST(I1Evidence, TerminalBeforeVisibleInvalidatesTheRow) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  I1ObservedTerminal& terminal =
+      event_for_edit(&input.observations.terminals, kI1EditCount - 1U);
+  I1ObservedVisibleOutput& visible =
+      event_for_edit(&input.observations.visible_outputs, kI1EditCount - 1U);
+  std::swap(terminal.causal_sequence, visible.causal_sequence);
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "visible publication does not precede terminal"),
+            row.validity_reasons.end());
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves Host success/failure status must agree with Run terminal kind.
+ * @throws Nothing when contradictory settlement fails closed.
+ */
+TEST(I1Evidence, HostSettlementContradictingTerminalInvalidatesTheRow) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  ASSERT_TRUE(input.edits.back().settlement_status.has_value());
+  input.edits.back().settlement_status->ok = false;
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "Host settlement contradicts Run terminal kind"),
+            row.validity_reasons.end());
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
 }
 
 /**

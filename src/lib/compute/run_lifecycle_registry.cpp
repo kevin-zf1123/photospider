@@ -1147,8 +1147,12 @@ void RunLifecycleRegistry::finalize_admission(
         throw std::logic_error(
             "Run lifecycle bundle disappeared during finalization.");
       }
+      std::size_t index = 0U;
       for (Impl::RunRecord& run : admission->runs) {
         if (!run.quiescent) {
+          const std::optional<ComputeRunObservationCoordinate> coordinate =
+              settlement_observers[index]
+                  .reserve_lifecycle_observation_coordinate();
           run.quiescent = true;
           publish_committed_transition([&]() {
             impl_->telemetry.publish(
@@ -1157,7 +1161,9 @@ void RunLifecycleRegistry::finalize_admission(
                 admission->graph_instance_id.value(), run.run_id.value(),
                 admission->run_group_id, bundle_id, impl_->counters_locked());
           });
+          settlement_observers[index].observe_run_quiescent(coordinate);
         }
+        ++index;
       }
     }
 
@@ -1176,12 +1182,16 @@ void RunLifecycleRegistry::finalize_admission(
         throw std::logic_error(
             "Run lifecycle bundle disappeared during resource settlement.");
       }
+      std::size_t index = 0U;
       for (Impl::RunRecord& run : admission->runs) {
         if (!run.quiescent) {
           throw std::logic_error(
               "Run lifecycle resource settlement preceded quiescence.");
         }
         if (!run.resource_settled) {
+          const std::optional<ComputeRunObservationCoordinate> coordinate =
+              settlement_observers[index]
+                  .reserve_lifecycle_observation_coordinate();
           run.resource_settled = true;
           publish_committed_transition([&]() {
             impl_->telemetry.publish(
@@ -1190,7 +1200,9 @@ void RunLifecycleRegistry::finalize_admission(
                 admission->graph_instance_id.value(), run.run_id.value(),
                 admission->run_group_id, bundle_id, impl_->counters_locked());
           });
+          settlement_observers[index].observe_run_resource_settled(coordinate);
         }
+        ++index;
       }
       std::array<std::uint64_t, 2U> run_ids{0U, 0U};
       std::size_t run_id_count = 0U;

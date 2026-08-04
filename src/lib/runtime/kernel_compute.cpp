@@ -312,9 +312,13 @@ void observe_current_product_generation(
     GraphInstanceId graph_instance_id,
     const std::shared_ptr<compute::ComputeRunObservationSink>& observation_sink,
     const compute::SupersessionIdentity& identity) noexcept {
-  execution_service.observe_current_supersession(graph_instance_id, identity);
+  std::optional<compute::ComputeRunObservationCoordinate> coordinate;
   if (observation_sink != nullptr) {
-    observation_sink->on_current_generation(identity);
+    coordinate = observation_sink->reserve_causal_coordinate();
+  }
+  execution_service.observe_current_supersession(graph_instance_id, identity);
+  if (coordinate.has_value()) {
+    observation_sink->on_current_generation(identity, *coordinate);
   }
 }
 

@@ -613,11 +613,37 @@ Json observations_json(const I1EpisodeObservationSnapshot& observations) {
          content_digest_json(compute_content_digest(event.output))},
     });
   }
+  const auto lifecycle_transitions_json = [](const auto& events) {
+    Json result = Json::array();
+    for (const I1ObservedRunLifecycleTransition& event : events) {
+      result.push_back(Json{
+          {"edit_index", event.edit_index},
+          {"run_id", event.run_id},
+          {"generation", event.generation},
+          {"observed_at_ns", monotonic_nanoseconds(event.observed_at)},
+          {"causal_sequence", event.causal_sequence},
+      });
+    }
+    return result;
+  };
+  Json host_settlements = Json::array();
+  for (const I1ObservedHostSettlement& event : observations.host_settlements) {
+    host_settlements.push_back(Json{
+        {"edit_index", event.edit_index},
+        {"observed_at_ns", monotonic_nanoseconds(event.observed_at)},
+        {"causal_sequence", event.causal_sequence},
+    });
+  }
   return Json{{"current_generations", std::move(generations)},
               {"service_starts", std::move(starts)},
               {"cancellations", std::move(cancellations)},
               {"terminals", std::move(terminals)},
               {"visible_outputs", std::move(visible_outputs)},
+              {"run_quiescences",
+               lifecycle_transitions_json(observations.run_quiescences)},
+              {"resource_settlements",
+               lifecycle_transitions_json(observations.resource_settlements)},
+              {"host_settlements", std::move(host_settlements)},
               {"overflowed", observations.overflowed}};
 }
 
@@ -693,10 +719,12 @@ Json inner_row_json(const I1EpisodeInnerRow& row) {
              monotonic_nanoseconds(row.evidence.measurement_start)},
             {"measurement_end_ns",
              monotonic_nanoseconds(row.evidence.measurement_end)},
-            {"snapshot_sample_ns",
-             monotonic_nanoseconds(row.evidence.snapshot_sample)},
-            {"snapshot_at_exact_boundary",
-             row.evidence.snapshot_at_exact_boundary}}},
+            {"observation_cut_captured_at_ns",
+             monotonic_nanoseconds(row.evidence.observation_cut.captured_at)},
+            {"observation_cut_causal_sequence",
+             row.evidence.observation_cut.causal_sequence},
+            {"final_snapshot_sample_ns",
+             monotonic_nanoseconds(row.evidence.final_snapshot_sample)}}},
       {"edits", std::move(edits)},
       {"accepted_products", std::move(products)},
       {"observations", observations_json(row.evidence.observations)},
@@ -912,7 +940,9 @@ bool row_is_invalid(const I1EpisodeInnerRow& row) noexcept {
  * admission synchronously closes the Graph to revoke publication and
  * cancel/drain earlier generations before throwing; every other exceptional
  * exit retains the same graph-close guard, and no later edit or slot is
- * submitted.
+ * submitted. At `Q_end` it first captures the shared causal-history cut, then
+ * consumes futures and an eventual resource snapshot; only product lifecycle
+ * and Host-settlement coordinates preceding that cut prove boundary membership.
  */
 I1ReplicateSummary run_exact_replicate(
     const I1RunnerOptions& options,
@@ -1031,6 +1061,8 @@ I1ReplicateSummary run_exact_replicate(
     const auto measurement_end =
         checked_i1_time_add(episode_origin, kI1MeasurementEndOffset);
     std::this_thread::sleep_until(measurement_end);
+    const I1ObservationHistoryCut observation_cut =
+        observations.capture_history_cut();
     std::array<std::optional<OperationStatus>, kI1EditCount> settlements;
     for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
       std::future<OperationStatus>& future =
@@ -1043,11 +1075,23 @@ I1ReplicateSummary run_exact_replicate(
       }
       settlements[edit_index] = future.get();
     }
-    const I1EpisodeObservationSnapshot observation_snapshot =
-        observations.snapshot();
-    const auto snapshot_sample = std::chrono::steady_clock::now();
+    const auto settlement_publication_guard =
+        slot + 1U < kI1GridSlotCount ? i1_episode_origin(grid_origin, slot + 1U)
+                                     : terminal_boundary;
+    while (observations.published_host_settlement_count() < kI1EditCount &&
+           std::chrono::steady_clock::now() < settlement_publication_guard) {
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    if (observations.published_host_settlement_count() != kI1EditCount) {
+      throw std::runtime_error(
+          "I1 Host settlement evidence missed the terminal guard at slot " +
+          std::to_string(slot));
+    }
     const I1ExecutionSnapshot final_snapshot =
         i1_host->i1_execution_snapshot(baseline.lifecycle.snapshot_cut, 4096U);
+    const auto final_snapshot_sample = std::chrono::steady_clock::now();
+    const I1EpisodeObservationSnapshot observation_snapshot =
+        observations.snapshot();
 
     I1EpisodeEvidenceInput input;
     input.replicate_ordinal = options.replicate_ordinal;
@@ -1057,11 +1101,11 @@ I1ReplicateSummary run_exact_replicate(
     input.terminal_boundary = terminal_boundary;
     input.measurement_start = measurement_start;
     input.measurement_end = measurement_end;
-    input.snapshot_sample = snapshot_sample;
+    input.observation_cut = observation_cut;
     input.observations = observation_snapshot;
     input.baseline = baseline;
     input.final_snapshot = final_snapshot;
-    input.snapshot_at_exact_boundary = true;
+    input.final_snapshot_sample = final_snapshot_sample;
     input.expected_final_digest = expected_digest;
     for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
       input.edits[edit_index] = capture_i1_edit_evidence(

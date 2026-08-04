@@ -76,7 +76,7 @@ struct I1EditEvidence final {
   std::optional<I1HostReturnEvidence> host_return;
   /** @brief Success-only accepted pre-call coordinate. */
   std::optional<I1AcceptedCoordinate> accepted_coordinate;
-  /** @brief Completed product status observed no later than `Q_end`. */
+  /** @brief Product status consumed after the authoritative history cut. */
   std::optional<OperationStatus> settlement_status;
 };
 
@@ -112,10 +112,10 @@ struct I1EpisodeEvidenceInput final {
   std::chrono::steady_clock::time_point terminal_boundary;
   /** @brief Exact nominal measurement start `Q_start=S_11`. */
   std::chrono::steady_clock::time_point measurement_start;
-  /** @brief Exact quiescence snapshot boundary `Q_end`. */
+  /** @brief Exact causal-history boundary `Q_end`. */
   std::chrono::steady_clock::time_point measurement_end;
-  /** @brief Actual pre-snapshot monotonic sample retained as raw evidence. */
-  std::chrono::steady_clock::time_point snapshot_sample;
+  /** @brief First collector coordinate excluded from the `Q_end` history. */
+  I1ObservationHistoryCut observation_cut;
   /** @brief All twelve complete admission/settlement records. */
   std::array<I1EditEvidence, kI1EditCount> edits;
   /** @brief Bounded product-boundary observations for the episode. */
@@ -123,10 +123,12 @@ struct I1EpisodeEvidenceInput final {
   /** @brief Authoritative snapshot after baseline materialization/settlement.
    */
   I1ExecutionSnapshot baseline;
-  /** @brief Authoritative snapshot taken at the exact `Q_end` tie cut. */
+  /** @brief Authoritative eventual snapshot after captured lifecycle history.
+   */
   I1ExecutionSnapshot final_snapshot;
-  /** @brief True only when the runner targeted the immutable frozen cut. */
-  bool snapshot_at_exact_boundary = false;
+  /** @brief Actual post-snapshot sample retained for terminal-guard checking.
+   */
+  std::chrono::steady_clock::time_point final_snapshot_sample;
   /** @brief Optional externally frozen/cold-established expected output. */
   std::optional<ContentDigest> expected_final_digest;
 };
@@ -227,7 +229,9 @@ struct I1ReplicateSummary final {
 /**
  * @brief Copies one move-only admission result into closed row evidence.
  * @param admission Admission result whose future remains caller-owned.
- * @param settlement Completed status observed by `Q_end`, if available.
+ * @param settlement Completed status consumed after the history cut, if
+ * available; the matching Host-settlement event proves whether it belonged to
+ * the `Q_end` history.
  * @return Copyable evidence with frozen coefficient and Region facts.
  * @throws std::out_of_range when the edit identity is invalid.
  * @throws std::bad_alloc when status ownership cannot allocate.

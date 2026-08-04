@@ -204,16 +204,19 @@ std::optional<std::uint64_t> cancellation_sequence_for_run(
 }
 
 /**
- * @brief Verifies one raw observed timestamp lies no later than `Q_end`.
- * @param observed_at Product callback timestamp.
- * @param measurement_end Exact inclusive event cut.
- * @return True when the event belongs to the retained cut.
+ * @brief Verifies one product coordinate belongs to authoritative `Q_end`.
+ * @param observed_at Product-boundary steady-clock sample.
+ * @param sequence Product-boundary causal sequence.
+ * @param measurement_end Exact inclusive time boundary.
+ * @param cut First collector sequence excluded from boundary history.
+ * @return True when both physical time and causal order precede the cut.
  * @throws Nothing.
  */
-bool event_within_cut(
-    std::chrono::steady_clock::time_point observed_at,
-    std::chrono::steady_clock::time_point measurement_end) noexcept {
-  return observed_at <= measurement_end;
+bool event_within_cut(std::chrono::steady_clock::time_point observed_at,
+                      std::uint64_t sequence,
+                      std::chrono::steady_clock::time_point measurement_end,
+                      const I1ObservationHistoryCut& cut) noexcept {
+  return observed_at <= measurement_end && sequence < cut.causal_sequence;
 }
 
 /**
@@ -354,17 +357,28 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
       global_invalidate("measurement end is not the frozen Q_end boundary");
     }
   }
-  if (!row.evidence.snapshot_at_exact_boundary) {
-    global_invalidate("quiescence snapshot was not taken at exact Q_end");
+  if (row.evidence.observation_cut.causal_sequence == 0U) {
+    global_invalidate("Q_end history cut has a zero causal sequence");
   }
-  if (row.evidence.snapshot_sample < row.evidence.measurement_end ||
+  if (row.evidence.observation_cut.captured_at < row.evidence.measurement_end ||
       (row.evidence.slot + 1U < kI1GridSlotCount &&
-       row.evidence.snapshot_sample >=
+       row.evidence.observation_cut.captured_at >=
            i1_episode_origin(row.evidence.grid_origin,
                              row.evidence.slot + 1U)) ||
       (row.evidence.slot + 1U == kI1GridSlotCount &&
-       row.evidence.snapshot_sample >= row.evidence.terminal_boundary)) {
-    global_invalidate("quiescence sample lies outside the terminal guard");
+       row.evidence.observation_cut.captured_at >=
+           row.evidence.terminal_boundary)) {
+    global_invalidate("Q_end history cut lies outside the terminal guard");
+  }
+  if (row.evidence.final_snapshot_sample <
+          row.evidence.observation_cut.captured_at ||
+      (row.evidence.slot + 1U < kI1GridSlotCount &&
+       row.evidence.final_snapshot_sample >=
+           i1_episode_origin(row.evidence.grid_origin,
+                             row.evidence.slot + 1U)) ||
+      (row.evidence.slot + 1U == kI1GridSlotCount &&
+       row.evidence.final_snapshot_sample >= row.evidence.terminal_boundary)) {
+    global_invalidate("final snapshot lies outside the terminal guard");
   }
   if (row.evidence.observations.overflowed) {
     global_invalidate("bounded Run observation storage overflowed");
@@ -372,6 +386,7 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
 
   std::uint64_t previous_event_sequence = 0U;
   std::uint64_t previous_generation = 0U;
+  std::set<std::uint64_t> seen_materialized_run_ids;
   for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
     const I1EditEvidence& edit = row.evidence.edits[edit_index];
     const auto expected_nominal = checked_i1_time_add(
@@ -417,7 +432,22 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
       global_invalidate("accepted coordinate does not equal reserved A_i/seq");
     }
     if (!edit.settlement_status.has_value()) {
-      global_invalidate("edit settlement was not complete by Q_end");
+      global_invalidate("edit product status is absent after bounded drain");
+    }
+    const I1ObservedHostSettlement* host_settlement = nullptr;
+    std::size_t host_settlement_count = 0U;
+    for (const I1ObservedHostSettlement& event :
+         row.evidence.observations.host_settlements) {
+      if (event.edit_index == edit_index) {
+        ++host_settlement_count;
+        host_settlement = &event;
+      }
+    }
+    if (host_settlement_count != 1U) {
+      global_invalidate("edit lacks exactly one Host settlement event");
+    } else if (edit.host_return.has_value() &&
+               host_settlement->observed_at < edit.host_return->return_time) {
+      global_invalidate("Host settlement precedes the scheduling return");
     }
 
     const std::optional<I1ObservedCurrentGeneration> generation =
@@ -428,6 +458,14 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
       continue;
     }
     previous_generation = generation->generation;
+    if (generation->observed_at < edit.admission_sample) {
+      global_invalidate("current generation precedes accepted admission");
+    }
+    if (host_settlement != nullptr &&
+        (host_settlement->causal_sequence <= generation->causal_sequence ||
+         host_settlement->observed_at < generation->observed_at)) {
+      global_invalidate("Host settlement does not follow current generation");
+    }
 
     std::set<std::uint64_t> materialized_runs;
     for (const I1ObservedServiceStart& start :
@@ -466,6 +504,25 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
         }
       }
     }
+    for (const I1ObservedRunLifecycleTransition& quiescence :
+         row.evidence.observations.run_quiescences) {
+      if (quiescence.edit_index == edit_index) {
+        materialized_runs.insert(quiescence.run_id);
+        if (quiescence.generation != generation->generation) {
+          global_invalidate("quiescence generation does not match edit");
+        }
+      }
+    }
+    for (const I1ObservedRunLifecycleTransition& settlement :
+         row.evidence.observations.resource_settlements) {
+      if (settlement.edit_index == edit_index) {
+        materialized_runs.insert(settlement.run_id);
+        if (settlement.generation != generation->generation) {
+          global_invalidate(
+              "resource settlement generation does not match edit");
+        }
+      }
+    }
     if (materialized_runs.size() > 1U) {
       global_invalidate("one accepted edit materialized multiple Run ids");
       continue;
@@ -475,22 +532,32 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
       product.run_id = *materialized_runs.begin();
       if (*product.run_id == 0U) {
         global_invalidate("materialized Run identity is zero");
+      } else if (!seen_materialized_run_ids.insert(*product.run_id).second) {
+        global_invalidate("materialized Run identity is reused across edits");
       }
       std::size_t terminal_count = 0U;
       std::size_t cancellation_count = 0U;
       std::size_t visible_count = 0U;
-      std::optional<compute::ComputeRunTerminalKind> terminal_kind;
+      std::size_t quiescence_count = 0U;
+      std::size_t resource_settlement_count = 0U;
+      const I1ObservedTerminal* terminal_event = nullptr;
+      const I1ObservedCancellation* cancellation_event = nullptr;
+      const I1ObservedVisibleOutput* visible_event = nullptr;
+      const I1ObservedRunLifecycleTransition* quiescence_event = nullptr;
+      const I1ObservedRunLifecycleTransition* resource_settlement_event =
+          nullptr;
       for (const I1ObservedTerminal& terminal :
            row.evidence.observations.terminals) {
         if (terminal.run_id == *product.run_id) {
           ++terminal_count;
-          terminal_kind = terminal.kind;
+          terminal_event = &terminal;
         }
       }
       for (const I1ObservedCancellation& cancellation :
            row.evidence.observations.cancellations) {
         if (cancellation.run_id == *product.run_id) {
           ++cancellation_count;
+          cancellation_event = &cancellation;
           if (cancellation.reason !=
                   compute::ComputeRunCancellationReason::Superseded &&
               cancellation.reason !=
@@ -503,6 +570,7 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
            row.evidence.observations.visible_outputs) {
         if (visible.run_id == *product.run_id) {
           ++visible_count;
+          visible_event = &visible;
           if (edit.deadline.has_value() &&
               visible.observed_at > *edit.deadline) {
             if (edit_index == kI1EditCount - 1U) {
@@ -514,28 +582,106 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
           }
         }
       }
+      for (const I1ObservedRunLifecycleTransition& quiescence :
+           row.evidence.observations.run_quiescences) {
+        if (quiescence.run_id == *product.run_id) {
+          ++quiescence_count;
+          quiescence_event = &quiescence;
+        }
+      }
+      for (const I1ObservedRunLifecycleTransition& settlement :
+           row.evidence.observations.resource_settlements) {
+        if (settlement.run_id == *product.run_id) {
+          ++resource_settlement_count;
+          resource_settlement_event = &settlement;
+        }
+      }
       if (terminal_count != 1U) {
         global_invalidate("materialized Run lacks exactly one terminal event");
       }
       if (cancellation_count > 1U || visible_count > 1U) {
         global_invalidate("Run has duplicate cancellation or visibility");
       }
-      if (terminal_kind == compute::ComputeRunTerminalKind::Cancelled &&
-          cancellation_count != 1U) {
-        global_invalidate("cancelled Run lacks one accepted cancellation");
+      if (quiescence_count != 1U || resource_settlement_count != 1U) {
+        global_invalidate(
+            "Run lacks exactly one quiescence and resource settlement");
       }
-      if (terminal_kind == compute::ComputeRunTerminalKind::Succeeded &&
-          visible_count != 1U) {
-        global_invalidate("successful current Run lacks one visible output");
+      if (terminal_event != nullptr) {
+        if (terminal_event->kind ==
+                compute::ComputeRunTerminalKind::Cancelled &&
+            cancellation_count != 1U) {
+          global_invalidate("cancelled Run lacks one accepted cancellation");
+        }
+        if (terminal_event->kind !=
+                compute::ComputeRunTerminalKind::Cancelled &&
+            cancellation_count != 0U) {
+          global_invalidate("non-cancelled Run carries accepted cancellation");
+        }
+        if (terminal_event->kind ==
+                compute::ComputeRunTerminalKind::Succeeded &&
+            visible_count != 1U) {
+          global_invalidate("successful current Run lacks one visible output");
+        }
+        if (terminal_event->kind !=
+                compute::ComputeRunTerminalKind::Succeeded &&
+            visible_count != 0U) {
+          global_invalidate("non-successful Run published visible output");
+        }
+        if (edit.settlement_status.has_value() &&
+            (edit.settlement_status->ok !=
+             (terminal_event->kind ==
+              compute::ComputeRunTerminalKind::Succeeded))) {
+          global_invalidate("Host settlement contradicts Run terminal kind");
+        }
+        if (generation->causal_sequence >= terminal_event->causal_sequence ||
+            generation->observed_at > terminal_event->observed_at) {
+          global_invalidate("Run terminal does not follow current generation");
+        }
+        for (const I1ObservedServiceStart& start :
+             row.evidence.observations.service_starts) {
+          if (start.run_id == *product.run_id &&
+              (start.causal_sequence <= generation->causal_sequence ||
+               start.observed_at < generation->observed_at)) {
+            global_invalidate(
+                "service start does not follow current generation");
+          }
+        }
       }
-      if (terminal_kind != compute::ComputeRunTerminalKind::Succeeded &&
-          visible_count != 0U) {
-        global_invalidate("non-successful Run published visible output");
+      if (cancellation_event != nullptr && terminal_event != nullptr &&
+          (cancellation_event->causal_sequence >=
+               terminal_event->causal_sequence ||
+           cancellation_event->observed_at > terminal_event->observed_at)) {
+        global_invalidate("accepted cancellation does not precede terminal");
       }
-      if (terminal_kind == compute::ComputeRunTerminalKind::Succeeded &&
-          edit.settlement_status.has_value() && !edit.settlement_status->ok) {
-        global_invalidate("successful Run has a failed Host settlement");
+      if (visible_event != nullptr && terminal_event != nullptr &&
+          (visible_event->causal_sequence >= terminal_event->causal_sequence ||
+           visible_event->observed_at > terminal_event->observed_at)) {
+        global_invalidate("visible publication does not precede terminal");
       }
+      if (terminal_event != nullptr && quiescence_event != nullptr &&
+          (terminal_event->causal_sequence >=
+               quiescence_event->causal_sequence ||
+           terminal_event->observed_at > quiescence_event->observed_at)) {
+        global_invalidate("Run quiescence does not follow terminal");
+      }
+      if (quiescence_event != nullptr && resource_settlement_event != nullptr &&
+          (quiescence_event->causal_sequence >=
+               resource_settlement_event->causal_sequence ||
+           quiescence_event->observed_at >
+               resource_settlement_event->observed_at)) {
+        global_invalidate("resource settlement does not follow Run quiescence");
+      }
+      if (resource_settlement_event != nullptr && host_settlement != nullptr &&
+          (resource_settlement_event->causal_sequence >=
+               host_settlement->causal_sequence ||
+           resource_settlement_event->observed_at >
+               host_settlement->observed_at)) {
+        global_invalidate(
+            "Host settlement does not follow Run resource settlement");
+      }
+    } else if (edit.settlement_status.has_value() &&
+               edit.settlement_status->ok) {
+      global_invalidate("successful Host settlement has no materialized Run");
     }
     row.accepted_products[edit_index] = product;
   }
@@ -554,8 +700,10 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
         if (!reserve_observation_sequence(sequence, &observation_sequences)) {
           global_invalidate("observation causal sequence is zero or duplicate");
         }
-        if (!event_within_cut(observed_at, row.evidence.measurement_end)) {
-          global_invalidate("observation occurred after Q_end");
+        if (!event_within_cut(observed_at, sequence,
+                              row.evidence.measurement_end,
+                              row.evidence.observation_cut)) {
+          global_invalidate("observation lies after the Q_end history cut");
         }
       };
   for (const I1ObservedCurrentGeneration& event :
@@ -567,6 +715,9 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
   }
   for (const I1ObservedServiceStart& event :
        row.evidence.observations.service_starts) {
+    if (event.edit_index >= kI1EditCount) {
+      global_invalidate("service-start event has invalid edit index");
+    }
     check_sequence_and_time(event.causal_sequence, event.observed_at);
   }
   for (const I1ObservedCancellation& event :
@@ -586,6 +737,27 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
        row.evidence.observations.visible_outputs) {
     if (event.edit_index >= kI1EditCount) {
       global_invalidate("visible-output event has invalid edit index");
+    }
+    check_sequence_and_time(event.causal_sequence, event.observed_at);
+  }
+  for (const I1ObservedRunLifecycleTransition& event :
+       row.evidence.observations.run_quiescences) {
+    if (event.edit_index >= kI1EditCount) {
+      global_invalidate("Run-quiescence event has invalid edit index");
+    }
+    check_sequence_and_time(event.causal_sequence, event.observed_at);
+  }
+  for (const I1ObservedRunLifecycleTransition& event :
+       row.evidence.observations.resource_settlements) {
+    if (event.edit_index >= kI1EditCount) {
+      global_invalidate("resource-settlement event has invalid edit index");
+    }
+    check_sequence_and_time(event.causal_sequence, event.observed_at);
+  }
+  for (const I1ObservedHostSettlement& event :
+       row.evidence.observations.host_settlements) {
+    if (event.edit_index >= kI1EditCount) {
+      global_invalidate("Host-settlement event has invalid edit index");
     }
     check_sequence_and_time(event.causal_sequence, event.observed_at);
   }

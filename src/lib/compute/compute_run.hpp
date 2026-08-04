@@ -302,6 +302,27 @@ struct ComputeRunQos {
 };
 
 /**
+ * @brief Observation-only coordinate reserved at one product linearization.
+ *
+ * The observation sink samples the process steady clock and reserves one
+ * strictly increasing observer-local sequence before the owning product state
+ * transition. Product code then carries this immutable coordinate to the
+ * corresponding callback even when callback delivery occurs later.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note The value grants no scheduling, cancellation, lifecycle, resource, or
+ * commit authority. Sequence zero is reserved for absent/overflow evidence.
+ */
+struct ComputeRunObservationCoordinate final {
+  /** @brief Steady-clock sample taken immediately before sequence reservation.
+   */
+  std::chrono::steady_clock::time_point observed_at;
+
+  /** @brief Strictly increasing observer-local causal sequence. */
+  std::uint64_t causal_sequence = 0U;
+};
+
+/**
  * @brief Source-private, observation-only sink for one product compute request.
  *
  * The sink receives immutable identities, scalar service facts, terminal
@@ -314,10 +335,11 @@ struct ComputeRunQos {
  * @throws Nothing. Implementations must contain every failure; an escaping
  * exception terminates because callbacks run on product correctness
  * boundaries.
- * @note Callbacks may run while the coordinator, Run, or execution-service
- * mutex is held. Implementations must remain bounded, nonblocking, and must
- * not re-enter compute services. The interface is source-private and is absent
- * from installed Host, operation, policy, CLI, and IPC contracts.
+ * @note Callbacks may run while the coordinator, Run, execution-service, or
+ * lifecycle-registry fence is held. Implementations must remain bounded,
+ * nonblocking, and must not re-enter compute services. The interface is
+ * source-private and is absent from installed Host, operation, policy, CLI,
+ * and IPC contracts.
  */
 class ComputeRunObservationSink {
  public:
@@ -329,60 +351,83 @@ class ComputeRunObservationSink {
   virtual ~ComputeRunObservationSink() noexcept = default;
 
   /**
+   * @brief Reserves one coordinate at an authoritative product boundary.
+   * @return Nonzero observer-local sequence paired with its steady-clock
+   * sample.
+   * @throws Nothing; implementations must contain sequence exhaustion.
+   * @note Callers invoke this immediately before the transition represented by
+   * the later callback. Reservation is bounded, nonblocking, allocation-free,
+   * and does not itself publish an event.
+   */
+  virtual ComputeRunObservationCoordinate
+  reserve_causal_coordinate() noexcept = 0;
+
+  /**
    * @brief Observes publication of one accepted current request generation.
    * @param identity Product-assigned key and generation becoming current.
+   * @param coordinate Coordinate reserved immediately before currentness
+   * publication.
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.
    * @note The coordinator invokes this immediately before publishing the same
    * generation to `is_current()`.
    */
   virtual void on_current_generation(
-      const SupersessionIdentity& identity) noexcept = 0;
+      const SupersessionIdentity& identity,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
 
   /**
    * @brief Observes one physically committed callback service start.
    * @param descriptor Immutable identity and policy inputs of the owning Run.
    * @param task_identity Exact Run-local callback identity.
    * @param service_charge Exact `work_units + ceil(ready_bytes/4096)` charge.
+   * @param coordinate Coordinate reserved at reserved-start commitment.
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.
-   * @note The service invokes this after ready removal, grant/gate commitment,
-   * and start counters become authoritative, while cancellation/start order is
-   * still serialized by product locks.
+   * @note The service reserves `coordinate` immediately before route-start
+   * commitment, then invokes this after ready removal, grant/gate commitment,
+   * and start counters become authoritative. The shared sink sequence, rather
+   * than callback scheduling order, total-orders start and cancellation.
    */
-  virtual void on_service_start(const ComputeRunDescriptor& descriptor,
-                                ComputeRunTaskIdentity task_identity,
-                                std::uint64_t service_charge) noexcept = 0;
+  virtual void on_service_start(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
 
   /**
    * @brief Observes acceptance of one Run cancellation reason.
    * @param descriptor Immutable identity and policy inputs of the cancelled
    * Run.
    * @param reason Stable cancellation reason that won terminal arbitration.
+   * @param coordinate Coordinate reserved at cancellation acceptance.
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.
    * @note Rejected or repeated cancellation requests produce no callback.
    */
   virtual void on_cancellation(
       const ComputeRunDescriptor& descriptor,
-      ComputeRunCancellationReason reason) noexcept = 0;
+      ComputeRunCancellationReason reason,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
 
   /**
    * @brief Observes the exactly-once terminal category of one Run.
    * @param descriptor Immutable identity and policy inputs of the terminal Run.
    * @param kind Succeeded, Failed, or Cancelled terminal category.
+   * @param coordinate Coordinate reserved at terminal publication.
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.
    * @note Failure exception payload is deliberately excluded from the
    * authority-free evidence seam.
    */
-  virtual void on_terminal(const ComputeRunDescriptor& descriptor,
-                           ComputeRunTerminalKind kind) noexcept = 0;
+  virtual void on_terminal(
+      const ComputeRunDescriptor& descriptor, ComputeRunTerminalKind kind,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
 
   /**
    * @brief Observes one current HP publication and retains its immutable Value.
    * @param descriptor Immutable identity of the Run whose contender committed.
    * @param output Copy of the exact immutable image Value published visibly.
+   * @param coordinate Coordinate reserved at visible publication.
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.
    * @note Value copying retains immutable shared state and grants no mutation
@@ -390,8 +435,48 @@ class ComputeRunObservationSink {
    * succeeding terminal callback in one Run-arbiter resolution, so a stale,
    * failed, empty, or already-resolved contender produces no visibility.
    */
-  virtual void on_current_visible(const ComputeRunDescriptor& descriptor,
-                                  Value output) noexcept = 0;
+  virtual void on_current_visible(
+      const ComputeRunDescriptor& descriptor, Value output,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes physical Run quiescence selected by lifecycle finalization.
+   * @param descriptor Immutable identity of the quiescent Run.
+   * @param coordinate Coordinate reserved at the quiescence transition.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Terminal publication precedes this event. The registry remains the
+   * sole lifecycle authority; this callback cannot retain a Run lease.
+   */
+  virtual void on_run_quiescent(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes exact return of one Run's physical root resources.
+   * @param descriptor Immutable identity of the settled Run.
+   * @param coordinate Coordinate reserved at resource settlement.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Quiescence precedes this event. The callback carries no ledger token,
+   * reservation, grant, or lifecycle-finalization authority.
+   */
+  virtual void on_run_resource_settled(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes publication and Host tracking settlement of one request.
+   * @param coordinate Coordinate reserved only after the caller-visible status
+   * future is ready and Host tracking records that publication.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The request-scoped sink already identifies the edit. This event owns
+   * no Run descriptor because supersession may settle before Run
+   * materialization.
+   */
+  virtual void on_host_settled(
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
 };
 
 /**
@@ -1118,6 +1203,39 @@ class ComputeRunSettlementObserver final {
    * @throws std::system_error when Run synchronization or waiting fails.
    */
   void wait_for_resource_settlement() const;
+
+  /**
+   * @brief Reserves one coordinate for a registry-owned lifecycle transition.
+   * @return Coordinate from the Run's sink, or nullopt when observation is
+   * disabled.
+   * @throws Nothing; sink exhaustion remains encoded in returned evidence.
+   * @note RunLifecycleRegistry calls this while its lifecycle fence excludes a
+   * competing transition, then commits the matching state before delivery.
+   */
+  std::optional<ComputeRunObservationCoordinate>
+  reserve_lifecycle_observation_coordinate() const noexcept;
+
+  /**
+   * @brief Delivers one already-reserved physical-quiescence observation.
+   * @param coordinate Optional coordinate reserved before the transition.
+   * @return Nothing.
+   * @throws Nothing; sink callbacks contain every failure.
+   * @note A missing coordinate means the Run has no observation sink. This
+   * method changes no Run or registry lifecycle state.
+   */
+  void observe_run_quiescent(
+      std::optional<ComputeRunObservationCoordinate> coordinate) const noexcept;
+
+  /**
+   * @brief Delivers one already-reserved resource-settlement observation.
+   * @param coordinate Optional coordinate reserved before the transition.
+   * @return Nothing.
+   * @throws Nothing; sink callbacks contain every failure.
+   * @note The registry invokes this only after exact root settlement and never
+   * uses the callback result for lifecycle decisions.
+   */
+  void observe_run_resource_settled(
+      std::optional<ComputeRunObservationCoordinate> coordinate) const noexcept;
 
   /**
    * @brief Reports whether this value retains one Run control block.

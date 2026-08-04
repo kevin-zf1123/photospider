@@ -1689,6 +1689,9 @@ class ExecutionService::BoundedReadyStore final {
    * staging operation-gate ownership.
    * @throws std::system_error while staging the reservation child grant.
    * @note Exceptional exits precede every ready/fairness/in-flight mutation.
+   * An observation coordinate reserved after grant/gate staging and before the
+   * route commit is the logical start-commit point only when that commit
+   * succeeds; a rejected route leaves an unpublished sequence gap.
    * @note Caller holds the service/store mutex. This method locks the Run and
    * then its reservation through `try_grant`, preserving the frozen order.
    */
@@ -1755,6 +1758,12 @@ class ExecutionService::BoundedReadyStore final {
             pin.entry->submission.operation_constraints())) {
       return StartResult::Obsolete;
     }
+    const std::shared_ptr<ComputeRunObservationSink>& observation_sink =
+        pin.entry->submission.lease_.descriptor().observation_sink();
+    std::optional<ComputeRunObservationCoordinate> start_coordinate;
+    if (observation_sink != nullptr) {
+      start_coordinate = observation_sink->reserve_causal_coordinate();
+    }
     const Device device = pin.entry->submission.metadata().device();
     if (!routes.commit_start(run.route, device)) {
       operation_gate_.finish(pin.entry->submission.operation_constraints());
@@ -1770,12 +1779,11 @@ class ExecutionService::BoundedReadyStore final {
     ++class_dispatch_count(pin.service_class);
     ++run.committed_starts;
     ++run.in_flight;
-    const std::shared_ptr<ComputeRunObservationSink>& observation_sink =
-        pin.entry->submission.lease_.descriptor().observation_sink();
-    if (observation_sink != nullptr) {
+    if (start_coordinate.has_value()) {
       observation_sink->on_service_start(
           pin.entry->submission.lease_.descriptor(),
-          pin.entry->submission.identity(), pin.entry->policy_service_cost);
+          pin.entry->submission.identity(), pin.entry->policy_service_cost,
+          *start_coordinate);
     }
     if (pin.service_class == ComputeRunQosClass::Interactive &&
         throughput_ready) {

@@ -655,7 +655,9 @@ class RunLifecycleRegistry final {
    * authority to Active for retry. Concurrent callers serialize through
    * Active/Finalizing/Finalized state and observe one successful finalization;
    * no by-value duplicate authority is created. Callers must complete
-   * commit/discard and root resource release first.
+   * commit/discard and root resource release first. For an observed Run, the
+   * registry reserves and publishes distinct quiescence and resource-return
+   * coordinates at those transitions while retaining sole lifecycle authority.
    */
   void finalize_admission(RunLifecycleAdmissionHandle& handle);
 

@@ -204,7 +204,7 @@ struct I1ObservedServiceStart final {
   compute::ComputeRunQos qos;
   /** @brief Exact work plus 4096-byte ready quanta. */
   std::uint64_t service_charge = 0U;
-  /** @brief Actual observer callback timestamp. */
+  /** @brief Steady-clock sample reserved at service-start linearization. */
   std::chrono::steady_clock::time_point observed_at;
   /** @brief Collector-local causal order across every product callback. */
   std::uint64_t causal_sequence = 0U;
@@ -224,7 +224,7 @@ struct I1ObservedCancellation final {
   /** @brief Stable product cancellation reason. */
   compute::ComputeRunCancellationReason reason =
       compute::ComputeRunCancellationReason::ExplicitRequest;
-  /** @brief Actual observer callback timestamp. */
+  /** @brief Steady-clock sample reserved at cancellation acceptance. */
   std::chrono::steady_clock::time_point observed_at;
   /** @brief Collector-local causal order. */
   std::uint64_t causal_sequence = 0U;
@@ -244,7 +244,7 @@ struct I1ObservedTerminal final {
   /** @brief Exact terminal category. */
   compute::ComputeRunTerminalKind kind =
       compute::ComputeRunTerminalKind::Failed;
-  /** @brief Actual observer callback timestamp. */
+  /** @brief Steady-clock sample reserved at terminal publication. */
   std::chrono::steady_clock::time_point observed_at;
   /** @brief Collector-local causal order. */
   std::uint64_t causal_sequence = 0U;
@@ -259,7 +259,7 @@ struct I1ObservedCurrentGeneration final {
   std::size_t edit_index = 0U;
   /** @brief Product-assigned nonzero generation. */
   std::uint64_t generation = 0U;
-  /** @brief Actual observer callback timestamp. */
+  /** @brief Steady-clock sample reserved at currentness publication. */
   std::chrono::steady_clock::time_point observed_at;
   /** @brief Collector-local causal order. */
   std::uint64_t causal_sequence = 0U;
@@ -276,12 +276,59 @@ struct I1ObservedVisibleOutput final {
   std::uint64_t run_id = 0U;
   /** @brief Exact product generation that remained current. */
   std::uint64_t generation = 0U;
-  /** @brief Actual visible-publication observer timestamp. */
+  /** @brief Steady-clock sample reserved at visible publication. */
   std::chrono::steady_clock::time_point observed_at;
   /** @brief Collector-local causal order. */
   std::uint64_t causal_sequence = 0U;
   /** @brief Immutable image Value published by the current HP snapshot. */
   Value output;
+};
+
+/**
+ * @brief One Run quiescence or resource-settlement lifecycle transition.
+ * @throws Nothing for value construction and copying.
+ * @note The containing observation vector fixes which transition kind this
+ * record represents; the record itself preserves the common Run join keys.
+ */
+struct I1ObservedRunLifecycleTransition final {
+  /** @brief Edit whose materialized Run reached the transition. */
+  std::size_t edit_index = 0U;
+  /** @brief Opaque materialized Run identity. */
+  std::uint64_t run_id = 0U;
+  /** @brief Product generation of the settled Run. */
+  std::uint64_t generation = 0U;
+  /** @brief Steady-clock sample reserved at transition linearization. */
+  std::chrono::steady_clock::time_point observed_at;
+  /** @brief Collector-local causal order reserved at linearization. */
+  std::uint64_t causal_sequence = 0U;
+};
+
+/**
+ * @brief Caller-visible future publication plus Host tracking settlement.
+ * @throws Nothing for value construction and copying.
+ * @note The edit-scoped sink supplies identity even when supersession prevents
+ * materialization of a concrete Run.
+ */
+struct I1ObservedHostSettlement final {
+  /** @brief Edit whose Host request completed tracking publication. */
+  std::size_t edit_index = 0U;
+  /** @brief Steady-clock sample reserved after future/tracking publication. */
+  std::chrono::steady_clock::time_point observed_at;
+  /** @brief Collector-local causal order reserved after publication. */
+  std::uint64_t causal_sequence = 0U;
+};
+
+/**
+ * @brief Authoritative causal cut reserved for the immutable `Q_end` boundary.
+ * @throws Nothing for value construction and copying.
+ * @note An event belongs to the boundary history only when its product
+ * coordinate is no later than `Q_end` and its sequence precedes this cut.
+ */
+struct I1ObservationHistoryCut final {
+  /** @brief Actual steady-clock sample paired with cut reservation. */
+  std::chrono::steady_clock::time_point captured_at;
+  /** @brief First collector sequence excluded from boundary history. */
+  std::uint64_t causal_sequence = 0U;
 };
 
 /**
@@ -300,6 +347,12 @@ struct I1EpisodeObservationSnapshot final {
   std::vector<I1ObservedTerminal> terminals;
   /** @brief Current-visible HP outputs. */
   std::vector<I1ObservedVisibleOutput> visible_outputs;
+  /** @brief Physical Run quiescence transitions. */
+  std::vector<I1ObservedRunLifecycleTransition> run_quiescences;
+  /** @brief Exact Run root-resource return transitions. */
+  std::vector<I1ObservedRunLifecycleTransition> resource_settlements;
+  /** @brief Caller-visible future plus Host tracking settlements. */
+  std::vector<I1ObservedHostSettlement> host_settlements;
   /** @brief True when any fixed observation capacity was exceeded. */
   bool overflowed = false;
 };
@@ -346,10 +399,30 @@ class I1EpisodeObservationCollector final {
    * @brief Copies every completely published bounded observation slot.
    * @return Stable event vectors and overflow status.
    * @throws std::bad_alloc when result vectors allocate.
-   * @note Callers use settlement futures/lifecycle counters to decide whether
-   * this snapshot is final; the method itself never waits or cancels work.
+   * @note Callers capture the `Q_end` history cut first and may copy published
+   * events later; each coordinate still proves its own cut membership. This
+   * method never waits or cancels work.
    */
   I1EpisodeObservationSnapshot snapshot() const;
+
+  /**
+   * @brief Reserves the first observation coordinate excluded at `Q_end`.
+   * @return Authoritative cut sharing every edit sink's causal sequence.
+   * @throws Nothing; sequence exhaustion is reflected by snapshot overflow.
+   * @note The caller first waits until the immutable `Q_end` time. Events with
+   * later timestamps remain outside the boundary even if scheduler lateness
+   * lets their sequence precede this reservation.
+   */
+  I1ObservationHistoryCut capture_history_cut() noexcept;
+
+  /**
+   * @brief Returns completely published Host-settlement observation count.
+   * @return Number of fixed slots release-published by status workers.
+   * @throws Nothing.
+   * @note The runner may poll this only after consuming all settlement futures;
+   * product callbacks never wait for the poller.
+   */
+  std::size_t published_host_settlement_count() const noexcept;
 
  private:
   /** @brief Opaque shared fixed-capacity store defined in the implementation.
