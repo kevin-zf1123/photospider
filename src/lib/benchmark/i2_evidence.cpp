@@ -547,6 +547,8 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
 
   std::set<std::uint64_t> accepted_sequences;
   std::set<std::uint64_t> generations;
+  std::array<std::optional<I1ObservedCurrentGeneration>, kI1EditCount>
+      current_generation_events;
   std::uint64_t previous_accepted_sequence = 0U;
   for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
     const I2EditEvidence& edit = row.evidence.edits[edit_index];
@@ -607,6 +609,7 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
         !(generation->accepted_coordinate == edit.accepted_coordinate)) {
       edit_valid = false;
     } else {
+      current_generation_events[edit_index] = generation;
       row.accepted_products[edit_index] = I2AcceptedProductIdentity{
           generation->generation, generation->accepted_coordinate, std::nullopt,
           std::nullopt};
@@ -625,36 +628,58 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
       structural_failure("I2 observation sequence is duplicate or outside cut");
     }
   };
+  /**
+   * @brief Validates one child event against the cut and generation ordering.
+   * @param child Descriptor identifying the accepted edit and child Run.
+   * @param time Steady-clock observation time carried by the event.
+   * @param sequence Request-scoped causal sequence carried by the event.
+   * @return Nothing.
+   * @throws std::bad_alloc when sequence or validity-reason storage allocates.
+   * @note Malformed evidence is recorded as a structural failure; this helper
+   * does not grant authority to alter the observed product lifecycle.
+   */
+  const auto check_child_event = [&](const I2ObservedChildDescriptor& child,
+                                     std::chrono::steady_clock::time_point time,
+                                     std::uint64_t sequence) {
+    check_event(time, sequence);
+    if (child.edit_index >= kI1EditCount ||
+        !current_generation_events[child.edit_index].has_value() ||
+        current_generation_events[child.edit_index]->causal_sequence >=
+            sequence) {
+      structural_failure(
+          "I2 child event does not follow its current generation");
+    }
+  };
   for (const I1ObservedCurrentGeneration& event :
        row.evidence.observations.current_generations) {
     check_event(event.observed_at, event.causal_sequence);
   }
   for (const I2ObservedServiceStart& event :
        row.evidence.observations.service_starts) {
-    check_event(event.observed_at, event.causal_sequence);
+    check_child_event(event.child, event.observed_at, event.causal_sequence);
   }
   for (const I2ObservedCancellation& event :
        row.evidence.observations.cancellations) {
-    check_event(event.observed_at, event.causal_sequence);
+    check_child_event(event.child, event.observed_at, event.causal_sequence);
   }
   for (const I2ObservedTerminal& event : row.evidence.observations.terminals) {
-    check_event(event.observed_at, event.causal_sequence);
+    check_child_event(event.child, event.observed_at, event.causal_sequence);
   }
   for (const I2ObservedFinalTrigger& event :
        row.evidence.observations.final_triggers) {
-    check_event(event.observed_at, event.causal_sequence);
+    check_child_event(event.child, event.observed_at, event.causal_sequence);
   }
   for (const I2ObservedVisibleOutput& event :
        row.evidence.observations.visible_outputs) {
-    check_event(event.observed_at, event.causal_sequence);
+    check_child_event(event.child, event.observed_at, event.causal_sequence);
   }
   for (const I2ObservedRunLifecycleTransition& event :
        row.evidence.observations.run_quiescences) {
-    check_event(event.observed_at, event.causal_sequence);
+    check_child_event(event.child, event.observed_at, event.causal_sequence);
   }
   for (const I2ObservedRunLifecycleTransition& event :
        row.evidence.observations.resource_settlements) {
-    check_event(event.observed_at, event.causal_sequence);
+    check_child_event(event.child, event.observed_at, event.causal_sequence);
   }
   for (const I1ObservedHostSettlement& event :
        row.evidence.observations.host_settlements) {
@@ -828,6 +853,7 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
     }
   }
 
+  std::map<RunKey, I2ObservedCancellation> cancellations;
   for (const I2ObservedCancellation& cancellation :
        row.evidence.observations.cancellations) {
     const RunKey key{cancellation.child.edit_index, cancellation.child.run_id};
@@ -835,9 +861,19 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
     if (terminal == terminals.end() ||
         !i2_child_equal(cancellation.child, terminal->second.child) ||
         terminal->second.kind != compute::ComputeRunTerminalKind::Cancelled ||
-        cancellation.causal_sequence >= terminal->second.causal_sequence) {
+        cancellation.causal_sequence >= terminal->second.causal_sequence ||
+        !cancellations.emplace(key, cancellation).second) {
       structural_failure(
           "I2 cancellation/terminal state machine is inconsistent");
+    }
+  }
+  for (const auto& [key, terminal] : terminals) {
+    const bool terminal_is_cancelled =
+        terminal.kind == compute::ComputeRunTerminalKind::Cancelled;
+    const bool has_cancellation = cancellations.count(key) == 1U;
+    if (terminal_is_cancelled != has_cancellation) {
+      structural_failure(
+          "I2 terminal/cancellation cardinality is not exactly one-to-one");
     }
   }
 

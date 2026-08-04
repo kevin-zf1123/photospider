@@ -11,6 +11,7 @@
 #include <stdexcept>
 
 #include "core/image_buffer_processing.hpp"
+#include "core/image_buffer_storage.hpp"
 
 namespace ps::image_processing {
 namespace {
@@ -177,9 +178,9 @@ void exact_box_average_factor_four_region(const ImageBuffer& source,
         "Exact box average requires matching channels and factor-four "
         "extents.");
   }
-  if (source.data.get() == destination.data.get()) {
+  if (detail::image_buffer_storage_envelopes_may_overlap(source, destination)) {
     throw std::invalid_argument(
-        "Exact box average source and destination must not alias.");
+        "Exact box average source and destination storage must not overlap.");
   }
 
   ScopedRoundToNearest round_to_nearest;

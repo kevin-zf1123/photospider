@@ -96,7 +96,8 @@ void resize_cpu_image_buffer_region(const ImageBuffer& source,
  * coordinate samples the aligned source block beginning at `(4*x, 4*y)`.
  * @return Nothing.
  * @throws std::invalid_argument for malformed/non-CPU/non-FP32 descriptors,
- * mismatched channels or factor-four extents, or aliased source/destination.
+ * mismatched channels or factor-four extents, or source/destination active
+ * storage envelopes that may overlap.
  * @throws std::out_of_range when `destination_roi` is empty or outside the
  * destination extent.
  * @throws std::runtime_error when the host floating-point environment cannot
@@ -104,8 +105,10 @@ void resize_cpu_image_buffer_region(const ImageBuffer& source,
  * @note The sixteen binary32 samples are accumulated in binary64, multiplied
  * by exact `1/16`, then rounded exactly once to binary32. The complete caller
  * floating-point environment, including exception flags and rounding mode, is
- * restored on every return or exception. Pixels and row padding outside the
- * destination ROI remain unchanged.
+ * restored on every return or exception. Overlap inspection uses checked
+ * half-open byte intervals and conservatively rejects shared owners or
+ * unrepresentable address endpoints before any write. Pixels and row padding
+ * outside the destination ROI remain unchanged.
  */
 void exact_box_average_factor_four_region(const ImageBuffer& source,
                                           const ImageBuffer& destination,

@@ -5,10 +5,12 @@
 #include <fenv.h>  // NOLINT(build/c++11)
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <memory>
 
 #include "compute/progressive_compute.hpp"
 #include "core/image_buffer_processing.hpp"
@@ -191,6 +193,61 @@ TEST(ExactBoxAverageFactorFour, RejectsWrongGeometryAndAliasing) {
   EXPECT_THROW(image_processing::exact_box_average_factor_four_region(
                    source, destination, PixelRect{2, 0, 1, 1}),
                std::out_of_range);
+}
+
+/**
+ * @brief Proves valid factor-four geometry cannot hide overlapping envelopes.
+ * @throws Allocation failures are reported by GoogleTest.
+ * @note Both cases use different starting addresses, so the test cannot pass
+ * through the former start-pointer equality check.
+ */
+TEST(ExactBoxAverageFactorFour,
+     RejectsGeometricallyValidOverlappingStorageEnvelopes) {
+  auto shared_storage = std::make_shared<std::array<std::byte, 68U>>();
+  std::shared_ptr<void> shared_source_owner(shared_storage,
+                                            shared_storage->data());
+  std::shared_ptr<void> shared_destination_owner(
+      shared_storage, shared_storage->data() + sizeof(float));
+  ImageBuffer shared_source{
+      4, 4, 1, DataType::FLOAT32, Device::CPU, 16U, shared_source_owner, {}};
+  ImageBuffer shared_destination{
+      1, 1, 1, DataType::FLOAT32, Device::CPU, 4U, shared_destination_owner,
+      {}};
+  ASSERT_NE(shared_source.data.get(), shared_destination.data.get());
+  ASSERT_FALSE(shared_source.data.owner_before(shared_destination.data));
+  ASSERT_FALSE(shared_destination.data.owner_before(shared_source.data));
+  EXPECT_THROW(image_processing::exact_box_average_factor_four_region(
+                   shared_source, shared_destination, PixelRect{0, 0, 1, 1}),
+               std::invalid_argument);
+
+  std::array<std::byte, 68U> distinct_storage{};
+  /**
+   * @brief Suppresses deletion for stack-owned test storage.
+   * @param storage Borrowed address whose lifetime is owned by the test scope.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Both independent control blocks are destroyed before the underlying
+   * lexical storage leaves scope.
+   */
+  const auto retain_external_storage = [](void* storage) noexcept {
+    static_cast<void>(storage);
+  };
+  std::shared_ptr<void> distinct_source_owner(distinct_storage.data(),
+                                              retain_external_storage);
+  std::shared_ptr<void> distinct_destination_owner(
+      distinct_storage.data() + sizeof(float), retain_external_storage);
+  ImageBuffer distinct_source{
+      4, 4, 1, DataType::FLOAT32, Device::CPU, 16U, distinct_source_owner, {}};
+  ImageBuffer distinct_destination{
+      1, 1, 1, DataType::FLOAT32, Device::CPU, 4U, distinct_destination_owner,
+      {}};
+  ASSERT_NE(distinct_source.data.get(), distinct_destination.data.get());
+  ASSERT_TRUE(distinct_source.data.owner_before(distinct_destination.data) ||
+              distinct_destination.data.owner_before(distinct_source.data));
+  EXPECT_THROW(
+      image_processing::exact_box_average_factor_four_region(
+          distinct_source, distinct_destination, PixelRect{0, 0, 1, 1}),
+      std::invalid_argument);
 }
 
 }  // namespace

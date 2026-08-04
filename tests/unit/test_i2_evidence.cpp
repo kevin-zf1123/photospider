@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -274,6 +275,68 @@ TEST(I2Evidence, CrossEventChildDescriptorDriftIsInvalid) {
 
   const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
 
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves a Cancelled terminal cannot pass without cancellation proof.
+ * @throws Nothing when the evaluator rejects the otherwise complete episode.
+ * @note The synthetic final was triggered and started before cancellation and
+ * has no visible output. Before terminal/cancellation cardinality validation,
+ * this shape could still produce Pass on all four independent verdicts.
+ */
+TEST(I2Evidence, CancelledTerminalWithoutCancellationEvidenceIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  auto terminal = std::find_if(
+      input.observations.terminals.begin(), input.observations.terminals.end(),
+      [](const I2ObservedTerminal& event) {
+        return event.child.edit_index == 0U &&
+               event.child.quality == compute::ComputeRunQuality::Full;
+      });
+  ASSERT_NE(terminal, input.observations.terminals.end());
+  const std::uint64_t run_id = terminal->child.run_id;
+  terminal->kind = compute::ComputeRunTerminalKind::Cancelled;
+  input.observations.visible_outputs.erase(
+      std::remove_if(input.observations.visible_outputs.begin(),
+                     input.observations.visible_outputs.end(),
+                     [run_id](const I2ObservedVisibleOutput& output) {
+                       return output.child.run_id == run_id;
+                     }),
+      input.observations.visible_outputs.end());
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "I2 terminal/cancellation cardinality is not exactly "
+                      "one-to-one"),
+            row.validity_reasons.end());
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves accepted generation causally precedes every child event.
+ * @throws Nothing when swapping only two causal sequences invalidates the row.
+ */
+TEST(I2Evidence, CurrentGenerationMustPrecedePreviewServiceStart) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  ASSERT_FALSE(input.observations.current_generations.empty());
+  ASSERT_FALSE(input.observations.service_starts.empty());
+  ASSERT_EQ(input.observations.current_generations.front().edit_index,
+            input.observations.service_starts.front().child.edit_index);
+  std::swap(input.observations.current_generations.front().causal_sequence,
+            input.observations.service_starts.front().causal_sequence);
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "I2 child event does not follow its current generation"),
+            row.validity_reasons.end());
   EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
   EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
   EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);

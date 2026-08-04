@@ -308,12 +308,14 @@ TEST(I2Profile, ContinuousGridAndTerminalGuardAreExact) {
             checked_i1_time_add(origin, kI2EpisodeStride * 110));
   EXPECT_EQ(i2_terminal_boundary(origin),
             checked_i1_time_add(origin, kI2EpisodeStride * 111));
-  EXPECT_EQ(classify_i2_slot(0U), std::make_pair(I2EpisodePhase::Cold, 0U));
-  EXPECT_EQ(classify_i2_slot(10U), std::make_pair(I2EpisodePhase::Warmup, 9U));
+  EXPECT_EQ(classify_i2_slot(0U),
+            std::make_pair(I2EpisodePhase::Cold, std::size_t{0U}));
+  EXPECT_EQ(classify_i2_slot(10U),
+            std::make_pair(I2EpisodePhase::Warmup, std::size_t{9U}));
   EXPECT_EQ(classify_i2_slot(11U),
-            std::make_pair(I2EpisodePhase::Measured, 0U));
+            std::make_pair(I2EpisodePhase::Measured, std::size_t{0U}));
   EXPECT_EQ(classify_i2_slot(110U),
-            std::make_pair(I2EpisodePhase::Measured, 99U));
+            std::make_pair(I2EpisodePhase::Measured, std::size_t{99U}));
   EXPECT_EQ(kI2LatestFinalDeadlineOffset + kI2TerminalGuard, kI2EpisodeStride);
   EXPECT_THROW(i2_episode_origin(origin, 111U), std::out_of_range);
   EXPECT_THROW(classify_i2_slot(111U), std::out_of_range);
