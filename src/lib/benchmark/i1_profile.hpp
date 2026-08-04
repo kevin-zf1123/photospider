@@ -196,7 +196,14 @@ struct I1EditAdmissionResult final {
   /** @brief Checked-derived immutable nominal Host-call start. */
   std::chrono::steady_clock::time_point nominal_time;
 
-  /** @brief Sole monotonic sample taken at the attempted admission boundary. */
+  /**
+   * @brief Whether this fixed-width position reached the admission boundary.
+   * @note False positions occur only after an earlier edit aborts the episode;
+   * their sample and all Host-call facts are non-evidence defaults.
+   */
+  bool admission_attempted = false;
+
+  /** @brief Sole monotonic sample taken when admission_attempted is true. */
   std::chrono::steady_clock::time_point admission_sample;
 
   /** @brief Whether the sample lies in the inclusive two-millisecond window. */

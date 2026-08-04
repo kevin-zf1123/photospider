@@ -453,6 +453,7 @@ I1EditAdmissionResult I1AcceptedBoundaryCollector::admit_edit(
   result.nominal_time = checked_i1_time_add(
       episode_origin, checked_i1_time_multiply(kI1EditStride, edit_index));
   sleep_until_(result.nominal_time);
+  result.admission_attempted = true;
   result.admission_sample = clock_();
   const std::chrono::steady_clock::time_point latest_start =
       checked_i1_time_add(result.nominal_time, kI1AdmissionLateness);

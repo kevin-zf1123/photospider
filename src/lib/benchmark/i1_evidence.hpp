@@ -64,7 +64,9 @@ struct I1EditEvidence final {
   PixelRect region;
   /** @brief Immutable checked-derived nominal Host-call start. */
   std::chrono::steady_clock::time_point nominal_time;
-  /** @brief Sole pre-call monotonic sample. */
+  /** @brief Whether this edit reached its admission boundary. */
+  bool admission_attempted = false;
+  /** @brief Sole pre-call monotonic sample when admission was attempted. */
   std::chrono::steady_clock::time_point admission_sample;
   /** @brief Whether the inclusive two-millisecond window was satisfied. */
   bool admission_window_valid = false;

@@ -266,6 +266,7 @@ I1EditEvidence capture_i1_edit_evidence(
       kI1EditCoefficients[admission.edit_index],
       i1_edit_region(admission.edit_index),
       admission.nominal_time,
+      admission.admission_attempted,
       admission.admission_sample,
       admission.admission_window_valid,
       admission.reserved_event_sequence,
@@ -403,10 +404,12 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
     }
     const auto latest_admission =
         checked_i1_time_add(expected_nominal, kI1AdmissionLateness);
-    if (!edit.admission_window_valid ||
+    if (!edit.admission_attempted || !edit.admission_window_valid ||
         edit.admission_sample < expected_nominal ||
         edit.admission_sample > latest_admission) {
-      global_invalidate("edit admission is outside the inclusive window");
+      global_invalidate(
+          "edit admission was not attempted or is outside the inclusive "
+          "window");
     }
     if (!edit.reserved_event_sequence.has_value() ||
         *edit.reserved_event_sequence == 0U ||

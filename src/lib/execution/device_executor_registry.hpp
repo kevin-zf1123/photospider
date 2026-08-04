@@ -315,8 +315,8 @@ class DeviceExecutorRegistry final {
    * @return Nothing.
    * @throws ResidencyManager validation, allocation, or synchronization errors.
    * @note This fallible step runs before the coordinator publication is
-   * submitted, marks the lineage as coordinator-managed, and advances no
-   * generation.
+   * submitted, marks the lineage as coordinator-managed, and assigns no
+   * current identity.
    */
   void track_lineage(std::uint64_t graph_instance_id, int target_node_id,
                      ComputeIntent request_intent);

@@ -751,10 +751,10 @@ TEST(DeviceResidency, RejectsZeroResidentCapacity) {
  * @brief Proves a newer generation fails an old destination before Ready.
  * @return Nothing; GoogleTest reports stale acceptance or lookup failures.
  * @throws Fake publication, diagnostic, identity, and manager exceptions.
- * @note The manager learns generation two from pretracked coordinator
- * publication before any generation-two Run starts. Physical source work may
- * settle, but destination failure prevents the stale callback from releasing
- * request-local dependent work.
+ * @note After lineage pretracking, the coordinator assigns generation two as
+ * the exact managed identity before any generation-two Run starts. Physical
+ * source work may settle, but destination failure prevents the stale callback
+ * from releasing request-local dependent work.
  */
 TEST(DeviceResidency, StaleCompletionCannotPublishReadyDestination) {
   ResidencyManager manager;
@@ -784,12 +784,13 @@ TEST(DeviceResidency, StaleCompletionCannotPublishReadyDestination) {
 }
 
 /**
- * @brief Proves a late older Run cannot regress a pretracked current lineage.
- * @return Nothing; GoogleTest reports stale admission or generation rollback.
+ * @brief Proves a late stale Run cannot replace the exact managed identity.
+ * @return Nothing; GoogleTest reports stale admission or identity replacement.
  * @throws Fake publication, identity, and synchronized manager exceptions.
- * @note Generation two becomes current before generation one's Run observation.
- * The later observation is monotonic, and transfer admission is rejected before
- * native submission or destination readiness.
+ * @note The coordinator assigns generation two as the exact current identity
+ * before generation one's Run observation. The later stale observation cannot
+ * replace it, and transfer admission is rejected before native submission or
+ * destination readiness.
  */
 TEST(DeviceResidency, PretrackedCurrentRejectsLateOlderRunAdmission) {
   ResidencyManager manager;
@@ -812,8 +813,8 @@ TEST(DeviceResidency, PretrackedCurrentRejectsLateOlderRunAdmission) {
 }
 
 /**
- * @brief Proves coordinator-managed native freshness accepts an exact current
- * generation even when its scalar moves backward.
+ * @brief Proves coordinator-managed native freshness accepts a numerically
+ * lower exact current generation.
  * @return Nothing; GoogleTest reports stale admission or currentness drift.
  * @throws Fake publication, identity, and synchronized manager exceptions.
  * @note Generation two models the earlier accepted coordinate that publishes
@@ -821,7 +822,7 @@ TEST(DeviceResidency, PretrackedCurrentRejectsLateOlderRunAdmission) {
  * coordinate. A late observation from generation two must not restore it.
  */
 TEST(DeviceResidency,
-     CoordinatorCurrentnessCanMoveToLowerGenerationWithoutStaleRollback) {
+     CoordinatorCurrentnessCanAssignLowerGenerationWithoutStaleReplacement) {
   ResidencyManager manager;
   PendingReplicaPair stale_pair = make_pending_replica_pair();
   PendingReplicaPair current_pair = make_pending_replica_pair();

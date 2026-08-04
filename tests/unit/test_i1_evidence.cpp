@@ -7,11 +7,13 @@
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "benchmark/i1_evidence.hpp"
 #include "photospider/data/value.hpp"
+#include "verification/i1_evidence_json.hpp"
 
 namespace ps::benchmark {
 namespace {
@@ -105,6 +107,7 @@ I1EpisodeEvidenceInput make_valid_input(
         kI1EditCoefficients[edit_index],
         i1_edit_region(edit_index),
         nominal,
+        true,
         admission,
         true,
         static_cast<std::uint64_t>(edit_index + 1U),
@@ -268,6 +271,24 @@ void open_observation_sequence_gap(I1EpisodeObservationSnapshot* observations,
 }
 
 /**
+ * @brief Removes every synthetic observation belonging to one failed edit.
+ * @tparam Event Observation type carrying `edit_index`.
+ * @param events Mutable event vector.
+ * @param edit_index Failed edit whose product facts must be absent.
+ * @return Nothing.
+ * @throws Nothing under vector element movement/destruction.
+ */
+template <typename Event>
+void erase_events_for_edit(std::vector<Event>* events,
+                           std::size_t edit_index) noexcept {
+  events->erase(std::remove_if(events->begin(), events->end(),
+                               [edit_index](const Event& event) {
+                                 return event.edit_index == edit_index;
+                               }),
+                events->end());
+}
+
+/**
  * @brief Proves nearest rank uses one-based `ceil(p*N)` selection.
  * @throws Nothing when exact percentile selection remains stable.
  */
@@ -361,6 +382,150 @@ TEST(I1Evidence, CurrentGenerationRequiresExactAcceptedCoordinateBinding) {
                       "coordinate"),
             row.validity_reasons.end());
   EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves a failed Host admission remains a source-faithful inner JSON
+ * row without accepted/current/product facts.
+ * @throws Nothing when evaluation and the runner-owned serializer fail closed.
+ * @note The first ten edits retain their observer history. The eleventh edit
+ * retains its pre-call sample, reservation, deadline, and exact raw Host
+ * return; the fixed-width twelfth suffix records that admission was not
+ * attempted. Graph-close state proves publication/resource revocation.
+ */
+TEST(I1Evidence, FailedAdmissionSerializesRawEvidenceWithoutAcceptedProduct) {
+  constexpr std::size_t kFailedEdit = kI1EditCount - 2U;
+  constexpr std::size_t kUnattemptedEdit = kI1EditCount - 1U;
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  I1EditEvidence& failed_edit = input.edits[kFailedEdit];
+  const OperationStatus admission_failure{
+      false,
+      OperationErrorDomain::Graph,
+      static_cast<std::int32_t>(GraphErrc::ComputeError),
+      graph_error_stable_name(GraphErrc::ComputeError),
+      "injected I1 admission failure",
+  };
+  failed_edit.host_return = I1HostReturnEvidence{
+      checked_i1_time_add(failed_edit.admission_sample, 100us),
+      admission_failure, false};
+  failed_edit.accepted_coordinate.reset();
+  failed_edit.settlement_status.reset();
+
+  I1EditEvidence& unattempted_edit = input.edits[kUnattemptedEdit];
+  unattempted_edit.admission_attempted = false;
+  unattempted_edit.admission_sample = {};
+  unattempted_edit.admission_window_valid = false;
+  unattempted_edit.reserved_event_sequence.reset();
+  unattempted_edit.deadline.reset();
+  unattempted_edit.host_return.reset();
+  unattempted_edit.accepted_coordinate.reset();
+  unattempted_edit.settlement_status.reset();
+
+  erase_events_for_edit(&input.observations.current_generations, kFailedEdit);
+  erase_events_for_edit(&input.observations.current_generations,
+                        kUnattemptedEdit);
+  erase_events_for_edit(&input.observations.service_starts, kFailedEdit);
+  erase_events_for_edit(&input.observations.service_starts, kUnattemptedEdit);
+  erase_events_for_edit(&input.observations.cancellations, kFailedEdit);
+  erase_events_for_edit(&input.observations.cancellations, kUnattemptedEdit);
+  erase_events_for_edit(&input.observations.terminals, kFailedEdit);
+  erase_events_for_edit(&input.observations.terminals, kUnattemptedEdit);
+  erase_events_for_edit(&input.observations.visible_outputs, kFailedEdit);
+  erase_events_for_edit(&input.observations.visible_outputs, kUnattemptedEdit);
+  erase_events_for_edit(&input.observations.run_quiescences, kFailedEdit);
+  erase_events_for_edit(&input.observations.run_quiescences, kUnattemptedEdit);
+  erase_events_for_edit(&input.observations.resource_settlements, kFailedEdit);
+  erase_events_for_edit(&input.observations.resource_settlements,
+                        kUnattemptedEdit);
+  erase_events_for_edit(&input.observations.host_settlements, kFailedEdit);
+  erase_events_for_edit(&input.observations.host_settlements, kUnattemptedEdit);
+  input.final_snapshot.lifecycle.counters.registered_graph_count = 0U;
+  input.final_snapshot.lifecycle.counters.open_graph_count = 0U;
+  input.final_snapshot.lifecycle.counters.live_policy_binding_count = 0U;
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  const I1EditEvidence& recorded_failed_edit = row.evidence.edits[kFailedEdit];
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+  EXPECT_FALSE(row.accepted_products[kFailedEdit].has_value());
+
+  const nlohmann::json encoded = i1_inner_row_json(row);
+  const nlohmann::json& encoded_edit = encoded.at("edits").at(kFailedEdit);
+  EXPECT_TRUE(encoded_edit.at("admission_attempted").get<bool>());
+  EXPECT_EQ(encoded_edit.at("admission_sample_ns").get<std::int64_t>(),
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                recorded_failed_edit.admission_sample.time_since_epoch())
+                .count());
+  EXPECT_EQ(encoded_edit.at("reserved_event_sequence").get<std::uint64_t>(),
+            kFailedEdit + 1U);
+  ASSERT_TRUE(recorded_failed_edit.deadline.has_value());
+  EXPECT_EQ(encoded_edit.at("deadline_ns").get<std::int64_t>(),
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                recorded_failed_edit.deadline->time_since_epoch())
+                .count());
+  const nlohmann::json& encoded_return = encoded_edit.at("host_return");
+  EXPECT_FALSE(encoded_return.at("status").at("ok").get<bool>());
+  EXPECT_EQ(encoded_return.at("status").at("domain").get<std::uint32_t>(),
+            static_cast<std::uint32_t>(OperationErrorDomain::Graph));
+  EXPECT_EQ(encoded_return.at("status").at("code").get<std::int32_t>(),
+            static_cast<std::int32_t>(GraphErrc::ComputeError));
+  EXPECT_EQ(encoded_return.at("status").at("name").get<std::string>(),
+            graph_error_stable_name(GraphErrc::ComputeError));
+  EXPECT_EQ(encoded_return.at("status").at("message").get<std::string>(),
+            "injected I1 admission failure");
+  EXPECT_FALSE(encoded_return.at("future_valid").get<bool>());
+  EXPECT_TRUE(encoded_edit.at("accepted_coordinate").is_null());
+  EXPECT_TRUE(encoded_edit.at("settlement_status").is_null());
+  EXPECT_TRUE(encoded.at("accepted_products").at(kFailedEdit).is_null());
+
+  ASSERT_EQ(encoded.at("edits").size(), kI1EditCount);
+  const nlohmann::json& encoded_unattempted_edit =
+      encoded.at("edits").at(kUnattemptedEdit);
+  EXPECT_FALSE(encoded_unattempted_edit.at("admission_attempted").get<bool>());
+  EXPECT_TRUE(encoded_unattempted_edit.at("admission_sample_ns").is_null());
+  EXPECT_FALSE(
+      encoded_unattempted_edit.at("admission_window_valid").get<bool>());
+  EXPECT_TRUE(encoded_unattempted_edit.at("reserved_event_sequence").is_null());
+  EXPECT_TRUE(encoded_unattempted_edit.at("deadline_ns").is_null());
+  EXPECT_TRUE(encoded_unattempted_edit.at("host_return").is_null());
+  EXPECT_TRUE(encoded_unattempted_edit.at("accepted_coordinate").is_null());
+  EXPECT_TRUE(encoded_unattempted_edit.at("settlement_status").is_null());
+  EXPECT_TRUE(encoded.at("accepted_products").at(kUnattemptedEdit).is_null());
+
+  const nlohmann::json& encoded_observations = encoded.at("observations");
+  EXPECT_EQ(encoded_observations.at("current_generations").size(), kFailedEdit);
+  EXPECT_EQ(encoded_observations.at("service_starts").size(), kFailedEdit);
+  EXPECT_EQ(encoded_observations.at("visible_outputs").size(), kFailedEdit);
+  for (const nlohmann::json& current :
+       encoded_observations.at("current_generations")) {
+    EXPECT_LT(current.at("edit_index").get<std::size_t>(), kFailedEdit);
+  }
+  EXPECT_EQ(encoded.at("resource_high_water_and_final")
+                .at("host")
+                .at("reserved")
+                .at("cpu_slots")
+                .get<std::uint64_t>(),
+            0U);
+  const nlohmann::json& final_counters =
+      encoded.at("resource_high_water_and_final")
+          .at("lifecycle")
+          .at("counters");
+  EXPECT_EQ(final_counters.at("registered_graph_count").get<std::uint64_t>(),
+            0U);
+  EXPECT_EQ(final_counters.at("open_graph_count").get<std::uint64_t>(), 0U);
+  EXPECT_EQ(encoded.at("verdicts").at("latency").get<std::string>(), "invalid");
+  EXPECT_EQ(encoded.at("verdicts").at("waste").get<std::string>(), "invalid");
+  EXPECT_EQ(encoded.at("verdicts").at("memory").get<std::string>(), "invalid");
+  EXPECT_EQ(encoded.at("verdicts").at("output").get<std::string>(), "invalid");
+  EXPECT_FALSE(encoded.at("outer_canonical_envelope_claim").get<bool>());
+
+  const I1ReplicateSummary summary = evaluate_i1_replicate({row});
+  EXPECT_EQ(summary.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary.output_verdict, I1Verdict::Invalid);
 }
 
 /**

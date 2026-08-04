@@ -132,6 +132,7 @@ TEST(I1AcceptedBoundaryCollector, SuccessfulCallUsesPreCallCoordinate) {
 
   ASSERT_EQ(sleeps.size(), 1U);
   EXPECT_EQ(sleeps.front(), nominal);
+  EXPECT_TRUE(result.admission_attempted);
   EXPECT_TRUE(result.admission_window_valid);
   ASSERT_TRUE(result.reserved_event_sequence.has_value());
   EXPECT_EQ(*result.reserved_event_sequence, 7U);
@@ -190,6 +191,7 @@ TEST(I1AcceptedBoundaryCollector, FailedHostCallCreatesNoAcceptedEvent) {
   I1EditAdmissionResult result = collector.admit_edit(
       origin, 0U, make_test_request(0U), make_test_sink(observations, 0U));
 
+  EXPECT_TRUE(result.admission_attempted);
   EXPECT_TRUE(result.admission_window_valid);
   EXPECT_EQ(result.reserved_event_sequence, std::optional<std::uint64_t>(19U));
   EXPECT_TRUE(result.deadline.has_value());
@@ -231,6 +233,8 @@ TEST(I1AcceptedBoundaryCollector, InvalidWindowsNeverCallOrReserve) {
   I1EditAdmissionResult late = collector.admit_edit(
       origin, 1U, make_test_request(1U), make_test_sink(observations, 1U));
 
+  EXPECT_TRUE(early.admission_attempted);
+  EXPECT_TRUE(late.admission_attempted);
   EXPECT_FALSE(early.admission_window_valid);
   EXPECT_FALSE(late.admission_window_valid);
   EXPECT_FALSE(early.reserved_event_sequence.has_value());

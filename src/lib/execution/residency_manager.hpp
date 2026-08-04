@@ -101,8 +101,8 @@ class ResidencyManager final {
    * @throws std::bad_alloc or std::system_error from map synchronization.
    * @note A fresh row uses internal generation zero until an accepted current
    * publication assigns the exact generation. Tracking marks the row as
-   * coordinator-managed; failed and born-stale candidates never advance the
-   * placeholder.
+   * coordinator-managed; failed and born-stale candidates never assign the
+   * placeholder as a current identity.
    */
   void track_lineage(std::uint64_t graph_instance_id, int target_node_id,
                      ComputeIntent request_intent);
@@ -222,8 +222,8 @@ class ResidencyManager final {
    * @return Copy of the resident Value, or nullopt when absent.
    * @throws std::system_error when synchronization fails.
    * @note Lookup does not refresh recency, map, import, transfer, or alter
-   * eviction. Generation advance alone does not invalidate retained entries;
-   * bounded publication pressure can evict an older revision.
+   * eviction. Managed-current assignment alone does not invalidate retained
+   * entries; bounded publication pressure can evict an older revision.
    */
   std::optional<Value> find(ValueRevisionId revision, DeviceId device,
                             MemoryDomain memory_domain) const;
