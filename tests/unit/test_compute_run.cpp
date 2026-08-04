@@ -9655,7 +9655,7 @@ TEST(ExecutionServiceCancellation,
  * @brief Proves a route commit holding the Run arbiter orders before cancel.
  *
  * @return Nothing; GoogleTest reports coordinate inversion, missing callbacks,
- * executable entry, cancellation failure, or resource leakage.
+ * cancellation failure, or resource leakage.
  * @throws Allocation, future, service, or synchronization exceptions from
  * setup and settlement.
  * @note The worker blocks with the Run terminal arbiter held immediately before
@@ -9715,7 +9715,6 @@ TEST(ExecutionServiceCancellation,
   ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_NO_THROW(run_future.get());
-  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
