@@ -203,14 +203,17 @@ Registry 共享的 `ResidencyManager` 会在 native commit 前准入完整
 Graph/target/intent/generation/Run/task/producer/revision/binding identity。Current-generation
 publication 被提交给 coordinator 之前，Kernel 会先以可失败方式预跟踪 request lineage，
 并建立内部零 generation 占位。只有被接受的 current publication 才会在 coordinator mutex
-仍排除 `is_current()` 的期间调用 manager 的无 allocation generation 推进；被拒绝或
-born-stale 的 candidate 不会推进它。因此，如果 N+1 在 generation N 启动物理 Run 前成为
-current，N 随后的 observation 不能让 manager 倒退，其 transfer admission 会被视为 stale。
+仍排除 `is_current()` 的期间，以无 allocation 方式把精确 generation 赋给 manager；被拒绝或
+born-stale 的 candidate 不会改变它。因此，如果更新的 accepted request 在较旧 accepted request
+启动其物理 Run 前成为 current，旧 Run 随后的 observation 就无法覆盖 manager 的 current
+identity，无论两者的 generation 数值大小如何，其 transfer admission 都会被视为 stale。
 Current-generation
-校验、producer Ready transition 与 resident 插入形成同一个 manager-locked 线性化区间。因此，
-新 generation 要么先于旧 callback，使 destination 在 Ready 前进入 typed failure；要么发生在
-一个已经以 current 身份发布的 completion 之后。Duplicate 与 proper-subset identity 不能消费
-另一条 admission。Perlin provider 会编码显式 texture-to-buffer blit，不调用
+校验、producer Ready transition 与 resident 插入形成同一个 manager-locked 线性化区间。对于
+coordinator-managed lineage，current-identity update 要么先于旧 callback，使 destination 在
+Ready 前进入 typed failure；要么发生在一个已经按当时 exact current generation 发布的
+completion 之后。Standalone lineage 另行保留 numeric-maximum generation order。Duplicate 与
+proper-subset identity 不能消费另一条 admission。Perlin provider 会编码显式
+texture-to-buffer blit，不调用
 `waitUntilCompleted` 或 `getBytes`；CPU-to-Metal 使用相反方向的显式 blit。`GraphRuntime`
 仍不拥有 native Metal state，#74 仍是最终 visible-commit gate，而 #86 把 device-memory/scratch
 authority 保留在 service ledger 内，而不是放进 residency 或 Run。

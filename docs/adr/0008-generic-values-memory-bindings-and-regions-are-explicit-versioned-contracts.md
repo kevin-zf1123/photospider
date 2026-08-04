@@ -377,10 +377,13 @@ waiting, or transferring. CPU-to-CPU, CPU-to-Metal, and Metal-to-CPU transfers
 publish distinct bindings that preserve one logical `ValueRevisionId`. The
 process-owned `ResidencyManager` admits complete Run/task/producer/revision/
 binding identities and linearizes current-generation validation, producer
-Ready publication, and replica insertion under one lock. Therefore a newer
-generation either makes an old callback typed-Failed before destination Ready,
-or follows a completion that was already current; mismatched and duplicate
-identities cannot consume or republish another admission. Pending operation
+Ready publication, and replica insertion under one lock. For a coordinator-
+managed lineage, an updated accepted current identity therefore either makes
+an old callback typed-Failed before destination Ready, or follows a completion
+published against the then-current exact generation. Numeric generation
+magnitude does not establish managed currentness; standalone lineages retain
+numeric-maximum order. Mismatched and duplicate identities cannot consume or
+republish another admission. Pending operation
 Values keep their Run unsettled and release dependants only through the same
 `ExecutionService` ready store after terminal success. The Metal Perlin path
 encodes an explicit texture-to-shared-buffer blit, installs the completion
@@ -397,11 +400,13 @@ not a byte-budget authority.
 
 The current-generation handoff is staged rather than allocating in the
 coordinator critical section. Kernel pretracks a zero-generation lineage row
-before submitting publication. Only an accepted current candidate advances the
-pretracked row through a no-throw callback immediately before coordinator
-currentness becomes observable. A rejected or born-stale candidate leaves the
-row unchanged, and a generation-N Run that starts after N+1 publication cannot
-move the monotonic manager row backwards. The prepared candidate owns a
+before submitting publication. Only an accepted current candidate assigns the
+exact published generation through a no-throw callback immediately before
+coordinator currentness becomes observable. A rejected or born-stale candidate
+leaves the row unchanged, and a stale Run that starts after another accepted
+identity becomes current cannot overwrite that exact managed identity,
+regardless of numeric generation direction. Standalone rows separately retain
+numeric-maximum order. The prepared candidate owns a
 compute-request-lane reserved ticket before this fallible pretracking step.
 Graph close therefore drains and joins that lane before retiring the exact
 Graph's lineage rows, preventing a paused caller from recreating maintenance

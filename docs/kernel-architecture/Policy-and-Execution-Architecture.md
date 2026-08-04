@@ -354,9 +354,12 @@ pretrack the lineage without changing its current generation; this fallible
 allocation completes before coordinator submission. When the candidate is
 accepted as current, the coordinator invokes a no-throw, no-allocation service
 callback while holding its mutex and before publishing its own current row.
-That callback advances the manager under the manager mutex. Failed,
-close-rejected, and born-stale candidates never invoke it, and an older Run
-that starts afterward cannot regress the monotonic manager generation.
+That callback assigns the manager's exact accepted current generation under the
+manager mutex. Failed, close-rejected, and born-stale candidates never invoke
+it. A stale Run that starts afterward cannot overwrite this coordinator-
+published current identity, regardless of numeric generation direction.
+Standalone manager lineages, which do not use this callback, separately retain
+numeric-maximum generation order.
 
 ## Compute I/O Execution Boundary
 

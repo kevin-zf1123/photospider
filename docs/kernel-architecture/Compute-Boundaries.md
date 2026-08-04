@@ -250,15 +250,19 @@ The registry's shared `ResidencyManager` admits complete Graph/target/intent/
 generation/Run/task/producer/revision/binding identity before native commit.
 Before coordinator publication is submitted, Kernel fallibly pretracks the
 request lineage with an internal zero-generation placeholder. Only an accepted
-current publication invokes the manager's no-allocation generation advance
+current publication assigns the manager's exact generation without allocation
 while the coordinator mutex still excludes `is_current()`; rejected and
-born-stale candidates do not advance it. Consequently, if N+1 becomes current
-before generation N starts its physical Run, N's later observation cannot move
-the manager backwards and its transfer admission is stale.
+born-stale candidates do not change it. Consequently, if a newer accepted
+request becomes current before an older accepted request starts its physical
+Run, the older Run's later observation cannot overwrite the manager's current
+identity, regardless of either generation's numeric magnitude, and its
+transfer admission is stale.
 Current-generation validation, producer Ready transitions, and resident
-insertion form one manager-locked linearization interval. A newer generation
-therefore either precedes an old callback and gives its destination a typed
-failure before Ready, or follows a completion already published as current.
+insertion form one manager-locked linearization interval. For a coordinator-
+managed lineage, a current-identity update therefore either precedes an old
+callback and gives its destination a typed failure before Ready, or follows a
+completion already published against the then-current exact generation.
+Standalone lineages separately retain numeric-maximum generation order.
 Duplicate and proper-subset identities cannot consume another admission. The
 Perlin provider encodes an explicit texture-to-buffer blit and calls neither
 `waitUntilCompleted` nor `getBytes`; CPU-to-Metal uses the inverse explicit
