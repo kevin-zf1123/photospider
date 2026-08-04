@@ -446,6 +446,15 @@ source-private test seam 会在最后一个 pre-Kernel point 失败，并证明 
 暴露 current generation 或 product output；它不会改变 installed Host、IPC、CLI 或 plugin
 contract。
 
+I1 的 curve 算术已经冻结，而不是委托给 OpenCV bulk reciprocal 近似。每个
+coefficient 舍入一次到 binary32 RNE，每个 sample 使用
+`RNE32(1/RNE32(1+RNE32(input*k32)))`。provider 在这些显式 scalar 截断前后保存、安装并
+恢复 worker 浮点环境。版本为 `i1-coordinate-pattern-curve-chain-fp32-v1` 的独立 oracle
+不依赖 Host/Kernel/cache/scheduler/YAML/provider，独立重建 source 与四个 stage。对 HWC
+`[2048,2048,4]` NativeScalar32 tensor 与冻结 ImageFacet，其精确
+`Sha256CanonicalV1` digest 是
+`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`。
+
 冻结的 I1 graph、十二项 coefficient/Region、仅成功时产生 accepted coordinate 的 collector 与
 product binding、连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor
 output digest、resource snapshot，以及 fail-closed episode/replicate evaluator 均已成为当前实现。
@@ -457,6 +466,14 @@ settlement 回填到该 history。封闭的 `execution-profile-i1-inner-row-v1` 
 latency、waste、
 memory settlement 与 output correctness。它不声称实现 ADR 0010 canonical 15-field outer row、
 section、bundle、reference comparison，也不覆盖 Issues #94 至 #96 负责的 profile。
+
+expected digest 在候选执行前安装，且必须等于该 immutable oracle；缺失或被替换属于
+Invalid，完整候选不匹配属于 Fail。每个 visible `Value` 在 `Q_end` 前只遍历一次，其
+类型化 result 被冻结，handle 随后释放。因此 evaluation 与 JSON 无法重新计算 payload
+hash。一个自有且不含 Value 的 evaluator 可以与下一 baseline preparation 重叠，但必须在
+admission 前完成；JSON、dump 与 durable ordered flush 等待到 `T^I1`，或等待到撤销 later
+submission 的 abort。live evidence set 受一个 evaluator 与 221 条不含 Value 的 row 限制，
+exception 通过唯一 future 返回。
 
 手工 `i1_edit_storm_benchmark` 被排除在默认 build 与 CTest 之外。它会执行精确 221-slot
 workload，并把 raw inner row 与 replicate summary 写入 checkout 外显式指定的 disposable

@@ -552,6 +552,17 @@ deterministic source-private test seam fails at the last pre-Kernel point and
 proves that Host resource failure exposes no current generation or product
 output; it does not alter installed Host, IPC, CLI, or plugin contracts.
 
+I1's curve arithmetic is frozen rather than delegated to an OpenCV bulk
+reciprocal approximation. Each coefficient is rounded once to binary32 RNE,
+and every sample uses `RNE32(1/RNE32(1+RNE32(input*k32)))`. The provider saves,
+installs, and restores the worker floating-point environment around those
+explicit scalar cuts. An independent oracle versioned
+`i1-coordinate-pattern-curve-chain-fp32-v1` reconstructs the source and four
+stages without Host/Kernel/cache/scheduler/YAML/provider dependencies. For the
+HWC `[2048,2048,4]` NativeScalar32 tensor and frozen ImageFacet, its exact
+`Sha256CanonicalV1` digest is
+`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`.
+
 The frozen I1 graph, twelve coefficients/Regions, success-only accepted
 coordinate collector and product binding, continuous cold/warmup/measured
 221-slot grid, tie and guard rules, canonical DenseTensor output digest,
@@ -567,6 +578,16 @@ closed `execution-profile-i1-inner-row-v1` evidence independently evaluates late
 waste, memory settlement, and output correctness. It does not claim the ADR
 0010 canonical 15-field outer row, section, bundle, reference comparison, or
 the profiles assigned to Issues #94 through #96.
+
+The expected digest is installed before candidate execution and must equal
+that immutable oracle; absence or substitution is Invalid, while a complete
+candidate mismatch is Fail. Each visible `Value` is traversed once before
+`Q_end`, its typed result is frozen, and the handle is released. Evaluation and
+JSON therefore cannot rehash the payload. One owned Value-free evaluator may
+overlap next-baseline preparation but must complete before admission; JSON,
+dump, and durable ordered flush wait for `T^I1` or an abort that revokes later
+submission. The live evidence set is bounded by one evaluator and 221
+Value-free rows, with exceptions returned through the sole future.
 
 The manual `i1_edit_storm_benchmark` is excluded from the default build and
 CTest. It executes the exact 221-slot workload and writes raw inner rows plus a

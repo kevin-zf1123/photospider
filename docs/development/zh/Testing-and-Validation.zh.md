@@ -1420,6 +1420,8 @@ test，不是模拟 I1 collector return。
 | 精确 drain anchor | 每个 episode 要求 `Q_start=S_11=E+183,333,337 ns` 与 `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`，不受 actual admission 或 deadline 变化影响。Window 可以与 active final Run 重叠，但不会取消它或延长 `D_i`。 |
 | Deadline 与 next-origin guard | 在最晚合法 admission 下，要求 `D_11<=E+335,333,337 ns`、从该 deadline 到 `Q_end` 精确 348,000,000 ns，以及从 `Q_end` 到下一 origin 精确 66,666,663 ns。Reset/baseline preparation 必须容纳在该 guard 中；最后一个 measured episode 在 `T^I1` 前使用相同 guard。 |
 | Boundary tie 与 settlement | 在 `Q_start`，nominal marker 先于同 timestamp admission；在 `Q_end`，从 product transition 使用的 observation sink causal allocator（而非 accepted-row sequence allocator）中预留首个被排除的 coordinate。只有 timestamp 不晚于 `Q_end` 且 causal sequence 位于 cut 之前的 event 才属于该 history。任何缺失或更晚的 terminal/quiescence/root-resource/Host settlement 都是 invalid；eventual snapshot 不能回填。 |
+| 独立最终 golden | 不经过 Host、Kernel、cache、scheduler、YAML 或候选 provider code，独立重算 coordinate-pattern source 与四个显式 binary32-RNE curve stage。要求 version 为 `i1-coordinate-pattern-curve-chain-fp32-v1`，精确 `Sha256CanonicalV1` digest 为 `17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`，再交叉校验一个精确 2048 真实产品结果。expected evidence 缺失或被替换属于 Invalid；候选不匹配属于 Fail。 |
+| Guard-safe evidence finalization | 在 `Q_end` 前对每个 visible output 只计算一次 digest，冻结其类型化 result，并释放其 `Value`。evaluation 与 JSON 不得重新计算 hash。最多允许一个不含 Value 的 evaluator 与下一 baseline preparation 重叠，要求在 admission 前完成，并把有序 JSON/durable I/O 延迟到 `T^I1`，或延迟到撤销 later submission 的 abort。 |
 | 逐 Run causal closure | 每个 materialized edit 必须使用唯一 Run id，且精确具有一条 terminal/quiescence/resource/Host chain；cancellation 与 visible publication 各自至多一次，只有 Cancelled 才有 cancellation，只有 Succeeded 才有 visibility，Host status 必须与 terminal 一致。Current generation 必须早于每个 service start，每个 start 必须早于 terminal，visible 必须先于 successful terminal，随后严格为 terminal、quiescence、resource return、Host settlement。不可逆 service-start commit 与 cancellation acceptance 共用 Run-owned terminal arbiter，service-start observation 在 service/Run lock 外投递。`cancellation < start < terminal` 是结构上有效的证据，但会使 Waste 失败；产品路径必须阻止它。 |
 | 无缺口 service-start capacity | 从冻结 curve node 的 Macro256 切片派生每个 node 64 个 tile，从一个 monolithic source 加四个 curve node 派生每个完整 Run 257 个 start，并派生每个十二次 edit episode 3,084 个 start。确定性证明 pre-route 两个方向的 start/cancel 顺序、cancellation 获胜时 route/executable 零泄漏、route commit 获胜时 start coordinate 更小、暂存权威可回滚/复用、第 3,084 个 start 仍成功，以及第 3,085 个 start fail closed。 |
 | Fail-closed arithmetic/evidence | 拒绝 grid/slot/start/admission/deadline/drain checked overflow、boundary/event evidence 缺失或重复、moved origin、nonquiescence，或同 workload id 下的 manifest rule drift。既有 section/verdict digest 绑定 evidence，不改变 15/5-field envelope。 |
@@ -2021,7 +2023,12 @@ identity binding、equal-time row-local ordering、彼此独立的 accepted-row 
 sequence、精确冻结的 graph/request construction、one-based nearest-rank aggregate、彼此独立的
 discarded/post-cancel service、Host/device lifetime-high-water observation、final settlement、
 canonical DenseTensor logical identity，以及真实 embedded Host latest-wins product path。这些是
-correctness test；它们不会断言 timed 221-slot run 中与机器相关的 percentile 或 waste threshold。
+correctness test。`test_i1_profile` 会独立重算冻结 mathematical golden；
+`test_i1_evidence` 覆盖 `Value` release 后 expected digest 缺失、被替换、invalid 与候选不匹配；
+`test_i1_product_path` 交叉校验一个精确 2048 结果。既有
+`test_opencv_operation_concurrency` cap-one/cap-eight 断言保护确定性 curve provider 的
+bitwise output identity。它们不会断言 timed 221-slot run 中与机器相关的 percentile 或
+waste threshold。
 
 精确定时 workload 由手工、`EXCLUDE_FROM_ALL` 的 `i1_edit_storm_benchmark` target 承担；
 它不注册到 CTest 或 CI。必须显式构建，并把每个 replicate 分别写入 checkout 外、父目录已存在、
@@ -2039,7 +2046,12 @@ cmake --build build --target i1_edit_storm_benchmark -j
 
 Runner 会把产品 worker count 固定为 eight，保留唯一连续的 221-slot cold/warmup/measured
 grid，绝不移动或 backfill 已错过的 slot，并在 evidence invalid 后停止后续 submission。完整运行
-会写出冻结的 `i1-graph.yaml`、`invocation.json`、raw `episodes.ndjson` 与 `summary.json`；
+会在候选执行前安装 immutable expected digest，在 `Q_end` 前对每个 visible output 只计算一次
+digest，冻结类型化 result，并释放每个 `Value`。正常 `Q_end` 时，一个自有且不含 Value 的
+evaluator 可以与下一 baseline preparation 重叠，但必须在下一 admission 前完成。JSON
+construction、dump 与 disk flush 位于每个后续 origin guard 之外，并在 `T^I1` 按精确 slot
+顺序 drain；bounded live set 是一个 evaluator 加 221 条不含 Value 的 row。完整运行会写出
+冻结的 `i1-graph.yaml`、`invocation.json`、raw `episodes.ndjson` 与 `summary.json`；
 异常会在此前已安全完成的 artifact 之外写出 `failure.json`。特别是 failed/invalid admission
 会先向 `episodes.ndjson` 追加并 flush 对应 Invalid inner row，保留 raw admission 事实和关闭后的
 observer/resource 状态，然后才写 `failure.json`。这些是封闭的 Issue #93 inner artifact，并明确

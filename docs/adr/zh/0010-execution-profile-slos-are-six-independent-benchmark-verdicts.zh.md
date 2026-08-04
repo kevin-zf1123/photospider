@@ -66,6 +66,20 @@ site-operation 表示一个 transform 处理一个 RGBA pixel site，与 channel
 parameter value、所选 operation/provider binary 与 generation，以及后续全部
 payload 都在 workload manifest 中按内容寻址。
 
+对 I1 的精确 HP path，每个解析后的 curve coefficient 都在
+round-to-nearest-ties-to-even（RNE）下舍入一次到 binary32。随后每个 sample 使用
+三次显式 binary32 截断：`p=RNE32(input*k32)`、`d=RNE32(1+p)` 和
+`output=RNE32(1/d)`。provider 在 worker 上临时安装 RNE，避免依赖架构的 bulk
+reciprocal 近似，并在复用前恢复先前的浮点环境。
+
+独立 I1 最终 oracle 的版本是 `i1-coordinate-pattern-curve-chain-fp32-v1`。它不经过
+Host、Kernel、cache、scheduler、YAML 或候选 provider，独立重建 source 和四个 stage。
+对 HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor 与 ImageFacet
+`(x=1,y=0,channel=2)`，冻结的 `Sha256CanonicalV1` digest 是
+`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`。
+expected value 在候选执行前固定；product-path test 会交叉校验它，但绝不能用候选结果
+bootstrap 它。
+
 规范 workload matrix 如下：
 
 | Workload | 冻结行为 |
@@ -251,6 +265,15 @@ replicate 无效。较晚的 eventual resource/lifecycle snapshot 不能把 even
 origin 前完成，不能移动 origin。每项 grid、nominal-start、admission、deadline 与
 drain 计算都使用 checked arithmetic；overflow 使结果无效。
 
+每个 visible output 在 measurement window 内最多遍历一次以计算类型化 digest，随后
+释放其 `Value` handle。evaluation 与 serialization 只使用冻结 result。正常
+`Q^I1_end` 处理会把一个不含 Value 的输入移入自有 async evaluator，同时主线程准备
+下一 baseline；evaluator 必须在下一次 admission 前完成。JSON construction、dump 与
+disk flush 等待到 `T^I1`，并保持精确 slot 顺序。异常路径撤销 later submission，并在
+返回前 drain 每条已闭合 row。这把 ownership 限定为一个 evaluator 与 221 条不含 Value
+的 row；Host、Graph、collector、mutable `Value` 或 worker exception 都不能逃逸唯一
+future boundary。
+
 除 M1 最后一个 `k=6` warmup occurrence 这一处例外外，第十二次 edit publication
 必须持续 current 到 `Q^I1_end`。这一处例外要求同一 publication 在 `B^M1`
 carryover snapshot 中仍为 current，并持续到首个 measured edit 仅成功时存在的
@@ -425,6 +448,10 @@ Sample 只有在返回的 `ContentDigestResult.state` 为
 tag 与小写十六进制 `ContentDigest.bytes`。任何其他 state、缺失 digest、provider/
 readiness failure 或不同 algorithm 都会使受影响行成为 `invalid`。这个 canonical
 logical `ContentDigest` 不是 artifact raw byte 的 SHA-256。
+
+I1 还要求 expected digest 等于上述 immutable oracle。expected evidence 缺失、
+不受支持或被 caller 替换属于 Invalid。完整候选 digest 与 oracle 不同属于 Fail。
+evaluator 与 JSON encoder 都不得重新计算 payload digest。
 
 每个 B1 job 在全新的可丢弃 job 目录下提交两个文件。Payload
 `output.rgba32le` 是紧密 row-major RGBA，sample 为 little-endian IEEE-754

@@ -1775,6 +1775,8 @@ The mandatory I1 phase/drain scenario oracle is:
 | Exact drain anchor | For every episode require `Q_start=S_11=E+183,333,337 ns` and `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`, independent of actual admission and deadline. The window may overlap an active final Run but does not cancel it or extend `D_i`. |
 | Deadline and next-origin guards | With latest legal admission, require `D_11<=E+335,333,337 ns`, exactly 348,000,000 ns from that deadline to `Q_end`, and exactly 66,666,663 ns from `Q_end` to the next origin. Reset/baseline preparation must fit that guard; the last measured episode uses the same guard before `T^I1`. |
 | Boundary tie and settlement | At `Q_start`, nominal marker precedes equal-time admission. At `Q_end`, reserve the first excluded coordinate from the observation sink's causal allocator used by product transitions, not from the accepted-row sequence allocator. An event belongs only when its timestamp is no later than `Q_end` and its causal sequence precedes the cut. Any missing or later terminal/quiescence/root-resource/Host settlement is invalid; an eventual snapshot cannot backdate it. |
+| Independent final golden | Recompute the coordinate-pattern source and four explicit binary32-RNE curve stages without Host, Kernel, cache, scheduler, YAML, or candidate provider code. Require version `i1-coordinate-pattern-curve-chain-fp32-v1` and exact `Sha256CanonicalV1` digest `17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`, then cross-check one exact 2048 real-product result. Missing or substituted expected evidence is Invalid; a candidate mismatch is Fail. |
+| Guard-safe evidence finalization | Digest each visible output once before `Q_end`, freeze its typed result, and release its `Value`. Evaluation and JSON must not rehash it. Allow at most one Value-free evaluator to overlap next-baseline preparation, require completion before admission, and delay ordered JSON/durable I/O until `T^I1` or an abort that revokes later submission. |
 | Per-Run causal closure | Require a unique Run id per materialized edit, exactly one terminal/quiescence/resource/Host chain, at most one cancellation and visible publication, cancellation iff Cancelled, visibility iff Succeeded, and Host status agreeing with the terminal. Require current generation before every service start, every start before terminal, visible before successful terminal, and terminal before quiescence before resource return before Host settlement. Irreversible service-start commit and cancellation acceptance share the Run-owned terminal arbiter, and service-start observation is delivered outside service/Run locks. `cancellation < start < terminal` is structurally valid evidence but fails Waste; the product path must prevent it. |
 | Lossless service-start capacity | Derive 64 Macro256 tiles per frozen curve node, 257 starts per complete Run from one monolithic source plus four curve nodes, and 3,084 starts per twelve-edit episode. Deterministically prove both pre-route start/cancel orders, zero route/executable leakage when cancellation wins, lower start coordinate when route commitment wins, rollback/reuse of staged authority, success through start 3,084, and fail-closed overflow at start 3,085. |
 | Fail-closed arithmetic/evidence | Reject checked overflow in grid/slot/start/admission/deadline/drain arithmetic, missing or duplicate boundary/event evidence, a moved origin, nonquiescence, or a workload-manifest rule drift under the same id. Existing section/verdict digests bind the evidence without changing the 15/5-field envelope. |
@@ -2448,9 +2450,14 @@ ordering, independent accepted-row and observer-causal sequences, exact frozen
 graph/request construction, one-based nearest-rank aggregation, independent
 discarded and post-cancel service, Host/device lifetime-high-water observation,
 final settlement, canonical DenseTensor logical identity, and the real
-embedded Host latest-wins product path. These are correctness tests; they do
-not assert machine-dependent percentile or waste thresholds from a timed
-221-slot run.
+embedded Host latest-wins product path. `test_i1_profile` independently
+recomputes the frozen mathematical golden, `test_i1_evidence` covers missing,
+substituted, invalid, and candidate-mismatch digest evidence after `Value`
+release, and `test_i1_product_path` cross-checks one exact 2048 result. The
+existing `test_opencv_operation_concurrency` cap-one/cap-eight assertion guards
+bitwise output identity for the deterministic curve provider. These are
+correctness tests; they do not assert machine-dependent percentile or waste
+thresholds from a timed 221-slot run.
 
 The exact timed workload is the manual, `EXCLUDE_FROM_ALL`
 `i1_edit_storm_benchmark` target and is not registered with CTest or CI. Build
@@ -2469,7 +2476,14 @@ cmake --build build --target i1_edit_storm_benchmark -j
 
 The runner fixes the product worker count at eight, keeps one continuous
 221-slot cold/warmup/measured grid, never shifts or backfills a missed slot,
-and aborts later submissions on invalid evidence. A complete run writes the
+and aborts later submissions on invalid evidence. It installs the immutable
+expected digest before candidate execution, digests each visible output once
+before `Q_end`, freezes the typed result, and releases every `Value`. At normal
+`Q_end`, one owned Value-free evaluator may overlap next-baseline preparation
+but must finish before the next admission. JSON construction, dump, and disk
+flush remain outside every later-origin guard and drain in exact slot order at
+`T^I1`; the bounded live set is one evaluator plus 221 Value-free rows. A
+complete run writes the
 frozen `i1-graph.yaml`, `invocation.json`, raw `episodes.ndjson`, and
 `summary.json`; an exception writes `failure.json` in addition to whatever
 earlier artifacts were safely completed. In particular, a failed/invalid

@@ -74,6 +74,22 @@ generated source bytes, normalized graph and parameter values, selected
 operation/provider binary and generation, and all later payloads are
 content-addressed in the workload manifest.
 
+For I1's exact HP path, each parsed curve coefficient is rounded once to
+binary32 under round-to-nearest-ties-to-even (RNE). Each sample then uses three
+explicit binary32 cuts: `p=RNE32(input*k32)`, `d=RNE32(1+p)`, and
+`output=RNE32(1/d)`. The provider temporarily installs RNE on its worker,
+avoids architecture-dependent bulk reciprocal approximations, and restores the
+previous floating-point environment before reuse.
+
+The independent I1 final oracle is versioned
+`i1-coordinate-pattern-curve-chain-fp32-v1`. It reconstructs the source and
+four stages without Host, Kernel, cache, scheduler, YAML, or the candidate
+provider. For the HWC `[2048,2048,4]` FloatingPoint/NativeScalar32 tensor with
+ImageFacet `(x=1,y=0,channel=2)`, the frozen `Sha256CanonicalV1` digest is
+`17266cf3871544d61decc0805ce300ded59a688e75e826c15ce4b6989db4c493`.
+The expected value is fixed before candidate execution; a product-path test
+cross-checks it but can never bootstrap it.
+
 The canonical workload matrix is:
 
 | Workload | Frozen behavior |
@@ -294,6 +310,17 @@ guard and finish before the next origin rather than slide it. Every grid,
 nominal-start, admission, deadline, and drain computation uses checked
 arithmetic; overflow is invalid.
 
+Each visible output is traversed for its typed digest at most once during the
+measurement window, after which its `Value` handle is released. Evaluation and
+serialization use only the frozen result. Normal `Q^I1_end` handling moves one
+Value-free input into an owned async evaluator while the main thread prepares
+the next baseline; the evaluator must finish before the next admission. JSON
+construction, dump, and disk flush wait until `T^I1` and preserve exact slot
+order. Exceptional paths revoke later submission and drain every closed row
+before returning. This bounds ownership to one evaluator and 221 Value-free
+rows, and no Host, Graph, collector, mutable `Value`, or worker exception can
+escape the sole future boundary.
+
 Except solely for M1's final warmup occurrence at `k=6`, the twelfth-edit
 publication remains current through `Q^I1_end`. That one exception keeps the
 same publication current at the `B^M1` carryover snapshot and until the first
@@ -493,6 +520,11 @@ tag and lowercase hexadecimal `ContentDigest.bytes`. Any other state, absent
 digest, provider/readiness failure, or different algorithm makes the affected
 row `invalid`. This canonical logical `ContentDigest` is not the SHA-256 of an
 artifact's raw bytes.
+
+I1 additionally requires the expected digest to equal the immutable oracle
+above. Missing, unsupported, or caller-substituted expected evidence is
+Invalid. A complete candidate digest that differs from the oracle is Fail.
+Neither the evaluator nor JSON encoder may recalculate a payload digest.
 
 Each B1 job commits two files below a fresh disposable job directory. The
 payload `output.rgba32le` is tightly packed row-major RGBA with little-endian
