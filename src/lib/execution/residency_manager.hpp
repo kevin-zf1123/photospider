@@ -30,7 +30,7 @@ enum class ResidencyCompletionDisposition : std::uint32_t {
    * retention.
    */
   Published = 0U,
-  /** @brief A newer canonical request generation made this completion stale. */
+  /** @brief The current exact generation no longer matches this completion. */
   Stale = 1U,
   /**
    * @brief Identity, terminal facts, or exact producer capability did not
@@ -181,10 +181,13 @@ class ResidencyManager final {
    * @return Published, Stale, or Rejected after complete locked validation.
    * @throws std::bad_alloc or std::system_error from synchronized ownership.
    * @note Identity/freshness validation, both Ready transitions, and resident
-   * insertion are one manager-locked linearization interval. Therefore a newer
-   * generation either precedes this method and makes it Stale before
-   * destination Ready, or follows a completed current publication. Stale
-   * consumes its obsolete admission without touching either producer;
+   * insertion are one manager-locked linearization interval. A currentness
+   * update therefore either precedes this method and makes a non-current exact
+   * generation Stale before destination Ready, or follows a completion already
+   * published against the then-current generation. Coordinator-managed
+   * currentness uses exact equality regardless of numeric direction;
+   * standalone currentness retains numeric-maximum order. Stale consumes its
+   * obsolete admission without touching either producer;
    * a missing or different registered identity leaves any other rightful
    * admission untouched. After exact Value metadata validation, a
    * producer-capability rejection preserves the current admission and both

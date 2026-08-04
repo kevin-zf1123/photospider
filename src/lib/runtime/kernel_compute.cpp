@@ -200,7 +200,8 @@ class CandidateCompletion<void> final {
 std::exception_ptr make_superseded_exception() noexcept {
   try {
     throw GraphError(GraphErrc::ComputeError,
-                     "Compute request was superseded by a newer generation.");
+                     "Compute request was superseded by an updated accepted "
+                     "request.");
   } catch (...) {
     return std::current_exception();
   }
@@ -604,10 +605,11 @@ class KernelGraphRevisionCommitPolicy final
   }
 
   /**
-   * @brief Enforces latest-wins currency inside graph-state commit ordering.
+   * @brief Enforces exact current identity inside graph-state commit ordering.
    * @param run_lease Commit contender carrying the request lineage snapshot.
-   * @return Nothing when this exact generation is still current.
-   * @throws GraphError when a newer generation was published first.
+   * @return Nothing when this exact supersession identity is still current.
+   * @throws GraphError when the Run's exact supersession identity is no longer
+   * current.
    * @throws std::system_error when coordinator synchronization fails.
    * @note This publication predicate runs after contender claim but before
    * revision validation, persistence, or visible state mutation. Cooperative
@@ -619,7 +621,7 @@ class KernelGraphRevisionCommitPolicy final
             run_lease.descriptor().supersession())) {
       throw GraphError(
           GraphErrc::ComputeError,
-          "ComputeRun supersession generation is stale; staged output "
+          "ComputeRun supersession identity is non-current; staged output "
           "discarded.");
     }
   }
@@ -1051,7 +1053,8 @@ Kernel::compute_async_request(ComputeRequest request) {
           LastError error{
               GraphErrc::ComputeError,
               std::string(
-                  "Compute request was superseded by a newer generation.")};
+                  "Compute request was superseded by an updated accepted "
+                  "request.")};
           runtime->store_last_error(error);
           completion->set_value(AsyncComputeResult{false, std::move(error)});
         } catch (...) {
