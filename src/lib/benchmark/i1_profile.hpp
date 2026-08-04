@@ -159,17 +159,12 @@ enum class I1MeasurementStartEventKind : std::uint8_t {
 };
 
 /**
- * @brief Success-only logical coordinate reserved before one Host call.
- * @throws Nothing for value construction and copying.
- * @note The timestamp is the sole pre-call sample, never the Host return time.
+ * @brief I1 name for the product-bound accepted-boundary coordinate type.
+ * @throws std::invalid_argument when constructed with sequence zero.
+ * @note This row-local coordinate is the pre-call `(A_i,event_sequence_i)`;
+ * it is not the observation sink's independent causal coordinate.
  */
-struct I1AcceptedCoordinate final {
-  /** @brief Exact pre-call monotonic admission sample. */
-  std::chrono::steady_clock::time_point admission_time;
-
-  /** @brief Unique strictly increasing row-local logical event sequence. */
-  std::uint64_t event_sequence = 0U;
-};
+using I1AcceptedCoordinate = compute::AcceptedBoundaryCoordinate;
 
 /**
  * @brief Raw status and timestamp observed when the final Host call returned.
@@ -302,6 +297,8 @@ struct I1ObservedCurrentGeneration final {
   std::chrono::steady_clock::time_point observed_at;
   /** @brief Collector-local causal order. */
   std::uint64_t causal_sequence = 0U;
+  /** @brief Exact product identity binding to the pre-call row coordinate. */
+  std::optional<I1AcceptedCoordinate> accepted_coordinate;
 };
 
 /**

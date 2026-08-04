@@ -154,9 +154,9 @@ class I1EpisodeObservationCollector::Impl final {
         compute::ComputeRunObservationCoordinate coordinate) noexcept override {
       impl_->publish(
           impl_->current_generations_, impl_->next_current_generation_,
-          I1ObservedCurrentGeneration{edit_index_, identity.generation.value(),
-                                      coordinate.observed_at,
-                                      coordinate.causal_sequence});
+          I1ObservedCurrentGeneration{
+              edit_index_, identity.generation.value(), coordinate.observed_at,
+              coordinate.causal_sequence, identity.accepted_coordinate});
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_service_start */
@@ -475,6 +475,8 @@ I1EditAdmissionResult I1AcceptedBoundaryCollector::admit_edit(
   result.reserved_event_sequence = event_sequence;
   result.deadline =
       checked_i1_time_add(result.admission_sample, kI1DeadlineBudget);
+  const I1AcceptedCoordinate accepted_coordinate(result.admission_sample,
+                                                 event_sequence);
 
   request.intent = ComputeIntent::GlobalHighPrecision;
   request.execution.parallel = true;
@@ -483,7 +485,7 @@ I1EditAdmissionResult I1AcceptedBoundaryCollector::admit_edit(
       std::move(request),
       compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
                              result.deadline, 1U, 8U},
-      std::move(observation_sink)};
+      std::move(observation_sink), accepted_coordinate};
   Result<std::future<OperationStatus>> host_result =
       host_.compute_i1_async(std::move(private_request));
   const std::chrono::steady_clock::time_point return_time = clock_();
@@ -492,8 +494,7 @@ I1EditAdmissionResult I1AcceptedBoundaryCollector::admit_edit(
   result.host_return.emplace(I1HostReturnEvidence{
       return_time, std::move(host_result.status), future_valid});
   if (accepted) {
-    result.accepted_coordinate =
-        I1AcceptedCoordinate{result.admission_sample, event_sequence};
+    result.accepted_coordinate = accepted_coordinate;
     result.settlement = std::move(host_result.value);
   }
   return result;

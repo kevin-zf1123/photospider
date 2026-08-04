@@ -81,16 +81,19 @@ struct I1EditEvidence final {
 };
 
 /**
- * @brief Product identity matched independently to one accepted edit.
+ * @brief Product identity and exact coordinate matched to one accepted edit.
  * @throws Nothing for value construction or comparison.
  * @note `run_id` is absent when supersession settles an accepted edit before a
- * concrete Run descriptor is materialized.
+ * concrete Run descriptor is materialized. A populated row always requires
+ * `accepted_coordinate` to equal the edit's pre-call coordinate exactly.
  */
 struct I1AcceptedProductIdentity final {
   /** @brief Product generation published for the accepted edit. */
   std::uint64_t generation = 0U;
   /** @brief Optional opaque materialized Run identity. */
   std::optional<std::uint64_t> run_id;
+  /** @brief Exact product-bound pre-call accepted coordinate. */
+  std::optional<I1AcceptedCoordinate> accepted_coordinate;
 };
 
 /**

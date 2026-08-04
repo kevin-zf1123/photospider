@@ -386,6 +386,7 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
 
   std::uint64_t previous_event_sequence = 0U;
   std::uint64_t previous_generation = 0U;
+  std::optional<I1AcceptedCoordinate> previous_product_coordinate;
   std::set<std::uint64_t> seen_materialized_run_ids;
   for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
     const I1EditEvidence& edit = row.evidence.edits[edit_index];
@@ -425,9 +426,9 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
       global_invalidate("Host admission did not return canonical success");
     }
     if (!edit.accepted_coordinate.has_value() ||
-        edit.accepted_coordinate->admission_time != edit.admission_sample ||
+        edit.accepted_coordinate->admission_time() != edit.admission_sample ||
         !edit.reserved_event_sequence.has_value() ||
-        edit.accepted_coordinate->event_sequence !=
+        edit.accepted_coordinate->event_sequence() !=
             *edit.reserved_event_sequence) {
       global_invalidate("accepted coordinate does not equal reserved A_i/seq");
     }
@@ -458,6 +459,19 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
       continue;
     }
     previous_generation = generation->generation;
+    if (!generation->accepted_coordinate.has_value() ||
+        !edit.accepted_coordinate.has_value() ||
+        !(*generation->accepted_coordinate == *edit.accepted_coordinate)) {
+      global_invalidate(
+          "current generation is not bound to the accepted coordinate");
+    } else if (previous_product_coordinate.has_value() &&
+               !(*previous_product_coordinate <
+                 *generation->accepted_coordinate)) {
+      global_invalidate(
+          "product accepted-coordinate ordering is not increasing");
+    } else {
+      previous_product_coordinate = generation->accepted_coordinate;
+    }
     if (generation->observed_at < edit.admission_sample) {
       global_invalidate("current generation precedes accepted admission");
     }
@@ -527,7 +541,8 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
       global_invalidate("one accepted edit materialized multiple Run ids");
       continue;
     }
-    I1AcceptedProductIdentity product{generation->generation, std::nullopt};
+    I1AcceptedProductIdentity product{generation->generation, std::nullopt,
+                                      generation->accepted_coordinate};
     if (!materialized_runs.empty()) {
       product.run_id = *materialized_runs.begin();
       if (*product.run_id == 0U) {
@@ -853,12 +868,12 @@ I1EpisodeInnerRow evaluate_i1_episode(I1EpisodeEvidenceInput input) {
     if (!final_edit.accepted_coordinate.has_value()) {
       latency_invalidate("twelfth edit lacks an accepted latency start");
     } else if (final_visible->observed_at <
-               final_edit.accepted_coordinate->admission_time) {
+               final_edit.accepted_coordinate->admission_time()) {
       latency_invalidate("final visibility precedes accepted admission");
     } else {
       row.final_latency = std::chrono::duration_cast<std::chrono::nanoseconds>(
           final_visible->observed_at -
-          final_edit.accepted_coordinate->admission_time);
+          final_edit.accepted_coordinate->admission_time());
     }
     row.final_digest = compute_content_digest(final_visible->output);
     if (row.final_digest.state != ContentDigestState::Available ||

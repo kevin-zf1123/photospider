@@ -2635,14 +2635,16 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
    */
   Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) override {
-    return compute_async_internal(std::move(request), std::nullopt, nullptr);
+    return compute_async_internal(std::move(request), std::nullopt, nullptr,
+                                  std::nullopt);
   }
 
   /** @copydoc benchmark::I1Host::compute_i1_async */
   Result<std::future<OperationStatus>> compute_i1_async(
       benchmark::I1HostComputeRequest request) override {
     return compute_async_internal(std::move(request.request), request.qos,
-                                  std::move(request.observation_sink));
+                                  std::move(request.observation_sink),
+                                  request.accepted_coordinate);
   }
 
   /** @copydoc benchmark::I1Host::i1_execution_snapshot */
@@ -3887,8 +3889,9 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
    * callers.
    *
    * The method first validates installed execution controls and the optional
-   * all-or-none private I1 QoS/observer pair. It then translates the ordinary
-   * Host request, attaches the private fields, pre-registers lifecycle
+   * all-or-none private I1 QoS/observer/accepted-coordinate tuple. It then
+   * translates the ordinary Host request, attaches the private fields,
+   * pre-registers lifecycle
    * tracking, submits through InteractionService, and joins one status worker
    * that publishes the exact backend outcome before notifying close.
    *
@@ -3897,6 +3900,8 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
    * established public Throughput default.
    * @param observation_sink Optional observation-only sink paired with
    * `run_qos`.
+   * @param accepted_coordinate Optional pre-call row-local coordinate paired
+   * with `run_qos` and `observation_sink`.
    * @return Scheduling status and a future for the exact product outcome.
    * @throws std::bad_alloc when request, future, or tracking ownership cannot
    * allocate.
@@ -3909,7 +3914,8 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
    */
   Result<std::future<OperationStatus>> compute_async_internal(
       HostComputeRequest request, std::optional<compute::ComputeRunQos> run_qos,
-      std::shared_ptr<compute::ComputeRunObservationSink> observation_sink) {
+      std::shared_ptr<compute::ComputeRunObservationSink> observation_sink,
+      std::optional<compute::AcceptedBoundaryCoordinate> accepted_coordinate) {
     return guarded_result<std::future<OperationStatus>>(
         "compute_async", GraphErrc::ComputeError, [&] {
           if (!valid_compute_execution_options(request.execution)) {
@@ -3919,11 +3925,13 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
           }
           const bool has_private_qos = run_qos.has_value();
           const bool has_private_observer = observation_sink != nullptr;
-          if (has_private_qos != has_private_observer) {
+          const bool has_private_coordinate = accepted_coordinate.has_value();
+          if (has_private_qos != has_private_observer ||
+              has_private_qos != has_private_coordinate) {
             return failure_result<std::future<OperationStatus>>(
                 GraphErrc::InvalidParameter,
-                "private I1 QoS and observation sink must be supplied "
-                "together");
+                "private I1 QoS, observation sink, and accepted coordinate "
+                "must be supplied together");
           }
           if (has_private_qos &&
               (run_qos->service_class !=
@@ -3939,6 +3947,7 @@ class EmbeddedHost final : public Host, public benchmark::I1Host {
 
           Kernel::ComputeRequest kernel_request =
               to_kernel_compute_request(request);
+          kernel_request.accepted_coordinate = std::move(accepted_coordinate);
           kernel_request.run_qos = std::move(run_qos);
           std::shared_ptr<compute::ComputeRunObservationSink>
               status_observation_sink = observation_sink;

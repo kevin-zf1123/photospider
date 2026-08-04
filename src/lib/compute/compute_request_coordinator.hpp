@@ -29,6 +29,8 @@ namespace ps::compute {
  * @throws std::system_error when coordinator/executor synchronization fails.
  * @note Generation publication and currency checks use `graph_state_`; ticket
  * wake is nonblocking and consumes a pre-reserved compute-lane admission.
+ * Source-private accepted-boundary candidates additionally require their
+ * typed logical coordinate to advance before they may replace current work.
  */
 class ComputeRequestCoordinator final {
  public:
@@ -163,15 +165,22 @@ class ComputeRequestCoordinator final {
   /**
    * @brief Allocates identity and acquires/reuses key ticket admission.
    * @param key Canonical target/request-intent lineage.
+   * @param accepted_coordinate Optional pre-call accepted-boundary ordering
+   * coordinate to bind into the product identity on current publication.
    * @return Move-only preparation that leaves current publication unchanged.
    * @throws std::overflow_error when graph-wide generation is exhausted.
    * @throws std::runtime_error after coordinator or lane admission stops.
    * @throws std::bad_alloc for row/ticket/callback ownership failure.
    * @throws std::system_error for synchronization failure.
    * @note Capacity waiting occurs only when this key has no reusable ticket,
-   * and occurs without graph-state or coordinator mutex ownership.
+   * and occurs without graph-state or coordinator mutex ownership. The
+   * coordinate is independent from observation causal sequence. Host success
+   * remains the accepted-record authority; the coordinator decides only
+   * whether this proposed binding becomes the complete current identity.
    */
-  PreparedCandidate prepare(const SupersessionKey& key);
+  PreparedCandidate prepare(const SupersessionKey& key,
+                            std::optional<AcceptedBoundaryCoordinate>
+                                accepted_coordinate = std::nullopt);
 
   /**
    * @brief Publishes one prepared candidate through graph-state ordering.
@@ -192,9 +201,11 @@ class ComputeRequestCoordinator final {
    * requests Superseded on the active source, settles displaced pending work,
    * and wakes only the adopted reserved ticket. The caller waits for neither
    * graph-state availability nor execution quiescence after admission. The
-   * current observer runs before the coordinator publishes the generation,
-   * making external freshness invalidation and `is_current()` observation one
-   * ordered transaction.
+   * current observer runs before the coordinator publishes the complete
+   * identity, making external freshness invalidation and `is_current()`
+   * observation one ordered transaction. When both current and candidate
+   * identities carry accepted coordinates, both generation and coordinate
+   * order must advance; same timestamps are resolved by row-local sequence.
    */
   void publish(PreparedCandidate prepared,
                std::shared_ptr<ComputeRequestCancellationSource> cancellation,
@@ -203,9 +214,9 @@ class ComputeRequestCoordinator final {
                CurrentGenerationCallback publish_current = {});
 
   /**
-   * @brief Tests exact current key/generation currency.
+   * @brief Tests exact current key/generation/accepted-coordinate currency.
    * @param identity Run-captured lineage version.
-   * @return True only while the row's current generation matches exactly.
+   * @return True only while the row's complete current identity matches.
    * @throws std::system_error if coordinator synchronization fails.
    * @note Product commit calls this inside the graph-state transaction after
    * the Run contender is claimed and before persistence/publication.
@@ -246,8 +257,8 @@ class ComputeRequestCoordinator final {
 
   /** @brief Bounded ownership for one canonical supersession key. */
   struct LineageRow {
-    /** @brief Latest published generation, absent before first publication. */
-    std::optional<SupersessionGeneration> current_generation;
+    /** @brief Complete latest identity, absent before first publication. */
+    std::optional<SupersessionIdentity> current_identity;
     /** @brief Single executor reservation reused by every key generation. */
     GraphStateExecutor::ContinuationTicket ticket;
     /** @brief Latest unmaterialized published candidate. */

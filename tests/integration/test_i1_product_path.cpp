@@ -386,6 +386,7 @@ TEST(I1ProductPath, NewerGenerationIsSoleVisibleSettledOutput) {
   ASSERT_NE(i1_host, nullptr);
   const I1ExecutionSnapshot baseline = i1_host->i1_execution_snapshot(0U, 1U);
   I1EpisodeObservationCollector observations;
+  const auto shared_admission_time = std::chrono::steady_clock::now();
 
   const auto first_deadline = std::chrono::steady_clock::now() + 5s;
   Result<std::future<OperationStatus>> first =
@@ -393,7 +394,8 @@ TEST(I1ProductPath, NewerGenerationIsSoleVisibleSettledOutput) {
           make_reduced_request(load.session, 0U),
           compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
                                  first_deadline, 1U, 8U},
-          observations.make_edit_sink(0U)});
+          observations.make_edit_sink(0U),
+          I1AcceptedCoordinate{shared_admission_time, 1U}});
   ASSERT_TRUE(first.status.ok) << first.status.message;
   ASSERT_TRUE(first.value.valid());
   ASSERT_TRUE(gate.wait_for_entry(5s));
@@ -407,7 +409,8 @@ TEST(I1ProductPath, NewerGenerationIsSoleVisibleSettledOutput) {
           make_reduced_request(load.session, 11U),
           compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
                                  second_deadline, 1U, 8U},
-          observations.make_edit_sink(11U)});
+          observations.make_edit_sink(11U),
+          I1AcceptedCoordinate{shared_admission_time, 2U}});
   ASSERT_TRUE(second.status.ok) << second.status.message;
   ASSERT_TRUE(second.value.valid());
   EXPECT_TRUE(wait_for_supersession(observations, 5s));
@@ -428,6 +431,24 @@ TEST(I1ProductPath, NewerGenerationIsSoleVisibleSettledOutput) {
   EXPECT_EQ(snapshot.current_generations[1].edit_index, 11U);
   EXPECT_LT(snapshot.current_generations[0].generation,
             snapshot.current_generations[1].generation);
+  ASSERT_TRUE(snapshot.current_generations[0].accepted_coordinate.has_value());
+  ASSERT_TRUE(snapshot.current_generations[1].accepted_coordinate.has_value());
+  EXPECT_EQ(
+      snapshot.current_generations[0].accepted_coordinate->admission_time(),
+      shared_admission_time);
+  EXPECT_EQ(
+      snapshot.current_generations[1].accepted_coordinate->admission_time(),
+      shared_admission_time);
+  EXPECT_EQ(
+      snapshot.current_generations[0].accepted_coordinate->event_sequence(),
+      1U);
+  EXPECT_EQ(
+      snapshot.current_generations[1].accepted_coordinate->event_sequence(),
+      2U);
+  EXPECT_EQ(snapshot.current_generations[0].causal_sequence, 1U);
+  EXPECT_NE(
+      snapshot.current_generations[1].causal_sequence,
+      snapshot.current_generations[1].accepted_coordinate->event_sequence());
 
   ASSERT_EQ(snapshot.cancellations.size(), 1U);
   const I1ObservedCancellation& cancellation = snapshot.cancellations.front();

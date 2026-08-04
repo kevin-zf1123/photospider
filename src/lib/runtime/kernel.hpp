@@ -274,6 +274,15 @@ class Kernel {
     std::optional<compute::SupersessionIdentity> supersession;
 
     /**
+     * @brief Optional source-private pre-call accepted-boundary coordinate.
+     * @note Embedded public Host conversion leaves this empty. The I1 Host
+     * seam supplies the checked row-local coordinate before product generation
+     * allocation; Kernel binds it into `supersession` at preparation. It is
+     * distinct from observation causal sequence and absent from public ABI.
+     */
+    std::optional<compute::AcceptedBoundaryCoordinate> accepted_coordinate;
+
+    /**
      * @brief Optional explicit private Run QoS for maintained verification.
      * @note Embedded public Host conversion leaves this empty and receives the
      * established Throughput default. Source-private verification may supply a

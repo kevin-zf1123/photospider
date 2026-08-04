@@ -3,6 +3,7 @@
 #include <limits>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
 
 namespace ps::compute {
 
@@ -41,6 +42,40 @@ SupersessionGeneration::SupersessionGeneration(std::uint64_t value)
         "SupersessionGeneration value must be nonzero.");
   }
 }
+
+/** @copydoc AcceptedBoundaryCoordinate::AcceptedBoundaryCoordinate */
+AcceptedBoundaryCoordinate::AcceptedBoundaryCoordinate(
+    std::chrono::steady_clock::time_point admission_time,
+    std::uint64_t event_sequence)
+    : admission_time_(admission_time), event_sequence_(event_sequence) {
+  if (event_sequence_ == 0U) {
+    throw std::invalid_argument(
+        "AcceptedBoundaryCoordinate event sequence must be nonzero.");
+  }
+}
+
+/** @copydoc AcceptedBoundaryCoordinate::operator== */
+bool AcceptedBoundaryCoordinate::operator==(
+    const AcceptedBoundaryCoordinate& other) const noexcept {
+  return admission_time_ == other.admission_time_ &&
+         event_sequence_ == other.event_sequence_;
+}
+
+/** @copydoc AcceptedBoundaryCoordinate::operator< */
+bool AcceptedBoundaryCoordinate::operator<(
+    const AcceptedBoundaryCoordinate& other) const noexcept {
+  return std::tie(admission_time_, event_sequence_) <
+         std::tie(other.admission_time_, other.event_sequence_);
+}
+
+/** @copydoc SupersessionIdentity::SupersessionIdentity */
+SupersessionIdentity::SupersessionIdentity(
+    SupersessionKey key, SupersessionGeneration generation,
+    std::optional<AcceptedBoundaryCoordinate> accepted_coordinate) noexcept
+    : key(std::move(key)),
+      generation(std::move(generation)),
+      accepted_coordinate(std::move(accepted_coordinate)) {
+}  // NOLINT(whitespace/indent_namespace)
 
 /** @copydoc SupersessionGenerationAllocator::SupersessionGenerationAllocator */
 SupersessionGenerationAllocator::SupersessionGenerationAllocator(

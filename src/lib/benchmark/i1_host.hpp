@@ -39,6 +39,13 @@ struct I1HostComputeRequest final {
 
   /** @brief Observation-only sink retained by every materialized child Run. */
   std::shared_ptr<compute::ComputeRunObservationSink> observation_sink;
+
+  /**
+   * @brief Pre-call row-local coordinate proposed for success-only binding.
+   * @note The embedded Host carries this value into product supersession. A
+   * failed Host scheduling return does not make it accepted or current.
+   */
+  compute::AcceptedBoundaryCoordinate accepted_coordinate;
 };
 
 /**

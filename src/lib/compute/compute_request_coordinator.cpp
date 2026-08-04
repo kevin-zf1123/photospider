@@ -7,6 +7,46 @@
 #include <utility>
 
 namespace ps::compute {
+namespace {
+
+/**
+ * @brief Tests whether one candidate may replace the exact current identity.
+ * @param current Complete current identity for the lineage row.
+ * @param candidate Prepared candidate proposed for current publication.
+ * @return True when generation advances and, when both are bound, the typed
+ * accepted-boundary coordinate also advances.
+ * @throws Nothing.
+ * @note Mixed bound/unbound product traffic retains established generation
+ * ordering. Within the private accepted-boundary domain, equal timestamps are
+ * ordered only by row-local event sequence; observation causal sequence is
+ * never consulted.
+ */
+bool candidate_follows_current(const SupersessionIdentity& current,
+                               const SupersessionIdentity& candidate) noexcept {
+  if (!(current.generation < candidate.generation)) {
+    return false;
+  }
+  if (current.accepted_coordinate.has_value() &&
+      candidate.accepted_coordinate.has_value()) {
+    return *current.accepted_coordinate < *candidate.accepted_coordinate;
+  }
+  return true;
+}
+
+/**
+ * @brief Compares the current-version fields of two same-key identities.
+ * @param current Coordinator-owned exact current identity.
+ * @param candidate Run-captured identity being tested at commit.
+ * @return True when generation and optional accepted binding both match.
+ * @throws Nothing.
+ */
+bool same_current_version(const SupersessionIdentity& current,
+                          const SupersessionIdentity& candidate) noexcept {
+  return current.generation == candidate.generation &&
+         current.accepted_coordinate == candidate.accepted_coordinate;
+}
+
+}  // namespace
 
 /** @copydoc ComputeRequestCoordinator::PreparedCandidate::PreparedCandidate */
 ComputeRequestCoordinator::PreparedCandidate::PreparedCandidate(
@@ -77,8 +117,10 @@ ComputeRequestCoordinator::~ComputeRequestCoordinator() noexcept {
 
 /** @copydoc ComputeRequestCoordinator::prepare */
 ComputeRequestCoordinator::PreparedCandidate ComputeRequestCoordinator::prepare(
-    const SupersessionKey& key) {
-  SupersessionIdentity identity{key, SupersessionGeneration(1)};
+    const SupersessionKey& key,
+    std::optional<AcceptedBoundaryCoordinate> accepted_coordinate) {
+  SupersessionIdentity identity{key, SupersessionGeneration(1),
+                                std::move(accepted_coordinate)};
   bool needs_ticket = false;
   {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -207,8 +249,9 @@ void ComputeRequestCoordinator::publish(
         --row.provisional_adopters;
 
         rejected_by_close = !accepting_ || !row.ticket.valid();
-        if (!rejected_by_close && row.current_generation.has_value() &&
-            !(row.current_generation.value() < prepared.identity_.generation)) {
+        if (!rejected_by_close && row.current_identity.has_value() &&
+            !candidate_follows_current(*row.current_identity,
+                                       prepared.identity_)) {
           born_superseded = true;
         }
 
@@ -220,7 +263,7 @@ void ComputeRequestCoordinator::publish(
               std::terminate();
             }
           }
-          row.current_generation = prepared.identity_.generation;
+          row.current_identity = prepared.identity_;
           displaced_pending = std::move(row.pending);
           if (row.active != nullptr) {
             displaced_active = row.active->cancellation;
@@ -413,8 +456,8 @@ bool ComputeRequestCoordinator::is_current(
   std::lock_guard<std::mutex> lock(mutex_);
   const auto row_iterator = rows_.find(identity.key);
   return row_iterator != rows_.end() &&
-         row_iterator->second.current_generation.has_value() &&
-         row_iterator->second.current_generation.value() == identity.generation;
+         row_iterator->second.current_identity.has_value() &&
+         same_current_version(*row_iterator->second.current_identity, identity);
 }
 
 /** @copydoc ComputeRequestCoordinator::stop_admission */

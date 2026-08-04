@@ -228,6 +228,9 @@ struct PreparedProductCompute {
  * @throws std::invalid_argument for invalid target/intent normalization.
  * @throws std::overflow_error for exhausted generation space.
  * @throws std::bad_alloc or executor synchronization/admission exceptions.
+ * @note An optional source-private accepted coordinate is bound into the
+ * prepared identity before publication; it never uses Host return time or the
+ * observation sink's causal sequence.
  */
 PreparedProductCompute prepare_product_compute(GraphRuntime& runtime,
                                                Kernel::ComputeRequest request) {
@@ -238,7 +241,7 @@ PreparedProductCompute prepare_product_compute(GraphRuntime& runtime,
           ? request.cancellation_source
           : std::make_shared<compute::ComputeRequestCancellationSource>();
   compute::ComputeRequestCoordinator::PreparedCandidate prepared =
-      runtime.prepare_compute_request(key);
+      runtime.prepare_compute_request(key, request.accepted_coordinate);
   request.cancellation_source = cancellation;
   request.supersession = prepared.identity();
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)

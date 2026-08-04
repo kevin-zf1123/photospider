@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 
@@ -119,16 +120,96 @@ class SupersessionGeneration {
 };
 
 /**
+ * @brief Checked logical admission coordinate for accepted-boundary ordering.
+ *
+ * The coordinate combines the sole pre-Host-call monotonic sample with an
+ * independently allocated row-local event sequence. Lexicographic ordering
+ * makes the sequence authoritative only when timestamps are equal. It is
+ * deliberately distinct from `ComputeRunObservationCoordinate`, whose causal
+ * sequence orders product lifecycle observations.
+ *
+ * @throws std::invalid_argument when constructed with sequence zero.
+ * @note This source-private value is neither an installed Host field nor a
+ * public/IPC execution-profile selector. Host return time and observation
+ * causal sequence never participate in this coordinate.
+ */
+class AcceptedBoundaryCoordinate final {
+ public:
+  /**
+   * @brief Constructs one validated pre-call logical admission coordinate.
+   * @param admission_time Sole monotonic sample taken before Host invocation.
+   * @param event_sequence Nonzero row-local event sequence reserved pre-call.
+   * @throws std::invalid_argument when `event_sequence` is zero.
+   */
+  AcceptedBoundaryCoordinate(
+      std::chrono::steady_clock::time_point admission_time,
+      std::uint64_t event_sequence);
+
+  /**
+   * @brief Returns the pre-call monotonic sample.
+   * @return Exact admission timestamp retained without resampling.
+   * @throws Nothing.
+   */
+  std::chrono::steady_clock::time_point admission_time() const noexcept {
+    return admission_time_;
+  }
+
+  /**
+   * @brief Returns the independent row-local tie-breaking sequence.
+   * @return Checked nonzero event sequence.
+   * @throws Nothing.
+   */
+  std::uint64_t event_sequence() const noexcept { return event_sequence_; }
+
+  /**
+   * @brief Compares both immutable coordinate components exactly.
+   * @param other Candidate accepted-boundary coordinate.
+   * @return True only when timestamp and row-local sequence are equal.
+   * @throws Nothing.
+   */
+  bool operator==(const AcceptedBoundaryCoordinate& other) const noexcept;
+
+  /**
+   * @brief Orders coordinates by timestamp and then row-local sequence.
+   * @param other Candidate coordinate from the same evidence row/domain.
+   * @return True when this coordinate logically precedes `other`.
+   * @throws Nothing.
+   */
+  bool operator<(const AcceptedBoundaryCoordinate& other) const noexcept;
+
+ private:
+  /** @brief Sole pre-call monotonic admission sample. */
+  std::chrono::steady_clock::time_point admission_time_;
+  /** @brief Checked nonzero row-local tie-breaking sequence. */
+  std::uint64_t event_sequence_ = 0U;
+};
+
+/**
  * @brief Immutable request lineage version shared by materialized child Runs.
  * @throws Nothing for copy and move after its validated components exist.
  * @note A realtime request gives this same identity to its HP and RT children;
- * each child still owns a distinct RunId and terminal/resource state.
+ * each child still owns a distinct RunId and terminal/resource state. The
+ * optional accepted coordinate exists only for source-private admission paths
+ * that provide one before generation allocation.
  */
 struct SupersessionIdentity {
+  /**
+   * @brief Constructs one complete immutable product lineage identity.
+   * @param key Canonical target/request-intent lineage.
+   * @param generation Checked graph-wide generation.
+   * @param accepted_coordinate Optional source-private accepted binding.
+   * @throws Nothing after validated component construction.
+   */
+  SupersessionIdentity(SupersessionKey key, SupersessionGeneration generation,
+                       std::optional<AcceptedBoundaryCoordinate>
+                           accepted_coordinate = std::nullopt) noexcept;
+
   /** @brief Canonical target/request-intent lineage. */
   SupersessionKey key;
   /** @brief Graph-wide nonzero lineage version. */
   SupersessionGeneration generation;
+  /** @brief Exact source-private accepted-boundary ordering binding. */
+  std::optional<AcceptedBoundaryCoordinate> accepted_coordinate;
 };
 
 /**

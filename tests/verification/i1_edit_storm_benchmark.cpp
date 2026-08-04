@@ -514,8 +514,8 @@ Json edit_evidence_json(const I1EditEvidence& edit) {
   if (edit.accepted_coordinate.has_value()) {
     accepted = Json{
         {"admission_time_ns",
-         monotonic_nanoseconds(edit.accepted_coordinate->admission_time)},
-        {"event_sequence", edit.accepted_coordinate->event_sequence},
+         monotonic_nanoseconds(edit.accepted_coordinate->admission_time())},
+        {"event_sequence", edit.accepted_coordinate->event_sequence()},
     };
   }
   Json settlement = nullptr;
@@ -550,11 +550,20 @@ Json observations_json(const I1EpisodeObservationSnapshot& observations) {
   Json generations = Json::array();
   for (const I1ObservedCurrentGeneration& event :
        observations.current_generations) {
+    Json accepted_coordinate = nullptr;
+    if (event.accepted_coordinate.has_value()) {
+      accepted_coordinate = Json{
+          {"admission_time_ns",
+           monotonic_nanoseconds(event.accepted_coordinate->admission_time())},
+          {"event_sequence", event.accepted_coordinate->event_sequence()},
+      };
+    }
     generations.push_back(
         Json{{"edit_index", event.edit_index},
              {"generation", event.generation},
              {"observed_at_ns", monotonic_nanoseconds(event.observed_at)},
-             {"causal_sequence", event.causal_sequence}});
+             {"causal_sequence", event.causal_sequence},
+             {"accepted_coordinate", std::move(accepted_coordinate)}});
   }
   Json starts = Json::array();
   for (const I1ObservedServiceStart& event : observations.service_starts) {
@@ -683,11 +692,21 @@ Json inner_row_json(const I1EpisodeInnerRow& row) {
     if (row.accepted_products[edit_index].has_value()) {
       const I1AcceptedProductIdentity& identity =
           *row.accepted_products[edit_index];
+      Json accepted_coordinate = nullptr;
+      if (identity.accepted_coordinate.has_value()) {
+        accepted_coordinate = Json{
+            {"admission_time_ns",
+             monotonic_nanoseconds(
+                 identity.accepted_coordinate->admission_time())},
+            {"event_sequence", identity.accepted_coordinate->event_sequence()},
+        };
+      }
       product =
           Json{{"edit_index", edit_index},
                {"generation", identity.generation},
                {"run_id", identity.run_id.has_value() ? Json(*identity.run_id)
-                                                      : Json(nullptr)}};
+                                                      : Json(nullptr)},
+               {"accepted_coordinate", std::move(accepted_coordinate)}};
     }
     products.push_back(std::move(product));
   }

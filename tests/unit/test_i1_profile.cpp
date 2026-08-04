@@ -30,6 +30,9 @@ struct CapturedAdmission final {
 
   /** @brief Whether a non-null observation-only sink was supplied. */
   bool has_observation_sink = false;
+
+  /** @brief Exact pre-call coordinate delivered at Host invocation. */
+  std::optional<I1AcceptedCoordinate> accepted_coordinate;
 };
 
 /**
@@ -46,8 +49,9 @@ class RecordingI1Host final : public I1Host {
   /** @copydoc I1Host::compute_i1_async */
   Result<std::future<OperationStatus>> compute_i1_async(
       I1HostComputeRequest request) override {
-    admissions.push_back(CapturedAdmission{
-        request.qos, request.request, request.observation_sink != nullptr});
+    admissions.push_back(CapturedAdmission{request.qos, request.request,
+                                           request.observation_sink != nullptr,
+                                           request.accepted_coordinate});
     Result<std::future<OperationStatus>> result;
     result.status = schedule_status;
     if (result.status.ok) {
@@ -139,8 +143,8 @@ TEST(I1AcceptedBoundaryCollector, SuccessfulCallUsesPreCallCoordinate) {
   EXPECT_TRUE(result.host_return->status.ok);
   EXPECT_TRUE(result.host_return->future_valid);
   ASSERT_TRUE(result.accepted_coordinate.has_value());
-  EXPECT_EQ(result.accepted_coordinate->admission_time, admission);
-  EXPECT_EQ(result.accepted_coordinate->event_sequence, 7U);
+  EXPECT_EQ(result.accepted_coordinate->admission_time(), admission);
+  EXPECT_EQ(result.accepted_coordinate->event_sequence(), 7U);
   ASSERT_TRUE(result.settlement.valid());
   EXPECT_TRUE(result.settlement.get().ok);
 
@@ -157,6 +161,9 @@ TEST(I1AcceptedBoundaryCollector, SuccessfulCallUsesPreCallCoordinate) {
   EXPECT_EQ(captured.request.intent,
             std::optional<ComputeIntent>(ComputeIntent::GlobalHighPrecision));
   EXPECT_TRUE(captured.has_observation_sink);
+  ASSERT_TRUE(captured.accepted_coordinate.has_value());
+  EXPECT_EQ(captured.accepted_coordinate->admission_time(), admission);
+  EXPECT_EQ(captured.accepted_coordinate->event_sequence(), 7U);
 }
 
 /**
@@ -191,7 +198,12 @@ TEST(I1AcceptedBoundaryCollector, FailedHostCallCreatesNoAcceptedEvent) {
   EXPECT_FALSE(result.host_return->future_valid);
   EXPECT_FALSE(result.accepted_coordinate.has_value());
   EXPECT_FALSE(result.settlement.valid());
-  EXPECT_EQ(host.admissions.size(), 1U);
+  ASSERT_EQ(host.admissions.size(), 1U);
+  EXPECT_TRUE(observations.snapshot().current_generations.empty());
+  ASSERT_TRUE(host.admissions.front().accepted_coordinate.has_value());
+  EXPECT_EQ(host.admissions.front().accepted_coordinate->admission_time(),
+            origin);
+  EXPECT_EQ(host.admissions.front().accepted_coordinate->event_sequence(), 19U);
 }
 
 /**
@@ -228,6 +240,7 @@ TEST(I1AcceptedBoundaryCollector, InvalidWindowsNeverCallOrReserve) {
   EXPECT_FALSE(early.host_return.has_value());
   EXPECT_FALSE(late.host_return.has_value());
   EXPECT_TRUE(host.admissions.empty());
+  EXPECT_TRUE(observations.snapshot().current_generations.empty());
   ASSERT_EQ(sleeps.size(), 2U);
   EXPECT_EQ(sleeps[0], origin);
   EXPECT_EQ(sleeps[1], second_nominal);
@@ -258,8 +271,8 @@ TEST(I1AcceptedBoundaryCollector, AdmissionWindowEndpointsAreInclusive) {
 
   EXPECT_TRUE(first.admission_window_valid);
   EXPECT_TRUE(second.admission_window_valid);
-  EXPECT_EQ(first.accepted_coordinate->event_sequence, 41U);
-  EXPECT_EQ(second.accepted_coordinate->event_sequence, 42U);
+  EXPECT_EQ(first.accepted_coordinate->event_sequence(), 41U);
+  EXPECT_EQ(second.accepted_coordinate->event_sequence(), 42U);
   EXPECT_EQ(host.admissions.size(), 2U);
 }
 
@@ -283,7 +296,7 @@ TEST(I1AcceptedBoundaryCollector, SequenceExhaustionPreventsSecondHostCall) {
   I1EditAdmissionResult first = collector.admit_edit(
       origin, 0U, make_test_request(0U), make_test_sink(observations, 0U));
   ASSERT_TRUE(first.accepted_coordinate.has_value());
-  EXPECT_EQ(first.accepted_coordinate->event_sequence,
+  EXPECT_EQ(first.accepted_coordinate->event_sequence(),
             std::numeric_limits<std::uint64_t>::max());
   EXPECT_THROW(collector.admit_edit(origin, 1U, make_test_request(1U),
                                     make_test_sink(observations, 1U)),

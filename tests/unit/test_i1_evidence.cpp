@@ -119,8 +119,9 @@ I1EpisodeEvidenceInput make_valid_input(
     const std::uint64_t generation = edit_index + 1U;
     const std::uint64_t run_id = 100U + edit_index;
     input.observations.current_generations.push_back(
-        I1ObservedCurrentGeneration{edit_index, generation, admission,
-                                    causal_sequence++});
+        I1ObservedCurrentGeneration{
+            edit_index, generation, admission, causal_sequence++,
+            I1AcceptedCoordinate{admission, edit_index + 1U}});
     input.observations.service_starts.push_back(I1ObservedServiceStart{
         edit_index,
         run_id,
@@ -233,6 +234,44 @@ TEST(I1Evidence, NearestRankUsesCeilingOneBasedIndex) {
   EXPECT_EQ(i1_nearest_rank(samples, 95U, 100U), std::chrono::nanoseconds(190));
   EXPECT_EQ(i1_nearest_rank(samples, 99U, 100U), std::chrono::nanoseconds(198));
   EXPECT_THROW(i1_nearest_rank({}, 50U, 100U), std::invalid_argument);
+}
+
+/**
+ * @brief Proves product binding uses row-local sequence, not causal sequence.
+ * @throws Nothing when the complete synthetic row remains valid.
+ */
+TEST(I1Evidence, AcceptedAndObservationSequenceDomainsRemainIndependent) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  const I1ObservedCurrentGeneration& second_generation =
+      event_for_edit(&input.observations.current_generations, 1U);
+  ASSERT_TRUE(second_generation.accepted_coordinate.has_value());
+  EXPECT_EQ(second_generation.accepted_coordinate->event_sequence(), 2U);
+  EXPECT_NE(second_generation.accepted_coordinate->event_sequence(),
+            second_generation.causal_sequence);
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_TRUE(row.validity_reasons.empty());
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Rejects a generation callback bound to any coordinate but its edit.
+ * @throws Nothing when the evaluator fails closed on the exact mismatch.
+ */
+TEST(I1Evidence, CurrentGenerationRequiresExactAcceptedCoordinateBinding) {
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  I1ObservedCurrentGeneration& generation =
+      event_for_edit(&input.observations.current_generations, 3U);
+  generation.accepted_coordinate =
+      I1AcceptedCoordinate{input.edits[3U].admission_sample,
+                           *input.edits[3U].reserved_event_sequence + 100U};
+
+  const I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "current generation is not bound to the accepted "
+                      "coordinate"),
+            row.validity_reasons.end());
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
 }
 
 /**
