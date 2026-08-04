@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -803,84 +804,358 @@ TEST(I1Evidence, FailedAdmissionSerializesRawEvidenceWithoutAcceptedProduct) {
 }
 
 /**
- * @brief Proves failed-admission selection never hashes after the history cut.
- * @throws Allocation, ComputeRun, evaluation, JSON, and stream failures
- * unchanged to GoogleTest.
- * @note The test follows the runner's selected digest policy, captures the cut,
- * releases the still-unfrozen Value, evaluates the failed row, and exercises
- * the ordered NDJSON flush. A regression to failed-path hashing would replace
- * the required explicit missing-digest fact and fail the assertions below.
+ * @brief Deterministic failed-admission Host and runner-finalization port.
+ *
+ * The first Host call succeeds with an immediately ready settlement so the
+ * collector can retain a prior visible Value. The second call returns a raw
+ * Graph failure without a future. Port operations record the exact shared
+ * finalizer sequence and whether outer persistence observed a flushed row.
+ *
+ * @throws std::bad_alloc when copied snapshot, diagnostic, or stream evidence
+ * cannot allocate.
+ * @note The fake grants no Graph, scheduling, cancellation, or persistence
+ * authority outside this regression.
  */
-TEST(I1Evidence, FailedAdmissionSkipsHashAndFlushesFullyInvalidRow) {
-  I1EpisodeObservationCollector collector;
-  std::shared_ptr<compute::ComputeRunObservationSink> sink =
-      collector.make_edit_sink(0U);
+class FailedAdmissionWorkflowHost final
+    : public I1Host,
+      public I1FailedAdmissionFinalizationPort {
+ public:
+  /**
+   * @brief Binds deterministic closed evidence and flush observers.
+   * @param closed_snapshot Snapshot returned only after Graph close.
+   * @param final_sample Deterministic post-cut monotonic sample.
+   * @param lifecycle_cursor Expected baseline lifecycle cursor.
+   * @param episode_output Inner-row stream inspected by outer persistence.
+   * @param completed_rows Shared exact-slot row sequence.
+   * @param written_rows Shared durable inner-row cursor.
+   * @throws std::bad_alloc when snapshot ownership cannot allocate.
+   * @note Every borrowed object outlives the finalizer call.
+   */
+  FailedAdmissionWorkflowHost(
+      I1ExecutionSnapshot closed_snapshot,
+      std::chrono::steady_clock::time_point final_sample,
+      std::uint64_t lifecycle_cursor, const std::ostringstream& episode_output,
+      const std::vector<I1EpisodeInnerRow>& completed_rows,
+      const std::size_t& written_rows)
+      : closed_snapshot_(std::move(closed_snapshot)),
+        final_sample_(final_sample),
+        lifecycle_cursor_(lifecycle_cursor),
+        episode_output_(episode_output),
+        completed_rows_(completed_rows),
+        written_rows_(written_rows) {}
+
+  /** @copydoc I1Host::compute_i1_async */
+  Result<std::future<OperationStatus>> compute_i1_async(
+      I1HostComputeRequest request) override {
+    ++host_call_count;
+    Result<std::future<OperationStatus>> result;
+    if (host_call_count == 1U) {
+      result.status = success_status();
+      std::promise<OperationStatus> promise;
+      result.value = promise.get_future();
+      promise.set_value(success_status());
+      return result;
+    }
+
+    failed_call_observer_present = request.observation_sink != nullptr;
+    failed_proposed_coordinate = request.accepted_coordinate;
+    result.status = OperationStatus{
+        false, OperationErrorDomain::Graph,
+        static_cast<std::int32_t>(GraphErrc::ComputeError),
+        graph_error_stable_name(GraphErrc::ComputeError),
+        "injected Host admission failure after visible publication"};
+    return result;
+  }
+
+  /** @copydoc I1Host::i1_execution_snapshot */
+  I1ExecutionSnapshot i1_execution_snapshot(std::uint64_t after_cursor,
+                                            std::size_t limit) const override {
+    ++snapshot_call_count;
+    snapshot_saw_closed_graph = graph_closed;
+    snapshot_after_cursor = after_cursor;
+    snapshot_limit = limit;
+    return closed_snapshot_;
+  }
+
+  /** @copydoc I1FailedAdmissionFinalizationPort::close_graph */
+  OperationStatus close_graph() override {
+    ++close_call_count;
+    graph_closed = true;
+    return success_status();
+  }
+
+  /**
+   * @brief Captures the deterministic execution state after fake Graph close.
+   * @return Owned closed lifecycle/resource snapshot.
+   * @throws std::bad_alloc when snapshot copying cannot allocate.
+   * @note The call uses the same cursor/page limit as the manual runner.
+   */
+  I1ExecutionSnapshot capture_closed_execution_snapshot() override {
+    return i1_execution_snapshot(lifecycle_cursor_, 4096U);
+  }
+
+  /** @copydoc I1FailedAdmissionFinalizationPort::monotonic_now */
+  std::chrono::steady_clock::time_point monotonic_now() override {
+    ++monotonic_call_count;
+    return final_sample_;
+  }
+
+  /** @copydoc I1FailedAdmissionFinalizationPort::persist_outer_failure */
+  void persist_outer_failure(std::string_view diagnostic) override {
+    ++outer_persistence_call_count;
+    persisted_diagnostic = std::string(diagnostic);
+    outer_persistence_saw_flushed_inner_row =
+        written_rows_ == 1U && completed_rows_.size() == 1U &&
+        episode_output_.good() && !episode_output_.str().empty();
+  }
+
+  /** @copydoc I1FailedAdmissionFinalizationPort::observe_stage */
+  void observe_stage(
+      I1FailedAdmissionFinalizationStage stage) noexcept override {
+    if (stage_count < stages.size()) {
+      stages[stage_count++] = stage;
+    } else {
+      stage_overflow = true;
+    }
+  }
+
+  /** @brief Number of real fake-Host admission calls. */
+  std::size_t host_call_count = 0U;
+  /** @brief Whether the failed call retained a non-null observer. */
+  bool failed_call_observer_present = false;
+  /** @brief Proposed coordinate passed to the failed Host call. */
+  std::optional<I1AcceptedCoordinate> failed_proposed_coordinate;
+  /** @brief Number of exact-once Graph-close calls. */
+  std::size_t close_call_count = 0U;
+  /** @brief Whether the fake Graph is synchronously closed. */
+  bool graph_closed = false;
+  /** @brief Number of closed execution snapshot calls. */
+  mutable std::size_t snapshot_call_count = 0U;
+  /** @brief Whether snapshot capture observed the closed Graph. */
+  mutable bool snapshot_saw_closed_graph = false;
+  /** @brief Cursor supplied to the closed lifecycle snapshot. */
+  mutable std::uint64_t snapshot_after_cursor = 0U;
+  /** @brief Page bound supplied to the closed lifecycle snapshot. */
+  mutable std::size_t snapshot_limit = 0U;
+  /** @brief Number of final monotonic samples. */
+  std::size_t monotonic_call_count = 0U;
+  /** @brief Number of additive outer failure persistence calls. */
+  std::size_t outer_persistence_call_count = 0U;
+  /** @brief Diagnostic presented to additive outer persistence. */
+  std::string persisted_diagnostic;
+  /** @brief Whether outer persistence saw one already-flushed inner row. */
+  bool outer_persistence_saw_flushed_inner_row = false;
+  /** @brief Exact shared-finalizer stage trace. */
+  std::array<I1FailedAdmissionFinalizationStage, 6U> stages{};
+  /** @brief Number of retained stage observations. */
+  std::size_t stage_count = 0U;
+  /** @brief Whether the finalizer emitted more than its closed vocabulary. */
+  bool stage_overflow = false;
+
+ private:
+  /** @brief Owned deterministic closed execution snapshot. */
+  I1ExecutionSnapshot closed_snapshot_;
+  /** @brief Deterministic monotonic sample paired with that snapshot. */
+  std::chrono::steady_clock::time_point final_sample_;
+  /** @brief Baseline lifecycle cursor preceding the failed episode. */
+  std::uint64_t lifecycle_cursor_ = 0U;
+  /** @brief Borrowed ordered inner-row stream. */
+  const std::ostringstream& episode_output_;
+  /** @brief Borrowed exact-slot row sequence. */
+  const std::vector<I1EpisodeInnerRow>& completed_rows_;
+  /** @brief Borrowed durable inner-row cursor. */
+  const std::size_t& written_rows_;
+};
+
+/**
+ * @brief Creates one minimal ordinary request for shared-flow verification.
+ * @param edit_index Frozen edit whose Region is attached.
+ * @return Request accepted by the deterministic private Host boundary.
+ * @throws std::out_of_range for an invalid edit index.
+ */
+HostComputeRequest make_failed_admission_request(std::size_t edit_index) {
+  HostComputeRequest request;
+  request.session = GraphSessionId{"i1-failed-finalization-test"};
+  request.node = NodeId{kI1TargetNodeId};
+  request.dirty_roi = i1_edit_region(edit_index);
+  return request;
+}
+
+/**
+ * @brief Proves runner and test share the complete failed-admission terminator.
+ * @throws Allocation, fake Host, ComputeRun, evaluation, JSON, and stream
+ * failures unchanged to GoogleTest.
+ * @note A real `I1AcceptedBoundaryCollector` call receives the fake Host's raw
+ * failure. The shared runner symbol must then close, cut, release without
+ * hashing, snapshot, emit four Invalid verdicts, flush NDJSON, and only then
+ * begin outer failure persistence. Reordering or restoring Freeze breaks the
+ * stage, flush, or missing-digest assertions.
+ */
+TEST(I1Evidence, FailedAdmissionUsesSharedRunnerFinalizationFlow) {
+  std::ostringstream output;
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  std::size_t written = 0U;
+
+  I1EpisodeEvidenceInput input = make_valid_input(0U);
+  const auto wall_sample = std::chrono::steady_clock::now();
+  input.grid_origin =
+      checked_i1_time_subtract(wall_sample, kI1MeasurementEndOffset + 1ms);
+  input.episode_origin = i1_episode_origin(input.grid_origin, input.slot);
+  input.terminal_boundary = i1_terminal_boundary(input.grid_origin);
+  input.measurement_start =
+      checked_i1_time_add(input.episode_origin, kI1MeasurementStartOffset);
+  input.measurement_end =
+      checked_i1_time_add(input.episode_origin, kI1MeasurementEndOffset);
+
+  I1ExecutionSnapshot closed_snapshot = input.final_snapshot;
+  closed_snapshot.host_resources.reserved = ResourceVector{};
+  closed_snapshot.lifecycle.counters = compute::ExecutionLifecycleCounters{};
+  closed_snapshot.lifecycle.snapshot_cut =
+      input.baseline.lifecycle.snapshot_cut + 3U;
+  closed_snapshot.lifecycle.next_cursor =
+      closed_snapshot.lifecycle.snapshot_cut;
+  const auto final_sample = checked_i1_time_add(input.measurement_end, 2ms);
+  FailedAdmissionWorkflowHost host(std::move(closed_snapshot), final_sample,
+                                   input.baseline.lifecycle.snapshot_cut,
+                                   output, rows, written);
+
+  I1EpisodeObservationCollector observations;
+  std::shared_ptr<compute::ComputeRunObservationSink> first_sink =
+      observations.make_edit_sink(0U);
+  std::shared_ptr<compute::ComputeRunObservationSink> failed_sink =
+      observations.make_edit_sink(1U);
+  const auto first_admission = input.episode_origin;
+  const auto failed_admission =
+      checked_i1_time_add(input.episode_origin, kI1EditStride);
+  std::vector<std::chrono::steady_clock::time_point> samples{
+      first_admission, checked_i1_time_add(first_admission, 100us),
+      failed_admission, checked_i1_time_add(failed_admission, 100us)};
+  std::size_t sample_index = 0U;
+  I1AcceptedBoundaryCollector admissions(
+      host, [&samples, &sample_index] { return samples.at(sample_index++); },
+      [](auto) {}, 31U);
+
+  I1EditAdmissionResult accepted = admissions.admit_edit(
+      input.episode_origin, 0U, make_failed_admission_request(0U), first_sink);
+  ASSERT_TRUE(accepted.accepted_coordinate.has_value());
+  ASSERT_TRUE(accepted.settlement.valid());
+
   compute::ComputeRunSubmission submission{
-      "i1-failed-admission-digest-policy",
+      "i1-failed-admission-shared-flow",
       GraphInstanceId{8101U},
       GraphRevision{8101U},
       kI1TargetNodeId,
       ComputeIntent::GlobalHighPrecision,
       compute::ComputeRunQuality::Full,
       compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
-                             std::nullopt, 1U, 8U},
+                             accepted.deadline, 1U, 8U},
       compute::SupersessionIdentity{
           compute::SupersessionKey(kI1TargetNodeId,
                                    ComputeIntent::GlobalHighPrecision),
-          compute::SupersessionGeneration(1U)},
-      nullptr};
+          compute::SupersessionGeneration(1U), accepted.accepted_coordinate},
+      first_sink};
   compute::ComputeRun run(std::move(submission));
   compute::ComputeRunLease lease = run.acquire_lease();
-  sink->on_current_visible(lease.descriptor(), make_test_output(),
-                           sink->reserve_causal_coordinate());
+  first_sink->on_current_generation(lease.descriptor().supersession(),
+                                    first_sink->reserve_causal_coordinate());
+  first_sink->on_current_visible(lease.descriptor(), make_test_output(),
+                                 first_sink->reserve_causal_coordinate());
 
-  const I1PreCutDigestPolicy digest_policy = i1_pre_cut_digest_policy(true);
-  if (digest_policy == I1PreCutDigestPolicy::FreezePublishedOutputs) {
-    collector.freeze_visible_output_digests();
+  I1EditAdmissionResult failed = admissions.admit_edit(
+      input.episode_origin, 1U, make_failed_admission_request(1U), failed_sink);
+  ASSERT_TRUE(failed.admission_attempted);
+  ASSERT_TRUE(failed.admission_window_valid);
+  ASSERT_TRUE(failed.host_return.has_value());
+  EXPECT_FALSE(failed.host_return->status.ok);
+  EXPECT_FALSE(failed.host_return->future_valid);
+  EXPECT_FALSE(failed.accepted_coordinate.has_value());
+  EXPECT_FALSE(failed.settlement.valid());
+
+  std::array<I1EditAdmissionResult, kI1EditCount> results;
+  for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
+    results[edit_index].edit_index = edit_index;
+    results[edit_index].nominal_time = checked_i1_time_add(
+        input.episode_origin,
+        std::chrono::nanoseconds(kI1EditStride.count() *
+                                 static_cast<std::int64_t>(edit_index)));
   }
-  const I1ObservationHistoryCut history_cut = collector.capture_history_cut();
-  collector.release_unfrozen_visible_outputs();
-  I1EpisodeObservationSnapshot observations = collector.snapshot();
+  results[0U] = std::move(accepted);
+  results[1U] = std::move(failed);
 
-  EXPECT_EQ(digest_policy, I1PreCutDigestPolicy::SkipPayloadTraversal);
-  ASSERT_EQ(observations.visible_outputs.size(), 1U);
-  EXPECT_FALSE(observations.visible_outputs.front().output.valid());
-  EXPECT_TRUE(observations.visible_outputs.front().value_valid_at_capture);
-  EXPECT_FALSE(observations.visible_outputs.front().content_digest.has_value());
+  bool saw_terminal_error = false;
+  std::string terminal_diagnostic;
+  try {
+    finalize_i1_failed_admission(
+        "Host admission failed at edit 1", std::move(input), std::move(results),
+        &observations, &host, &output, &rows, &written);
+  } catch (const I1FailedAdmissionFinalizationError& error) {
+    saw_terminal_error = true;
+    terminal_diagnostic = error.what();
+  }
+  EXPECT_TRUE(saw_terminal_error);
+  EXPECT_NE(terminal_diagnostic.find("Host admission failed at edit 1"),
+            std::string::npos);
 
-  I1EpisodeEvidenceInput input = make_valid_input(0U);
-  input.observation_cut = history_cut;
-  input.observations = std::move(observations);
-  input.final_snapshot_sample = history_cut.captured_at;
-  I1EditEvidence& failed_edit = input.edits[1U];
-  failed_edit.host_return = I1HostReturnEvidence{
-      checked_i1_time_add(failed_edit.admission_sample, 100us),
-      OperationStatus{false, OperationErrorDomain::Graph,
-                      static_cast<std::int32_t>(GraphErrc::ComputeError),
-                      graph_error_stable_name(GraphErrc::ComputeError),
-                      "injected failed admission after visible publication"},
-      false};
-  failed_edit.accepted_coordinate.reset();
-  failed_edit.settlement_status.reset();
+  EXPECT_EQ(host.host_call_count, 2U);
+  EXPECT_TRUE(host.failed_call_observer_present);
+  ASSERT_TRUE(host.failed_proposed_coordinate.has_value());
+  EXPECT_EQ(host.failed_proposed_coordinate->event_sequence(), 32U);
+  EXPECT_EQ(host.close_call_count, 1U);
+  EXPECT_TRUE(host.graph_closed);
+  EXPECT_EQ(host.snapshot_call_count, 1U);
+  EXPECT_TRUE(host.snapshot_saw_closed_graph);
+  EXPECT_EQ(host.snapshot_after_cursor, 10U);
+  EXPECT_EQ(host.snapshot_limit, 4096U);
+  EXPECT_EQ(host.monotonic_call_count, 1U);
+  EXPECT_EQ(host.outer_persistence_call_count, 1U);
+  EXPECT_TRUE(host.outer_persistence_saw_flushed_inner_row);
+  EXPECT_NE(host.persisted_diagnostic.find("Host admission failed at edit 1"),
+            std::string::npos);
 
-  std::vector<I1EpisodeInnerRow> rows;
-  rows.reserve(kI1GridSlotCount);
-  rows.push_back(evaluate_i1_episode(std::move(input)));
+  const std::array<I1FailedAdmissionFinalizationStage, 6U> expected_stages{
+      I1FailedAdmissionFinalizationStage::GraphCloseCompleted,
+      I1FailedAdmissionFinalizationStage::HistoryCutCaptured,
+      I1FailedAdmissionFinalizationStage::UnfrozenOutputsReleased,
+      I1FailedAdmissionFinalizationStage::ClosedExecutionSnapshotCaptured,
+      I1FailedAdmissionFinalizationStage::InnerRowFlushed,
+      I1FailedAdmissionFinalizationStage::OuterFailurePersistenceStarted};
+  EXPECT_FALSE(host.stage_overflow);
+  EXPECT_EQ(host.stage_count, expected_stages.size());
+  EXPECT_EQ(host.stages, expected_stages);
+
   ASSERT_EQ(rows.size(), 1U);
-  EXPECT_EQ(rows.front().latency_verdict, I1Verdict::Invalid);
-  EXPECT_EQ(rows.front().waste_verdict, I1Verdict::Invalid);
-  EXPECT_EQ(rows.front().memory_verdict, I1Verdict::Invalid);
-  EXPECT_EQ(rows.front().output_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(written, 1U);
+  const I1EpisodeInnerRow& row = rows.front();
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+  ASSERT_TRUE(row.evidence.edits[1U].host_return.has_value());
+  EXPECT_FALSE(row.evidence.edits[1U].host_return->status.ok);
+  EXPECT_FALSE(row.evidence.edits[1U].accepted_coordinate.has_value());
+  EXPECT_FALSE(row.accepted_products[1U].has_value());
+  EXPECT_FALSE(row.evidence.edits[2U].admission_attempted);
+  ASSERT_EQ(row.evidence.observations.visible_outputs.size(), 1U);
+  const I1ObservedVisibleOutput& visible =
+      row.evidence.observations.visible_outputs.front();
+  EXPECT_GT(row.evidence.observation_cut.causal_sequence,
+            visible.causal_sequence);
+  EXPECT_TRUE(visible.value_valid_at_capture);
+  EXPECT_FALSE(visible.output.valid());
+  EXPECT_FALSE(visible.content_digest.has_value());
+  EXPECT_EQ(row.evidence.final_snapshot.lifecycle.counters.open_graph_count,
+            0U);
+  EXPECT_EQ(
+      row.evidence.final_snapshot.lifecycle.counters.registered_graph_count,
+      0U);
 
-  std::ostringstream output;
-  std::size_t written = 0U;
-  flush_i1_episode_rows(&output, rows, &written);
-  ASSERT_EQ(written, 1U);
   const nlohmann::json encoded = nlohmann::json::parse(output.str());
   EXPECT_EQ(encoded.at("verdicts").at("latency").get<std::string>(), "invalid");
   EXPECT_EQ(encoded.at("verdicts").at("waste").get<std::string>(), "invalid");
   EXPECT_EQ(encoded.at("verdicts").at("memory").get<std::string>(), "invalid");
   EXPECT_EQ(encoded.at("verdicts").at("output").get<std::string>(), "invalid");
+  EXPECT_TRUE(encoded.at("accepted_products").at(1U).is_null());
   EXPECT_EQ(encoded.at("observations")
                 .at("visible_outputs")
                 .front()

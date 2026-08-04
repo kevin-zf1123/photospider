@@ -5,12 +5,17 @@
 #pragma once
 
 #include <array>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
 #include <future>
 #include <iosfwd>
 #include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "benchmark/i1_evidence.hpp"
@@ -18,26 +23,138 @@
 namespace ps::benchmark {
 
 /**
- * @brief Pre-history-cut digest traversal selected for one episode outcome.
- * @throws Nothing for value construction or comparison.
+ * @brief Observable milestones in the runner-owned failed-admission terminator.
+ * @throws Nothing for value construction, copying, or comparison.
+ * @note The sequence is closed and monotonic. In particular, no payload-digest
+ * milestone exists because failed admission is release-only after Graph close.
  */
-enum class I1PreCutDigestPolicy : std::uint8_t {
-  /** @brief Freeze outputs during the normal pre-cut measurement window. */
-  FreezePublishedOutputs,
-  /** @brief Preserve missing digests after a failed admission and Graph close.
-   */
-  SkipPayloadTraversal,
+enum class I1FailedAdmissionFinalizationStage : std::uint8_t {
+  /** @brief Graph close was attempted before any history cut. */
+  GraphCloseCompleted,
+  /** @brief The first excluded causal coordinate has been reserved. */
+  HistoryCutCaptured,
+  /** @brief Every unfrozen visible Value was released without traversal. */
+  UnfrozenOutputsReleased,
+  /** @brief Closed lifecycle/resource state was captured after release. */
+  ClosedExecutionSnapshotCaptured,
+  /** @brief The all-Invalid inner row reached a successful stream flush. */
+  InnerRowFlushed,
+  /** @brief Outer failure persistence may begin after the inner-row flush. */
+  OuterFailurePersistenceStarted,
 };
 
 /**
- * @brief Selects whether an episode may traverse visible payloads before cut.
- * @param admission_failed True when failed admission selects Graph close.
- * @return Freeze for a normal episode, otherwise skip payload traversal.
- * @throws Nothing.
- * @note After the history cut, both paths may only release unfrozen Values;
- * neither path may compute a digest.
+ * @brief Injectable runner authorities used only after failed I1 admission.
+ *
+ * The workflow owns ordering while this port supplies the concrete Graph close,
+ * closed execution snapshot, monotonic sample, and additive failure-artifact
+ * persistence. The interface exposes no normal-path digest traversal and no
+ * admission, scheduling, cancellation, or publication authority.
+ *
+ * @throws As documented by individual operations.
+ * @note The manual runner and deterministic unit regression implement this same
+ * interface; it is verification-only and not part of an installed ABI.
  */
-I1PreCutDigestPolicy i1_pre_cut_digest_policy(bool admission_failed) noexcept;
+class I1FailedAdmissionFinalizationPort {
+ public:
+  /**
+   * @brief Releases a verification port without changing product state.
+   * @throws Nothing.
+   */
+  virtual ~I1FailedAdmissionFinalizationPort() noexcept = default;
+
+  /**
+   * @brief Synchronously closes the episode Graph and revokes publication.
+   * @return Exact close status; a failed status is retained in diagnostics.
+   * @throws Host ownership or synchronization failures unchanged.
+   * @note This is always the first externally visible finalization operation.
+   */
+  virtual OperationStatus close_graph() = 0;
+
+  /**
+   * @brief Captures authoritative state after close, cut, and Value release.
+   * @return Closed lifecycle and resource snapshot for the failed row.
+   * @throws Snapshot allocation or synchronization failures unchanged.
+   */
+  virtual I1ExecutionSnapshot capture_closed_execution_snapshot() = 0;
+
+  /**
+   * @brief Samples the final snapshot's process-monotonic observation time.
+   * @return Time paired with `capture_closed_execution_snapshot()`.
+   * @throws Injected monotonic-clock failures unchanged.
+   */
+  virtual std::chrono::steady_clock::time_point monotonic_now() = 0;
+
+  /**
+   * @brief Persists additive outer failure metadata after durable inner
+   * evidence.
+   * @param diagnostic Complete failed-admission/finalization diagnostic.
+   * @return Nothing after the failure artifact is durably written.
+   * @throws I/O, JSON, or allocation failures to the workflow, which preserves
+   * the primary failed-admission exception and does not permit an early retry.
+   */
+  virtual void persist_outer_failure(std::string_view diagnostic) = 0;
+
+  /**
+   * @brief Observes one completed ordering milestone without authority.
+   * @param stage Monotonic finalization stage reached by the workflow.
+   * @return Nothing.
+   * @throws Nothing; implementations must remain no-throw.
+   * @note The production runner uses the default no-op. Deterministic tests use
+   * this callback only to prove close/cut/release/flush ordering.
+   */
+  virtual void observe_stage(I1FailedAdmissionFinalizationStage stage) noexcept;
+};
+
+/**
+ * @brief Signals that failed admission has already owned outer persistence.
+ * @throws std::bad_alloc when diagnostic ownership cannot allocate.
+ * @note The manual `main` catches this type separately and must not write
+ * `failure.json` again. The artifact was either written after the inner row, or
+ * deliberately withheld because the inner row could not be flushed first.
+ */
+class I1FailedAdmissionFinalizationError final : public std::runtime_error {
+ public:
+  /**
+   * @brief Owns the terminal failed-admission diagnostic.
+   * @param diagnostic Complete source and finalization diagnostic.
+   * @throws std::bad_alloc when base exception storage cannot allocate.
+   */
+  explicit I1FailedAdmissionFinalizationError(std::string diagnostic);
+};
+
+/**
+ * @brief Closes, seals, persists, and aborts one failed-admission episode.
+ *
+ * The workflow performs these phases exactly once and in order: Graph close;
+ * history cut; ready-settlement consumption; release-only Value disposal;
+ * closed observation/resource capture; fixed-width edit capture; all-Invalid
+ * evaluation; ordered `episodes.ndjson` flush; additive outer failure write;
+ * and terminal exception propagation. It never calls payload digest traversal.
+ *
+ * @param diagnostic Initial raw failed-admission diagnostic.
+ * @param input Prepopulated immutable grid/baseline/golden row facts.
+ * @param admissions All fixed-width admission results, including untouched
+ * suffix positions and any earlier accepted settlement futures.
+ * @param observations Episode collector that outlives every attached sink.
+ * @param port Concrete close/snapshot/failure-persistence authorities.
+ * @param episode_output Open ordered inner-row stream.
+ * @param completed_rows Pre-reserved exact-slot row sequence.
+ * @param written_rows Durable in/out row cursor for `episode_output`.
+ * @return Never returns; throws after persistence or fail-closed suppression.
+ * @throws I1FailedAdmissionFinalizationError after the inner row and outer
+ * failure artifact are ordered, or when finalization cannot safely permit the
+ * outer artifact. Lower-level diagnostics are retained in `what()` when
+ * possible.
+ * @note The function requires at least one attempted admission without an
+ * accepted coordinate and forbids later edit/slot submission by construction.
+ */
+[[noreturn]] void finalize_i1_failed_admission(
+    std::string diagnostic, I1EpisodeEvidenceInput input,
+    std::array<I1EditAdmissionResult, kI1EditCount> admissions,
+    I1EpisodeObservationCollector* observations,
+    I1FailedAdmissionFinalizationPort* port, std::ostream* episode_output,
+    std::vector<I1EpisodeInnerRow>* completed_rows, std::size_t* written_rows);
 
 /**
  * @brief Owned nullary work item for one payload-free episode evaluation.

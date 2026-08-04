@@ -4,13 +4,18 @@
  */
 #include "verification/i1_evidence_workflow.hpp"
 
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <future>
 #include <memory>
 #include <ostream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -181,12 +186,190 @@ const char* exception_diagnostic(const std::exception_ptr& failure) noexcept {
   }
 }
 
+/**
+ * @brief Appends one semicolon-delimited failed-finalization diagnostic.
+ * @param diagnostic Mutable complete runner diagnostic.
+ * @param detail Nonempty additional fact without a leading separator.
+ * @return Nothing after exact text ownership is appended.
+ * @throws std::bad_alloc when string growth cannot allocate.
+ */
+void append_failure_diagnostic(std::string* diagnostic,
+                               std::string_view detail) {
+  if (diagnostic == nullptr) {
+    throw std::invalid_argument("I1 failure diagnostic is null");
+  }
+  diagnostic->append("; ");
+  diagnostic->append(detail.data(), detail.size());
+}
+
+/**
+ * @brief Reports whether every independent episode verdict is Invalid.
+ * @param row Evaluated failed-admission row.
+ * @return True only for four Invalid verdicts.
+ * @throws Nothing.
+ * @note Failed admission aborts the frozen episode, so retaining any partial
+ * Pass or Fail claim is structurally inconsistent with the closed evidence.
+ */
+bool row_is_fully_invalid(const I1EpisodeInnerRow& row) noexcept {
+  return row.latency_verdict == I1Verdict::Invalid &&
+         row.waste_verdict == I1Verdict::Invalid &&
+         row.memory_verdict == I1Verdict::Invalid &&
+         row.output_verdict == I1Verdict::Invalid;
+}
+
+/**
+ * @brief Detects the required failed/invalid admission in fixed-width input.
+ * @param admissions Complete episode admission results.
+ * @return True when an attempted boundary has no accepted coordinate.
+ * @throws Nothing.
+ */
+bool contains_failed_admission(
+    const std::array<I1EditAdmissionResult, kI1EditCount>&
+        admissions) noexcept {
+  for (const I1EditAdmissionResult& admission : admissions) {
+    if (admission.admission_attempted &&
+        !admission.accepted_coordinate.has_value()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
-/** @copydoc i1_pre_cut_digest_policy */
-I1PreCutDigestPolicy i1_pre_cut_digest_policy(bool admission_failed) noexcept {
-  return admission_failed ? I1PreCutDigestPolicy::SkipPayloadTraversal
-                          : I1PreCutDigestPolicy::FreezePublishedOutputs;
+/** @copydoc I1FailedAdmissionFinalizationPort::observe_stage */
+void I1FailedAdmissionFinalizationPort::observe_stage(
+    I1FailedAdmissionFinalizationStage stage) noexcept {
+  static_cast<void>(stage);
+}
+
+/**
+ * @brief Owns one terminal diagnostic for the specialized runner catch.
+ * @param diagnostic Complete failed-admission/finalization diagnostic.
+ * @throws std::bad_alloc when base exception storage cannot allocate.
+ */
+I1FailedAdmissionFinalizationError::I1FailedAdmissionFinalizationError(
+    std::string diagnostic)
+    : std::runtime_error(std::move(diagnostic)) {}
+
+/** @copydoc finalize_i1_failed_admission */
+[[noreturn]] void finalize_i1_failed_admission(
+    std::string diagnostic, I1EpisodeEvidenceInput input,
+    std::array<I1EditAdmissionResult, kI1EditCount> admissions,
+    I1EpisodeObservationCollector* observations,
+    I1FailedAdmissionFinalizationPort* port, std::ostream* episode_output,
+    std::vector<I1EpisodeInnerRow>* completed_rows, std::size_t* written_rows) {
+  try {
+    if (observations == nullptr || port == nullptr ||
+        episode_output == nullptr || completed_rows == nullptr ||
+        written_rows == nullptr) {
+      throw std::invalid_argument(
+          "I1 failed-admission finalization state is null");
+    }
+    if (!contains_failed_admission(admissions)) {
+      throw std::invalid_argument(
+          "I1 failed-admission finalization lacks a failed admission");
+    }
+    if (input.slot >= kI1GridSlotCount ||
+        input.slot != completed_rows->size() ||
+        completed_rows->capacity() < kI1GridSlotCount) {
+      throw std::invalid_argument(
+          "I1 failed-admission row is not the reserved next grid slot");
+    }
+
+    OperationStatus close_status = port->close_graph();
+    port->observe_stage(
+        I1FailedAdmissionFinalizationStage::GraphCloseCompleted);
+    if (!close_status.ok) {
+      append_failure_diagnostic(
+          &diagnostic,
+          std::string("graph-close publication revocation failed: ") +
+              close_status.message);
+    }
+
+    input.observation_cut = observations->capture_history_cut();
+    port->observe_stage(I1FailedAdmissionFinalizationStage::HistoryCutCaptured);
+
+    std::array<std::optional<OperationStatus>, kI1EditCount> settlements;
+    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
+      std::future<OperationStatus>& future = admissions[edit_index].settlement;
+      if (!future.valid()) {
+        continue;
+      }
+      if (future.wait_for(std::chrono::nanoseconds(0)) !=
+          std::future_status::ready) {
+        append_failure_diagnostic(&diagnostic,
+                                  std::string("accepted edit ") +
+                                      std::to_string(edit_index) +
+                                      " remained active after graph close");
+        continue;
+      }
+      try {
+        settlements[edit_index] = future.get();
+      } catch (const std::exception& error) {
+        append_failure_diagnostic(&diagnostic,
+                                  std::string("accepted edit ") +
+                                      std::to_string(edit_index) +
+                                      " settlement raised: " + error.what());
+      } catch (...) {
+        append_failure_diagnostic(
+            &diagnostic, std::string("accepted edit ") +
+                             std::to_string(edit_index) +
+                             " settlement raised a non-standard exception");
+      }
+    }
+
+    observations->release_unfrozen_visible_outputs();
+    port->observe_stage(
+        I1FailedAdmissionFinalizationStage::UnfrozenOutputsReleased);
+    input.final_snapshot = port->capture_closed_execution_snapshot();
+    input.final_snapshot_sample = port->monotonic_now();
+    port->observe_stage(
+        I1FailedAdmissionFinalizationStage::ClosedExecutionSnapshotCaptured);
+    input.observations = observations->snapshot();
+    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
+      input.edits[edit_index] = capture_i1_edit_evidence(
+          admissions[edit_index], std::move(settlements[edit_index]));
+    }
+
+    completed_rows->push_back(evaluate_i1_episode(std::move(input)));
+    if (!row_is_fully_invalid(completed_rows->back())) {
+      append_failure_diagnostic(
+          &diagnostic,
+          "failed admission did not produce four Invalid verdicts");
+    }
+    flush_i1_episode_rows(episode_output, *completed_rows, written_rows);
+    port->observe_stage(I1FailedAdmissionFinalizationStage::InnerRowFlushed);
+    port->observe_stage(
+        I1FailedAdmissionFinalizationStage::OuterFailurePersistenceStarted);
+    try {
+      port->persist_outer_failure(diagnostic);
+    } catch (const std::exception& error) {
+      append_failure_diagnostic(
+          &diagnostic,
+          std::string("failure artifact persistence failed: ") + error.what());
+    } catch (...) {
+      append_failure_diagnostic(
+          &diagnostic,
+          "failure artifact persistence raised a non-standard exception");
+    }
+    throw I1FailedAdmissionFinalizationError(std::move(diagnostic));
+  } catch (const I1FailedAdmissionFinalizationError&) {
+    throw;
+  } catch (const std::exception& error) {
+    append_failure_diagnostic(
+        &diagnostic,
+        std::string("failed-admission finalization stopped before outer "
+                    "failure persistence: ") +
+            error.what());
+    throw I1FailedAdmissionFinalizationError(std::move(diagnostic));
+  } catch (...) {
+    append_failure_diagnostic(
+        &diagnostic,
+        "failed-admission finalization stopped on a non-standard exception "
+        "before outer failure persistence");
+    throw I1FailedAdmissionFinalizationError(std::move(diagnostic));
+  }
 }
 
 /** @copydoc I1EpisodeEvaluationRecoveryError::I1EpisodeEvaluationRecoveryError

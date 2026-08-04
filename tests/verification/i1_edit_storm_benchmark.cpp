@@ -208,6 +208,28 @@ void write_text_file(const std::filesystem::path& path,
 }
 
 /**
+ * @brief Writes the unchanged additive manual-runner failure envelope.
+ * @param output_directory Prepared disposable result root.
+ * @param diagnostic Complete primary/finalization diagnostic.
+ * @return Nothing after `failure.json` is durably written.
+ * @throws JSON, filesystem, and allocation failures unchanged.
+ * @note Failed-admission control permits this helper only after its source row
+ * has been flushed to `episodes.ndjson`; generic setup failures may call it
+ * directly because no episode admission was available to preserve.
+ */
+void write_failure_artifact(const std::filesystem::path& output_directory,
+                            std::string_view diagnostic) {
+  const Json failure{
+      {"schema", "execution-profile-i1-manual-failure-v1"},
+      {"workload_id", kI1WorkloadId},
+      {"diagnostic", diagnostic},
+      {"later_slots_backfilled", false},
+      {"outer_canonical_envelope_claim", false},
+  };
+  write_text_file(output_directory / "failure.json", failure.dump(2) + "\n");
+}
+
+/**
  * @brief Converts a steady-clock point to its retained signed nanosecond tick.
  * @param value Point in the runner's process monotonic domain.
  * @return Nanoseconds since the implementation-defined steady-clock epoch.
@@ -323,6 +345,73 @@ class ScopedGraphClose final {
 };
 
 /**
+ * @brief Adapts one live runner episode to the shared failure terminator.
+ *
+ * The adapter supplies only Graph close, closed read-only execution state,
+ * monotonic sampling, and additive failure-artifact persistence. Ordering is
+ * owned entirely by `finalize_i1_failed_admission()`.
+ *
+ * @throws Nothing for construction and destruction; virtual operations retain
+ * their underlying Host/JSON/I/O exception behavior.
+ * @note Every referenced owner outlives the non-returning finalization call.
+ */
+class I1RunnerFailedAdmissionPort final
+    : public I1FailedAdmissionFinalizationPort {
+ public:
+  /**
+   * @brief Binds the concrete authorities for one failed episode.
+   * @param graph_close Existing exact-once Graph close guard.
+   * @param i1_host Source-private execution snapshot capability.
+   * @param lifecycle_cursor Baseline cursor preceding episode transitions.
+   * @param output_directory Prepared disposable artifact root.
+   * @throws Nothing because all inputs are borrowed references or scalars.
+   */
+  I1RunnerFailedAdmissionPort(
+      ScopedGraphClose& graph_close, I1Host& i1_host,
+      std::uint64_t lifecycle_cursor,
+      const std::filesystem::path& output_directory) noexcept
+      : graph_close_(graph_close),
+        i1_host_(i1_host),
+        lifecycle_cursor_(lifecycle_cursor),
+        output_directory_(output_directory) {}
+
+  /** @copydoc I1FailedAdmissionFinalizationPort::close_graph */
+  OperationStatus close_graph() override {
+    return graph_close_.close_now().status;
+  }
+
+  /**
+   * @brief Captures authoritative execution state after live Graph close.
+   * @return Closed Host/device/lifecycle snapshot for the failed episode.
+   * @throws Snapshot allocation and synchronization failures unchanged.
+   * @note The baseline cursor preserves only this episode's lifecycle page.
+   */
+  I1ExecutionSnapshot capture_closed_execution_snapshot() override {
+    return i1_host_.i1_execution_snapshot(lifecycle_cursor_, 4096U);
+  }
+
+  /** @copydoc I1FailedAdmissionFinalizationPort::monotonic_now */
+  std::chrono::steady_clock::time_point monotonic_now() override {
+    return std::chrono::steady_clock::now();
+  }
+
+  /** @copydoc I1FailedAdmissionFinalizationPort::persist_outer_failure */
+  void persist_outer_failure(std::string_view diagnostic) override {
+    write_failure_artifact(output_directory_, diagnostic);
+  }
+
+ private:
+  /** @brief Borrowed exact-once Graph close authority. */
+  ScopedGraphClose& graph_close_;
+  /** @brief Borrowed source-private closed-snapshot authority. */
+  I1Host& i1_host_;
+  /** @brief Cursor immediately preceding the failed episode. */
+  std::uint64_t lifecycle_cursor_ = 0U;
+  /** @brief Borrowed prepared disposable artifact root. */
+  const std::filesystem::path& output_directory_;
+};
+
+/**
  * @brief Drops raw heavyweight Value/lifecycle ownership after NDJSON write.
  * @param row Evaluated row retained only for replicate aggregation.
  * @return Nothing after fields unused by `evaluate_i1_replicate` are cleared.
@@ -377,21 +466,6 @@ bool row_is_invalid(const I1EpisodeInnerRow& row) noexcept {
   return row.latency_verdict == I1Verdict::Invalid ||
          row.waste_verdict == I1Verdict::Invalid ||
          row.memory_verdict == I1Verdict::Invalid ||
-         row.output_verdict == I1Verdict::Invalid;
-}
-
-/**
- * @brief Reports whether every independent episode verdict is Invalid.
- * @param row Evaluated inner row produced after a failed admission.
- * @return True only when latency, waste, memory, and output are all Invalid.
- * @throws Nothing.
- * @note A failed admission cannot preserve a partial Pass/Fail claim because
- * the runner deliberately aborts before completing the frozen episode.
- */
-bool row_is_fully_invalid(const I1EpisodeInnerRow& row) noexcept {
-  return row.latency_verdict == I1Verdict::Invalid &&
-         row.waste_verdict == I1Verdict::Invalid &&
-         row.memory_verdict == I1Verdict::Invalid &&
          row.output_verdict == I1Verdict::Invalid;
 }
 
@@ -573,84 +647,6 @@ I1ReplicateSummary run_exact_replicate(
         }
       }
 
-      const I1PreCutDigestPolicy digest_policy =
-          i1_pre_cut_digest_policy(failed_admission_edit.has_value());
-      if (failed_admission_edit.has_value()) {
-        const VoidResult revoked = graph_close.close_now();
-        if (!revoked.status.ok) {
-          failed_admission_diagnostic +=
-              "; graph-close publication revocation failed: " +
-              revoked.status.message;
-        }
-      }
-      if (digest_policy == I1PreCutDigestPolicy::FreezePublishedOutputs) {
-        const auto digest_freeze_deadline = checked_i1_time_subtract(
-            measurement_end, kI1DigestFreezeSafetyMargin);
-        freeze_visible_outputs_until(&observations, digest_freeze_deadline,
-                                     measurement_end);
-        std::this_thread::sleep_until(measurement_end);
-      }
-      const I1ObservationHistoryCut observation_cut =
-          observations.capture_history_cut();
-      std::array<std::optional<OperationStatus>, kI1EditCount> settlements;
-      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
-           ++edit_index) {
-        std::future<OperationStatus>& future =
-            admission_results[edit_index].settlement;
-        if (!future.valid()) {
-          if (failed_admission_edit.has_value()) {
-            continue;
-          }
-          throw std::runtime_error(
-              "I1 settlement future is absent at Q_end for slot " +
-              std::to_string(slot) + ", edit " + std::to_string(edit_index));
-        }
-        if (future.wait_for(std::chrono::nanoseconds(0)) !=
-            std::future_status::ready) {
-          if (failed_admission_edit.has_value()) {
-            failed_admission_diagnostic += "; accepted edit " +
-                                           std::to_string(edit_index) +
-                                           " remained active after graph close";
-            continue;
-          }
-          throw std::runtime_error(
-              "I1 settlement remained active at Q_end for slot " +
-              std::to_string(slot) + ", edit " + std::to_string(edit_index));
-        }
-        try {
-          settlements[edit_index] = future.get();
-        } catch (const std::exception& error) {
-          if (!failed_admission_edit.has_value()) {
-            throw;
-          }
-          failed_admission_diagnostic += "; accepted edit " +
-                                         std::to_string(edit_index) +
-                                         " settlement raised: " + error.what();
-        }
-      }
-      if (!failed_admission_edit.has_value()) {
-        const auto settlement_publication_guard =
-            slot + 1U < kI1GridSlotCount
-                ? i1_episode_origin(grid_origin, slot + 1U)
-                : terminal_boundary;
-        while (observations.published_host_settlement_count() < kI1EditCount &&
-               std::chrono::steady_clock::now() <
-                   settlement_publication_guard) {
-          std::this_thread::sleep_for(std::chrono::microseconds(50));
-        }
-        if (observations.published_host_settlement_count() != kI1EditCount) {
-          throw std::runtime_error(
-              "I1 Host settlement evidence missed the terminal guard at slot " +
-              std::to_string(slot));
-        }
-      }
-      observations.release_unfrozen_visible_outputs();
-      const I1ExecutionSnapshot final_snapshot = i1_host->i1_execution_snapshot(
-          baseline.lifecycle.snapshot_cut, 4096U);
-      const auto final_snapshot_sample = std::chrono::steady_clock::now();
-      const I1EpisodeObservationSnapshot observation_snapshot =
-          observations.snapshot();
-
       I1EpisodeEvidenceInput input;
       input.replicate_ordinal = options.replicate_ordinal;
       input.slot = slot;
@@ -659,27 +655,65 @@ I1ReplicateSummary run_exact_replicate(
       input.terminal_boundary = terminal_boundary;
       input.measurement_start = measurement_start;
       input.measurement_end = measurement_end;
-      input.observation_cut = observation_cut;
-      input.observations = observation_snapshot;
       input.baseline = baseline;
-      input.final_snapshot = final_snapshot;
-      input.final_snapshot_sample = final_snapshot_sample;
       input.expected_final_digest = expected_digest;
+
+      if (failed_admission_edit.has_value()) {
+        I1RunnerFailedAdmissionPort failed_port(graph_close, *i1_host,
+                                                baseline.lifecycle.snapshot_cut,
+                                                output_directory);
+        finalize_i1_failed_admission(
+            std::move(failed_admission_diagnostic), std::move(input),
+            std::move(admission_results), &observations, &failed_port,
+            &episode_output, &rows, &written_rows);
+      }
+
+      const auto digest_freeze_deadline = checked_i1_time_subtract(
+          measurement_end, kI1DigestFreezeSafetyMargin);
+      freeze_visible_outputs_until(&observations, digest_freeze_deadline,
+                                   measurement_end);
+      std::this_thread::sleep_until(measurement_end);
+      input.observation_cut = observations.capture_history_cut();
+      std::array<std::optional<OperationStatus>, kI1EditCount> settlements;
+      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
+           ++edit_index) {
+        std::future<OperationStatus>& future =
+            admission_results[edit_index].settlement;
+        if (!future.valid()) {
+          throw std::runtime_error(
+              "I1 settlement future is absent at Q_end for slot " +
+              std::to_string(slot) + ", edit " + std::to_string(edit_index));
+        }
+        if (future.wait_for(std::chrono::nanoseconds(0)) !=
+            std::future_status::ready) {
+          throw std::runtime_error(
+              "I1 settlement remained active at Q_end for slot " +
+              std::to_string(slot) + ", edit " + std::to_string(edit_index));
+        }
+        settlements[edit_index] = future.get();
+      }
+      const auto settlement_publication_guard =
+          slot + 1U < kI1GridSlotCount
+              ? i1_episode_origin(grid_origin, slot + 1U)
+              : terminal_boundary;
+      while (observations.published_host_settlement_count() < kI1EditCount &&
+             std::chrono::steady_clock::now() < settlement_publication_guard) {
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+      }
+      if (observations.published_host_settlement_count() != kI1EditCount) {
+        throw std::runtime_error(
+            "I1 Host settlement evidence missed the terminal guard at slot " +
+            std::to_string(slot));
+      }
+      observations.release_unfrozen_visible_outputs();
+      input.final_snapshot = i1_host->i1_execution_snapshot(
+          baseline.lifecycle.snapshot_cut, 4096U);
+      input.final_snapshot_sample = std::chrono::steady_clock::now();
+      input.observations = observations.snapshot();
       for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
            ++edit_index) {
         input.edits[edit_index] = capture_i1_edit_evidence(
             admission_results[edit_index], std::move(settlements[edit_index]));
-      }
-
-      if (failed_admission_edit.has_value()) {
-        I1EpisodeInnerRow row = evaluate_i1_episode(std::move(input));
-        rows.push_back(std::move(row));
-        if (!row_is_fully_invalid(rows.back())) {
-          failed_admission_diagnostic +=
-              "; failed admission did not produce four Invalid verdicts";
-        }
-        flush_i1_episode_rows(&episode_output, rows, &written_rows);
-        throw std::runtime_error(failed_admission_diagnostic);
       }
 
       start_i1_episode_evaluation(std::move(input), &pending_evaluation, &rows);
@@ -772,19 +806,14 @@ int main(int argc, char** argv) {
         summary.memory_verdict == ps::benchmark::I1Verdict::Pass &&
         summary.output_verdict == ps::benchmark::I1Verdict::Pass;
     return passed ? 0 : 2;
+  } catch (const ps::benchmark::I1FailedAdmissionFinalizationError& error) {
+    std::cerr << "i1_edit_storm_benchmark: " << error.what() << '\n';
+    return 1;
   } catch (const std::exception& error) {
     std::cerr << "i1_edit_storm_benchmark: " << error.what() << '\n';
     if (output_directory.has_value()) {
       try {
-        const ps::benchmark::Json failure{
-            {"schema", "execution-profile-i1-manual-failure-v1"},
-            {"workload_id", ps::benchmark::kI1WorkloadId},
-            {"diagnostic", error.what()},
-            {"later_slots_backfilled", false},
-            {"outer_canonical_envelope_claim", false},
-        };
-        ps::benchmark::write_text_file(*output_directory / "failure.json",
-                                       failure.dump(2) + "\n");
+        ps::benchmark::write_failure_artifact(*output_directory, error.what());
       } catch (...) {
       }
     }
