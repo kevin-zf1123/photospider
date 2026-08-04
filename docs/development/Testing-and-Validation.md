@@ -1719,12 +1719,17 @@ deadline `D_i=A_i+150,000,000 ns`, and is the normative admission/acceptance
 timestamp if that call succeeds. After validating `A_i` and before invoking
 Host, the runner reserves one unique, strictly increasing row-local
 `event_sequence_i`. Success creates the accepted logical-event coordinate
-`(A_i,event_sequence_i)`, makes that generation current there, and uses that
-coordinate for every latest-wins and same-timestamp decision. Host return
-timestamp/status remain raw evidence and never replace the coordinate. Failure
-creates no accepted event, invalidates the replicate, and cannot synthesize or
-backfill another timestamp; the reserved sequence and failure/return facts stay
-in existing inner evidence without changing the 15/5-field envelope. `A_i`
+`(A_i,event_sequence_i)`. Before Host invocation, the runner carries the typed
+proposed coordinate through the private Host/Kernel request; Kernel binds it
+into product `SupersessionIdentity` before current publication, and the current
+observation copies the exact binding. Bound replacement requires both
+generation and accepted coordinate to advance. The accepted-row and observer-
+causal sequence allocators are independent and each starts at one. Host return
+timestamp/status never replace the coordinate. Failure creates no accepted
+event, current observation, or accepted product binding, invalidates the
+replicate, and cannot synthesize or backfill another timestamp; the proposed
+coordinate and failure/return facts stay in existing inner evidence without
+changing the 15/5-field envelope. `A_i`
 must be in
 `[S_i,S_i+2,000,000 ns]`; `S_i` never anchors the deadline and permitted wake
 lateness never consumes the 150 ms budget. Overflow, early start, more than
@@ -1742,12 +1747,13 @@ The mandatory I1 phase/drain scenario oracle is:
 | Scenario | Oracle |
 | --- | --- |
 | Continuous isolated phase grid | Retain one `G^I1`; derive cold slot zero, warmup slots `1..20`, measured slots `21..220`, and only `T^I1=G^I1+221*750,000,000 ns` as a terminal non-start boundary. Map each phase's natural ordinal to zero-based `r`; reject a fresh phase origin, cooling delay, shifted slot, or late counter reset. |
-| Successful accepted-boundary coordinate | After validating each `A_i`, reserve its unique row-local `event_sequence_i` before Host invocation. On success require the normative accepted coordinate to equal `(A_i,event_sequence_i)`, make the generation current there, and reject a Host return timestamp/status as a deadline, current-generation, supersession, or tie-order coordinate. |
-| Failed admission has no accepted event | On Host failure retain the reserved sequence and failure/return observations as raw inner evidence, invalidate the replicate, and require no accepted-admission event, current-generation transition, alternate timestamp, backfill, or outer schema field. |
+| Successful accepted-boundary coordinate | After validating each `A_i`, reserve its unique row-local `event_sequence_i` before Host invocation and carry `(A_i,event_sequence_i)` through the private Host/Kernel request seam. On success require the product supersession identity and current-generation observation to contain that exact coordinate; reject a Host return timestamp/status or observer callback time/sequence as a deadline, current-generation, supersession, tie-order, or substitute binding coordinate. |
+| Accepted and causal sequence domains | Start the row-local accepted sequence allocator and the observation sink's causal sequence allocator independently at one. Require each to be strictly ordered only within its own domain; never infer a row/product binding by numeric equality between the two sequences. |
+| Failed admission has no accepted event | On Host failure retain the reserved proposed coordinate and failure/return observations as raw inner evidence, invalidate the replicate, and require no accepted-admission event, current-generation observation, product binding, alternate timestamp, backfill, or outer schema field. |
 | Per-edit expiry is publication-closing | Require every intermediate visible output at or before its own `D_i`; a later intermediate publication contradicts the frozen product/workload contract and invalidates the row. The required twelfth output remains a complete latency-gate failure when visible after its own deadline. |
 | Exact drain anchor | For every episode require `Q_start=S_11=E+183,333,337 ns` and `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`, independent of actual admission and deadline. The window may overlap an active final Run but does not cancel it or extend `D_i`. |
 | Deadline and next-origin guards | With latest legal admission, require `D_11<=E+335,333,337 ns`, exactly 348,000,000 ns from that deadline to `Q_end`, and exactly 66,666,663 ns from `Q_end` to the next origin. Reset/baseline preparation must fit that guard; the last measured episode uses the same guard before `T^I1`. |
-| Boundary tie and settlement | At `Q_start`, nominal marker precedes equal-time admission. At `Q_end`, reserve the first excluded coordinate from the same causal allocator used by product transitions. An event belongs only when its timestamp is no later than `Q_end` and its sequence precedes the cut. Any missing or later terminal/quiescence/root-resource/Host settlement is invalid; an eventual snapshot cannot backdate it. |
+| Boundary tie and settlement | At `Q_start`, nominal marker precedes equal-time admission. At `Q_end`, reserve the first excluded coordinate from the observation sink's causal allocator used by product transitions, not from the accepted-row sequence allocator. An event belongs only when its timestamp is no later than `Q_end` and its causal sequence precedes the cut. Any missing or later terminal/quiescence/root-resource/Host settlement is invalid; an eventual snapshot cannot backdate it. |
 | Per-Run causal closure | Require a unique Run id per materialized edit, exactly one terminal/quiescence/resource/Host chain, at most one cancellation and visible publication, cancellation iff Cancelled, visibility iff Succeeded, and Host status agreeing with the terminal. Require current generation before every service start, every start before terminal, visible before successful terminal, and terminal before quiescence before resource return before Host settlement. Irreversible service-start commit and cancellation acceptance share the Run-owned terminal arbiter, and service-start observation is delivered outside service/Run locks. `cancellation < start < terminal` is structurally valid evidence but fails Waste; the product path must prevent it. |
 | Lossless service-start capacity | Derive 64 Macro256 tiles per frozen curve node, 257 starts per complete Run from one monolithic source plus four curve nodes, and 3,084 starts per twelve-edit episode. Deterministically prove both pre-route start/cancel orders, zero route/executable leakage when cancellation wins, lower start coordinate when route commitment wins, rollback/reuse of staged authority, success through start 3,084, and fail-closed overflow at start 3,085. |
 | Fail-closed arithmetic/evidence | Reject checked overflow in grid/slot/start/admission/deadline/drain arithmetic, missing or duplicate boundary/event evidence, a moved origin, nonquiescence, or a workload-manifest rule drift under the same id. Existing section/verdict digests bind the evidence without changing the 15/5-field envelope. |
@@ -2390,9 +2396,11 @@ or retained as repository content.
 
 Issue #93 owns the reusable I1 accepted-boundary collector: pre-call `A_i`
 sampling and row-local sequence reservation, success-only
-`(A_i,event_sequence_i)` acceptance/current ordering, failure evidence without
-an accepted event, the continuous isolated-I1 grid, and exact drain/tie/guard
-behavior. Issue #95 owns the B1 `OutputStore` fixed raw probe-to-
+`(A_i,event_sequence_i)` binding into product supersession identity, exact
+row-to-current evidence matching, independent accepted-row/observer-causal
+sequence domains, failure evidence without an accepted event or product
+binding, the continuous isolated-I1 grid, and exact drain/tie/guard behavior.
+Issue #95 owns the B1 `OutputStore` fixed raw probe-to-
 schema mappings,
 backend-to-fixed-schema adapters, mount normalizer, performance-configuration
 mapping/proof, the single canonical encoder/digests, eligibility and
@@ -2409,16 +2417,18 @@ it adds no current probe, serializer, public API, runner, or runtime result
 field.
 
 Issue #93 now registers the long-lived deterministic I1 behavior in
-`test_i1_profile`, `test_i1_evidence`,
+`test_compute_supersession`, `test_i1_profile`, `test_i1_evidence`,
 `test_dense_tensor_content_digest`, `test_resource_ledger`, and, when the
 repository OpenCV operation provider is enabled, `test_i1_product_path`.
 Together they cover checked grid/admission arithmetic, success-only accepted
-coordinates, exact frozen graph/request construction, one-based nearest-rank
-aggregation, independent discarded and post-cancel service, Host/device
-lifetime-high-water observation, final settlement, canonical DenseTensor
-logical identity, and the real embedded Host latest-wins product path. These
-are correctness tests; they do not assert machine-dependent percentile or
-waste thresholds from a timed 221-slot run.
+coordinates, exact Host/Kernel/product identity binding, equal-time row-local
+ordering, independent accepted-row and observer-causal sequences, exact frozen
+graph/request construction, one-based nearest-rank aggregation, independent
+discarded and post-cancel service, Host/device lifetime-high-water observation,
+final settlement, canonical DenseTensor logical identity, and the real
+embedded Host latest-wins product path. These are correctness tests; they do
+not assert machine-dependent percentile or waste thresholds from a timed
+221-slot run.
 
 The exact timed workload is the manual, `EXCLUDE_FROM_ALL`
 `i1_edit_storm_benchmark` target and is not registered with CTest or CI. Build

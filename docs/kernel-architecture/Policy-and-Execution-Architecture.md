@@ -518,9 +518,25 @@ After the live HP Graph swap, the sole commit contender emits current-visible
 output and the succeeding terminal-success observation in one Run-arbiter
 resolution; a rejected or already-resolved contender emits neither event.
 
+Before the final I1 Host call, the collector reserves the typed accepted-row
+coordinate `(A_i, event_sequence_i)` and carries it through the source-private
+Host/Kernel request seam. Kernel binds that exact coordinate into
+`SupersessionIdentity`, and `ComputeRequestCoordinator` publishes and observes
+the complete current identity rather than reconstructing it from a later
+callback. For coordinate-bound I1 lineage, replacement requires both a
+strictly newer generation and a strictly newer accepted coordinate; equal
+timestamps are ordered by the row-local accepted sequence. The observation
+sink's causal sequence is a separate allocator and ordering domain that also
+starts at one. Current-generation evidence copies the product-bound accepted
+coordinate, and the evaluator requires an exact row-to-product binding plus
+strict product-coordinate order. A failed Host call may retain the proposed
+coordinate for diagnostics, but it cannot create an accepted row, current
+observation, or product binding.
+
 The frozen I1 graph, twelve coefficients/Regions, success-only accepted
-coordinate collector, continuous cold/warmup/measured 221-slot grid, tie and
-guard rules, canonical DenseTensor output digest, resource snapshots, and
+coordinate collector and product binding, continuous cold/warmup/measured
+221-slot grid, tie and guard rules, canonical DenseTensor output digest,
+resource snapshots, and
 fail-closed episode/replicate evaluator are current. `ResourceLedger` Host and
 device snapshots now retain lifetime high-water values for successful
 reservations as well as current/limit values. At `Q_end`, I1 first captures the

@@ -70,6 +70,13 @@ reserved-ticket turn 最多 materialize 一个 generation，并运行既有 Kern
 它只会为 generation publication、snapshot capture 或最终精确 revision/generation transaction
 进入 graph-state；不会创建每个 Graph 的 background runner 或每个 generation 的 thread。
 
+I1 request 可以通过 Host 与 Kernel 把一个可选的 source-private accepted-boundary coordinate
+带入 coordinator。Coordinator 会保存完整 current `SupersessionIdentity`。一个已绑定 coordinate
+的 candidate 只有在 generation 与 accepted coordinate 都严格推进时，才能替换另一个已绑定
+coordinate 的 current identity；admission timestamp 相等时，使用 row-local accepted sequence
+打破平局。两端都没有 binding 的旧 caller 保持仅按 generation 排序；bound/unbound 混合 identity
+同样保持 generation ordering，因此这条私有 evidence seam 不会改变 public 或非 I1 行为。
+
 `close_and_drain()` 对并发调用与重复调用都保持幂等。它会停止 admission，让被满队列阻塞的
 producer 以 `std::runtime_error` 被唤醒，按 FIFO 排空已有 work，并在返回前 join worker。每个
 caller 都等待自己加入的持久 close generation。已 join 的 lane 永远不会重新开放 admission 或创建
@@ -83,7 +90,7 @@ Host-owned reserved-start transaction 提交的每个 Run 执行权。
 
 | 模块 | 当前职责 | 不拥有 |
 | --- | --- | --- |
-| `ComputeRequestCoordinator` | 每个 live Graph 的 checked generation allocation、graph-state publication、每个 admitted key 的一个 latest mailbox 与 reserved ticket、active-source supersession notification、精确 pending settlement，以及一个 logical active-runner slot | Run plan、staging、execution worker、Graph lifetime lease、lifecycle registry、telemetry 或 public ABI |
+| `ComputeRequestCoordinator` | 每个 live Graph 的 checked generation allocation、完整 current-identity graph-state publication、可选 source-private accepted-coordinate ordering、每个 admitted key 的一个 latest mailbox 与 reserved ticket、active-source supersession notification、精确 pending settlement，以及一个 logical active-runner slot | Run plan、staging、execution worker、Graph lifetime lease、lifecycle registry、telemetry 或 public ABI |
 | `ComputeService` | 请求验证、intent 协调、创建/settle 一个 HP Run 或一个包含独立 HP/RT child 的 realtime `RunGroup`、调用 staged commit policy、协作者构造和最终结果选择 | 前端值、worker thread、图文档、live Graph revision/generation authority 或 public cancellation policy |
 | `RunGroup` | 一个 realtime request identity、不同的 HP/RT child Run 与 observation lease、request-wide cancellation fan-out、RT-first gate 和确定性 aggregate outcome | Child plan/dispatcher、Graph state、worker、resource reservation、lifecycle registry 或 public control |
 | `ComputeRun` | 带精确 Graph identity/revision 与 request supersession identity 的不可变单 domain HP/RT descriptor、单调 phase、私有弱生命周期 cancellation source、read-only lease observation、唯一 terminal/commit arbiter、通过共享 control 对 full-plan/temporary storage 或 dirty-HP staging storage 的所有权、稳定 lease，以及复合 task identity | 配对 realtime grouping、Graph state、worker、revision/generation mint 或 publication authority、公开 cancellation control 或 resource admission |
@@ -272,7 +279,8 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 1. `Kernel` 解析 session，把缺失 intent 规范化为 HP，形成 `(target, canonical request intent)`，
    分配经检查的 graph-wide generation，并在 graph-state 之外采用该 key 的 reserved compute-lane
    ticket。随后一个 graph-state work item 把该 generation 发布为 current，合并一个 pending value，
-   并唤醒 ticket。
+   并唤醒 ticket。对于 private I1 path，Kernel 还会在 publication 之前把 pre-call
+   accepted-boundary coordinate 带入 immutable supersession identity。
 2. `ComputeService` 验证 target、intent、dirty ROI、cache flag 和 execution strategy。
 3. 一次 reserved-ticket turn 会在 graph-state work item 中捕获 request-owned Graph/proxy
    snapshot。对于非 realtime HP，`ComputeService` 在 planning 前创建一个 `ComputeRun`；对于

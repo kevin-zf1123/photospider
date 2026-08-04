@@ -82,6 +82,16 @@ enters graph-state only for generation publication, snapshot capture, or the
 final exact revision/generation transaction; no per-Graph background runner or
 per-generation thread is created.
 
+An optional source-private accepted-boundary coordinate may accompany an I1
+request through Host and Kernel into this coordinator. The coordinator stores
+the complete current `SupersessionIdentity`. A coordinate-bound candidate may
+replace another coordinate-bound current identity only when both generation
+and accepted coordinate advance strictly; equal admission timestamps use the
+row-local accepted sequence as the tie-breaker. Legacy callers without either
+binding retain generation-only ordering. Mixed bound/unbound identities also
+retain generation ordering so this private evidence seam does not alter public
+or non-I1 behavior.
+
 `close_and_drain()` is concurrent-call and repeat-call idempotent. It stops
 admission, wakes full-queue producers with `std::runtime_error`, drains prior
 work FIFO, and joins the worker before returning. Each caller waits for the
@@ -99,7 +109,7 @@ reserved-start transaction.
 
 | Module | Current responsibility | Does not own |
 | --- | --- | --- |
-| `ComputeRequestCoordinator` | Per-live-Graph checked generation allocation, graph-state publication, one latest mailbox and reserved ticket per admitted key, active-source supersession notification, exact pending settlement, and one logical active-runner slot | Run plans, staging, execution workers, Graph lifetime leases, lifecycle registry, telemetry, or public ABI |
+| `ComputeRequestCoordinator` | Per-live-Graph checked generation allocation, complete current-identity graph-state publication, optional source-private accepted-coordinate ordering, one latest mailbox and reserved ticket per admitted key, active-source supersession notification, exact pending settlement, and one logical active-runner slot | Run plans, staging, execution workers, Graph lifetime leases, lifecycle registry, telemetry, or public ABI |
 | `ComputeService` | Request validation, intent coordination, creation/settlement of one HP Run or one realtime `RunGroup` with separate HP/RT children, staged commit-policy invocation, collaborator construction, and final result selection | Frontend values, worker threads, graph documents, live Graph revision/generation authority, or public cancellation policy |
 | `RunGroup` | One realtime request identity, distinct HP/RT child Runs and observation leases, request-wide cancellation fan-out, RT-first gate, and deterministic aggregate outcome | Child plans/dispatchers, Graph state, workers, resource reservations, lifecycle registry, or public controls |
 | `ComputeRun` | Immutable single-domain HP/RT descriptor with exact Graph identity/revision and request supersession identity, monotonic phase, a private weak-lifetime cancellation source, read-only lease observation, one terminal/commit arbiter, shared-control ownership of full-plan/temporary or dirty-HP staging storage, stable leases, and composite task identity | Paired realtime grouping, Graph state, workers, revision/generation mint or publication authority, public cancellation control, or resource admission |
@@ -342,7 +352,9 @@ pure-C policy ABI v1 and receives no execution resource.
    `(target, canonical request intent)`, allocates a checked graph-wide
    generation, and adopts the key's reserved compute-lane ticket outside
    graph-state. A graph-state work item then publishes that generation as
-   current, coalesces one pending value, and wakes the ticket.
+   current, coalesces one pending value, and wakes the ticket. For the private
+   I1 path, Kernel also carries the pre-call accepted-boundary coordinate into
+   the immutable supersession identity before that publication.
 2. `ComputeService` validates target, intent, dirty ROI, cache flags, and the
    selected execution strategy.
 3. One reserved-ticket turn captures request-owned Graph/proxy snapshots in a

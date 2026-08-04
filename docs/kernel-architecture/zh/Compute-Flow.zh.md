@@ -46,9 +46,12 @@ session identity 与显式 Run QoS 数据。parallel/runtime 选择则通过独�
 
 Source-private 的 Issue #93 `I1Host` seam 会复用同一 embedded path，而不是使用 benchmark-only
 executor。它会在普通 `HostComputeRequest` 外附加显式 Interactive QoS、weight one、cap eight、
-每次 edit 的 immutable deadline，以及只读 observation sink。该 seam 只由 embedded Host 实现，
-不会安装，也不会通过 Host、IPC、CLI 或 plugin record 暴露。其 asynchronous scheduling
-成功返回是冻结的 I1 acceptance boundary；返回的 future 仍表示稍后的产品 settlement。
+每次 edit 的 immutable deadline、只读 observation sink，以及调用前 row-local accepted
+coordinate。Embedded Host 会把该 coordinate 传入私有 Kernel request；Kernel 会在
+coordinator publication 前把它绑定到产品 `SupersessionIdentity`。该 seam 只由 embedded Host
+实现，不会安装，也不会通过 Host、IPC、CLI 或 plugin record 暴露。其 asynchronous
+scheduling 成功返回是冻结的 I1 acceptance boundary；返回的 future 仍表示稍后的产品
+settlement。
 
 Dirty ROI 从 `HostComputeRequest` 复制到 `Kernel::ComputeRequest`，再经过 graph propagation、
 planning、task selection、staged execution 与 `NodeExecutor` 时，始终保持为内核自有的
@@ -312,13 +315,18 @@ commit 和 cancellation acceptance 仍共享同一个 ordering authority。Servi
 Graph swap 成功后报告；terminal success 仍排在该 observation 之后。唯一 HP contender 会在同一个
 Run-arbiter claim 下解析这两个 observation，因此被拒绝或已经解析的 contender 不会发出其中任何
 一个。这些 callback 只保留 scalar fact 或 immutable Value，不能启动、取消、提高优先级、settle
-或发布 work。
+或发布 work。这套 causal sequence 与 I1 的 row-local accepted sequence 相互独立，尽管两个
+allocator 都从一开始。Current-generation observation 复制产品 identity 中已经存储的 accepted
+binding；它不会从 callback order 或 causal sequence 重新构造该 binding。
 
 这是截至 issue #76 的当前基线。私有 request source 可以 cooperative cancel 一个 HP Run，或当前
 realtime request 的两个 child Run；immutable deadline 会在有界 observation point 提议
 `DeadlineExceeded`，Run-owned terminal arbiter 则会排列 cancellation、failure 与 visible commit。
-每个 Graph 的 latest-wins publication 会让精确 key 的最新 generation 成为权威、请求取消旧的
-active owner、合并一个 pending owner，并在 cancellation 迟到时仍拒绝 stale commit。这是
+每个 Graph 的 latest-wins publication 会让精确 key 的最新完整 identity 成为权威、请求取消旧的
+active owner、合并一个 pending owner，并在 cancellation 迟到时仍拒绝 stale commit。对于两个
+携带 accepted coordinate 的 source-private identity，generation 与 coordinate 都必须向前推进；
+accepted timestamp 相同时按 row-local event sequence 排序。没有 binding 的 traffic 保持既有
+generation rule。这是
 process-owned `RunLifecycleRegistry` 现在会在 capture 或 planning 前开始 candidate、保留 Graph
 lifetime lease，并原子安装一个 standalone Run 或包含两个 realtime child 的完整 bundle。
 Empty/no-op 与 connected-preflight 路径使用相同的 admission/finalization 边界。connected
@@ -455,7 +463,9 @@ subscription surface 都不属于当前软件契约。
 
 I1 evidence path 与 public graph-event ring 分离。其有界 request-scoped collector 会为十二次
 edit 预分配 observation slot，并为每次产品 transition 分配一个 collector-local causal
-sequence。Overflow 会使 row invalid，而不会静默丢弃 evidence。在冻结的 `Q_end`，runner 会先
+sequence。Evaluator 会独立要求每个 current generation 的 product-bound accepted coordinate
+精确等于该 edit 调用前的 `(A_i,event_sequence_i)`，并要求 generation order 与 accepted-
+coordinate order 一致。Overflow 会使 row invalid，而不会静默丢弃 evidence。在冻结的 `Q_end`，runner 会先
 预留首个被排除 event 的 sequence。只有 monotonic sample 不晚于 `Q_end` 且 sequence 位于 cut
 之前的 product event 才属于 boundary history。随后 runner 可以消费已经产生的 future，并取得
 eventual Host/device `ResourceLedger` 与 `ExecutionLifecycleTelemetry` snapshot；但该较晚 snapshot

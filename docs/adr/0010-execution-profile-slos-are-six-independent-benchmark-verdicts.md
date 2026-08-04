@@ -195,10 +195,18 @@ not consume the 150 ms Run budget. On successful Host admission, the
 accepted-admission logical event has the exact coordinate
 `(A_i,event_sequence_i)`. The new edit/generation becomes current at that
 coordinate, and every current-generation, latest-wins, supersession, and
-same-timestamp ordering decision uses it. The later Host return timestamp and
-status remain raw measurement evidence only; neither may replace or reanchor
-that coordinate, and learning success only on return does not move the logical
-boundary. On admission failure, no accepted-admission logical event
+same-timestamp ordering decision uses it. The collector carries that
+pre-reserved coordinate through the source-private I1 Host and Kernel request
+and binds it into the product `SupersessionIdentity` before coordinator
+publication. Within a bound lineage, replacement requires both the graph-wide
+generation and accepted coordinate to advance; equal timestamps use the
+row-local sequence. The independent observation `causal_sequence` still starts
+at one and orders lifecycle facts only. The current-generation observation and
+evaluator must reproduce the exact identity binding, never infer it from
+callback/edit order. The later Host return timestamp and status remain raw
+measurement evidence only; neither may replace or reanchor that coordinate,
+and learning success only on return does not move the logical boundary. On
+admission failure, no accepted-admission logical event
 exists, the reserved sequence plus failure/return facts remain raw evidence,
 the replicate is invalid, and the harness must not synthesize, backfill, or
 select an alternate acceptance timestamp. These facts remain in the existing
@@ -1797,7 +1805,7 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 
 | Issue | Required v1 delivery |
 | --- | --- |
-| #93 | Implement the reusable I1 accepted-boundary collector that samples `A_i`, reserves row-local `event_sequence_i` before Host invocation, emits `(A_i,event_sequence_i)` only on successful admission, retains return/failure as raw evidence without an accepted event, and drives current/latest-wins ordering; use it for the continuous 221-slot isolated-I1 grid, exact `S_11` drain/tie/guard behavior, request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
+| #93 | Implement the reusable I1 accepted-boundary collector that samples `A_i`, reserves row-local `event_sequence_i` before Host invocation, emits `(A_i,event_sequence_i)` only on successful admission, carries the proposed coordinate into product supersession identity before current publication, requires exact row/current binding while keeping accepted-row and observer-causal sequence domains independent, and retains failure as raw evidence without an accepted event, current observation, or product binding; use it for the continuous 221-slot isolated-I1 grid, exact `S_11` drain/tie/guard behavior, request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
 | #94 | Implement I2 on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-before-next-edit ordering, and I1 coefficient/index/update/full-resolution-final lineage frozen here; it cannot redefine those schedules or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
 | #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
 | #96 | Compose the exact I1 and B1 fixtures into M1; reuse #93's I1 accepted-boundary collector without redefining it, binding the first measured edit exactly to `edit_index=0`, `A_0`, and its pre-call reserved sequence; implement the fixed `C^M1`/`W^M1` cold/warmup origins, counts, B1 offer protocol, cross-`B^M1` I1 settlement, and the frozen final-warmup current-hold exception through that successful coordinate in `[B^M1,B^M1+2,000,000 ns]`; implement the exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary; interpret the existing `cycle_ordinal` component as an independent producer-local counter for each measured B1 Graph without treating it as retry or adding a field; reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |

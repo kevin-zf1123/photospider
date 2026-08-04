@@ -57,11 +57,13 @@ plugin ABI is unchanged.
 The source-private Issue #93 `I1Host` seam uses this same embedded path rather
 than a benchmark-only executor. It wraps an ordinary `HostComputeRequest` with
 explicit Interactive QoS, weight one, cap eight, an immutable per-edit
-deadline, and a read-only observation sink. The seam is implemented only by
-the embedded Host and is not installed or exposed through Host, IPC, CLI, or a
-plugin record. Its successful asynchronous scheduling return is the frozen I1
-acceptance boundary; the returned future still represents later product
-settlement.
+deadline, a read-only observation sink, and the pre-call row-local accepted
+coordinate. The embedded Host carries that coordinate into the private Kernel
+request; Kernel binds it into the product `SupersessionIdentity` before
+coordinator publication. The seam is implemented only by the embedded Host and
+is not installed or exposed through Host, IPC, CLI, or a plugin record. Its
+successful asynchronous scheduling return is the frozen I1 acceptance
+boundary; the returned future still represents later product settlement.
 
 The dirty ROI remains a kernel-owned `PixelRect` while it is copied from
 `HostComputeRequest` through `Kernel::ComputeRequest`, graph propagation,
@@ -403,14 +405,22 @@ success remains ordered after that observation. The sole HP contender resolves
 both observations under one Run-arbiter claim, so a rejected or already-resolved
 contender emits neither. These callbacks retain scalar facts or an immutable
 Value only and cannot start, cancel, prioritize, settle, or publish work.
+This causal sequence is independent from I1's row-local accepted sequence even
+though both allocators start at one. Current-generation observation copies the
+accepted binding already stored in the product identity; it does not recreate
+that binding from callback order or causal sequence.
 
 This is the current baseline through issue #76. A private request source can
 cooperatively cancel one HP Run or both current realtime child Runs; immutable
 deadlines propose `DeadlineExceeded` at bounded observation points, and the
 Run-owned terminal arbiter orders cancellation, failure, and visible commit.
-Per-Graph latest-wins publication makes the newest generation authoritative for
-that exact key, requests cancellation of an older active owner, coalesces one
-pending owner, and still denies stale commit if cancellation arrives late.
+Per-Graph latest-wins publication makes the newest complete identity
+authoritative for that exact key, requests cancellation of an older active
+owner, coalesces one pending owner, and still denies stale commit if
+cancellation arrives late. For two source-private identities carrying accepted
+coordinates, both generation and coordinate must advance; equal accepted
+timestamps are ordered by row-local event sequence. Traffic without a binding
+retains the established generation rule.
 The process-owned `RunLifecycleRegistry` now begins a candidate before capture
 or planning, retains a Graph lifetime lease, and atomically installs either one
 standalone Run or both realtime children as a complete bundle. Empty/no-op and
@@ -581,6 +591,9 @@ These constants are not permanent ABI.
 The I1 evidence path is separate from the public graph-event ring. Its bounded
 request-scoped collector preallocates observation slots for the twelve edits
 and assigns one collector-local causal sequence to every product transition.
+The evaluator separately requires each current generation's product-bound
+accepted coordinate to equal that edit's pre-call `(A_i,event_sequence_i)` and
+requires generation order to agree with accepted-coordinate order.
 Overflow invalidates the row rather than dropping evidence silently. At the
 frozen `Q_end`, the runner first reserves the sequence of the first excluded
 event. A product event belongs to the boundary history only when its monotonic

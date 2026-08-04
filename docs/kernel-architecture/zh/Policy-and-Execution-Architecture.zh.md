@@ -420,9 +420,20 @@ Live HP Graph swap 完成后，唯一 commit contender 会在同一次 Run-arbit
 发出 current-visible output 与 terminal-success observation；被拒绝或已经解析的 contender
 不会发出其中任何一个 event。
 
-冻结的 I1 graph、十二项 coefficient/Region、仅成功时产生 accepted coordinate 的 collector、
-连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor output digest、
-resource snapshot，以及 fail-closed episode/replicate evaluator 均已成为当前实现。
+在最终 I1 Host call 之前，collector 会预留 typed accepted-row coordinate
+`(A_i, event_sequence_i)`，并通过 source-private Host/Kernel request seam 传递它。Kernel 会把
+这一精确 coordinate 绑定进 `SupersessionIdentity`，`ComputeRequestCoordinator` 会发布并观察
+完整 current identity，而不是通过较晚 callback 重建 identity。对于已绑定 coordinate 的 I1
+lineage，replacement 要求 generation 与 accepted coordinate 都严格更新；timestamp 相等时由
+row-local accepted sequence 排序。Observation sink 的 causal sequence 属于独立的 allocator 与
+ordering domain，同样从一开始。Current-generation evidence 会复制 product-bound accepted
+coordinate，evaluator 要求 row 与 product 精确绑定，并要求 product coordinate 严格有序。
+失败的 Host call 可以为诊断保留 proposed coordinate，但不能产生 accepted row、current
+observation 或 product binding。
+
+冻结的 I1 graph、十二项 coefficient/Region、仅成功时产生 accepted coordinate 的 collector 与
+product binding、连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor
+output digest、resource snapshot，以及 fail-closed episode/replicate evaluator 均已成为当前实现。
 `ResourceLedger` 的 Host/device snapshot 现在除 current/limit 外，还保留 successful reservation
 的 lifetime high-water value。在 `Q_end`，I1 会先捕获首个被排除的 causal coordinate；必需的
 terminal/quiescence/resource/Host settlement 只有在 timestamp 不晚于 boundary 且 sequence 位于

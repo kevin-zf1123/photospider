@@ -1374,11 +1374,14 @@ monotonic-clock sample；它启动 latency sample，通过 checked addition 得�
 absolute Run deadline `D_i=A_i+150,000,000 ns`，并在该 call 成功时作为规范的
 admission/acceptance timestamp。Runner 在校验 `A_i` 后、调用 Host 前预留一个唯一且
 严格递增的 row-local `event_sequence_i`。成功时产生 accepted 逻辑 event coordinate
-`(A_i,event_sequence_i)`，让该 generation 在此成为 current，并用该 coordinate 完成
-全部 latest-wins 与同 timestamp 决策。Host return timestamp/status 保持为 raw
-evidence，绝不替代该 coordinate。Failure 不产生 accepted event，会使 replicate
-invalid，也不能合成或回填其他 timestamp；预留的 sequence 与 failure/return 事实保留在
-既有 inner evidence 中，不改变 15/5-field envelope。`A_i` 必须处于
+`(A_i,event_sequence_i)`。Runner 会在 Host invocation 前通过 private Host/Kernel request
+传递 typed proposed coordinate；Kernel 会在 current publication 前把它绑定进 product
+`SupersessionIdentity`，current observation 会复制精确 binding。已绑定 replacement 要求
+generation 与 accepted coordinate 都推进。Accepted-row 与 observer-causal sequence
+allocator 相互独立，并各自从一开始。Host return timestamp/status 绝不替代该 coordinate。
+Failure 不产生 accepted event、current observation 或 accepted product binding，会使
+replicate invalid，也不能合成或回填其他 timestamp；proposed coordinate 与 failure/return
+事实保留在既有 inner evidence 中，不改变 15/5-field envelope。`A_i` 必须处于
 `[S_i,S_i+2,000,000 ns]`；nominal `S_i` 绝不锚定 deadline，允许的 wake lateness
 也不消耗 150 ms budget。Overflow、提前启动、迟于 2 ms、miss/drop/gap 或
 admission failure 都会使 replicate 无效。Runner 在任何迟到 Host call 前请求
@@ -1393,12 +1396,13 @@ cancellation/supersession 并记录其被接受、撤销 publication，并且不
 | 场景 | Oracle |
 | --- | --- |
 | 连续 isolated phase grid | 保留唯一 `G^I1`；派生 cold slot zero、warmup slot `1..20`、measured slot `21..220`，并且只把 `T^I1=G^I1+221*750,000,000 ns` 作为 terminal non-start boundary。把每个 phase 的自然 ordinal 映射为从零开始的 `r`；拒绝 fresh phase origin、cooling delay、shifted slot 或迟到的 counter reset。 |
-| 成功的 accepted-boundary coordinate | 校验每个 `A_i` 后，在 Host invocation 前预留其唯一 row-local `event_sequence_i`。成功时要求规范 accepted coordinate 精确等于 `(A_i,event_sequence_i)`，让 generation 在此成为 current，并拒绝把 Host return timestamp/status 用作 deadline、current-generation、supersession 或 tie-order coordinate。 |
-| 失败的 admission 不产生 accepted event | Host failure 时，把预留 sequence 与 failure/return observation 保留为 raw inner evidence，使 replicate invalid，并要求不存在 accepted-admission event、current-generation transition、替代 timestamp、backfill 或 outer schema field。 |
+| 成功的 accepted-boundary coordinate | 校验每个 `A_i` 后，在 Host invocation 前预留其唯一 row-local `event_sequence_i`，并通过 private Host/Kernel request seam 传递 `(A_i,event_sequence_i)`。成功时要求 product supersession identity 与 current-generation observation 包含这一精确 coordinate；拒绝把 Host return timestamp/status 或 observer callback time/sequence 用作 deadline、current-generation、supersession、tie-order 或替代 binding coordinate。 |
+| Accepted 与 causal sequence domain | Row-local accepted sequence allocator 与 observation sink causal sequence allocator 各自从一开始。要求二者只在各自 domain 内严格有序；绝不能通过两个 sequence 的数值相等推断 row/product binding。 |
+| 失败的 admission 不产生 accepted event | Host failure 时，把预留的 proposed coordinate 与 failure/return observation 保留为 raw inner evidence，使 replicate invalid，并要求不存在 accepted-admission event、current-generation observation、product binding、替代 timestamp、backfill 或 outer schema field。 |
 | 每次 edit 的 expiry 都会关闭 publication | 要求每个 intermediate visible output 不晚于其自身 `D_i`；更晚的 intermediate publication 与冻结的 product/workload contract 冲突，并使 row invalid。必需的 twelfth output 若晚于自身 deadline，仍属于证据完整的 latency-gate failure。 |
 | 精确 drain anchor | 每个 episode 要求 `Q_start=S_11=E+183,333,337 ns` 与 `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`，不受 actual admission 或 deadline 变化影响。Window 可以与 active final Run 重叠，但不会取消它或延长 `D_i`。 |
 | Deadline 与 next-origin guard | 在最晚合法 admission 下，要求 `D_11<=E+335,333,337 ns`、从该 deadline 到 `Q_end` 精确 348,000,000 ns，以及从 `Q_end` 到下一 origin 精确 66,666,663 ns。Reset/baseline preparation 必须容纳在该 guard 中；最后一个 measured episode 在 `T^I1` 前使用相同 guard。 |
-| Boundary tie 与 settlement | 在 `Q_start`，nominal marker 先于同 timestamp admission；在 `Q_end`，从产品 transition 共用的同一 causal allocator 中预留首个被排除的 coordinate。只有 timestamp 不晚于 `Q_end` 且 sequence 位于 cut 之前的 event 才属于该 history。任何缺失或更晚的 terminal/quiescence/root-resource/Host settlement 都是 invalid；eventual snapshot 不能回填。 |
+| Boundary tie 与 settlement | 在 `Q_start`，nominal marker 先于同 timestamp admission；在 `Q_end`，从 product transition 使用的 observation sink causal allocator（而非 accepted-row sequence allocator）中预留首个被排除的 coordinate。只有 timestamp 不晚于 `Q_end` 且 causal sequence 位于 cut 之前的 event 才属于该 history。任何缺失或更晚的 terminal/quiescence/root-resource/Host settlement 都是 invalid；eventual snapshot 不能回填。 |
 | 逐 Run causal closure | 每个 materialized edit 必须使用唯一 Run id，且精确具有一条 terminal/quiescence/resource/Host chain；cancellation 与 visible publication 各自至多一次，只有 Cancelled 才有 cancellation，只有 Succeeded 才有 visibility，Host status 必须与 terminal 一致。Current generation 必须早于每个 service start，每个 start 必须早于 terminal，visible 必须先于 successful terminal，随后严格为 terminal、quiescence、resource return、Host settlement。不可逆 service-start commit 与 cancellation acceptance 共用 Run-owned terminal arbiter，service-start observation 在 service/Run lock 外投递。`cancellation < start < terminal` 是结构上有效的证据，但会使 Waste 失败；产品路径必须阻止它。 |
 | 无缺口 service-start capacity | 从冻结 curve node 的 Macro256 切片派生每个 node 64 个 tile，从一个 monolithic source 加四个 curve node 派生每个完整 Run 257 个 start，并派生每个十二次 edit episode 3,084 个 start。确定性证明 pre-route 两个方向的 start/cancel 顺序、cancellation 获胜时 route/executable 零泄漏、route commit 获胜时 start coordinate 更小、暂存权威可回滚/复用、第 3,084 个 start 仍成功，以及第 3,085 个 start fail closed。 |
 | Fail-closed arithmetic/evidence | 拒绝 grid/slot/start/admission/deadline/drain checked overflow、boundary/event evidence 缺失或重复、moved origin、nonquiescence，或同 workload id 下的 manifest rule drift。既有 section/verdict digest 绑定 evidence，不改变 15/5-field envelope。 |
@@ -1973,8 +1977,10 @@ resource-limit 或 settlement invariant 时，应注册长期确定性产品行�
 performance-result file 都不得注册到 CTest/CI，也不得作为仓库内容长期保留。
 
 Issue #93 负责可复用的 I1 accepted-boundary collector：call 前 `A_i` 采样与 row-local
-sequence 预留、仅成功时产生的 `(A_i,event_sequence_i)` acceptance/current 排序、失败
-且不产生 acceptance 的 evidence、连续 isolated-I1 grid，以及精确 drain/tie/guard 行为。
+sequence 预留、仅成功时把 `(A_i,event_sequence_i)` 绑定进 product supersession identity、
+row 与 current evidence 精确匹配、accepted-row/observer-causal sequence domain 彼此独立、
+failure 且不产生 accepted event 或 product binding 的 evidence、连续 isolated-I1 grid，以及
+精确 drain/tie/guard 行为。
 Issue #95 负责 B1 `OutputStore` 固定 raw probe-to-schema mapping、backend 到固定
 schema 的 adapter、mount normalizer、performance-configuration mapping/proof、唯一
 canonical encoder/digest、eligibility 与 root-containment evidence，以及 cap-1/
@@ -1989,14 +1995,15 @@ field 或 sentinel。Issue #92 只定义本 evidence
 contract；它不新增当前 probe、serializer、public API、runner 或 runtime result
 field。
 
-Issue #93 现已通过 `test_i1_profile`、`test_i1_evidence`、
+Issue #93 现已通过 `test_compute_supersession`、`test_i1_profile`、`test_i1_evidence`、
 `test_dense_tensor_content_digest`、`test_resource_ledger`，以及在启用仓库 OpenCV operation
 provider 时的 `test_i1_product_path`，注册长期确定性的 I1 行为。它们共同覆盖 checked
-grid/admission arithmetic、仅成功时产生的 accepted coordinate、精确冻结的 graph/request
-construction、one-based nearest-rank aggregate、彼此独立的 discarded/post-cancel service、
-Host/device lifetime-high-water observation、final settlement、canonical DenseTensor logical
-identity，以及真实 embedded Host latest-wins product path。这些是 correctness test；它们不会
-断言 timed 221-slot run 中与机器相关的 percentile 或 waste threshold。
+grid/admission arithmetic、仅成功时产生的 accepted coordinate、精确 Host/Kernel/product
+identity binding、equal-time row-local ordering、彼此独立的 accepted-row 与 observer-causal
+sequence、精确冻结的 graph/request construction、one-based nearest-rank aggregate、彼此独立的
+discarded/post-cancel service、Host/device lifetime-high-water observation、final settlement、
+canonical DenseTensor logical identity，以及真实 embedded Host latest-wins product path。这些是
+correctness test；它们不会断言 timed 221-slot run 中与机器相关的 percentile 或 waste threshold。
 
 精确定时 workload 由手工、`EXCLUDE_FROM_ALL` 的 `i1_edit_storm_benchmark` target 承担；
 它不注册到 CTest 或 CI。必须显式构建，并把每个 replicate 分别写入 checkout 外、父目录已存在、

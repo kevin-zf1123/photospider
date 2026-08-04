@@ -172,9 +172,15 @@ post-admission return time 都无效。允许的 start lateness 不会消耗 150
 Host admission 成功时，accepted-admission 逻辑 event 的精确 coordinate 为
 `(A_i,event_sequence_i)`。新 edit/generation 在该 coordinate 成为 current；全部
 current-generation、latest-wins、supersession 与同 timestamp 排序都使用该
-coordinate。之后的 Host return timestamp 与 status 只能保留为 raw measurement
-evidence，不得替代或重新锚定该 coordinate；即使只在 return 时获知成功，也不会
-移动逻辑 boundary。Admission 失败时不存在 accepted-admission 逻辑 event；
+coordinate。Collector 会把这个调用前预留的 coordinate 经 source-private I1 Host 与
+Kernel request 传递，并在 coordinator publication 前绑定到产品
+`SupersessionIdentity`。在带 binding 的 lineage 内，只有 graph-wide generation 与
+accepted coordinate 都向前推进时才能 replacement；timestamp 相同时使用 row-local
+sequence。独立的 observation `causal_sequence` 仍从一开始，并且只排列 lifecycle
+事实。Current-generation observation 与 evaluator 必须复现精确 identity binding，绝不能
+根据 callback/edit 顺序推断。之后的 Host return timestamp 与 status 只能保留为 raw
+measurement evidence，不得替代或重新锚定该 coordinate；即使只在 return 时获知成功，
+也不会移动逻辑 boundary。Admission 失败时不存在 accepted-admission 逻辑 event；
 预留的 sequence 与 failure/return 事实保持为 raw evidence，replicate 无效，Harness
 不得合成、回填或选择替代 acceptance timestamp。这些事实继续由既有
 workload-manifest 与 measurement-evidence section 承载，不新增 outer row 或 bundle
@@ -1577,7 +1583,7 @@ good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidenc
 
 | Issue | 必需 v1 交付 |
 | --- | --- |
-| #93 | 实现可复用的 I1 accepted-boundary collector：采样 `A_i`、在 Host invocation 前预留 row-local `event_sequence_i`，只在 admission 成功时发出 `(A_i,event_sequence_i)`，把 return/failure 保留为 raw evidence 且不产生 accepted event，并以该 coordinate 驱动 current/latest-wins 排序；将其用于连续 221-slot isolated-I1 grid、精确 `S_11` drain/tie/guard 行为、I1 request/current-generation 与 cancellation/quiescence 观测；发布 isolated latency、waste 与 memory 行，以及必需的 output-correctness 证据。 |
+| #93 | 实现可复用的 I1 accepted-boundary collector：采样 `A_i`、在 Host invocation 前预留 row-local `event_sequence_i`，只在 admission 成功时发出 `(A_i,event_sequence_i)`，在 current publication 前把 proposed coordinate 带入 product supersession identity，要求 row/current 精确 binding 并保持 accepted-row 与 observer-causal sequence domain 彼此独立，把 failure 保留为 raw evidence 且不产生 accepted event、current observation 或 product binding；将其用于连续 221-slot isolated-I1 grid、精确 `S_11` drain/tie/guard 行为、I1 request/current-generation 与 cancellation/quiescence 观测；发布 isolated latency、waste 与 memory 行，以及必需的 output-correctness 证据。 |
 | #94 | 在此处冻结的精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-before-next-edit ordering，以及 I1 coefficient/index/update/full-resolution-final lineage 上实现 I2；不得重新定义这些 schedule，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
 | #95 | 实现 B1 immutable manifest、occurrence-scoped job/task identity、reservation、canonical semantic trace、crash-durable artifact commit、固定 storage/performance probe-to-schema adapter、mount normalization、唯一 encoder/digest、eligibility/B1 check 与 logical/raw golden；在 Run cap 1 与 8 下发布 closed-schema isolated throughput、determinism、zero-fault waste 与 memory 行。 |
 | #96 | 把精确 I1 与 B1 fixture 组合为 M1；复用 #93 的 I1 accepted-boundary collector 且不得重新定义，将第一次 measured edit 精确绑定到 `edit_index=0`、`A_0` 与其 call 前预留的 sequence；实现固定的 `C^M1`/`W^M1` cold/warmup origin、count、B1 offer protocol、跨 `B^M1` I1 settlement，以及通过 `[B^M1,B^M1+2,000,000 ns]` 内该成功 coordinate 实现的 final-warmup current-hold 冻结例外；实现精确 cutoff/carryover/FIFO/phase-attribution 与 temporal-resource boundary；把既有 `cycle_ordinal` component 解释为每个 measured B1 Graph 的独立 producer-local counter，且绝不把它当作 retry 或新增 field；原样复用精确 v1 manifest byte，强制执行 same-ordinal 完整 M1/B1 environment pair，同时让 I1-only pair 只比较 base，并发布 closed-schema mixed latency、throughput progress、fairness、waste 与 memory 行。 |

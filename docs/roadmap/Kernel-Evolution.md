@@ -1138,11 +1138,16 @@ miss/drop/gap handling. The one pre-Host-invocation sample `A_i` starts latency,
 checked-adds the absolute I1 Run deadline `D_i=A_i+150,000,000 ns`, and is also
 the normative admission/acceptance timestamp when Host succeeds. The harness
 reserves a unique row-local `event_sequence_i` before that call; success creates
-exact coordinate `(A_i,event_sequence_i)` and makes the generation current
-there. Host return time/status remain raw evidence and never replace the
-coordinate. Failure creates no accepted event, invalidates the replicate, and
-cannot backfill an alternate timestamp. These facts use existing inner
-manifest/measurement evidence without adding an outer field. Nominal `S_i` and
+exact coordinate `(A_i,event_sequence_i)`. The proposed coordinate travels
+through the private Host/Kernel request and is bound into product
+`SupersessionIdentity` before current publication; the current observation
+copies that exact binding. Coordinate-bound replacement requires generation
+and accepted coordinate to advance, while accepted-row and observer-causal
+sequences remain independent domains. Host return time/status never replace
+the coordinate. Failure creates no accepted event, current observation, or
+product binding, invalidates the replicate, and cannot backfill an alternate
+timestamp. These facts use existing inner manifest/measurement evidence
+without adding an outer field. Nominal `S_i` and
 the quiescence drain never extend that budget, and missed or expired work cannot
 publish. Isolated I1 derives
 cold slot zero, warmup slots `1..20`, measured slots `21..220`, and terminal
@@ -1253,7 +1258,7 @@ The delivery rows are fixed:
 
 | Issue | Required target evidence |
 | --- | --- |
-| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | Reusable I1 accepted-boundary collector with pre-call `A_i` sampling and row-local sequence reservation, success-only `(A_i,event_sequence_i)` current/latest-wins ordering, failure without an accepted event, the continuous 221-slot isolated grid, exact `S_11` drain/tie/guard behavior, latency, waste, memory, and required output correctness. |
+| [#93](https://github.com/kevin-zf1123/photospider/issues/93) | Reusable I1 accepted-boundary collector with pre-call `A_i` sampling and row-local sequence reservation; success-only `(A_i,event_sequence_i)` binding into the product supersession identity; exact row-to-current evidence matching; independent accepted-row and observer-causal sequence domains; failure without an accepted event, current observation, or product binding; the continuous 221-slot isolated grid; exact `S_11` drain/tie/guard behavior; latency, waste, memory, and required output correctness. |
 | [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-next-edit ordering, I1 coefficient/index/update lineage, and full-resolution final path; #94 cannot redefine that cadence or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and fixed storage/performance probe-to-schema, encoder, eligibility, and compatibility evidence at caps 1 and 8. |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact `C^M1`/`W^M1` input grid, fixed B1 offer protocol, cross-boundary I1 settlement, reuse of #93's collector binding the first measured edit to `edit_index=0`, `A_0`, and its pre-call sequence, the frozen final-warmup current-hold exception through that successful coordinate without redefining it, independent producer-local cycles, phase-boundary/carryover/FIFO/attribution evidence, plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
