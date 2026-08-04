@@ -77,6 +77,16 @@ coordinate 的 current identity；admission timestamp 相等时，使用 row-loc
 打破平局。两端都没有 binding 的旧 caller 保持仅按 generation 排序；bound/unbound 混合 identity
 同样保持 generation ordering，因此这条私有 evidence seam 不会改变 public 或非 I1 行为。
 
+Public 与 I1 asynchronous request 也会共享同一个 embedded-Host admission transaction。
+Host 在进入 Kernel 前构造所有可能失败的 caller-side resource：caller promise/future、成功
+`Result` envelope、backend-delivery bridge、已 join 的 status worker，以及 close-visible tracking。
+之所以必须采用该顺序，是因为 coordinator publication 可能在 Kernel call 返回前并发地令产品
+identity 成为 current。一旦 Kernel 可能已经发布该 identity，Host 的 accepted tail 就只包含
+no-throw future sharing、single-producer bridge delivery，以及 prebuilt result 的移动。因而
+preparation failure（包括确定性的 source-private test injection）发生在进入 Kernel 前，不能创建
+current identity、accepted product binding 或 visible output。若违反 one-delivery/one-settlement
+结构性 invariant，则会 fail-stop，而不会成为可恢复的 post-publication rejection。
+
 `close_and_drain()` 对并发调用与重复调用都保持幂等。它会停止 admission，让被满队列阻塞的
 producer 以 `std::runtime_error` 被唤醒，按 FIFO 排空已有 work，并在返回前 join worker。每个
 caller 都等待自己加入的持久 close generation。已 join 的 lane 永远不会重新开放 admission 或创建

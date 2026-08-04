@@ -213,6 +213,18 @@ select an alternate acceptance timestamp. These facts remain in the existing
 workload-manifest and measurement-evidence sections and add no outer row or
 bundle field.
 
+The embedded Host must make that success-only boundary transactional with
+respect to its own resource preparation. Before it enters Kernel for either the
+ordinary public request or the source-private I1 request, it constructs the
+caller promise/future, successful result envelope, one-delivery backend bridge,
+joined status worker, and close-visible tracking. Kernel current publication may
+race ahead of its return, so after Kernel may have published a product identity,
+Host performs only no-throw future sharing, bridge delivery, and movement of the
+prebuilt result. Any recoverable Host preparation failure, including the
+deterministic source-private test injection, therefore occurs before Kernel
+entry and creates no current observation, accepted binding, or visible output.
+A structural duplicate delivery or settlement is fail-stop.
+
 An overflow, early start, start more than 2 ms late, admission failure, dropped
 edit, or cadence-event gap invalidates the replicate. A missed edit is not
 submitted late: before any Host call for that edit, the harness requests

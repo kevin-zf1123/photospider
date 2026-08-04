@@ -53,6 +53,18 @@ coordinator publication 前把它绑定到产品 `SupersessionIdentity`。该 se
 scheduling 成功返回是冻结的 I1 acceptance boundary；返回的 future 仍表示稍后的产品
 settlement。
 
+Public 与 I1 asynchronous admission 共享同一个 Host-side preparation transaction。Embedded
+adapter 在进入 `InteractionService` 前，会创建 caller future、成功 `Result` envelope、一个
+backend-delivery bridge、已 join 的 status worker，以及 close-visible tracking。Kernel
+publication 可能在 `cmd_compute_async()` 返回前并发地令 candidate 成为 current，因此 accepted
+return path 只执行 no-throw `future::share()`、一次 single-producer bridge delivery，以及
+prebuilt result 的 no-throw move。Worker creation、promise/future creation、container growth、
+diagnostic/result construction 和可测试的 resource failure 都发生在进入 Kernel 前。Preparation
+被拒绝或 Kernel 在 publication 前失败时，Host 会发送 empty bridge sentinel、抽取 tracking
+ownership、在 lifecycle mutex 外 join，并返回失败；该请求不会产生 accepted coordinate、current
+observation 或 product output binding。违反 one-delivery bridge 的结构性 invariant 会 fail-stop，
+而不会成为可恢复的 post-publication Host rejection。
+
 Dirty ROI 从 `HostComputeRequest` 复制到 `Kernel::ComputeRequest`，再经过 graph propagation、
 planning、task selection、staged execution 与 `NodeExecutor` 时，始终保持为内核自有的
 `PixelRect`；extent 使用 `PixelSize`。这条路径不会进行 OpenCV geometry 转换；provider 只有在

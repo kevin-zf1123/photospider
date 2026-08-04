@@ -1147,7 +1147,13 @@ sequences remain independent domains. Host return time/status never replace
 the coordinate. Failure creates no accepted event, current observation, or
 product binding, invalidates the replicate, and cannot backfill an alternate
 timestamp. These facts use existing inner manifest/measurement evidence
-without adding an outer field. Nominal `S_i` and
+without adding an outer field. Public and I1 async calls share one embedded-Host
+preparation transaction: caller promise/future, successful result envelope,
+backend bridge, joined status worker, and close tracking are established before
+Kernel entry. Because current publication may race ahead of Kernel return, the
+accepted tail is no-fail; deterministic Host resource failure is injected only
+at the last pre-Kernel point and produces no current identity, accepted binding,
+or visible output. Nominal `S_i` and
 the quiescence drain never extend that budget, and missed or expired work cannot
 publish. Isolated I1 derives
 cold slot zero, warmup slots `1..20`, measured slots `21..220`, and terminal

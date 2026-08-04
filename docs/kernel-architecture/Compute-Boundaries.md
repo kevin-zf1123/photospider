@@ -92,6 +92,20 @@ binding retain generation-only ordering. Mixed bound/unbound identities also
 retain generation ordering so this private evidence seam does not alter public
 or non-I1 behavior.
 
+Public and I1 asynchronous requests also share one embedded-Host admission
+transaction. Before entering Kernel, Host constructs every fallible caller-side
+resource: the caller promise/future, the successful `Result` envelope, the
+backend-delivery bridge, the joined status worker, and close-visible tracking.
+This ordering is required because coordinator publication may make the product
+identity current concurrently before the Kernel call returns. Once Kernel may
+have published that identity, the accepted Host tail contains only no-throw
+future sharing, single-producer bridge delivery, and movement of the prebuilt
+result. Preparation failure, including the deterministic source-private test
+injection, therefore occurs before Kernel entry and cannot create a current
+identity, accepted product binding, or visible output. Violating the structural
+one-delivery/one-settlement invariant is fail-stop rather than a recoverable
+post-publication rejection.
+
 `close_and_drain()` is concurrent-call and repeat-call idempotent. It stops
 admission, wakes full-queue producers with `std::runtime_error`, drains prior
 work FIFO, and joins the worker before returning. Each caller waits for the

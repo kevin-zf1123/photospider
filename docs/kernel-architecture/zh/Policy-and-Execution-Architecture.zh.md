@@ -431,6 +431,15 @@ coordinate，evaluator 要求 row 与 product 精确绑定，并要求 product c
 失败的 Host call 可以为诊断保留 proposed coordinate，但不能产生 accepted row、current
 observation 或 product binding。
 
+普通 public request 与 source-private I1 request 使用同一个 embedded-Host preparation
+transaction。Caller promise/future ownership、成功 result envelope、one-delivery backend
+bridge、status worker 与 close-visible tracking 都会在 `InteractionService` 进入 Kernel 前建立。
+Kernel 可能在返回前并发发布 current，因此 accepted Host tail 被刻意设计为 no-fail：它只会
+share backend future、通过 prebuilt bridge delivery 它，并移动 prebuilt result。确定性的
+source-private test seam 会在最后一个 pre-Kernel point 失败，并证明 Host resource failure 不会
+暴露 current generation 或 product output；它不会改变 installed Host、IPC、CLI 或 plugin
+contract。
+
 冻结的 I1 graph、十二项 coefficient/Region、仅成功时产生 accepted coordinate 的 collector 与
 product binding、连续 cold/warmup/measured 221-slot grid、tie/guard rule、canonical DenseTensor
 output digest、resource snapshot，以及 fail-closed episode/replicate evaluator 均已成为当前实现。

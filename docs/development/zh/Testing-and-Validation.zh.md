@@ -1391,6 +1391,14 @@ cancellation/supersession 并记录其被接受、撤销 publication，并且不
 无效 admission result 会同步关闭 Graph，以撤销该 episode 的 publication 并取消、drain
 较早 generation，然后 runner 才中止全部后续 edit 与 grid slot。
 
+Embedded Host 会在这条 success-only boundary 前关闭更窄的 resource-admission race。Public
+与 I1 call 都会在进入 Kernel 前预构造 caller promise/future、成功 result envelope、backend-
+delivery bridge、已 join 的 status worker，以及 close-visible tracking。确定性的 source-private
+injection 会在最后一个 pre-Kernel point 触发。Test oracle 要求这次失败返回 invalid caller future、
+不调用任何 product source callback、不发布任何 current/product/lifecycle observation，并允许下一次
+未注入的 I1 request 成为 generation one 且正常 settlement。这是 common Host path 的 correctness
+test，不是模拟 I1 collector return。
+
 强制 I1 phase/drain scenario oracle 如下：
 
 | 场景 | Oracle |
@@ -1399,6 +1407,7 @@ cancellation/supersession 并记录其被接受、撤销 publication，并且不
 | 成功的 accepted-boundary coordinate | 校验每个 `A_i` 后，在 Host invocation 前预留其唯一 row-local `event_sequence_i`，并通过 private Host/Kernel request seam 传递 `(A_i,event_sequence_i)`。成功时要求 product supersession identity 与 current-generation observation 包含这一精确 coordinate；拒绝把 Host return timestamp/status 或 observer callback time/sequence 用作 deadline、current-generation、supersession、tie-order 或替代 binding coordinate。 |
 | Accepted 与 causal sequence domain | Row-local accepted sequence allocator 与 observation sink causal sequence allocator 各自从一开始。要求二者只在各自 domain 内严格有序；绝不能通过两个 sequence 的数值相等推断 row/product binding。 |
 | 失败的 admission 不产生 accepted event | Host failure 时，把预留的 proposed coordinate 与 failure/return observation 保留为 raw inner evidence，使 replicate invalid，并要求不存在 accepted-admission event、current-generation observation、product binding、替代 timestamp、backfill 或 outer schema field。 |
+| 已准备的 Host resource failure 不能进入 Kernel | 在所有 caller-side async resource 与 close tracking 已完成 preparation、但即将进入 Kernel 前注入失败。要求 public request 不调用 source callback；要求 I1 request 不暴露 current、cancellation、start、terminal、quiescence、resource-return、visibility 或 Host-settlement observation。关闭 injection 后，要求下一次 request 以 generation one 成功。 |
 | 每次 edit 的 expiry 都会关闭 publication | 要求每个 intermediate visible output 不晚于其自身 `D_i`；更晚的 intermediate publication 与冻结的 product/workload contract 冲突，并使 row invalid。必需的 twelfth output 若晚于自身 deadline，仍属于证据完整的 latency-gate failure。 |
 | 精确 drain anchor | 每个 episode 要求 `Q_start=S_11=E+183,333,337 ns` 与 `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`，不受 actual admission 或 deadline 变化影响。Window 可以与 active final Run 重叠，但不会取消它或延长 `D_i`。 |
 | Deadline 与 next-origin guard | 在最晚合法 admission 下，要求 `D_11<=E+335,333,337 ns`、从该 deadline 到 `Q_end` 精确 348,000,000 ns，以及从 `Q_end` 到下一 origin 精确 66,666,663 ns。Reset/baseline preparation 必须容纳在该 guard 中；最后一个 measured episode 在 `T^I1` 前使用相同 guard。 |
@@ -1995,10 +2004,11 @@ field 或 sentinel。Issue #92 只定义本 evidence
 contract；它不新增当前 probe、serializer、public API、runner 或 runtime result
 field。
 
-Issue #93 现已通过 `test_compute_supersession`、`test_i1_profile`、`test_i1_evidence`、
+Issue #93 现已通过 `test_host_adapter`、`test_compute_supersession`、`test_i1_profile`、`test_i1_evidence`、
 `test_dense_tensor_content_digest`、`test_resource_ledger`，以及在启用仓库 OpenCV operation
 provider 时的 `test_i1_product_path`，注册长期确定性的 I1 行为。它们共同覆盖 checked
-grid/admission arithmetic、仅成功时产生的 accepted coordinate、精确 Host/Kernel/product
+grid/admission arithmetic、仅成功时产生的 accepted coordinate、transactional pre-Kernel Host
+preparation failure、精确 Host/Kernel/product
 identity binding、equal-time row-local ordering、彼此独立的 accepted-row 与 observer-causal
 sequence、精确冻结的 graph/request construction、one-based nearest-rank aggregate、彼此独立的
 discarded/post-cancel service、Host/device lifetime-high-water observation、final settlement、

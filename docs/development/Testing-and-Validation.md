@@ -1742,6 +1742,17 @@ latency. Concretely, an invalid admission result synchronously closes the Graph
 to revoke episode publication and cancel/drain earlier generations before the
 runner aborts every later edit and grid slot.
 
+The embedded Host closes the narrower resource-admission race before this
+success-only boundary. Both the public and I1 calls prebuild the caller
+promise/future, successful result envelope, backend-delivery bridge, joined
+status worker, and close-visible tracking before entering Kernel. A deterministic
+source-private injection fires at the last pre-Kernel point. The test oracle
+requires that this failure return an invalid caller future, invoke no product
+source callback, publish no current/product/lifecycle observation, and allow the
+next un-injected I1 request to become generation one and settle normally. This
+is a correctness test of the common Host path, not a simulated I1 collector
+return.
+
 The mandatory I1 phase/drain scenario oracle is:
 
 | Scenario | Oracle |
@@ -1750,6 +1761,7 @@ The mandatory I1 phase/drain scenario oracle is:
 | Successful accepted-boundary coordinate | After validating each `A_i`, reserve its unique row-local `event_sequence_i` before Host invocation and carry `(A_i,event_sequence_i)` through the private Host/Kernel request seam. On success require the product supersession identity and current-generation observation to contain that exact coordinate; reject a Host return timestamp/status or observer callback time/sequence as a deadline, current-generation, supersession, tie-order, or substitute binding coordinate. |
 | Accepted and causal sequence domains | Start the row-local accepted sequence allocator and the observation sink's causal sequence allocator independently at one. Require each to be strictly ordered only within its own domain; never infer a row/product binding by numeric equality between the two sequences. |
 | Failed admission has no accepted event | On Host failure retain the reserved proposed coordinate and failure/return observations as raw inner evidence, invalidate the replicate, and require no accepted-admission event, current-generation observation, product binding, alternate timestamp, backfill, or outer schema field. |
+| Prepared Host resource failure cannot enter Kernel | Inject failure after all caller-side async resources and close tracking are prepared but immediately before Kernel entry. Require the public request to invoke no source callback, and require the I1 request to expose no current, cancellation, start, terminal, quiescence, resource-return, visibility, or Host-settlement observation. Disable the injection and require the next request to succeed as generation one. |
 | Per-edit expiry is publication-closing | Require every intermediate visible output at or before its own `D_i`; a later intermediate publication contradicts the frozen product/workload contract and invalidates the row. The required twelfth output remains a complete latency-gate failure when visible after its own deadline. |
 | Exact drain anchor | For every episode require `Q_start=S_11=E+183,333,337 ns` and `Q_end=Q_start+500,000,000 ns=E+683,333,337 ns`, independent of actual admission and deadline. The window may overlap an active final Run but does not cancel it or extend `D_i`. |
 | Deadline and next-origin guards | With latest legal admission, require `D_11<=E+335,333,337 ns`, exactly 348,000,000 ns from that deadline to `Q_end`, and exactly 66,666,663 ns from `Q_end` to the next origin. Reset/baseline preparation must fit that guard; the last measured episode uses the same guard before `T^I1`. |
@@ -2417,11 +2429,12 @@ it adds no current probe, serializer, public API, runner, or runtime result
 field.
 
 Issue #93 now registers the long-lived deterministic I1 behavior in
-`test_compute_supersession`, `test_i1_profile`, `test_i1_evidence`,
+`test_host_adapter`, `test_compute_supersession`, `test_i1_profile`, `test_i1_evidence`,
 `test_dense_tensor_content_digest`, `test_resource_ledger`, and, when the
 repository OpenCV operation provider is enabled, `test_i1_product_path`.
 Together they cover checked grid/admission arithmetic, success-only accepted
-coordinates, exact Host/Kernel/product identity binding, equal-time row-local
+coordinates, transactional pre-Kernel Host preparation failure, exact
+Host/Kernel/product identity binding, equal-time row-local
 ordering, independent accepted-row and observer-causal sequences, exact frozen
 graph/request construction, one-based nearest-rank aggregation, independent
 discarded and post-cancel service, Host/device lifetime-high-water observation,

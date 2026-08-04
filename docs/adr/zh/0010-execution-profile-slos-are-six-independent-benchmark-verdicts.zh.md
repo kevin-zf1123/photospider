@@ -186,6 +186,15 @@ measurement evidence，不得替代或重新锚定该 coordinate；即使只在 
 workload-manifest 与 measurement-evidence section 承载，不新增 outer row 或 bundle
 field。
 
+Embedded Host 必须使这条 success-only boundary 相对于自身 resource preparation 保持
+transactional。对于普通 public request 与 source-private I1 request，Host 都会在进入 Kernel
+前构造 caller promise/future、成功 result envelope、one-delivery backend bridge、已 join 的
+status worker，以及 close-visible tracking。Kernel current publication 可能先于调用返回，因此
+一旦 Kernel 可能已经发布 product identity，Host 就只执行 no-throw future sharing、bridge
+delivery 和 prebuilt result 的移动。所有可恢复的 Host preparation failure（包括确定性的
+source-private test injection）因而都发生在进入 Kernel 前，不会创建 current observation、
+accepted binding 或 visible output。重复 delivery 或 settlement 这类结构性错误会 fail-stop。
+
 Overflow、提前启动、迟于 2 ms 启动、admission failure、dropped edit 或 cadence-event
 gap 都会使 replicate 无效。Missed edit 不会迟到补交：在为该 edit 调用任何 Host
 边界前，harness 请求此前全部 generation 的 cancellation/supersession、记录其被接受，

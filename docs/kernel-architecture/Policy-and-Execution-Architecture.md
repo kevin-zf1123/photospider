@@ -533,6 +533,17 @@ strict product-coordinate order. A failed Host call may retain the proposed
 coordinate for diagnostics, but it cannot create an accepted row, current
 observation, or product binding.
 
+The ordinary public request and the source-private I1 request use the same
+embedded-Host preparation transaction. Caller promise/future ownership, the
+successful result envelope, a one-delivery backend bridge, the status worker,
+and close-visible tracking are all established before `InteractionService`
+enters Kernel. Kernel may publish current concurrently before returning, so the
+accepted Host tail is deliberately no-fail: it only shares the backend future,
+delivers it through the prebuilt bridge, and moves the prebuilt result. A
+deterministic source-private test seam fails at the last pre-Kernel point and
+proves that Host resource failure exposes no current generation or product
+output; it does not alter installed Host, IPC, CLI, or plugin contracts.
+
 The frozen I1 graph, twelve coefficients/Regions, success-only accepted
 coordinate collector and product binding, continuous cold/warmup/measured
 221-slot grid, tie and guard rules, canonical DenseTensor output digest,

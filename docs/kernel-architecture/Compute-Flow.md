@@ -65,6 +65,21 @@ is not installed or exposed through Host, IPC, CLI, or a plugin record. Its
 successful asynchronous scheduling return is the frozen I1 acceptance
 boundary; the returned future still represents later product settlement.
 
+Public and I1 asynchronous admission share one Host-side preparation
+transaction. Before entering `InteractionService`, the embedded adapter creates
+the caller future, successful `Result` envelope, one backend-delivery bridge,
+the joined status worker, and close-visible tracking. Kernel publication may
+make a candidate current concurrently before `cmd_compute_async()` returns, so
+the accepted return path performs only no-throw `future::share()`, one
+single-producer bridge delivery, and a no-throw move of the prebuilt result.
+Worker creation, promise/future creation, container growth, diagnostic/result
+construction, and testable resource failure all precede Kernel entry. A
+rejected preparation or pre-publication Kernel failure sends an empty bridge
+sentinel, extracts tracking ownership, joins outside the lifecycle mutex, and
+returns failure without an accepted coordinate, current observation, or
+product output binding. Structural violation of the one-delivery bridge is
+fail-stop rather than a recoverable post-publication Host rejection.
+
 The dirty ROI remains a kernel-owned `PixelRect` while it is copied from
 `HostComputeRequest` through `Kernel::ComputeRequest`, graph propagation,
 planning, task selection, staged execution, and `NodeExecutor`. Extents use

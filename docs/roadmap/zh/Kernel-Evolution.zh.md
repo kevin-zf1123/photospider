@@ -928,7 +928,12 @@ coordinate 的 replacement 要求 generation 与 accepted coordinate 都推进�
 evidence，绝不替代该 coordinate。Failure 不产生 accepted event、current observation 或
 product binding，使 replicate invalid，也不能回填替代 timestamp。这些事实使用既有 inner
 manifest/measurement evidence，不新增 outer field。
-Nominal `S_i` 与 quiescence drain 绝不会延长该 budget，missed 或 expired work 也不能
+Public 与 I1 async call 共享一个 embedded-Host preparation transaction：caller promise/future、
+成功 result envelope、backend bridge、已 join 的 status worker 与 close tracking 都会在进入
+Kernel 前建立。由于 current publication 可能先于 Kernel return，accepted tail 保持 no-fail；
+确定性的 Host resource failure 只在最后一个 pre-Kernel point 注入，不会产生 current identity、
+accepted binding 或 visible output。Nominal `S_i` 与 quiescence drain 绝不会延长该 budget，
+missed 或 expired work 也不能
 发布。Isolated I1 从唯一 `G^I1` 派生 cold slot zero、
 warmup slot `1..20`、measured slot `21..220` 与 terminal stride 221；任何 phase 都
 不能另选 origin 或插入 cooling delay。每个 episode 固定
