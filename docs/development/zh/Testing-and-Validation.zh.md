@@ -1521,8 +1521,11 @@ job index。只有在该 receipt 和 logical/raw 两种 golden check 后才贡�
 binding 获取两次。已配置 Metal device 允许每个不同 preview/final revision 的
 首次 access 执行一次精确大小的 upload；第二次必须命中相同 residency。禁止
 CPU copy、readback、disk/codec access 或额外 transfer。复制第二次 access、diagnostic、
-resource 与 no-I/O fact 后，Host 会在最终 row snapshot 前，按精确 revision、完整 binding 与
-producer identity 只释放该 row 的 resident。错误 identity 不释放任何内容；不得使用 broad
+resource 与 no-I/O fact 后，只要 managed lineage 仍存活，已经 Ready 的 immutable Value
+即使在较新 generation 已 current 时仍可被获取；该 verification acquisition 不修改
+currentness，也不放宽精确 seed/revision/binding/producer/fence 检查。Host 会在最终 row
+snapshot 前，按精确 revision、完整 binding 与 producer identity 只释放该 row 的
+resident。错误 identity 不释放任何内容；不得使用 broad
 clear、capacity-pressure substitute，也不得改变普通 residency policy。Local acquisition Value
 析构后，每个已配置 device 的完整 memory-and-scratch `reserved` vector 必须等于 row 前
 baseline。
@@ -1537,7 +1540,9 @@ phase transition 都不得新选 origin 或插入 delay。
 `RealTimeUpdate`/`Interactive` preview child，并在共享 realtime request identity 下 arm 合法的
 `GlobalHighPrecision`/`Full` final child。Edit `0..10` 绝不等待：下一次 acceptance
 遵循冻结 schedule，较早 preview 必须严格在其之前可见，才能保持 current。Final
-只在其 preview 可见且仍为 current 时提交。更新 generation 会撤销两个较旧 child
+只在其 preview 可见且仍为 current 时提交。两个 child Run arbiter 绑定同一个 request-
+local gate，并在 terminal arbitration 内、发布 `Cancelled` 前 deny 该 gate；cleanup
+callback 留在该顺序之外。更新 generation 会撤销两个较旧 child
 的 publication permission。Preview latency 与两个 child deadline 都锚定到同一个
 actual preview admission；final trigger/admission 被保留，但不能重置 1,000 ms deadline。
 只有 `edit_index=11` 必须按顺序并在两个 absolute bound 内发布二者。Issue #94 实现
@@ -1549,12 +1554,21 @@ actual preview admission；final trigger/admission 被保留，但不能重置 1
 真实 product-path 与条件式 native-Metal test 构成。Product-path test 覆盖 preview
 visibility 先于 final trigger 与 HP service、trigger 前取消、trigger 后 stale-final 拒绝、
 相同时刻较新 edit ordering、精确 child QoS/deadline、不可变 Value acquisition 复用，以及
-lifecycle/resource/Host settlement。Host-settlement case 独立覆盖 preview-only、preview 加
+lifecycle/resource/Host settlement。Progressive-gate test 把真实 Run arbiter 绑定到 final
+trigger 使用的同一个 gate：确定性 barrier 在 `Cancelled` 已成为 terminal 后延迟 cleanup，
+同时仍要求 trigger、HP service 与 visible-final attempt 全部为零；反向顺序证明 trigger
+winner 保持 Triggered，而之后的 cancellation/currentness 负责 publication。Host-
+settlement case 独立覆盖 preview-only、preview 加
 cancelled final、preview 加 successful final 与 no-child terminal shape；它们要求 Host
 sequence/time 晚于每个已 materialize child resource，且 status 等于确定性的 progressive
-aggregate。Residency case 覆盖正确与错误 identity、在只允许一个 allocation 的 device limit
-下连续 revision、第二次无 transfer/allocation，以及完整 device reservation 闭合。Evidence
-test 还要求两个 expected endpoint digest 在
+aggregate。Residency case 先发布 generation one，再把同一 managed lineage 推进到 generation
+two，随后要求 historical Ready Value 在不改变 currentness 的情况下，以精确 identity 完成
+transfer/reuse。它们还覆盖错误 seed、binding 与 producer rejection、在只允许一个
+allocation 的 device limit 下连续 revision、第二次无 transfer/allocation、精确 release 与
+完整 device reservation 闭合；条件式 native test 保留真实 Metal path。Evidence test 要求
+visible successful Run 中每个 `(run_id, local_task_id)` 只有 causal sequence 最早的 start
+属于 useful，之后的 duplicate/retry 属于 discarded，不同 task 仍属于 useful，并且独立计算
+post-cancel intersection。它们还要求两个 expected endpoint digest 在
 candidate 比较前匹配各自 frozen oracle，把 expected/candidate 同步伪造区分为 Invalid、把
 candidate-only mismatch 区分为 Fail，并锁定上述区分 phase 的 aggregate 边界。
 `i2_progressive_benchmark` 是显式
@@ -1902,7 +1916,7 @@ sample 或 median summary 不能隐藏失败进程。
 | Throughput | 每秒成功的 logical RGBA pixel-site transform，以 MPix-op/s 报告；一个 B1 job 只有在 Run success + crash-durable receipt + logical/raw golden verification 后才贡献 16,777,216 个 site-operation。Interval 在 final golden verification 结束。Candidate/reference replicate 按 ordinal 在一个精确兼容 storage environment 下配对：ratio 中位数 >=0.95，且每个 ratio >=0.90。每个 M1 一秒 B1 rate 使用 same-subject、same-ordinal 且 storage-compatible 的 paired isolated cap-8 B1 rate；p05 >=0.20，denominator 或 storage fingerprint 缺失、为零或不兼容时 invalid。 |
 | Fairness | 对两个 B1 Graph 整个一秒 window 都保有未消费 offered demand、且 producer 均未暂停的窗口，`J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`，其中 `x` 是 completed `work_units + ceil(ready_bytes/4096)`。总 service 为零时 invalid；Jain p05 >=0.95。两个 class 都保持 startable 时，最多三次 Interactive start 后出现 Throughput。M1 还要求 headroom 导致的 Interactive admission failure 为零，并独立通过 latency/progress。 |
 | Determinism | 对三个 replicate、fresh-process restart 与 Run cap 1/8 中相同的 B1 job index，typed logical `ContentDigest`、raw payload SHA-256、canonical manifest SHA-256、`execution-profile-semantic-trace-v1` SHA-256 与按 job index 区分的 logical/raw golden mismatch count 全部为零。 |
-| Waste | `discarded_started_service / all_started_service`，使用 `work_units + ceil(ready_bytes/4096)`。每个无法 commit 结果的已启动 callback 都会被计费；已经进入的不可抢占 work 如实 drain。I1/I2 Interactive 每个 replicate <=0.25，M1 对 Interactive service 单独应用该上限；accepted cancellation/supersession 后才启动的 work 精确为零。I2 在允许的首次 transfer 规则下，额外 filesystem/codec、CPU-copy、readback、transfer 与 allocation byte 为零。无故障 isolated/mixed B1 的 discarded/duplicate/retry service 为零。 |
+| Waste | `discarded_started_service / all_started_service`，使用 `work_units + ceil(ready_bytes/4096)`。每个无法 commit 结果的已启动 callback 都会被计费；对于 visible successful I1/I2 Run，每个 `(run_id,local_task_id)` 只有 causal sequence 最早的 start 属于 useful，之后的 duplicate/retry 属于 discarded，而不同 task 仍属于 useful。已经进入的不可抢占 work 如实 drain。I1/I2 Interactive 每个 replicate <=0.25，M1 对 Interactive service 单独应用该上限；accepted cancellation/supersession 后才启动的 work 精确为零，并与 discarded work 独立计数。I2 在允许的首次 transfer 规则下，额外 filesystem/codec、CPU-copy、readback、transfer 与 allocation byte 为零。无故障 isolated/mixed B1 的 discarded/duplicate/retry service 为零。 |
 | Memory | Host retained、Host scratch、ready byte 与已配置 device memory/scratch 的独立 high-water byte，加上 B1 active Compute I/O task/planned byte。不得超过绝对 limit；isolated row-owned delta 与 B1 I/O count 回到 row 前 baseline/零，M1 shutdown 回到零。I2 精确 row-scoped resident release 发生在第二次 reuse evidence 之后、最终 snapshot 之前；每个已配置 device 的完整 memory-and-scratch `reserved` vector 等于 row 前 baseline。Candidate B1/I2 peak <=固定同环境 reference 的 105%。Process RSS 只作为 diagnostic。B1 planned-byte charge 与 event-aligned sample 是 Compute I/O admission、planned-byte high-water 与 final settlement 的强制性权威证据；它们不证明 physical memory ownership，也不能替代 RSS 或 ledger/device ownership evidence。 |
 
 每个必需维度输出 `pass`、`fail`、`invalid` 或 schema 预定义的

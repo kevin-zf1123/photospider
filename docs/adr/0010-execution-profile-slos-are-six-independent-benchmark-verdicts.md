@@ -474,6 +474,13 @@ required results. The twelfth preview must become visible no later than
 `D^final_{r,11}`. Expiry uses the same clock, revokes publication, and never
 reanchors either deadline.
 
+The RT and HP Run arbiters bind one request-local final gate. Cancellation
+denies it inside the matching Run terminal critical section before `Cancelled`
+is published; cleanup callbacks remain outside that section and cannot decide
+the race. Final trigger consumes the same atomic gate. A cancellation winner
+therefore suppresses trigger and HP service, while a trigger winner remains
+subject to later cancellation and currentness at visible commit.
+
 Preview latency starts at `A^I2_{r,i}` immediately before the preview Host
 admission call and
 ends at current preview visibility. Final end-to-end latency uses that same
@@ -517,7 +524,13 @@ the second must reuse the same device-local residency with zero transfer or
 allocation. Metal-to-Host transfer, filesystem/codec I/O, and any transfer
 beyond those two conditional first accesses are forbidden. Without Metal only
 the device-specific component is predefined `not-applicable`; the Host reuse
-and no-I/O gates still apply. After the second access and its diagnostic,
+and no-I/O gates still apply. An already-Ready immutable Value may be acquired
+after a newer generation becomes current while its coordinator-managed lineage
+remains live. This
+verification acquisition does not mutate currentness, but still requires exact
+seed, revision, source/destination binding, producer, and fence identity;
+ordinary current Run submissions retain exact stale-generation rejection.
+After the second access and its diagnostic,
 resource, and no-I/O facts have been copied, the Host removes only that row's
 resident by exact `revision + complete StorageBinding + producer` identity
 before the final row snapshot. A wrong identity is a no-op. This
@@ -1575,6 +1588,13 @@ cancellation, supersession, failure, duplicate execution, or retry. Work that
 starts after cancellation or supersession is accepted is counted separately
 and must be exactly zero. Entered non-preemptible work is charged until it
 drains.
+
+For I1 and I2, only the earliest causal start of one
+`(run_id, local_task_id)` in a visible successful Run is useful. Later starts
+for that identity are duplicate/retry work and contribute their full charge to
+discarded service; distinct local task identities remain useful. Starts from
+non-visible Runs remain discarded. Post-cancellation accounting is independent,
+so an intersecting start contributes once to each applicable sum.
 
 Each I1 and I2 replicate must have an Interactive discarded-service ratio at
 most 0.25. M1 applies that same ratio to Interactive service alone so completed

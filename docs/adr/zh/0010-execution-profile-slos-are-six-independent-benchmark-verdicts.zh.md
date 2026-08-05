@@ -411,6 +411,12 @@ episode 无效。较早 generation 只能在仍为 current 时发布，并不属
 `D^final_{r,11}` 可见。Expiry 使用同一个 clock，撤销 publication，并且绝不重新锚定
 任一 deadline。
 
+RT 与 HP Run arbiter 绑定同一个 request-local final gate。Cancellation 在匹配 Run 的
+terminal critical section 内、发布 `Cancelled` 前 deny 该 gate；cleanup callback 保持在
+该区间之外，不能决定 race。Final trigger 消费同一个 atomic gate。因此 cancellation
+winner 会抑制 trigger 与 HP service，而 trigger winner 仍受之后的 cancellation 与 visible
+commit currentness 约束。
+
 Preview latency 从 preview Host admission call 前的 `A^I2_{r,i}` 立即开始，到 current preview
 可见时结束。Final end-to-end latency 使用同一起点，到 current final 可见时结束；
 较晚的 final trigger 与 Host admission timestamp 单独保留，但绝不重置
@@ -446,7 +452,11 @@ transfer，第二次必须复用同一个
 device-local residency，且 transfer 与 allocation 都为零。禁止 Metal-to-Host
 transfer、filesystem/codec I/O，以及上述两个条件式首次 access 之外的任何 transfer。
 没有 Metal 时，只有 device-specific 组件属于预定义 `not-applicable`；Host reuse
-与 no-I/O 门禁仍然适用。复制第二次 access 及其 diagnostic、resource 与 no-I/O fact 后，
+与 no-I/O 门禁仍然适用。当 coordinator-managed lineage 仍存活时，已经 Ready 的
+immutable Value 可以在较新 generation 成为 current 后被获取。该 verification acquisition
+不修改 currentness，但仍要求精确 seed、revision、source/destination binding、producer 与
+fence identity；普通 current Run submission 仍按精确 generation 拒绝 stale completion。
+复制第二次 access 及其 diagnostic、resource 与 no-I/O fact 后，
 Host 必须在最终 row snapshot 前，通过精确的 `revision + 完整 StorageBinding + producer`
 identity，只移除该 row 的 resident。错误 identity 不产生任何效果。该 verification-only
 release 既不 broad clear cache，也不改变普通 lookup、publication、replacement、capacity 或
@@ -1380,6 +1390,12 @@ Started service 使用 `work_units + ceil(ready_bytes/4096)`。分子包含每�
 cancellation、supersession、failure、duplicate execution 或 retry 而无法 commit
 结果的已启动 callback。在 cancellation 或 supersession 被接受后才启动的 work
 单独计数，并且必须精确为零。已经进入的不可抢占 work 必须一直计费到 drain。
+
+对于 I1 与 I2，一个 visible successful Run 中，同一个 `(run_id, local_task_id)` 只有 causal
+sequence 最早的 start 属于 useful。之后具有相同 identity 的 start 都是 duplicate/retry
+work，并将完整 charge 计入 discarded service；不同 local task identity 仍属于 useful。
+Non-visible Run 的 start 仍属于 discarded。Post-cancellation accounting 独立执行，因此
+交集中的一个 start 在每个适用 sum 中各贡献一次。
 
 每个 I1 与 I2 replicate 的 Interactive discarded-service ratio 必须不超过 0.25。
 M1 对 Interactive service 单独应用相同 ratio，避免 completed B1 service 稀释它。
