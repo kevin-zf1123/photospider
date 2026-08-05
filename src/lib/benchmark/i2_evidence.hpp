@@ -125,9 +125,19 @@ struct I2EpisodeEvidenceInput final {
   I1ExecutionSnapshot final_snapshot;
   /** @brief Actual post-snapshot sample for terminal-boundary checking. */
   std::chrono::steady_clock::time_point final_snapshot_sample;
-  /** @brief Independent exact edit-eleven preview golden. */
+  /**
+   * @brief Caller-supplied copy of the exact frozen edit-eleven preview
+   * oracle.
+   * @note Evaluation requires complete equality with
+   * `i2_frozen_preview_content_digest()` before candidate comparison.
+   */
   std::optional<ContentDigest> expected_preview_digest;
-  /** @brief Exact unchanged I1 edit-eleven final golden. */
+  /**
+   * @brief Caller-supplied copy of the exact frozen I1 edit-eleven final
+   * oracle.
+   * @note Evaluation requires complete equality with
+   * `i1_frozen_final_content_digest()` before candidate comparison.
+   */
   std::optional<ContentDigest> expected_final_digest;
 };
 
@@ -214,7 +224,7 @@ struct I2ReplicateSummary final {
   std::size_t measured_sample_count = 0U;
   /** @brief Measured nearest-rank values. */
   std::optional<I2LatencyPercentiles> latency;
-  /** @brief Measured-phase physical service aggregate. */
+  /** @brief Physical service aggregate from measured slots `11..110` only. */
   I1ServiceEvidence measured_service;
   /** @brief Complete replicate invalidation reasons. */
   std::vector<std::string> validity_reasons;
@@ -242,6 +252,15 @@ I2EditEvidence capture_i2_edit_evidence(
 
 /**
  * @brief Evaluates and closes one raw I2 episode fail-closed.
+ *
+ * The evaluator first validates the continuous-grid and child-lifecycle
+ * structure, then derives endpoint latency, service, acquisition, and resource
+ * evidence. It independently binds the expected preview and final digests to
+ * their frozen workload oracles before comparing the already captured
+ * candidate digests. Missing, unsupported, or substituted expected evidence
+ * therefore produces output Invalid; a complete candidate-only mismatch
+ * produces output Fail without changing the other three axes.
+ *
  * @param input Complete raw evidence captured at frozen boundaries.
  * @return Closed row with matched children, sums, and independent verdicts.
  * @throws std::bad_alloc when copied evidence/reasons allocate.
@@ -254,13 +273,20 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input);
 
 /**
  * @brief Aggregates one exact continuous 111-slot I2 replicate.
+ *
+ * Memory and output verdicts consume all 111 rows. Latency and waste consume
+ * complete verdicts, endpoint samples, and service only from measured slots
+ * `11..110`; cold slot zero and warmup slots `1..10` propagate Invalid only,
+ * while their Pass or Fail values do not enter steady-state aggregates.
+ *
  * @param rows Evaluated rows in any order; slots must be unique and complete,
  * share one exact grid origin and stride-111 terminal boundary, and retain
  * checked-derived episode origins for their slot identities.
  * @return Measured percentiles/service sums and four verdicts.
  * @throws std::bad_alloc when indexing, copying, or sorting allocates.
- * @note Checked grid arithmetic failures are captured as Invalid summary
- * evidence and never escape as arithmetic exceptions.
+ * @note Checked grid arithmetic failures and non-measured latency/waste
+ * invalidity are captured as Invalid summary evidence and never escape as
+ * arithmetic exceptions. Non-measured Fail never becomes a measured failure.
  */
 I2ReplicateSummary evaluate_i2_replicate(
     const std::vector<I2EpisodeInnerRow>& rows);

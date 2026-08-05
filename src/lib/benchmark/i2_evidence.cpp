@@ -1001,15 +1001,29 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
         row.final_digest = *final->second.content_digest;
       }
       if (!row.evidence.expected_preview_digest.has_value() ||
-          !row.evidence.expected_final_digest.has_value() ||
           row.evidence.expected_preview_digest->algorithm !=
               CanonicalDigestAlgorithm::Sha256CanonicalV1 ||
-          row.evidence.expected_final_digest->algorithm !=
-              CanonicalDigestAlgorithm::Sha256CanonicalV1) {
-        invalidate_i2(&reasons, "I2 independent expected digests are missing");
+          !(*row.evidence.expected_preview_digest ==
+            i2_frozen_preview_content_digest())) {
+        invalidate_i2(
+            &reasons,
+            "I2 expected preview digest is not the frozen preview golden");
         output_complete = false;
-      } else if (preview->second.content_digest.has_value() &&
-                 final->second.content_digest.has_value()) {
+      }
+      if (!row.evidence.expected_final_digest.has_value() ||
+          row.evidence.expected_final_digest->algorithm !=
+              CanonicalDigestAlgorithm::Sha256CanonicalV1 ||
+          !(*row.evidence.expected_final_digest ==
+            i1_frozen_final_content_digest())) {
+        invalidate_i2(
+            &reasons,
+            "I2 expected final digest is not the frozen I1 final golden");
+        output_complete = false;
+      }
+      if (row.evidence.expected_preview_digest.has_value() &&
+          row.evidence.expected_final_digest.has_value() &&
+          preview->second.content_digest.has_value() &&
+          final->second.content_digest.has_value()) {
         output_matches =
             row.preview_digest.digest == row.evidence.expected_preview_digest &&
             row.final_digest.digest == row.evidence.expected_final_digest;
@@ -1212,14 +1226,22 @@ I2ReplicateSummary evaluate_i2_replicate(
     if (row == nullptr) {
       continue;
     }
+    accumulate_i2_verdict(row->memory_verdict, &memory_fail, &memory_invalid);
+    accumulate_i2_verdict(row->output_verdict, &output_fail, &output_invalid);
+
+    const I2EpisodePhase phase = classify_i2_slot(slot).first;
+    if (phase != I2EpisodePhase::Measured) {
+      if (row->latency_verdict == I1Verdict::Invalid) {
+        latency_invalid = true;
+      }
+      if (row->waste_verdict == I1Verdict::Invalid) {
+        waste_invalid = true;
+      }
+      continue;
+    }
     accumulate_i2_verdict(row->latency_verdict, &latency_fail,
                           &latency_invalid);
     accumulate_i2_verdict(row->waste_verdict, &waste_fail, &waste_invalid);
-    accumulate_i2_verdict(row->memory_verdict, &memory_fail, &memory_invalid);
-    accumulate_i2_verdict(row->output_verdict, &output_fail, &output_invalid);
-    if (slot <= kI2WarmupSlotCount) {
-      continue;
-    }
     if (!row->latencies.preview.has_value() ||
         !row->latencies.final.has_value()) {
       latency_invalid = true;

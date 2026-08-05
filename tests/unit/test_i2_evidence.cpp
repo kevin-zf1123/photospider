@@ -353,6 +353,53 @@ std::vector<I2EpisodeInnerRow> make_i2_aggregate_rows() {
 }
 
 /**
+ * @brief Produces a typed digest that differs from one frozen oracle.
+ * @param digest Complete digest to copy and alter deterministically.
+ * @return Same typed algorithm with a different first digest byte.
+ * @throws Nothing.
+ */
+ContentDigest forge_i2_digest(ContentDigest digest) noexcept {
+  digest.bytes.front() = digest.bytes.front() == std::byte{0x00}
+                             ? std::byte{0x01}
+                             : std::byte{0x00};
+  return digest;
+}
+
+/**
+ * @brief Finds one twelfth-edit visible endpoint in mutable raw evidence.
+ * @param input Complete episode evidence to inspect.
+ * @param quality Interactive preview or Full final endpoint selector.
+ * @return Mutable matching record, or null when the endpoint is absent.
+ * @throws Nothing.
+ */
+I2ObservedVisibleOutput* find_i2_endpoint(
+    I2EpisodeEvidenceInput* input,
+    compute::ComputeRunQuality quality) noexcept {
+  const auto found =
+      std::find_if(input->observations.visible_outputs.begin(),
+                   input->observations.visible_outputs.end(),
+                   [quality](const I2ObservedVisibleOutput& output) {
+                     return output.child.edit_index == kI1EditCount - 1U &&
+                            output.child.quality == quality;
+                   });
+  return found == input->observations.visible_outputs.end() ? nullptr : &*found;
+}
+
+/**
+ * @brief Creates aggregate rows whose measured latency and waste both pass.
+ * @return Complete continuous grid with 100 identical measured samples.
+ * @throws std::bad_alloc when row storage grows.
+ */
+std::vector<I2EpisodeInnerRow> make_passing_i2_aggregate_rows() {
+  std::vector<I2EpisodeInnerRow> rows = make_i2_aggregate_rows();
+  for (I2EpisodeInnerRow& row : rows) {
+    row.latencies.preview = 10ms;
+    row.latencies.final = 20ms;
+  }
+  return rows;
+}
+
+/**
  * @brief Proves a complete closed row independently passes all four axes.
  * @throws Nothing when the synthetic product/evidence contract stays stable.
  */
@@ -366,6 +413,98 @@ TEST(I2Evidence, CompleteEpisodePassesIndependentVerdicts) {
   EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.latencies.preview, 2ms);
   EXPECT_EQ(row.latencies.final, 6ms);
+}
+
+/**
+ * @brief Proves synchronized preview expected/candidate forgery is Invalid.
+ * @throws Nothing when the frozen preview oracle remains authoritative.
+ */
+TEST(I2Evidence, SynchronizedPreviewDigestForgeryIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  const ContentDigest forged =
+      forge_i2_digest(i2_frozen_preview_content_digest());
+  input.expected_preview_digest = forged;
+  I2ObservedVisibleOutput* preview =
+      find_i2_endpoint(&input, compute::ComputeRunQuality::Interactive);
+  ASSERT_NE(preview, nullptr);
+  ASSERT_TRUE(preview->content_digest.has_value());
+  ASSERT_TRUE(preview->content_digest->digest.has_value());
+  preview->content_digest->digest = forged;
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves synchronized final expected/candidate forgery is Invalid.
+ * @throws Nothing when the frozen I1 final oracle remains authoritative.
+ */
+TEST(I2Evidence, SynchronizedFinalDigestForgeryIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  const ContentDigest forged =
+      forge_i2_digest(i1_frozen_final_content_digest());
+  input.expected_final_digest = forged;
+  I2ObservedVisibleOutput* final =
+      find_i2_endpoint(&input, compute::ComputeRunQuality::Full);
+  ASSERT_NE(final, nullptr);
+  ASSERT_TRUE(final->content_digest.has_value());
+  ASSERT_TRUE(final->content_digest->digest.has_value());
+  final->content_digest->digest = forged;
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves a candidate-only preview digest mismatch is Fail.
+ * @throws Nothing when complete output evidence remains independently valid.
+ */
+TEST(I2Evidence, CandidateOnlyPreviewDigestMismatchIsFail) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  I2ObservedVisibleOutput* preview =
+      find_i2_endpoint(&input, compute::ComputeRunQuality::Interactive);
+  ASSERT_NE(preview, nullptr);
+  ASSERT_TRUE(preview->content_digest.has_value());
+  ASSERT_TRUE(preview->content_digest->digest.has_value());
+  preview->content_digest->digest =
+      forge_i2_digest(*preview->content_digest->digest);
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Fail);
+}
+
+/**
+ * @brief Proves a candidate-only final digest mismatch is Fail.
+ * @throws Nothing when complete output evidence remains independently valid.
+ */
+TEST(I2Evidence, CandidateOnlyFinalDigestMismatchIsFail) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  I2ObservedVisibleOutput* final =
+      find_i2_endpoint(&input, compute::ComputeRunQuality::Full);
+  ASSERT_NE(final, nullptr);
+  ASSERT_TRUE(final->content_digest.has_value());
+  ASSERT_TRUE(final->content_digest->digest.has_value());
+  final->content_digest->digest =
+      forge_i2_digest(*final->content_digest->digest);
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Fail);
 }
 
 /**
@@ -566,6 +705,85 @@ TEST(I2Evidence, ReplicateUsesOnlyOneHundredMeasuredSlots) {
   EXPECT_EQ(summary.waste_verdict, I1Verdict::Pass);
   EXPECT_EQ(summary.memory_verdict, I1Verdict::Pass);
   EXPECT_EQ(summary.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves cold/warmup latency and waste Fail do not enter aggregates.
+ * @throws Nothing when only the 100 measured rows supply samples and service.
+ */
+TEST(I2Evidence, ReplicateIgnoresColdWarmupLatencyWasteFailures) {
+  std::vector<I2EpisodeInnerRow> rows = make_passing_i2_aggregate_rows();
+  for (std::size_t slot = 0U; slot <= kI2WarmupSlotCount; ++slot) {
+    rows[slot].latency_verdict = I1Verdict::Fail;
+    rows[slot].waste_verdict = I1Verdict::Fail;
+    rows[slot].latencies.preview = 10s;
+    rows[slot].latencies.final = 10s;
+    rows[slot].service = I1ServiceEvidence{100000U, 100000U, 100000U, 1.0};
+  }
+
+  const I2ReplicateSummary summary = evaluate_i2_replicate(rows);
+
+  EXPECT_EQ(summary.measured_sample_count, kI2MeasuredSlotCount);
+  EXPECT_EQ(summary.measured_service.all_started_service, 10000U);
+  EXPECT_EQ(summary.measured_service.discarded_started_service, 1000U);
+  EXPECT_EQ(summary.measured_service.post_cancel_started_service, 0U);
+  EXPECT_EQ(summary.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(summary.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(summary.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(summary.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves non-measured latency/waste Invalid still fails closed.
+ * @throws Nothing when cold and warmup structural invalidity propagates.
+ */
+TEST(I2Evidence, ReplicatePropagatesColdWarmupLatencyWasteInvalid) {
+  std::vector<I2EpisodeInnerRow> rows = make_passing_i2_aggregate_rows();
+  rows.front().latency_verdict = I1Verdict::Invalid;
+  rows[kI2WarmupSlotCount].waste_verdict = I1Verdict::Invalid;
+
+  const I2ReplicateSummary summary = evaluate_i2_replicate(rows);
+
+  EXPECT_EQ(summary.measured_sample_count, kI2MeasuredSlotCount);
+  EXPECT_EQ(summary.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(summary.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves measured latency/waste Fail still reaches both summaries.
+ * @throws Nothing when measured row verdicts remain authoritative.
+ */
+TEST(I2Evidence, ReplicatePropagatesMeasuredLatencyWasteFailures) {
+  std::vector<I2EpisodeInnerRow> rows = make_passing_i2_aggregate_rows();
+  constexpr std::size_t kFirstMeasuredSlot = kI2WarmupSlotCount + 1U;
+  rows[kFirstMeasuredSlot].latency_verdict = I1Verdict::Fail;
+  rows[kFirstMeasuredSlot].waste_verdict = I1Verdict::Fail;
+
+  const I2ReplicateSummary summary = evaluate_i2_replicate(rows);
+
+  EXPECT_EQ(summary.latency_verdict, I1Verdict::Fail);
+  EXPECT_EQ(summary.waste_verdict, I1Verdict::Fail);
+  EXPECT_EQ(summary.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(summary.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves memory and output continue to consume all 111 phase rows.
+ * @throws Nothing when non-measured failures remain visible on those axes.
+ */
+TEST(I2Evidence, ReplicateUsesAllPhasesForMemoryAndOutput) {
+  std::vector<I2EpisodeInnerRow> rows = make_passing_i2_aggregate_rows();
+  rows.front().memory_verdict = I1Verdict::Fail;
+  rows[1U].output_verdict = I1Verdict::Fail;
+
+  const I2ReplicateSummary summary = evaluate_i2_replicate(rows);
+
+  EXPECT_EQ(summary.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(summary.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(summary.memory_verdict, I1Verdict::Fail);
+  EXPECT_EQ(summary.output_verdict, I1Verdict::Fail);
 }
 
 /**
