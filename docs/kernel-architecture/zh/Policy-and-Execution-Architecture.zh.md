@@ -501,7 +501,13 @@ residency、lifecycle/resource settlement，以及四项相互独立的 inner ve
 唯一 accepted current-generation observation 先于每个匹配的 child event；每个 Cancelled
 terminal 必须恰有一个 descriptor 完全一致且更早的 cancellation，而所有非 Cancelled terminal
 都不得有 cancellation。缺失、重复、迟到、多余或漂移的 evidence 会使四项 verdict 全部
-Invalid。手工
+Invalid。Output axis 还会在 candidate 比较前独立要求 caller 提供的 expected preview 与 final
+digest 分别等于 `i2_frozen_preview_content_digest()` 与
+`i1_frozen_final_content_digest()`。Expected evidence 损坏时，即使 candidate evidence 与其
+同步，也属于 Invalid；expected oracle 完整时，candidate-only mismatch 属于 Fail。在 replicate
+层面，memory 与 output 消费全部 111 行。Latency 与 waste 只消费 measured slot `11..110`
+的 sample、service 与完整 verdict；cold 和 warmup 只传播 Invalid，因此其 Pass 或 Fail value
+不能污染 100 行 steady-state aggregate。手工
 `i2_progressive_benchmark` target 为 `EXCLUDE_FROM_ALL`，不属于 CTest，并且只向调用者选择的
 目录写入 `execution-profile-i2-inner-row-v1` evidence。该 inner record 不是 ADR 0010
 canonical 15-field outer row、bundle 或 reference comparison。因此，仅构建它或通过

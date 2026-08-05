@@ -378,6 +378,10 @@ measured episode 使用同一个连续 replicate grid；只有
 steady-state aggregate。十个 warmup slot 与 100 个 measured slot 的 nominal phase
 span 分别是 15 s 与 150 s，与 I1 的 20×750-ms warmup 与 200×750-ms measured pacing
 相同，同时不与 I2 的 1,000 ms final deadline 重叠。
+不过，memory 与 output verdict 仍消费全部 111 行。Latency 与 waste 只消费 measured
+slot `11..110` 的完整 verdict、endpoint sample 与 service；cold slot zero 与 warmup
+slot `1..10` 只传播 Invalid，它们的 Pass 或 Fail value 与 service 保持在 steady-state
+aggregate 之外。
 
 对于该 state machine，“相同 I1 lineage”还冻结完整 numeric 与 execution sequence。令
 `K=[0.82,1.18,0.86,1.14,0.90,1.10,0.94,1.06,0.98,1.02,0.96,1.04]`。
@@ -449,9 +453,12 @@ tag 与小写十六进制 `ContentDigest.bytes`。任何其他 state、缺失 di
 readiness failure 或不同 algorithm 都会使受影响行成为 `invalid`。这个 canonical
 logical `ContentDigest` 不是 artifact raw byte 的 SHA-256。
 
-I1 还要求 expected digest 等于上述 immutable oracle。expected evidence 缺失、
-不受支持或被 caller 替换属于 Invalid。完整候选 digest 与 oracle 不同属于 Fail。
-evaluator 与 JSON encoder 都不得重新计算 payload digest。
+I1 要求 expected digest 等于上述 immutable I1 oracle。I2 要求 expected preview 等于
+`i2_frozen_preview_content_digest()`，expected final 等于
+`i1_frozen_final_content_digest()`，并包含精确 typed algorithm。Expected evidence
+缺失、不受支持或被 caller 替换时，即使 candidate observation 被改成匹配该替代值，
+也属于 Invalid。只有 expected oracle 已独立有效时，完整 candidate mismatch 才属于
+Fail。evaluator 与 JSON encoder 都不得重新计算 payload digest。
 
 每个 B1 job 在全新的可丢弃 job 目录下提交两个文件。Payload
 `output.rgba32le` 是紧密 row-major RGBA，sample 为 little-endian IEEE-754

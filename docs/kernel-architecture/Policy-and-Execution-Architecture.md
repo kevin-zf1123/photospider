@@ -623,7 +623,15 @@ accepted current-generation observation to precede every matching child event;
 each Cancelled terminal must have exactly one descriptor-identical earlier
 cancellation, while every non-Cancelled terminal must have none. Missing,
 duplicate, late, extra, or drifted evidence invalidates all four verdicts. The
-manual
+output axis independently requires the caller-supplied expected preview and
+final digests to equal `i2_frozen_preview_content_digest()` and
+`i1_frozen_final_content_digest()` before candidate comparison. Expected
+evidence corruption is Invalid even when candidate evidence mirrors it; a
+candidate-only mismatch with intact expected oracles is Fail. At replicate
+level, memory and output consume all 111 rows. Latency and waste consume samples,
+service, and complete verdicts only from measured slots `11..110`; cold and
+warmup propagate Invalid only, so their Pass or Fail values cannot pollute the
+100-row steady-state aggregate. The manual
 `i2_progressive_benchmark` target is `EXCLUDE_FROM_ALL`, is absent from CTest,
 and writes `execution-profile-i2-inner-row-v1` evidence only to a caller-selected
 directory. That inner record is not the canonical ADR 0010 15-field outer row,

@@ -1704,6 +1704,7 @@ The mandatory I2 cadence scenario oracle is:
 | Scenario | Oracle |
 | --- | --- |
 | Continuous phase grid and measured origin/index | Retain one replicate-grid origin `G^I2` for all 111 episode slots: cold starts at `G^I2`, warmup at `G^I2+1*1,500,000,000 ns`, measured at `E^I2_0=G^I2+11*1,500,000,000 ns`, and the non-start terminal boundary is `T^I2=G^I2+111*1,500,000,000 ns`. In measured, map `episode_ordinal=1..100` to `episode_index=0..99` and derive every origin as `E^I2_r=E^I2_0+r*1,500,000,000 ns`; reject any fresh episode/phase origin or transition delay. |
+| Phase-aware replicate aggregation | Aggregate memory and output over all 111 rows. For latency and waste, cold slot zero and warmup slots `1..10` propagate Invalid only; their Pass/Fail verdicts, samples, and service never enter steady state. Measured slots `11..110` contribute complete verdicts, exactly 100 endpoint pairs, and exactly 100 rows of service. A non-measured Fail is ignored on those two axes, a non-measured Invalid remains Invalid, and a measured Fail remains Fail. |
 | Twelve-edit admission schedule | For every episode and `edit_index=i` in `0..11`, require `S^I2_{r,i}=E^I2_r+i*16,666,667 ns` and one preview Host-admission sample `A^I2_{r,i}` in the closed interval `[S^I2_{r,i},S^I2_{r,i}+2,000,000 ns]`. |
 | Single invalid edit event | Move one admission below its nominal start or above its lateness bound, omit/duplicate/reorder/fail one admission, trigger checked-arithmetic overflow, or insert one cadence gap; the replicate is invalid, publication is revoked, and no edit or later episode catches up, backfills, or shifts. |
 | Episode spacing and quiescence | Require consecutive origins exactly 1,500,000,000 ns apart and all prior work quiescent before the next origin; require the final measured episode quiescent before `T^I2`. The latest legal twelfth final deadline is origin plus 1,185,333,337 ns, leaving a minimum 314,666,663 ns guard that never extends the deadline. |
@@ -1913,8 +1914,12 @@ conditional native-Metal tests. The product-path tests exercise preview
 visibility before final trigger and HP service, cancellation before trigger,
 post-trigger stale-final denial, equal-time newer-edit ordering, exact child
 QoS/deadlines, immutable Value acquisition reuse, and lifecycle/resource/Host
-settlement. `i2_progressive_benchmark` is an explicit `EXCLUDE_FROM_ALL`
-manual target and is not registered with CTest. It writes only the closed
+settlement. Evidence tests also require both expected endpoint digests to match
+their frozen oracles before candidate comparison, distinguish synchronized
+expected/candidate forgery as Invalid from candidate-only mismatch as Fail, and
+lock the phase-aware aggregate boundary above. `i2_progressive_benchmark` is an
+explicit `EXCLUDE_FROM_ALL` manual target and is not registered with CTest. It
+writes only the closed
 `execution-profile-i2-inner-row-v1` raw records and summary to an absolute,
 caller-selected empty output directory. The inner schema is not the canonical
 15-field outer row, bundle, or reference resolver, and neither compilation nor
@@ -1925,7 +1930,12 @@ Required logical values call `compute_content_digest(Value)` and require
 `Available`, a present `ContentDigest`, and
 `CanonicalDigestAlgorithm::Sha256CanonicalV1`. Logical digest, raw little-endian
 payload SHA-256, canonical manifest SHA-256, semantic-trace SHA-256, and the
-logical/raw golden identity remain separate evidence families.
+logical/raw golden identity remain separate evidence families. I2 expected
+preview evidence must equal `i2_frozen_preview_content_digest()` and expected
+final evidence must equal `i1_frozen_final_content_digest()`. Missing,
+unsupported, or substituted expected evidence is Invalid even when candidate
+evidence mirrors the substitution; with both expected oracles intact, a
+candidate-only endpoint mismatch is Fail.
 
 ### Storage environment fingerprint
 

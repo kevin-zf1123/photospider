@@ -1360,6 +1360,7 @@ upsample、复用或其他方式从 preview 派生的 Value。
 | 场景 | Oracle |
 | --- | --- |
 | 连续 phase grid 与 measured origin/index | 为全部 111 个 episode slot 保留唯一 replicate-grid origin `G^I2`：cold 从 `G^I2` 开始，warmup 从 `G^I2+1*1,500,000,000 ns` 开始，measured 从 `E^I2_0=G^I2+11*1,500,000,000 ns` 开始，不启动 episode 的 terminal boundary 为 `T^I2=G^I2+111*1,500,000,000 ns`。在 measured 中，把 `episode_ordinal=1..100` 映射为 `episode_index=0..99`，并按 `E^I2_r=E^I2_0+r*1,500,000,000 ns` 派生每个 origin；拒绝任何新选的 episode/phase origin 或 transition delay。 |
+| 区分 phase 的 replicate aggregate | 在全部 111 行上聚合 memory 与 output。对于 latency 与 waste，cold slot zero 与 warmup slot `1..10` 只传播 Invalid；它们的 Pass/Fail verdict、sample 与 service 绝不进入 steady state。Measured slot `11..110` 贡献完整 verdict、精确 100 个 endpoint pair 与精确 100 行 service。Non-measured Fail 在这两项上被忽略，non-measured Invalid 仍为 Invalid，measured Fail 仍为 Fail。 |
 | 十二次 edit admission schedule | 对每个 episode 与 `0..11` 中的 `edit_index=i`，要求 `S^I2_{r,i}=E^I2_r+i*16,666,667 ns`，且唯一 preview Host-admission sample `A^I2_{r,i}` 位于封闭区间 `[S^I2_{r,i},S^I2_{r,i}+2,000,000 ns]`。 |
 | 单个无效 edit event | 把一个 admission 移到 nominal start 之前或 lateness bound 之后，遗漏/重复/重排/令一个 admission 失败、触发 checked-arithmetic overflow，或插入一个 cadence gap；replicate 无效、publication 被撤销，且任何 edit 或后续 episode 都不得追赶、回填或移动。 |
 | Episode spacing 与 quiescence | 要求相邻 origin 精确相差 1,500,000,000 ns，且前一 episode 的全部 work 在下一 origin 前 quiescent；最后一个 measured episode 必须在 `T^I2` 前 quiescent。最晚合法第十二次 final deadline 为 origin 加 1,185,333,337 ns，留下最少 314,666,663 ns 且绝不延长 deadline 的 guard。 |
@@ -1543,7 +1544,10 @@ actual preview admission；final trigger/admission 被保留，但不能重置 1
 真实 product-path 与条件式 native-Metal test 构成。Product-path test 覆盖 preview
 visibility 先于 final trigger 与 HP service、trigger 前取消、trigger 后 stale-final 拒绝、
 相同时刻较新 edit ordering、精确 child QoS/deadline、不可变 Value acquisition 复用，以及
-lifecycle/resource/Host settlement。`i2_progressive_benchmark` 是显式
+lifecycle/resource/Host settlement。Evidence test 还要求两个 expected endpoint digest 在
+candidate 比较前匹配各自 frozen oracle，把 expected/candidate 同步伪造区分为 Invalid、把
+candidate-only mismatch 区分为 Fail，并锁定上述区分 phase 的 aggregate 边界。
+`i2_progressive_benchmark` 是显式
 `EXCLUDE_FROM_ALL` 的手工 target，不注册到 CTest。它只向 absolute、由调用者选择且为空的
 output directory 写入闭合的 `execution-profile-i2-inner-row-v1` raw record 与 summary。
 该 inner schema 不是 canonical 15-field outer row、bundle 或 reference resolver；仅编译或
@@ -1553,7 +1557,11 @@ output directory 写入闭合的 `execution-profile-i2-inner-row-v1` raw record 
 必需 logical value 调用 `compute_content_digest(Value)`，并且要求 `Available`、
 存在 `ContentDigest`，以及 `CanonicalDigestAlgorithm::Sha256CanonicalV1`。Logical
 digest、raw little-endian payload SHA-256、canonical manifest SHA-256、semantic-
-trace SHA-256 与 logical/raw golden identity 始终是不同的 evidence family。
+trace SHA-256 与 logical/raw golden identity 始终是不同的 evidence family。I2 expected
+preview evidence 必须等于 `i2_frozen_preview_content_digest()`，expected final evidence
+必须等于 `i1_frozen_final_content_digest()`。Expected evidence 缺失、不受支持或被替换
+时，即使 candidate evidence 也同步为该替代值，仍为 Invalid；两个 expected oracle 保持不变
+时，candidate-only endpoint mismatch 为 Fail。
 
 ### 存储环境指纹
 

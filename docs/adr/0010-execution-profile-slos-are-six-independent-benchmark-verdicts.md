@@ -433,6 +433,11 @@ preview/final pairs enter steady-state aggregates. The
 ten warmup slots and 100 measured slots occupy nominal 15 s and 150 s phase
 spans, matching I1's 20-by-750-ms warmup and 200-by-750-ms measured pacing
 without overlapping I2's 1,000 ms final deadline.
+Memory and output verdicts nevertheless consume all 111 rows. Latency and
+waste consume complete verdicts, endpoint samples, and service only from
+measured slots `11..110`; cold slot zero and warmup slots `1..10` propagate
+Invalid only, while their Pass or Fail values and service remain outside the
+steady-state aggregate.
 
 For this state machine, “same I1 lineage” also freezes the complete numeric and
 execution sequence. Let
@@ -521,10 +526,14 @@ digest, provider/readiness failure, or different algorithm makes the affected
 row `invalid`. This canonical logical `ContentDigest` is not the SHA-256 of an
 artifact's raw bytes.
 
-I1 additionally requires the expected digest to equal the immutable oracle
-above. Missing, unsupported, or caller-substituted expected evidence is
-Invalid. A complete candidate digest that differs from the oracle is Fail.
-Neither the evaluator nor JSON encoder may recalculate a payload digest.
+I1 requires its expected digest to equal the immutable I1 oracle above. I2
+requires its expected preview to equal `i2_frozen_preview_content_digest()` and
+its expected final to equal `i1_frozen_final_content_digest()`, including the
+exact typed algorithm. Missing, unsupported, or caller-substituted expected
+evidence is Invalid even when the candidate observation is changed to match
+that substitution. Only after the expected oracle is independently valid does
+a complete candidate mismatch become Fail. Neither the evaluator nor JSON
+encoder may recalculate a payload digest.
 
 Each B1 job commits two files below a fresh disposable job directory. The
 payload `output.rgba32le` is tightly packed row-major RGBA with little-endian
