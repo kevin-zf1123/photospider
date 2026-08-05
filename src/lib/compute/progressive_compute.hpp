@@ -34,10 +34,12 @@ struct ProgressiveComputeOptions final {
  * The gate starts Pending. A successful current RT publication may arm it;
  * accepted cancellation denies Pending or Armed from the matching Run
  * terminal arbitration interval before `Cancelled` is published; and the HP
- * callback may consume only Armed. Triggered and Denied are terminal gate
- * states. Cleanup notifications are deliberately outside this ordering. The
- * gate never starts work itself and owns no cancellation, scheduling,
- * currentness, lifecycle, resource, Graph, or commit authority.
+ * Run-owned final-trigger operation may consume only Armed while holding the
+ * HP Run terminal arbiter through observation publication. Triggered and
+ * Denied are terminal gate states. Cleanup notifications are deliberately
+ * outside this ordering. The gate never starts work itself and owns no
+ * cancellation, scheduling, currentness, lifecycle, resource, Graph, or
+ * commit authority.
  *
  * @throws Nothing from every operation.
  * @note Callers retain this object through shared request ownership. The one
@@ -93,7 +95,9 @@ class ProgressiveFinalGate final {
    * @return True only when this call changes Armed to Triggered.
    * @throws Nothing.
    * @note Pending, Denied, and repeated Triggered observations return false and
-   * grant no permission to enter provider or ExecutionService work.
+   * grant no permission to enter provider or ExecutionService work. Product HP
+   * submission calls this only through the Run-owned arbitration operation so
+   * trigger observation and later terminal publication remain ordered.
    */
   bool try_trigger() noexcept;
 

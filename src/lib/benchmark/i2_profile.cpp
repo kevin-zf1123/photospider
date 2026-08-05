@@ -31,6 +31,21 @@ constexpr std::size_t kI2FinalTriggersPerEditCapacity = 2U;
 /** @brief Visible-output diagnostic slots per edit. */
 constexpr std::size_t kI2VisibleOutputsPerEditCapacity = 4U;
 
+/**
+ * @brief Harness-only terminal state for one published visible payload.
+ * @throws Nothing for value construction and comparison.
+ * @note This state is private implementation metadata and is absent from the
+ * frozen inner evidence schema and installed ABI.
+ */
+enum class I2VisibleOutputFreezeState : std::uint8_t {
+  /** @brief Payload may still be traversed or explicitly acquired. */
+  Pending,
+  /** @brief Digest and acquisition succeeded and all facts are sticky. */
+  Frozen,
+  /** @brief Incomplete evidence was retained while payload ownership ended. */
+  ReleasedUnfrozen,
+};
+
 /** @brief Quiescence diagnostic slots per edit. */
 constexpr std::size_t kI2RunQuiescencesPerEditCapacity = 4U;
 
@@ -360,6 +375,15 @@ class I2EpisodeObservationCollector::Impl final {
   std::array<PublishedI2ObservationSlot<I2ObservedVisibleOutput>,
              kI1EditCount * kI2VisibleOutputsPerEditCapacity>
       visible_outputs_;
+  /**
+   * @brief Harness-only capture state parallel to `visible_outputs_`.
+   * @note Collector API calls are externally serialized; product callbacks
+   * publish a slot before the harness reads or mutates its corresponding
+   * state, so this array needs no independent atomic protocol.
+   */
+  std::array<I2VisibleOutputFreezeState,
+             kI1EditCount * kI2VisibleOutputsPerEditCapacity>
+      visible_output_freeze_states_{};
   /** @brief Fixed physical-quiescence storage. */
   std::array<PublishedI2ObservationSlot<I2ObservedRunLifecycleTransition>,
              kI1EditCount * kI2RunQuiescencesPerEditCapacity>
@@ -413,12 +437,19 @@ I2EpisodeObservationSnapshot I2EpisodeObservationCollector::snapshot() const {
 std::size_t I2EpisodeObservationCollector::freeze_visible_outputs(
     I2Host& host) {
   std::size_t published_count = 0U;
-  for (PublishedI2ObservationSlot<I2ObservedVisibleOutput>& slot :
-       impl_->visible_outputs_) {
+  for (std::size_t index = 0U; index < impl_->visible_outputs_.size();
+       ++index) {
+    PublishedI2ObservationSlot<I2ObservedVisibleOutput>& slot =
+        impl_->visible_outputs_[index];
     if (!slot.published.load(std::memory_order_acquire)) {
       continue;
     }
     ++published_count;
+    I2VisibleOutputFreezeState& freeze_state =
+        impl_->visible_output_freeze_states_[index];
+    if (freeze_state != I2VisibleOutputFreezeState::Pending) {
+      continue;
+    }
     I2ObservedVisibleOutput& visible = slot.value;
     visible.value_valid_at_capture = visible.output.valid();
     if (visible.output.valid() && !visible.value_revision.valid()) {
@@ -440,6 +471,7 @@ std::size_t I2EpisodeObservationCollector::freeze_visible_outputs(
     }
     if (visible.content_digest.has_value() && visible.acquisition.has_value()) {
       visible.output = Value{};
+      freeze_state = I2VisibleOutputFreezeState::Frozen;
     }
   }
   return published_count;
@@ -448,13 +480,23 @@ std::size_t I2EpisodeObservationCollector::freeze_visible_outputs(
 /** @copydoc I2EpisodeObservationCollector::release_unfrozen_visible_outputs */
 void I2EpisodeObservationCollector::
     release_unfrozen_visible_outputs() noexcept {  // NOLINT(whitespace/indent_namespace)
-  for (PublishedI2ObservationSlot<I2ObservedVisibleOutput>& slot :
-       impl_->visible_outputs_) {
+  for (std::size_t index = 0U; index < impl_->visible_outputs_.size();
+       ++index) {
+    PublishedI2ObservationSlot<I2ObservedVisibleOutput>& slot =
+        impl_->visible_outputs_[index];
     if (!slot.published.load(std::memory_order_acquire)) {
       continue;
     }
-    slot.value.value_valid_at_capture = slot.value.output.valid();
-    slot.value.output = Value{};
+    I2VisibleOutputFreezeState& freeze_state =
+        impl_->visible_output_freeze_states_[index];
+    if (freeze_state != I2VisibleOutputFreezeState::Pending) {
+      continue;
+    }
+    I2ObservedVisibleOutput& visible = slot.value;
+    visible.value_valid_at_capture =
+        visible.value_valid_at_capture || visible.output.valid();
+    visible.output = Value{};
+    freeze_state = I2VisibleOutputFreezeState::ReleasedUnfrozen;
   }
 }
 

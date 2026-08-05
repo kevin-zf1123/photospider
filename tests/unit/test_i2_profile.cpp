@@ -245,9 +245,19 @@ class RecordingI2Host final : public I2Host {
   /** @copydoc I2Host::acquire_i2_value */
   I2ValueAcquisitionEvidence acquire_i2_value(
       Value value, const I2ValueLineage& lineage) override {
-    static_cast<void>(value);
     static_cast<void>(lineage);
-    return {};
+    ++acquisition_call_count;
+    if (fail_acquisition) {
+      throw std::runtime_error("synthetic I2 acquisition failure");
+    }
+    const StorageBinding binding = value.storage_binding();
+    const I2ValueAccessEvidence access{std::nullopt,      value.revision_id(),
+                                       binding,           binding.allocation,
+                                       binding.byte_size, false};
+    I2ValueAcquisitionEvidence evidence;
+    evidence.host_first = access;
+    evidence.host_second = access;
+    return evidence;
   }
 
   /** @copydoc I2Host::i2_execution_snapshot */
@@ -264,7 +274,27 @@ class RecordingI2Host final : public I2Host {
   OperationStatus settlement_status;
   /** @brief Ordered captured Host admissions. */
   std::vector<CapturedI2Admission> admissions;
+  /** @brief Exact explicit Value-acquisition invocation count. */
+  std::size_t acquisition_call_count = 0U;
+  /** @brief Whether the next and later Value acquisitions fail. */
+  bool fail_acquisition = false;
 };
+
+/**
+ * @brief Builds one small Ready Host Value for collector freeze tests.
+ * @return Valid rank-one FP32 Value with stable revision and binding facts.
+ * @throws Value validation or allocation failures unchanged.
+ */
+Value make_i2_freeze_test_value() {
+  std::vector<std::byte> storage(4U * sizeof(float));
+  return Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{4U},
+                            ElementSemantics::FloatingPoint,
+                            StorageEncoding{32U}},
+      std::nullopt,
+      StridedLayout{{static_cast<std::ptrdiff_t>(sizeof(float))}, 0U},
+      std::move(storage));
+}
 
 /**
  * @brief Builds one synthetic child submission for collector callbacks.
@@ -416,6 +446,120 @@ TEST(I2EpisodeObservationCollector, RetainsChildAwareProgressiveOrder) {
   EXPECT_LT(preview_visible_sequence, trigger_sequence);
   EXPECT_LT(trigger_sequence, snapshot.service_starts[0].causal_sequence);
   EXPECT_FALSE(snapshot.overflowed);
+}
+
+/**
+ * @brief Proves successful visible capture is sticky across repeated cleanup.
+ * @throws Value, digest, Host, or collector failures reach GoogleTest.
+ * @note The sole Host acquisition must run once; payload release cannot erase
+ * any captured identity, digest, or acquisition fact.
+ */
+TEST(I2EpisodeObservationCollector,
+     SuccessfulFreezeRemainsStickyAcrossRepeatAndRelease) {
+  I2EpisodeObservationCollector collector;
+  RecordingI2Host host;
+  std::shared_ptr<compute::ComputeRunObservationSink> sink =
+      collector.make_edit_sink(11U);
+  const auto accepted_time = std::chrono::steady_clock::time_point(
+      std::chrono::nanoseconds(4000000000));
+  const compute::AcceptedBoundaryCoordinate accepted(accepted_time, 9U);
+  compute::ComputeRun preview(make_i2_test_submission(
+      ComputeIntent::RealTimeUpdate, compute::ComputeRunQuality::Interactive,
+      checked_i1_time_add(accepted_time, kI2PreviewDeadlineBudget), accepted));
+  compute::ComputeRunLease preview_lease = preview.acquire_lease();
+  const compute::ComputeRunObservationCoordinate coordinate =
+      sink->reserve_causal_coordinate();
+  sink->on_current_visible(preview_lease.descriptor(),
+                           make_i2_freeze_test_value(), coordinate);
+
+  ASSERT_EQ(collector.freeze_visible_outputs(host), 1U);
+  ASSERT_EQ(host.acquisition_call_count, 1U);
+  const I2EpisodeObservationSnapshot frozen = collector.snapshot();
+  ASSERT_EQ(frozen.visible_outputs.size(), 1U);
+  const I2ObservedVisibleOutput& baseline = frozen.visible_outputs.front();
+  ASSERT_TRUE(baseline.value_valid_at_capture);
+  EXPECT_FALSE(baseline.output.valid());
+  ASSERT_TRUE(baseline.value_revision.valid());
+  ASSERT_TRUE(baseline.value_allocation.valid());
+  ASSERT_TRUE(baseline.content_digest.has_value());
+  ASSERT_TRUE(baseline.acquisition.has_value());
+
+  ASSERT_EQ(collector.freeze_visible_outputs(host), 1U);
+  collector.release_unfrozen_visible_outputs();
+  collector.release_unfrozen_visible_outputs();
+  ASSERT_EQ(collector.freeze_visible_outputs(host), 1U);
+  EXPECT_EQ(host.acquisition_call_count, 1U);
+  const I2EpisodeObservationSnapshot repeated = collector.snapshot();
+  ASSERT_EQ(repeated.visible_outputs.size(), 1U);
+  const I2ObservedVisibleOutput& retained = repeated.visible_outputs.front();
+  EXPECT_TRUE(retained.value_valid_at_capture);
+  EXPECT_FALSE(retained.output.valid());
+  EXPECT_EQ(retained.value_revision, baseline.value_revision);
+  EXPECT_EQ(retained.value_binding, baseline.value_binding);
+  EXPECT_EQ(retained.value_allocation, baseline.value_allocation);
+  EXPECT_EQ(retained.value_storage_bytes, baseline.value_storage_bytes);
+  ASSERT_TRUE(retained.content_digest.has_value());
+  EXPECT_EQ(retained.content_digest->state, baseline.content_digest->state);
+  EXPECT_EQ(retained.content_digest->digest, baseline.content_digest->digest);
+  EXPECT_EQ(retained.content_digest->diagnostic,
+            baseline.content_digest->diagnostic);
+  ASSERT_TRUE(retained.acquisition.has_value());
+  EXPECT_EQ(retained.acquisition->host_first.revision,
+            baseline.acquisition->host_first.revision);
+  EXPECT_EQ(retained.acquisition->host_first.binding,
+            baseline.acquisition->host_first.binding);
+}
+
+/**
+ * @brief Proves partial and never-frozen payloads release as explicit Invalid.
+ * @throws Value, digest, or synthetic Host failures reach GoogleTest.
+ * @note Missing acquisition or digest stays missing after release, later
+ * freeze calls perform no Host work, and every collector-owned Value is empty.
+ */
+TEST(I2EpisodeObservationCollector,
+     ReleasePreservesExplicitIncompleteFreezeEvidence) {
+  const auto accepted_time = std::chrono::steady_clock::time_point(
+      std::chrono::nanoseconds(5000000000));
+  const compute::AcceptedBoundaryCoordinate accepted(accepted_time, 10U);
+  compute::ComputeRun preview(make_i2_test_submission(
+      ComputeIntent::RealTimeUpdate, compute::ComputeRunQuality::Interactive,
+      checked_i1_time_add(accepted_time, kI2PreviewDeadlineBudget), accepted));
+  compute::ComputeRunLease preview_lease = preview.acquire_lease();
+
+  I2EpisodeObservationCollector partial_collector;
+  std::shared_ptr<compute::ComputeRunObservationSink> partial_sink =
+      partial_collector.make_edit_sink(10U);
+  partial_sink->on_current_visible(preview_lease.descriptor(),
+                                   make_i2_freeze_test_value(),
+                                   partial_sink->reserve_causal_coordinate());
+  RecordingI2Host failing_host;
+  failing_host.fail_acquisition = true;
+  EXPECT_THROW(partial_collector.freeze_visible_outputs(failing_host),
+               std::runtime_error);
+  EXPECT_EQ(failing_host.acquisition_call_count, 1U);
+  partial_collector.release_unfrozen_visible_outputs();
+  EXPECT_EQ(partial_collector.freeze_visible_outputs(failing_host), 1U);
+  EXPECT_EQ(failing_host.acquisition_call_count, 1U);
+  const I2EpisodeObservationSnapshot partial = partial_collector.snapshot();
+  ASSERT_EQ(partial.visible_outputs.size(), 1U);
+  EXPECT_TRUE(partial.visible_outputs.front().value_valid_at_capture);
+  EXPECT_FALSE(partial.visible_outputs.front().output.valid());
+  EXPECT_TRUE(partial.visible_outputs.front().content_digest.has_value());
+  EXPECT_FALSE(partial.visible_outputs.front().acquisition.has_value());
+
+  I2EpisodeObservationCollector unfrozen_collector;
+  std::shared_ptr<compute::ComputeRunObservationSink> unfrozen_sink =
+      unfrozen_collector.make_edit_sink(9U);
+  unfrozen_sink->on_current_visible(preview_lease.descriptor(),
+                                    make_i2_freeze_test_value(),
+                                    unfrozen_sink->reserve_causal_coordinate());
+  unfrozen_collector.release_unfrozen_visible_outputs();
+  const I2EpisodeObservationSnapshot unfrozen = unfrozen_collector.snapshot();
+  ASSERT_EQ(unfrozen.visible_outputs.size(), 1U);
+  EXPECT_TRUE(unfrozen.visible_outputs.front().value_valid_at_capture);
+  EXPECT_FALSE(unfrozen.visible_outputs.front().output.valid());
+  EXPECT_FALSE(unfrozen.visible_outputs.front().content_digest.has_value());
+  EXPECT_FALSE(unfrozen.visible_outputs.front().acquisition.has_value());
 }
 
 /**

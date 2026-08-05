@@ -404,8 +404,6 @@ class RealTimeDirtyNodeExecutor {
    * @param entry RT dirty ROI and extent metadata.
    * @param image_inputs_ready Resolved RT image inputs.
    * @param rt_buffer Destination RT proxy buffer.
-   * @param exact_factor_four_source Whether to use the frozen aligned box
-   * average instead of ordinary build-selected resize.
    * @param operation Selected operation and metadata snapshot.
    * @return Nothing.
    * @throws std::bad_alloc when RT operation execution exhausts memory.
@@ -441,10 +439,16 @@ class RealTimeDirtyNodeExecutor {
    * @param result Operation result produced by a monolithic implementation.
    * @param entry RT dirty ROI and extent metadata.
    * @param rt_buffer Destination RT proxy buffer.
+   * @param exact_factor_four_source Whether to use the frozen aligned box
+   * average instead of ordinary build-selected resize.
+   * @return Nothing.
    * @throws OpenCV exceptions from Mat conversion, resize, ROI slicing, or
    * copy.
+   * @throws std::invalid_argument or std::out_of_range when exact factor-four
+   * geometry, format, storage separation, or ROI constraints are invalid.
    * @note Full-frame monolithic output is resized to the planned RT extent when
-   * necessary before the dirty ROI is copied.
+   * necessary before the dirty ROI is copied. The exact path instead applies
+   * the frozen aligned box average directly into the planned dirty ROI.
    */
   void copy_monolithic_image_roi(const NodeOutput& result,
                                  const RtPlanEntry& entry,

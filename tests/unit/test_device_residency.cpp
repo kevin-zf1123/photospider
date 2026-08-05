@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -711,9 +712,10 @@ TEST(DeviceResidency, ExactReleaseRejectsWrongIdentityAndRemovesOnlyMatch) {
  * @return Nothing; GoogleTest reports identity, reuse, or settlement drift.
  * @throws Fake publication, ledger, identity, and manager exceptions.
  * @note Generation one is published before generation two becomes current.
- * Its immutable Ready source then admits one verification transfer, survives
- * an exact-seed mismatch, reuses the same resident twice, rejects wrong release
- * identity, and returns the sole device lease after local Values unwind.
+ * Its immutable Ready source then admits one verification transfer. Exact
+ * lookup reuses the resident twice, while wrong seed/source identities and
+ * post-retirement lookup fail closed without broad resident removal. Exact
+ * release finally returns the sole device lease after local Values unwind.
  */
 TEST(DeviceResidency,
      PublishedHistoricalValueAcquisitionSurvivesNewerCurrentGeneration) {
@@ -759,10 +761,11 @@ TEST(DeviceResidency,
   historical.destination.value = Value();
 
   {
-    const std::optional<Value> first =
-        manager.find(revision, metal, MemoryDomain::DeviceLocal);
+    const std::optional<Value> first = manager.find_published_value_acquisition(
+        seed, historical.source, metal, MemoryDomain::DeviceLocal);
     const std::optional<Value> second =
-        manager.find(revision, metal, MemoryDomain::DeviceLocal);
+        manager.find_published_value_acquisition(seed, historical.source, metal,
+                                                 MemoryDomain::DeviceLocal);
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(first->revision_id(), revision);
@@ -771,6 +774,49 @@ TEST(DeviceResidency,
     EXPECT_EQ(second->storage_binding(), binding);
     EXPECT_EQ(first->producer_identity(), producer);
     EXPECT_EQ(second->producer_identity(), producer);
+
+    const std::array<DeviceCompletionSeed, 5U> wrong_seeds{
+        wrong_run.seed(),
+        DeviceCompletionSeed(7U, 41, ComputeIntent::RealTimeUpdate, 1U, 301U,
+                             1U,
+                             DeviceCompletionUse::PublishedValueAcquisition),
+        DeviceCompletionSeed(7U, 41, ComputeIntent::RealTimeUpdate, 2U, 301U,
+                             0U,
+                             DeviceCompletionUse::PublishedValueAcquisition),
+        DeviceCompletionSeed(8U, 41, ComputeIntent::RealTimeUpdate, 1U, 301U,
+                             0U,
+                             DeviceCompletionUse::PublishedValueAcquisition),
+        DeviceCompletionSeed(7U, 41, ComputeIntent::GlobalHighPrecision, 1U,
+                             301U, 0U,
+                             DeviceCompletionUse::PublishedValueAcquisition)};
+    for (const DeviceCompletionSeed& wrong_seed : wrong_seeds) {
+      EXPECT_THROW(
+          (void)manager.find_published_value_acquisition(
+              wrong_seed, historical.source, metal, MemoryDomain::DeviceLocal),
+          std::invalid_argument);
+    }
+    EXPECT_THROW((void)manager.find_published_value_acquisition(
+                     make_seed(1U, 301U), historical.source, metal,
+                     MemoryDomain::DeviceLocal),
+                 std::invalid_argument);
+
+    PendingDeviceValuePublication wrong_source =
+        make_pending_host_replica(historical.source, MemoryDomain::HostPinned);
+    ASSERT_TRUE(wrong_source.producer.complete_ready());
+    EXPECT_THROW(
+        (void)manager.find_published_value_acquisition(
+            seed, wrong_source.value, metal, MemoryDomain::DeviceLocal),
+        std::invalid_argument);
+
+    const Value acquired_before_retirement = *first;
+    EXPECT_EQ(manager.retire_graph_lineages(seed.graph_instance_id()), 1U);
+    EXPECT_TRUE(acquired_before_retirement.valid());
+    EXPECT_EQ(acquired_before_retirement.storage_binding(), binding);
+    EXPECT_THROW((void)manager.find_published_value_acquisition(
+                     seed, historical.source, metal, MemoryDomain::DeviceLocal),
+                 std::invalid_argument);
+    EXPECT_TRUE(
+        manager.find(revision, metal, MemoryDomain::DeviceLocal).has_value());
 
     StorageBinding wrong_binding = binding;
     ++wrong_binding.byte_size;

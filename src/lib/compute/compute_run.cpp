@@ -358,6 +358,16 @@ class ComputeRunControl {
       const std::shared_ptr<ProgressiveFinalGate>& gate);
 
   /**
+   * @brief Consumes and observes final permission under terminal arbitration.
+   * @return True only after one open bound Run publishes its trigger event.
+   * @throws Clock, cancellation-callback, or synchronization exceptions.
+   * @note Deadline observation occurs before acquiring the final arbitration
+   * interval. That interval then owns the Open check, gate CAS, coordinate
+   * reservation, and observer delivery as one cancellation-ordered operation.
+   */
+  bool try_publish_progressive_final_trigger();
+
+  /**
    * @brief Registers one physical root reservation before ledger admission.
    * @param telemetry Stable service telemetry owner outliving this control.
    * @return Non-owning exact-settlement callback bound to this control.
@@ -863,6 +873,25 @@ void ComputeRunControl::bind_progressive_final_gate(
       terminal_outcome->kind == ComputeRunTerminalKind::Cancelled) {
     (void)progressive_final_gate->deny();
   }
+}
+
+/** @copydoc ComputeRunControl::try_publish_progressive_final_trigger */
+bool ComputeRunControl::try_publish_progressive_final_trigger() {
+  if (observe_cancellation().has_value()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex);
+  if (arbiter_state != ComputeRunArbiterState::Open ||
+      !progressive_final_gate || !progressive_final_gate->try_trigger()) {
+    return false;
+  }
+  if (descriptor.observation_sink() != nullptr) {
+    const ComputeRunObservationCoordinate coordinate =
+        descriptor.observation_sink()->reserve_causal_coordinate();
+    descriptor.observation_sink()->on_progressive_final_triggered(descriptor,
+                                                                  coordinate);
+  }
+  return true;
 }
 
 /** @copydoc ComputeRunControl::begin_resource_settlement_observation */
@@ -1921,6 +1950,11 @@ ComputeRunLease::register_cancellation_notification(
 void ComputeRunLease::bind_progressive_final_gate(
     const std::shared_ptr<ProgressiveFinalGate>& gate) const {
   control_->bind_progressive_final_gate(gate);
+}
+
+/** @copydoc ComputeRunLease::try_publish_progressive_final_trigger */
+bool ComputeRunLease::try_publish_progressive_final_trigger() const {
+  return control_->try_publish_progressive_final_trigger();
 }
 
 /** @copydoc ComputeRunLease::try_claim_commit */

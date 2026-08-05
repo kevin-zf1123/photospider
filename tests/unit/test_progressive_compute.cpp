@@ -13,14 +13,17 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <future>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <thread>
+#include <utility>
 
 #include "compute/progressive_compute.hpp"
 #include "core/image_buffer_processing.hpp"
 #include "photospider/core/image_buffer.hpp"
+#include "photospider/data/value.hpp"
 
 namespace ps::testing {
 namespace {
@@ -46,6 +49,230 @@ compute::ComputeRunSubmission make_progressive_gate_submission() {
           compute::SupersessionKey(4, ComputeIntent::RealTimeUpdate),
           compute::SupersessionGeneration(1U)},
       nullptr};
+}
+
+/**
+ * @brief Records and optionally pauses Run-owned final-trigger observation.
+ * @throws Nothing from construction, callbacks, and scalar inspection.
+ * @note The trigger callback may deliberately wait in tests while the Run
+ * terminal arbiter is held. Production observers remain bounded/nonblocking.
+ */
+class ProgressiveTriggerOrderObservationSink final
+    : public compute::ComputeRunObservationSink {
+ public:
+  /** @copydoc compute::ComputeRunObservationSink::reserve_causal_coordinate */
+  compute::ComputeRunObservationCoordinate reserve_causal_coordinate() noexcept
+      override {
+    return {std::chrono::steady_clock::now(),
+            next_sequence_.fetch_add(1U, std::memory_order_relaxed)};
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_current_generation */
+  void on_current_generation(
+      const compute::SupersessionIdentity& identity,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)identity;
+    (void)coordinate;
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_service_start */
+  void on_service_start(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunTaskIdentity task_identity,
+      std::uint64_t service_charge,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)task_identity;
+    (void)service_charge;
+    (void)coordinate;
+    service_count_.fetch_add(1U, std::memory_order_release);
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_cancellation */
+  void on_cancellation(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunCancellationReason reason,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)reason;
+    cancellation_sequence_.store(coordinate.causal_sequence,
+                                 std::memory_order_release);
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_terminal */
+  void on_terminal(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunTerminalKind kind,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)kind;
+    terminal_sequence_.store(coordinate.causal_sequence,
+                             std::memory_order_release);
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_current_visible */
+  void on_current_visible(
+      const compute::ComputeRunDescriptor& descriptor, Value output,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)output;
+    (void)coordinate;
+    visible_count_.fetch_add(1U, std::memory_order_release);
+  }
+
+  /** @copydoc
+   * compute::ComputeRunObservationSink::on_progressive_final_triggered */
+  void on_progressive_final_triggered(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    trigger_sequence_.store(coordinate.causal_sequence,
+                            std::memory_order_release);
+    trigger_entered_.store(true, std::memory_order_release);
+    while (pause_trigger_.load(std::memory_order_acquire) &&
+           !release_trigger_.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_run_quiescent */
+  void on_run_quiescent(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)coordinate;
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_run_resource_settled */
+  void on_run_resource_settled(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)descriptor;
+    (void)coordinate;
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_host_settled */
+  void on_host_settled(
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)coordinate;
+  }
+
+  /**
+   * @brief Enables the trigger-callback test barrier before invocation.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Call only before the Run-owned trigger operation starts.
+   */
+  void pause_trigger() noexcept {
+    pause_trigger_.store(true, std::memory_order_release);
+  }
+
+  /**
+   * @brief Releases a trigger callback paused in the Run critical section.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Repeated release is idempotent.
+   */
+  void release_trigger() noexcept {
+    release_trigger_.store(true, std::memory_order_release);
+  }
+
+  /**
+   * @brief Returns whether the trigger callback reached its barrier.
+   * @return True after the real trigger observation entered.
+   * @throws Nothing.
+   * @note Acquire ordering exposes the already-published trigger sequence.
+   */
+  bool trigger_entered() const noexcept {
+    return trigger_entered_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns the unique trigger causal sequence.
+   * @return Nonzero sequence after trigger observation, otherwise zero.
+   * @throws Nothing.
+   * @note The value is copied from the real Run-owned callback coordinate.
+   */
+  std::uint64_t trigger_sequence() const noexcept {
+    return trigger_sequence_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns the accepted cancellation causal sequence.
+   * @return Nonzero sequence after cancellation observation, otherwise zero.
+   * @throws Nothing.
+   * @note Rejected cancellation never changes the value.
+   */
+  std::uint64_t cancellation_sequence() const noexcept {
+    return cancellation_sequence_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns the exactly-once terminal causal sequence.
+   * @return Nonzero sequence after terminal observation, otherwise zero.
+   * @throws Nothing.
+   * @note The tests create only one terminal contender.
+   */
+  std::uint64_t terminal_sequence() const noexcept {
+    return terminal_sequence_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns observed HP service-start count.
+   * @return Exact callback count.
+   * @throws Nothing.
+   * @note Cancellation-first tests require zero.
+   */
+  std::size_t service_count() const noexcept {
+    return service_count_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns observed visible-final count.
+   * @return Exact callback count.
+   * @throws Nothing.
+   * @note Cancellation-first tests require zero.
+   */
+  std::size_t visible_count() const noexcept {
+    return visible_count_.load(std::memory_order_acquire);
+  }
+
+ private:
+  /** @brief Nonzero observation sequence allocator. */
+  std::atomic<std::uint64_t> next_sequence_{1U};
+  /** @brief Whether the trigger callback should wait. */
+  std::atomic<bool> pause_trigger_{false};
+  /** @brief Whether the trigger callback reached its barrier. */
+  std::atomic<bool> trigger_entered_{false};
+  /** @brief Barrier release flag. */
+  std::atomic<bool> release_trigger_{false};
+  /** @brief Unique trigger causal sequence. */
+  std::atomic<std::uint64_t> trigger_sequence_{0U};
+  /** @brief Accepted cancellation causal sequence. */
+  std::atomic<std::uint64_t> cancellation_sequence_{0U};
+  /** @brief Cancelled terminal causal sequence. */
+  std::atomic<std::uint64_t> terminal_sequence_{0U};
+  /** @brief Observed service-start count. */
+  std::atomic<std::size_t> service_count_{0U};
+  /** @brief Observed visible-final count. */
+  std::atomic<std::size_t> visible_count_{0U};
+};
+
+/**
+ * @brief Waits boundedly for one atomic test predicate.
+ * @param predicate Nonblocking predicate over test-owned atomics.
+ * @return True when the predicate became true before two seconds elapsed.
+ * @throws Nothing when the predicate is nonthrowing.
+ * @note The bound prevents a broken barrier from hanging the test process.
+ */
+template <typename Predicate>
+bool wait_for_progressive_predicate(Predicate predicate) noexcept {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!predicate() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  return predicate();
 }
 
 /**
@@ -224,7 +451,7 @@ TEST(ProgressiveFinalGate,
   std::uint64_t final_trigger_count = 0U;
   std::uint64_t hp_service_count = 0U;
   std::uint64_t visible_final_count = 0U;
-  if (gate->try_trigger()) {
+  if (lease.try_publish_progressive_final_trigger()) {
     ++final_trigger_count;
     ++hp_service_count;
     ++visible_final_count;
@@ -256,7 +483,7 @@ TEST(ProgressiveFinalGate, TriggerWinnerRemainsTriggeredAfterCancellation) {
   auto gate = std::make_shared<compute::ProgressiveFinalGate>();
   lease.bind_progressive_final_gate(gate);
   ASSERT_TRUE(gate->arm());
-  ASSERT_TRUE(gate->try_trigger());
+  ASSERT_TRUE(lease.try_publish_progressive_final_trigger());
 
   EXPECT_TRUE(run.cancellation_source().request_cancellation(
       compute::ComputeRunCancellationReason::Superseded));
@@ -264,6 +491,104 @@ TEST(ProgressiveFinalGate, TriggerWinnerRemainsTriggeredAfterCancellation) {
   const auto terminal = lease.terminal_outcome();
   ASSERT_TRUE(terminal.has_value());
   EXPECT_EQ(terminal->kind, compute::ComputeRunTerminalKind::Cancelled);
+}
+
+/**
+ * @brief Proves trigger observation completes before concurrent cancellation.
+ * @throws Run, future, allocation, or synchronization failures fail the test.
+ * @note The observer deliberately pauses inside the Run-owned trigger
+ * critical section. Cancellation may begin concurrently but cannot reserve or
+ * publish either of its real observations until the trigger callback returns.
+ */
+TEST(ProgressiveFinalGate,
+     RunOwnedTriggerObservationPrecedesConcurrentCancellationTerminal) {
+  auto sink = std::make_shared<ProgressiveTriggerOrderObservationSink>();
+  compute::ComputeRunSubmission submission = make_progressive_gate_submission();
+  submission.observation_sink = sink;
+  compute::ComputeRun run(std::move(submission));
+  compute::ComputeRunLease lease = run.acquire_lease();
+  auto gate = std::make_shared<compute::ProgressiveFinalGate>();
+  lease.bind_progressive_final_gate(gate);
+  ASSERT_TRUE(gate->arm());
+  sink->pause_trigger();
+
+  std::future<bool> trigger = std::async(std::launch::async, [&lease] {
+    return lease.try_publish_progressive_final_trigger();
+  });
+  const bool trigger_entered = wait_for_progressive_predicate(
+      [&sink] { return sink->trigger_entered(); });
+  if (!trigger_entered) {
+    sink->release_trigger();
+    EXPECT_TRUE(trigger_entered);
+    trigger.wait();
+    return;
+  }
+
+  std::atomic<bool> cancellation_called{false};
+  const compute::ComputeRunCancellationSource cancellation_source =
+      run.cancellation_source();
+  std::future<bool> cancellation = std::async(
+      std::launch::async, [cancellation_source, &cancellation_called] {
+        cancellation_called.store(true, std::memory_order_release);
+        return cancellation_source.request_cancellation(
+            compute::ComputeRunCancellationReason::Superseded);
+      });
+  const bool cancellation_started =
+      wait_for_progressive_predicate([&cancellation_called] {
+        return cancellation_called.load(std::memory_order_acquire);
+      });
+  if (!cancellation_started) {
+    sink->release_trigger();
+    EXPECT_TRUE(cancellation_started);
+    trigger.wait();
+    cancellation.wait();
+    return;
+  }
+  EXPECT_EQ(sink->cancellation_sequence(), 0U);
+  EXPECT_EQ(sink->terminal_sequence(), 0U);
+
+  sink->release_trigger();
+  ASSERT_EQ(trigger.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_TRUE(trigger.get());
+  ASSERT_EQ(cancellation.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_TRUE(cancellation.get());
+  EXPECT_EQ(gate->state(), compute::ProgressiveFinalGate::State::Triggered);
+  ASSERT_NE(sink->trigger_sequence(), 0U);
+  ASSERT_NE(sink->cancellation_sequence(), 0U);
+  ASSERT_NE(sink->terminal_sequence(), 0U);
+  EXPECT_LT(sink->trigger_sequence(), sink->cancellation_sequence());
+  EXPECT_LT(sink->cancellation_sequence(), sink->terminal_sequence());
+}
+
+/**
+ * @brief Proves a cancellation winner emits no trigger or downstream output.
+ * @throws Run, allocation, or synchronization failures fail the test.
+ * @note Cancellation and terminal coordinates are real Run observations; a
+ * later final attempt cannot emit trigger, service-start, or visibility.
+ */
+TEST(ProgressiveFinalGate,
+     CancellationTerminalPreventsRunOwnedTriggerAndDownstreamObservations) {
+  auto sink = std::make_shared<ProgressiveTriggerOrderObservationSink>();
+  compute::ComputeRunSubmission submission = make_progressive_gate_submission();
+  submission.observation_sink = sink;
+  compute::ComputeRun run(std::move(submission));
+  compute::ComputeRunLease lease = run.acquire_lease();
+  auto gate = std::make_shared<compute::ProgressiveFinalGate>();
+  lease.bind_progressive_final_gate(gate);
+  ASSERT_TRUE(gate->arm());
+
+  ASSERT_TRUE(run.cancellation_source().request_cancellation(
+      compute::ComputeRunCancellationReason::Superseded));
+  EXPECT_FALSE(lease.try_publish_progressive_final_trigger());
+  EXPECT_EQ(gate->state(), compute::ProgressiveFinalGate::State::Denied);
+  EXPECT_EQ(sink->trigger_sequence(), 0U);
+  ASSERT_NE(sink->cancellation_sequence(), 0U);
+  ASSERT_NE(sink->terminal_sequence(), 0U);
+  EXPECT_LT(sink->cancellation_sequence(), sink->terminal_sequence());
+  EXPECT_EQ(sink->service_count(), 0U);
+  EXPECT_EQ(sink->visible_count(), 0U);
 }
 
 TEST(ExactBoxAverageFactorFour, RoundsOnceToNearestAndRestoresEnvironment) {

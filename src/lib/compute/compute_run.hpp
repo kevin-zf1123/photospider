@@ -462,9 +462,11 @@ class ComputeRunObservationSink {
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.
    * @note The default no-op preserves existing source-private observers. The
-   * event grants no authority and is emitted only after current RT preview
-   * success wins against cancellation, immediately before HP provider or
-   * ExecutionService entry.
+   * event grants no authority. A Run-owned operation consumes the bound gate,
+   * reserves this coordinate, and delivers the callback while holding the HP
+   * Run terminal arbiter; successful return is immediately before HP provider
+   * or ExecutionService entry. Implementations must not block or re-enter Run
+   * state (tests may use a deliberate barrier to verify the lock boundary).
    */
   virtual void on_progressive_final_triggered(
       const ComputeRunDescriptor& descriptor,
@@ -1507,6 +1509,22 @@ class ComputeRunLease {
    */
   void bind_progressive_final_gate(
       const std::shared_ptr<ProgressiveFinalGate>& gate) const;
+
+  /**
+   * @brief Atomically consumes and observes progressive final permission.
+   * @return True only when this open Run consumed its bound Armed gate and
+   * published the unique final-trigger observation.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @throws Any exception from a contract-violating injected clock or from a
+   * cancellation cleanup callback when deadline cancellation wins.
+   * @note Deadline cancellation is observed first. The subsequent Open check,
+   * gate consumption, coordinate reservation, and observation callback all
+   * occur while the same Run terminal-arbiter mutex is held. Cancellation that
+   * wins first publishes no trigger; a trigger winner is observed before any
+   * later cancellation or terminal observation. A missing or non-Armed gate
+   * returns false without creating HP submission authority.
+   */
+  bool try_publish_progressive_final_trigger() const;
 
   /**
    * @brief Attempts to reserve the terminal arbiter for visible commit.

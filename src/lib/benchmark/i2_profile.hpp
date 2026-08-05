@@ -180,7 +180,7 @@ struct I2ObservedVisibleOutput final {
   std::uint64_t causal_sequence = 0U;
   /** @brief Exact immutable current Value retained until harness capture. */
   Value output;
-  /** @brief Whether output was valid at the sole harness capture. */
+  /** @brief Sticky fact that output was valid at the first harness capture. */
   bool value_valid_at_capture = false;
   /** @brief Sole typed canonical digest result. */
   std::optional<ContentDigestResult> content_digest;
@@ -311,8 +311,9 @@ class I2EpisodeObservationCollector final {
    * @return Number of completely published visible slots encountered.
    * @throws Digest, Value, Host, Metal, allocation, and synchronization
    * failures unchanged.
-   * @note Each slot is traversed/acquired at most once; its Value is released
-   * before successful return and later calls perform no payload work.
+   * @note Each successfully frozen slot is traversed/acquired at most once;
+   * its Value is released before successful return, all frozen facts remain
+   * sticky, and later calls perform no payload work for that slot.
    */
   std::size_t freeze_visible_outputs(I2Host& host);
 
@@ -320,7 +321,9 @@ class I2EpisodeObservationCollector final {
    * @brief Releases every visible Value not successfully frozen.
    * @return Nothing after all release-published Value handles are empty.
    * @throws Nothing.
-   * @note Missing digest/acquisition evidence remains explicit and Invalid.
+   * @note Successfully frozen slots are unchanged. Every remaining payload is
+   * released exactly once, and missing digest/acquisition evidence remains
+   * explicit and Invalid on every later snapshot or freeze attempt.
    */
   void release_unfrozen_visible_outputs() noexcept;
 

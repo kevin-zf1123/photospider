@@ -244,6 +244,29 @@ class ResidencyManager final {
                         ProducerIdentity producer);
 
   /**
+   * @brief Finds one resident for an exact published-Value acquisition.
+   * @param seed Exact acquisition seed, including historical generation, Run,
+   * task, and `PublishedValueAcquisition` use.
+   * @param source Exact Ready immutable source publication being reacquired.
+   * @param device Concrete resident device required by the caller.
+   * @param memory_domain Exact resident allocation domain.
+   * @return Copy of the resident Value, or nullopt only when no matching
+   * revision/device/domain entry has ever been published or it was evicted.
+   * @throws std::invalid_argument when seed/use, live managed lineage, source,
+   * resident, Ready state, or first-publication identity does not match.
+   * @throws std::system_error when synchronization fails.
+   * @note The live-lineage check, entry lookup, complete saved completion
+   * identity validation, both Ready-fence observations, and Value copy share
+   * one manager mutex interval. Retirement first therefore rejects, while a
+   * lookup first returns a Value that was valid at that linearization even if
+   * the lineage retires afterward. The operation changes no recency,
+   * currentness, capacity, release, or ordinary `find()` semantics.
+   */
+  std::optional<Value> find_published_value_acquisition(
+      const DeviceCompletionSeed& seed, const Value& source, DeviceId device,
+      MemoryDomain memory_domain) const;
+
+  /**
    * @brief Finds one exact Ready replica without waiting or implicit transfer.
    * @param revision Logical revision to locate.
    * @param device Concrete target device.
@@ -314,6 +337,19 @@ class ResidencyManager final {
   };
 
   /**
+   * @brief One Ready resident plus its exact first-publication provenance.
+   * @throws Nothing for destruction; copying retains immutable Value owners.
+   * @note The completion identity closes exact acquisition seed, source, and
+   * destination facts. It grants no producer capability or native access.
+   */
+  struct ResidentEntry final {
+    /** @brief Ready immutable replica retained by ordinary residency policy. */
+    Value value;
+    /** @brief Exact completion identity that first published this entry. */
+    DeviceCompletionIdentity publication_identity;
+  };
+
+  /**
    * @brief Builds the lineage key shared by seed operations.
    * @param seed Valid completion seed.
    * @return Complete canonical lineage key.
@@ -355,7 +391,7 @@ class ResidencyManager final {
    * @note Values retain native/provider owners until replacement, capacity
    * eviction, exact verification release, or manager destruction.
    */
-  std::map<ReplicaKey, Value> resident_values_;
+  std::map<ReplicaKey, ResidentEntry> resident_values_;
 };
 
 }  // namespace ps::execution

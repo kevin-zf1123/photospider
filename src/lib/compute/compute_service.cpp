@@ -1350,19 +1350,8 @@ ComputeService::prepare_intent_update(
   };
   state->callbacks.run_high_precision_update = [this, state_ptr]() {
     if (state_ptr->progressive_final_gate) {
-      if (state_ptr->hp_lease.observe_cancellation().has_value()) {
+      if (!state_ptr->hp_lease.try_publish_progressive_final_trigger()) {
         return;
-      }
-      if (!state_ptr->progressive_final_gate->try_trigger()) {
-        return;
-      }
-      const compute::ComputeRunDescriptor& descriptor =
-          state_ptr->hp_lease.descriptor();
-      if (descriptor.observation_sink() != nullptr) {
-        const compute::ComputeRunObservationCoordinate coordinate =
-            descriptor.observation_sink()->reserve_causal_coordinate();
-        descriptor.observation_sink()->on_progressive_final_triggered(
-            descriptor, coordinate);
       }
     }
     (void)execute_realtime_child_run(

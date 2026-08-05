@@ -269,8 +269,8 @@ ResidencyCompletionDisposition ResidencyManager::publish_ready_transfer(
   const StorageBinding binding = destination.storage_binding();
   const ReplicaKey replica_key{destination.revision_id().value(),
                                binding.device, binding.memory_domain};
-  std::map<ReplicaKey, Value> staged_replica;
-  staged_replica.emplace(replica_key, destination);
+  std::map<ReplicaKey, ResidentEntry> staged_replica;
+  staged_replica.emplace(replica_key, ResidentEntry{destination, identity});
   if (source_producer != nullptr && !source_producer->complete_ready()) {
     pending_transfers_.erase(pending);
     return ResidencyCompletionDisposition::Rejected;
@@ -286,7 +286,7 @@ ResidencyCompletionDisposition ResidencyManager::publish_ready_transfer(
       resident_values_.erase(resident_values_.begin());
     }
   } else {
-    resident->second = destination;
+    resident->second = ResidentEntry{destination, identity};
   }
   pending_transfers_.erase(pending);
   return ResidencyCompletionDisposition::Published;
@@ -313,20 +313,70 @@ bool ResidencyManager::release_resident(ValueRevisionId revision,
     return false;
   }
 
-  std::map<ReplicaKey, Value>::node_type released;
+  std::map<ReplicaKey, ResidentEntry>::node_type released;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto resident = resident_values_.find(
         ReplicaKey{revision.value(), binding.device, binding.memory_domain});
     if (resident == resident_values_.end() ||
-        resident->second.revision_id() != revision ||
-        resident->second.storage_binding() != binding ||
-        resident->second.producer_identity() != producer) {
+        resident->second.value.revision_id() != revision ||
+        resident->second.value.storage_binding() != binding ||
+        resident->second.value.producer_identity() != producer) {
       return false;
     }
     released = resident_values_.extract(resident);
   }
   return !released.empty();
+}
+
+/** @copydoc ResidencyManager::find_published_value_acquisition */
+std::optional<Value> ResidencyManager::find_published_value_acquisition(
+    const DeviceCompletionSeed& seed, const Value& source, DeviceId device,
+    MemoryDomain memory_domain) const {
+  if (seed.completion_use() != DeviceCompletionUse::PublishedValueAcquisition ||
+      !source.valid()) {
+    throw std::invalid_argument(
+        "Published Value lookup requires exact acquisition seed and source.");
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto current = current_generations_.find(lineage_key(seed));
+  if (current == current_generations_.end() ||
+      !current->second.coordinator_managed ||
+      current->second.generation == 0U) {
+    throw std::invalid_argument(
+        "Published Value lookup requires a live managed lineage.");
+  }
+
+  const ReadyFenceSnapshot source_state = source.ready_fence().poll();
+  if (!source_state.ready()) {
+    throw std::invalid_argument(
+        "Published Value lookup requires a Ready source fence.");
+  }
+
+  const auto resident = resident_values_.find(
+      ReplicaKey{source.revision_id().value(), device, memory_domain});
+  if (resident == resident_values_.end()) {
+    return std::nullopt;
+  }
+  const ResidentEntry& entry = resident->second;
+  const DeviceCompletionIdentity& publication = entry.publication_identity;
+  const ReadyFenceSnapshot resident_state = entry.value.ready_fence().poll();
+  if (!resident_state.ready() || !(publication.seed() == seed) ||
+      publication.source_revision() != source.revision_id() ||
+      publication.source_producer() != source.producer_identity() ||
+      publication.source_binding() != source.storage_binding() ||
+      !entry.value.valid() ||
+      publication.destination_revision() != entry.value.revision_id() ||
+      publication.destination_producer() != entry.value.producer_identity() ||
+      publication.destination_binding() != entry.value.storage_binding() ||
+      entry.value.revision_id() != source.revision_id() ||
+      entry.value.storage_binding().device != device ||
+      entry.value.storage_binding().memory_domain != memory_domain) {
+    throw std::invalid_argument(
+        "Published Value resident does not match exact publication identity.");
+  }
+  return entry.value;
 }
 
 /** @copydoc ResidencyManager::find */
@@ -342,7 +392,7 @@ std::optional<Value> ResidencyManager::find(ValueRevisionId revision,
   if (resident == resident_values_.end()) {
     return std::nullopt;
   }
-  return resident->second;
+  return resident->second.value;
 }
 
 }  // namespace ps::execution

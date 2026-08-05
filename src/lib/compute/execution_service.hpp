@@ -1207,13 +1207,14 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * completion wait expires.
    * @throws Native executor, resource, allocation, and synchronization failures
    * unchanged.
-   * @note The method first consults the process-owned ResidencyManager. A miss
-   * enters exactly one registered Metal executor invocation using the service
-   * ResourceLedger; a hit performs no executor submission, allocation, or
-   * transfer. The source may belong to a previously current generation because
-   * its Ready immutable publication, rather than new Run submission, is being
-   * acquired; exact revision/binding/producer/fence closure remains mandatory.
-   * This source-private verification seam exposes no native handle or registry
+   * @note The method first uses the process-owned ResidencyManager's atomic
+   * published-acquisition lookup. A genuine absence enters exactly one
+   * registered Metal executor invocation using the service ResourceLedger; an
+   * exact hit performs no executor submission, allocation, or transfer.
+   * Historical source generation is allowed only while its managed lineage is
+   * live and the calling seed plus source/resident revision, binding, producer,
+   * Ready fence, and saved first-publication identity all match exactly. This
+   * source-private verification seam exposes no native handle or registry
    * mutation and performs no device-to-Host readback.
    */
   DeviceResidentValueAcquisition acquire_metal_resident_value(

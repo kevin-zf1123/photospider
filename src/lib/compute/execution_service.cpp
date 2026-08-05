@@ -5420,8 +5420,8 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
         "Metal executor registry has no process residency manager.");
   }
   const DeviceId metal_device(DeviceBackend::Metal);
-  std::optional<Value> resident = residency->find(
-      source.revision_id(), metal_device, MemoryDomain::DeviceLocal);
+  std::optional<Value> resident = residency->find_published_value_acquisition(
+      completion_seed, source, metal_device, MemoryDomain::DeviceLocal);
   if (resident.has_value()) {
     const ReadyFenceSnapshot resident_state = resident->ready_fence().poll();
     if (!resident_state.ready()) {
@@ -5463,8 +5463,8 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
   if (!terminal.ready()) {
     throw ReadyFenceAccessError(terminal);
   }
-  resident = residency->find(source.revision_id(), metal_device,
-                             MemoryDomain::DeviceLocal);
+  resident = residency->find_published_value_acquisition(
+      completion_seed, source, metal_device, MemoryDomain::DeviceLocal);
   if (!resident.has_value() ||
       resident->storage_binding() != pending.storage_binding()) {
     throw std::logic_error(

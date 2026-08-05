@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -552,7 +553,8 @@ TEST(I2ProductPath, PreviewTriggersFinalAndAcquisitionsReuseExactBindings) {
 
 /**
  * @brief Proves equal-time newer acceptance cancels an older blocked preview
- * before final trigger, so the older HP child performs no service work.
+ * before final trigger, so both older child cancellations precede their
+ * matching terminals and the older HP child performs no service work.
  * @throws Product, filesystem, allocation, and synchronization failures
  * unchanged to GoogleTest.
  * @note The provider gate establishes the cancellation-before-trigger race
@@ -596,6 +598,9 @@ TEST(I2ProductPath, NewerEqualTimeAcceptanceSuppressesOlderFinalTrigger) {
   bool old_trigger = false;
   bool old_full_service = false;
   bool old_preview_visible = false;
+  bool old_final_visible = false;
+  std::map<std::uint64_t, std::uint64_t> old_cancellation_sequences;
+  std::map<std::uint64_t, std::uint64_t> old_terminal_sequences;
   for (const I2ObservedFinalTrigger& trigger : snapshot.final_triggers) {
     old_trigger = old_trigger || trigger.child.edit_index == 0U;
   }
@@ -610,10 +615,39 @@ TEST(I2ProductPath, NewerEqualTimeAcceptanceSuppressesOlderFinalTrigger) {
         old_preview_visible ||
         (visible.child.edit_index == 0U &&
          visible.child.quality == compute::ComputeRunQuality::Interactive);
+    old_final_visible =
+        old_final_visible ||
+        (visible.child.edit_index == 0U &&
+         visible.child.quality == compute::ComputeRunQuality::Full);
+  }
+  for (const I2ObservedCancellation& cancellation : snapshot.cancellations) {
+    if (cancellation.child.edit_index == 0U) {
+      EXPECT_TRUE(
+          old_cancellation_sequences
+              .emplace(cancellation.child.run_id, cancellation.causal_sequence)
+              .second);
+    }
+  }
+  for (const I2ObservedTerminal& terminal : snapshot.terminals) {
+    if (terminal.child.edit_index == 0U &&
+        terminal.kind == compute::ComputeRunTerminalKind::Cancelled) {
+      EXPECT_TRUE(old_terminal_sequences
+                      .emplace(terminal.child.run_id, terminal.causal_sequence)
+                      .second);
+    }
   }
   EXPECT_FALSE(old_trigger);
   EXPECT_FALSE(old_full_service);
   EXPECT_FALSE(old_preview_visible);
+  EXPECT_FALSE(old_final_visible);
+  ASSERT_EQ(old_cancellation_sequences.size(), 2U);
+  ASSERT_EQ(old_terminal_sequences.size(), 2U);
+  for (const auto& [run_id, cancellation_sequence] :
+       old_cancellation_sequences) {
+    const auto terminal = old_terminal_sequences.find(run_id);
+    ASSERT_NE(terminal, old_terminal_sequences.end());
+    EXPECT_LT(cancellation_sequence, terminal->second);
+  }
   ASSERT_GE(snapshot.current_generations.size(), 2U);
   EXPECT_EQ(
       snapshot.current_generations[0].accepted_coordinate->event_sequence(),
