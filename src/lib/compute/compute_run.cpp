@@ -19,6 +19,7 @@
 #include "compute/compute_task_submission.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/execution_lifecycle_telemetry.hpp"
+#include "compute/progressive_compute.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #include "photospider/data/value.hpp"
 
@@ -258,9 +259,10 @@ class ComputeRunControl {
    * publish when this cancellation wins the child terminal arbiter.
    * @return True only when cancellation claimed the open arbiter.
    * @throws Callback or synchronization exceptions after terminal publication.
-   * @note The optional latch is released while `mutex` is held, after the
-   * cancellation outcome is fixed and before Terminal becomes observable.
-   * Cleanup then runs outside `mutex`.
+   * @note A bound progressive gate is denied while `mutex` is held and before
+   * the cancellation outcome becomes observable. The optional latch is then
+   * released after that outcome is fixed and before Terminal becomes
+   * observable. Cleanup runs outside `mutex`.
    */
   bool request_cancellation(
       ComputeRunCancellationReason reason,
@@ -272,9 +274,10 @@ class ComputeRunControl {
    * @param request_child_cancellation_won Optional request-level winner latch.
    * @return Acceptance plus the first cleanup callback failure.
    * @throws Synchronization or plan-publication exceptions.
-   * @note Every selected cleanup callback is attempted. This seam lets the
-   * post-lifecycle-linearization caller contain callback code without
-   * misclassifying a synchronization failure as recoverable.
+   * @note A bound progressive gate is denied before terminal publication.
+   * Every selected cleanup callback is then attempted outside `mutex`. This
+   * seam lets the post-lifecycle-linearization caller contain callback code
+   * without misclassifying a synchronization failure as recoverable.
    */
   ComputeRunCancellationDispatchResult
   request_cancellation_containing_callbacks(
@@ -308,7 +311,8 @@ class ComputeRunControl {
    * @brief Atomically observes deadline and reserves commit terminal ownership.
    * @return True only when phase is CommitPending and the arbiter was open.
    * @throws Clock callback or synchronization exceptions.
-   * @note Deadline cancellation cleanup runs before a false return.
+   * @note Deadline cancellation denies a bound progressive gate before
+   * terminal publication; cleanup then runs before a false return.
    */
   bool try_claim_commit();
 
@@ -339,6 +343,19 @@ class ComputeRunControl {
    */
   bool register_cancellation_slot(
       const std::shared_ptr<ComputeRunCancellationSlot>& slot);
+
+  /**
+   * @brief Binds cancellation terminal publication to one progressive gate.
+   * @param gate Non-null request gate shared by progressive child Runs.
+   * @return Nothing.
+   * @throws std::invalid_argument for a null gate.
+   * @throws std::logic_error when a different gate is already bound.
+   * @throws std::system_error when Run synchronization fails.
+   * @note The strong gate owner is one-way and cannot form a Run cycle. An
+   * already-cancelled terminal denies the gate under this Run's mutex.
+   */
+  void bind_progressive_final_gate(
+      const std::shared_ptr<ProgressiveFinalGate>& gate);
 
   /**
    * @brief Registers one physical root reservation before ledger admission.
@@ -412,6 +429,13 @@ class ComputeRunControl {
    * sequential service phases do not grow retained Run storage after admission.
    */
   std::vector<std::weak_ptr<ComputeRunCancellationSlot>> cancellation_slots;
+
+  /**
+   * @brief Optional request gate denied before cancellation becomes terminal.
+   * @note Only atomic `deny()` is called while `mutex` is held; the gate never
+   * calls back into Run state and therefore introduces no reverse lock order.
+   */
+  std::shared_ptr<ProgressiveFinalGate> progressive_final_gate;
 
   /** @brief Optional full HP plan, dependency state, runner, and temp output.
    */
@@ -563,6 +587,9 @@ ComputeRunControl::request_cancellation_containing_callbacks(
     if (arbiter_state != ComputeRunArbiterState::Open) {
       return {};
     }
+    if (progressive_final_gate) {
+      (void)progressive_final_gate->deny();
+    }
     std::optional<ComputeRunObservationCoordinate> cancellation_coordinate;
     std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
     if (descriptor.observation_sink() != nullptr) {
@@ -673,6 +700,9 @@ bool ComputeRunControl::try_claim_commit() {
     }
     if (descriptor.qos().deadline.has_value() &&
         now >= *descriptor.qos().deadline) {
+      if (progressive_final_gate) {
+        (void)progressive_final_gate->deny();
+      }
       std::optional<ComputeRunObservationCoordinate> cancellation_coordinate;
       std::optional<ComputeRunObservationCoordinate> terminal_coordinate;
       if (descriptor.observation_sink() != nullptr) {
@@ -814,6 +844,25 @@ bool ComputeRunControl::register_cancellation_slot(
     slot->invoke(*immediate_reason);
   }
   return false;
+}
+
+/** @copydoc ComputeRunControl::bind_progressive_final_gate */
+void ComputeRunControl::bind_progressive_final_gate(
+    const std::shared_ptr<ProgressiveFinalGate>& gate) {
+  if (!gate) {
+    throw std::invalid_argument(
+        "ComputeRun progressive final gate binding requires a gate.");
+  }
+  std::lock_guard<std::mutex> lock(mutex);
+  if (progressive_final_gate && progressive_final_gate != gate) {
+    throw std::logic_error(
+        "ComputeRun is already bound to another progressive final gate.");
+  }
+  progressive_final_gate = gate;
+  if (terminal_outcome.has_value() &&
+      terminal_outcome->kind == ComputeRunTerminalKind::Cancelled) {
+    (void)progressive_final_gate->deny();
+  }
 }
 
 /** @copydoc ComputeRunControl::begin_resource_settlement_observation */
@@ -1866,6 +1915,12 @@ ComputeRunLease::register_cancellation_notification(
     return ComputeRunCancellationRegistration();
   }
   return ComputeRunCancellationRegistration(std::move(slot));
+}
+
+/** @copydoc ComputeRunLease::bind_progressive_final_gate */
+void ComputeRunLease::bind_progressive_final_gate(
+    const std::shared_ptr<ProgressiveFinalGate>& gate) const {
+  control_->bind_progressive_final_gate(gate);
 }
 
 /** @copydoc ComputeRunLease::try_claim_commit */

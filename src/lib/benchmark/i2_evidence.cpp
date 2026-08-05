@@ -1036,7 +1036,17 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
       structural_failure("I2 all-started service sum overflowed");
       break;
     }
-    if (visible_run_ids.count(start.child.run_id) == 0U &&
+    bool discarded = visible_run_ids.count(start.child.run_id) == 0U;
+    for (const I2ObservedServiceStart& candidate :
+         row.evidence.observations.service_starts) {
+      if (candidate.child.run_id == start.child.run_id &&
+          candidate.local_task_id == start.local_task_id &&
+          candidate.causal_sequence < start.causal_sequence) {
+        discarded = true;
+        break;
+      }
+    }
+    if (discarded &&
         !checked_add_i2_service(&row.service.discarded_started_service,
                                 start.service_charge)) {
       structural_failure("I2 discarded service sum overflowed");

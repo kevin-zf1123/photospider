@@ -222,6 +222,21 @@ DeviceCompletionSeed make_seed(std::uint64_t generation, std::uint64_t run_id) {
 }
 
 /**
+ * @brief Builds an I2-style seed for one published immutable Value acquisition.
+ * @param generation Historical nonzero request generation carried by Value.
+ * @param run_id Historical nonzero child Run identity.
+ * @return Complete realtime-lineage acquisition seed for target 41.
+ * @throws std::invalid_argument for invalid inputs.
+ * @note The seed grants no current submission or Graph commit authority.
+ */
+DeviceCompletionSeed make_published_value_acquisition_seed(
+    std::uint64_t generation, std::uint64_t run_id) {
+  return DeviceCompletionSeed(7U, 41, ComputeIntent::RealTimeUpdate, generation,
+                              run_id, 0U,
+                              DeviceCompletionUse::PublishedValueAcquisition);
+}
+
+/**
  * @brief Proves public access planning classifies direct and transfer work.
  * @return Nothing; GoogleTest reports plan or binding mismatches.
  * @throws Value allocation, publication, or access-planning exceptions.
@@ -685,6 +700,90 @@ TEST(DeviceResidency, ExactReleaseRejectsWrongIdentityAndRemovesOnlyMatch) {
   EXPECT_FALSE(manager.release_resident(revision, binding, producer));
   EXPECT_FALSE(
       manager.find(revision, metal, MemoryDomain::DeviceLocal).has_value());
+  EXPECT_TRUE(owner.expired());
+  const auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves a published old-generation Value remains acquirable twice.
+ * @return Nothing; GoogleTest reports identity, reuse, or settlement drift.
+ * @throws Fake publication, ledger, identity, and manager exceptions.
+ * @note Generation one is published before generation two becomes current.
+ * Its immutable Ready source then admits one verification transfer, survives
+ * an exact-seed mismatch, reuses the same resident twice, rejects wrong release
+ * identity, and returns the sole device lease after local Values unwind.
+ */
+TEST(DeviceResidency,
+     PublishedHistoricalValueAcquisitionSurvivesNewerCurrentGeneration) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+  PendingLeasedUpload historical = make_pending_leased_upload(ledger);
+  const DeviceCompletionIdentity acquisition(
+      make_published_value_acquisition_seed(1U, 301U), historical.source,
+      historical.destination.value);
+  const DeviceCompletionIdentity wrong_run(
+      make_published_value_acquisition_seed(1U, 302U), historical.source,
+      historical.destination.value);
+  const DeviceCompletionSeed& seed = acquisition.seed();
+  manager.track_lineage(seed.graph_instance_id(), seed.target_node_id(),
+                        seed.request_intent());
+  manager.publish_current_generation(
+      seed.graph_instance_id(), seed.target_node_id(), seed.request_intent(),
+      seed.supersession_generation());
+  manager.publish_current_generation(seed.graph_instance_id(),
+                                     seed.target_node_id(),
+                                     seed.request_intent(), 2U);
+
+  ASSERT_NO_THROW(manager.register_transfer(acquisition));
+  EXPECT_EQ(manager.publish_ready_transfer(
+                wrong_run, historical.source, historical.destination.value,
+                nullptr, historical.destination.producer),
+            ResidencyCompletionDisposition::Rejected);
+  ASSERT_EQ(manager.publish_ready_transfer(
+                acquisition, historical.source, historical.destination.value,
+                nullptr, historical.destination.producer),
+            ResidencyCompletionDisposition::Published);
+  const ValueRevisionId revision = historical.destination.value.revision_id();
+  const StorageBinding binding = historical.destination.value.storage_binding();
+  const ProducerIdentity producer =
+      historical.destination.value.producer_identity();
+  const std::weak_ptr<FakeLeasedDeviceAllocation> owner =
+      historical.destination_owner;
+  historical.destination.value = Value();
+
+  {
+    const std::optional<Value> first =
+        manager.find(revision, metal, MemoryDomain::DeviceLocal);
+    const std::optional<Value> second =
+        manager.find(revision, metal, MemoryDomain::DeviceLocal);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(first->revision_id(), revision);
+    EXPECT_EQ(second->revision_id(), revision);
+    EXPECT_EQ(first->storage_binding(), binding);
+    EXPECT_EQ(second->storage_binding(), binding);
+    EXPECT_EQ(first->producer_identity(), producer);
+    EXPECT_EQ(second->producer_identity(), producer);
+
+    StorageBinding wrong_binding = binding;
+    ++wrong_binding.byte_size;
+    EXPECT_FALSE(manager.release_resident(revision, wrong_binding, producer));
+    EXPECT_FALSE(manager.release_resident(
+        revision, binding, historical.source.producer_identity()));
+    EXPECT_TRUE(manager.release_resident(revision, binding, producer));
+    EXPECT_FALSE(manager.release_resident(revision, binding, producer));
+    EXPECT_FALSE(
+        manager.find(revision, metal, MemoryDomain::DeviceLocal).has_value());
+    EXPECT_FALSE(owner.expired());
+  }
+
   EXPECT_TRUE(owner.expired());
   const auto released = ledger.device_snapshot(metal);
   ASSERT_TRUE(released.has_value());

@@ -2907,7 +2907,7 @@ class EmbeddedHost final : public Host,
     const execution::DeviceCompletionSeed completion_seed(
         lineage.graph_instance_id, lineage.target_node_id,
         lineage.request_intent, lineage.supersession_generation, lineage.run_id,
-        0U);
+        0U, execution::DeviceCompletionUse::PublishedValueAcquisition);
     const AccessPlan first_plan = value.plan_access(
         AccessTarget{metal_device, MemoryDomain::DeviceLocal, false, true});
     if (first_plan.kind() != AccessPlanKind::Transfer ||

@@ -249,16 +249,41 @@ struct I2EpisodeObservationSnapshot final {
  */
 class I2EpisodeObservationCollector final {
  public:
-  /** @brief Allocates one empty fixed-capacity episode store. */
+  /**
+   * @brief Allocates one empty fixed-capacity episode observation store.
+   * @throws std::bad_alloc when shared implementation ownership cannot be
+   * allocated.
+   * @note The collector owns the store while edit sinks may share its lifetime.
+   * Construction starts no thread and grants no Run, cancellation, scheduler,
+   * currentness, resource, payload, or commit authority.
+   */
   I2EpisodeObservationCollector();
 
-  /** @brief Releases shared storage after every edit sink is gone. */
+  /**
+   * @brief Releases this collector's shared observation-store ownership.
+   * @throws Nothing.
+   * @note Existing edit sinks may retain the store after this object is
+   * destroyed. Callers must externally synchronize collector API calls;
+   * product callbacks remain safe through their independently shared sinks.
+   */
   ~I2EpisodeObservationCollector() noexcept;
 
-  /** @brief Prevents duplicate causal-sequence ownership. */
+  /**
+   * @brief Prevents copying one collector's causal-sequence ownership.
+   * @param other Collector whose ownership cannot be duplicated.
+   * @throws Nothing because the operation is deleted.
+   * @note Edit sinks, rather than collector copies, share callback lifetime.
+   */
   I2EpisodeObservationCollector(const I2EpisodeObservationCollector&) = delete;
 
-  /** @brief Prevents duplicate assignment of observation ownership. */
+  /**
+   * @brief Prevents replacing one collector's observation ownership.
+   * @param other Collector whose ownership cannot be assigned.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   * @note Stable collector identity preserves one bounded store and causal
+   * sequence authority for the complete harness scope.
+   */
   I2EpisodeObservationCollector& operator=(
       const I2EpisodeObservationCollector&) = delete;
 

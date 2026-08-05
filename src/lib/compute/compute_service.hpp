@@ -514,8 +514,10 @@ class ComputeService {
    * operation lookup, resource reservation, and preflight staging.
    * @note Candidate preparation freezes connected-preflight providers,
    * devices, callables, and service reservations without entering provider
-   * code. No physical callback, Run phase, lifecycle record, Graph output, or
-   * proxy output is published.
+   * code. Progressive preparation also binds one final gate to both child Run
+   * arbiters so cancellation denial precedes terminal publication and the HP
+   * callback consumes that same gate. No physical callback, Run phase,
+   * lifecycle record, Graph output, or proxy output is published.
    */
   std::unique_ptr<PreparedIntentUpdateState> prepare_intent_update(
       GraphModel& graph, const ExecutionStrategy& strategy,

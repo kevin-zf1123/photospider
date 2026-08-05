@@ -5,7 +5,9 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -479,6 +481,100 @@ void cancel_i2_final(I2EpisodeEvidenceInput* input, std::size_t edit_index) {
 }
 
 /**
+ * @brief Shifts one homogeneous event vector to open a causal sequence.
+ * @tparam Event I2 observation type exposing mutable `causal_sequence`.
+ * @param events Mutable observation vector.
+ * @param insertion_sequence Nonzero sequence to make available.
+ * @return Nothing.
+ * @throws std::overflow_error when any shifted sequence is exhausted.
+ * @note Event order in the vector is irrelevant; only causal scalars change.
+ */
+template <typename Event>
+void shift_i2_sequences_at_or_after(std::vector<Event>* events,
+                                    std::uint64_t insertion_sequence) {
+  for (Event& event : *events) {
+    if (event.causal_sequence >= insertion_sequence) {
+      if (event.causal_sequence == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("Synthetic I2 causal sequence exhausted.");
+      }
+      ++event.causal_sequence;
+    }
+  }
+}
+
+/**
+ * @brief Opens one causal sequence across a complete synthetic observation cut.
+ * @param input Mutable complete episode evidence.
+ * @param insertion_sequence Nonzero sequence to reserve for a new event.
+ * @return Nothing.
+ * @throws std::invalid_argument when the requested sequence is zero.
+ * @throws std::overflow_error when an event or history cut is exhausted.
+ * @note Accepted-coordinate event sequences are a separate row-local domain
+ * and deliberately remain unchanged.
+ */
+void make_i2_causal_sequence_room(I2EpisodeEvidenceInput* input,
+                                  std::uint64_t insertion_sequence) {
+  if (insertion_sequence == 0U) {
+    throw std::invalid_argument(
+        "Synthetic I2 insertion sequence must be nonzero.");
+  }
+  shift_i2_sequences_at_or_after(&input->observations.current_generations,
+                                 insertion_sequence);
+  shift_i2_sequences_at_or_after(&input->observations.service_starts,
+                                 insertion_sequence);
+  shift_i2_sequences_at_or_after(&input->observations.cancellations,
+                                 insertion_sequence);
+  shift_i2_sequences_at_or_after(&input->observations.terminals,
+                                 insertion_sequence);
+  shift_i2_sequences_at_or_after(&input->observations.final_triggers,
+                                 insertion_sequence);
+  shift_i2_sequences_at_or_after(&input->observations.visible_outputs,
+                                 insertion_sequence);
+  shift_i2_sequences_at_or_after(&input->observations.run_quiescences,
+                                 insertion_sequence);
+  shift_i2_sequences_at_or_after(&input->observations.resource_settlements,
+                                 insertion_sequence);
+  shift_i2_sequences_at_or_after(&input->observations.host_settlements,
+                                 insertion_sequence);
+  if (input->observation_cut.causal_sequence >= insertion_sequence) {
+    if (input->observation_cut.causal_sequence ==
+        std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("Synthetic I2 history cut exhausted.");
+    }
+    ++input->observation_cut.causal_sequence;
+  }
+}
+
+/**
+ * @brief Appends one service start immediately before its matching terminal.
+ * @param input Mutable complete episode evidence.
+ * @param start Prototype carrying exact child, charge, task, and time facts.
+ * @return Nothing.
+ * @throws std::logic_error when the matching child terminal is absent.
+ * @throws std::overflow_error when causal sequence space is exhausted.
+ * @throws std::bad_alloc when observation storage grows.
+ * @note Callers may preserve the prototype task id to model duplicate/retry or
+ * replace it to model a distinct useful local task. The event time is retained
+ * verbatim so post-cancel tests can select the exact intersection boundary.
+ */
+void append_i2_service_start_before_terminal(I2EpisodeEvidenceInput* input,
+                                             I2ObservedServiceStart start) {
+  const auto terminal =
+      std::find_if(input->observations.terminals.begin(),
+                   input->observations.terminals.end(),
+                   [&start](const I2ObservedTerminal& event) {
+                     return event.child.run_id == start.child.run_id;
+                   });
+  if (terminal == input->observations.terminals.end()) {
+    throw std::logic_error("Synthetic I2 child terminal is missing.");
+  }
+  const std::uint64_t insertion_sequence = terminal->causal_sequence;
+  make_i2_causal_sequence_room(input, insertion_sequence);
+  start.causal_sequence = insertion_sequence;
+  input->observations.service_starts.push_back(std::move(start));
+}
+
+/**
  * @brief Creates aggregate rows whose measured latency and waste both pass.
  * @return Complete continuous grid with 100 identical measured samples.
  * @throws std::bad_alloc when row storage grows.
@@ -506,6 +602,121 @@ TEST(I2Evidence, CompleteEpisodePassesIndependentVerdicts) {
   EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.latencies.preview, 2ms);
   EXPECT_EQ(row.latencies.final, 6ms);
+}
+
+/**
+ * @brief Proves only the first start of a visible Run-local task is useful.
+ * @throws Synthetic evidence allocation or checked arithmetic failures fail
+ * the test.
+ * @note The duplicate remains pre-cancel, so only discarded service changes;
+ * the replicate-level ratio gate is exercised separately below.
+ */
+TEST(I2Evidence, SuccessfulVisibleRunDuplicateTaskCountsAsDiscarded) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  const I2ObservedServiceStart original =
+      input.observations.service_starts.back();
+  append_i2_service_start_before_terminal(&input, original);
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(row.validity_reasons.empty());
+  EXPECT_EQ(row.service.all_started_service, 6400U);
+  EXPECT_EQ(row.service.discarded_started_service, 400U);
+  EXPECT_EQ(row.service.post_cancel_started_service, 0U);
+  ASSERT_TRUE(row.service.discarded_ratio.has_value());
+  EXPECT_DOUBLE_EQ(*row.service.discarded_ratio, 0.0625);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves distinct local tasks of one visible Run remain independently
+ * useful.
+ * @throws Synthetic evidence allocation or checked arithmetic failures fail
+ * the test.
+ */
+TEST(I2Evidence, SuccessfulVisibleRunDistinctLocalTasksRemainUseful) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  I2ObservedServiceStart distinct = input.observations.service_starts.back();
+  distinct.local_task_id = 1U;
+  append_i2_service_start_before_terminal(&input, std::move(distinct));
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(row.validity_reasons.empty());
+  EXPECT_EQ(row.service.all_started_service, 6400U);
+  EXPECT_EQ(row.service.discarded_started_service, 0U);
+  EXPECT_EQ(row.service.post_cancel_started_service, 0U);
+  ASSERT_TRUE(row.service.discarded_ratio.has_value());
+  EXPECT_DOUBLE_EQ(*row.service.discarded_ratio, 0.0);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves duplicate and post-cancel service intersect without drift.
+ * @throws Synthetic evidence allocation or checked arithmetic failures fail
+ * the test.
+ * @note The cancelled final's original and repeated starts are both discarded;
+ * only the repeated start occurs after cancellation and is counted once in the
+ * independent post-cancel field.
+ */
+TEST(I2Evidence, PostCancelDuplicateCountsOnceInEachWasteDimension) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  cancel_i2_final(&input, 0U);
+  const auto original = std::find_if(
+      input.observations.service_starts.begin(),
+      input.observations.service_starts.end(),
+      [](const I2ObservedServiceStart& event) {
+        return event.child.edit_index == 0U &&
+               event.child.quality == compute::ComputeRunQuality::Full;
+      });
+  ASSERT_NE(original, input.observations.service_starts.end());
+  I2ObservedServiceStart duplicate = *original;
+  duplicate.observed_at =
+      checked_i1_time_add(input.edits[0U].admission_sample, 6750us);
+  append_i2_service_start_before_terminal(&input, std::move(duplicate));
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(row.validity_reasons.empty());
+  EXPECT_EQ(row.service.all_started_service, 6400U);
+  EXPECT_EQ(row.service.discarded_started_service, 800U);
+  EXPECT_EQ(row.service.post_cancel_started_service, 400U);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Fail);
+}
+
+/**
+ * @brief Proves duplicate task retries can fail measured replicate waste.
+ * @throws Synthetic evidence allocation or checked arithmetic failures fail
+ * the test.
+ * @note Six exact repeats of one 400-unit visible final task yield a measured
+ * discarded ratio above 0.25 without introducing post-cancel work.
+ */
+TEST(I2Evidence, MeasuredDuplicateTaskRetriesFailReplicateWasteRatio) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  const I2ObservedServiceStart original =
+      input.observations.service_starts.back();
+  for (std::size_t duplicate_index = 0U; duplicate_index < 6U;
+       ++duplicate_index) {
+    append_i2_service_start_before_terminal(&input, original);
+  }
+  const I2EpisodeInnerRow duplicate_row = evaluate_i2_episode(std::move(input));
+  ASSERT_TRUE(duplicate_row.validity_reasons.empty());
+  ASSERT_TRUE(duplicate_row.service.discarded_ratio.has_value());
+  EXPECT_GT(*duplicate_row.service.discarded_ratio,
+            kI2DiscardedServiceRatioLimit);
+
+  std::vector<I2EpisodeInnerRow> rows = make_passing_i2_aggregate_rows();
+  for (std::size_t slot = kI2WarmupSlotCount + 1U; slot < kI2GridSlotCount;
+       ++slot) {
+    rows[slot].service = duplicate_row.service;
+  }
+  const I2ReplicateSummary summary = evaluate_i2_replicate(rows);
+
+  ASSERT_TRUE(summary.measured_service.discarded_ratio.has_value());
+  EXPECT_GT(*summary.measured_service.discarded_ratio,
+            kI2DiscardedServiceRatioLimit);
+  EXPECT_EQ(summary.measured_service.post_cancel_started_service, 0U);
+  EXPECT_EQ(summary.waste_verdict, I1Verdict::Fail);
 }
 
 /**

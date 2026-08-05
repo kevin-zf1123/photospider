@@ -6,11 +6,17 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <thread>
 
 #include "compute/progressive_compute.hpp"
 #include "core/image_buffer_processing.hpp"
@@ -18,6 +24,29 @@
 
 namespace ps::testing {
 namespace {
+
+/**
+ * @brief Builds one deterministic HP child for progressive gate arbitration.
+ * @return Valid full-quality child under a realtime request lineage.
+ * @throws std::bad_alloc when owned descriptor strings cannot allocate.
+ * @note The Run has no deadline or observation sink; tests drive only its
+ * private cancellation authority and the bound progressive gate.
+ */
+compute::ComputeRunSubmission make_progressive_gate_submission() {
+  return compute::ComputeRunSubmission{
+      "progressive-gate-linearization",
+      GraphInstanceId{1U},
+      GraphRevision{1U},
+      4,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
+                             std::nullopt, 1U, 8U},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey(4, ComputeIntent::RealTimeUpdate),
+          compute::SupersessionGeneration(1U)},
+      nullptr};
+}
 
 /**
  * @brief Restores the test thread floating-point environment after one scope.
@@ -135,6 +164,106 @@ TEST(ProgressiveFinalGate, CancellationDeniesPendingOrArmedFinal) {
   EXPECT_TRUE(armed_gate.deny());
   EXPECT_FALSE(armed_gate.try_trigger());
   EXPECT_EQ(armed_gate.state(), compute::ProgressiveFinalGate::State::Denied);
+}
+
+/**
+ * @brief Proves cancellation denial precedes terminal-visible cleanup delay.
+ * @throws Run synchronization or thread-construction failures fail the test.
+ * @note The registered cleanup callback intentionally delays a redundant
+ * `deny()`. Reaching it proves `Cancelled` has already been committed, while
+ * the Run-bound gate must already reject the simultaneous final attempt.
+ */
+TEST(ProgressiveFinalGate,
+     CommittedCancellationDeniesBeforeDelayedCleanupCanTriggerFinal) {
+  compute::ComputeRun run(make_progressive_gate_submission());
+  compute::ComputeRunLease lease = run.acquire_lease();
+  auto gate = std::make_shared<compute::ProgressiveFinalGate>();
+  lease.bind_progressive_final_gate(gate);
+  ASSERT_TRUE(gate->arm());
+
+  std::atomic<bool> cleanup_entered{false};
+  std::atomic<bool> release_cleanup{false};
+  std::atomic<bool> delayed_deny_won{true};
+  /**
+   * @brief Delays the former callback-owned gate denial behind a test barrier.
+   * @param reason Accepted cancellation reason; identity is irrelevant here.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  const auto delayed_cleanup =
+      [&](compute::ComputeRunCancellationReason reason) noexcept {
+        (void)reason;
+        cleanup_entered.store(true, std::memory_order_release);
+        while (!release_cleanup.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
+        delayed_deny_won.store(gate->deny(), std::memory_order_release);
+      };
+  compute::ComputeRunCancellationRegistration registration =
+      lease.register_cancellation_notification(delayed_cleanup);
+  ASSERT_TRUE(registration.active());
+  bool cancellation_won = false;
+  std::exception_ptr cancellation_failure;
+  std::thread canceller([&] {
+    try {
+      cancellation_won = run.cancellation_source().request_cancellation(
+          compute::ComputeRunCancellationReason::Superseded);
+    } catch (...) {
+      cancellation_failure = std::current_exception();
+    }
+  });
+
+  const auto wait_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!cleanup_entered.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < wait_deadline) {
+    std::this_thread::yield();
+  }
+  EXPECT_TRUE(cleanup_entered.load(std::memory_order_acquire));
+
+  std::uint64_t final_trigger_count = 0U;
+  std::uint64_t hp_service_count = 0U;
+  std::uint64_t visible_final_count = 0U;
+  if (gate->try_trigger()) {
+    ++final_trigger_count;
+    ++hp_service_count;
+    ++visible_final_count;
+  }
+  EXPECT_EQ(final_trigger_count, 0U);
+  EXPECT_EQ(hp_service_count, 0U);
+  EXPECT_EQ(visible_final_count, 0U);
+  EXPECT_EQ(gate->state(), compute::ProgressiveFinalGate::State::Denied);
+
+  release_cleanup.store(true, std::memory_order_release);
+  canceller.join();
+  EXPECT_FALSE(cancellation_failure);
+  EXPECT_TRUE(cancellation_won);
+  EXPECT_FALSE(delayed_deny_won.load(std::memory_order_acquire));
+  const auto terminal = lease.terminal_outcome();
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_EQ(terminal->kind, compute::ComputeRunTerminalKind::Cancelled);
+}
+
+/**
+ * @brief Proves a final trigger that linearizes first remains permitted.
+ * @throws Run synchronization failures fail the test.
+ * @note Later cancellation still owns the Run terminal and stale-publication
+ * policy; it cannot roll the already-consumed request gate backward.
+ */
+TEST(ProgressiveFinalGate, TriggerWinnerRemainsTriggeredAfterCancellation) {
+  compute::ComputeRun run(make_progressive_gate_submission());
+  compute::ComputeRunLease lease = run.acquire_lease();
+  auto gate = std::make_shared<compute::ProgressiveFinalGate>();
+  lease.bind_progressive_final_gate(gate);
+  ASSERT_TRUE(gate->arm());
+  ASSERT_TRUE(gate->try_trigger());
+
+  EXPECT_TRUE(run.cancellation_source().request_cancellation(
+      compute::ComputeRunCancellationReason::Superseded));
+  EXPECT_EQ(gate->state(), compute::ProgressiveFinalGate::State::Triggered);
+  const auto terminal = lease.terminal_outcome();
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_EQ(terminal->kind, compute::ComputeRunTerminalKind::Cancelled);
 }
 
 TEST(ExactBoxAverageFactorFour, RoundsOnceToNearestAndRestoresEnvironment) {

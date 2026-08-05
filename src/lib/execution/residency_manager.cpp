@@ -52,6 +52,15 @@ void ResidencyManager::observe_generation(const DeviceCompletionSeed& seed) {
   std::lock_guard<std::mutex> lock(mutex_);
   const LineageKey key = lineage_key(seed);
   auto current = current_generations_.find(key);
+  if (seed.completion_use() == DeviceCompletionUse::PublishedValueAcquisition) {
+    if (current == current_generations_.end() ||
+        !current->second.coordinator_managed ||
+        current->second.generation == 0U) {
+      throw std::invalid_argument(
+          "Published Value acquisition requires a live managed lineage.");
+    }
+    return;
+  }
   if (current == current_generations_.end()) {
     current_generations_.emplace(
         key, LineageCurrentness{seed.supersession_generation(), false});
@@ -157,7 +166,17 @@ void ResidencyManager::register_transfer(
   const LineageKey key = lineage_key(identity.seed());
   auto current = current_generations_.find(key);
   const std::uint64_t generation = identity.seed().supersession_generation();
-  if (current != current_generations_.end()) {
+  const bool published_value_acquisition =
+      identity.seed().completion_use() ==
+      DeviceCompletionUse::PublishedValueAcquisition;
+  if (published_value_acquisition) {
+    if (current == current_generations_.end() ||
+        !current->second.coordinator_managed ||
+        current->second.generation == 0U) {
+      throw std::invalid_argument(
+          "Published Value acquisition requires a live managed lineage.");
+    }
+  } else if (current != current_generations_.end()) {
     const bool stale = current->second.coordinator_managed
                            ? current->second.generation != generation
                            : current->second.generation > generation;
@@ -166,9 +185,10 @@ void ResidencyManager::register_transfer(
           "Cannot register a non-current device transfer completion.");
     }
   }
-  if (current == current_generations_.end()) {
+  if (!published_value_acquisition && current == current_generations_.end()) {
     current_generations_.emplace(key, LineageCurrentness{generation, false});
-  } else if (!current->second.coordinator_managed &&
+  } else if (!published_value_acquisition &&
+             !current->second.coordinator_managed &&
              current->second.generation < generation) {
     current->second.generation = generation;
   }
@@ -223,10 +243,25 @@ ResidencyCompletionDisposition ResidencyManager::publish_ready_transfer(
     return ResidencyCompletionDisposition::Rejected;
   }
 
+  const bool published_value_acquisition =
+      identity.seed().completion_use() ==
+      DeviceCompletionUse::PublishedValueAcquisition;
+  if (published_value_acquisition && source_producer != nullptr) {
+    pending_transfers_.erase(pending);
+    return ResidencyCompletionDisposition::Rejected;
+  }
+
   const LineageKey key = lineage_key(identity.seed());
   const auto current = current_generations_.find(key);
-  if (current == current_generations_.end() ||
-      current->second.generation != identity.seed().supersession_generation()) {
+  const bool currentness_valid =
+      published_value_acquisition
+          ? current != current_generations_.end() &&
+                current->second.coordinator_managed &&
+                current->second.generation != 0U
+          : current != current_generations_.end() &&
+                current->second.generation ==
+                    identity.seed().supersession_generation();
+  if (!currentness_valid) {
     pending_transfers_.erase(pending);
     return ResidencyCompletionDisposition::Stale;
   }

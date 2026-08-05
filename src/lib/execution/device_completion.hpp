@@ -14,15 +14,32 @@
 namespace ps::execution {
 
 /**
+ * @brief Selects whether native completion is new work or replica acquisition.
+ * @throws Nothing for value construction and comparison.
+ * @note The value changes only residency currentness validation. It grants no
+ * producer, binding, fence, publication, Graph, or visible-commit authority.
+ */
+enum class DeviceCompletionUse : std::uint8_t {
+  /** @brief New Run work must remain the exact current generation. */
+  CurrentRunSubmission,
+  /**
+   * @brief Transfer an already-Ready immutable published Value for inspection.
+   */
+  PublishedValueAcquisition,
+};
+
+/**
  * @brief Immutable Run/task lineage captured before native submission.
  *
  * The seed names the exact Graph instance, canonical request lineage, Run, and
- * Run-local task whose provider is about to enqueue native work. It contains no
- * allocation or producer facts; those are added only after source and
- * destination Values have been published.
+ * Run-local task whose provider is about to enqueue native work. It also
+ * distinguishes current Run submission from verification acquisition of an
+ * already-published immutable Value. It contains no allocation or producer
+ * facts; those are added only after source and destination Values have been
+ * published.
  *
  * @throws std::invalid_argument for zero identities, a negative target, or an
- * unsupported request intent.
+ * unsupported request intent/completion use.
  * @note This source-private value grants no queue, payload, completion, cache,
  * or visible-commit authority.
  */
@@ -36,12 +53,16 @@ class DeviceCompletionSeed final {
    * @param supersession_generation Nonzero graph-wide preparation identity.
    * @param run_id Nonzero opaque Run identity scalar.
    * @param local_task_id Dense Run-local task identity.
+   * @param completion_use Current Run submission by default, or explicit
+   * published-Value acquisition.
    * @throws std::invalid_argument for invalid scalar or enum inputs.
    */
   DeviceCompletionSeed(std::uint64_t graph_instance_id, int target_node_id,
                        ComputeIntent request_intent,
                        std::uint64_t supersession_generation,
-                       std::uint64_t run_id, std::uint64_t local_task_id);
+                       std::uint64_t run_id, std::uint64_t local_task_id,
+                       DeviceCompletionUse completion_use =
+                           DeviceCompletionUse::CurrentRunSubmission);
 
   /**
    * @brief Returns the nonzero live Graph identity scalar.
@@ -93,6 +114,15 @@ class DeviceCompletionSeed final {
   std::uint64_t local_task_id() const noexcept { return local_task_id_; }
 
   /**
+   * @brief Returns the native completion's currentness semantics.
+   * @return Current submission or published immutable Value acquisition.
+   * @throws Nothing.
+   */
+  DeviceCompletionUse completion_use() const noexcept {
+    return completion_use_;
+  }
+
+  /**
    * @brief Compares every Run/task lineage component.
    * @param other Seed to compare.
    * @return True only when every component matches.
@@ -113,6 +143,9 @@ class DeviceCompletionSeed final {
   std::uint64_t run_id_ = 0U;
   /** @brief Dense Run-local task identity scalar. */
   std::uint64_t local_task_id_ = 0U;
+  /** @brief Currentness semantics included in exact completion identity. */
+  DeviceCompletionUse completion_use_ =
+      DeviceCompletionUse::CurrentRunSubmission;
 };
 
 /**

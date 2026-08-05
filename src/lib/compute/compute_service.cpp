@@ -833,10 +833,9 @@ struct PreparedIntentUpdateState final {
   compute::PreparedHighPrecisionDirtyRun hp_prepared;
   /** @brief Complete unpublished RT dirty domain for realtime. */
   compute::PreparedRealTimeDirtyRun rt_prepared;
-  /** @brief RT-to-HP cancellation/gate propagation registration. */
+  /** @brief RT-to-HP commit denial and cancellation propagation registration.
+   */
   compute::ComputeRunCancellationRegistration rt_cancellation_registration;
-  /** @brief HP cancellation registration that denies an untriggered final. */
-  compute::ComputeRunCancellationRegistration hp_cancellation_registration;
   /** @brief Fully allocated coordinator callbacks bound before installation. */
   compute::IntentUpdateCallbacks callbacks;
 };
@@ -1272,6 +1271,8 @@ ComputeService::prepare_intent_update(
   if (request.progressive_options.has_value()) {
     state->progressive_final_gate =
         std::make_shared<compute::ProgressiveFinalGate>();
+    state->rt_lease->bind_progressive_final_gate(state->progressive_final_gate);
+    state->hp_lease.bind_progressive_final_gate(state->progressive_final_gate);
   }
   bool uses_process_service = false;
   if (strategy.use_parallel_executor) {
@@ -1332,22 +1333,10 @@ ComputeService::prepare_intent_update(
     state->rt_cancellation_registration =
         state->rt_lease->register_cancellation_notification(
             [gate = state->sibling_commit_gate,
-             progressive_gate = state->progressive_final_gate,
              hp_cancellation](compute::ComputeRunCancellationReason reason) {
               gate->abort_hp_commit();
-              if (progressive_gate) {
-                (void)progressive_gate->deny();
-              }
               (void)hp_cancellation.request_cancellation(reason);
             });
-    if (state->progressive_final_gate) {
-      state->hp_cancellation_registration =
-          state->hp_lease.register_cancellation_notification(
-              [progressive_gate = state->progressive_final_gate](
-                  compute::ComputeRunCancellationReason) {
-                (void)progressive_gate->deny();
-              });
-    }
     (void)state->rt_lease->observe_cancellation();
     (void)state->hp_lease.observe_cancellation();
   }
@@ -1361,7 +1350,9 @@ ComputeService::prepare_intent_update(
   };
   state->callbacks.run_high_precision_update = [this, state_ptr]() {
     if (state_ptr->progressive_final_gate) {
-      (void)state_ptr->hp_lease.observe_cancellation();
+      if (state_ptr->hp_lease.observe_cancellation().has_value()) {
+        return;
+      }
       if (!state_ptr->progressive_final_gate->try_trigger()) {
         return;
       }

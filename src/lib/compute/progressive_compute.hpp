@@ -32,16 +32,20 @@ struct ProgressiveComputeOptions final {
  * @brief Atomic request-local gate ordering preview success against final work.
  *
  * The gate starts Pending. A successful current RT publication may arm it;
- * accepted cancellation may deny Pending or Armed; and the HP callback may
- * consume only Armed. Triggered and Denied are terminal gate states. The gate
- * never starts work itself and owns no cancellation, scheduling, currentness,
- * lifecycle, resource, Graph, or commit authority.
+ * accepted cancellation denies Pending or Armed from the matching Run
+ * terminal arbitration interval before `Cancelled` is published; and the HP
+ * callback may consume only Armed. Triggered and Denied are terminal gate
+ * states. Cleanup notifications are deliberately outside this ordering. The
+ * gate never starts work itself and owns no cancellation, scheduling,
+ * currentness, lifecycle, resource, Graph, or commit authority.
  *
  * @throws Nothing from every operation.
  * @note Callers retain this object through shared request ownership. The one
- * atomic state is the linearization authority only for whether HP submission
- * is permitted; product currentness and Run terminal arbitration remain
- * authoritative for visible publication.
+ * atomic state is the shared cancellation/final-trigger linearization
+ * authority only for whether HP submission is permitted. Matching RT and HP
+ * Run arbiters call `deny()` before cancellation becomes terminal; product
+ * currentness and Run terminal arbitration remain authoritative for visible
+ * publication.
  */
 class ProgressiveFinalGate final {
  public:

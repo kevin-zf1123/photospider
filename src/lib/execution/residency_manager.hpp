@@ -26,11 +26,10 @@ namespace ps::execution {
  */
 enum class ResidencyCompletionDisposition : std::uint32_t {
   /**
-   * @brief Exact current completion published Ready and applied residency
-   * retention.
+   * @brief Exact admitted completion published Ready and applied residency.
    */
   Published = 0U,
-  /** @brief The current exact generation no longer matches this completion. */
+  /** @brief Required currentness or live managed lineage no longer holds. */
   Stale = 1U,
   /**
    * @brief Identity, terminal facts, or exact producer capability did not
@@ -52,8 +51,9 @@ enum class ResidencyCompletionDisposition : std::uint32_t {
  * Completed replicas are retained up to a fixed entry-count capacity;
  * publication beyond that bound evicts the oldest logical revision and
  * releases its strong native/provider owners. A source-private verification
- * caller may also release one complete revision/binding/producer identity
- * without clearing or changing ordinary cache policy.
+ * caller may acquire an already-published historical Value while its managed
+ * lineage remains live, then release one complete revision/binding/producer
+ * identity without changing currentness or ordinary cache policy.
  * Canonical generation rows are Graph-scoped maintenance state and retire
  * after exact Graph close has drained every Run and pending native completion.
  *
@@ -84,12 +84,15 @@ class ResidencyManager final {
    * @brief Records one observed generation for a canonical lineage.
    * @param seed Run/task seed whose Graph/target/request lineage is observed.
    * @return Nothing.
+   * @throws std::invalid_argument when a published-Value acquisition does not
+   * name an already-current coordinator-managed lineage.
    * @throws std::overflow_error never; generations are supplied, not minted.
    * @throws std::bad_alloc or std::system_error from map synchronization.
    * @note Standalone lineages retain the numeric maximum. A lineage marked as
    * coordinator-managed retains its exact published current generation, so a
    * stale Run observation never changes currentness in either numeric
-   * direction.
+   * direction. Published-Value acquisition observations validate that live
+   * authority but neither compare nor mutate its current generation.
    */
   void observe_generation(const DeviceCompletionSeed& seed);
 
@@ -162,13 +165,17 @@ class ResidencyManager final {
    * @brief Admits one exact replica production before native submission.
    * @param identity Complete source/destination completion identity.
    * @return Nothing.
-   * @throws std::invalid_argument when the generation is not current.
+   * @throws std::invalid_argument when a current submission's generation is
+   * stale, or when a published-Value acquisition lacks a live managed lineage.
    * @throws std::bad_alloc or std::system_error from synchronized ownership.
    * @note Re-admitting the exact identity is idempotent. Reusing the same
    * destination producer for different facts is rejected. Standalone lineages
    * advance by numeric generation when pre-submission observation was omitted;
-   * coordinator-managed lineages require exact equality with the published
-   * generation and never infer currentness from magnitude.
+   * coordinator-managed current submissions require exact equality with the
+   * published generation and never infer currentness from magnitude. A
+   * `PublishedValueAcquisition` must name an existing nonzero managed lineage,
+   * but deliberately does not require its immutable source's historical
+   * generation to remain current and never changes currentness.
    */
   void register_transfer(const DeviceCompletionIdentity& identity);
 
@@ -188,18 +195,21 @@ class ResidencyManager final {
    * generation Stale before destination Ready, or follows a completion already
    * published against the then-current generation. Coordinator-managed
    * currentness uses exact equality regardless of numeric direction;
-   * standalone currentness retains numeric-maximum order. Stale consumes its
-   * obsolete admission without touching either producer;
-   * a missing or different registered identity leaves any other rightful
-   * admission untouched. After exact Value metadata validation, a
-   * producer-capability rejection preserves the current admission and both
-   * producer fences. Each supplied producer must be active and share the exact
-   * private ReadyFence control state of its corresponding pending Value;
-   * matching revision, producer, allocation, or binding scalars cannot
-   * substitute for that provenance. Callers must publish typed failure or
-   * cancellation for a Stale destination. A new exact replica that exceeds the
-   * fixed resident-entry capacity causes the oldest logical revision entry to
-   * be released in the same interval.
+   * standalone currentness retains numeric-maximum order. Published-Value
+   * acquisition instead requires an already-Ready source and remains valid if
+   * a newer generation becomes current before transfer completion; exact seed,
+   * revision, producer, binding, and fence validation is unchanged. Stale
+   * consumes its obsolete admission without touching either producer; a missing
+   * or different registered identity leaves any other rightful admission
+   * untouched. After exact Value metadata validation, a producer-capability
+   * rejection preserves the current admission and both producer fences. Each
+   * supplied producer must be active and share the exact private ReadyFence
+   * control state of its corresponding pending Value; matching revision,
+   * producer, allocation, or binding scalars cannot substitute for that
+   * provenance. Callers must publish typed failure or cancellation for a Stale
+   * destination. A new exact replica that exceeds the fixed resident-entry
+   * capacity causes the oldest logical revision entry to be released in the
+   * same interval.
    */
   ResidencyCompletionDisposition publish_ready_transfer(
       const DeviceCompletionIdentity& identity, const Value& source,

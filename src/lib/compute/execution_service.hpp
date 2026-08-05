@@ -1196,8 +1196,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * Value.
    * @param width Positive logical image width.
    * @param height Positive logical image height.
-   * @param completion_seed Exact current Graph/request/Run lineage attached to
-   * a real native transfer.
+   * @param completion_seed Exact Graph/request/Run lineage and explicit
+   * published-Value acquisition semantics attached to a real native transfer.
    * @return Ready resident Value plus whether executor submission occurred.
    * @throws std::invalid_argument for missing Metal, invalid source geometry,
    * or malformed lineage.
@@ -1210,8 +1210,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @note The method first consults the process-owned ResidencyManager. A miss
    * enters exactly one registered Metal executor invocation using the service
    * ResourceLedger; a hit performs no executor submission, allocation, or
-   * transfer. This source-private verification seam exposes no native handle or
-   * registry mutation and performs no device-to-Host readback.
+   * transfer. The source may belong to a previously current generation because
+   * its Ready immutable publication, rather than new Run submission, is being
+   * acquired; exact revision/binding/producer/fence closure remains mandatory.
+   * This source-private verification seam exposes no native handle or registry
+   * mutation and performs no device-to-Host readback.
    */
   DeviceResidentValueAcquisition acquire_metal_resident_value(
       Value source, std::uint32_t width, std::uint32_t height,

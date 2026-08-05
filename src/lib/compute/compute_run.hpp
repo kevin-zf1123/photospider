@@ -39,6 +39,7 @@ class TaskSubmissionPlan;
 class ComputeRun;
 class ExecutionService;
 class ExecutionLifecycleTelemetry;
+class ProgressiveFinalGate;
 class RunLifecycleRegistry;
 enum class ComputeRunTerminalKind;
 enum class ComputeRunCancellationReason;
@@ -834,7 +835,8 @@ class ComputeRunCancellationSource {
    * @throws std::system_error if Run-state or cleanup synchronization fails.
    * @throws Any exception from a registered cleanup callback after
    * cancellation becomes terminal.
-   * @note Cleanup notifications run after the terminal mutex is released.
+   * @note A bound progressive gate is denied before cancellation becomes
+   * terminal. Cleanup notifications run after the terminal mutex is released.
    * Every selected notification is attempted; the first callback exception is
    * rethrown only after the remaining slots have been invoked.
    */
@@ -1491,6 +1493,22 @@ class ComputeRunLease {
       std::function<void(ComputeRunCancellationReason)> callback) const;
 
   /**
+   * @brief Binds one progressive final gate to cancellation arbitration.
+   * @param gate Non-null request gate shared by the progressive RT/HP children.
+   * @return Nothing.
+   * @throws std::invalid_argument when `gate` is null.
+   * @throws std::logic_error when this Run is already bound to another gate.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @note Accepted cancellation denies the bound gate while holding the Run
+   * terminal mutex and before publishing `Cancelled`; cleanup callbacks remain
+   * outside that mutex and are not part of final-trigger linearization. Binding
+   * an already-cancelled Run denies the gate before return. The gate retains no
+   * Run, scheduler, currentness, resource, or commit authority.
+   */
+  void bind_progressive_final_gate(
+      const std::shared_ptr<ProgressiveFinalGate>& gate) const;
+
+  /**
    * @brief Attempts to reserve the terminal arbiter for visible commit.
    * @return Active one-shot contender when phase/deadline/arbiter permit
    * commit, otherwise nullopt without changing an existing terminal outcome.
@@ -1498,8 +1516,9 @@ class ComputeRunLease {
    * @throws Any exception from a contract-violating injected clock.
    * @throws Any exception from a registered cleanup callback when deadline
    * cancellation wins.
-   * @note Deadline is observed immediately before the atomic claim. Only the
-   * returned contender can resolve an accepted commit claim.
+   * @note Deadline is observed immediately before the atomic claim. A deadline
+   * winner denies any bound progressive gate before publishing cancellation.
+   * Only the returned contender can resolve an accepted commit claim.
    */
   std::optional<ComputeRunCommitContender> try_claim_commit() const;
 

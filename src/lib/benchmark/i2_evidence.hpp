@@ -271,7 +271,10 @@ I2EditEvidence capture_i2_edit_evidence(
  * follows all materialized child resource settlements in both causal sequence
  * and steady time, and its status matches deterministic progressive terminal
  * aggregation: at least one materialized child and all such children
- * Succeeded.
+ * Succeeded. For a visible successful Run, only the earliest causal start of
+ * each `(run_id, local_task_id)` can be useful; later duplicate/retry starts
+ * are discarded. Post-cancellation starts are counted independently, including
+ * their precise intersection with discarded work.
  */
 I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input);
 

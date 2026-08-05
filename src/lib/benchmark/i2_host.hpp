@@ -192,7 +192,8 @@ class I2Host {
 
   /**
    * @brief Captures two Host and conditional two Metal acquisitions.
-   * @param value Exact current preview or final immutable Value.
+   * @param value Exact Ready preview or final immutable Value captured while
+   * visible; it may be historical when a newer generation is already current.
    * @param lineage Exact visible child descriptor lineage.
    * @return Closed direct/transfer/reuse/resource/no-I/O evidence.
    * @throws Validation, ReadyFence, native executor, resource, allocation, and
@@ -200,8 +201,9 @@ class I2Host {
    * @note This verification-only method executes no Graph work, readback,
    * filesystem, codec, cache, output-store, or document persistence. After
    * copying second-reuse facts it removes only the exact acquired Metal
-   * revision/binding/producer, so row cleanup changes no ordinary residency
-   * lookup, publication, replacement, or capacity policy.
+   * revision/binding/producer. Historical acquisition validates a live managed
+   * lineage without changing currentness, so row cleanup changes no ordinary
+   * residency lookup, publication, replacement, or capacity policy.
    */
   virtual I2ValueAcquisitionEvidence acquire_i2_value(
       Value value, const I2ValueLineage& lineage) = 0;
