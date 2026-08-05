@@ -1271,7 +1271,7 @@ The delivery rows are fixed:
 | Issue | Required target evidence |
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | Reusable I1 accepted-boundary collector with pre-call `A_i` sampling and row-local sequence reservation; success-only `(A_i,event_sequence_i)` binding into the product supersession identity; exact row-to-current evidence matching; independent accepted-row and observer-causal sequence domains; failure without an accepted event, current observation, or product binding; the continuous 221-slot isolated grid; exact `S_11` drain/tie/guard behavior; latency, waste, memory, and required output correctness. |
-| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, Host/conditional-Metal residency and copy waste, memory, and required output correctness on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-next-edit ordering, I1 coefficient/index/update lineage, and full-resolution final path; #94 cannot redefine that cadence or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
+| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | I2 preview/final latency, child-resource-before-Host settlement closure, exact row-scoped Host/conditional-Metal residency release and copy waste, memory, and required output correctness on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-next-edit ordering, I1 coefficient/index/update lineage, and full-resolution final path; #94 cannot redefine that cadence or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | B1 isolated throughput, exact determinism, fault-free zero waste, memory, and fixed storage/performance probe-to-schema, encoder, eligibility, and compatibility evidence at caps 1 and 8. |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact `C^M1`/`W^M1` input grid, fixed B1 offer protocol, cross-boundary I1 settlement, reuse of #93's collector binding the first measured edit to `edit_index=0`, `A_0`, and its pre-call sequence, the frozen final-warmup current-hold exception through that successful coordinate without redefining it, independent producer-local cycles, phase-boundary/carryover/FIFO/attribution evidence, plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
 
@@ -1280,8 +1280,10 @@ machine conformance. Issues #93 and #94 now provide the source-private I1 and I2
 product mechanisms, bounded inner collectors/evaluators, exact-workload manual
 runners, and deterministic tests assigned to those delivery rows. In
 particular, #94 adds preview-then-final coordination, exact preview arithmetic,
-Host/conditional-Metal acquisition evidence, and the closed
-`execution-profile-i2-inner-row-v1` record without changing the canonical
+Host/conditional-Metal acquisition evidence, exact row-scoped resident release
+with complete device-reservation closure, child-resource-before-Host settlement
+order and aggregate status, and the closed `execution-profile-i2-inner-row-v1`
+record without changing the canonical
 15-field outer row or installed ABI. The I2 runner is `EXCLUDE_FROM_ALL`, absent
 from CTest, and no exact 111-slot machine run is claimed by this current-state
 document. Canonical outer-row/bundle/reference composition and the B1/M1 work

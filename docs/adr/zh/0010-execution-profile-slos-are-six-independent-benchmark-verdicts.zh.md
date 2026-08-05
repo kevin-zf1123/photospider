@@ -430,6 +430,13 @@ edit cadence/order、start-lateness、deadline anchor 或 equal-time ordering �
 都会使带 `I2-progressive-v1` 标签的 row 无效。有意改变时必须使用新的 workload id
 和新的 manifest/digest/golden lineage。
 
+对于每个 edit，I2 Host settlement sequence 必须严格大于每个已 materialize child resource
+settlement，steady timestamp 也不得早于其中任何一个。Host status 是确定性的 progressive
+terminal aggregate：当且仅当至少一个 child 已 materialize 且所有已 materialize child 均为
+Succeeded 时成功。因此 preview-only 与 preview 加 successful final 都成功，preview 加
+cancelled final 与 no-child 都失败。Sequence、time 或 status 矛盾会使四项彼此独立报告的
+inner verdict axis 全部 Invalid，而不是虚构或回填 child evidence。
+
 I2 具有必需的 Host-local output path 与条件式 Metal residency 组件。Preview 与
 final 都向同一个本地 consumer 两次暴露各自不可变的 CPU `ValueRevisionId`、Host
 binding/allocation identity 与 storage byte；两次获取必须复用同一个 binding，不得
@@ -439,7 +446,12 @@ transfer，第二次必须复用同一个
 device-local residency，且 transfer 与 allocation 都为零。禁止 Metal-to-Host
 transfer、filesystem/codec I/O，以及上述两个条件式首次 access 之外的任何 transfer。
 没有 Metal 时，只有 device-specific 组件属于预定义 `not-applicable`；Host reuse
-与 no-I/O 门禁仍然适用。第十二次 edit（`edit_index=11`）的 final logical digest
+与 no-I/O 门禁仍然适用。复制第二次 access 及其 diagnostic、resource 与 no-I/O fact 后，
+Host 必须在最终 row snapshot 前，通过精确的 `revision + 完整 StorageBinding + producer`
+identity，只移除该 row 的 resident。错误 identity 不产生任何效果。该 verification-only
+release 既不 broad clear cache，也不改变普通 lookup、publication、replacement、capacity 或
+eviction 语义。Acquisition-local Value 析构后，完整 memory-and-scratch device `reserved`
+vector 等于 row 前 baseline。第十二次 edit（`edit_index=11`）的 final logical digest
 必须等于 I1 `edit_index=11` digest，preview logical digest 必须等于其自身 fixture
 golden。Workload manifest 与 fixture oracle 绑定完整 `K` array、index/Region mapping、
 node update/transform order、preview average-and-rounding order，以及 full-resolution
@@ -1386,6 +1398,11 @@ settlement 的强制性权威证据；它不证明 physical memory ownership，�
 或 ledger/device ownership evidence。任何权威 dimension 都不得超过冻结 limit。
 Isolated 行必须精确结算到 row 前 baseline；M1 shutdown 必须结算到零。
 
+对于配置 Metal 的 I2，精确 row-scoped resident release 发生在复制第二次 reuse evidence
+之后、最终 row snapshot 之前。完整 device `reserved` vector（包括 persistent memory 与
+scratch）必须匹配 row 前 baseline，避免不同 revision 在固定 resident-entry capacity 以下累积
+device memory。
+
 对每个权威 dimension，candidate B1 与 I2 peak 必须不超过已固定同环境 reference
 的 105%，同时仍满足绝对 limit。Process RSS 只作为 diagnostic，因为它包含当前
 authority 之外的 allocation；它不能替代 ledger/device 证据，也不能免除 settlement。
@@ -1634,13 +1651,14 @@ good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidenc
 | Issue | 必需 v1 交付 |
 | --- | --- |
 | #93 | 实现可复用的 I1 accepted-boundary collector：采样 `A_i`、在 Host invocation 前预留 row-local `event_sequence_i`，只在 admission 成功时发出 `(A_i,event_sequence_i)`，在 current publication 前把 proposed coordinate 带入 product supersession identity，要求 row/current 精确 binding 并保持 accepted-row 与 observer-causal sequence domain 彼此独立，把 failure 保留为 raw evidence 且不产生 accepted event、current observation 或 product binding；将其用于连续 221-slot isolated-I1 grid、精确 `S_11` drain/tie/guard 行为、I1 request/current-generation 与 cancellation/quiescence 观测；发布 isolated latency、waste 与 memory 行，以及必需的 output-correctness 证据。 |
-| #94 | 在此处冻结的精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-before-next-edit ordering，以及 I1 coefficient/index/update/full-resolution-final lineage 上实现 I2；不得重新定义这些 schedule，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。发布 preview/final latency、Host/条件式 Metal residency 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
+| #94 | 在此处冻结的精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-before-next-edit ordering，以及 I1 coefficient/index/update/full-resolution-final lineage 上实现 I2；不得重新定义这些 schedule，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。发布 preview/final latency、child-resource 先于 Host settlement 的闭合、精确 row-scoped 条件式 Metal residency release 与 copy-waste、memory 行，以及必需的 output-correctness 证据。 |
 | #95 | 实现 B1 immutable manifest、occurrence-scoped job/task identity、reservation、canonical semantic trace、crash-durable artifact commit、固定 storage/performance probe-to-schema adapter、mount normalization、唯一 encoder/digest、eligibility/B1 check 与 logical/raw golden；在 Run cap 1 与 8 下发布 closed-schema isolated throughput、determinism、zero-fault waste 与 memory 行。 |
 | #96 | 把精确 I1 与 B1 fixture 组合为 M1；复用 #93 的 I1 accepted-boundary collector 且不得重新定义，将第一次 measured edit 精确绑定到 `edit_index=0`、`A_0` 与其 call 前预留的 sequence；实现固定的 `C^M1`/`W^M1` cold/warmup origin、count、B1 offer protocol、跨 `B^M1` I1 settlement，以及通过 `[B^M1,B^M1+2,000,000 ns]` 内该成功 coordinate 实现的 final-warmup current-hold 冻结例外；实现精确 cutoff/carryover/FIFO/phase-attribution 与 temporal-resource boundary；把既有 `cycle_ordinal` component 解释为每个 measured B1 Graph 的独立 producer-local counter，且绝不把它当作 retry 或新增 field；原样复用精确 v1 manifest byte，强制执行 same-ordinal 完整 M1/B1 environment pair，同时让 I1-only pair 只比较 base，并发布 closed-schema mixed latency、throughput progress、fairness、waste 与 memory 行。 |
 
 当前 #94 源码树已实现其私有 preview-then-final 产品协调、精确 preview/final arithmetic、
-Host 与条件式真实 Metal acquisition evidence、连续 grid profile、fail-closed inner evaluator，
-以及显式手工 runner。其输出的 `execution-profile-i2-inner-row-v1` record 有意窄于本 ADR
+Host 与条件式真实 Metal acquisition evidence、精确 row-scoped resident release、child-
+resource 先于 Host settlement 的顺序与 aggregate status、连续 grid profile、fail-closed inner
+evaluator，以及显式手工 runner。其输出的 `execution-profile-i2-inner-row-v1` record 有意窄于本 ADR
 冻结的 canonical outer row、bundle 与 reference composition。Runner 被排除在默认 build
 与 CTest 之外，本文也不声明已经产生精确 111-slot 机器结果。因此，该实现状态完成了负责的
 mechanism 与 inner-evidence surface，但不会提升缺失的机器运行，也不声称完成 #95/#96。

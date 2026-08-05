@@ -498,6 +498,15 @@ start-lateness, deadline anchor, or equal-time ordering drift makes a row
 labelled `I2-progressive-v1` invalid. A deliberate change requires a new
 workload id and new manifest/digest/golden lineage.
 
+For each edit, the I2 Host settlement sequence is strictly greater than every
+materialized child resource settlement, and its steady timestamp is no earlier
+than any of them. Host status is the deterministic progressive terminal
+aggregate: success exactly when at least one child materialized and every
+materialized child Succeeded. Preview-only and preview plus successful final
+therefore succeed; preview plus cancelled final and no-child fail. A sequence,
+time, or status contradiction makes all four independently reported inner
+verdict axes Invalid instead of inventing or backdating child evidence.
+
 I2 has a required Host-local output path and a conditional Metal residency
 component. Preview and final each expose their immutable CPU
 `ValueRevisionId`, Host binding/allocation identity, and storage bytes twice to
@@ -508,7 +517,15 @@ the second must reuse the same device-local residency with zero transfer or
 allocation. Metal-to-Host transfer, filesystem/codec I/O, and any transfer
 beyond those two conditional first accesses are forbidden. Without Metal only
 the device-specific component is predefined `not-applicable`; the Host reuse
-and no-I/O gates still apply. The twelfth edit (`edit_index=11`) final logical
+and no-I/O gates still apply. After the second access and its diagnostic,
+resource, and no-I/O facts have been copied, the Host removes only that row's
+resident by exact `revision + complete StorageBinding + producer` identity
+before the final row snapshot. A wrong identity is a no-op. This
+verification-only release neither clears the cache broadly nor changes normal
+lookup, publication, replacement, capacity, or eviction semantics. After
+acquisition-local Values unwind, the complete memory-and-scratch device
+`reserved` vector equals the pre-row baseline. The twelfth edit
+(`edit_index=11`) final logical
 digest must equal the I1 `edit_index=11` digest, and its preview logical digest
 must equal its own fixture golden. The workload manifest and fixture oracle bind
 the complete `K` array, index/Region mapping, node-update/transform order,
@@ -1579,6 +1596,12 @@ replace RSS or ledger/device ownership evidence. No authoritative dimension
 may exceed its frozen limit. An isolated row must settle exactly to its pre-row
 baseline; M1 shutdown must settle to zero.
 
+For I2 with Metal configured, the exact row-scoped resident release occurs
+after second-reuse evidence is copied and before the final row snapshot. The
+complete device `reserved` vector, including persistent memory and scratch,
+must match its pre-row baseline so distinct revisions cannot accumulate device
+memory below the fixed resident-entry capacity.
+
 For every authoritative dimension, candidate B1 and I2 peaks must be no more
 than 105 percent of the pinned same-environment reference while still meeting
 absolute limits. Process RSS is diagnostic because it includes allocations
@@ -1870,14 +1893,16 @@ normative references. Raw evidence must reproduce every aggregate and verdict.
 | Issue | Required v1 delivery |
 | --- | --- |
 | #93 | Implement the reusable I1 accepted-boundary collector that samples `A_i`, reserves row-local `event_sequence_i` before Host invocation, emits `(A_i,event_sequence_i)` only on successful admission, carries the proposed coordinate into product supersession identity before current publication, requires exact row/current binding while keeping accepted-row and observer-causal sequence domains independent, and retains failure as raw evidence without an accepted event, current observation, or product binding; use it for the continuous 221-slot isolated-I1 grid, exact `S_11` drain/tie/guard behavior, request/current-generation and cancellation/quiescence observation; publish isolated latency, waste, and memory rows plus required output-correctness evidence. |
-| #94 | Implement I2 on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-before-next-edit ordering, and I1 coefficient/index/update/full-resolution-final lineage frozen here; it cannot redefine those schedules or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, Host/conditional-Metal residency and copy-waste, and memory rows plus required output-correctness evidence. |
+| #94 | Implement I2 on the exact 100-episode/12-edit cadence, acceptance/deadline anchors, preview-before-next-edit ordering, and I1 coefficient/index/update/full-resolution-final lineage frozen here; it cannot redefine those schedules or select different coefficients for edits `0..10` while retaining `I2-progressive-v1`. Publish preview/final latency, child-resource-before-Host settlement closure, exact row-scoped conditional-Metal residency release and copy-waste, and memory rows plus required output-correctness evidence. |
 | #95 | Implement B1 immutable manifests, occurrence-scoped job/task identities, reservations, canonical semantic trace, crash-durable artifact commit, fixed storage/performance probe-to-schema adapters, mount normalization, the single encoder/digests, eligibility/B1 checks, and logical/raw goldens; publish closed-schema isolated throughput, determinism, zero-fault waste, and memory rows at Run caps 1 and 8. |
 | #96 | Compose the exact I1 and B1 fixtures into M1; reuse #93's I1 accepted-boundary collector without redefining it, binding the first measured edit exactly to `edit_index=0`, `A_0`, and its pre-call reserved sequence; implement the fixed `C^M1`/`W^M1` cold/warmup origins, counts, B1 offer protocol, cross-`B^M1` I1 settlement, and the frozen final-warmup current-hold exception through that successful coordinate in `[B^M1,B^M1+2,000,000 ns]`; implement the exact cutoff/carryover/FIFO/phase-attribution and temporal-resource boundary; interpret the existing `cycle_ordinal` component as an independent producer-local counter for each measured B1 Graph without treating it as retry or adding a field; reuse the exact v1 manifest bytes, enforce the same-ordinal full M1/B1 environment pair while leaving the I1-only pair base-only, and publish closed-schema mixed latency, throughput progress, fairness, waste, and memory rows. |
 
 The current #94 source tree implements its private preview-then-final product
 coordination, exact preview/final arithmetic, Host and conditional real-Metal
-acquisition evidence, continuous-grid profile, fail-closed inner evaluator, and
-explicit manual runner. Its emitted `execution-profile-i2-inner-row-v1` record
+acquisition evidence, exact row-scoped resident release, child-resource-before-
+Host settlement order and aggregate status, continuous-grid profile, fail-
+closed inner evaluator, and explicit manual runner. Its emitted
+`execution-profile-i2-inner-row-v1` record
 is deliberately narrower than the canonical outer row, bundle, and reference
 composition frozen by this ADR. The runner is excluded from the default build
 and CTest, and no exact 111-slot machine result is asserted here. Thus this

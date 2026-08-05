@@ -1031,15 +1031,16 @@ self、enclosing、later-stage、comparison 或 M1 cycle 都会 fail closed。#9
 | Issue | 必需目标证据 |
 | --- | --- |
 | [#93](https://github.com/kevin-zf1123/photospider/issues/93) | 可复用的 I1 accepted-boundary collector，包含 call 前 `A_i` 采样与 row-local sequence 预留；仅成功时把 `(A_i,event_sequence_i)` 绑定进 product supersession identity；row 与 current evidence 精确匹配；accepted-row 与 observer-causal sequence domain 彼此独立；failure 不产生 accepted event、current observation 或 product binding；以及连续 221-slot isolated grid、精确 `S_11` drain/tie/guard 行为、latency、waste、memory 与必需 output correctness。 |
-| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-next-edit ordering、I1 coefficient/index/update lineage 与 full-resolution final path 上生成 I2 preview/final latency、Host/条件式 Metal residency 与 copy waste、memory 及必需 output correctness；#94 不得重新定义该 cadence，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。 |
+| [#94](https://github.com/kevin-zf1123/photospider/issues/94) | 在精确 100-episode/12-edit cadence、acceptance/deadline anchor、preview-next-edit ordering、I1 coefficient/index/update lineage 与 full-resolution final path 上生成 I2 preview/final latency、child-resource 先于 Host settlement 的闭合、精确 row-scoped Host/条件式 Metal residency release 与 copy waste、memory 及必需 output correctness；#94 不得重新定义该 cadence，也不得为 edit `0..10` 选择不同 coefficient 后仍保留 `I2-progressive-v1`。 |
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory，以及固定 storage/performance probe-to-schema、encoder、eligibility 与 compatibility 证据。 |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 生成 M1 精确 `C^M1`/`W^M1` input grid、固定 B1 offer protocol、跨 boundary I1 settlement，复用 #93 collector 并把第一次 measured edit 绑定到 `edit_index=0`、`A_0` 与其 call 前 sequence，以及不得重新定义的 final-warmup current-hold 直到该成功 coordinate 这一冻结例外、独立 producer-local cycle 与 phase-boundary/carryover/FIFO/attribution evidence，并使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
 
 ADR 0010 是当前已接受的决策记录，但它本身不构成机器符合性声明。Issue #93 与 #94
 现在已经提供各自交付行负责的 source-private I1/I2 产品机制、有界 inner collector/evaluator、
 exact-workload 手工 runner 与 deterministic test。具体而言，#94 新增 preview-then-final
-coordination、精确 preview arithmetic、Host/条件式 Metal acquisition evidence，以及闭合的
-`execution-profile-i2-inner-row-v1` record，同时不改变 canonical 15-field outer row 或
+coordination、精确 preview arithmetic、Host/条件式 Metal acquisition evidence、具备完整
+device-reservation 闭合的精确 row-scoped resident release、child-resource 先于 Host settlement
+的顺序与 aggregate status，以及闭合的 `execution-profile-i2-inner-row-v1` record，同时不改变 canonical 15-field outer row 或
 installed ABI。I2 runner 为 `EXCLUDE_FROM_ALL`，不属于 CTest；本文不声明已经完成精确
 111-slot 机器运行。Canonical outer-row/bundle/reference composition 与 B1/M1 工作仍属于
 下游任务。既有 policy-order test、`BenchmarkService`、lifecycle telemetry、ledger

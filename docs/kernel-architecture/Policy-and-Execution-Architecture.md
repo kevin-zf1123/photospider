@@ -340,6 +340,14 @@ releasing the lowest-revision entry under publication pressure; generation
 assignment alone does not bulk-clear them. This entry count neither measures
 nor admits bytes.
 
+The source-private I2 verification path additionally has an exact resident
+release operation. Under the manager mutex it validates one nonzero revision,
+the complete `StorageBinding`, and the producer identity, then extracts only
+the matching map node; destruction of the retained Value/native owner occurs
+after unlocking. A wrong identity is a no-op. This narrow operation does not
+broad-clear residency, use capacity pressure as cleanup, or alter normal
+lookup, publication, replacement, capacity, and eviction behavior.
+
 V-9 places authoritative device-memory and scratch admission in the existing
 service `ResourceLedger`, not in policy or residency. Each configured
 non-CPU `DeviceId` has isolated limits. Metal atomically reserves native
@@ -623,6 +631,16 @@ accepted current-generation observation to precede every matching child event;
 each Cancelled terminal must have exactly one descriptor-identical earlier
 cancellation, while every non-Cancelled terminal must have none. Missing,
 duplicate, late, extra, or drifted evidence invalidates all four verdicts. The
+Host settlement for each edit must in turn have a sequence strictly greater
+than every materialized child resource settlement and a steady timestamp no
+earlier than any of them. Its status is successful exactly when at least one
+child materialized and every materialized child Succeeded: preview-only and
+preview-plus-successful-final succeed, while preview-plus-cancelled-final and
+no-child fail. A sequence, time, or status contradiction makes all four axes
+Invalid without inventing a child outcome. After copying second-Metal-reuse,
+diagnostic, resource, and no-I/O facts, the Host performs the exact row-scoped
+resident release before its final snapshot; every configured device's complete
+memory-and-scratch `reserved` vector must equal the pre-row baseline. The
 output axis independently requires the caller-supplied expected preview and
 final digests to equal `i2_frozen_preview_content_digest()` and
 `i1_frozen_final_content_digest()` before candidate comparison. Expected

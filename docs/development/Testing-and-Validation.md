@@ -1884,7 +1884,13 @@ twelfth-edit (`edit_index=11`) preview/final is
 acquired twice through the same Host binding. A configured Metal device permits
 one exact-size first upload per distinct preview/final revision; the second
 access must hit the same residency. No CPU copy, readback, disk/codec access, or
-additional transfer is permitted.
+additional transfer is permitted. After second-access, diagnostic, resource,
+and no-I/O facts are copied, the Host releases only that row's resident by
+exact revision, complete binding, and producer identity before the final row
+snapshot. A wrong identity releases nothing; no broad clear, capacity-pressure
+substitute, or ordinary residency-policy change is permitted. Once local
+acquisition Values unwind, every configured device's complete memory-and-
+scratch `reserved` vector must equal its pre-row baseline.
 
 I2 uses the ADR 0010 target state machine, not an invented current API: one
 replicate-grid origin fixes a continuous 111-slot cold/warmup/measured grid,
@@ -1914,7 +1920,13 @@ conditional native-Metal tests. The product-path tests exercise preview
 visibility before final trigger and HP service, cancellation before trigger,
 post-trigger stale-final denial, equal-time newer-edit ordering, exact child
 QoS/deadlines, immutable Value acquisition reuse, and lifecycle/resource/Host
-settlement. Evidence tests also require both expected endpoint digests to match
+settlement. The Host-settlement cases independently cover preview-only,
+preview-plus-cancelled-final, preview-plus-successful-final, and no-child
+terminal shapes; they require Host sequence/time after every materialized child
+resource and status equal to the deterministic progressive aggregate. The
+residency cases cover exact and wrong identity, repeated revisions under a
+one-allocation device limit, no second transfer/allocation, and complete device
+reservation closure. Evidence tests also require both expected endpoint digests to match
 their frozen oracles before candidate comparison, distinguish synchronized
 expected/candidate forgery as Invalid from candidate-only mismatch as Fail, and
 lock the phase-aware aggregate boundary above. `i2_progressive_benchmark` is an
@@ -2301,7 +2313,7 @@ samples and a median summary cannot hide a failed process.
 | Fairness | For a complete one-second window where both B1 Graphs retain unconsumed offered demand without a producer pause, `J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`, where `x` is completed `work_units + ceil(ready_bytes/4096)`. Zero total service is invalid; p05 Jain >=0.95. While both classes remain startable, at most three Interactive starts precede Throughput. M1 also has zero headroom-caused Interactive admission failures and independently passes latency/progress. |
 | Determinism | For the same B1 job index across three replicates, fresh-process restart, and Run caps 1/8, typed logical `ContentDigest`, raw payload SHA-256, canonical manifest SHA-256, `execution-profile-semantic-trace-v1` SHA-256, and job-indexed logical/raw golden mismatch counts are all zero. |
 | Waste | `discarded_started_service / all_started_service`, using `work_units + ceil(ready_bytes/4096)`. Every started callback whose result cannot commit is charged; entered non-preemptible work drains honestly. I1/I2 Interactive <=0.25 per replicate, and M1 applies that bound to Interactive service alone; work starting after accepted cancellation/supersession is exactly zero. I2 extra filesystem/codec, CPU-copy, readback, transfer, and allocation bytes are zero under its permitted first-transfer rule. Fault-free isolated/mixed B1 discarded/duplicate/retry service is zero. |
-| Memory | Independent high-water bytes for Host retained, Host scratch, ready bytes, and configured-device memory/scratch, plus B1 active Compute I/O tasks/planned bytes. No absolute limit exceed; isolated row-owned deltas and B1 I/O counts return to the pre-row baseline/zero, and M1 shutdown returns to zero. Candidate B1/I2 peaks are <=105% of the pinned same-environment reference. Process RSS is diagnostic only. B1 planned-byte charge and event-aligned samples are mandatory, authoritative evidence for Compute I/O admission, planned-byte high-water, and final settlement; they do not establish physical memory ownership or replace RSS or ledger/device ownership evidence. |
+| Memory | Independent high-water bytes for Host retained, Host scratch, ready bytes, and configured-device memory/scratch, plus B1 active Compute I/O tasks/planned bytes. No absolute limit exceed; isolated row-owned deltas and B1 I/O counts return to the pre-row baseline/zero, and M1 shutdown returns to zero. I2 exact row-scoped resident release occurs after second-reuse evidence and before the final snapshot; every configured device's complete memory-and-scratch `reserved` vector equals its pre-row baseline. Candidate B1/I2 peaks are <=105% of the pinned same-environment reference. Process RSS is diagnostic only. B1 planned-byte charge and event-aligned samples are mandatory, authoritative evidence for Compute I/O admission, planned-byte high-water, and final settlement; they do not establish physical memory ownership or replace RSS or ledger/device ownership evidence. |
 
 Each required dimension emits `pass`, `fail`, `invalid`, or a schema-defined
 `not-applicable`; there is no composite score. Missing source evidence,

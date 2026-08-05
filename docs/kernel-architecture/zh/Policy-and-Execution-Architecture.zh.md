@@ -280,6 +280,12 @@ capacity authority。已结算 replica 可在 Run 释放后继续复用，但 ma
 native/provider retention；generation 指派本身不会批量清除它们。这个 entry 数量既不
 测量也不准入 bytes。
 
+Source-private I2 验证路径还提供精确 resident release 操作。它在 manager mutex 下验证一个
+非零 revision、完整 `StorageBinding` 与 producer identity，然后只 extract 匹配的 map node；
+解锁后才析构被保留的 Value/native owner。错误 identity 不产生任何效果。该窄操作不会 broad
+clear residency、用 capacity pressure 代替清理，也不会改变普通 lookup、publication、
+replacement、capacity 与 eviction 行为。
+
 V-9 把权威 device-memory 与 scratch admission 放入既有 service `ResourceLedger`，而不是
 policy 或 residency。每个已配置非 CPU `DeviceId` 都有隔离 limit。Metal 会在 allocation
 前原子预留 native size/alignment plan、审计 `allocatedSize`，并在 command submission 前提交
@@ -501,7 +507,14 @@ residency、lifecycle/resource settlement，以及四项相互独立的 inner ve
 唯一 accepted current-generation observation 先于每个匹配的 child event；每个 Cancelled
 terminal 必须恰有一个 descriptor 完全一致且更早的 cancellation，而所有非 Cancelled terminal
 都不得有 cancellation。缺失、重复、迟到、多余或漂移的 evidence 会使四项 verdict 全部
-Invalid。Output axis 还会在 candidate 比较前独立要求 caller 提供的 expected preview 与 final
+Invalid。每个 edit 的 Host settlement 还必须具有严格大于每个已 materialize child resource
+settlement 的 sequence，steady timestamp 也不得早于其中任何一个。其 status 当且仅当至少一个
+child 已 materialize 且所有已 materialize child 均为 Succeeded 时成功：preview-only 与
+preview 加 successful final 成功，preview 加 cancelled final 与 no-child 失败。Sequence、time
+或 status 矛盾会使四项 axis 全部 Invalid，且不得虚构 child outcome。复制第二次 Metal reuse、
+diagnostic、resource 与 no-I/O fact 后，Host 会在最终 snapshot 前执行精确 row-scoped resident
+release；每个已配置 device 的完整 memory-and-scratch `reserved` vector 必须等于 row 前
+baseline。Output axis 还会在 candidate 比较前独立要求 caller 提供的 expected preview 与 final
 digest 分别等于 `i2_frozen_preview_content_digest()` 与
 `i1_frozen_final_content_digest()`。Expected evidence 损坏时，即使 candidate evidence 与其
 同步，也属于 Invalid；expected oracle 完整时，candidate-only mismatch 属于 Fail。在 replicate
