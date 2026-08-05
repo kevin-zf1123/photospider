@@ -267,7 +267,11 @@ I2EditEvidence capture_i2_edit_evidence(
  * @note The function traverses no Value and trusts no eventual-zero backfill.
  * Each accepted current-generation observation must precede every matching
  * child event. Every Cancelled terminal must have exactly one matching earlier
- * cancellation, and every other terminal must have none.
+ * cancellation, and every other terminal must have none. Each Host settlement
+ * follows all materialized child resource settlements in both causal sequence
+ * and steady time, and its status matches deterministic progressive terminal
+ * aggregation: at least one materialized child and all such children
+ * Succeeded.
  */
 I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input);
 

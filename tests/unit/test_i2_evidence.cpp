@@ -386,6 +386,99 @@ I2ObservedVisibleOutput* find_i2_endpoint(
 }
 
 /**
+ * @brief Tests whether one evaluated row contains an exact validity reason.
+ * @param row Evaluated I2 row.
+ * @param reason Stable reason text to locate.
+ * @return True when the reason occurs at least once.
+ * @throws Nothing.
+ */
+bool has_i2_reason(const I2EpisodeInnerRow& row,
+                   const std::string& reason) noexcept {
+  return std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                   reason) != row.validity_reasons.end();
+}
+
+/**
+ * @brief Erases one edit/quality child from a homogeneous event vector.
+ * @tparam Event Child-aware I2 observation type exposing `child`.
+ * @param events Mutable event vector.
+ * @param edit_index Exact edit identity.
+ * @param quality Interactive preview or Full final selector.
+ * @return Nothing after stable erase-remove compaction.
+ * @throws Nothing for the maintained trivially movable observation types.
+ */
+template <typename Event>
+void erase_i2_child_events(std::vector<Event>* events, std::size_t edit_index,
+                           compute::ComputeRunQuality quality) {
+  events->erase(std::remove_if(events->begin(), events->end(),
+                               [edit_index, quality](const Event& event) {
+                                 return event.child.edit_index == edit_index &&
+                                        event.child.quality == quality;
+                               }),
+                events->end());
+}
+
+/**
+ * @brief Removes every lifecycle fact for one synthetic materialized child.
+ * @param input Complete mutable episode evidence.
+ * @param edit_index Exact edit identity.
+ * @param quality Interactive preview or Full final selector.
+ * @return Nothing after removing all child-owned observations.
+ * @throws Nothing for maintained observation-vector compaction.
+ * @note Current-generation, Host return, and Host settlement evidence remain
+ * request-owned and are deliberately preserved.
+ */
+void erase_i2_materialized_child(I2EpisodeEvidenceInput* input,
+                                 std::size_t edit_index,
+                                 compute::ComputeRunQuality quality) {
+  erase_i2_child_events(&input->observations.service_starts, edit_index,
+                        quality);
+  erase_i2_child_events(&input->observations.cancellations, edit_index,
+                        quality);
+  erase_i2_child_events(&input->observations.terminals, edit_index, quality);
+  erase_i2_child_events(&input->observations.final_triggers, edit_index,
+                        quality);
+  erase_i2_child_events(&input->observations.visible_outputs, edit_index,
+                        quality);
+  erase_i2_child_events(&input->observations.run_quiescences, edit_index,
+                        quality);
+  erase_i2_child_events(&input->observations.resource_settlements, edit_index,
+                        quality);
+}
+
+/**
+ * @brief Converts one synthetic successful final into a cancelled final.
+ * @param input Complete mutable episode evidence.
+ * @param edit_index Exact edit whose final is changed.
+ * @return Nothing after adding exact earlier cancellation and failed Host
+ * status.
+ * @throws std::logic_error when the expected final terminal is absent.
+ * @throws std::bad_alloc when cancellation storage grows.
+ * @note The removed final-visible sequence is reused between service start and
+ * terminal, preserving unique request-causal order.
+ */
+void cancel_i2_final(I2EpisodeEvidenceInput* input, std::size_t edit_index) {
+  const auto terminal = std::find_if(
+      input->observations.terminals.begin(),
+      input->observations.terminals.end(),
+      [edit_index](const I2ObservedTerminal& event) {
+        return event.child.edit_index == edit_index &&
+               event.child.quality == compute::ComputeRunQuality::Full;
+      });
+  if (terminal == input->observations.terminals.end()) {
+    throw std::logic_error("Synthetic I2 final terminal is missing.");
+  }
+  erase_i2_child_events(&input->observations.visible_outputs, edit_index,
+                        compute::ComputeRunQuality::Full);
+  terminal->kind = compute::ComputeRunTerminalKind::Cancelled;
+  input->observations.cancellations.push_back(I2ObservedCancellation{
+      terminal->child, compute::ComputeRunCancellationReason::Superseded,
+      checked_i1_time_add(input->edits[edit_index].admission_sample, 6500us),
+      terminal->causal_sequence - 1U});
+  input->edits[edit_index].settlement_status->ok = false;
+}
+
+/**
  * @brief Creates aggregate rows whose measured latency and waste both pass.
  * @return Complete continuous grid with 100 identical measured samples.
  * @throws std::bad_alloc when row storage grows.
@@ -413,6 +506,169 @@ TEST(I2Evidence, CompleteEpisodePassesIndependentVerdicts) {
   EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.latencies.preview, 2ms);
   EXPECT_EQ(row.latencies.final, 6ms);
+}
+
+/**
+ * @brief Proves a preview-only materialization settles Host success exactly.
+ * @throws Nothing when the single successful child remains causally closed.
+ */
+TEST(I2Evidence, PreviewOnlyHostSettlementMatchesSuccessfulOutcome) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  erase_i2_materialized_child(&input, 0U, compute::ComputeRunQuality::Full);
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(row.validity_reasons.empty());
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves a successful preview plus cancelled final settles Host failure.
+ * @throws Nothing when cancellation, terminal, resource, and Host order close.
+ */
+TEST(I2Evidence, CancelledFinalHostSettlementMatchesFailedOutcome) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  cancel_i2_final(&input, 0U);
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(row.validity_reasons.empty());
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves successful progressive children reject failed Host status.
+ * @throws Nothing when the status contradiction makes every row axis Invalid.
+ */
+TEST(I2Evidence, SuccessfulChildrenRejectFailedHostSettlement) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  input.edits[0U].settlement_status->ok = false;
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(has_i2_reason(
+      row, "I2 Host settlement contradicts progressive child outcomes"));
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves a cancelled final rejects successful Host settlement status.
+ * @throws Nothing when the status contradiction makes every row axis Invalid.
+ */
+TEST(I2Evidence, CancelledFinalRejectsSuccessfulHostSettlement) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  cancel_i2_final(&input, 0U);
+  input.edits[0U].settlement_status->ok = true;
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(has_i2_reason(
+      row, "I2 Host settlement contradicts progressive child outcomes"));
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves no materialized child maps to failed Host product status.
+ * @throws Nothing when missing preview remains independently workload-Invalid.
+ * @note The frozen workload still requires an early preview before the next
+ * edit; this test isolates Host aggregation without fabricating child outcome.
+ */
+TEST(I2Evidence, NoMaterializedChildRequiresFailedHostSettlement) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  erase_i2_materialized_child(&input, 0U,
+                              compute::ComputeRunQuality::Interactive);
+  erase_i2_materialized_child(&input, 0U, compute::ComputeRunQuality::Full);
+  input.edits[0U].settlement_status->ok = false;
+
+  const I2EpisodeInnerRow legal_status = evaluate_i2_episode(input);
+  EXPECT_TRUE(has_i2_reason(
+      legal_status, "I2 early edit did not materialize a preview child"));
+  EXPECT_FALSE(has_i2_reason(
+      legal_status,
+      "I2 Host settlement contradicts progressive child outcomes"));
+
+  input.edits[0U].settlement_status->ok = true;
+  const I2EpisodeInnerRow contradictory_status =
+      evaluate_i2_episode(std::move(input));
+  EXPECT_TRUE(has_i2_reason(
+      contradictory_status,
+      "I2 Host settlement contradicts progressive child outcomes"));
+}
+
+/**
+ * @brief Proves Host causal sequence must follow final resource settlement.
+ * @throws Nothing when swapping two unique sequences fails closed.
+ */
+TEST(I2Evidence, HostSequenceBeforeChildResourceSettlementIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  auto host = std::find_if(input.observations.host_settlements.begin(),
+                           input.observations.host_settlements.end(),
+                           [](const I1ObservedHostSettlement& event) {
+                             return event.edit_index == 0U;
+                           });
+  auto resource = std::find_if(
+      input.observations.resource_settlements.begin(),
+      input.observations.resource_settlements.end(),
+      [](const I2ObservedRunLifecycleTransition& event) {
+        return event.child.edit_index == 0U &&
+               event.child.quality == compute::ComputeRunQuality::Full;
+      });
+  ASSERT_NE(host, input.observations.host_settlements.end());
+  ASSERT_NE(resource, input.observations.resource_settlements.end());
+  std::swap(host->causal_sequence, resource->causal_sequence);
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(has_i2_reason(
+      row, "I2 Host settlement did not follow all child resource settlements"));
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves Host steady time cannot precede child resource settlement.
+ * @throws Nothing when sequence remains legal but time fails closed.
+ */
+TEST(I2Evidence, HostTimeBeforeChildResourceSettlementIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  auto host = std::find_if(input.observations.host_settlements.begin(),
+                           input.observations.host_settlements.end(),
+                           [](const I1ObservedHostSettlement& event) {
+                             return event.edit_index == 0U;
+                           });
+  const auto resource = std::find_if(
+      input.observations.resource_settlements.begin(),
+      input.observations.resource_settlements.end(),
+      [](const I2ObservedRunLifecycleTransition& event) {
+        return event.child.edit_index == 0U &&
+               event.child.quality == compute::ComputeRunQuality::Full;
+      });
+  ASSERT_NE(host, input.observations.host_settlements.end());
+  ASSERT_NE(resource, input.observations.resource_settlements.end());
+  host->observed_at = resource->observed_at - 1us;
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(has_i2_reason(
+      row, "I2 Host settlement did not follow all child resource settlements"));
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
 }
 
 /**
@@ -587,6 +843,85 @@ TEST(I2Evidence, MetalBindingByteSizeDriftIsInvalid) {
                 "I2 Metal binding/allocation/storage-byte facts are not exact "
                 "reuse"});
   EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves the second Metal reuse cannot add transfer or allocation work.
+ * @throws Nothing when otherwise-valid diagnostics fail output closed.
+ */
+TEST(I2Evidence, MetalSecondReuseCounterDriftIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  ASSERT_FALSE(input.observations.visible_outputs.empty());
+  auto& acquisition = input.observations.visible_outputs.front().acquisition;
+  ASSERT_TRUE(acquisition.has_value());
+  acquisition->metal = make_i2_metal_acquisition(acquisition->host_first);
+  EXPECT_EQ(evaluate_i2_episode(input).output_verdict, I1Verdict::Pass);
+  ASSERT_TRUE(acquisition->metal.after_second.has_value());
+  ++acquisition->metal.after_second->submission_count;
+  ++acquisition->metal.after_second->total_allocations;
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(has_i2_reason(
+      row, "I2 Metal executor counters do not prove one transfer then reuse"));
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves second reuse cannot change retained device-memory ownership.
+ * @throws Nothing when otherwise-valid resource evidence fails output closed.
+ */
+TEST(I2Evidence, MetalSecondReuseDeviceMemoryDriftIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  ASSERT_FALSE(input.observations.visible_outputs.empty());
+  auto& acquisition = input.observations.visible_outputs.front().acquisition;
+  ASSERT_TRUE(acquisition.has_value());
+  acquisition->metal = make_i2_metal_acquisition(acquisition->host_first);
+  EXPECT_EQ(evaluate_i2_episode(input).output_verdict, I1Verdict::Pass);
+  ASSERT_TRUE(acquisition->metal.resources_after_second.has_value());
+  acquisition->metal.resources_after_second->reserved.device_memory_bytes =
+      acquisition->host_first.storage_bytes;
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(has_i2_reason(
+      row, "I2 Metal resources changed during reuse or retained scratch"));
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves final device-memory reservation must equal its row baseline.
+ * @throws Nothing when memory alone becomes Fail with other axes independent.
+ * @note Scratch remains unchanged, so this regression detects the previously
+ * omitted persistent device-memory component specifically.
+ */
+TEST(I2Evidence, DeviceMemoryReservationDriftIsMemoryFailure) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  ResourceLedger::DeviceSnapshot baseline;
+  baseline.device = DeviceId(DeviceBackend::Metal);
+  baseline.limits = DeviceResourceVector{1024U, 512U};
+  baseline.available = baseline.limits;
+  input.baseline.device_resources.push_back(baseline);
+  ResourceLedger::DeviceSnapshot final = baseline;
+  final.reserved.device_memory_bytes = 16U;
+  final.high_water.device_memory_bytes = 16U;
+  final.available.device_memory_bytes -= 16U;
+  input.final_snapshot.device_resources.push_back(final);
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_TRUE(row.validity_reasons.empty());
+  EXPECT_FALSE(row.memory_settled);
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Fail);
+  EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
 }
 
 /**

@@ -465,7 +465,7 @@ bool validate_i2_acquisition(const I2ValueAcquisitionEvidence& access,
   if (access.metal.resources_after_first->reserved.device_scratch_bytes != 0U ||
       !device_snapshot_equal(*access.metal.resources_after_first,
                              *access.metal.resources_after_second)) {
-    fail("I2 Metal resource evidence did not settle scratch before reuse");
+    fail("I2 Metal resources changed during reuse or retained scratch");
   }
   return valid;
 }
@@ -708,7 +708,6 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
   using RunKey = std::pair<std::size_t, std::uint64_t>;
   std::map<RunKey, I2ObservedTerminal> terminals;
   std::set<std::uint64_t> global_run_ids;
-  std::array<std::size_t, kI1EditCount> terminal_counts{};
   for (const I2ObservedTerminal& terminal :
        row.evidence.observations.terminals) {
     const I2ObservedChildDescriptor& child = terminal.child;
@@ -744,7 +743,6 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
       structural_failure("I2 child descriptor/terminal identity is malformed");
       continue;
     }
-    ++terminal_counts[child.edit_index];
     I2AcceptedProductIdentity& product =
         *row.accepted_products[child.edit_index];
     std::optional<std::uint64_t>& slot =
@@ -758,10 +756,10 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
     }
   }
   for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-    if (terminal_counts[edit_index] != 0U &&
-        terminal_counts[edit_index] != 2U) {
-      structural_failure(
-          "I2 materialized request did not settle both children");
+    const auto& product = row.accepted_products[edit_index];
+    if (product.has_value() && product->final_run_id.has_value() &&
+        !product->preview_run_id.has_value()) {
+      structural_failure("I2 final child materialized without its preview");
     }
   }
 
@@ -1069,10 +1067,41 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
   for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
     if (host_settlement_counts[edit_index] != 1U) {
       structural_failure("I2 accepted edit lacks exactly one Host settlement");
-    } else if (row.evidence.edits[edit_index].host_return.has_value() &&
-               host_settlements[edit_index]->observed_at <
-                   row.evidence.edits[edit_index].host_return->return_time) {
+      continue;
+    }
+    const I1ObservedHostSettlement& host = *host_settlements[edit_index];
+    if (row.evidence.edits[edit_index].host_return.has_value() &&
+        host.observed_at <
+            row.evidence.edits[edit_index].host_return->return_time) {
       structural_failure("I2 Host settlement precedes its scheduling return");
+    }
+
+    bool materialized = false;
+    bool all_materialized_succeeded = true;
+    for (const auto& [key, terminal] : terminals) {
+      if (key.first != edit_index) {
+        continue;
+      }
+      materialized = true;
+      all_materialized_succeeded =
+          all_materialized_succeeded &&
+          terminal.kind == compute::ComputeRunTerminalKind::Succeeded;
+      const auto settled = settlements.find(key);
+      if (settled == settlements.end() ||
+          host.causal_sequence <= settled->second.causal_sequence ||
+          host.observed_at < settled->second.observed_at) {
+        structural_failure(
+            "I2 Host settlement did not follow all child resource "
+            "settlements");
+      }
+    }
+    const bool progressive_succeeded =
+        materialized && all_materialized_succeeded;
+    if (row.evidence.edits[edit_index].settlement_status.has_value() &&
+        row.evidence.edits[edit_index].settlement_status->ok !=
+            progressive_succeeded) {
+      structural_failure(
+          "I2 Host settlement contradicts progressive child outcomes");
     }
   }
 
@@ -1108,9 +1137,7 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input) {
       const auto& after = row.evidence.final_snapshot.device_resources[index];
       memory_valid =
           memory_valid && before.device == after.device &&
-          before.limits == after.limits &&
-          after.reserved.device_scratch_bytes ==
-              before.reserved.device_scratch_bytes &&
+          before.limits == after.limits && before.reserved == after.reserved &&
           device_resources_not_less(before.high_water, after.high_water) &&
           device_resources_within(after.reserved, after.limits) &&
           device_resources_within(after.high_water, after.limits);

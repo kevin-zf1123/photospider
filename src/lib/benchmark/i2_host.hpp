@@ -131,7 +131,9 @@ struct I2MetalAcquisitionEvidence final {
   /** @brief Device ledger after first transfer and scratch settlement. */
   std::optional<ResourceLedger::DeviceSnapshot> resources_after_first;
 
-  /** @brief Device ledger after second reuse. */
+  /**
+   * @brief Device ledger after second reuse and before exact row release.
+   */
   std::optional<ResourceLedger::DeviceSnapshot> resources_after_second;
 };
 
@@ -140,8 +142,9 @@ struct I2MetalAcquisitionEvidence final {
  *
  * @throws std::bad_alloc when nested optional/string ownership allocates.
  * @note The caller supplies one immutable visible Value. This record releases
- * every payload/read owner before return and therefore cannot extend product
- * currentness or lifecycle settlement.
+ * every payload/read owner and any conditional exact Metal resident before
+ * return and therefore cannot extend product currentness, device reservation,
+ * or lifecycle settlement.
  */
 struct I2ValueAcquisitionEvidence final {
   /** @brief First direct Host read acquisition. */
@@ -195,7 +198,10 @@ class I2Host {
    * @throws Validation, ReadyFence, native executor, resource, allocation, and
    * synchronization failures unchanged.
    * @note This verification-only method executes no Graph work, readback,
-   * filesystem, codec, cache, output-store, or document persistence.
+   * filesystem, codec, cache, output-store, or document persistence. After
+   * copying second-reuse facts it removes only the exact acquired Metal
+   * revision/binding/producer, so row cleanup changes no ordinary residency
+   * lookup, publication, replacement, or capacity policy.
    */
   virtual I2ValueAcquisitionEvidence acquire_i2_value(
       Value value, const I2ValueLineage& lineage) = 0;

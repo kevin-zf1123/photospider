@@ -51,7 +51,9 @@ enum class ResidencyCompletionDisposition : std::uint32_t {
  * allocations, scratch, cache policy, or visible Graph commit authority.
  * Completed replicas are retained up to a fixed entry-count capacity;
  * publication beyond that bound evicts the oldest logical revision and
- * releases its strong native/provider owners.
+ * releases its strong native/provider owners. A source-private verification
+ * caller may also release one complete revision/binding/producer identity
+ * without clearing or changing ordinary cache policy.
  * Canonical generation rows are Graph-scoped maintenance state and retire
  * after exact Graph close has drained every Run and pending native completion.
  *
@@ -215,6 +217,23 @@ class ResidencyManager final {
   bool discard_transfer(const DeviceCompletionIdentity& identity);
 
   /**
+   * @brief Releases one Ready resident only when every copied identity matches.
+   * @param revision Exact logical revision of the retained replica.
+   * @param binding Complete device/allocation/domain/size/visibility binding.
+   * @param producer Exact producer that published the retained replica.
+   * @return True only when the matching resident was removed.
+   * @throws std::system_error when synchronization fails.
+   * @note Revision, device, and memory domain select one candidate; complete
+   * binding and producer equality authorize removal. Missing or mismatched
+   * facts are a no-op. The removed Value and its native/provider owners are
+   * destroyed after releasing the manager mutex. This source-private seam is
+   * intended for row-scoped verification cleanup and does not alter ordinary
+   * lookup, publication, capacity, or replacement policy.
+   */
+  bool release_resident(ValueRevisionId revision, const StorageBinding& binding,
+                        ProducerIdentity producer);
+
+  /**
    * @brief Finds one exact Ready replica without waiting or implicit transfer.
    * @param revision Logical revision to locate.
    * @param device Concrete target device.
@@ -323,8 +342,8 @@ class ResidencyManager final {
   std::map<std::uint64_t, DeviceCompletionIdentity> pending_transfers_;
   /**
    * @brief Bounded Ready replicas indexed oldest revision first.
-   * @note Values retain native/provider owners until replacement, eviction, or
-   * manager destruction.
+   * @note Values retain native/provider owners until replacement, capacity
+   * eviction, exact verification release, or manager destruction.
    */
   std::map<ReplicaKey, Value> resident_values_;
 };

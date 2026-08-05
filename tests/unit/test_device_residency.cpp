@@ -639,6 +639,118 @@ TEST(DeviceResidency,
 }
 
 /**
+ * @brief Proves exact resident release requires every immutable identity fact.
+ * @return Nothing; GoogleTest reports no-op, lookup, or lease mismatches.
+ * @throws Fake publication, ledger, identity, and manager exceptions.
+ * @note Wrong producer and complete-binding drift preserve the rightful row.
+ * Exact revision/binding/producer removal then releases the manager's sole
+ * remaining strong native-and-lease owner outside its mutex.
+ */
+TEST(DeviceResidency, ExactReleaseRejectsWrongIdentityAndRemovesOnlyMatch) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+  PendingLeasedUpload upload = make_pending_leased_upload(ledger);
+  const DeviceCompletionIdentity identity(make_seed(13U, 131U), upload.source,
+                                          upload.destination.value);
+  const ValueRevisionId revision = upload.destination.value.revision_id();
+  const StorageBinding binding = upload.destination.value.storage_binding();
+  const ProducerIdentity producer =
+      upload.destination.value.producer_identity();
+  const std::weak_ptr<FakeLeasedDeviceAllocation> owner =
+      upload.destination_owner;
+  manager.observe_generation(identity.seed());
+  ASSERT_NO_THROW(manager.register_transfer(identity));
+  ASSERT_EQ(manager.publish_ready_transfer(identity, upload.source,
+                                           upload.destination.value, nullptr,
+                                           upload.destination.producer),
+            ResidencyCompletionDisposition::Published);
+  upload.destination.value = Value();
+
+  StorageBinding wrong_binding = binding;
+  ++wrong_binding.byte_size;
+  EXPECT_FALSE(manager.release_resident(revision, wrong_binding, producer));
+  EXPECT_FALSE(manager.release_resident(revision, binding,
+                                        upload.source.producer_identity()));
+  EXPECT_FALSE(manager.release_resident(ValueRevisionId{}, binding, producer));
+  EXPECT_TRUE(
+      manager.find(revision, metal, MemoryDomain::DeviceLocal).has_value());
+  EXPECT_FALSE(owner.expired());
+
+  EXPECT_TRUE(manager.release_resident(revision, binding, producer));
+  EXPECT_FALSE(manager.release_resident(revision, binding, producer));
+  EXPECT_FALSE(
+      manager.find(revision, metal, MemoryDomain::DeviceLocal).has_value());
+  EXPECT_TRUE(owner.expired());
+  const auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves row-scoped releases avoid low-limit cross-revision buildup.
+ * @return Nothing; GoogleTest reports admission, reuse, or byte drift.
+ * @throws Fake publication, ledger, identity, and manager exceptions.
+ * @note The limit fits exactly one allocation. Each distinct revision is
+ * looked up twice without new ownership, then exactly released before the next
+ * revision is allocated; capacity eviction is never used as cleanup.
+ */
+TEST(DeviceResidency, ExactRowReleasePreventsCrossRevisionReservationBuildup) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+
+  for (std::uint64_t generation = 1U; generation <= 5U; ++generation) {
+    PendingLeasedUpload upload = make_pending_leased_upload(ledger);
+    const DeviceCompletionIdentity identity(
+        make_seed(generation, 200U + generation), upload.source,
+        upload.destination.value);
+    const ValueRevisionId revision = upload.destination.value.revision_id();
+    const StorageBinding binding = upload.destination.value.storage_binding();
+    const ProducerIdentity producer =
+        upload.destination.value.producer_identity();
+    const std::weak_ptr<FakeLeasedDeviceAllocation> owner =
+        upload.destination_owner;
+    manager.observe_generation(identity.seed());
+    ASSERT_NO_THROW(manager.register_transfer(identity));
+    ASSERT_EQ(manager.publish_ready_transfer(identity, upload.source,
+                                             upload.destination.value, nullptr,
+                                             upload.destination.producer),
+              ResidencyCompletionDisposition::Published);
+    upload.destination.value = Value();
+
+    {
+      const std::optional<Value> first =
+          manager.find(revision, metal, MemoryDomain::DeviceLocal);
+      const std::optional<Value> second =
+          manager.find(revision, metal, MemoryDomain::DeviceLocal);
+      ASSERT_TRUE(first.has_value());
+      ASSERT_TRUE(second.has_value());
+      EXPECT_EQ(first->storage_binding(), binding);
+      EXPECT_EQ(second->storage_binding(), binding);
+      const auto retained = ledger.device_snapshot(metal);
+      ASSERT_TRUE(retained.has_value());
+      EXPECT_EQ(retained->reserved,
+                (DeviceResourceVector{kAllocationBytes, 0U}));
+    }
+
+    ASSERT_TRUE(manager.release_resident(revision, binding, producer));
+    EXPECT_TRUE(owner.expired());
+    const auto released = ledger.device_snapshot(metal);
+    ASSERT_TRUE(released.has_value());
+    EXPECT_EQ(released->reserved, DeviceResourceVector{});
+  }
+}
+
+/**
  * @brief Proves stale, rejected, cancelled, and reused identities cannot
  * release or duplicate another fake allocation's unique memory lease.
  * @return Nothing; GoogleTest reports disposition or exact-release mismatch.

@@ -436,7 +436,9 @@ bool wait_for_i2_cancellation(const I2EpisodeObservationCollector& collector,
  * @throws Product, filesystem, native Metal, digest, and synchronization
  * failures unchanged to GoogleTest.
  * @note The 16x16 fixture validates long-lived behavior only; it is not the
- * exact 111-slot workload and asserts no machine SLO percentile.
+ * exact 111-slot workload and asserts no machine SLO percentile. Conditional
+ * Metal acquisition must return every configured device reservation to its
+ * exact pre-acquisition value before this focused row continues.
  */
 TEST(I2ProductPath, PreviewTriggersFinalAndAcquisitionsReuseExactBindings) {
   ScopedI2TempDirectory temp;
@@ -459,7 +461,20 @@ TEST(I2ProductPath, PreviewTriggersFinalAndAcquisitionsReuseExactBindings) {
   const OperationStatus settled = result.value.get();
   ASSERT_TRUE(settled.ok) << settled.message;
   ASSERT_TRUE(wait_for_i2_settlement(observations, 5s));
+  const I1ExecutionSnapshot before_acquisitions =
+      i2_host->i2_execution_snapshot(0U, 4096U);
   ASSERT_EQ(observations.freeze_visible_outputs(*i2_host), 2U);
+  const I1ExecutionSnapshot after_acquisitions = i2_host->i2_execution_snapshot(
+      before_acquisitions.lifecycle.snapshot_cut, 4096U);
+  ASSERT_EQ(before_acquisitions.device_resources.size(),
+            after_acquisitions.device_resources.size());
+  for (std::size_t index = 0U;
+       index < before_acquisitions.device_resources.size(); ++index) {
+    EXPECT_EQ(before_acquisitions.device_resources[index].device,
+              after_acquisitions.device_resources[index].device);
+    EXPECT_EQ(before_acquisitions.device_resources[index].reserved,
+              after_acquisitions.device_resources[index].reserved);
+  }
 
   const I2EpisodeObservationSnapshot snapshot = observations.snapshot();
   ASSERT_FALSE(snapshot.overflowed);

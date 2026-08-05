@@ -5473,6 +5473,23 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
   return DeviceResidentValueAcquisition{std::move(*resident), true};
 }
 
+/** @copydoc ExecutionService::release_metal_resident_value */
+bool ExecutionService::release_metal_resident_value(
+    ValueRevisionId revision, const StorageBinding& binding,
+    ProducerIdentity producer) {
+  if (binding.device != DeviceId(DeviceBackend::Metal) ||
+      binding.memory_domain != MemoryDomain::DeviceLocal) {
+    return false;
+  }
+  const std::shared_ptr<execution::ResidencyManager> residency =
+      pool_->device_executors.residency_manager();
+  if (!residency) {
+    throw std::logic_error(
+        "Metal resident release requires the process residency manager.");
+  }
+  return residency->release_resident(revision, binding, producer);
+}
+
 /** @copydoc ExecutionService::submit_initial_task_handles */
 void ExecutionService::submit_initial_task_handles(
     std::vector<ExecutionTaskHandle>&& handles, int total_task_count,

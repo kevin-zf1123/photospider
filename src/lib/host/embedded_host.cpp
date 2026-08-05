@@ -2356,6 +2356,90 @@ benchmark::I2ValueAccessEvidence observe_i2_host_access(const Value& value) {
 }
 
 /**
+ * @brief Guarantees row-scoped cleanup of one exact I2 Metal resident.
+ *
+ * The guard records only immutable replica identity after the first successful
+ * acquisition. The normal path calls `release()` after second-reuse evidence
+ * is copied and treats a mismatch as an invariant failure. Stack unwinding
+ * retries best-effort cleanup without replacing the primary exception.
+ *
+ * @throws Nothing for construction and destruction.
+ * @note The guard owns no Value, native allocation, ledger lease, executor,
+ * Graph, or cache authority. Ordinary product paths never construct it.
+ */
+class I2MetalResidentReleaseGuard final {
+ public:
+  /**
+   * @brief Captures the exact acquired resident identity.
+   * @param service Process execution service owning residency.
+   * @param revision Exact logical revision.
+   * @param binding Complete Metal binding including allocation identity.
+   * @param producer Exact resident producer identity.
+   * @throws Nothing.
+   */
+  I2MetalResidentReleaseGuard(compute::ExecutionService& service,
+                              ValueRevisionId revision, StorageBinding binding,
+                              ProducerIdentity producer) noexcept
+      : service_(&service),
+        revision_(revision),
+        binding_(binding),
+        producer_(producer) {}
+
+  /**
+   * @brief Performs best-effort exact cleanup during exceptional unwinding.
+   * @throws Nothing; synchronization failures leave the primary exception
+   * authoritative.
+   */
+  ~I2MetalResidentReleaseGuard() noexcept {
+    if (!active_) {
+      return;
+    }
+    try {
+      (void)service_->release_metal_resident_value(revision_, binding_,
+                                                   producer_);
+    } catch (...) {
+    }
+  }
+
+  /** @brief Prevents duplicating exact cleanup authority. */
+  I2MetalResidentReleaseGuard(const I2MetalResidentReleaseGuard&) = delete;
+  /** @brief Prevents replacing exact cleanup authority. */
+  I2MetalResidentReleaseGuard& operator=(const I2MetalResidentReleaseGuard&) =
+      delete;
+  /** @brief Prevents moving exact cleanup across lexical row scope. */
+  I2MetalResidentReleaseGuard(I2MetalResidentReleaseGuard&&) = delete;
+  /** @brief Prevents move-assigning exact cleanup authority. */
+  I2MetalResidentReleaseGuard& operator=(I2MetalResidentReleaseGuard&&) =
+      delete;
+
+  /**
+   * @brief Releases the exact resident on the normal evidence path.
+   * @return True only when the recorded resident was removed.
+   * @throws ExecutionService registry or synchronization failures unchanged.
+   * @note The guard becomes inactive after a non-throwing attempt, including
+   * an identity mismatch; the caller must fail closed on false.
+   */
+  bool release() {
+    const bool released =
+        service_->release_metal_resident_value(revision_, binding_, producer_);
+    active_ = false;
+    return released;
+  }
+
+ private:
+  /** @brief Borrowed process service that outlives this stack guard. */
+  compute::ExecutionService* service_ = nullptr;
+  /** @brief Exact logical revision copied from the first acquisition. */
+  ValueRevisionId revision_;
+  /** @brief Complete device binding copied from the first acquisition. */
+  StorageBinding binding_;
+  /** @brief Exact producer copied from the first acquisition. */
+  ProducerIdentity producer_;
+  /** @brief Whether exceptional cleanup remains armed. */
+  bool active_ = true;
+};
+
+/**
  * @brief Converts backend plugin load report into a public report.
  *
  * @param report Backend plugin load report.
@@ -2835,6 +2919,10 @@ class EmbeddedHost final : public Host,
         state_->execution_service->acquire_metal_resident_value(
             value, width, height, completion_seed);
     const StorageBinding first_binding = first.value.storage_binding();
+    const ProducerIdentity first_producer = first.value.producer_identity();
+    I2MetalResidentReleaseGuard resident_release(*state_->execution_service,
+                                                 first.value.revision_id(),
+                                                 first_binding, first_producer);
     if (!first.value.valid() ||
         first.value.revision_id() != value.revision_id() ||
         first_binding.device != metal_device ||
@@ -2865,6 +2953,7 @@ class EmbeddedHost final : public Host,
         AccessTarget{metal_device, MemoryDomain::DeviceLocal, false, false});
     if (!second.value.valid() ||
         second.value.revision_id() != value.revision_id() ||
+        second.value.producer_identity() != first_producer ||
         second_binding != first_binding ||
         second_plan.kind() != AccessPlanKind::Direct ||
         second_plan.transfer_bytes() != 0U) {
@@ -2885,6 +2974,10 @@ class EmbeddedHost final : public Host,
         state_->execution_service->device_resource_snapshot(metal_device);
     evidence.io_after =
         state_->execution_service->compute_io_executor().snapshot();
+    if (!resident_release.release()) {
+      throw std::logic_error(
+          "I2 Metal resident changed before exact row cleanup.");
+    }
     return evidence;
   }
 

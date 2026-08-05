@@ -270,6 +270,30 @@ bool ResidencyManager::discard_transfer(
   return true;
 }
 
+/** @copydoc ResidencyManager::release_resident */
+bool ResidencyManager::release_resident(ValueRevisionId revision,
+                                        const StorageBinding& binding,
+                                        ProducerIdentity producer) {
+  if (!revision.valid() || !binding.allocation.valid() || !producer.valid()) {
+    return false;
+  }
+
+  std::map<ReplicaKey, Value>::node_type released;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto resident = resident_values_.find(
+        ReplicaKey{revision.value(), binding.device, binding.memory_domain});
+    if (resident == resident_values_.end() ||
+        resident->second.revision_id() != revision ||
+        resident->second.storage_binding() != binding ||
+        resident->second.producer_identity() != producer) {
+      return false;
+    }
+    released = resident_values_.extract(resident);
+  }
+  return !released.empty();
+}
+
 /** @copydoc ResidencyManager::find */
 std::optional<Value> ResidencyManager::find(ValueRevisionId revision,
                                             DeviceId device,

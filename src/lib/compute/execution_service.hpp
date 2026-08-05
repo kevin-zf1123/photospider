@@ -1218,6 +1218,22 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       const execution::DeviceCompletionSeed& completion_seed);
 
   /**
+   * @brief Releases one exact process-resident Metal Value after I2 capture.
+   * @param revision Exact logical revision copied from the acquired Value.
+   * @param binding Complete acquired Metal binding, including allocation.
+   * @param producer Exact producer copied from the acquired Value.
+   * @return True only when the complete identity removed one resident.
+   * @throws std::logic_error when the process registry lacks its manager.
+   * @throws std::system_error when residency synchronization fails.
+   * @note This source-private verification cleanup delegates to exact manager
+   * identity matching. Wrong facts are a no-op, and ordinary lookup,
+   * publication, replacement, and capacity behavior never invoke it.
+   */
+  bool release_metal_resident_value(ValueRevisionId revision,
+                                    const StorageBinding& binding,
+                                    ProducerIdentity producer);
+
+  /**
    * @brief Preallocates native freshness state before Graph publication.
    * @param graph_instance_id Exact live Graph identity.
    * @param identity Prepared canonical request lineage; its generation is not
