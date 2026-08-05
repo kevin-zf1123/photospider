@@ -254,9 +254,13 @@ I2EpisodeInnerRow evaluate_i2_episode(I2EpisodeEvidenceInput input);
 
 /**
  * @brief Aggregates one exact continuous 111-slot I2 replicate.
- * @param rows Evaluated rows in any order; slots must be unique and complete.
+ * @param rows Evaluated rows in any order; slots must be unique and complete,
+ * share one exact grid origin and stride-111 terminal boundary, and retain
+ * checked-derived episode origins for their slot identities.
  * @return Measured percentiles/service sums and four verdicts.
  * @throws std::bad_alloc when indexing, copying, or sorting allocates.
+ * @note Checked grid arithmetic failures are captured as Invalid summary
+ * evidence and never escape as arithmetic exceptions.
  */
 I2ReplicateSummary evaluate_i2_replicate(
     const std::vector<I2EpisodeInnerRow>& rows);

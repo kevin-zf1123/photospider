@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -65,6 +66,70 @@ I2ValueAcquisitionEvidence make_i2_acquisition(const Value& value) {
   result.metal.available = false;
   result.metal.unavailable_reason =
       "not-applicable: process Metal executor unavailable";
+  return result;
+}
+
+/**
+ * @brief Creates complete synthetic one-transfer/one-reuse Metal evidence.
+ * @param host Exact first Host access whose revision and byte envelope move.
+ * @return Closed available-Metal evidence with distinct device allocation.
+ * @throws Value allocation or optional-plan construction failures unchanged.
+ * @note A second tiny CPU Value mints a distinct allocation identity; only its
+ * authority-free identity is retained while the synthetic binding is relabeled
+ * as device-local Metal storage.
+ */
+I2MetalAcquisitionEvidence make_i2_metal_acquisition(
+    const I2ValueAccessEvidence& host) {
+  const Value allocation_source = make_i2_evidence_value();
+  StorageBinding metal_binding = allocation_source.storage_binding();
+  metal_binding.device = DeviceId(DeviceBackend::Metal);
+  metal_binding.memory_domain = MemoryDomain::DeviceLocal;
+  metal_binding.byte_size = host.storage_bytes;
+  metal_binding.host_visible = false;
+
+  const AccessTarget transfer_target{DeviceId(DeviceBackend::Metal),
+                                     MemoryDomain::DeviceLocal, false, true};
+  const AccessTarget reuse_target{DeviceId(DeviceBackend::Metal),
+                                  MemoryDomain::DeviceLocal, false, false};
+  I2MetalAcquisitionEvidence result;
+  result.available = true;
+  result.first = I2ValueAccessEvidence{
+      AccessPlan{AccessPlanKind::Transfer, host.revision.value(), host.binding,
+                 transfer_target, VisibilityObligations{}, host.storage_bytes},
+      host.revision,
+      metal_binding,
+      metal_binding.allocation,
+      host.storage_bytes,
+      true};
+  result.second = I2ValueAccessEvidence{
+      AccessPlan{AccessPlanKind::Direct, host.revision.value(), metal_binding,
+                 reuse_target, VisibilityObligations{}, 0U},
+      host.revision,
+      metal_binding,
+      metal_binding.allocation,
+      host.storage_bytes,
+      false};
+
+  execution::DeviceExecutorDiagnostics before;
+  before.device = Device::GPU_METAL;
+  before.queue_ready = true;
+  execution::DeviceExecutorDiagnostics after_first = before;
+  after_first.submission_count = 1U;
+  after_first.invocation_count = 1U;
+  after_first.total_allocations = 2U;
+  result.before = before;
+  result.after_first = after_first;
+  result.after_second = after_first;
+
+  ResourceLedger::DeviceSnapshot resources_before;
+  resources_before.device = DeviceId(DeviceBackend::Metal);
+  resources_before.limits.device_memory_bytes = 1U << 20U;
+  resources_before.available = resources_before.limits;
+  ResourceLedger::DeviceSnapshot resources_after = resources_before;
+  resources_after.high_water.device_memory_bytes = host.storage_bytes;
+  result.resources_before = resources_before;
+  result.resources_after_first = resources_after;
+  result.resources_after_second = resources_after;
   return result;
 }
 
@@ -133,14 +198,17 @@ I2ObservedVisibleOutput make_i2_visible(
 /**
  * @brief Creates one structurally complete synthetic I2 episode.
  * @param slot Continuous grid slot in `[0,110]`.
+ * @param grid_origin Replicate origin used for every row-local time formula.
  * @return Raw closed evidence whose four evaluator verdicts are Pass.
  * @throws Checked-time, Value, digest, and allocation failures unchanged.
  */
-I2EpisodeEvidenceInput make_valid_i2_input(std::size_t slot) {
+I2EpisodeEvidenceInput make_valid_i2_input(
+    std::size_t slot, std::chrono::steady_clock::time_point grid_origin =
+                          std::chrono::steady_clock::time_point(1s)) {
   I2EpisodeEvidenceInput input;
   input.replicate_ordinal = 1U;
   input.slot = slot;
-  input.grid_origin = std::chrono::steady_clock::time_point(1s);
+  input.grid_origin = grid_origin;
   input.episode_origin = i2_episode_origin(input.grid_origin, slot);
   input.terminal_boundary = i2_terminal_boundary(input.grid_origin);
 
@@ -250,6 +318,41 @@ I2EpisodeEvidenceInput make_valid_i2_input(std::size_t slot) {
 }
 
 /**
+ * @brief Creates 111 aggregate-ready rows on one exact continuous grid.
+ * @return Complete slot-indexed rows with closed grid facts and Pass row axes.
+ * @throws std::bad_alloc when row storage grows.
+ * @note The latency distribution intentionally exercises aggregate thresholds;
+ * these rows bypass episode evaluation only to isolate replicate arithmetic.
+ */
+std::vector<I2EpisodeInnerRow> make_i2_aggregate_rows() {
+  const auto grid_origin = std::chrono::steady_clock::time_point(1s);
+  const auto terminal_boundary = i2_terminal_boundary(grid_origin);
+  std::vector<I2EpisodeInnerRow> rows;
+  rows.reserve(kI2GridSlotCount);
+  for (std::size_t slot = 0U; slot < kI2GridSlotCount; ++slot) {
+    I2EpisodeInnerRow row;
+    row.evidence.replicate_ordinal = 1U;
+    row.evidence.slot = slot;
+    row.evidence.grid_origin = grid_origin;
+    row.evidence.episode_origin = i2_episode_origin(grid_origin, slot);
+    row.evidence.terminal_boundary = terminal_boundary;
+    const std::chrono::milliseconds measured_rank =
+        slot <= kI2WarmupSlotCount
+            ? 1ms
+            : std::chrono::milliseconds(static_cast<std::int64_t>(slot - 10U));
+    row.latencies.preview = measured_rank;
+    row.latencies.final = measured_rank * 2;
+    row.service = I1ServiceEvidence{100U, 10U, 0U, 0.1};
+    row.latency_verdict = I1Verdict::Pass;
+    row.waste_verdict = I1Verdict::Pass;
+    row.memory_verdict = I1Verdict::Pass;
+    row.output_verdict = I1Verdict::Pass;
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+/**
  * @brief Proves a complete closed row independently passes all four axes.
  * @throws Nothing when the synthetic product/evidence contract stays stable.
  */
@@ -263,6 +366,88 @@ TEST(I2Evidence, CompleteEpisodePassesIndependentVerdicts) {
   EXPECT_EQ(row.output_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.latencies.preview, 2ms);
   EXPECT_EQ(row.latencies.final, 6ms);
+}
+
+/**
+ * @brief Proves the repeated second Metal allocation cannot drift from reuse.
+ * @throws Nothing when otherwise-valid available-Metal evidence fails closed.
+ */
+TEST(I2Evidence, MetalSecondAllocationDriftIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  ASSERT_FALSE(input.observations.visible_outputs.empty());
+  auto& acquisition = input.observations.visible_outputs.front().acquisition;
+  ASSERT_TRUE(acquisition.has_value());
+  acquisition->metal = make_i2_metal_acquisition(acquisition->host_first);
+  EXPECT_EQ(evaluate_i2_episode(input).output_verdict, I1Verdict::Pass);
+  ASSERT_TRUE(acquisition->metal.second.has_value());
+  acquisition->metal.second->allocation = acquisition->host_first.allocation;
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_EQ(row.validity_reasons,
+            std::vector<std::string>{
+                "I2 Metal binding/allocation/storage-byte facts are not exact "
+                "reuse"});
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves the repeated second Metal byte envelope cannot drift from
+ * reuse.
+ * @throws Nothing when otherwise-valid available-Metal evidence fails closed.
+ */
+TEST(I2Evidence, MetalSecondStorageBytesDriftIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  ASSERT_FALSE(input.observations.visible_outputs.empty());
+  auto& acquisition = input.observations.visible_outputs.front().acquisition;
+  ASSERT_TRUE(acquisition.has_value());
+  acquisition->metal = make_i2_metal_acquisition(acquisition->host_first);
+  EXPECT_EQ(evaluate_i2_episode(input).output_verdict, I1Verdict::Pass);
+  ASSERT_TRUE(acquisition->metal.second.has_value());
+  ++acquisition->metal.second->storage_bytes;
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_EQ(row.validity_reasons,
+            std::vector<std::string>{
+                "I2 Metal binding/allocation/storage-byte facts are not exact "
+                "reuse"});
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves a shared binding cannot drift from repeated Metal byte facts.
+ * @throws Nothing when the adjusted Direct plan remains otherwise consistent.
+ */
+TEST(I2Evidence, MetalBindingByteSizeDriftIsInvalid) {
+  I2EpisodeEvidenceInput input = make_valid_i2_input(0U);
+  ASSERT_FALSE(input.observations.visible_outputs.empty());
+  auto& acquisition = input.observations.visible_outputs.front().acquisition;
+  ASSERT_TRUE(acquisition.has_value());
+  acquisition->metal = make_i2_metal_acquisition(acquisition->host_first);
+  EXPECT_EQ(evaluate_i2_episode(input).output_verdict, I1Verdict::Pass);
+  ASSERT_TRUE(acquisition->metal.first.has_value());
+  ASSERT_TRUE(acquisition->metal.second.has_value());
+  auto& first = *acquisition->metal.first;
+  auto& second = *acquisition->metal.second;
+  ++first.binding.byte_size;
+  second.binding = first.binding;
+  second.plan =
+      AccessPlan{AccessPlanKind::Direct,
+                 second.revision.value(),
+                 second.binding,
+                 AccessTarget{DeviceId(DeviceBackend::Metal),
+                              MemoryDomain::DeviceLocal, false, false},
+                 VisibilityObligations{},
+                 0U};
+
+  const I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
+
+  EXPECT_EQ(row.validity_reasons,
+            std::vector<std::string>{
+                "I2 Metal binding/allocation/storage-byte facts are not exact "
+                "reuse"});
+  EXPECT_EQ(row.output_verdict, I1Verdict::Invalid);
 }
 
 /**
@@ -367,25 +552,7 @@ TEST(I2Evidence, OverflowingRawEvidenceIsInvalidWithoutThrowing) {
  * @throws Nothing when the exact 111-slot row schema remains stable.
  */
 TEST(I2Evidence, ReplicateUsesOnlyOneHundredMeasuredSlots) {
-  std::vector<I2EpisodeInnerRow> rows;
-  rows.reserve(kI2GridSlotCount);
-  for (std::size_t slot = 0U; slot < kI2GridSlotCount; ++slot) {
-    I2EpisodeInnerRow row;
-    row.evidence.replicate_ordinal = 1U;
-    row.evidence.slot = slot;
-    const std::chrono::milliseconds measured_rank =
-        slot <= kI2WarmupSlotCount
-            ? 1ms
-            : std::chrono::milliseconds(static_cast<std::int64_t>(slot - 10U));
-    row.latencies.preview = measured_rank;
-    row.latencies.final = measured_rank * 2;
-    row.service = I1ServiceEvidence{100U, 10U, 0U, 0.1};
-    row.latency_verdict = I1Verdict::Pass;
-    row.waste_verdict = I1Verdict::Pass;
-    row.memory_verdict = I1Verdict::Pass;
-    row.output_verdict = I1Verdict::Pass;
-    rows.push_back(std::move(row));
-  }
+  const std::vector<I2EpisodeInnerRow> rows = make_i2_aggregate_rows();
 
   const I2ReplicateSummary summary = evaluate_i2_replicate(rows);
 
@@ -399,6 +566,66 @@ TEST(I2Evidence, ReplicateUsesOnlyOneHundredMeasuredSlots) {
   EXPECT_EQ(summary.waste_verdict, I1Verdict::Pass);
   EXPECT_EQ(summary.memory_verdict, I1Verdict::Pass);
   EXPECT_EQ(summary.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves one row-local-valid translated grid cannot join a replicate.
+ * @throws Nothing when all 111 individual rows evaluate before aggregation.
+ */
+TEST(I2Evidence, ReplicateRejectsOneTranslatedRowLocalGrid) {
+  const auto common_grid_origin = std::chrono::steady_clock::time_point(1s);
+  const auto translated_grid_origin = std::chrono::steady_clock::time_point(2s);
+  constexpr std::size_t kTranslatedSlot = 57U;
+  std::vector<I2EpisodeInnerRow> rows;
+  rows.reserve(kI2GridSlotCount);
+  for (std::size_t slot = 0U; slot < kI2GridSlotCount; ++slot) {
+    const auto grid_origin =
+        slot == kTranslatedSlot ? translated_grid_origin : common_grid_origin;
+    I2EpisodeInnerRow row =
+        evaluate_i2_episode(make_valid_i2_input(slot, grid_origin));
+    ASSERT_TRUE(row.validity_reasons.empty()) << "slot=" << slot;
+    ASSERT_EQ(row.latency_verdict, I1Verdict::Pass) << "slot=" << slot;
+    ASSERT_EQ(row.waste_verdict, I1Verdict::Pass) << "slot=" << slot;
+    ASSERT_EQ(row.memory_verdict, I1Verdict::Pass) << "slot=" << slot;
+    ASSERT_EQ(row.output_verdict, I1Verdict::Pass) << "slot=" << slot;
+    rows.push_back(std::move(row));
+  }
+
+  const I2ReplicateSummary summary = evaluate_i2_replicate(rows);
+
+  EXPECT_EQ(summary.validity_reasons,
+            std::vector<std::string>{
+                "I2 replicate grid origin/episode origins/terminal boundary "
+                "do not form one checked 111-slot grid"});
+  EXPECT_EQ(summary.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary.output_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves replicate checked-time overflow is captured as Invalid.
+ * @throws Nothing when the evaluator preserves its fail-closed boundary.
+ */
+TEST(I2Evidence, ReplicateGridOverflowIsInvalidWithoutThrowing) {
+  std::vector<I2EpisodeInnerRow> rows = make_i2_aggregate_rows();
+  for (I2EpisodeInnerRow& row : rows) {
+    row.evidence.grid_origin = std::chrono::steady_clock::time_point::max();
+    row.evidence.episode_origin = row.evidence.grid_origin;
+    row.evidence.terminal_boundary = row.evidence.grid_origin;
+  }
+
+  std::optional<I2ReplicateSummary> summary;
+  EXPECT_NO_THROW(summary = evaluate_i2_replicate(rows));
+  ASSERT_TRUE(summary.has_value());
+  EXPECT_EQ(summary->validity_reasons,
+            std::vector<std::string>{
+                "I2 replicate grid origin/episode origins/terminal boundary "
+                "do not form one checked 111-slot grid"});
+  EXPECT_EQ(summary->latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary->waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary->memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(summary->output_verdict, I1Verdict::Invalid);
 }
 
 /**

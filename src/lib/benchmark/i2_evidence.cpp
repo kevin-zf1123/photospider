@@ -329,6 +329,19 @@ std::optional<std::uint64_t> i2_cancellation_sequence(
 }
 
 /**
+ * @brief Tests closure of repeated allocation and byte facts in one access.
+ * @param access Serialized access evidence to inspect without payload access.
+ * @return True only when the repeated fields exactly name the binding.
+ * @throws Nothing.
+ * @note This helper checks closed evidence identity only; plan semantics and
+ * cross-acquisition reuse remain independently validated by the caller.
+ */
+bool i2_access_binding_closed(const I2ValueAccessEvidence& access) noexcept {
+  return access.binding.allocation == access.allocation &&
+         access.binding.byte_size == access.storage_bytes;
+}
+
+/**
  * @brief Validates one explicit Host/conditional-Metal access record.
  * @param access Closed acquisition evidence.
  * @param revision Exact visible Value revision.
@@ -357,8 +370,8 @@ bool validate_i2_acquisition(const I2ValueAcquisitionEvidence& access,
       access.host_first.binding != access.host_second.binding ||
       access.host_first.allocation != access.host_second.allocation ||
       access.host_first.storage_bytes != access.host_second.storage_bytes ||
-      access.host_first.binding.allocation != access.host_first.allocation ||
-      access.host_first.binding.byte_size != access.host_first.storage_bytes ||
+      !i2_access_binding_closed(access.host_first) ||
+      !i2_access_binding_closed(access.host_second) ||
       !access.host_first.binding.host_visible ||
       access.host_first.binding.device != DeviceId(DeviceBackend::CPU) ||
       access.host_first.binding.memory_domain != MemoryDomain::Host) {
@@ -407,13 +420,19 @@ bool validate_i2_acquisition(const I2ValueAcquisitionEvidence& access,
   }
   const I2ValueAccessEvidence& first = *access.metal.first;
   const I2ValueAccessEvidence& second = *access.metal.second;
+  if (!first.allocation.valid() || first.binding != second.binding ||
+      first.allocation != second.allocation ||
+      first.storage_bytes != second.storage_bytes ||
+      !i2_access_binding_closed(first) || !i2_access_binding_closed(second)) {
+    fail("I2 Metal binding/allocation/storage-byte facts are not exact reuse");
+  }
   if (!first.plan.has_value() || !second.plan.has_value() ||
       first.plan->kind() != AccessPlanKind::Transfer ||
       first.plan->transfer_bytes() != access.host_first.storage_bytes ||
       second.plan->kind() != AccessPlanKind::Direct ||
       second.plan->transfer_bytes() != 0U || !first.executor_submitted ||
       second.executor_submitted || first.revision != revision ||
-      second.revision != revision || first.binding != second.binding ||
+      second.revision != revision ||
       first.binding == access.host_first.binding ||
       first.allocation == access.host_first.allocation ||
       first.storage_bytes != access.host_first.storage_bytes ||
@@ -1140,6 +1159,41 @@ I2ReplicateSummary evaluate_i2_replicate(
     invalidate_i2(&summary.validity_reasons,
                   "I2 replicate slots/schema/ordinal are incomplete");
   }
+  bool grid_valid = true;
+  if (!rows.empty()) {
+    const auto common_grid_origin = rows.front().evidence.grid_origin;
+    std::optional<std::chrono::steady_clock::time_point> expected_terminal;
+    try {
+      expected_terminal = i2_terminal_boundary(common_grid_origin);
+    } catch (const std::exception&) {
+      grid_valid = false;
+    }
+    for (const I2EpisodeInnerRow& row : rows) {
+      if (row.evidence.grid_origin != common_grid_origin ||
+          !expected_terminal.has_value() ||
+          row.evidence.terminal_boundary != *expected_terminal) {
+        grid_valid = false;
+      }
+      if (row.evidence.slot >= kI2GridSlotCount) {
+        continue;
+      }
+      try {
+        if (row.evidence.episode_origin !=
+            i2_episode_origin(common_grid_origin, row.evidence.slot)) {
+          grid_valid = false;
+        }
+      } catch (const std::exception&) {
+        grid_valid = false;
+      }
+    }
+  }
+  if (!grid_valid) {
+    invalidate_i2(
+        &summary.validity_reasons,
+        "I2 replicate grid origin/episode origins/terminal boundary do not "
+        "form one checked 111-slot grid");
+  }
+  common_valid = common_valid && grid_valid;
 
   std::vector<std::chrono::nanoseconds> preview_samples;
   std::vector<std::chrono::nanoseconds> final_samples;
