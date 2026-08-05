@@ -1519,16 +1519,19 @@ ADR 0009 receipt。较弱、不支持或失败的 durability 都会使结果无�
 job index。只有在该 receipt 和 logical/raw 两种 golden check 后才贡献 throughput。每个 I2
 第十二次 edit（`edit_index=11`）preview/final 都通过相同 Host
 binding 获取两次。已配置 Metal device 允许每个不同 preview/final revision 的
-首次 access 执行一次精确大小的 upload；第二次必须命中相同 residency。禁止
-CPU copy、readback、disk/codec access 或额外 transfer。复制第二次 access、diagnostic、
-resource 与 no-I/O fact 后，只要 managed lineage 仍存活，已经 Ready 的 immutable Value
-即使在较新 generation 已 current 时仍可被获取；该 verification acquisition 不修改
-currentness，也不放宽精确 seed/revision/binding/producer/fence 检查。Host 会在最终 row
-snapshot 前，按精确 revision、完整 binding 与 producer identity 只释放该 row 的
-resident。错误 identity 不释放任何内容；不得使用 broad
-clear、capacity-pressure substitute，也不得改变普通 residency policy。Local acquisition Value
-析构后，每个已配置 device 的完整 memory-and-scratch `reserved` vector 必须等于 row 前
-baseline。
+首次 access 执行一次精确大小的 upload；第二次必须命中相同 residency。该命中不是 broad
+revision/device lookup：resident 保留其完整 publication identity，一个
+持有 manager lock 的 `PublishedValueAcquisition` lookup 会验证仍存活的 managed lineage、完整
+seed/use、source Ready identity、已保存的 publication 与 resident Ready identity。
+Lookup-before-lineage-retirement 返回合法的 immutable copy；retirement-before-lookup 即使普通
+broad lookup 仍能找到该 entry 也会拒绝。禁止 CPU copy、readback、disk/codec access 或额外
+transfer。复制第二次 access、diagnostic、resource 与 no-I/O fact 后，只要 managed lineage 仍
+存活，已经 Ready 的 immutable Value 即使在较新 generation 已 current 时仍可被获取；该
+verification acquisition 不修改 currentness，也不放宽精确 seed/revision/binding/producer/
+fence 检查。Host 会在最终 row snapshot 前，按精确 revision、完整 binding 与 producer identity
+只释放该 row 的 resident。错误 identity 不释放任何内容；不得使用 broad clear、capacity-
+pressure substitute，也不得改变普通 residency policy。Local acquisition Value 析构后，每个
+已配置 device 的完整 memory-and-scratch `reserved` vector 必须等于 row 前 baseline。
 
 I2 使用 ADR 0010 的目标 state machine，而不是虚构当前 API：唯一 replicate-grid
 origin 固定连续的 111-slot cold/warmup/measured grid，measured 从 stride 11 开始，
@@ -1542,9 +1545,12 @@ phase transition 都不得新选 origin 或插入 delay。
 遵循冻结 schedule，较早 preview 必须严格在其之前可见，才能保持 current。Final
 只在其 preview 可见且仍为 current 时提交。两个 child Run arbiter 绑定同一个 request-
 local gate，并在 terminal arbitration 内、发布 `Cancelled` 前 deny 该 gate；cleanup
-callback 留在该顺序之外。更新 generation 会撤销两个较旧 child
-的 publication permission。Preview latency 与两个 child deadline 都锚定到同一个
-actual preview admission；final trigger/admission 被保留，但不能重置 1,000 ms deadline。
+callback 留在该顺序之外。Final permission 与 observation 是一个 HP Run-owned operation：
+它在 HP terminal-arbiter mutex 下检查 Open、消费 gate、预留 causal coordinate，并在解锁前
+完成 trigger callback。`ComputeService` 只能在该 operation 成功后提交 HP，因此匹配的 HP
+cancellation 不能在 gate consumption 与 trigger observation 之间发布。更新 generation 会撤销
+两个较旧 child 的 publication permission。Preview latency 与两个 child deadline 都锚定到
+同一个 actual preview admission；final trigger/admission 被保留，但不能重置 1,000 ms deadline。
 只有 `edit_index=11` 必须按顺序并在两个 absolute bound 内发布二者。Issue #94 实现
 该冻结 cadence、I1 coefficient/update sequence 与 full-resolution final path；它不能
 重新定义 cadence，也不能为 edit `0..10` 选择不同 coefficient 后仍保留
@@ -1555,17 +1561,24 @@ actual preview admission；final trigger/admission 被保留，但不能重置 1
 visibility 先于 final trigger 与 HP service、trigger 前取消、trigger 后 stale-final 拒绝、
 相同时刻较新 edit ordering、精确 child QoS/deadline、不可变 Value acquisition 复用，以及
 lifecycle/resource/Host settlement。Progressive-gate test 把真实 Run arbiter 绑定到 final
-trigger 使用的同一个 gate：确定性 barrier 在 `Cancelled` 已成为 terminal 后延迟 cleanup，
-同时仍要求 trigger、HP service 与 visible-final attempt 全部为零；反向顺序证明 trigger
-winner 保持 Triggered，而之后的 cancellation/currentness 负责 publication。Host-
+trigger 使用的同一个 gate。`test_progressive_compute` 的一个确定性 observer barrier 在
+Run-owned trigger operation 内暂停，并证明并发 cancellation 在 trigger observation 完成前既
+不能发布 cancellation，也不能发布 terminal；反向 case 先发布 cancellation/terminal，并要求
+之后的 trigger operation、HP service 与 visibility count 保持为零。较早的 cleanup-delay
+regression 继续证明 terminal cancellation 不能被之后的 notification 重新打开。`test_i2_profile`
+冻结真实 visible Value，并要求重复 freeze 与 release 在不进行第二次 digest/acquisition 的情况
+下保留每项已采集 fact；其 partial-capture failure case 要求 cleanup 保留前缀、保持 acquisition
+显式缺失、释放 Value，并禁止之后回填。Host-
 settlement case 独立覆盖 preview-only、preview 加
 cancelled final、preview 加 successful final 与 no-child terminal shape；它们要求 Host
 sequence/time 晚于每个已 materialize child resource，且 status 等于确定性的 progressive
 aggregate。Residency case 先发布 generation one，再把同一 managed lineage 推进到 generation
-two，随后要求 historical Ready Value 在不改变 currentness 的情况下，以精确 identity 完成
-transfer/reuse。它们还覆盖错误 seed、binding 与 producer rejection、在只允许一个
-allocation 的 device limit 下连续 revision、第二次无 transfer/allocation、精确 release 与
-完整 device reservation 闭合；条件式 native test 保留真实 Metal path。Evidence test 要求
+two，随后要求 historical Ready Value 在不改变 currentness 的情况下，以已保存的精确
+publication identity 完成 transfer/reuse。它们覆盖错误 Run、task、generation、Graph、intent、
+source revision、binding、producer 与 fence rejection；lookup-before-retirement copy survival；
+即使普通 broad hit 仍存在也执行 retirement-before-lookup rejection；在只允许一个 allocation
+的 device limit 下连续 revision；第二次无 transfer/allocation；精确 release；以及完整 device
+reservation 闭合。条件式 native test 保留真实 Metal path。Evidence test 要求
 visible successful Run 中每个 `(run_id, local_task_id)` 只有 causal sequence 最早的 start
 属于 useful，之后的 duplicate/retry 属于 discarded，不同 task 仍属于 useful，并且独立计算
 post-cancel intersection。它们还要求两个 expected endpoint digest 在

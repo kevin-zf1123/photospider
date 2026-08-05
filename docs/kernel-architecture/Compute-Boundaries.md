@@ -132,7 +132,7 @@ reserved-start transaction.
 | `ComputeRequestCoordinator` | Per-live-Graph checked generation allocation, complete current-identity graph-state publication, optional source-private accepted-coordinate ordering, one latest mailbox and reserved ticket per admitted key, active-source supersession notification, exact pending settlement, and one logical active-runner slot | Run plans, staging, execution workers, Graph lifetime leases, lifecycle registry, telemetry, or public ABI |
 | `ComputeService` | Request validation, intent coordination, creation/settlement of one HP Run or one realtime `RunGroup` with separate HP/RT children, staged commit-policy invocation, collaborator construction, and final result selection | Frontend values, worker threads, graph documents, live Graph revision/generation authority, or public cancellation policy |
 | `RunGroup` | One realtime request identity, distinct HP/RT child Runs and observation leases, request-wide cancellation fan-out, RT-first gate, and deterministic aggregate outcome | Child plans/dispatchers, Graph state, workers, resource reservations, lifecycle registry, or public controls |
-| `ComputeRun` | Immutable single-domain HP/RT descriptor with exact Graph identity/revision and request supersession identity, monotonic phase, a private weak-lifetime cancellation source, read-only lease observation, one terminal/commit arbiter, shared-control ownership of full-plan/temporary or dirty-HP staging storage, stable leases, and composite task identity | Paired realtime grouping, Graph state, workers, revision/generation mint or publication authority, public cancellation control, or resource admission |
+| `ComputeRun` | Immutable single-domain HP/RT descriptor with exact Graph identity/revision and request supersession identity, monotonic phase, a private weak-lifetime cancellation source, read-only lease observation, one terminal/commit arbiter that also owns progressive HP trigger permission plus observation, shared-control ownership of full-plan/temporary or dirty-HP staging storage, stable leases, and composite task identity | Paired realtime grouping, Graph state, workers, revision/generation mint or publication authority, public cancellation control, or resource admission |
 | `ComputeCommitPolicy` | Product-only validation of exact Run/staged/live provenance and current supersession generation, a retained read-only Run lease, in-transaction cancellation observation and Run-owned commit-contender resolution, deferred HP cache persistence, and serialized visible publication before Run success | Planning, execution workers, a cancellation source or arbitrary cancellation authority, final lifecycle registry, or public ABI |
 | `ComputeCachePolicy` | HP cache eligibility and cache-path decisions | Disk I/O ownership or operation execution |
 | `NodeInputResolver` | Runtime parameters and ready image inputs | Graph traversal or output commit |
@@ -264,6 +264,14 @@ callback and gives its destination a typed failure before Ready, or follows a
 completion already published against the then-current exact generation.
 Standalone lineages separately retain numeric-maximum generation order.
 Duplicate and proper-subset identities cannot consume another admission. The
+published-Value acquisition path additionally stores the complete successful
+`DeviceCompletionIdentity` beside each resident. Its exact lookup holds the
+manager mutex while checking live managed lineage, completion use and seed,
+the source Ready identity, saved publication identity, and resident Ready
+identity. Lineage retirement that wins before lookup rejects even if ordinary
+broad revision/device residency still exists; a lookup that wins first returns
+a legal immutable `Value` copy. The ordinary broad lookup, retention,
+replacement, capacity, and eviction paths are unchanged. The
 Perlin provider encodes an explicit texture-to-buffer blit and calls neither
 `waitUntilCompleted` nor `getBytes`; CPU-to-Metal uses the inverse explicit
 blit. `GraphRuntime` still owns no native Metal state, #74 remains the final
@@ -782,6 +790,16 @@ older commit right. The installed Host, CLI, and IPC protocol version 2
 surfaces expose no cancellation entry; IPC jobs continue to report
 `cancellable: false`.
 
+For progressive requests, the HP callback does not manipulate the gate or
+observer separately. It invokes one `ComputeRunLease` operation that first
+observes deadline cancellation, then holds the HP Run terminal-arbiter mutex
+across the Open check, shared-gate consume, causal-coordinate reservation, and
+final-trigger observer callback. Matching HP cancellation therefore either
+wins first and suppresses the trigger or waits until the trigger observation is
+complete. `ComputeService` starts HP work only after that operation returns
+success. The shared gate remains the cross-child atomic decision, and sibling
+cleanup callbacks remain outside both Run mutexes.
+
 ### Current compute-I/O completion limits
 
 The current HP product transaction performs eligible configured disk-cache
@@ -966,11 +984,16 @@ request state only. The accepted coordinate remains the product supersession
 identity; RT preview and HP final are distinct child Runs with exact descriptors
 and Interactive QoS; the graph-state/currentness gate remains the only visible-
 commit authority. `ProgressiveFinalGate` adds a request-scoped atomic decision
-between current-preview publication and final submission, while cancellation
-and supersession continue through the existing Run and generation authorities.
-The observation callbacks copy facts and freeze immutable Values but provide no
-control capability. I2 Host/conditional-Metal acquisition uses the existing
-AccessPlan, process residency manager, device registry, and resource ledger.
+between current-preview publication and final submission, while one HP Run-
+owned operation keeps successful consumption and trigger observation inside
+terminal arbitration. Cancellation and supersession continue through the
+existing Run and generation authorities. Observation callbacks copy facts and
+freeze immutable Values but provide no control capability. Successful I2
+visible-output capture is one-way and sticky; failed cleanup preserves any
+captured prefix and explicit missing facts while releasing the Value without
+retry. I2 Host/conditional-Metal acquisition uses the existing AccessPlan,
+process residency manager, device registry, and resource ledger, with exact
+published-identity lookup separate from ordinary broad residency access.
 None of these private seams adds an installed Host field, IPC message, CLI
 command, plugin callback, scheduler route, or second resource/residency owner.
 

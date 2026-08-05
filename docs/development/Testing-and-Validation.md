@@ -1883,17 +1883,23 @@ only after that receipt and both logical/raw golden checks. Every I2
 twelfth-edit (`edit_index=11`) preview/final is
 acquired twice through the same Host binding. A configured Metal device permits
 one exact-size first upload per distinct preview/final revision; the second
-access must hit the same residency. No CPU copy, readback, disk/codec access, or
-additional transfer is permitted. After second-access, diagnostic, resource,
-and no-I/O facts are copied, an already-Ready immutable Value remains eligible
-when a newer generation is current as long as the managed lineage is live;
-this verification acquisition does not mutate currentness or relax exact
-seed/revision/binding/producer/fence checks. The Host releases only that row's
+access must hit the same residency. That hit is not a broad revision/device
+lookup: the resident retains its complete publication identity, and one
+manager-locked `PublishedValueAcquisition` lookup validates the live managed
+lineage, full seed/use, source Ready identity, saved publication, and resident
+Ready identity. Lookup before lineage retirement returns a legal immutable
+copy; retirement before lookup rejects even if ordinary broad lookup still
+finds the entry. No CPU copy, readback, disk/codec access, or additional
+transfer is permitted. After second-access, diagnostic, resource, and no-I/O
+facts are copied, an already-Ready immutable Value remains eligible when a
+newer generation is current as long as the managed lineage is live; this
+verification acquisition does not mutate currentness or relax exact seed/
+revision/binding/producer/fence checks. The Host releases only that row's
 resident by exact revision, complete binding, and producer identity before the
-final row snapshot. A wrong identity releases nothing; no broad clear, capacity-pressure
-substitute, or ordinary residency-policy change is permitted. Once local
-acquisition Values unwind, every configured device's complete memory-and-
-scratch `reserved` vector must equal its pre-row baseline.
+final row snapshot. A wrong identity releases nothing; no broad clear,
+capacity-pressure substitute, or ordinary residency-policy change is
+permitted. Once local acquisition Values unwind, every configured device's
+complete memory-and-scratch `reserved` vector must equal its pre-row baseline.
 
 I2 uses the ADR 0010 target state machine, not an invented current API: one
 replicate-grid origin fixes a continuous 111-slot cold/warmup/measured grid,
@@ -1910,10 +1916,15 @@ schedule, and a prior preview must be visible strictly before it to remain
 current. The final submits only when its preview becomes visible while still
 current. Both child Run arbiters bind the same request-local gate and deny it
 inside terminal arbitration before publishing `Cancelled`; cleanup callbacks
-stay outside that ordering. A newer generation revokes both older publication
-permissions. Preview latency and both child deadlines anchor to the same actual
-preview admission; final trigger/admission is retained but cannot reset the
-1,000 ms deadline.
+stay outside that ordering. Final permission and observation are one HP
+Run-owned operation: under the HP terminal-arbiter mutex it checks Open,
+consumes the gate, reserves the causal coordinate, and completes the trigger
+callback before unlocking. `ComputeService` may submit HP only after that
+operation succeeds, so matching HP cancellation cannot publish between gate
+consumption and trigger observation. A newer generation revokes both older
+publication permissions. Preview latency and both child deadlines anchor to
+the same actual preview admission; final trigger/admission is retained but
+cannot reset the 1,000 ms deadline.
 Only `edit_index=11` must publish both, in order and within the two absolute
 bounds. #94 implements this frozen cadence and the I1 coefficient/update
 sequence and full-resolution final path; it cannot redefine the cadence or
@@ -1926,21 +1937,31 @@ conditional native-Metal tests. The product-path tests exercise preview
 visibility before final trigger and HP service, cancellation before trigger,
 post-trigger stale-final denial, equal-time newer-edit ordering, exact child
 QoS/deadlines, immutable Value acquisition reuse, and lifecycle/resource/Host
-settlement. The progressive-gate tests bind the real Run arbiter to the same
-gate used by final trigger: a deterministic barrier delays cleanup after
-`Cancelled` is already terminal and still requires zero trigger, HP service,
-and visible-final attempts; the inverse order proves a trigger winner remains
-Triggered while later cancellation/currentness owns publication. The Host-
+settlement. `test_progressive_compute` binds the real HP Run arbiter to the
+same gate used by final trigger. One deterministic observer barrier pauses
+inside the Run-owned trigger operation and proves concurrent cancellation can
+publish neither cancellation nor terminal until trigger observation completes;
+the inverse case publishes cancellation/terminal first and requires the later
+trigger operation plus HP service/visibility counts to stay zero. The older
+cleanup-delay regression continues to prove a terminal cancellation cannot be
+reopened by its later notification. `test_i2_profile` freezes a real visible
+Value and requires a repeated freeze plus release to preserve every captured
+fact without a second digest/acquisition; its partial-capture failure case
+requires cleanup to preserve the prefix, retain explicit missing acquisition,
+release the Value, and forbid later backfill. The Host-
 settlement cases independently cover preview-only,
 preview-plus-cancelled-final, preview-plus-successful-final, and no-child
 terminal shapes; they require Host sequence/time after every materialized child
 resource and status equal to the deterministic progressive aggregate. The
 residency cases publish generation one, advance the same managed lineage to
 generation two, then require the historical Ready Value to transfer/reuse under
-its exact identity without changing currentness. They also cover wrong seed,
-binding, and producer rejection, repeated revisions under a one-allocation
-device limit, no second transfer/allocation, exact release, and complete device
-reservation closure; conditional native tests retain the real Metal path.
+its exact saved publication identity without changing currentness. They cover
+wrong Run, task, generation, Graph, intent, source revision, binding, producer,
+and fence rejection; lookup-before-retirement copy survival;
+retirement-before-lookup rejection despite an ordinary broad hit; repeated
+revisions under a one-allocation device limit; no second transfer/allocation;
+exact release; and complete device reservation closure. Conditional native
+tests retain the real Metal path.
 Evidence tests require only the earliest causal start per
 `(run_id, local_task_id)` in a visible successful Run to be useful, later
 duplicates/retries to be discarded, distinct tasks to remain useful, and the

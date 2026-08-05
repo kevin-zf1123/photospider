@@ -108,7 +108,7 @@ Host-owned reserved-start transaction 提交的每个 Run 执行权。
 | `ComputeRequestCoordinator` | 每个 live Graph 的 checked generation allocation、完整 current-identity graph-state publication、可选 source-private accepted-coordinate ordering、每个 admitted key 的一个 latest mailbox 与 reserved ticket、active-source supersession notification、精确 pending settlement，以及一个 logical active-runner slot | Run plan、staging、execution worker、Graph lifetime lease、lifecycle registry、telemetry 或 public ABI |
 | `ComputeService` | 请求验证、intent 协调、创建/settle 一个 HP Run 或一个包含独立 HP/RT child 的 realtime `RunGroup`、调用 staged commit policy、协作者构造和最终结果选择 | 前端值、worker thread、图文档、live Graph revision/generation authority 或 public cancellation policy |
 | `RunGroup` | 一个 realtime request identity、不同的 HP/RT child Run 与 observation lease、request-wide cancellation fan-out、RT-first gate 和确定性 aggregate outcome | Child plan/dispatcher、Graph state、worker、resource reservation、lifecycle registry 或 public control |
-| `ComputeRun` | 带精确 Graph identity/revision 与 request supersession identity 的不可变单 domain HP/RT descriptor、单调 phase、私有弱生命周期 cancellation source、read-only lease observation、唯一 terminal/commit arbiter、通过共享 control 对 full-plan/temporary storage 或 dirty-HP staging storage 的所有权、稳定 lease，以及复合 task identity | 配对 realtime grouping、Graph state、worker、revision/generation mint 或 publication authority、公开 cancellation control 或 resource admission |
+| `ComputeRun` | 带精确 Graph identity/revision 与 request supersession identity 的不可变单 domain HP/RT descriptor、单调 phase、私有弱生命周期 cancellation source、read-only lease observation、同时拥有 progressive HP trigger permission 与 observation 的唯一 terminal/commit arbiter、通过共享 control 对 full-plan/temporary storage 或 dirty-HP staging storage 的所有权、稳定 lease，以及复合 task identity | 配对 realtime grouping、Graph state、worker、revision/generation mint 或 publication authority、公开 cancellation control 或 resource admission |
 | `ComputeCommitPolicy` | 仅产品使用的精确 Run/staged/live provenance 与 current supersession generation 验证、保留的 read-only Run lease、transaction 内 cancellation observation 与 Run-owned commit-contender resolution、延迟 HP cache persistence，以及在 Run success 前串行发布可见状态 | Planning、execution worker、cancellation source 或任意 cancellation authority、最终 lifecycle registry 或 public ABI |
 | `ComputeCachePolicy` | HP cache eligibility 与缓存路径决定 | 磁盘 I/O 所有权或 operation 执行 |
 | `NodeInputResolver` | runtime parameter 和 ready image input | 图遍历或输出提交 |
@@ -212,7 +212,13 @@ Current-generation
 coordinator-managed lineage，current-identity update 要么先于旧 callback，使 destination 在
 Ready 前进入 typed failure；要么发生在一个已经按当时 exact current generation 发布的
 completion 之后。Standalone lineage 另行保留 numeric-maximum generation order。Duplicate 与
-proper-subset identity 不能消费另一条 admission。Perlin provider 会编码显式
+proper-subset identity 不能消费另一条 admission。Published-Value acquisition path 还会在每个
+resident 旁保存成功 publication 的完整 `DeviceCompletionIdentity`。其精确 lookup 持有 manager
+mutex，并验证仍存活的 managed lineage、completion use 与 seed、source Ready identity、已保存
+的 publication identity，以及 resident Ready identity。Lineage retirement 如果先于 lookup，
+即使普通 broad revision/device residency 仍存在也会拒绝；lookup 如果先完成，则返回合法的
+immutable `Value` copy。普通 broad lookup、retention、replacement、capacity 与 eviction path
+保持不变。Perlin provider 会编码显式
 texture-to-buffer blit，不调用
 `waitUntilCompleted` 或 `getBytes`；CPU-to-Metal 使用相反方向的显式 blit。`GraphRuntime`
 仍不拥有 native Metal state，#74 仍是最终 visible-commit gate，而 #86 把 device-memory/scratch
@@ -605,6 +611,14 @@ pending gate；如果旧 RT proxy 先完成 commit，它会保持可见，但旧
 Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC job 继续报告
 `cancellable: false`。
 
+对于 progressive request，HP callback 不会分别操作 gate 与 observer。它会调用一个
+`ComputeRunLease` operation：先观察 deadline cancellation，再持有 HP Run terminal-arbiter
+mutex，连续完成 Open 检查、共享 gate consumption、causal-coordinate reservation 与 final-
+trigger observer callback。匹配的 HP cancellation 因此要么先胜出并抑制 trigger，要么等待
+trigger observation 完成。`ComputeService` 只会在该 operation 返回成功后启动 HP work。
+共享 gate 继续构成跨 child 的 atomic decision，而 sibling cleanup callback 仍在两个 Run mutex
+之外。
+
 ### 当前 compute-I/O 完成限制
 
 当前 HP product transaction 会在 revision validation 之后、no-throw live Graph swap
@@ -741,11 +755,15 @@ Issue #94 只通过可选的 source-private request state 组合这些既有 aut
 coordinate 仍是产品 supersession identity；RT preview 与 HP final 是具有精确 descriptor 与
 Interactive QoS 的不同 child Run；graph-state/currentness gate 仍是唯一 visible-commit
 authority。`ProgressiveFinalGate` 在 current-preview publication 与 final submission 之间增加
-request-scoped atomic decision，而 cancellation 与 supersession 继续使用既有 Run 与 generation
-authority。Observation callback 只复制 fact 并冻结 immutable Value，不提供控制能力。I2
-Host/条件式 Metal acquisition 复用既有 AccessPlan、进程 residency manager、device registry
-与 resource ledger。这些私有 seam 都不会新增 installed Host field、IPC message、CLI command、
-plugin callback、scheduler route 或第二个 resource/residency owner。
+request-scoped atomic decision，而一个 HP Run-owned operation 会使成功 consumption 与 trigger
+observation 一直位于 terminal arbitration 内。Cancellation 与 supersession 继续使用既有 Run
+与 generation authority。Observation callback 只复制 fact 并冻结 immutable Value，不提供控制
+能力。成功的 I2 visible-output capture 是单向且 sticky 的；失败 cleanup 会保留任何已采集前缀
+与显式缺失 fact，同时释放 Value 且不重试。I2 Host/条件式 Metal acquisition 复用既有
+AccessPlan、进程 residency manager、device registry 与 resource ledger，并把精确 published-
+identity lookup 与普通 broad residency access 分开。这些私有 seam 都不会新增 installed Host
+field、IPC message、CLI command、plugin callback、scheduler route 或第二个 resource/residency
+owner。
 
 ## 实现与验证入口
 
