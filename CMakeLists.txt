@@ -337,6 +337,8 @@ if(APPLE)
 endif()
 
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(UTF8PROC REQUIRED IMPORTED_TARGET libutf8proc)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 endif()
@@ -691,6 +693,10 @@ target_link_libraries(photospider_graph_internal PRIVATE
 
 # Module: compute, dirty execution, GraphRuntime, and interaction ownership.
 set(KERNEL_FACADE_SOURCES
+    src/lib/benchmark/b1_environment.cpp
+    src/lib/benchmark/b1_evidence.cpp
+    src/lib/benchmark/b1_output_store.cpp
+    src/lib/benchmark/b1_profile.cpp
     src/lib/benchmark/i1_evidence.cpp
     src/lib/benchmark/i1_profile.cpp
     src/lib/benchmark/i2_evidence.cpp
@@ -772,7 +778,8 @@ target_link_libraries(photospider_host_internal PRIVATE
     photospider_policy_internal
     photospider_execution_internal
     photospider_compute_internal
-    Photospider::operation_sdk)
+    Photospider::operation_sdk
+    PkgConfig::UTF8PROC)
 if(PHOTOSPIDER_ENABLE_YAML)
     target_compile_definitions(photospider_host_internal PRIVATE
         PHOTOSPIDER_HAS_YAML)
@@ -862,6 +869,7 @@ function(configure_photospider_product_objects TARGET_NAME)
         Photospider::operation_sdk
         Photospider::operation_runtime
         Photospider::policy_sdk
+        PkgConfig::UTF8PROC
         Threads::Threads
         ${CMAKE_DL_LIBS})
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
@@ -2006,6 +2014,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             photospider_internal_test_product)
         target_compile_definitions(test_i2_product_path PRIVATE
             PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+        add_ps_test(test_b1_product_path
+            tests/integration/test_b1_product_path.cpp
+            photospider_internal_test_product)
+        target_link_libraries(test_b1_product_path PRIVATE
+            PkgConfig::UTF8PROC)
         add_ps_test(test_opencv_operation_concurrency
             tests/integration/test_opencv_operation_concurrency.cpp)
         target_compile_definitions(test_opencv_operation_concurrency PRIVATE
@@ -2073,6 +2086,26 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             nlohmann_json::nlohmann_json
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
+        add_executable(b1_immutable_benchmark EXCLUDE_FROM_ALL
+            tests/verification/b1_immutable_benchmark.cpp
+            tests/verification/b1_evidence_json.cpp)
+        set_target_properties(b1_immutable_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(b1_immutable_benchmark PRIVATE cxx_std_17)
+        target_include_directories(b1_immutable_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(b1_immutable_benchmark PRIVATE
+            PHOTOSPIDER_B1_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(b1_immutable_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            PkgConfig::UTF8PROC
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
     endif()
     add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
     add_ps_test(test_i1_evidence tests/unit/test_i1_evidence.cpp)
@@ -2088,6 +2121,16 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_link_libraries(test_i2_evidence PRIVATE
         nlohmann_json::nlohmann_json)
     add_ps_test(test_i2_profile tests/unit/test_i2_profile.cpp)
+    add_ps_test(test_b1_profile tests/unit/test_b1_profile.cpp)
+    add_ps_test(test_b1_environment tests/unit/test_b1_environment.cpp)
+    target_link_libraries(test_b1_environment PRIVATE PkgConfig::UTF8PROC)
+    add_ps_test(test_b1_evidence tests/unit/test_b1_evidence.cpp)
+    target_sources(test_b1_evidence PRIVATE
+        tests/verification/b1_evidence_json.cpp)
+    target_link_libraries(test_b1_evidence PRIVATE
+        nlohmann_json::nlohmann_json
+        PkgConfig::UTF8PROC)
+    add_ps_test(test_b1_output_store tests/unit/test_b1_output_store.cpp)
     add_ps_test(test_progressive_compute
         tests/unit/test_progressive_compute.cpp)
     add_ps_test(test_dense_tensor_content_digest
@@ -2472,6 +2515,18 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_i2_profile
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_environment
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_evidence
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_output_store
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_progressive_compute
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -2485,6 +2540,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 LABELS kernel-concurrency
                 TIMEOUT 30)
         gtest_discover_tests(test_i2_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+        gtest_discover_tests(test_b1_product_path
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS kernel-concurrency
@@ -2611,6 +2671,7 @@ if(TARGET photospider_internal_test_product)
         test_host_adapter
         test_i1_product_path
         test_i2_product_path
+        test_b1_product_path
         test_kernel_contracts
         test_policy_execution)
     set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS "")

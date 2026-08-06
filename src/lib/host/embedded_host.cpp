@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "benchmark/b1_host.hpp"
 #include "benchmark/i1_host.hpp"
 #include "benchmark/i2_host.hpp"
 #include "compute/dirty_region_snapshot.hpp"
@@ -2280,6 +2281,25 @@ bool valid_private_interactive_qos(const compute::ComputeRunQos& qos) noexcept {
 }
 
 /**
+ * @brief Tests the exact private B1 Throughput QoS shape and public cap bind.
+ * @param qos Complete private scheduling value.
+ * @param execution Ordinary request execution controls.
+ * @return True for Throughput, no deadline, weight one, cap one/eight, and an
+ * identical ordinary request cap.
+ * @throws Nothing.
+ * @note This validates evidence inputs only and does not change process lanes.
+ */
+bool valid_private_b1_qos(
+    const compute::ComputeRunQos& qos,
+    const HostComputeExecutionOptions& execution) noexcept {
+  return qos.service_class == compute::ComputeRunQosClass::Throughput &&
+         !qos.deadline.has_value() && qos.weight == 1U &&
+         (qos.maximum_parallelism == std::optional<std::uint32_t>{1U} ||
+          qos.maximum_parallelism == std::optional<std::uint32_t>{8U}) &&
+         qos.maximum_parallelism == execution.maximum_parallelism;
+}
+
+/**
  * @brief Derives checked logical image dimensions from one I2 output Value.
  * @param value Ready CPU RGBA FP32 Value published by a progressive child.
  * @return Width then height as the native Metal upload contract requires.
@@ -2472,6 +2492,7 @@ HostPluginLoadReport to_public_plugin_report(const PluginLoadResult& report) {
  *       state comes from the one process owner shared by every adapter.
  */
 class EmbeddedHost final : public Host,
+                           public benchmark::B1Host,
                            public benchmark::I1Host,
                            public benchmark::I2Host {
  public:
@@ -2849,6 +2870,69 @@ class EmbeddedHost final : public Host,
         state_->execution_service->device_resource_snapshots(),
         state_->execution_service->lifecycle_snapshot(
             after_cursor, static_cast<std::uint32_t>(limit))};
+  }
+
+  /** @copydoc benchmark::B1Host::compute_b1_image */
+  Result<ImageBuffer> compute_b1_image(
+      benchmark::B1HostComputeRequest request) override {
+    return guarded_result<ImageBuffer>(
+        "compute_b1_image", GraphErrc::ComputeError, [&] {
+          if (!valid_compute_execution_options(request.request.execution) ||
+              !valid_private_b1_qos(request.qos, request.request.execution) ||
+              request.observation_sink == nullptr) {
+            return failure_result<ImageBuffer>(
+                GraphErrc::InvalidParameter,
+                "B1 compute requires matching Throughput QoS, cap, and sink");
+          }
+          auto admission =
+              state_->try_admit_session_operation(request.request.session);
+          if (!admission) {
+            return failure_result<ImageBuffer>(
+                GraphErrc::NotFound,
+                "graph session is closing: " + request.request.session.value);
+          }
+          if (!session_exists(*state_, request.request.session)) {
+            return failure_result<ImageBuffer>(
+                GraphErrc::NotFound,
+                "graph session not found: " + request.request.session.value);
+          }
+          auto kernel_request = to_kernel_compute_request(request.request);
+          kernel_request.run_qos = request.qos;
+          kernel_request.observation_sink = std::move(request.observation_sink);
+          auto image =
+              state_->interaction.cmd_compute_and_get_image(kernel_request);
+          if (!image) {
+            const auto error = state_->interaction.cmd_last_error(
+                request.request.session.value);
+            if (!error) {
+              return success_result(ImageBuffer{});
+            }
+            Result<ImageBuffer> result;
+            result.status = failure_status(error->code, error->message);
+            return result;
+          }
+          return success_result(std::move(*image));
+        });
+  }
+
+  /** @copydoc benchmark::B1Host::b1_compute_io_executor */
+  execution::ComputeIoExecutor& b1_compute_io_executor() noexcept override {
+    return state_->execution_service->compute_io_executor();
+  }
+
+  /** @copydoc benchmark::B1Host::b1_execution_snapshot */
+  benchmark::B1ExecutionSnapshot b1_execution_snapshot(
+      std::uint64_t after_cursor, std::size_t limit) const override {
+    if (limit > compute::kExecutionLifecycleTelemetryMaxPageSize) {
+      throw std::invalid_argument(
+          "B1 lifecycle snapshot limit exceeds the maintained maximum.");
+    }
+    return benchmark::B1ExecutionSnapshot{
+        state_->execution_service->resource_snapshot(),
+        state_->execution_service->device_resource_snapshots(),
+        state_->execution_service->lifecycle_snapshot(
+            after_cursor, static_cast<std::uint32_t>(limit)),
+        state_->execution_service->compute_io_executor().snapshot()};
   }
 
   /** @copydoc benchmark::I2Host::acquire_i2_value */
