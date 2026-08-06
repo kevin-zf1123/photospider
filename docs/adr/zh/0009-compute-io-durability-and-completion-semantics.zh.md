@@ -14,6 +14,12 @@ Issue #87 以决策与文档变更的形式接受本 ADR。Issue #88 现在只�
 `OutputStore` 变成 crash-durable store。后续专项变更必须实现 Run publication
 之后的 cache outcome、durable 输出提交、Graph 文档事务和旧输出副作用迁移。
 
+Issue #95 现在实现了一条有意收窄的 source-private B1 手工/release 输出所有者。
+`B1OutputStore` 把 Issue #88 executor 与面向精确不可变 B1 artifact 的 rooted fresh-
+occurrence、manifest-last/no-replace 事务、类型化 crash-durable receipt 及 leaf-to-root
+barrier 组合起来。它不替代私有 IPC delivery store，不新增已安装输出 API，也不完成
+本 ADR 中通用 recovery、post-publication cache、Graph 文档与旧输出副作用目标。
+
 在 Primary head `c99c94b56065aee6d456337af8ee0aa45c12e0a1` 上对 Issue #118
 进行的后期审核，在其复用的 Issue #88 executor 依赖中发现两条死锁：同一 worker
 提交后等待 completion，以及已准入 lazy factory 对同一 executor 发起 shutdown。

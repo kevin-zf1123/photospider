@@ -494,6 +494,16 @@ outcome and introduces a separate, receipt-bearing durable output commit. The
 executor mechanism is current; the target post-publication ordering and
 durable output commit are not.
 
+Issue #95 adds one deliberately narrower source-private exception for the B1
+manual/release profile. `B1OutputStore` reuses the current process
+`ComputeIoExecutor` to perform two exact charged tasks, then proves synchronized
+payload bytes, manifest-last no-replace publication, directory barriers, and a
+typed crash-durable receipt below a selected canonical root. This path is
+invoked only after the B1 Run result is acquired through the ordinary embedded
+Host compute path. It does not move general HP cache persistence after Graph
+publication, replace the daemon delivery store, or make durable output part of
+public Host/CLI/IPC success.
+
 ## GlobalHighPrecision
 
 `GlobalHighPrecision` is the full-quality path. Without a dirty ROI it performs

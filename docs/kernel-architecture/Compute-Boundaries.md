@@ -585,12 +585,13 @@ SLO.
 
 [ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
 freezes the target workloads, six metric formulas, invalidation rules, and
-downstream evidence ownership. Issues #93 through #96 must add their collectors
-at the actual admission, visibility, cancellation/quiescence, artifact, trace,
-completed-service, and resource-lifetime boundaries. No placeholder zero value
-is a substitute for a missing observation source.
+downstream evidence ownership. Issues #93 through #95 now add their assigned
+source-private inner collectors at the actual admission, visibility,
+cancellation/quiescence, artifact, trace, completed-service, and
+resource-lifetime boundaries; #96 must add the remaining M1 composition. No
+placeholder zero value is a substitute for a missing observation source.
 
-Those target collectors have precise boundary obligations. Edit ordinals
+Those profile collectors have precise boundary obligations. Edit ordinals
 `1..12` map to `edit_index=0..11`; nominal monotonic admission starts and their
 bounded lateness are distinct timestamps. I2 records preview admission/visible,
 final trigger/admission/visible, and generation-current checks using the legal
@@ -601,7 +602,7 @@ achieved durability, complete output receipt, raw payload/manifest hashes, and
 the separate canonical semantic trace. M1 records two same-ordinal isolated
 pair references in addition to candidate/reference comparison provenance.
 
-These remain target harness/evidence semantics. Exact per-job planned-byte
+These remain profile harness/evidence semantics. Exact per-job planned-byte
 charges and their event-aligned snapshots are mandatory, authoritative evidence
 for Compute I/O admission, planned-byte high-water, and final settlement. They
 do not add fields to the current `BenchmarkResult`, change `ComputeRun`, prove

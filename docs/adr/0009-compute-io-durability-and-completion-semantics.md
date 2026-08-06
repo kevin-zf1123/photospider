@@ -17,6 +17,14 @@ move cache failure behind Run publication, or turn the current private IPC
 post-publication cache outcomes, durable output commit, Graph-document
 transactions, and legacy output-side-effect migration.
 
+Issue #95 now implements a deliberately narrow source-private B1 manual/release
+output owner. `B1OutputStore` composes the Issue #88 executor with a rooted
+fresh-occurrence, manifest-last/no-replace transaction, typed crash-durable
+receipt, and leaf-to-root barriers for the exact immutable B1 artifact. It does
+not replace the private IPC delivery store, add an installed output API, or
+complete the general recovery, post-publication cache, Graph-document, and
+legacy output-side-effect targets in this ADR.
+
 Late review of Issue #118 at Primary head
 `c99c94b56065aee6d456337af8ee0aa45c12e0a1` found two deadlocks in that reused
 Issue #88 executor dependency: same-worker submission followed by completion

@@ -6,9 +6,9 @@ Photospider. For architecture internals, see
 
 ## 1. Build And Setup
 
-Install the required C++ toolchain, OpenCV, yaml-cpp, and test dependencies for
-the default CLI and GoogleTest profile. Initialize submodules when using the
-vendored FTXUI source:
+Install the required C++ toolchain, OpenCV, utf8proc, yaml-cpp, and test
+dependencies for the default CLI and GoogleTest profile. Initialize submodules
+when using the vendored FTXUI source:
 
 ```bash
 git submodule update --init --recursive
@@ -543,3 +543,31 @@ Run a specific test executable:
 cmake --build build --target test_policy_registry -j
 ./build/tests/test_policy_registry
 ```
+
+Build and inspect the source-private B1 exact-workload runner:
+
+```bash
+cmake --build build --target b1_immutable_benchmark -j
+./build/tests/b1_immutable_benchmark --help
+```
+
+One invocation emits one exact cap-one or cap-eight B1 inner row. It requires
+three canonical environment manifests, a closed raw-storage proof, and an
+existing empty absolute output directory outside the checkout:
+
+```bash
+./build/tests/b1_immutable_benchmark \
+  --output-dir /absolute/fresh/b1-output \
+  --base-manifest /absolute/evidence/base.manifest \
+  --storage-manifest /absolute/evidence/storage.manifest \
+  --environment-class-manifest /absolute/evidence/environment-class.manifest \
+  --storage-proof /absolute/evidence/storage-proof.json \
+  --run-cap 1 \
+  --replicate-ordinal 1
+```
+
+A complete isolated B1 collection uses fresh processes and fresh output roots
+for the six cap/replicate combinations. Each invocation writes more than
+2.2 GiB of payload data. The runner is `EXCLUDE_FROM_ALL`, is not registered
+with CTest, and emits no canonical outer-row, bundle, reference, or machine-
+conformance claim.

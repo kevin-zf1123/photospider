@@ -1276,21 +1276,26 @@ The delivery rows are fixed:
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | M1 exact `C^M1`/`W^M1` input grid, fixed B1 offer protocol, cross-boundary I1 settlement, reuse of #93's collector binding the first measured edit to `edit_index=0`, `A_0`, and its pre-call sequence, the frozen final-warmup current-hold exception through that successful coordinate without redefining it, independent producer-local cycles, phase-boundary/carryover/FIFO/attribution evidence, plus mixed latency, Throughput progress, fairness, waste, and memory using the exact I1/B1 fixtures and storage-compatible B1 pair without constraining its I1-only pair. |
 
 ADR 0010 is the current accepted decision record, not by itself a statement of
-machine conformance. Issues #93 and #94 now provide the source-private I1 and I2
-product mechanisms, bounded inner collectors/evaluators, exact-workload manual
-runners, and deterministic tests assigned to those delivery rows. In
-particular, #94 adds preview-then-final coordination, exact preview arithmetic,
-Host/conditional-Metal acquisition evidence, exact row-scoped resident release
-with complete device-reservation closure, child-resource-before-Host settlement
-order and aggregate status, and the closed `execution-profile-i2-inner-row-v1`
-record without changing the canonical
-15-field outer row or installed ABI. The I2 runner is `EXCLUDE_FROM_ALL`, absent
-from CTest, and no exact 111-slot machine run is claimed by this current-state
-document. Canonical outer-row/bundle/reference composition and the B1/M1 work
-remain downstream. Existing policy-order tests, `BenchmarkService`, lifecycle
-telemetry, ledger snapshots, and manual tools do not by themselves establish
-profile conformance. The maintained manual/release protocol and test-ownership
-boundary are documented in
+machine conformance. Issues #93 through #95 now provide the source-private I1,
+I2, and B1 product mechanisms, bounded inner collectors/evaluators,
+exact-workload manual runners, and deterministic tests assigned to those
+delivery rows. In particular, #94 adds preview-then-final coordination, exact
+preview arithmetic, Host/conditional-Metal acquisition evidence, exact
+row-scoped resident release with complete device-reservation closure,
+child-resource-before-Host settlement order and aggregate status, and the
+closed `execution-profile-i2-inner-row-v1` record. #95 adds the immutable B1
+workload/identity/oracle, Throughput/cap path through the ordinary embedded
+Host, process-Compute-I/O-backed crash-durable output owner, closed
+storage/performance environment contract, four-verdict inner evaluator, and
+one-row cap-one/cap-eight runner. None of these additions changes the canonical
+15-field outer row or installed ABI. The I1, I2, and B1 runners are
+`EXCLUDE_FROM_ALL` and absent from CTest; this current-state document claims
+neither an exact 111-slot I2 machine run nor an exact three-replicate B1 machine
+corpus. Canonical outer-row/bundle/reference composition and M1 remain assigned
+to #96. Existing policy-order tests, `BenchmarkService`, lifecycle telemetry,
+ledger snapshots, and manual tools do not by themselves establish profile
+conformance. The maintained manual/release protocol and test-ownership boundary
+are documented in
 [Testing and Validation](../development/Testing-and-Validation.md#execution-profile-slo-manualrelease-protocol).
 
 ## Server and Plugin Isolation

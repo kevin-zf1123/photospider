@@ -1035,16 +1035,21 @@ self、enclosing、later-stage、comparison 或 M1 cycle 都会 fail closed。#9
 | [#95](https://github.com/kevin-zf1123/photospider/issues/95) | 在 cap 1 与 8 下生成 B1 isolated throughput、精确 determinism、fault-free zero waste、memory，以及固定 storage/performance probe-to-schema、encoder、eligibility 与 compatibility 证据。 |
 | [#96](https://github.com/kevin-zf1123/photospider/issues/96) | 生成 M1 精确 `C^M1`/`W^M1` input grid、固定 B1 offer protocol、跨 boundary I1 settlement，复用 #93 collector 并把第一次 measured edit 绑定到 `edit_index=0`、`A_0` 与其 call 前 sequence，以及不得重新定义的 final-warmup current-hold 直到该成功 coordinate 这一冻结例外、独立 producer-local cycle 与 phase-boundary/carryover/FIFO/attribution evidence，并使用精确 I1/B1 fixture 与 storage-compatible B1 pair 生成 mixed latency、Throughput progress、fairness、waste 与 memory，同时不约束其 I1-only pair。 |
 
-ADR 0010 是当前已接受的决策记录，但它本身不构成机器符合性声明。Issue #93 与 #94
-现在已经提供各自交付行负责的 source-private I1/I2 产品机制、有界 inner collector/evaluator、
-exact-workload 手工 runner 与 deterministic test。具体而言，#94 新增 preview-then-final
-coordination、精确 preview arithmetic、Host/条件式 Metal acquisition evidence、具备完整
-device-reservation 闭合的精确 row-scoped resident release、child-resource 先于 Host settlement
-的顺序与 aggregate status，以及闭合的 `execution-profile-i2-inner-row-v1` record，同时不改变 canonical 15-field outer row 或
-installed ABI。I2 runner 为 `EXCLUDE_FROM_ALL`，不属于 CTest；本文不声明已经完成精确
-111-slot 机器运行。Canonical outer-row/bundle/reference composition 与 B1/M1 工作仍属于
-下游任务。既有 policy-order test、`BenchmarkService`、lifecycle telemetry、ledger
-snapshot 与手工工具本身不能建立画像 conformance。长期手工/release protocol 与测试归属边界记录在
+ADR 0010 是当前已接受的决策记录，但它本身不构成机器符合性声明。Issue #93 至 #95
+现在已经提供各自交付行负责的 source-private I1、I2、B1 产品机制、有界 inner
+collector/evaluator、exact-workload 手工 runner 与 deterministic test。具体而言，#94 新增
+preview-then-final coordination、精确 preview arithmetic、Host/条件式 Metal acquisition
+evidence、具备完整 device-reservation 闭合的精确 row-scoped resident release、child-resource
+先于 Host settlement 的顺序与 aggregate status，以及闭合的
+`execution-profile-i2-inner-row-v1` record。#95 新增不可变 B1 workload/identity/oracle、经由
+普通 embedded Host 的 Throughput/cap 路径、由进程 Compute I/O 支撑的 crash-durable 输出
+所有者、闭合 storage/performance environment 合同、四 verdict inner evaluator，以及单 row
+cap-1/cap-8 runner。这些新增内容都不改变 canonical 15-field outer row 或 installed ABI。
+I1、I2、B1 runner 均为 `EXCLUDE_FROM_ALL` 且不属于 CTest；本文既不声明已经完成精确
+111-slot I2 机器运行，也不声明已经完成精确三 replicate B1 机器 corpus。Canonical
+outer-row/bundle/reference composition 与 M1 仍由 #96 负责。既有 policy-order test、
+`BenchmarkService`、lifecycle telemetry、ledger snapshot 与手工工具本身不能建立画像
+conformance。长期手工/release protocol 与测试归属边界记录在
 [测试与验证](../../development/zh/Testing-and-Validation.zh.md#执行画像-slo-手工release-protocol)。
 
 ## 服务器与插件隔离

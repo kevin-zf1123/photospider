@@ -1277,8 +1277,11 @@ operation-concurrency 变更时，应重新运行准确命令，并解释新输�
 
 [ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
 定义规范的 `execution-profile-slo-v1` 契约。Issue #92 会冻结本 protocol，但不
-实现 runner 或 collector。在 Issues #93 至 #96 交付各自负责的证据行之前，
-当前仓库没有任何命令能够生成符合要求的 bundle，也不暗示当前画像已经达标。
+实现 runner 或 collector。Issues #93 至 #95 现在已经提供各自的 source-private I1、I2 与
+B1 mechanism、封闭 inner evidence、deterministic test 和显式 exact-workload runner。
+当前仍没有命令组合 #96 负责的 canonical 15-field outer row、five-field bundle 与 M1
+evidence，因此仓库仍不能生成 conformant bundle。构建 runner 或通过 correctness test
+都不构成机器画像声明。
 
 最终长期维护的 runner 是手工 developer/release 工具。由于本节定义其长期产品
 测量职责，它可以留在 primary repository；但与机器相关的 latency、throughput
@@ -1852,7 +1855,7 @@ class compatibility。M1/paired-I1 只比较精确 base manifest/digest；二者
 environment manifest 有意不同。Raw field/proof 缺失、state invalid、byte/digest
 mismatch 或 containment 失败，都会使受影响 relative verdict 成为 `invalid`。
 
-Issue #95 必须增加长期确定性机制测试，覆盖固定 field/type/enum/cardinality 拒绝；
+Issue #95 现已增加长期确定性机制测试，覆盖固定 field/type/enum/cardinality 拒绝；
 每种 state/reason/payload 组合；NFC/text 与 scalar encoding，包括接受 uint64 `0`、
 `1`、`2`、`8`、`9`、`10`、`23`、`18446744073709551615`，拒绝 `00`、`01` 与
 overflow；精确 156-byte durability set 与 221-byte field record；known-empty ordered
@@ -2114,6 +2117,59 @@ observer/resource 状态，然后才写 `failure.json`。这些是封闭的 Issu
 不声明 canonical outer row/section/bundle。Exit zero 表示四项 I1 inner verdict 全部通过；exit two
 表示完整 evidence 至少有一项 threshold 失败；exit one 表示 parsing、setup、cadence 或 evidence
 invalid。仅构建 target 或运行 `--help` 只是 harness smoke，不是 performance evidence。
+
+Issue #95 现在通过 `test_b1_profile`、`test_b1_environment`、`test_b1_output_store`、
+`test_b1_evidence`，以及在启用仓库 OpenCV operation provider 时的
+`test_b1_product_path`，注册长期 B1 mechanism。这些测试冻结 34 个 seed/job identity 与独立
+binary32-RNE golden、canonical semantic trace、stable NFC text 与精确 21/24/4-field schema、
+scalar/collection/fixed-record/mount/全部 37 个 performance component 与 raw-proof rule、
+十一 reason eligibility truth set 与 pair compatibility、两个带 charge 的 no-replace
+crash-durable output stage 与 receipt、四项相互独立的 inner verdict，以及真实 Host 上精确
+Throughput QoS、cap-1/cap-8、Graph A/B predecessor、content/trace、lifecycle、resource 与
+Compute I/O closure。它们使用 disposable root，不包含机器相关 throughput 或 candidate/
+reference threshold。
+
+精确 B1 corpus 由手工 `b1_immutable_benchmark` target 承担。它为
+`EXCLUDE_FROM_ALL`，不属于 CTest/default CI，必须显式构建：
+
+```shell
+cmake --build build --target b1_immutable_benchmark -j
+./build/tests/b1_immutable_benchmark --help
+```
+
+每次 invocation 只接受一个 cap 与一个 fresh-process replicate。`--output-dir` 必须已经是
+checkout 外的空绝对目录，并且就是选定的 canonical durability root。三个 manifest input
+必须分别是经过独立预验证的精确 `execution-profile-base-environment-v1`、
+`execution-profile-storage-environment-v1` 与
+`execution-profile-environment-class-v1` byte。`--storage-proof` 必须是精确七 key JSON
+object，schema 为 `execution-profile-b1-storage-proof-v1`，其六个 boolean fact 名为
+`raw_mapping_complete`、`commit_semantics_consistent`、
+`durability_path_consistent`、`mount_normalization_proved`、
+`not_applicable_proofs_valid` 与 `performance_configuration_proved`。这些 boolean 是 retained
+raw-evidence claim，不是用户可任意选择的 switch；runner 会自行推导 root containment，并拒绝
+ineligible 结果。一条精确 invocation 如下：
+
+```shell
+mkdir -m 700 /absolute/durable-root/b1-cap1-r1
+./build/tests/b1_immutable_benchmark \
+  --output-dir /absolute/durable-root/b1-cap1-r1 \
+  --base-manifest /absolute/evidence/base.manifest \
+  --storage-manifest /absolute/evidence/storage.manifest \
+  --environment-class-manifest /absolute/evidence/b1-class.manifest \
+  --storage-proof /absolute/evidence/storage-proof.json \
+  --run-cap 1 --replicate-ordinal 1
+```
+
+在组合完整 B1 candidate 或 reference 前，必须针对 cap 1 与 8、ordinal 1 至 3，在六个不同
+fresh process 与 root 中运行。一次 invocation 会执行 cold seed 252、warmup seed
+253/254/255，再由两个并发且有序的 measured producer 处理偶数与奇数 job `0..29`。它会在
+所选 root 下写入 `invocation.json`、`row.json`、两份冻结 Graph YAML、session/cache 目录与
+34 个 immutable occurrence slot；在安全 root 选择后发生 exception 时，会以 no-replace 方式
+额外写入 `failure.json`。仅 payload 就超过 2.2 GiB。Exit zero 表示四项 inner verdict 全部
+通过；exit two 表示完整 evidence 至少一项 inner threshold 失败；exit one 表示 parsing、setup、
+product、durability 或 evidence invalid。Artifact 明确不声明 canonical outer row/bundle。
+构建 target 或运行 `--help` 只属于 harness smoke；本文不声明已经执行精确 34-job invocation
+或三 replicate B1 机器运行。
 
 ## CTest 注册
 

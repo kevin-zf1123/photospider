@@ -456,12 +456,13 @@ dimension verdict。
 机器的 scaling，不构成 Interactive、batch 或 mixed-load SLO。
 
 [ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
-冻结目标 workload、六项 metric 公式、失效规则与下游证据归属。Issues #93 至
-#96 必须在真实 admission、visibility、cancellation/quiescence、artifact、trace、
-completed-service 与 resource-lifetime 边界增加 collector。任何 placeholder zero
-value 都不能替代缺失的 observation source。
+冻结目标 workload、六项 metric 公式、失效规则与下游证据归属。Issues #93 至 #95
+现在已经在真实 admission、visibility、cancellation/quiescence、artifact、trace、
+completed-service 与 resource-lifetime 边界增加各自负责的 source-private inner
+collector；#96 必须增加剩余 M1 composition。任何 placeholder zero value 都不能替代
+缺失的 observation source。
 
-这些目标 collector 具有精确 boundary 义务。Edit ordinal `1..12` 映射为
+这些画像 collector 具有精确 boundary 义务。Edit ordinal `1..12` 映射为
 `edit_index=0..11`；nominal monotonic admission start 与其 bounded lateness 是不同
 timestamp。I2 使用合法 RT-preview/HP-final child descriptor，记录 preview
 admission/visible、final trigger/admission/visible 与 generation-current check。Logical
@@ -471,7 +472,7 @@ requested/achieved durability、完整 output receipt、raw payload/manifest has
 独立 canonical semantic trace。M1 除 candidate/reference comparison provenance 外，
 还记录两个 same-ordinal isolated pair reference。
 
-这些仍是目标 harness/evidence 语义。精确 per-job planned-byte charge 及其 event-
+这些仍是画像 harness/evidence 语义。精确 per-job planned-byte charge 及其 event-
 aligned snapshot 是 Compute I/O admission、planned-byte high-water 与 final settlement
 的强制性权威证据。它们不会向当前 `BenchmarkResult` 增加 field、改变 `ComputeRun`、
 证明 physical memory ownership、替代 diagnostic RSS 或 ledger/device ownership

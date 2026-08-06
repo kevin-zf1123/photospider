@@ -527,14 +527,32 @@ canonical 15-field outer row、bundle 或 reference comparison。因此，仅构
 deterministic test 不构成 I2 机器符合性声明；任何此类声明都必须显式运行并保留完整精确的
 111-slot workload 证据。
 
-同样，当前 `ComputeIoExecutor` 只提供 bounded task/planned-byte mechanism 与精确
-settlement snapshot。#95 必须把它与 ADR 0009 的唯一目标 `OutputStore` authority、
-typed crash-durability receipt、canonical semantic-trace encoder，以及分离的 raw-
-payload/manifest/golden identity 组合。在该目标 evidence contract 中，精确 per-job
-planned-byte charge 与 snapshot 是 Compute I/O admission、planned-byte high-water 与
-final settlement 的强制性权威证据。Planned byte 与 atomic manifest visibility 都
-不能证明 physical memory ownership 或 crash durability；planned byte 也不能替代
-diagnostic RSS 或 ledger/device ownership evidence。
+Issue #95 现在已经提供源码私有的 B1 composition，且不改变任何 installed surface。
+`B1Host::compute_b1_image` 会把精确 Throughput QoS、weight one、所选 cap 与只读
+observation sink 贯穿到普通同步 compute 所使用的同一 embedded Host、Kernel、provider、
+ledger 与 `ExecutionService` path。该私有 view 还会暴露唯一真实进程
+`ComputeIoExecutor` 与不带 authority 的 execution snapshot；它不会创建第二个
+scheduler、worker pool、ledger、Graph authority 或 public request。
+
+`B1OutputStore` 是 B1 manual/release output owner，而不是 ADR 0009 中仍属目标的通用
+产品 `OutputStore`。它会在一个预先选择的 canonical root 下创建全新的 no-replace
+occurrence slot，再把精确 67,108,864-byte payload charge 与精确 manifest charge 作为
+两个有序 task 提交给进程 executor。它写入紧密 little-endian RGBA binary32 byte，
+同步并重验 payload，以 no-replace 方式最后发布 canonical manifest，完成 leaf-to-root
+directory barrier，然后才返回类型化 crash-durable receipt。每次 accepted admission 与
+settlement 都保留完整 occurrence/task identity 和 event-aligned I/O snapshot；capacity
+retry 保持 attempt zero 与相同 charge。Planned byte 只对 Compute I/O admission、high-water
+与 final settlement 具有权威性，不能证明 physical memory ownership、durability、RSS 或
+ledger/device evidence。
+
+Source-private B1 profile、environment validator 与 evidence evaluator 还实现不可变
+34-seed logical/raw golden table、canonical semantic trace、精确 21/24/4-field environment
+schema、raw backend/mount/performance proof mapping、eligibility/root-containment/
+compatibility，以及四项相互独立的 inner verdict。`b1_immutable_benchmark` 为
+`EXCLUDE_FROM_ALL`，不属于 CTest，只会在 caller 选择的 eligible root 下写入一条精确
+34-job inner row。构建该 target、显示 help 或通过 deterministic test 都不构成 B1 机器
+符合性结果；本文既不声明已完成精确三 replicate 机器运行，也不声明 #96 outer row/bundle/
+reference composition。
 
 ## 实现与验证入口
 
@@ -553,6 +571,11 @@ diagnostic RSS 或 ledger/device ownership evidence。
 - `src/lib/benchmark/i2_host.hpp`
 - `src/lib/benchmark/i2_profile.*`
 - `src/lib/benchmark/i2_evidence.*`
+- `src/lib/benchmark/b1_host.hpp`
+- `src/lib/benchmark/b1_profile.*`
+- `src/lib/benchmark/b1_environment.*`
+- `src/lib/benchmark/b1_output_store.*`
+- `src/lib/benchmark/b1_evidence.*`
 - `src/lib/compute/progressive_compute.*`
 - `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/resource_ledger.*`
@@ -583,6 +606,12 @@ diagnostic RSS 或 ledger/device ownership evidence。
 - `tests/unit/test_i1_evidence.cpp`
 - `tests/integration/test_i1_product_path.cpp`
 - `tests/verification/i1_edit_storm_benchmark.cpp`
+- `tests/unit/test_b1_profile.cpp`
+- `tests/unit/test_b1_environment.cpp`
+- `tests/unit/test_b1_output_store.cpp`
+- `tests/unit/test_b1_evidence.cpp`
+- `tests/integration/test_b1_product_path.cpp`
+- `tests/verification/b1_immutable_benchmark.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
 - `tests/integration/test_ipc_daemon.cpp`

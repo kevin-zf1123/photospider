@@ -1615,9 +1615,13 @@ operation-concurrency change, and interpret the newly printed raw samples.
 
 [ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
 defines the normative `execution-profile-slo-v1` contract. Issue #92 freezes
-this protocol but does not implement a runner or collector. Until Issues #93
-through #96 deliver their assigned rows, no command in the current repository
-can produce a conformant bundle and no current profile claim is implied.
+this protocol but does not implement a runner or collector. Issues #93 through
+#95 now provide their source-private I1, I2, and B1 mechanisms, closed inner
+evidence, deterministic tests, and explicit exact-workload runners. No current
+command composes the canonical 15-field outer rows, five-field bundle, and M1
+evidence assigned to #96, so the repository still cannot produce a conformant
+bundle. Building a runner or passing correctness tests implies no machine
+profile claim.
 
 The eventual maintained runner is a manual developer/release tool. It may live
 in the primary repository because this section defines a lasting product-
@@ -2263,7 +2267,7 @@ only exact base manifests/digests; its environment manifests intentionally
 differ. A missing raw field/proof, invalid state, byte/digest mismatch, or
 failed containment makes the affected relative verdict `invalid`.
 
-Issue #95 must add deterministic mechanism tests covering fixed field/type/
+Issue #95 now adds deterministic mechanism tests covering fixed field/type/
 enum/cardinality rejection; every state/reason/payload combination; NFC/text
 and scalar encodings, including accepted uint64 `0`, `1`, `2`, `8`, `9`, `10`,
 `23`, and `18446744073709551615` plus rejected `00`, `01`, and overflow; the
@@ -2571,6 +2575,69 @@ all four I1 inner verdicts passed;
 exit two means complete evidence failed at least one threshold; exit one means
 parsing, setup, cadence, or evidence invalidation. Building the target or
 running `--help` is only a harness smoke, not performance evidence.
+
+Issue #95 now registers the long-lived B1 mechanism in `test_b1_profile`,
+`test_b1_environment`, `test_b1_output_store`, `test_b1_evidence`, and, when
+the repository OpenCV operation provider is enabled, `test_b1_product_path`.
+These tests freeze the 34 seed/job identities and independent binary32-RNE
+goldens; canonical semantic trace; stable NFC text and exact 21/24/4-field
+schemas; scalar, collection, fixed-record, mount, all 37 performance-component
+and raw-proof rules; the eleven-reason eligibility truth set and pair
+compatibility; two charged no-replace crash-durable output stages and receipt;
+all four independent inner verdicts; and exact real-Host Throughput QoS,
+cap-one/cap-eight, Graph A/B predecessor, content/trace, lifecycle, resource,
+and Compute I/O closure. They use disposable roots and no machine-dependent
+throughput or candidate/reference threshold.
+
+The exact B1 corpus is the manual `b1_immutable_benchmark` target. It is
+`EXCLUDE_FROM_ALL`, absent from CTest/default CI, and must be built explicitly:
+
+```shell
+cmake --build build --target b1_immutable_benchmark -j
+./build/tests/b1_immutable_benchmark --help
+```
+
+Each invocation accepts exactly one cap and one fresh-process replicate. Its
+`--output-dir` must already be an empty absolute directory outside the checkout
+and must be the selected canonical durability root. The three manifest inputs
+must be exact independently prevalidated
+`execution-profile-base-environment-v1`,
+`execution-profile-storage-environment-v1`, and
+`execution-profile-environment-class-v1` bytes. `--storage-proof` must be an
+exact seven-key JSON object with schema
+`execution-profile-b1-storage-proof-v1` and six boolean facts named
+`raw_mapping_complete`, `commit_semantics_consistent`,
+`durability_path_consistent`, `mount_normalization_proved`,
+`not_applicable_proofs_valid`, and `performance_configuration_proved`.
+Those booleans are retained raw-evidence claims, not user-selected switches;
+the runner derives root containment itself and rejects an ineligible result.
+One exact invocation is:
+
+```shell
+mkdir -m 700 /absolute/durable-root/b1-cap1-r1
+./build/tests/b1_immutable_benchmark \
+  --output-dir /absolute/durable-root/b1-cap1-r1 \
+  --base-manifest /absolute/evidence/base.manifest \
+  --storage-manifest /absolute/evidence/storage.manifest \
+  --environment-class-manifest /absolute/evidence/b1-class.manifest \
+  --storage-proof /absolute/evidence/storage-proof.json \
+  --run-cap 1 --replicate-ordinal 1
+```
+
+Run cap one and eight for ordinals one through three in six distinct fresh
+processes and roots before composing a complete B1 candidate or reference.
+One invocation executes cold seed 252, warmup seeds 253/254/255, then two
+concurrent ordered measured producers over even and odd jobs `0..29`. It writes
+`invocation.json`, `row.json`, the two frozen Graph YAMLs, session/cache
+directories, and 34 immutable occurrence slots below the selected root; an
+exception after safe root selection adds `failure.json` without replacing an
+existing artifact. The payloads alone exceed 2.2 GiB. Exit zero means all four
+inner verdicts passed, two means complete evidence failed at least one inner
+threshold, and one means parsing, setup, product, durability, or evidence was
+invalid. The artifacts explicitly make no canonical outer-row/bundle claim.
+Building the target or running `--help` is only a harness smoke; this document
+does not claim that an exact 34-job invocation or three-replicate B1 machine run
+has been executed.
 
 ## CTest Registration
 

@@ -657,15 +657,38 @@ bundle, or reference comparison. Building it or passing deterministic tests is
 therefore not an I2 machine-conformance claim; the exact 111-slot workload must
 be invoked explicitly and retained before any such claim.
 
-Likewise, current `ComputeIoExecutor` supplies only bounded task/planned-byte
-mechanism and exact settlement snapshots. #95 must compose it with ADR 0009's
-single target `OutputStore` authority, typed crash-durability receipt, canonical
-semantic-trace encoder, and separate raw-payload/manifest/golden identities. In
-that target evidence contract, exact per-job planned-byte charges and snapshots
-are mandatory and authoritative for Compute I/O admission, planned-byte
-high-water, and final settlement. Neither planned bytes nor atomic manifest
-visibility proves physical memory ownership or crash durability, and planned
-bytes do not replace diagnostic RSS or ledger/device ownership evidence.
+Issue #95 now supplies the source-private B1 composition without changing an
+installed surface. `B1Host::compute_b1_image` carries exact Throughput QoS,
+weight one, the selected cap, and an observation-only sink through the same
+embedded Host, Kernel, provider, ledger, and `ExecutionService` path used by
+ordinary synchronous compute. The same private view exposes the one real
+process `ComputeIoExecutor` and authority-free execution snapshots; it creates
+no second scheduler, worker pool, ledger, Graph authority, or public request.
+
+`B1OutputStore` is the B1 manual/release output owner, not the still-target
+general product `OutputStore` from ADR 0009. Under one preselected canonical
+root it creates a fresh no-replace occurrence slot, then submits the exact
+67,108,864-byte payload charge and exact manifest charge as two ordered tasks
+to the process executor. It writes tight little-endian RGBA binary32 bytes,
+syncs and revalidates the payload, publishes the canonical manifest last and
+without replacement, completes leaf-to-root directory barriers, and only then
+returns a typed crash-durable receipt. Every accepted admission and settlement
+retains the complete occurrence/task identity and an event-aligned I/O
+snapshot; capacity retry keeps attempt zero and the same charge. Planned bytes
+are authoritative only for Compute I/O admission, high-water, and final
+settlement, not physical memory ownership, durability, RSS, or ledger/device
+evidence.
+
+The source-private B1 profile, environment validator, and evidence evaluator
+also implement the immutable 34-seed logical/raw golden table, canonical
+semantic trace, exact 21/24/4-field environment schemas, raw backend/mount/
+performance proof mappings, eligibility/root-containment/compatibility, and
+four independent inner verdicts. `b1_immutable_benchmark` is
+`EXCLUDE_FROM_ALL`, absent from CTest, and writes one exact 34-job inner row
+below a caller-selected eligible root. Building it, showing its help, or
+passing deterministic tests is not a B1 machine-conformance result; this
+document claims neither an exact three-replicate machine run nor the #96 outer
+row/bundle/reference composition.
 
 ## Implementation and Validation Entry Points
 
@@ -684,6 +707,11 @@ bytes do not replace diagnostic RSS or ledger/device ownership evidence.
 - `src/lib/benchmark/i2_host.hpp`
 - `src/lib/benchmark/i2_profile.*`
 - `src/lib/benchmark/i2_evidence.*`
+- `src/lib/benchmark/b1_host.hpp`
+- `src/lib/benchmark/b1_profile.*`
+- `src/lib/benchmark/b1_environment.*`
+- `src/lib/benchmark/b1_output_store.*`
+- `src/lib/benchmark/b1_evidence.*`
 - `src/lib/compute/progressive_compute.*`
 - `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/resource_ledger.*`
@@ -714,6 +742,12 @@ bytes do not replace diagnostic RSS or ledger/device ownership evidence.
 - `tests/unit/test_i1_evidence.cpp`
 - `tests/integration/test_i1_product_path.cpp`
 - `tests/verification/i1_edit_storm_benchmark.cpp`
+- `tests/unit/test_b1_profile.cpp`
+- `tests/unit/test_b1_environment.cpp`
+- `tests/unit/test_b1_output_store.cpp`
+- `tests/unit/test_b1_evidence.cpp`
+- `tests/integration/test_b1_product_path.cpp`
+- `tests/verification/b1_immutable_benchmark.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
 - `tests/integration/test_ipc_daemon.cpp`

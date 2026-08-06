@@ -24,7 +24,7 @@ a smaller user build.
 On macOS:
 
 ```bash
-brew install cmake pkg-config opencv yaml-cpp nlohmann-json
+brew install cmake pkg-config opencv utf8proc yaml-cpp nlohmann-json
 ```
 
 On Ubuntu or Debian:
@@ -32,7 +32,7 @@ On Ubuntu or Debian:
 ```bash
 sudo apt-get update
 sudo apt-get install build-essential cmake pkg-config libopencv-dev \
-  libyaml-cpp-dev nlohmann-json3-dev
+  libutf8proc-dev libyaml-cpp-dev nlohmann-json3-dev
 ```
 
 Then initialize FTXUI, configure the project, build the CLI, and start the
