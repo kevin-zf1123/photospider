@@ -1911,9 +1911,17 @@ slot, and receipt bind the complete job instance as well as its fixture job
 index. The store holds root and slot directory descriptors and performs every
 slot/payload/manifest mutation, barrier, revalidation, and cleanup relative to
 them. Root pathname replacement or symlink substitution must fail closed with
-no redirected artifact. A post-slot exception guard cancels/waits for accepted
-work before identity-verified cleanup, proves exact charge retirement, and
-leaves an exact-identity retry possible. A B1 job contributes throughput
+no redirected artifact. It also holds a nonblocking advisory exclusive root
+lock; cooperating processes/threads must honor it and reserve B1 staging and
+occurrence names to the single store owner. A post-slot exception guard
+cancels/waits for accepted work before cleanup, proves exact charge retirement,
+checks every recorded identity twice, and checks each removal plus following
+absence. Because POSIX separates the final identity recheck from name removal,
+the deletion guarantee is scoped to that cooperating exclusive-owner contract;
+a non-cooperating same-UID mutation is outside the threat model. A pre-guard
+anchor handoff failure must retain ambiguous residue and must not claim
+retryability. Within the precondition, only checked removal and observed
+absence leave an exact-identity retry possible. A B1 job contributes throughput
 only after that receipt and both logical/raw golden checks. Every I2
 twelfth-edit (`edit_index=11`) preview/final is
 acquired twice through the same Host binding. A configured Metal device permits
@@ -2272,13 +2280,20 @@ The independent validator performs these steps in order:
    return exactly `canonical-schema-invalid` and stop before raw-proof, digest,
    environment-class, or other eligibility evaluation;
 3. require the complete raw proof to be retained in durable evidence and JSON,
-   bind each normalized field to that exact raw observation/proof, and validate
-   every field-specific N/A claim, mount normalization decision, stable
-   instance/endpoint/anchor identity, fixed performance configuration,
-   excluded-option no-effect proof, and root-containment proof;
+   treat it only as expected evidence, bind each normalized field to that exact
+   raw observation/proof, and validate every field-specific N/A claim, mount
+   normalization decision, stable instance/endpoint/anchor identity, fixed
+   performance configuration, excluded-option no-effect proof, and root-
+   containment proof;
 4. recompute `storage_environment_digest` and `base_environment_digest` as
    lowercase SHA-256 over their complete exact manifest bytes;
-5. parse the exact four-field environment-class manifest and recompute
+5. for every required-storage side, require a process-private actual
+   observation produced independently from retained files: stable initial/final
+   held-root identity and descriptor-derived filesystem type, an actual typed
+   successful receipt, and a complete trusted probe whose canonical bytes equal
+   the retained raw proof; any named unverified external field makes that side
+   ineligible, and diagnostic JSON cannot rehydrate this authority;
+6. parse the exact four-field environment-class manifest and recompute
    `environment_class_digest`; independently bind its base-digest payload to
    the retained/recomputed base, bind B1/M1 known `required`/`none` and storage-
    digest payload to present retained/recomputed storage, independently
@@ -2288,7 +2303,7 @@ The independent validator performs these steps in order:
    I1/I2 known `not-applicable`/`row-has-no-output-commit` plus the exact N/A
    state/reason/empty payload to complete storage-evidence absence; a recomputed
    class self-hash never substitutes for these bindings; and
-6. evaluate every canonical-manifest predicate in the table, emit all and only
+7. evaluate every canonical-manifest predicate in the table, emit all and only
    true reason tokens once in unsigned-ASCII order, and derive `eligible`
    exactly from an empty list or `ineligible` from a nonempty list. The reason
    list is retained evidence but is not included in an environment digest.
@@ -2301,9 +2316,11 @@ exact base compatibility and the fixed storage-N/A environment manifest.
 Candidate/reference B1/M1, B1 cap-1/cap-8, and M1/paired-B1-cap-8 use exact
 base, storage, and full environment-class compatibility. M1/paired-I1 compares
 only exact base manifests/digests; its environment manifests intentionally
-differ. A missing/drifting raw field/proof, stale retained eligibility, invalid
-state, byte/digest mismatch, or failed containment makes the affected relative
-verdict `invalid`.
+differ, but the M1 required-storage side must still pass its own actual-
+authority binding. A missing/drifting raw field/proof, missing or file-
+reconstructed actual authority, stale retained eligibility, invalid state,
+byte/digest mismatch, or failed containment makes the affected relative verdict
+`invalid`.
 
 Run that four-field binding check for self-validation, cap-one/cap-eight,
 candidate/reference, and mixed relations before comparing peers. Mechanism
@@ -2312,6 +2329,15 @@ environment-class self-hash while leaving the actual retained manifest
 unchanged; both mutations remain incompatible. Additional cases remove or drift
 the retained proof and alter canonical storage bytes while recomputing storage/
 class digests but retaining stale eligibility; every case remains incompatible.
+Synchronous storage-proof recasts must also be exercised after recomputing the
+storage digest, class digest, and retained eligibility: self, both cap sides,
+both candidate/reference sides, both M1/B1 sides, and the M1 side of M1/I1 all
+remain invalid because their independent actual observation did not change.
+JSON tests must prove it exposes only diagnostic authority metadata/digests, and
+runner tests must prove canonical input files never initialize the actual
+probe. When the portable runner cannot verify an external mount, performance,
+hardware-cache, power-loss-protection, or transaction-event fact, its exact
+field is reported and the row is Invalid rather than machine-conformant.
 
 Issue #95 now adds deterministic mechanism tests covering fixed field/type/
 enum/cardinality rejection; every state/reason/payload combination; NFC/text
@@ -2348,9 +2374,10 @@ For each candidate or reference bundle:
    process workers, Run caps, all limits/headroom, fixture hashes, seeds, and
    cache/residency preconditions; encode and independently validate the exact
    24-field base manifest before warmup; for B1/M1 also select the
-   `OutputStore` root, capture its raw storage/capability/configuration
-   observations, encode the exact 21-field storage manifest, freeze the fixed
-   performance configuration, and compute its eligibility and digest;
+   `OutputStore` root, capture the pre-warmup storage/capability/configuration
+   observations through a trusted adapter, encode the exact 21-field storage
+   manifest and retained raw proof as expected evidence, freeze the fixed
+   performance configuration, and compute retained eligibility and digest;
 3. require candidate and reference to have the same evidence schema, workload
    id, row-applicable environment class, limits, and fixture hashes; B1/M1
    comparisons require byte-identical eligible storage/base manifests and a
@@ -2379,6 +2406,10 @@ For each candidate or reference bundle:
    admission, visibility, cancellation/quiescence, start, completion,
    offered-demand eligibility, artifact/receipt, trace, digest, transfer/copy/
    residency, and resource-lifetime observations at their owning boundaries;
+   for required storage, re-observe the held root at the initial/final row
+   boundaries, retain actual typed receipts, and require the independently
+   produced complete probe to exact-match retained expected proof; any
+   unverified external field makes the row Invalid;
 8. reject any required telemetry cursor gap/drop rather than estimating lost
    observations;
 9. compute every replicate aggregate and independent dimension verdict from

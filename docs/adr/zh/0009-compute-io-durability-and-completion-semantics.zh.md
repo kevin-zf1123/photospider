@@ -190,25 +190,33 @@ Creation、file access、publication、barrier、revalidation 与 cleanup 始终
 descriptor-relative 操作，并验证预期 filesystem identity。因此 root path replacement
 或 symlink substitution 会使最终 binding 失败，而不会重定向写入。
 
-源码私有的 B1 实现会创建 mode-`0700` 的同 root staging anchor 与一个 private child
-slot。对每次 `mkdirat` → `openat` handoff，它会先记录 no-follow named directory
-identity，在此之前不修改 child 内容，然后要求打开的 descriptor 具有完全相同的
-identity。Handoff 失败时绝不会按当前 name 删除 child，因为该 name 可能已经指向
-replacement。Payload 与 manifest task 只修改已验证的 private slot。两个 accepted
-charge 均结算后，完整 directory 会通过一次 atomic no-replace directory rename 发布到
-不可变 occurrence name（Darwin 使用 `RENAME_EXCL`，Linux 使用
-`RENAME_NOREPLACE`），随后完成 source anchor 与 destination root barrier，并最终重验
-descriptor/name binding。实现不会先创建 public occurrence，再重新打开它进行写入。
+源码私有的 B1 实现会在 store 生命周期内取得所选 root 的 nonblocking advisory
+exclusive lock，并创建 mode-`0700` 的同 root staging anchor 与一个 private child slot。
+其 namespace contract 只覆盖一个协作式 store owner：所有协作进程/线程都必须遵守该
+lock，并把 `.b1-staging-*` 与 `occurrence-*` name 保留给这个 owner。该 lock 不是防御
+任意不协作 same-UID actor 的安全边界。对每次 `mkdirat` → `openat` handoff，它会先记录
+no-follow named directory identity，在此之前不修改 child 内容，然后要求打开的 descriptor
+具有完全相同的 identity。如果 anchor handoff 在 transaction guard 建立前失败，实现会保留
+含义不确定的当前 anchor name，传播失败，且不声称可重试。如果 slot handoff 在 guard 激活后
+失败，而 replacement residue 阻止精确 guarded cleanup，则会 fail-stop。Payload 与 manifest
+task 只修改已验证的 private slot。两个 accepted charge 均结算后，完整 directory 会通过一次
+atomic no-replace directory rename 发布到不可变 occurrence name（Darwin 使用
+`RENAME_EXCL`，Linux 使用 `RENAME_NOREPLACE`），随后完成 source anchor 与 destination
+root barrier，并最终重验 descriptor/name binding。实现不会先创建 public occurrence，再重新
+打开它进行写入。
 
 Allocation-free transaction guard 会在 anchor、slot、payload、private manifest 与
 published manifest 逐一归属事务时记录其精确 identity。若后续 factory、observation、
 wait、publication 或 receipt 工作失败，guard 会先 cancel 并等待每个 accepted Compute
 I/O task，并证明其精确 charge 已退休。Cleanup 是严格操作而非 best effort：每个存在的
-name 在 cleanup race seam 前后都必须保持已记录 type 与 identity；每次 unlink/rmdir、
-删除后的 absence 以及 parent-directory sync 都必须成功。Extra leaf、type/identity
-replacement、`EIO`/`EROFS`、非空 directory 或无法证明的 name binding 都会 fail-stop；
-不同 identity 的 replacement 永远不会被删除。只有精确删除完成后，原 commit identity
-才保持可重试。
+name 都必须通过两次 descriptor-relative 的已记录 type/identity 检查；每次
+`unlinkat`/`rmdir` 结果、随后 absence 与 parent-directory sync 都必须成功。POSIX 不会把
+最终 identity 检查与后续按 name 删除合并成一个原子的 identity-selected 操作。在协作式
+exclusive-owner 前提下，不会有 actor 在这段间隔修改 reserved name；任一次检查检测到
+replacement 都会在删除前保留它并 fail-stop。最终检查之后由不协作 same-UID actor 发起的
+mutation 不在本 contract 内，设计也不声称永远不会删除这种 replacement。Extra leaf、
+type/identity 漂移、`EIO`/`EROFS`、非空 directory 或无法证明 absence 都会 fail-stop。
+只有在该前提内完成 checked removal 并观察到 absence 后，原 commit identity 才保持可重试。
 
 回执标识 commit、descriptor/content、namespace、version 与达到的 durability。
 它不是可变 cache 或 staging path。默认策略绝不覆盖已提交输出；替换使用显式

@@ -232,29 +232,42 @@ barriers, revalidation, and cleanup remain descriptor-relative and verify the
 expected filesystem identities. A root-path replacement or symlink
 substitution therefore fails the final binding instead of redirecting writes.
 
-The source-private B1 realization creates a mode-`0700` same-root staging
-anchor and a private child slot. For each `mkdirat` → `openat` handoff it first
-records the no-follow named directory identity, performs no child mutation,
-then requires the opened descriptor to have that exact identity. A handoff
-failure never removes the current child by name because that name may already
-denote a replacement. Payload and manifest tasks mutate only the verified
-private slot. After both accepted charges settle, the complete directory is
-published to its immutable occurrence name by one atomic no-replace directory
-rename (`RENAME_EXCL` on Darwin or `RENAME_NOREPLACE` on Linux), followed by
-source-anchor and destination-root barriers and final descriptor/name
-revalidation. No mkdir-created public occurrence is reopened for later writes.
+The source-private B1 realization acquires a nonblocking advisory exclusive
+lock on the selected root for the store lifetime and creates a mode-`0700`
+same-root staging anchor and private child slot. Its namespace contract covers
+one cooperating store owner: every cooperating process/thread honors that lock
+and reserves `.b1-staging-*` and `occurrence-*` names to that owner. The lock is
+not a security boundary against an arbitrary non-cooperating same-UID actor.
+For each `mkdirat` → `openat` handoff the store first records the no-follow
+named directory identity, performs no child mutation, then requires the opened
+descriptor to have that exact identity. If the anchor handoff fails before the
+transaction guard exists, the ambiguous current anchor name is retained and
+the failure propagates without a retryability claim. A slot handoff failure
+after guard activation fail-stops if replacement residue prevents exact guarded
+cleanup. Payload and manifest tasks mutate only the verified private slot.
+After both accepted charges settle, the complete directory is published to its
+immutable occurrence name by one atomic no-replace directory rename
+(`RENAME_EXCL` on Darwin or `RENAME_NOREPLACE` on Linux), followed by source-
+anchor and destination-root barriers and final descriptor/name revalidation.
+No mkdir-created public occurrence is reopened for later writes.
 
 An allocation-free transaction guard records the exact identity of the anchor,
 slot, payload, private manifest, and published manifest as each becomes owned.
 If later factory, observation, wait, publication, or receipt work fails, the
 guard first cancels and waits for every accepted Compute I/O task and proves its
 exact charge retired. Cleanup is strict rather than best effort: each present
-name must have its recorded type and identity before and after the cleanup race
-seam, every unlink/rmdir and resulting absence is checked, and parent
-directories are synchronized. An extra leaf, type/identity replacement,
-`EIO`/`EROFS`, nonempty directory, or unprovable name binding terminates
-fail-stop; a different replacement is never deleted. Only exact deletion leaves
-the original commit identity retryable.
+name must have its recorded type and identity at two descriptor-relative
+checks, every `unlinkat`/`rmdir` result and following absence is checked, and
+parent directories are synchronized. POSIX does not make the final identity
+check and following name-based removal one atomic identity-selected operation.
+Under the cooperating exclusive-owner precondition, no actor mutates a
+reserved name in that interval; a replacement detected by either check is
+preserved and causes fail-stop before removal. A mutation by a non-cooperating
+same-UID actor after the final check is outside this contract, and the design
+does not claim it can never remove such a replacement. An extra leaf,
+type/identity drift, `EIO`/`EROFS`, nonempty directory, or unprovable absence
+terminates fail-stop. Only checked removal and observed absence within that
+precondition leave the original commit identity retryable.
 
 The receipt identifies commit, descriptor/content, namespace, version, and
 achieved durability. It is not a mutable cache or staging path. The default

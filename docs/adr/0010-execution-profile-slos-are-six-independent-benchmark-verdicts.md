@@ -646,13 +646,21 @@ makes the job invalid and yields no successful crash-durable receipt.
 
 The selected canonical root is opened without following links and its directory
 descriptor, plus the fresh slot descriptor, remains the transaction's namespace
-authority. Slot/payload/manifest mutation, publication, barriers, revalidation,
-and cleanup are descriptor-relative. A pathname replacement or symlink can only
-make the final path-to-descriptor binding fail; it cannot redirect writes. An
-allocation-free guard owns the slot immediately after creation, adopts any
-accepted completion before later work can throw, and on exceptional exit first
-cancels/waits for exact charge retirement before identity-verified cleanup. The
-same commit identity remains retryable.
+authority. The store holds a nonblocking advisory exclusive root lock for its
+lifetime; all cooperating processes/threads honor that lock and reserve the B1
+staging/occurrence namespace to its single owner. Slot/payload/manifest mutation,
+publication, barriers, revalidation, and cleanup are descriptor-relative. A
+pathname replacement or symlink can only make the final path-to-descriptor
+binding fail; it cannot redirect writes. An allocation-free guard owns the slot
+immediately after creation, adopts any accepted completion before later work can
+throw, and on exceptional exit first cancels/waits for exact charge retirement
+before checked cleanup. POSIX exposes the final identity recheck and following
+name removal as separate operations, so the cleanup guarantee relies on that
+cooperating exclusive-owner precondition. Detected drift fails before removal;
+arbitrary non-cooperating same-UID mutation is outside the contract. A
+pre-guard anchor handoff failure retains ambiguous residue and makes no
+retryability claim. Only checked removal and observed absence inside the
+precondition leave the same commit identity retryable.
 
 The `OutputCommitReceipt` evidence binds at least the stable `OutputCommitId`,
 rooted namespace/output slot, complete `job_instance_id`, job index, descriptor
@@ -1169,11 +1177,16 @@ payload to present storage bytes, their recomputed digest, and their claim, and
 must retain the exact raw storage proof. Each side independently recomputes the
 complete eligibility result from its retained storage bytes plus that proof and
 requires exact equality with the retained eligible flag and ordered reason
-list. Missing, incomplete, stale, or drifting proof and stale eligibility fail
-the binding. I1/I2 must bind `not-applicable`/`row-has-no-output-commit` and the exact
-N/A state/reason/empty payload to the absence of every storage evidence object.
-The recomputed class digest must match its claim, but a valid class self-hash
-does not repair a mismatched embedded base or storage digest payload.
+list. It must then bind those retained expected bytes to its own process-private
+actual storage observation: the held-root identity and descriptor-derived
+filesystem type, actual successful typed receipt, and an independently produced
+complete probe whose canonical encoding equals the retained proof. Missing,
+incomplete, stale, drifting, or retained-file-reconstructed authority fails the
+binding. I1/I2 must bind `not-applicable`/`row-has-no-output-commit` and the
+exact N/A state/reason/empty payload to the absence of every storage evidence
+and actual-observation object. The recomputed class digest must match its claim,
+but a valid class self-hash does not repair a mismatched embedded base or
+storage digest payload.
 
 The retained proof is not a list of producer assertions. Its only accepted
 encoding is the canonical
@@ -1200,7 +1213,14 @@ unknown, duplicate, malformed, stale, or internally drifting evidence therefore
 fails even when the 21-field manifest and all claimed/class digests have been
 recomputed to valid values. Durable JSON evidence carries the canonical proof
 bytes, their digest, and a complete readable decoding of the same observations;
-it does not introduce an alternate JSON proof grammar.
+it does not introduce an alternate JSON proof grammar. JSON also carries only
+a diagnostic rendering and digest of the actual-observation object; it cannot
+rehydrate the live root/receipt/probe authority. If a platform adapter cannot
+independently verify an external declaration such as effective mount semantics,
+the complete performance cut, hardware write-cache policy, power-loss
+protection, or transaction-event attestation, it lists the exact unverified
+field and the required-storage side is machine-ineligible. Canonical input
+files are expected claims, never a substitute for that observation.
 
 Storage compatibility eligibility is derived evidence, not digest input. Its
 reason list is a deterministic result, not a producer-selected subset:
@@ -1309,6 +1329,14 @@ each replicate records and freezes:
   fingerprint including the frozen B1 performance configuration,
   `storage_environment_digest`, compatibility eligibility, and raw
   capability/configuration observations.
+
+Those pre-warmup canonical bytes and proof are retained expected evidence. The
+process must also hold/re-observe the selected root descriptor across the row,
+collect actual typed receipts at transaction completion, and obtain the
+complete probe from a trusted source-private adapter. Compatibility is not
+evaluated until those actual facts exact-match the retained expectations; any
+external field the adapter cannot verify makes the required-storage side
+machine-ineligible.
 
 The v1 resource configuration is 32 CPU slots, 1 GiB Host retained memory,
 512 MiB Host scratch, 65,536 ready entries, 256 MiB ready bytes, and
@@ -2017,6 +2045,21 @@ composition frozen by this ADR. The runner is excluded from the default build
 and CTest, and no exact 111-slot machine result is asserted here. Thus this
 implementation status completes the assigned mechanism and inner-evidence
 surface without promoting an absent machine run or claiming #95/#96 delivery.
+
+The current #95 source tree likewise contains the source-private B1 workload,
+process-Compute-I/O-backed crash-durable owner, canonical environment/proof
+contract, inner evaluator, and explicit 34-job runner. The runner treats its
+four canonical files only as expected claims, obtains descriptor-derived root
+facts and actual typed receipts, and requires a separate complete trusted probe
+before required-storage compatibility can pass. The portable Darwin/Linux path
+cannot independently verify every mount, performance, hardware-cache, power-
+loss-protection, and transaction-event declaration, so it emits Invalid rather
+than a machine-conformance result. Its store holds an advisory exclusive root
+lock, and cleanup guarantees assume cooperating actors honor that lock and the
+reserved B1 namespace; POSIX provides no portable atomic identity-selected
+unlink/rmdir against a non-cooperating same-UID mutator. The target remains
+excluded from the default build and CTest, and neither an exact three-replicate
+B1 corpus nor #96 composition is asserted here.
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

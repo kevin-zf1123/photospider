@@ -554,12 +554,17 @@ synchronization、directory barrier 或 atomic no-replace publication、achieved
 crash-durable receipt。
 
 所选 canonical root 以不跟随链接的方式打开，其 directory descriptor 与全新 slot
-descriptor 始终作为 transaction 的 namespace authority。Slot/payload/manifest
-mutation、publication、barrier、revalidation 与 cleanup 都是 descriptor-relative。
-Pathname replacement 或 symlink 只能使最终 path-to-descriptor binding 失败，不能
-重定向写入。Allocation-free guard 在 slot 创建后立即接管它，在后续工作可能抛异常前
-接纳任意 accepted completion，并在异常退出时先 cancel/wait 到精确 charge 退休，再
-进行 identity-verified cleanup。相同 commit identity 保持可重试。
+descriptor 始终作为 transaction 的 namespace authority。Store 会在整个生命周期内持有
+nonblocking advisory exclusive root lock；所有协作进程/线程都必须遵守该 lock，并把 B1
+staging/occurrence namespace 保留给单一 owner。Slot/payload/manifest mutation、publication、
+barrier、revalidation 与 cleanup 都是 descriptor-relative。Pathname replacement 或 symlink
+只能使最终 path-to-descriptor binding 失败，不能重定向写入。Allocation-free guard 在 slot
+创建后立即接管它，在后续工作可能抛异常前接纳任意 accepted completion，并在异常退出时先
+cancel/wait 到精确 charge 退休，再进行 checked cleanup。POSIX 把最终 identity recheck 与
+后续按 name 删除暴露为两个独立操作，因此 cleanup 保证依赖该协作式 exclusive-owner 前提。
+检测到的漂移会在删除前失败；任意不协作 same-UID mutation 不在 contract 内。Guard 建立前的
+anchor handoff failure 会保留含义不确定的 residue，且不声称可重试。只有在该前提内完成 checked
+removal 并观察到 absence 后，相同 commit identity 才保持可重试。
 
 `OutputCommitReceipt` evidence 至少绑定稳定 `OutputCommitId`、rooted namespace/
 output slot、完整 `job_instance_id`、job index、descriptor 与 logical content
@@ -1026,11 +1031,14 @@ reason 相同，payload 为空。任何行都不遗漏四条 record 中的任意
 `required`/`none` 与 known class storage-digest payload 绑定到存在且 eligible 的
 storage byte、其复算 digest 及其 claim，并保留精确 raw storage proof。每一侧都必须
 从自己的 retained storage byte 加该 proof 独立复算完整 eligibility result，并要求与
-retained eligible flag 及有序 reason list 精确相等。Proof 缺失、不完整、陈旧或漂移，
-以及 stale eligibility，都必须使 binding 失败。I1/I2 必须把 `not-applicable`/
-`row-has-no-output-commit` 与精确 N/A state/reason/empty payload 绑定到全部 storage
-evidence object 均不存在。复算 class digest 必须匹配其 claim，但合法 class self-hash
-不能修复不匹配的内嵌 base 或 storage digest payload。
+retained eligible flag 及有序 reason list 精确相等。然后，它还必须把这些 retained expected
+byte 绑定到自己进程私有的实际 storage observation：held-root identity 与从 descriptor 得出的
+filesystem type、实际成功的 typed receipt，以及一个独立产生且 canonical encoding 与 retained
+proof 相等的完整 probe。缺失、不完整、陈旧、漂移或从 retained file 重建出来的 authority 都会
+使 binding 失败。I1/I2 必须把 `not-applicable`/`row-has-no-output-commit` 与精确 N/A
+state/reason/empty payload 绑定到全部 storage evidence 与 actual-observation object 均不存在。
+复算 class digest 必须匹配其 claim，但合法 class self-hash 不能修复不匹配的内嵌 base 或
+storage digest payload。
 
 Retained proof 不是 producer assertion 列表。唯一接受的编码是 canonical
 `execution-profile-b1-storage-raw-proof-v1\n` document，并使用与 manifest 相同的
@@ -1052,7 +1060,12 @@ receipt binding 与 component-wise containment check，以重建全部 predicate
 21-field manifest 与全部 claimed/class digest 已重新计算为合法值，缺失、未知、重复、
 malformed、stale 或内部漂移的 evidence 仍会失败。Durable JSON evidence 会携带 canonical
 proof byte、其 digest，以及同一 observation 的完整可读解码；它不会引入另一套 JSON
-proof grammar。
+proof grammar。JSON 还只会携带 actual-observation object 的 diagnostic rendering 与 digest，
+不能重新取得 live root/receipt/probe authority。如果 platform adapter 无法独立验证 effective
+mount semantics、完整 performance cut、hardware write-cache policy、power-loss protection 或
+transaction-event attestation 等 external declaration，它必须列出精确的 unverified field，且该
+required-storage 侧为 machine-ineligible。Canonical input file 只是 expected claim，绝不能
+代替该 observation。
 
 Storage compatibility eligibility 是 derived evidence，不是 digest 输入。Reason
 list 是确定性结果，不是 producer 自选 subset：
@@ -1144,6 +1157,12 @@ replicate 都要记录并冻结：
 - 对 B1 与 M1，所选 `OutputStore` root evidence、包含冻结 B1 performance
   configuration 的规范化 storage fingerprint、`storage_environment_digest`、
   compatibility eligibility 与 raw capability/configuration observation。
+
+这些 warmup 前 canonical byte 与 proof 是 retained expected evidence。进程还必须跨越整行
+持有并重新观察 selected root descriptor，在 transaction completion 收集实际 typed receipt，
+并从可信 source-private adapter 取得完整 probe。在这些实际 fact 与 retained expectation 精确
+匹配前不得评估 compatibility；adapter 无法验证的任一 external field 都会使 required-storage
+侧 machine-ineligible。
 
 v1 resource configuration 是 32 个 CPU slot、1 GiB Host retained memory、
 512 MiB Host scratch、65,536 个 ready entry、256 MiB ready byte；Interactive
@@ -1751,6 +1770,17 @@ evaluator，以及显式手工 runner。其输出的 `execution-profile-i2-inner
 冻结的 canonical outer row、bundle 与 reference composition。Runner 被排除在默认 build
 与 CTest 之外，本文也不声明已经产生精确 111-slot 机器结果。因此，该实现状态完成了负责的
 mechanism 与 inner-evidence surface，但不会提升缺失的机器运行，也不声称完成 #95/#96。
+
+当前 #95 源码树同样包含源码私有 B1 workload、由进程 Compute I/O 支撑的 crash-durable
+owner、canonical environment/proof contract、inner evaluator 与显式 34-job runner。Runner
+只把四个 canonical file 视为 expected claim，取得由 descriptor 导出的 root fact 与实际 typed
+receipt，并要求另一个完整可信 probe，required-storage compatibility 才能通过。Portable
+Darwin/Linux path 无法独立验证全部 mount、performance、hardware-cache、power-loss-
+protection 与 transaction-event declaration，因此会输出 Invalid，而不是 machine-conformance
+结果。Store 持有 advisory exclusive root lock，cleanup 保证假设协作 actor 遵守该 lock 与
+reserved B1 namespace；面对不协作 same-UID mutator，POSIX 没有 portable atomic identity-
+selected `unlink`/`rmdir`。该 target 仍排除在 default build 与 CTest 之外，本文也不声明已经
+产生精确三 replicate B1 corpus 或完成 #96 composition。
 
 每个 Issue 可以为其机制新增长期确定性行为测试，但不能重定义 workload，也不能
 用缺失、invalid 或不同版本的行提升目标。与机器相关的 latency、throughput 与

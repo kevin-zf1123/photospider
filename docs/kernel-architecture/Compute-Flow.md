@@ -499,19 +499,29 @@ manual/release profile. `B1OutputStore` reuses the current process
 `ComputeIoExecutor` to perform two exact charged tasks, then proves synchronized
 payload bytes, manifest-last assembly, atomic no-replace directory publication,
 directory barriers, and a typed crash-durable receipt below a selected
-canonical root. It writes only inside a verified mode-`0700` private staging
-anchor/slot held by no-follow descriptors; the mkdir-to-open identity must match
-before any artifact mutation. After both tasks settle, one Darwin
-`RENAME_EXCL` or Linux `RENAME_NOREPLACE` transition publishes the complete
-occurrence. Root-path or public-slot replacement cannot redirect writes. A
-transaction guard settles accepted Compute I/O charge before strict identity-
-checked cleanup; cleanup verifies every leaf/directory before and after the
-race seam and fail-stops on extra leaves, type/identity replacement, unlink/
-rmdir failure, or unproved absence. This path is invoked only after the
-B1 Run result is acquired through the ordinary embedded Host compute path. It
-does not move general HP cache persistence after Graph publication, replace the
-daemon delivery store, or make durable output part of public Host/CLI/IPC
-success.
+canonical root. It holds a nonblocking advisory exclusive root lock and writes
+only inside a verified mode-`0700` private staging anchor/slot held by no-follow
+descriptors; every cooperating actor must honor that lock and reserve B1 names
+to the single store owner. The mkdir-to-open identity must match before any
+artifact mutation. After both tasks settle, one Darwin `RENAME_EXCL` or Linux
+`RENAME_NOREPLACE` transition publishes the complete occurrence. Root-path or
+public-slot replacement cannot redirect writes. A transaction guard settles
+accepted Compute I/O charge before strict checked cleanup. It checks each
+identity twice, every removal result, and following absence, then fail-stops on
+detected extra leaves, type/identity drift, unlink/rmdir failure, or unproved
+absence. Because POSIX separates the final identity check from name removal,
+the cleanup guarantee is scoped to the cooperating exclusive-owner contract;
+arbitrary non-cooperating same-UID namespace mutation is not covered. A pre-
+guard anchor handoff failure retains ambiguous residue and makes no retryability
+claim. This path is invoked only after the B1 Run result is acquired through
+the ordinary embedded Host compute path. Its retained environment files are
+expected claims only: required-storage compatibility additionally needs each
+side's own process-private held-root observation, actual typed receipt, and
+complete independently produced probe. JSON cannot restore that authority,
+and an unverified external storage field makes the row machine-ineligible. The
+path does not move general HP cache persistence after Graph publication,
+replace the daemon delivery store, or make durable output part of public Host/
+CLI/IPC success.
 
 ## GlobalHighPrecision
 

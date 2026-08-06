@@ -388,16 +388,23 @@ Issue #95 增加了一个有意更窄、只用于 B1 manual/release profile 的�
 `B1OutputStore` 会复用当前进程 `ComputeIoExecutor` 执行两个带精确 charge 的 task，随后
 证明 payload byte 已同步、manifest-last assembly、atomic no-replace directory
 publication、directory barrier 与位于所选 canonical root 下的类型化 crash-durable
-receipt。它只会在由 no-follow descriptor 持有、且经过验证的 mode-`0700` private staging
-anchor/slot 内写入；mkdir-to-open identity 必须在任何 artifact mutation 前匹配。两个 task
-均结算后，一次 Darwin `RENAME_EXCL` 或 Linux `RENAME_NOREPLACE` transition 会发布完整
-occurrence。Root-path 或 public-slot replacement 都不能重定向写入。Transaction guard 会先
-结算 accepted Compute I/O charge，再进行严格 identity-checked cleanup；cleanup 会在 race
-seam 前后重验每个 leaf/directory，并对 extra leaf、type/identity replacement、unlink/rmdir
-失败或无法证明 absence 执行 fail-stop。该路径只会在 B1
-Run result 已通过普通 embedded Host compute path 获取之后调用。它不会把通用 HP cache
-persistence 移到 Graph publication 之后，不会替换 daemon delivery store，也不会让 durable
-output 成为 public Host/CLI/IPC success 的一部分。
+receipt。它会持有 nonblocking advisory exclusive root lock，并且只会在由 no-follow
+descriptor 持有、且经过验证的 mode-`0700` private staging anchor/slot 内写入；所有协作 actor
+都必须遵守该 lock，并把 B1 name 保留给单一 store owner。mkdir-to-open identity 必须在任何
+artifact mutation 前匹配。两个 task 均结算后，一次 Darwin `RENAME_EXCL` 或 Linux
+`RENAME_NOREPLACE` transition 会发布完整 occurrence。Root-path 或 public-slot replacement
+都不能重定向写入。Transaction guard 会先结算 accepted Compute I/O charge，再进行严格的
+checked cleanup。它会两次检查每个 identity、每个 removal 结果及随后 absence，并对检测到的
+extra leaf、type/identity 漂移、unlink/rmdir 失败或无法证明 absence 执行 fail-stop。由于
+POSIX 会把最终 identity 检查与按 name 删除分开，cleanup 保证仅限协作式 exclusive-owner
+contract；任意不协作 same-UID namespace mutation 不在覆盖范围内。Guard 建立前的 anchor
+handoff failure 会保留含义不确定的 residue，且不声称可重试。该路径只会在 B1 Run result 已
+通过普通 embedded Host compute path 获取之后调用。其 retained environment file 只是 expected
+claim：required-storage compatibility 还要求每一侧自己的进程私有 held-root observation、实际
+typed receipt 与独立产生的完整 probe。JSON 不能恢复该 authority，任一未验证 external storage
+field 都会使 row machine-ineligible。该路径不会把通用 HP cache persistence 移到 Graph
+publication 之后，不会替换 daemon delivery store，也不会让 durable output 成为 public Host/
+CLI/IPC success 的一部分。
 
 ## GlobalHighPrecision
 

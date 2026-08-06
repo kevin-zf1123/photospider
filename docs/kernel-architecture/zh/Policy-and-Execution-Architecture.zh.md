@@ -541,17 +541,22 @@ ledger 与 `ExecutionService` path。该私有 view 还会暴露唯一真实进�
 scheduler、worker pool、ledger、Graph authority 或 public request。
 
 `B1OutputStore` 是 B1 manual/release output owner，而不是 ADR 0009 中仍属目标的通用
-产品 `OutputStore`。它会在一个预先选择的 canonical root 下保留 no-follow root
-descriptor，并创建 mode-`0700` private staging anchor/slot。它会在 `openat` 前记录 named
-directory identity，且只有 held descriptor 精确匹配后才允许 artifact write；随后把精确
+产品 `OutputStore`。它会在一个预先选择的 canonical root 下保留 no-follow root descriptor，
+在整个生命周期内持有 nonblocking advisory exclusive lock，并创建 mode-`0700` private
+staging anchor/slot。协作进程与线程必须遵守该 lock，并把 B1 staging/occurrence name 保留给
+这个单一 owner。它会在 `openat` 前记录 named directory identity，且只有 held descriptor
+精确匹配后才允许 artifact write；随后把精确
 67,108,864-byte payload charge 与精确 manifest charge 作为两个有序 task 提交给进程
 executor。两个 task 均结算后，store 以平台 no-replace 语义把完整 private slot 原子 rename
-到不可变 public occurrence，并同步 source/destination namespace。每个 mutation、barrier、
-revalidation 与 cleanup 都保持 descriptor-relative，因此 pathname 或 real-directory slot
-replacement 既不能重定向写入，也不会被当作事务对象删除。Guard 会先结算 accepted work，
-再严格 cleanup：跨 race seam 两次检查已记录 leaf/directory identity，证明每次删除、absence
-与 parent barrier；若出现 unowned residue 或 cleanup failure 则 fail-stop。只有 cleanup 得到
-证明后，相同 commit identity 才保持可重试。Store 写入紧密 little-endian RGBA binary32
+到不可变 public occurrence，并同步 source/destination namespace。每个 artifact mutation、
+barrier 与 revalidation 都保持 descriptor-relative，因此 pathname 或 real-directory slot
+replacement 不能重定向写入。Guard 会先结算 accepted work，再进行 cleanup：两次检查已记录
+leaf/directory identity，检查每次按 name 删除的结果与随后 absence，并同步 parent；若检测到
+unowned residue 或 cleanup failure 则 fail-stop。POSIX 不会原子绑定最终 identity 检查与
+`unlinkat`/`rmdir`；因此该保证依赖协作式 exclusive-owner 前提，且不对这段间隔中任意不协作
+same-UID mutation 作出声明。Guard 建立前的 anchor handoff failure 会保留含义不确定的 residue，
+且不声称可重试。只有在该前提内完成 checked removal 并观察到 absence 后，相同 commit
+identity 才保持可重试。Store 写入紧密 little-endian RGBA binary32
 byte、同步并重验 payload 与 manifest、一次性发布、完成 leaf-to-root directory barrier，
 然后才返回类型化 crash-durable receipt。每次 offer 与
 settlement 都保留完整 occurrence/task identity、executor 签发的精确 delta 与同锁 I/O
@@ -563,16 +568,23 @@ Source-private B1 profile、environment validator 与 evidence evaluator 还实�
 34-seed logical/raw golden table、canonical semantic trace、精确 21/24/4-field environment
 schema、raw backend/mount/performance proof mapping、eligibility/root-containment/
 compatibility，以及四项相互独立的 inner verdict。适用 evidence 与 JSON 会保留 raw
-storage proof，形式是唯一封闭的 canonical 六 field proof document，其中包含全部 21 个 raw
+storage proof，形式是唯一封闭的 canonical 六 field expected document，其中包含全部 21 个 raw
 field observation、mount input、两次 performance cut、transaction/receipt event 与 root/
 destination observation；不会保留任何 derived proof boolean。每一侧 compatibility 都会
 重新解析这些 byte、重跑全部 mapping，并从自身 canonical storage byte 复算 eligibility，
-再与 retained claim 精确匹配。JSON 只增加可读解码，不引入另一套 proof grammar。
+再与 retained claim 精确匹配。随后，它会把该 expected claim 独立绑定到来自 held root
+descriptor、其 filesystem observation、真实 typed receipt 与完整可信 probe 的源码私有实际
+authority。JSON 只增加可读解码与 diagnostic actual-observation digest，不引入另一套 proof
+grammar，也不提供可复用 authority。任一 external storage declaration 缺少可信 observation，
+都会使该侧 machine-ineligible；禁止把 retained proof 复制到 actual-observation path。
 `b1_immutable_benchmark` 为
-`EXCLUDE_FROM_ALL`，不属于 CTest，只会在 caller 选择的 eligible root 下写入一条精确
-34-job inner row。构建该 target、显示 help 或通过 deterministic test 都不构成 B1 机器
-符合性结果；本文既不声明已完成精确三 replicate 机器运行，也不声明 #96 outer row/bundle/
-reference composition。
+`EXCLUDE_FROM_ALL`，不属于 CTest，会在 caller 选择的 root 下执行一条精确 34-job inner row。
+它的四个 environment file 是 expected input，而非 observation authority。当前 portable
+Darwin/Linux path 能观察 held root 与真实 receipt，但不能独立验证全部 mount、performance、
+hardware-cache、power-loss-protection 与 transaction-event fact；因此在取得可信完整 probe 前，
+它会输出 Invalid，而不是 machine-conformance claim。构建该 target、显示 help 或通过
+deterministic test 都不构成 B1 机器符合性结果；本文既不声明已完成精确三 replicate 机器运行，
+也不声明 #96 outer row/bundle/reference composition。
 
 ## 实现与验证入口
 

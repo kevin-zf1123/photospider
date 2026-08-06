@@ -1130,9 +1130,15 @@ mapped or proved irrelevant; opacity fails closed, while instantaneous load
 noise remains raw diagnostic evidence. Remote, RAM-backed, or copy-on-write
 storage is capability-gated rather than accepted or forbidden by class. #95
 implements the fixed probe-to-schema mapping, single encoder, eligibility, and
-B1 checks without changing v1. #96 reuses those exact bytes and enforces the
-same-ordinal full M1/B1 pair; the I1-only latency pair compares only the exact
-base manifest/digest and ignores M1's unrelated storage.
+B1 checks without changing v1. Retained manifests and the canonical six-field
+raw proof are expected evidence rather than observation authority. Every
+required-storage comparison side must separately bind them to its own held-root
+identity/filesystem observation, actual typed output receipt, and complete
+trusted probe; JSON cannot rehydrate that authority, and any unverified external
+storage declaration makes the side machine-ineligible. #96 reuses those exact
+bytes and actual-authority rule and enforces the same-ordinal full M1/B1 pair;
+the I1-only latency pair compares only the exact base manifest/digest and
+ignores M1's unrelated storage.
 
 The frozen protocol does not claim nanosecond-exact operating-system wakes.
 I1 and M1 fix nominal monotonic starts 16,666,667 ns apart, a 2 ms maximum
@@ -1287,8 +1293,15 @@ closed `execution-profile-i2-inner-row-v1` record. #95 adds the immutable B1
 workload/identity/oracle, Throughput/cap path through the ordinary embedded
 Host, process-Compute-I/O-backed crash-durable output owner, closed
 storage/performance environment contract, four-verdict inner evaluator, and
-one-row cap-one/cap-eight runner. None of these additions changes the canonical
-15-field outer row or installed ABI. The I1, I2, and B1 runners are
+one-row cap-one/cap-eight runner. The B1 runner holds an advisory exclusive
+output-root lock and obtains live root/receipt facts, but the current portable
+probe cannot independently verify every mount, performance, hardware-cache,
+power-loss-protection, and transaction-event declaration; it therefore emits
+Invalid instead of claiming machine conformance. Its guarded cleanup promise is
+scoped to cooperating actors that honor the lock and reserved B1 namespace
+because POSIX does not atomically bind the final identity check to name removal.
+None of these additions changes the canonical 15-field outer row or installed
+ABI. The I1, I2, and B1 runners are
 `EXCLUDE_FROM_ALL` and absent from CTest; this current-state document claims
 neither an exact 111-slot I2 machine run nor an exact three-replicate B1 machine
 corpus. Canonical outer-row/bundle/reference composition and M1 remain assigned

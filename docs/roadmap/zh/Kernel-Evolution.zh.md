@@ -912,9 +912,13 @@ service tier 与 device profile。任何可能影响完整 measured storage path
 option 都要映射或证明无关；opacity fail closed，而瞬时 load noise 保持为 raw
 diagnostic evidence。Remote、RAM-backed 或 copy-on-write storage 受 capability 门禁
 约束，而不是按 class 自动接受或禁止。#95 在不改变 v1 的前提下实现固定 probe-to-
-schema mapping、唯一 encoder、eligibility 与 B1 check。#96 原样复用这些精确 byte，
-并强制执行 same-ordinal 完整 M1/B1 pair；I1-only latency pair 只比较精确 base
-manifest/digest，忽略 M1 无关 storage。
+schema mapping、唯一 encoder、eligibility 与 B1 check。Retained manifest 与 canonical
+六 field raw proof 是 expected evidence，而不是 observation authority。每个 required-storage
+comparison side 都必须另外把它们绑定到自己的 held-root identity/filesystem observation、实际
+typed output receipt 与完整可信 probe；JSON 不能恢复该 authority，任何未验证 external storage
+declaration 都会使该侧 machine-ineligible。#96 原样复用这些精确 byte 与 actual-authority rule，
+并强制执行 same-ordinal 完整 M1/B1 pair；I1-only latency pair 只比较精确 base manifest/
+digest，忽略 M1 无关 storage。
 
 冻结 protocol 不声称操作系统会精确到纳秒醒来。I1 与 M1 固定相隔 16,666,667 ns 的
 nominal monotonic start、最大 2 ms admission-start lateness、精确 750,000,000 ns
@@ -1044,7 +1048,12 @@ evidence、具备完整 device-reservation 闭合的精确 row-scoped resident r
 `execution-profile-i2-inner-row-v1` record。#95 新增不可变 B1 workload/identity/oracle、经由
 普通 embedded Host 的 Throughput/cap 路径、由进程 Compute I/O 支撑的 crash-durable 输出
 所有者、闭合 storage/performance environment 合同、四 verdict inner evaluator，以及单 row
-cap-1/cap-8 runner。这些新增内容都不改变 canonical 15-field outer row 或 installed ABI。
+cap-1/cap-8 runner。B1 runner 会持有 advisory exclusive output-root lock，并取得 live root/
+receipt fact，但当前 portable probe 无法独立验证全部 mount、performance、hardware-cache、
+power-loss-protection 与 transaction-event declaration；因此它会输出 Invalid，而不是声称
+machine conformance。由于 POSIX 不会原子绑定最终 identity 检查与按 name 删除，其 guarded
+cleanup promise 只覆盖遵守该 lock 与 reserved B1 namespace 的协作 actor。这些新增内容都不
+改变 canonical 15-field outer row 或 installed ABI。
 I1、I2、B1 runner 均为 `EXCLUDE_FROM_ALL` 且不属于 CTest；本文既不声明已经完成精确
 111-slot I2 机器运行，也不声明已经完成精确三 replicate B1 机器 corpus。Canonical
 outer-row/bundle/reference composition 与 M1 仍由 #96 负责。既有 policy-order test、

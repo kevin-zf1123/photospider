@@ -675,20 +675,27 @@ no second scheduler, worker pool, ledger, Graph authority, or public request.
 
 `B1OutputStore` is the B1 manual/release output owner, not the still-target
 general product `OutputStore` from ADR 0009. Under one preselected canonical
-root it retains a no-follow root descriptor and creates a mode-`0700` private
-staging anchor/slot. It records the named directory identity before `openat`
-and requires the held descriptor to match before any artifact write, then
-submits the exact 67,108,864-byte payload charge and exact manifest charge as
-two ordered tasks to the process executor. After both settle, the store
-atomically renames the complete private slot to the immutable public occurrence
-with platform no-replace semantics and synchronizes both namespaces. Every
-mutation, barrier, revalidation, and cleanup remains descriptor-relative, so
-pathname or real-directory slot replacement cannot redirect writes or be
-deleted as the transaction's object. The guard settles accepted work before
-strict cleanup, checks recorded leaf/directory identities twice across the
-race seam, proves every removal/absence and parent barrier, and fail-stops on
-unowned residue or cleanup failure. Only proven cleanup keeps the commit
-identity retryable. The store writes tight little-endian RGBA binary32 bytes,
+root it retains a no-follow root descriptor, holds a nonblocking advisory
+exclusive lock for its lifetime, and creates a mode-`0700` private staging
+anchor/slot. Cooperating processes and threads must honor that lock and reserve
+the B1 staging/occurrence names to this single owner. It records the named
+directory identity before `openat` and requires the held descriptor to match
+before any artifact write, then submits the exact 67,108,864-byte payload charge
+and exact manifest charge as two ordered tasks to the process executor. After
+both settle, the store atomically renames the complete private slot to the
+immutable public occurrence with platform no-replace semantics and synchronizes
+both namespaces. Every artifact mutation, barrier, and revalidation remains
+descriptor-relative, so pathname or real-directory slot replacement cannot
+redirect writes. The guard settles accepted work before cleanup, checks
+recorded leaf/directory identities twice, checks each name-removal result and
+following absence, synchronizes parents, and fail-stops on detected unowned
+residue or cleanup failure. POSIX does not atomically bind the final identity
+check to `unlinkat`/`rmdir`; this guarantee therefore relies on the cooperating
+exclusive-owner precondition and makes no claim about arbitrary
+non-cooperating same-UID mutation in that interval. A pre-guard anchor handoff
+failure preserves ambiguous residue without a retryability claim. Only checked
+removal and observed absence inside the precondition keep the commit identity
+retryable. The store writes tight little-endian RGBA binary32 bytes,
 syncs and revalidates the payload and manifest, publishes once, completes
 leaf-to-root directory barriers, and only then returns a typed crash-durable
 receipt. Every offer and
@@ -703,16 +710,27 @@ also implement the immutable 34-seed logical/raw golden table, canonical
 semantic trace, exact 21/24/4-field environment schemas, raw backend/mount/
 performance proof mappings, eligibility/root-containment/compatibility, and
 four independent inner verdicts. Applicable evidence and JSON retain the raw
-storage proof as the one closed canonical six-field proof document, including
-all 21 raw field observations, mount inputs, two performance cuts, transaction/
-receipt events, and root/destination observations. No derived proof boolean is
-retained. Every compatibility side reparses those bytes, reruns all mappings,
-and recomputes eligibility from its own canonical storage bytes before exact-
-matching the retained claim. JSON adds a readable decoding but no alternate
-proof grammar.
+storage proof as the one closed canonical six-field expected document,
+including all 21 raw field observations, mount inputs, two performance cuts,
+transaction/receipt events, and root/destination observations. No derived
+proof boolean is retained. Every compatibility side reparses those bytes,
+reruns all mappings, and recomputes eligibility from its own canonical storage
+bytes before exact-matching the retained claim. It then independently binds
+that expected claim to source-private actual authority from the held root
+descriptor, its filesystem observation, real typed receipts, and a complete
+trusted probe. JSON adds a readable decoding and diagnostic actual-observation
+digest but no alternate proof grammar and no reusable authority. Missing
+trusted observation for any external storage declaration makes that side
+machine-ineligible; copying the retained proof into the actual-observation path
+is forbidden.
 `b1_immutable_benchmark` is
-`EXCLUDE_FROM_ALL`, absent from CTest, and writes one exact 34-job inner row
-below a caller-selected eligible root. Building it, showing its help, or
+`EXCLUDE_FROM_ALL`, absent from CTest, and executes one exact 34-job inner row
+below a caller-selected root. Its four environment files are expected input,
+not observation authority. The current portable Darwin/Linux path observes the
+held root and real receipts but cannot independently verify all mount,
+performance, hardware-cache, power-loss-protection, and transaction-event
+facts, so it emits an Invalid row rather than a machine-conformance claim until
+a trusted complete probe is available. Building it, showing its help, or
 passing deterministic tests is not a B1 machine-conformance result; this
 document claims neither an exact three-replicate machine run nor the #96 outer
 row/bundle/reference composition.

@@ -1543,8 +1543,14 @@ ADR 0009 receipt。较弱、不支持或失败的 durability 都会使结果无�
 job index。Store 持有 root 与 slot directory descriptor，并相对于它们执行每个
 slot/payload/manifest mutation、barrier、revalidation 与 cleanup。Root pathname
 replacement 或 symlink substitution 必须 fail closed，不得产生 redirected artifact。
-Slot 创建后的 exception guard 必须先 cancel/wait accepted work，再进行 identity-
-verified cleanup，证明精确 charge 已退休，并允许 exact-identity retry。只有在该 receipt
+Store 还会持有 nonblocking advisory exclusive root lock；协作进程/线程必须遵守它，并把
+B1 staging 与 occurrence name 保留给单一 store owner。Slot 创建后的 exception guard 必须
+先 cancel/wait accepted work，再进行 cleanup，证明精确 charge 已退休，两次检查每个已记录
+identity，并检查每次 removal 及随后 absence。由于 POSIX 会把最终 identity recheck 与按 name
+删除分开，删除保证仅限该协作式 exclusive-owner contract；不协作 same-UID mutation 不在
+threat model 内。Guard 建立前的 anchor handoff failure 必须保留含义不确定的 residue，且不得
+声称可重试。在该前提内，只有 checked removal 与观察到 absence 后才允许 exact-identity
+retry。只有在该 receipt
 和 logical/raw 两种 golden check 后才贡献 throughput。每个 I2
 第十二次 edit（`edit_index=11`）preview/final 都通过相同 Host
 binding 获取两次。已配置 Metal device 允许每个不同 preview/final revision 的
@@ -1858,13 +1864,18 @@ environment-digest 输入，但必须可以独立复现。
    resource、全部 37 个 performance component 与 cross-field consistency；如果步骤
    1 或 2 失败，则精确返回 `canonical-schema-invalid`，并在 raw-proof、digest、
    environment-class 或其他 eligibility evaluation 之前停止；
-3. 要求完整 raw proof 保留在 durable evidence 与 JSON 中，把每个规范化 field 绑定到
-   该精确 raw observation/proof，并验证每个 field-specific N/A claim、mount
+3. 要求完整 raw proof 保留在 durable evidence 与 JSON 中，只把它视为 expected evidence，
+   把每个规范化 field 绑定到该精确 raw observation/proof，并验证每个 field-specific N/A claim、mount
    normalization decision、稳定 instance/endpoint/anchor identity、固定 performance
    configuration、被排除 option 的 no-effect proof 与 root-containment proof；
 4. 对完整精确 manifest byte 计算小写 SHA-256，从而复算
    `storage_environment_digest` 与 `base_environment_digest`；
-5. 解析精确四 field environment-class manifest 并复算
+5. 对每一个 required-storage 侧，要求存在独立于 retained file 产生的进程私有 actual
+   observation：稳定的 initial/final held-root identity、从 descriptor 得出的 filesystem type、
+   实际成功的 typed receipt，以及 canonical byte 等于 retained raw proof 的完整可信 probe；
+   任一列出的 unverified external field 都会使该侧 ineligible，diagnostic JSON 不能恢复该
+   authority；
+6. 解析精确四 field environment-class manifest 并复算
    `environment_class_digest`；独立把其 base-digest payload 绑定到 retained/复算 base，
    把 B1/M1 known `required`/`none` 与 storage-digest payload 绑定到存在的 retained/
    复算 storage，从 retained storage byte 加 raw proof 独立复算完整 eligibility result，
@@ -1872,7 +1883,7 @@ environment-digest 输入，但必须可以独立复现。
    `not-applicable`/
    `row-has-no-output-commit` 及精确 N/A state/reason/empty payload 绑定到 storage
    evidence 完全不存在；复算 class self-hash 绝不能替代这些 binding；以及
-6. 评估表中每个 canonical-manifest predicate，只输出所有为真的 reason token，每项
+7. 评估表中每个 canonical-manifest predicate，只输出所有为真的 reason token，每项
    一次并按 unsigned-ASCII 排序；空 list 精确派生 `eligible`，非空 list 派生
    `ineligible`。Reason list 是 retained evidence，但不进入 environment digest。
 
@@ -1882,9 +1893,10 @@ performance record。仅 digest 相等不够。Candidate/reference I1/I2 使用�
 compatibility 与固定 storage-N/A environment manifest。Candidate/reference B1/M1、
 B1 cap-1/cap-8 与 M1/paired-B1-cap-8 使用精确 base、storage 和完整 environment-
 class compatibility。M1/paired-I1 只比较精确 base manifest/digest；二者的
-environment manifest 有意不同。Raw field/proof 缺失或漂移、retained eligibility
-陈旧、state invalid、byte/digest mismatch 或 containment 失败，都会使受影响 relative
-verdict 成为 `invalid`。
+environment manifest 有意不同，但 M1 required-storage 侧仍必须通过自己的 actual-authority
+binding。Raw field/proof 缺失或漂移、actual authority 缺失或从 file 重建、retained
+eligibility 陈旧、state invalid、byte/digest mismatch 或 containment 失败，都会使受影响
+relative verdict 成为 `invalid`。
 
 在比较 peer 前，对 self-validation、cap-one/cap-eight、candidate/reference 与 mixed
 relation 执行该四 field binding check。Mechanism test 必须修改内嵌 base 或 storage
@@ -1892,6 +1904,13 @@ digest payload，并在实际 retained manifest 不变时复算 environment-clas
 两种 mutation 仍必须 incompatible。附加 case 会移除或漂移 retained proof，以及修改
 canonical storage byte 并复算 storage/class digest、但保留 stale eligibility；每种 case
 仍必须 incompatible。
+测试还必须在复算 storage digest、class digest 与 retained eligibility 后执行同步 storage-
+proof recast：self、cap 两侧、candidate/reference 两侧、M1/B1 两侧，以及 M1/I1 的 M1 侧都
+必须因为其独立 actual observation 未改变而保持 invalid。JSON test 必须证明它只暴露
+diagnostic authority metadata/digest，runner test 必须证明 canonical input file 绝不会初始化
+actual probe。当 portable runner 无法验证 external mount、performance、hardware-cache、
+power-loss-protection 或 transaction-event fact 时，必须报告精确 field，并让 row 为 Invalid，
+而不是 machine-conformant。
 
 Issue #95 现已增加长期确定性机制测试，覆盖固定 field/type/enum/cardinality 拒绝；
 每种 state/reason/payload 组合；NFC/text 与 scalar encoding，包括接受 uint64 `0`、
@@ -1923,9 +1942,9 @@ Issue #92 不新增当前 test binary、serializer、probe、runner、API 或 ru
    eligibility、provider/plugin binary 与 generation、process worker、Run cap、
    全部 limit/headroom、fixture hash、seed 和 cache/residency precondition；在
    warmup 前编码并独立验证精确 24-field base manifest；对 B1/M1，还要选择
-   `OutputStore` root、采集 raw storage/capability/configuration observation、编码
-   精确 21-field storage manifest、冻结固定 performance configuration，并计算其
-   eligibility 与 digest；
+   `OutputStore` root，通过可信 adapter 采集 warmup 前 storage/capability/configuration
+   observation，把精确 21-field storage manifest 与 retained raw proof 编码为 expected
+   evidence、冻结固定 performance configuration，并计算 retained eligibility 与 digest；
 3. 要求 candidate 与 reference 的 evidence schema、workload id、environment
    class、limit 与 fixture hash 相同；B1/M1 比较要求逐 byte 相同且 eligible 的
    storage/base manifest 与匹配的四 field environment-class manifest，I1/I2 使用
@@ -1948,7 +1967,9 @@ Issue #92 不新增当前 test binary、serializer、probe、runner、API 或 ru
 7. 在各自 owner 边界采集 raw origin/drain/boundary sequence、carryover/FIFO/phase
    attribution、admission、visibility、cancellation/quiescence、start、completion、
    offered-demand eligibility、artifact/receipt、trace、digest、transfer/copy/
-   residency 与 resource-lifetime observation；
+   residency 与 resource-lifetime observation；对于 required storage，还要在 initial/final
+   row boundary 重新观察 held root，保留实际 typed receipt，并要求独立产生的完整 probe 与
+   retained expected proof 精确匹配；任一 unverified external field 都会使 row 为 Invalid；
 8. 拒绝任何必需的 telemetry cursor gap/drop，不估算缺失 observation；
 9. 使用 checked arithmetic 从 raw evidence 计算每个 replicate aggregate 与各项
    独立 dimension verdict；以及
