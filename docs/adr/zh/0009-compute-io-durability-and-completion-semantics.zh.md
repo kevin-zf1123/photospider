@@ -272,6 +272,12 @@ Graph 文档事务、daemon socket/polling 与 `OutputStore` 校验、提交、�
 和恢复仍属于各自领域 owner。这些 owner 可以提交有界字节传输或 codec 子工作，
 但执行器绝不选择路径、重试、覆盖、幂等、保留、提交或 durability 策略。
 
+当 domain owner 选择在 capacity rejection 后重新 offer 时，该 policy 必须声明有限
+且确定性的 attempt bound 与类型化 terminal result。它必须在遭拒 offer 之间保持
+logical task identity 与 charge，不能从 elapsed time 或 polling cadence 派生终止条件，
+并且在耗尽 bound 时释放 private staging authority。Executor 仍然只暴露类型化
+admission，不决定该 policy。
+
 拒绝让每种文件系统与 socket 操作都进入一个通用 pool，因为这会组合无关生命
 周期，并让 worker 机制成为意外的事务所有者。
 

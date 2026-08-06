@@ -338,6 +338,13 @@ owners. Those owners can submit bounded byte-transfer or codec subwork, but the
 executor never chooses paths, retry, overwrite, idempotency, retention, commit,
 or durability policy.
 
+When a domain owner elects to re-offer after capacity rejection, that policy
+must declare a finite deterministic attempt bound and a typed terminal result.
+It must preserve the logical task identity and charge across rejected offers,
+must not derive termination from elapsed time or polling cadence, and must
+release private staging authority when the bound is exhausted. The executor
+continues to expose only typed admission; it does not decide that policy.
+
 One generic pool for every filesystem and socket operation is rejected because
 it would combine unrelated lifecycles and make a worker mechanism an accidental
 transaction owner.

@@ -162,6 +162,13 @@ idempotent duplicate `try_submit` keeps the same attempt identity and charge.
 `attempt`. Fault-free B1/M1 permits only attempt zero, one accepted admission,
 and one start per logical task.
 
+The B1 output owner makes at most 64 total admission attempts for the current
+stage after capacity rejection, always with that same attempt-zero identity
+and charge. This is a deterministic count, not an elapsed-time or availability
+policy. A non-capacity rejection or the sixty-fourth capacity rejection returns
+typed `AdmissionFailed`, removes the incomplete occurrence slot, records one
+`Final` boundary, and performs no further offer for that stage.
+
 Every charge declaration, admission/status event, ledger or executor snapshot,
 start/terminal record, `OutputCommitId`, rooted no-replace output slot,
 `OutputCommitReceipt`, and row-evidence entry for B1 work binds the complete
@@ -607,6 +614,15 @@ offered job eligible and the same task pending; every admission attempt and
 typed status is retained. In fault-free B1 each task may be accepted and
 started only once, and no output retry, duplicate task, or changed charge
 identity is permitted.
+
+The retained Compute I/O evidence is one exact state machine: `Initial` first;
+payload attempt-zero offer/admission; payload settlement; manifest attempt-zero
+offer/admission; manifest settlement; and `Final` last. Capacity rejections may
+repeat only in the current offer state up to the 64-attempt bound. Every event
+binds the expected job, stage, attempt, charge, typed status, and coherent
+event-aligned snapshot. Missing, duplicate, reordered, gapped, wrong-identity,
+wrong-status, invalid-snapshot, or post-final evidence invalidates throughput,
+determinism, waste, and memory together.
 
 The payload-stage task completely writes, hashes, synchronizes, and revalidates
 the private payload stage before it settles. Only then may manifest-commit
@@ -1124,6 +1140,17 @@ or `row-has-no-output-commit`. I1/I2 encode known values `not-applicable` and
 `not-applicable`, that same reason, and an empty payload. No row omits any of
 the four records.
 
+Before self, cap-one/cap-eight, candidate/reference, or mixed compatibility is
+accepted, each side independently parses its retained base, optional storage,
+and class manifests and recomputes every applicable digest from the actual
+bytes. The class base-digest payload must equal the recomputed base and its
+claim. B1/M1 must bind `required`/`none` and the known class storage-digest
+payload to present eligible storage bytes, their recomputed digest, and their
+claim. I1/I2 must bind `not-applicable`/`row-has-no-output-commit` and the exact
+N/A state/reason/empty payload to the absence of every storage evidence object.
+The recomputed class digest must match its claim, but a valid class self-hash
+does not repair a mismatched embedded base or storage digest payload.
+
 Storage compatibility eligibility is derived evidence, not digest input. Its
 reason list is a deterministic result, not a producer-selected subset:
 
@@ -1539,6 +1566,17 @@ not physical start order. Each record contains `job`, Graph role, `task`,
 task's declared `work_units`, ready entries/bytes, CPU slots, Host
 retained/scratch bytes, and device-memory/scratch bytes. Fault-free B1 requires
 terminal outcome `succeeded`; nonterminal records use outcome `-`.
+
+Those canonical candidate records are produced only after execution from
+actual source-private product observations. Ready materialization observes the
+actual local identity, planned dependencies, shape/device, and submission
+resource declaration; the execution service observes the irreversible start;
+and task execution observes its terminal outcome. The collector maps the
+actual shape/declaration into the B1 resource vector. The frozen semantic plan
+is only the independent expectation oracle and is never emitted as observed
+evidence before execution. Missing, duplicate, or gapped observations,
+dependency/resource drift, causal reordering, or terminal-outcome drift makes
+determinism invalid even when every artifact digest matches.
 
 The canonical bytes begin with this exact ASCII header and LF:
 

@@ -144,6 +144,12 @@ identity 与 charge。`cycle_ordinal` 绝不能编码为 `attempt`、从 `attemp
 不能令其递增。Fault-free B1/M1 只允许 attempt zero，且每个 logical task 只接受一次
 admission 并启动一次。
 
+B1 output owner 在 capacity rejection 后，对当前 stage 最多执行 64 次总 admission
+attempt，并始终保持同一个 attempt-zero identity 与 charge。这是确定性计数，不是
+elapsed-time 或 availability policy。Non-capacity rejection 或第 64 次 capacity
+rejection 返回类型化 `AdmissionFailed`，删除不完整 occurrence slot，记录一条
+`Final` boundary，并且不再 offer 该 stage。
+
 B1 work 的每个 charge declaration、admission/status event、ledger 或 executor
 snapshot、start/terminal record、`OutputCommitId`、rooted no-replace output slot、
 `OutputCommitReceipt` 和 row-evidence entry 都绑定完整 `job_instance_id`；task-specific
@@ -521,6 +527,14 @@ snapshot high-water 与 final settlement 的强制性权威证据。它不能替
 eligible、同一个 task 保持 pending；所有 admission attempt 与 typed status 都会
 保留。在无故障 B1 中，每个 task 只能被接受并启动一次，不允许 output retry、
 duplicate task 或改变 charge identity。
+
+Retained Compute I/O evidence 是一个精确状态机：`Initial` 最先；payload attempt-zero
+offer/admission；payload settlement；manifest attempt-zero offer/admission；manifest
+settlement；`Final` 最后。Capacity rejection 只能在当前 offer state 重复，最多达到
+64-attempt bound。每个 event 都绑定 expected job、stage、attempt、charge、typed
+status 与一致的 event-aligned snapshot。缺失、重复、重排、gap、identity 错误、
+status 错误、snapshot 无效或 `Final` 后 evidence 会同时使 throughput、determinism、
+waste 与 memory invalid。
 
 Payload-stage task 在结算前必须完整写入、hash、同步并重新验证 private payload
 stage。只有这样，manifest-commit 才可以写入并同步 private canonical manifest，
@@ -990,6 +1004,15 @@ Environment-class manifest header 精确为
 `row-has-no-output-commit`；最后一条 digest record 的 state 为 `not-applicable`，
 reason 相同，payload 为空。任何行都不遗漏四条 record 中的任意一条。
 
+在接受 self、cap-one/cap-eight、candidate/reference 或 mixed compatibility 前，双方
+各自独立解析 retained base、可选 storage 与 class manifest，并从实际 byte 复算全部
+适用 digest。Class base-digest payload 必须等于复算 base 及其 claim。B1/M1 必须把
+`required`/`none` 与 known class storage-digest payload 绑定到存在且 eligible 的
+storage byte、其复算 digest 及其 claim。I1/I2 必须把 `not-applicable`/
+`row-has-no-output-commit` 与精确 N/A state/reason/empty payload 绑定到全部 storage
+evidence object 均不存在。复算 class digest 必须匹配其 claim，但合法 class self-hash
+不能修复不匹配的内嵌 base 或 storage digest payload。
+
 Storage compatibility eligibility 是 derived evidence，不是 digest 输入。Reason
 list 是确定性结果，不是 producer 自选 subset：
 
@@ -1348,6 +1371,15 @@ Semantic trace 对 deterministic plan 中的每个 logical task 精确包含一�
 outcome，以及 task 声明的 `work_units`、ready entry/byte、CPU slot、Host
 retained/scratch byte 与 device-memory/scratch byte。无故障 B1 要求 terminal
 outcome 为 `succeeded`；非 terminal record 使用 outcome `-`。
+
+这些 canonical candidate record 只能在执行后，从实际源码私有 product observation
+产生。Ready materialization 观察实际 local identity、planned dependency、shape/
+device 与 submission resource declaration；execution service 观察不可逆 start；task
+execution 观察其 terminal outcome。Collector 把实际 shape/declaration 映射为 B1
+resource vector。冻结 semantic plan 只能作为独立 expectation oracle，绝不能在执行前
+作为 observed evidence 发出。Observation 缺失、重复或存在 gap、dependency/resource
+漂移、causal reorder 或 terminal-outcome 漂移，即使全部 artifact digest 匹配，也会
+使 determinism invalid。
 
 Canonical byte 以以下精确 ASCII header 与 LF 开始：
 

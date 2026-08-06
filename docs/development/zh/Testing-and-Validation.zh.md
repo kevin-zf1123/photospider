@@ -1499,6 +1499,12 @@ receipt、raw trace 与 row evidence 都必须携带完整 job-instance identity
 semantic trace 继续按 job index 编码，并通过 row job-instance index 把其 digest join
 到每个唯一 occurrence。
 
+对每个 B1 output stage，capacity rejection 以不变的 attempt-zero identity 与 charge
+重新 offer，总 admission attempt 最多为 64 次。Test oracle 对 attempt 计数，绝不从
+time、sleep、polling 或 observed availability 派生该 bound。Non-capacity rejection
+或第 64 次 capacity rejection 必须返回 `AdmissionFailed`，删除不完整 slot，追加一条
+`Final` observation，并停止 offer 该 stage。
+
 每个 B1 job 在所选且已指纹化的 `OutputStore` root 下的全新可丢弃目录中写入
 ADR 0010 规定的精确
 `output.rgba32le` payload 与固定顺序 `manifest.txt`。两个有序
@@ -1514,6 +1520,14 @@ total 都是对真实 per-job charge 的 checked sum。Planned byte 是 Compute 
 admission、planned-byte high-water 与 final settlement 的强制性权威证据，但它仍是
 estimate，不证明 physical memory ownership，也不能替代 RSS 或 ledger/device
 ownership evidence。
+
+必须把 retained event stream 验证为精确状态机：`Initial` 最先；payload offer/
+admission 后接 settlement；manifest offer/admission 后接 settlement；`Final` 最后。
+Capacity-rejection row 只能在当前 offer state 重复，并保持 attempt zero 与相同 charge。
+检查每条 row 的 job、stage、attempt、planned byte、admission/completion status 与
+snapshot limit/phase total，以及 terminal I/O path 与 output status/receipt 的关系。
+缺失、重复、重排、stage/job/status 错误、attempt gap、无效 snapshot 与 `Final` 后
+mutation case 必须使 B1 四个 axis 全部为 `Invalid`。
 
 目标 `OutputStore` 请求并且必须达到 typed `crash-durable`；它结算 payload，最后
 以 no-replace 方式发布 canonical manifest，完成全部 leaf-to-root barrier，然后返回
@@ -1839,9 +1853,11 @@ environment-digest 输入，但必须可以独立复现。
 4. 对完整精确 manifest byte 计算小写 SHA-256，从而复算
    `storage_environment_digest` 与 `base_environment_digest`；
 5. 解析精确四 field environment-class manifest 并复算
-   `environment_class_digest`；B1/M1 要求 known `required` 与 storage digest，I1/I2
-   要求 known `not-applicable`、reason `row-has-no-output-commit`，以及 payload 为空的
-   N/A storage-digest record；以及
+   `environment_class_digest`；独立把其 base-digest payload 绑定到 retained/复算 base，
+   把 B1/M1 known `required`/`none` 与 storage-digest payload 绑定到存在且 eligible 的
+   retained/复算 storage，并把 I1/I2 known `not-applicable`/
+   `row-has-no-output-commit` 及精确 N/A state/reason/empty payload 绑定到 storage
+   evidence 完全不存在；复算 class self-hash 绝不能替代这些 binding；以及
 6. 评估表中每个 canonical-manifest predicate，只输出所有为真的 reason token，每项
    一次并按 unsigned-ASCII 排序；空 list 精确派生 `eligible`，非空 list 派生
    `ineligible`。Reason list 是 retained evidence，但不进入 environment digest。
@@ -1854,6 +1870,11 @@ B1 cap-1/cap-8 与 M1/paired-B1-cap-8 使用精确 base、storage 和完整 envi
 class compatibility。M1/paired-I1 只比较精确 base manifest/digest；二者的
 environment manifest 有意不同。Raw field/proof 缺失、state invalid、byte/digest
 mismatch 或 containment 失败，都会使受影响 relative verdict 成为 `invalid`。
+
+在比较 peer 前，对 self-validation、cap-one/cap-eight、candidate/reference 与 mixed
+relation 执行该四 field binding check。Mechanism test 必须修改内嵌 base 或 storage
+digest payload，并在实际 retained manifest 不变时复算 environment-class self-hash；
+两种 mutation 仍必须 incompatible。
 
 Issue #95 现已增加长期确定性机制测试，覆盖固定 field/type/enum/cardinality 拒绝；
 每种 state/reason/payload 组合；NFC/text 与 scalar encoding，包括接受 uint64 `0`、
@@ -1950,6 +1971,15 @@ job/task 与 action-rank sort，以及 lowercase SHA-256 都是必需项。Dupli
 unknown record 或 field、非法 dependency/outcome/encoding 或 collector gap 都会使
 结果无效。Physical time、worker/queue/global identity、raw sequence、retry 与
 completion order 不进入 canonical byte，但保留在独立 raw trace 中。
+
+只能在执行后，根据实际源码私有 product observation 构造 candidate record set：
+ready materialization 提供 local identity、实际 planned dependency、shape/device 与
+submission resource declaration；service admission 提供不可逆 start；task execution
+提供 terminal outcome。把实际 shape/declaration 归一化为 B1 resource vector，再与
+冻结 semantic plan 这一独立 expectation oracle 比较。绝不能把冻结 plan 作为执行前
+observed evidence 发出。Ready/start/terminal observation 缺失、重复或存在 gap、
+dependency/resource 漂移、causal reorder 或 terminal-outcome 漂移，即使 content/
+artifact digest 匹配，也必须使 determinism invalid。
 
 ### Evidence Bundle
 
@@ -2121,10 +2151,13 @@ invalid。仅构建 target 或运行 `--help` 只是 harness smoke，不是 perf
 Issue #95 现在通过 `test_b1_profile`、`test_b1_environment`、`test_b1_output_store`、
 `test_b1_evidence`，以及在启用仓库 OpenCV operation provider 时的
 `test_b1_product_path`，注册长期 B1 mechanism。这些测试冻结 34 个 seed/job identity 与独立
-binary32-RNE golden、canonical semantic trace、stable NFC text 与精确 21/24/4-field schema、
+binary32-RNE golden、由实际 observation 支撑的 canonical semantic trace 与 dependency/
+resource/outcome drift rejection、stable NFC text 与精确 21/24/4-field schema、
 scalar/collection/fixed-record/mount/全部 37 个 performance component 与 raw-proof rule、
-十一 reason eligibility truth set 与 pair compatibility、两个带 charge 的 no-replace
-crash-durable output stage 与 receipt、四项相互独立的 inner verdict，以及真实 Host 上精确
+十一 reason eligibility truth set 与 pair compatibility（包括篡改内嵌 digest 后复算
+class self-hash）、两个带 charge 的 no-replace crash-durable output stage、64-attempt
+exhaustion/cleanup 与 receipt、精确 Compute I/O FSM mutation matrix、四项相互独立的
+inner verdict，以及真实 Host 上精确
 Throughput QoS、cap-1/cap-8、Graph A/B predecessor、content/trace、lifecycle、resource 与
 Compute I/O closure。它们使用 disposable root，不包含机器相关 throughput 或 candidate/
 reference threshold。

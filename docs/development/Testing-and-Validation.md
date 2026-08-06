@@ -1860,6 +1860,13 @@ and row evidence must carry the complete job-instance identity. The normalized
 semantic trace remains job-index based and its digest is joined to each unique
 occurrence through the row job-instance index.
 
+For each B1 output stage, capacity rejection re-offers the unchanged attempt-
+zero identity and charge for at most 64 total admission attempts. The test
+oracle counts attempts and never derives this bound from time, sleeps, polling,
+or observed availability. A non-capacity rejection or the sixty-fourth
+capacity rejection must return `AdmissionFailed`, remove the incomplete slot,
+append one `Final` observation, and stop offering that stage.
+
 Every B1 job writes the exact ADR 0010 `output.rgba32le` payload and fixed-order
 `manifest.txt` in a fresh disposable directory below the selected fingerprinted
 `OutputStore` root. Its two ordered
@@ -1876,6 +1883,15 @@ of the true per-job charges. Planned bytes are mandatory, authoritative
 evidence for Compute I/O admission, planned-byte high-water, and final
 settlement, but are estimates rather than physical memory ownership evidence;
 they do not replace RSS or ledger/device ownership evidence.
+
+Validate the retained event stream as an exact state machine: `Initial` first;
+payload offer/admission then settlement; manifest offer/admission then
+settlement; `Final` last. Capacity-rejection rows may repeat only in the current
+offer state and keep attempt zero and the same charge. Check every row's job,
+stage, attempt, planned bytes, admission/completion status, and snapshot limits/
+phase totals, plus the terminal I/O-path-to-output-status/receipt relation.
+Missing, duplicate, reordered, wrong-stage/job/status, attempt-gap, invalid-
+snapshot, and post-final mutation cases must make all four B1 axes `Invalid`.
 
 The target `OutputStore` requests and must achieve typed `crash-durable`; it
 settles the payload, publishes the canonical manifest no-replace and last,
@@ -2247,10 +2263,12 @@ The independent validator performs these steps in order:
 4. recompute `storage_environment_digest` and `base_environment_digest` as
    lowercase SHA-256 over their complete exact manifest bytes;
 5. parse the exact four-field environment-class manifest and recompute
-   `environment_class_digest`; B1/M1 require known `required` plus the storage
-   digest, while I1/I2 require known `not-applicable`, reason
-   `row-has-no-output-commit`, and a N/A storage-digest record with empty
-   payload; and
+   `environment_class_digest`; independently bind its base-digest payload to
+   the retained/recomputed base, bind B1/M1 known `required`/`none` and storage-
+   digest payload to present eligible retained/recomputed storage, and bind
+   I1/I2 known `not-applicable`/`row-has-no-output-commit` plus the exact N/A
+   state/reason/empty payload to complete storage-evidence absence; a recomputed
+   class self-hash never substitutes for these bindings; and
 6. evaluate every canonical-manifest predicate in the table, emit all and only
    true reason tokens once in unsigned-ASCII order, and derive `eligible`
    exactly from an empty list or `ineligible` from a nonempty list. The reason
@@ -2266,6 +2284,12 @@ base, storage, and full environment-class compatibility. M1/paired-I1 compares
 only exact base manifests/digests; its environment manifests intentionally
 differ. A missing raw field/proof, invalid state, byte/digest mismatch, or
 failed containment makes the affected relative verdict `invalid`.
+
+Run that four-field binding check for self-validation, cap-one/cap-eight,
+candidate/reference, and mixed relations before comparing peers. Mechanism
+tests must alter the embedded base or storage digest payload and recompute the
+environment-class self-hash while leaving the actual retained manifest
+unchanged; both mutations remain incompatible.
 
 Issue #95 now adds deterministic mechanism tests covering fixed field/type/
 enum/cardinality rejection; every state/reason/payload combination; NFC/text
@@ -2377,6 +2401,17 @@ SHA-256 are mandatory. Duplicate/missing/unknown records or fields, invalid
 dependencies/outcomes/encoding, or collector gaps are invalid. Physical time,
 worker/queue/global identities, raw sequence, retry, and completion order are
 excluded from the canonical bytes but retained in the separate raw trace.
+
+Build the candidate record set only after execution from actual source-private
+product observations: ready materialization supplies local identity, actual
+planned dependencies, shape/device, and submission resource declaration;
+service admission supplies the irreversible start; task execution supplies the
+terminal outcome. Normalize the actual shape/declaration into the B1 resource
+vector, then compare with the frozen semantic plan as an independent
+expectation oracle. Never emit the frozen plan as pre-execution observed
+evidence. Missing/duplicate/gapped ready/start/terminal observations,
+dependency/resource drift, causal reorder, or terminal-outcome drift must
+invalidate determinism even when content/artifact digests match.
 
 ### Evidence bundle
 
@@ -2580,11 +2615,14 @@ Issue #95 now registers the long-lived B1 mechanism in `test_b1_profile`,
 `test_b1_environment`, `test_b1_output_store`, `test_b1_evidence`, and, when
 the repository OpenCV operation provider is enabled, `test_b1_product_path`.
 These tests freeze the 34 seed/job identities and independent binary32-RNE
-goldens; canonical semantic trace; stable NFC text and exact 21/24/4-field
+goldens; actual-observation-backed canonical semantic trace and dependency/
+resource/outcome drift rejection; stable NFC text and exact 21/24/4-field
 schemas; scalar, collection, fixed-record, mount, all 37 performance-component
 and raw-proof rules; the eleven-reason eligibility truth set and pair
-compatibility; two charged no-replace crash-durable output stages and receipt;
-all four independent inner verdicts; and exact real-Host Throughput QoS,
+compatibility, including embedded digest tamper plus recomputed class self-hash;
+two charged no-replace crash-durable output stages, 64-attempt exhaustion/
+cleanup, and receipt; the exact Compute I/O FSM mutation matrix; all four
+independent inner verdicts; and exact real-Host Throughput QoS,
 cap-one/cap-eight, Graph A/B predecessor, content/trace, lifecycle, resource,
 and Compute I/O closure. They use disposable roots and no machine-dependent
 throughput or candidate/reference threshold.
