@@ -386,11 +386,15 @@ output commit 尚未实现。
 
 Issue #95 增加了一个有意更窄、只用于 B1 manual/release profile 的源码私有例外。
 `B1OutputStore` 会复用当前进程 `ComputeIoExecutor` 执行两个带精确 charge 的 task，随后
-证明 payload byte 已同步、manifest-last no-replace publication、directory barrier 与位于所选
-canonical root 下的类型化 crash-durable receipt。它会保留 no-follow root/slot directory
-descriptor，作为全部 mutation、revalidation、barrier 与 cleanup authority；root-path
-replacement 不能重定向写入。Slot 创建后的 transaction guard 会先结算 accepted Compute
-I/O charge，再进行 identity-safe exception cleanup 与 exact-identity retry。该路径只会在 B1
+证明 payload byte 已同步、manifest-last assembly、atomic no-replace directory
+publication、directory barrier 与位于所选 canonical root 下的类型化 crash-durable
+receipt。它只会在由 no-follow descriptor 持有、且经过验证的 mode-`0700` private staging
+anchor/slot 内写入；mkdir-to-open identity 必须在任何 artifact mutation 前匹配。两个 task
+均结算后，一次 Darwin `RENAME_EXCL` 或 Linux `RENAME_NOREPLACE` transition 会发布完整
+occurrence。Root-path 或 public-slot replacement 都不能重定向写入。Transaction guard 会先
+结算 accepted Compute I/O charge，再进行严格 identity-checked cleanup；cleanup 会在 race
+seam 前后重验每个 leaf/directory，并对 extra leaf、type/identity replacement、unlink/rmdir
+失败或无法证明 absence 执行 fail-stop。该路径只会在 B1
 Run result 已通过普通 embedded Host compute path 获取之后调用。它不会把通用 HP cache
 persistence 移到 Graph publication 之后，不会替换 daemon delivery store，也不会让 durable
 output 成为 public Host/CLI/IPC success 的一部分。

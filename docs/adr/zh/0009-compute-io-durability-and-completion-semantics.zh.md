@@ -188,11 +188,27 @@ output intent/value；只有 `OutputStore` 编排能在 Run 结果已知后发�
 slot descriptor；所选 root pathname 是 evidence，不是持续 mutation authority。
 Creation、file access、publication、barrier、revalidation 与 cleanup 始终采用
 descriptor-relative 操作，并验证预期 filesystem identity。因此 root path replacement
-或 symlink substitution 会使最终 binding 失败，而不会重定向写入。Allocation-free
-transaction guard 在 slot 创建后立即接管 ownership。若后续 factory、observation、
-wait 或 receipt 工作抛异常，guard 会先 cancel 并等待每个 accepted Compute I/O task，
-证明其精确 charge 已退休，再只删除 identity-verified private leaf 与 slot。原 commit
-identity 保持可重试。
+或 symlink substitution 会使最终 binding 失败，而不会重定向写入。
+
+源码私有的 B1 实现会创建 mode-`0700` 的同 root staging anchor 与一个 private child
+slot。对每次 `mkdirat` → `openat` handoff，它会先记录 no-follow named directory
+identity，在此之前不修改 child 内容，然后要求打开的 descriptor 具有完全相同的
+identity。Handoff 失败时绝不会按当前 name 删除 child，因为该 name 可能已经指向
+replacement。Payload 与 manifest task 只修改已验证的 private slot。两个 accepted
+charge 均结算后，完整 directory 会通过一次 atomic no-replace directory rename 发布到
+不可变 occurrence name（Darwin 使用 `RENAME_EXCL`，Linux 使用
+`RENAME_NOREPLACE`），随后完成 source anchor 与 destination root barrier，并最终重验
+descriptor/name binding。实现不会先创建 public occurrence，再重新打开它进行写入。
+
+Allocation-free transaction guard 会在 anchor、slot、payload、private manifest 与
+published manifest 逐一归属事务时记录其精确 identity。若后续 factory、observation、
+wait、publication 或 receipt 工作失败，guard 会先 cancel 并等待每个 accepted Compute
+I/O task，并证明其精确 charge 已退休。Cleanup 是严格操作而非 best effort：每个存在的
+name 在 cleanup race seam 前后都必须保持已记录 type 与 identity；每次 unlink/rmdir、
+删除后的 absence 以及 parent-directory sync 都必须成功。Extra leaf、type/identity
+replacement、`EIO`/`EROFS`、非空 directory 或无法证明的 name binding 都会 fail-stop；
+不同 identity 的 replacement 永远不会被删除。只有精确删除完成后，原 commit identity
+才保持可重试。
 
 回执标识 commit、descriptor/content、namespace、version 与达到的 durability。
 它不是可变 cache 或 staging path。默认策略绝不覆盖已提交输出；替换使用显式

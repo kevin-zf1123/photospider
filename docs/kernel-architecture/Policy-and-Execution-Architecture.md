@@ -675,17 +675,23 @@ no second scheduler, worker pool, ledger, Graph authority, or public request.
 
 `B1OutputStore` is the B1 manual/release output owner, not the still-target
 general product `OutputStore` from ADR 0009. Under one preselected canonical
-root it retains a no-follow root descriptor, creates and retains a fresh
-no-replace occurrence-slot descriptor, then submits the exact 67,108,864-byte
-payload charge and exact manifest charge as two ordered tasks to the process
-executor. Every slot/payload/manifest mutation, barrier, revalidation, and
-cleanup remains descriptor-relative, so pathname replacement fails the final
-binding instead of redirecting writes. An allocation-free transaction guard
-settles accepted work before identity-verified exception cleanup and keeps the
-same commit identity retryable. The store writes tight little-endian RGBA
-binary32 bytes, syncs and revalidates the payload, publishes the canonical
-manifest last and without replacement, completes leaf-to-root directory
-barriers, and only then returns a typed crash-durable receipt. Every offer and
+root it retains a no-follow root descriptor and creates a mode-`0700` private
+staging anchor/slot. It records the named directory identity before `openat`
+and requires the held descriptor to match before any artifact write, then
+submits the exact 67,108,864-byte payload charge and exact manifest charge as
+two ordered tasks to the process executor. After both settle, the store
+atomically renames the complete private slot to the immutable public occurrence
+with platform no-replace semantics and synchronizes both namespaces. Every
+mutation, barrier, revalidation, and cleanup remains descriptor-relative, so
+pathname or real-directory slot replacement cannot redirect writes or be
+deleted as the transaction's object. The guard settles accepted work before
+strict cleanup, checks recorded leaf/directory identities twice across the
+race seam, proves every removal/absence and parent barrier, and fail-stops on
+unowned residue or cleanup failure. Only proven cleanup keeps the commit
+identity retryable. The store writes tight little-endian RGBA binary32 bytes,
+syncs and revalidates the payload and manifest, publishes once, completes
+leaf-to-root directory barriers, and only then returns a typed crash-durable
+receipt. Every offer and
 settlement retains the complete occurrence/task identity and executor-authored
 exact delta plus same-lock I/O snapshot; capacity retry keeps attempt zero and
 the same charge. Planned bytes and per-task events are authoritative only for
@@ -697,8 +703,13 @@ also implement the immutable 34-seed logical/raw golden table, canonical
 semantic trace, exact 21/24/4-field environment schemas, raw backend/mount/
 performance proof mappings, eligibility/root-containment/compatibility, and
 four independent inner verdicts. Applicable evidence and JSON retain the raw
-storage proof; every compatibility side recomputes eligibility from its own
-retained canonical bytes plus that proof and exact-matches the retained claim.
+storage proof as the one closed canonical six-field proof document, including
+all 21 raw field observations, mount inputs, two performance cuts, transaction/
+receipt events, and root/destination observations. No derived proof boolean is
+retained. Every compatibility side reparses those bytes, reruns all mappings,
+and recomputes eligibility from its own canonical storage bytes before exact-
+matching the retained claim. JSON adds a readable decoding but no alternate
+proof grammar.
 `b1_immutable_benchmark` is
 `EXCLUDE_FROM_ALL`, absent from CTest, and writes one exact 34-job inner row
 below a caller-selected eligible root. Building it, showing its help, or

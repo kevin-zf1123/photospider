@@ -1032,6 +1032,28 @@ retained eligible flag 及有序 reason list 精确相等。Proof 缺失、不�
 evidence object 均不存在。复算 class digest 必须匹配其 claim，但合法 class self-hash
 不能修复不匹配的内嵌 base 或 storage digest payload。
 
+Retained proof 不是 producer assertion 列表。唯一接受的编码是 canonical
+`execution-profile-b1-storage-raw-proof-v1\n` document，并使用与 manifest 相同的
+`field=<name-frame><state-frame><reason-frame><type-frame><payload-frame>` grammar。它按
+顺序精确包含六个 known field：`backend_observation`、`field_observations`、
+`mount_observation`、`performance_observation`、`transaction_observation` 与
+`containment_observation`。这些 field 共同保留 backend/root cut；全部 21 个 raw field
+value、任意 raw byte、proof kind 与 proof identity；provider 顺序的 native mount
+option/default/case/duplicate/no-effect proof；两次精确 37-component performance cut 及
+option/absence/conflict evidence；完整 contract/backend/durability/receipt binding 与七项
+commit-event observation；以及 selected/resolved root、每个 destination authority 与
+owner identity。Count、field、kind、order 与 uniqueness 都是封闭的，parse 后重新 encode
+必须逐 byte 复现同一 proof。
+
+Eligibility、mapping-complete、consistency、N/A-validity、performance-valid 或
+containment boolean 都不是 proof input。Validator 会独立解析每一侧 canonical proof
+byte，并重新运行 backend adapter、mount normalizer、performance mapper、transaction/
+receipt binding 与 component-wise containment check，以重建全部 predicate。因此，即使
+21-field manifest 与全部 claimed/class digest 已重新计算为合法值，缺失、未知、重复、
+malformed、stale 或内部漂移的 evidence 仍会失败。Durable JSON evidence 会携带 canonical
+proof byte、其 digest，以及同一 observation 的完整可读解码；它不会引入另一套 JSON
+proof grammar。
+
 Storage compatibility eligibility 是 derived evidence，不是 digest 输入。Reason
 list 是确定性结果，不是 producer 自选 subset：
 

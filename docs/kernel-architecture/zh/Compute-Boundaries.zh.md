@@ -470,9 +470,14 @@ equality 是 typed available `ContentDigest`。B1 记录每个 `ComputeIoExecuto
 charge、带 executor 签发的精确 delta/linkage/sequence 与同锁 process snapshot 的
 accepted admission/settlement event、planned-byte high-water、ADR 0009 requested/
 achieved durability、完整 output receipt、raw payload/manifest hash，以及独立 canonical
-semantic trace。适用 B1/M1 environment evidence 还会保留 raw storage proof，使每一侧
-compatibility 都能复算并精确匹配 eligibility。M1 除 candidate/reference comparison
-provenance 外，还记录两个 same-ordinal isolated pair reference。
+semantic trace。适用 B1/M1 environment evidence 还会保留唯一的
+`execution-profile-b1-storage-raw-proof-v1` document：共享 manifest grammar 下的六个
+field 承载 backend 与全部 21 个 raw field observation、native mount evidence、两次
+37-component performance cut、transaction/receipt event 以及 root/destination ownership。
+它不保留 derived proof boolean。每一侧 compatibility 都严格解析这些 byte，并独立 replay
+每个 adapter、normalizer、mapper、binding 与 containment predicate，之后才精确匹配
+eligibility。M1 除 candidate/reference comparison provenance 外，还记录两个 same-ordinal
+isolated pair reference。
 
 这些仍是画像 harness/evidence 语义。精确 per-job planned-byte charge 与 executor 签发的
 admission/settlement delta 是 Compute I/O admission、planned-byte high-water 与该 task

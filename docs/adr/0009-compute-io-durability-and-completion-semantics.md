@@ -231,11 +231,30 @@ not continuing mutation authority. Creation, file access, publication,
 barriers, revalidation, and cleanup remain descriptor-relative and verify the
 expected filesystem identities. A root-path replacement or symlink
 substitution therefore fails the final binding instead of redirecting writes.
-An allocation-free transaction guard takes ownership immediately after slot
-creation. If later factory, observation, wait, or receipt work throws, the guard
-first cancels and waits for every accepted Compute I/O task, proves its exact
-charge retired, then removes only identity-verified private leaves and the slot.
-The original commit identity remains retryable.
+
+The source-private B1 realization creates a mode-`0700` same-root staging
+anchor and a private child slot. For each `mkdirat` → `openat` handoff it first
+records the no-follow named directory identity, performs no child mutation,
+then requires the opened descriptor to have that exact identity. A handoff
+failure never removes the current child by name because that name may already
+denote a replacement. Payload and manifest tasks mutate only the verified
+private slot. After both accepted charges settle, the complete directory is
+published to its immutable occurrence name by one atomic no-replace directory
+rename (`RENAME_EXCL` on Darwin or `RENAME_NOREPLACE` on Linux), followed by
+source-anchor and destination-root barriers and final descriptor/name
+revalidation. No mkdir-created public occurrence is reopened for later writes.
+
+An allocation-free transaction guard records the exact identity of the anchor,
+slot, payload, private manifest, and published manifest as each becomes owned.
+If later factory, observation, wait, publication, or receipt work fails, the
+guard first cancels and waits for every accepted Compute I/O task and proves its
+exact charge retired. Cleanup is strict rather than best effort: each present
+name must have its recorded type and identity before and after the cleanup race
+seam, every unlink/rmdir and resulting absence is checked, and parent
+directories are synchronized. An extra leaf, type/identity replacement,
+`EIO`/`EROFS`, nonempty directory, or unprovable name binding terminates
+fail-stop; a different replacement is never deleted. Only exact deletion leaves
+the original commit identity retryable.
 
 The receipt identifies commit, descriptor/content, namespace, version, and
 achieved durability. It is not a mutable cache or staging path. The default

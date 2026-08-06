@@ -601,9 +601,15 @@ admission/settlement event with its executor-authored exact delta/linkage/
 sequence and same-lock process snapshot, planned-byte high-water, ADR 0009
 requested and achieved durability, complete output receipt, raw payload/
 manifest hashes, and the separate canonical semantic trace. Applicable B1/M1
-environment evidence also retains raw storage proof so each compatibility side
-can recompute and exact-match eligibility. M1 records two same-ordinal isolated
-pair references in addition to candidate/reference comparison provenance.
+environment evidence also retains exactly one
+`execution-profile-b1-storage-raw-proof-v1` document: six fields in the shared
+manifest grammar carry the backend and all 21 raw field observations, native
+mount evidence, both 37-component performance cuts, transaction/receipt events,
+and root/destination ownership. It retains no derived proof boolean. Each
+compatibility side strictly parses those bytes and independently replays every
+adapter, normalizer, mapper, binding, and containment predicate before exact-
+matching eligibility. M1 records two same-ordinal isolated pair references in
+addition to candidate/reference comparison provenance.
 
 These remain profile harness/evidence semantics. Exact per-job planned-byte
 charges and executor-authored admission/settlement deltas are mandatory,

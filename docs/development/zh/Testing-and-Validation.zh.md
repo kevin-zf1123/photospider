@@ -2173,8 +2173,11 @@ resource/outcome drift rejection、stable NFC text 与精确 21/24/4-field schem
 scalar/collection/fixed-record/mount/全部 37 个 performance component 与 raw-proof rule、
 十一 reason eligibility truth set 与 pair compatibility（包括篡改内嵌 digest 后复算
 class self-hash、proof 缺失/漂移，以及 byte/digest 复算后 eligibility 陈旧）、两个带
-charge 的 no-replace crash-durable output stage、64-attempt exhaustion/cleanup、slot
-创建后 fault rollback/retry、root replacement fail-closed 行为与 receipt、真实并发下
+charge、且位于已验证 private staging anchor 内的 crash-durable output stage、64-attempt
+exhaustion/cleanup、atomic no-replace directory publication、mkdir/open 与 public
+real-directory replacement race、slot 创建后 fault rollback/retry、root replacement
+fail-closed 行为、针对 extra/type/different-identity leaf 与注入 `EIO`/`EROFS` 的严格
+cleanup，以及 receipt、真实并发下
 executor 签发的精确 charge/release，以及 undercharge/伪造零值 Compute I/O FSM mutation
 matrix、四项相互独立的
 inner verdict，以及真实 Host 上精确
@@ -2194,13 +2197,15 @@ cmake --build build --target b1_immutable_benchmark -j
 checkout 外的空绝对目录，并且就是选定的 canonical durability root。三个 manifest input
 必须分别是经过独立预验证的精确 `execution-profile-base-environment-v1`、
 `execution-profile-storage-environment-v1` 与
-`execution-profile-environment-class-v1` byte。`--storage-proof` 必须是精确七 key JSON
-object，schema 为 `execution-profile-b1-storage-proof-v1`，其六个 boolean fact 名为
-`raw_mapping_complete`、`commit_semantics_consistent`、
-`durability_path_consistent`、`mount_normalization_proved`、
-`not_applicable_proofs_valid` 与 `performance_configuration_proved`。这些 boolean 是 retained
-raw-evidence claim，不是用户可任意选择的 switch；runner 会自行推导 root containment，并拒绝
-ineligible 结果。一条精确 invocation 如下：
+`execution-profile-environment-class-v1` byte。`--storage-proof` 必须是精确 canonical
+`execution-profile-b1-storage-raw-proof-v1` document，而不是 JSON。它使用共享 manifest
+field/frame grammar，并精确包含六个封闭 section：backend、21-field raw observation、mount、
+两次 performance cut、transaction/receipt 与 root/destination containment；其中没有任何
+derived proof boolean。Proof 的 selected/resolved root 必须等于 `--output-dir`，retained
+destination list 必须包含 runner 的 root、Graph、session、cache、invocation、row 与 failure
+path。Runner 会严格 parse/re-encode byte，独立重放全部 mapping 与 eligibility predicate，并
+拒绝 missing、unknown、duplicate、stale 或 drifting evidence，不会在运行时补写 proof fact。
+一条精确 invocation 如下：
 
 ```shell
 mkdir -m 700 /absolute/durable-root/b1-cap1-r1
@@ -2209,7 +2214,7 @@ mkdir -m 700 /absolute/durable-root/b1-cap1-r1
   --base-manifest /absolute/evidence/base.manifest \
   --storage-manifest /absolute/evidence/storage.manifest \
   --environment-class-manifest /absolute/evidence/b1-class.manifest \
-  --storage-proof /absolute/evidence/storage-proof.json \
+  --storage-proof /absolute/evidence/storage-proof.manifest \
   --run-cap 1 --replicate-ordinal 1
 ```
 

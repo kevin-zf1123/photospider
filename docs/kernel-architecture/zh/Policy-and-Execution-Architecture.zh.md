@@ -542,14 +542,18 @@ scheduler、worker pool、ledger、Graph authority 或 public request。
 
 `B1OutputStore` 是 B1 manual/release output owner，而不是 ADR 0009 中仍属目标的通用
 产品 `OutputStore`。它会在一个预先选择的 canonical root 下保留 no-follow root
-descriptor，创建并保留全新的 no-replace occurrence-slot descriptor，再把精确
+descriptor，并创建 mode-`0700` private staging anchor/slot。它会在 `openat` 前记录 named
+directory identity，且只有 held descriptor 精确匹配后才允许 artifact write；随后把精确
 67,108,864-byte payload charge 与精确 manifest charge 作为两个有序 task 提交给进程
-executor。每个 slot/payload/manifest mutation、barrier、revalidation 与 cleanup 都保持
-descriptor-relative，因此 pathname replacement 只会使最终 binding 失败，而不会重定向
-写入。Allocation-free transaction guard 会在 identity-verified exception cleanup 前结算
-accepted work，并使相同 commit identity 保持可重试。Store 写入紧密 little-endian RGBA
-binary32 byte、同步并重验 payload、以 no-replace 方式最后发布 canonical manifest、完成
-leaf-to-root directory barrier，然后才返回类型化 crash-durable receipt。每次 offer 与
+executor。两个 task 均结算后，store 以平台 no-replace 语义把完整 private slot 原子 rename
+到不可变 public occurrence，并同步 source/destination namespace。每个 mutation、barrier、
+revalidation 与 cleanup 都保持 descriptor-relative，因此 pathname 或 real-directory slot
+replacement 既不能重定向写入，也不会被当作事务对象删除。Guard 会先结算 accepted work，
+再严格 cleanup：跨 race seam 两次检查已记录 leaf/directory identity，证明每次删除、absence
+与 parent barrier；若出现 unowned residue 或 cleanup failure 则 fail-stop。只有 cleanup 得到
+证明后，相同 commit identity 才保持可重试。Store 写入紧密 little-endian RGBA binary32
+byte、同步并重验 payload 与 manifest、一次性发布、完成 leaf-to-root directory barrier，
+然后才返回类型化 crash-durable receipt。每次 offer 与
 settlement 都保留完整 occurrence/task identity、executor 签发的精确 delta 与同锁 I/O
 snapshot；capacity retry 保持 attempt zero 与相同 charge。Planned byte 与单 task event 只
 对 Compute I/O admission、high-water 与精确 task settlement 具有权威性，不能证明 physical
@@ -559,8 +563,12 @@ Source-private B1 profile、environment validator 与 evidence evaluator 还实�
 34-seed logical/raw golden table、canonical semantic trace、精确 21/24/4-field environment
 schema、raw backend/mount/performance proof mapping、eligibility/root-containment/
 compatibility，以及四项相互独立的 inner verdict。适用 evidence 与 JSON 会保留 raw
-storage proof；每一侧 compatibility 都从自身 retained canonical byte 加该 proof 复算
-eligibility，并与 retained claim 精确匹配。`b1_immutable_benchmark` 为
+storage proof，形式是唯一封闭的 canonical 六 field proof document，其中包含全部 21 个 raw
+field observation、mount input、两次 performance cut、transaction/receipt event 与 root/
+destination observation；不会保留任何 derived proof boolean。每一侧 compatibility 都会
+重新解析这些 byte、重跑全部 mapping，并从自身 canonical storage byte 复算 eligibility，
+再与 retained claim 精确匹配。JSON 只增加可读解码，不引入另一套 proof grammar。
+`b1_immutable_benchmark` 为
 `EXCLUDE_FROM_ALL`，不属于 CTest，只会在 caller 选择的 eligible root 下写入一条精确
 34-job inner row。构建该 target、显示 help 或通过 deterministic test 都不构成 B1 机器
 符合性结果；本文既不声明已完成精确三 replicate 机器运行，也不声明 #96 outer row/bundle/

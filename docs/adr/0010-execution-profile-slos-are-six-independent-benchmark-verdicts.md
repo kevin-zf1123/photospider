@@ -1175,6 +1175,33 @@ N/A state/reason/empty payload to the absence of every storage evidence object.
 The recomputed class digest must match its claim, but a valid class self-hash
 does not repair a mismatched embedded base or storage digest payload.
 
+The retained proof is not a list of producer assertions. Its only accepted
+encoding is the canonical
+`execution-profile-b1-storage-raw-proof-v1\n` document using the same
+`field=<name-frame><state-frame><reason-frame><type-frame><payload-frame>`
+grammar as the manifests. It contains exactly six known fields in order:
+`backend_observation`, `field_observations`, `mount_observation`,
+`performance_observation`, `transaction_observation`, and
+`containment_observation`. Together they retain the backend/root cut; all 21
+raw field values, arbitrary raw bytes, proof kinds, and proof identities;
+provider-ordered native mount options/defaults/case/duplicate/no-effect proofs;
+both exact 37-component performance cuts and option/absence/conflict evidence;
+the complete contract/backend/durability/receipt binding and seven commit-event
+observations; and the selected/resolved root plus every destination authority
+and owner identity. Counts, fields, kinds, order, and uniqueness are closed,
+and parse followed by encode must reproduce the exact proof bytes.
+
+No eligibility, mapping-complete, consistency, N/A-validity, performance-valid,
+or containment boolean is a proof input. The validator parses each side's
+canonical proof bytes independently and reconstructs every predicate by
+rerunning the backend adapter, mount normalizer, performance mapper,
+transaction/receipt binding, and component-wise containment checks. Missing,
+unknown, duplicate, malformed, stale, or internally drifting evidence therefore
+fails even when the 21-field manifest and all claimed/class digests have been
+recomputed to valid values. Durable JSON evidence carries the canonical proof
+bytes, their digest, and a complete readable decoding of the same observations;
+it does not introduce an alternate JSON proof grammar.
+
 Storage compatibility eligibility is derived evidence, not digest input. Its
 reason list is a deterministic result, not a producer-selected subset:
 

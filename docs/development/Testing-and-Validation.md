@@ -2643,9 +2643,12 @@ schemas; scalar, collection, fixed-record, mount, all 37 performance-component
 and raw-proof rules; the eleven-reason eligibility truth set and pair
 compatibility, including embedded digest tamper plus recomputed class self-hash,
 proof missing/drift, and stale eligibility after byte/digest recomputation; two
-charged no-replace crash-durable output stages, 64-attempt exhaustion/cleanup,
-post-slot fault rollback/retry, root replacement fail-closed behavior, and
-receipt; executor-authored exact charge/release under real concurrency plus the
+charged crash-durable output stages inside a verified private staging anchor,
+64-attempt exhaustion/cleanup, atomic no-replace directory publication,
+mkdir/open and public real-directory replacement races, post-slot fault
+rollback/retry, root replacement fail-closed behavior, strict cleanup for
+extra/type/different-identity leaves plus injected `EIO`/`EROFS`, and receipt;
+executor-authored exact charge/release under real concurrency plus the
 undercharge/forged-zero Compute I/O FSM mutation matrix; all four
 independent inner verdicts; and exact real-Host Throughput QoS,
 cap-one/cap-eight, Graph A/B predecessor, content/trace, lifecycle, resource,
@@ -2667,13 +2670,16 @@ must be exact independently prevalidated
 `execution-profile-base-environment-v1`,
 `execution-profile-storage-environment-v1`, and
 `execution-profile-environment-class-v1` bytes. `--storage-proof` must be an
-exact seven-key JSON object with schema
-`execution-profile-b1-storage-proof-v1` and six boolean facts named
-`raw_mapping_complete`, `commit_semantics_consistent`,
-`durability_path_consistent`, `mount_normalization_proved`,
-`not_applicable_proofs_valid`, and `performance_configuration_proved`.
-Those booleans are retained raw-evidence claims, not user-selected switches;
-the runner derives root containment itself and rejects an ineligible result.
+exact canonical `execution-profile-b1-storage-raw-proof-v1` document, not JSON.
+It uses the shared manifest field/frame grammar and contains exactly the six
+closed backend, 21-field raw observation, mount, two-cut performance,
+transaction/receipt, and root/destination-containment sections. It carries no
+derived proof boolean. The proof's selected/resolved root must equal
+`--output-dir`, and its retained destination list must include the runner's
+root, Graph, session, cache, invocation, row, and failure paths. The runner
+strictly reparses/re-encodes the bytes, independently replays all mappings and
+eligibility predicates, and rejects missing, unknown, duplicate, stale, or
+drifting evidence rather than filling any proof fact at runtime.
 One exact invocation is:
 
 ```shell
@@ -2683,7 +2689,7 @@ mkdir -m 700 /absolute/durable-root/b1-cap1-r1
   --base-manifest /absolute/evidence/base.manifest \
   --storage-manifest /absolute/evidence/storage.manifest \
   --environment-class-manifest /absolute/evidence/b1-class.manifest \
-  --storage-proof /absolute/evidence/storage-proof.json \
+  --storage-proof /absolute/evidence/storage-proof.manifest \
   --run-cap 1 --replicate-ordinal 1
 ```
 

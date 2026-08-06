@@ -552,8 +552,13 @@ cmake --build build --target b1_immutable_benchmark -j
 ```
 
 One invocation emits one exact cap-one or cap-eight B1 inner row. It requires
-three canonical environment manifests, a closed raw-storage proof, and an
-existing empty absolute output directory outside the checkout:
+three canonical environment manifests, a closed canonical raw-storage proof,
+and an existing empty absolute output directory outside the checkout. The proof
+must have header `execution-profile-b1-storage-raw-proof-v1`, use the same
+field/frame grammar as the manifests, contain the exact six backend/field/
+mount/performance/transaction/containment sections, and bind its selected and
+resolved root plus every runner destination to `--output-dir`. JSON proof flags
+and derived booleans are not accepted:
 
 ```bash
 ./build/tests/b1_immutable_benchmark \
@@ -561,7 +566,7 @@ existing empty absolute output directory outside the checkout:
   --base-manifest /absolute/evidence/base.manifest \
   --storage-manifest /absolute/evidence/storage.manifest \
   --environment-class-manifest /absolute/evidence/environment-class.manifest \
-  --storage-proof /absolute/evidence/storage-proof.json \
+  --storage-proof /absolute/evidence/storage-proof.manifest \
   --run-cap 1 \
   --replicate-ordinal 1
 ```
