@@ -24,6 +24,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     libgtest-dev \
     libopencv-dev \
     libssl-dev \
+    libutf8proc-dev \
     libyaml-cpp-dev \
     nlohmann-json3-dev \
     pkg-config \
