@@ -7,14 +7,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "benchmark/b1_profile.hpp"           // NOLINT(build/include_subdir)
 #include "execution/compute_io_executor.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::benchmark {
+
+namespace testing {
+struct B1OutputCommitReceiptTestAccess;
+}  // namespace testing
 
 /** @brief Exact deterministic number of capacity admission attempts per task.
  */
@@ -35,8 +41,8 @@ enum class B1OutputDurability : std::uint8_t {
 /**
  * @brief Live root facts observed through the held `B1OutputStore` descriptor.
  * @throws Nothing for ordinary movement except owned path/string allocation.
- * @note The observation is source-private authority for the current process;
- * copying its diagnostic strings into a file does not preserve that authority.
+ * @note This is a diagnostic result, not the descriptor capability itself;
+ * copying its strings into memory or a file does not preserve authority.
  */
 struct B1OutputStoreRootObservation final {
   /** @brief Canonical selected root still bound to the held descriptor. */
@@ -45,6 +51,68 @@ struct B1OutputStoreRootObservation final {
   std::string root_authority_identity;
   /** @brief Normalized filesystem type returned by descriptor `fstatfs`. */
   std::string filesystem_type;
+};
+
+/**
+ * @brief Opaque retained capability for one live B1 output-root descriptor.
+ *
+ * Copies share the same duplicated descriptor and advisory-lock lifetime. The
+ * descriptor is re-observed on every `observe()` call; copied diagnostic path,
+ * identity, or filesystem strings cannot construct this capability.
+ *
+ * @throws Nothing for copy, move, and destruction; `observe()` reports live
+ * descriptor or namespace failures separately.
+ * @note The last capability copy closes the duplicated descriptor fail-stop
+ * and may therefore extend exclusive-root ownership beyond `B1OutputStore`
+ * until copied `B1InnerRow` evidence is released.
+ * @note `observe()` is read-only and may run through distinct live copies in
+ * parallel; callers must not race destruction of the same C++ object instance.
+ */
+class B1OutputStoreRootAuthority final {
+ public:
+  /** @brief Shares one existing live descriptor capability. */
+  B1OutputStoreRootAuthority(const B1OutputStoreRootAuthority&) noexcept;
+
+  /** @brief Transfers one existing live descriptor capability. */
+  B1OutputStoreRootAuthority(B1OutputStoreRootAuthority&&) noexcept;
+
+  /** @brief Shares one existing live descriptor capability. */
+  B1OutputStoreRootAuthority& operator=(
+      const B1OutputStoreRootAuthority&) noexcept;
+
+  /** @brief Transfers one existing live descriptor capability. */
+  B1OutputStoreRootAuthority& operator=(B1OutputStoreRootAuthority&&) noexcept;
+
+  /**
+   * @brief Releases one shared owner of the duplicated descriptor.
+   * @throws Nothing; final descriptor-close failure terminates fail-stop.
+   */
+  ~B1OutputStoreRootAuthority() noexcept;
+
+  /**
+   * @brief Re-observes the held descriptor and its selected pathname binding.
+   * @return Fresh descriptor-derived root identity and filesystem facts.
+   * @throws std::system_error for descriptor/filesystem observation failure.
+   * @throws std::runtime_error for path, type, or identity drift.
+   * @note No serialized value or retained proof participates in this check.
+   */
+  B1OutputStoreRootObservation observe() const;
+
+ private:
+  /** @brief Source-private shared descriptor and frozen binding state. */
+  struct State;
+
+  /**
+   * @brief Adopts one store-minted shared descriptor state.
+   * @param state Non-null state created by `B1OutputStore`.
+   * @throws std::invalid_argument when `state` is null.
+   */
+  explicit B1OutputStoreRootAuthority(std::shared_ptr<const State> state);
+
+  /** @brief Shared live descriptor source; never serialized. */
+  std::shared_ptr<const State> state_;
+
+  friend class B1OutputStore;
 };
 
 /**
@@ -117,40 +185,155 @@ struct B1ComputeIoObservation final {
  * @brief Immutable successful crash-durable B1 output receipt.
  * @throws Nothing for ordinary value operations except owned string/path copy.
  * @note Construction is internal to `B1OutputStore` after all barriers.
+ * Concurrent reads are safe while the receipt object's lifetime is protected.
  */
-struct B1OutputCommitReceipt final {
-  /** @brief Stable lowercase SHA-256 commit identity. */
-  std::string commit_id;
-  /** @brief Canonical selected output root. */
-  std::filesystem::path resolved_root;
-  /** @brief Root-relative immutable occurrence slot. */
-  std::filesystem::path rooted_slot;
-  /** @brief Complete occurrence identity bound before first offer. */
-  B1JobInstance job;
-  /** @brief Fixed logical descriptor identity. */
-  std::string logical_descriptor;
-  /** @brief Typed logical candidate content identity. */
-  ContentDigest logical_content_digest;
-  /** @brief Fixed committed generation for the immutable occurrence. */
-  std::uint64_t committed_generation = 1U;
-  /** @brief Exact payload leaf name. */
-  std::string payload_name;
-  /** @brief Exact manifest leaf name published last. */
-  std::string manifest_name;
-  /** @brief Exact committed payload length. */
-  std::uint64_t payload_length = 0U;
-  /** @brief Exact committed manifest length. */
-  std::uint64_t manifest_length = 0U;
-  /** @brief SHA-256 of exact little-endian payload bytes. */
-  B1Sha256Digest payload_digest;
-  /** @brief SHA-256 of exact canonical manifest bytes. */
-  B1Sha256Digest manifest_digest;
-  /** @brief Requested durability contract. */
-  B1OutputDurability requested_durability = B1OutputDurability::CrashDurable;
-  /** @brief Achieved durability after all barriers. */
-  B1OutputDurability achieved_durability = B1OutputDurability::CrashDurable;
-  /** @brief Stable published manifest filesystem identity. */
-  std::string published_manifest_identity;
+class B1OutputCommitReceipt final {
+ public:
+  /** @brief Copies one store-minted immutable receipt capability. */
+  B1OutputCommitReceipt(const B1OutputCommitReceipt&) = default;
+
+  /** @brief Moves one store-minted immutable receipt capability. */
+  B1OutputCommitReceipt(B1OutputCommitReceipt&&) noexcept = default;
+
+  /** @brief Copies one store-minted immutable receipt capability. */
+  B1OutputCommitReceipt& operator=(const B1OutputCommitReceipt&) = default;
+
+  /** @brief Moves one store-minted immutable receipt capability. */
+  B1OutputCommitReceipt& operator=(B1OutputCommitReceipt&&) noexcept = default;
+
+  /** @brief Destroys immutable receipt storage without external side effects.
+   */
+  ~B1OutputCommitReceipt() = default;
+
+  /** @brief Returns the stable lowercase SHA-256 commit identity. */
+  const std::string& commit_id() const noexcept { return fields_.commit_id; }
+
+  /** @brief Returns the canonical selected output root. */
+  const std::filesystem::path& resolved_root() const noexcept {
+    return fields_.resolved_root;
+  }
+
+  /** @brief Returns the root-relative immutable occurrence slot. */
+  const std::filesystem::path& rooted_slot() const noexcept {
+    return fields_.rooted_slot;
+  }
+
+  /** @brief Returns the complete occurrence identity bound before offer. */
+  const B1JobInstance& job() const noexcept { return fields_.job; }
+
+  /** @brief Returns the fixed logical descriptor identity. */
+  const std::string& logical_descriptor() const noexcept {
+    return fields_.logical_descriptor;
+  }
+
+  /** @brief Returns the typed logical candidate content identity. */
+  const ContentDigest& logical_content_digest() const noexcept {
+    return fields_.logical_content_digest;
+  }
+
+  /** @brief Returns the fixed immutable committed generation. */
+  std::uint64_t committed_generation() const noexcept {
+    return fields_.committed_generation;
+  }
+
+  /** @brief Returns the exact payload leaf name. */
+  const std::string& payload_name() const noexcept {
+    return fields_.payload_name;
+  }
+
+  /** @brief Returns the exact manifest leaf name published last. */
+  const std::string& manifest_name() const noexcept {
+    return fields_.manifest_name;
+  }
+
+  /** @brief Returns the exact committed payload length. */
+  std::uint64_t payload_length() const noexcept {
+    return fields_.payload_length;
+  }
+
+  /** @brief Returns the exact committed manifest length. */
+  std::uint64_t manifest_length() const noexcept {
+    return fields_.manifest_length;
+  }
+
+  /** @brief Returns the SHA-256 of exact little-endian payload bytes. */
+  const B1Sha256Digest& payload_digest() const noexcept {
+    return fields_.payload_digest;
+  }
+
+  /** @brief Returns the SHA-256 of exact canonical manifest bytes. */
+  const B1Sha256Digest& manifest_digest() const noexcept {
+    return fields_.manifest_digest;
+  }
+
+  /** @brief Returns the requested durability contract. */
+  B1OutputDurability requested_durability() const noexcept {
+    return fields_.requested_durability;
+  }
+
+  /** @brief Returns the achieved durability after all barriers. */
+  B1OutputDurability achieved_durability() const noexcept {
+    return fields_.achieved_durability;
+  }
+
+  /** @brief Returns the stable published-manifest filesystem identity. */
+  const std::string& published_manifest_identity() const noexcept {
+    return fields_.published_manifest_identity;
+  }
+
+ private:
+  /**
+   * @brief Complete immutable fields accepted only from a minting owner.
+   * @throws Nothing for aggregate initialization except owned-value movement.
+   */
+  struct Fields final {
+    /** @brief Stable lowercase SHA-256 commit identity. */
+    std::string commit_id;
+    /** @brief Canonical selected output root. */
+    std::filesystem::path resolved_root;
+    /** @brief Root-relative immutable occurrence slot. */
+    std::filesystem::path rooted_slot;
+    /** @brief Complete occurrence identity bound before first offer. */
+    B1JobInstance job;
+    /** @brief Fixed logical descriptor identity. */
+    std::string logical_descriptor;
+    /** @brief Typed logical candidate content identity. */
+    ContentDigest logical_content_digest;
+    /** @brief Fixed committed generation for the immutable occurrence. */
+    std::uint64_t committed_generation = 1U;
+    /** @brief Exact payload leaf name. */
+    std::string payload_name;
+    /** @brief Exact manifest leaf name published last. */
+    std::string manifest_name;
+    /** @brief Exact committed payload length. */
+    std::uint64_t payload_length = 0U;
+    /** @brief Exact committed manifest length. */
+    std::uint64_t manifest_length = 0U;
+    /** @brief SHA-256 of exact little-endian payload bytes. */
+    B1Sha256Digest payload_digest;
+    /** @brief SHA-256 of exact canonical manifest bytes. */
+    B1Sha256Digest manifest_digest;
+    /** @brief Requested durability contract. */
+    B1OutputDurability requested_durability = B1OutputDurability::CrashDurable;
+    /** @brief Achieved durability after all barriers. */
+    B1OutputDurability achieved_durability = B1OutputDurability::CrashDurable;
+    /** @brief Stable published manifest filesystem identity. */
+    std::string published_manifest_identity;
+  };
+
+  /**
+   * @brief Mints one immutable receipt after complete store revalidation.
+   * @param fields Complete trusted store result.
+   * @throws std::bad_alloc only if owned movement unexpectedly allocates.
+   * @note No public constructor accepts serialized or retained proof fields.
+   */
+  explicit B1OutputCommitReceipt(Fields fields) : fields_(std::move(fields)) {}
+
+  /** @brief Immutable store-minted receipt facts. */
+  Fields fields_;
+
+  friend class B1OutputStore;
+  friend struct testing::B1OutputCommitReceiptTestAccess;
 };
 
 /**
@@ -380,6 +563,18 @@ class B1OutputStore final {
    * to the actual output namespace. Serialized strings are diagnostic only.
    */
   B1OutputStoreRootObservation observe_root_authority() const;
+
+  /**
+   * @brief Retains a copyable live root-descriptor capability for evidence.
+   * @return Opaque capability sharing the current root lock and binding.
+   * @throws std::system_error when descriptor duplication fails.
+   * @throws std::runtime_error when the current root binding has drifted.
+   * @throws std::bad_alloc when shared capability state cannot be allocated.
+   * @note The capability re-observes descriptor/path/filesystem state during
+   * validation and may outlive this store. Its diagnostic values cannot be
+   * serialized and reconstructed into a replacement capability.
+   */
+  B1OutputStoreRootAuthority retain_root_authority() const;
 
   /**
    * @brief Commits one exact candidate image using two ordered I/O tasks.

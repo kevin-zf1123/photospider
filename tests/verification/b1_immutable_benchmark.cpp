@@ -697,9 +697,9 @@ B1JobEvidence run_b1_job(Host& host, B1Host& b1_host,
       capture_b1_execution_snapshot(b1_host, lifecycle_cursor);
   if (evidence.output.receipt.has_value()) {
     const bool logical_match =
-        evidence.output.receipt->logical_content_digest ==
+        evidence.output.receipt->logical_content_digest() ==
         evidence.golden.logical_digest;
-    const bool raw_match = evidence.output.receipt->payload_digest ==
+    const bool raw_match = evidence.output.receipt->payload_digest() ==
                            evidence.golden.raw_payload_digest;
     (void)logical_match;
     (void)raw_match;
@@ -778,22 +778,11 @@ B1RunnerExpectedEnvironment load_runner_expected_environment(
 }
 
 /**
- * @brief Returns the exact manifest token for typed output durability.
- * @param durability Actual typed receipt value.
- * @return Process-lifetime `atomic-visible` or `crash-durable` token.
- * @throws Nothing.
- */
-const char* output_durability_token(B1OutputDurability durability) noexcept {
-  return durability == B1OutputDurability::CrashDurable ? "crash-durable"
-                                                        : "atomic-visible";
-}
-
-/**
  * @brief Forms row evidence from expected input plus actual root/receipts.
  * @param options Validated cap/replicate controls.
  * @param expected Canonical caller input retained only as expected claims.
  * @param initial_snapshot Authoritative pre-cold resource state.
- * @param root Actual descriptor-derived root observation stable across the row.
+ * @param root_authority Retained live descriptor capability for validation.
  * @param jobs Complete actual job evidence carrying typed output receipts.
  * @return Environment evidence whose live authority remains explicitly
  * incomplete when portable probes cannot verify external storage declarations.
@@ -803,30 +792,24 @@ const char* output_durability_token(B1OutputDurability durability) noexcept {
  * semantics, the full performance record, hardware write-cache policy, PLP,
  * or the seven event attestations. Those fields therefore remain listed as
  * unverified and machine conformance fails closed until a trusted source-
- * private adapter supplies a complete probe. Retained proof bytes are never
- * copied into `complete_probe`.
+ * private adapter supplies an opaque live probe source. Retained proof bytes
+ * are never promoted into that source.
  */
 B1EnvironmentEvidence make_runner_environment(
     const B1RunnerOptions& options, const B1RunnerExpectedEnvironment& expected,
     const B1ExecutionSnapshot& initial_snapshot,
-    const B1OutputStoreRootObservation& root,
+    B1OutputStoreRootAuthority root_authority,
     const std::vector<B1JobEvidence>& jobs) {
-  std::vector<B1StorageReceiptAuthorityObservation> receipts;
+  std::vector<B1OutputCommitReceipt> receipts;
   for (const B1JobEvidence& job : jobs) {
     if (!job.output.receipt.has_value()) {
       continue;
     }
-    const B1OutputCommitReceipt& receipt = *job.output.receipt;
-    receipts.push_back(B1StorageReceiptAuthorityObservation{
-        receipt.commit_id, receipt.resolved_root, receipt.rooted_slot,
-        receipt.published_manifest_identity,
-        output_durability_token(receipt.requested_durability),
-        output_durability_token(receipt.achieved_durability)});
+    receipts.push_back(*job.output.receipt);
   }
   B1StorageActualObservation actual =
-      make_b1_portable_runner_storage_observation(
-          root.resolved_root, root.resolved_root, root.root_authority_identity,
-          root.filesystem_type, std::move(receipts));
+      make_b1_portable_runner_storage_observation(std::move(root_authority),
+                                                  std::move(receipts));
 
   return B1EnvironmentEvidence{
       expected.base_manifest,
@@ -997,9 +980,9 @@ B1InnerRow run_exact_row(const B1RunnerOptions& options,
     throw std::runtime_error(
         "B1 live root authority drifted during the replicate");
   }
-  input.environment =
-      make_runner_environment(options, expected_environment,
-                              input.initial_snapshot, final_root, input.jobs);
+  input.environment = make_runner_environment(
+      options, expected_environment, input.initial_snapshot,
+      output_store.retain_root_authority(), input.jobs);
 
   B1InnerRow row = evaluate_b1_inner_row(std::move(input));
   write_fresh_text_file(output_directory / "row.json",

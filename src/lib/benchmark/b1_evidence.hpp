@@ -266,6 +266,8 @@ struct B1JobEvidence final {
 /**
  * @brief Complete raw input to one isolated cap-one or cap-eight B1 row.
  * @throws std::bad_alloc when job/environment/snapshot storage allocates.
+ * @note Copying an input that carries actual storage authority shares its live
+ * observer and may extend the retained output-root descriptor/lock lifetime.
  */
 struct B1InnerRowInput final {
   /** @brief Fresh-process replicate ordinal in `[1,3]`. */
@@ -291,6 +293,8 @@ struct B1InnerRowInput final {
  * @brief Closed typed B1 inner row with four independent verdict axes.
  * @throws std::bad_alloc when raw input/reasons are copied.
  * @note This is not the canonical 15-field outer row or comparison resolver.
+ * Copies retain the same opaque actual-storage capability, so its live root
+ * descriptor and trusted probe adapter outlive all copied rows.
  */
 struct B1InnerRow final {
   /** @brief Exact inner schema identity. */

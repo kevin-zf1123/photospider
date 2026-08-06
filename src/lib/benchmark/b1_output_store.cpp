@@ -1193,6 +1193,102 @@ B1OutputCommitStatus classify_task_failure(
 
 }  // namespace
 
+/**
+ * @brief Shared duplicated descriptor state behind root-authority copies.
+ * @throws std::bad_alloc when owned root storage cannot be constructed.
+ * @note The duplicated descriptor shares the store's open-file description
+ * and advisory lock. Final close failure terminates because silently losing
+ * proof of authority lifetime would violate the capability contract.
+ */
+struct B1OutputStoreRootAuthority::State final {
+  /**
+   * @brief Adopts one duplicated descriptor and its frozen binding identity.
+   * @param root Canonical selected path that must continue naming the fd.
+   * @param device Frozen descriptor device identity.
+   * @param inode Frozen descriptor inode identity.
+   * @param descriptor Owned nonnegative duplicated directory descriptor.
+   * @throws std::bad_alloc when `root` movement allocates unexpectedly.
+   */
+  State(std::filesystem::path root, std::uint64_t device, std::uint64_t inode,
+        int descriptor)
+      : root(std::move(root)),
+        device(device),
+        inode(inode),
+        descriptor(descriptor) {}
+
+  /**
+   * @brief Closes the exact duplicated authority descriptor.
+   * @throws Nothing; close failure terminates fail-stop.
+   */
+  ~State() noexcept {
+#if !defined(_WIN32)
+    if (descriptor >= 0 && ::close(descriptor) != 0) {
+      std::terminate();
+    }
+#endif
+  }
+
+  /** @brief Shared authority state cannot duplicate descriptor ownership. */
+  State(const State&) = delete;
+
+  /** @brief Shared authority state cannot be reassigned. */
+  State& operator=(const State&) = delete;
+
+  /** @brief Canonical selected pathname used for live binding checks. */
+  std::filesystem::path root;
+  /** @brief Frozen descriptor device identity. */
+  std::uint64_t device = 0U;
+  /** @brief Frozen descriptor inode identity. */
+  std::uint64_t inode = 0U;
+  /** @brief Owned duplicated descriptor, negative only on unsupported hosts. */
+  int descriptor = -1;
+};
+
+B1OutputStoreRootAuthority::B1OutputStoreRootAuthority(
+    const B1OutputStoreRootAuthority&) noexcept =
+    default;  // NOLINT(whitespace/indent_namespace)
+
+B1OutputStoreRootAuthority::B1OutputStoreRootAuthority(
+    B1OutputStoreRootAuthority&&) noexcept =
+    default;  // NOLINT(whitespace/indent_namespace)
+
+B1OutputStoreRootAuthority& B1OutputStoreRootAuthority::operator=(
+    const B1OutputStoreRootAuthority&) noexcept = default;
+
+B1OutputStoreRootAuthority& B1OutputStoreRootAuthority::operator=(
+    B1OutputStoreRootAuthority&&) noexcept = default;
+
+B1OutputStoreRootAuthority::~B1OutputStoreRootAuthority() noexcept = default;
+
+B1OutputStoreRootAuthority::B1OutputStoreRootAuthority(
+    std::shared_ptr<const State> state)
+    : state_(std::move(state)) {
+  if (!state_) {
+    throw std::invalid_argument("B1 root authority state is missing.");
+  }
+}
+
+B1OutputStoreRootObservation B1OutputStoreRootAuthority::observe() const {
+#if defined(_WIN32)
+  throw std::runtime_error(
+      "B1 retained root authority is unsupported on Windows.");
+#else
+  if (!state_) {
+    throw std::runtime_error("B1 retained root authority was moved from.");
+  }
+  verify_root_binding(state_->root, state_->descriptor, state_->device,
+                      state_->inode);
+  const struct stat root_stat =
+      directory_stat(state_->descriptor, "fstat retained B1 output root");
+  std::ostringstream identity;
+  identity << "dev=" << static_cast<std::uint64_t>(root_stat.st_dev)
+           << ";ino=" << static_cast<std::uint64_t>(root_stat.st_ino);
+  return B1OutputStoreRootObservation{
+      state_->root, identity.str(),
+      filesystem_type_from_descriptor(state_->descriptor)};
+#endif
+}
+
 B1OutputStore::B1OutputStore(std::filesystem::path root,
                              execution::ComputeIoExecutor& executor,
                              B1OutputStoreOptions options)
@@ -1242,6 +1338,24 @@ B1OutputStoreRootObservation B1OutputStore::observe_root_authority() const {
            << ";ino=" << static_cast<std::uint64_t>(root_stat.st_ino);
   return B1OutputStoreRootObservation{
       root_, identity.str(), filesystem_type_from_descriptor(root_descriptor_)};
+#endif
+}
+
+B1OutputStoreRootAuthority B1OutputStore::retain_root_authority() const {
+#if defined(_WIN32)
+  throw std::runtime_error(
+      "B1 retained root authority is unsupported on Windows.");
+#else
+  verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
+  const int duplicated = ::fcntl(root_descriptor_, F_DUPFD_CLOEXEC, 0);
+  if (duplicated < 0) {
+    throw_errno("duplicate retained B1 output root descriptor");
+  }
+  ScopedFileDescriptor owner(duplicated);
+  auto state = std::make_shared<B1OutputStoreRootAuthority::State>(
+      root_, root_device_, root_inode_, owner.get());
+  static_cast<void>(owner.release());
+  return B1OutputStoreRootAuthority(std::move(state));
 #endif
 }
 
@@ -1525,23 +1639,13 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
       throw B1RevalidationError(
           "B1 manifest digest changed after directory publication.");
     }
-    result.receipt =
-        B1OutputCommitReceipt{commit_id,
-                              root_,
-                              rooted_slot,
-                              job,
-                              "dense-tensor-hwc-fp32-rgba-2048x2048",
-                              *logical.digest,
-                              1U,
-                              kPayloadName,
-                              kManifestName,
-                              kB1PayloadBytes,
-                              b1_manifest_length(job.job_index),
-                              state->payload_digest,
-                              state->manifest_digest,
-                              B1OutputDurability::CrashDurable,
-                              B1OutputDurability::CrashDurable,
-                              state->published_identity};
+    result.receipt = B1OutputCommitReceipt(B1OutputCommitReceipt::Fields{
+        commit_id, root_, rooted_slot, job,
+        "dense-tensor-hwc-fp32-rgba-2048x2048", *logical.digest, 1U,
+        kPayloadName, kManifestName, kB1PayloadBytes,
+        b1_manifest_length(job.job_index), state->payload_digest,
+        state->manifest_digest, B1OutputDurability::CrashDurable,
+        B1OutputDurability::CrashDurable, state->published_identity});
     result.status = B1OutputCommitStatus::Succeeded;
     transaction.preserve_slot();
     return result;

@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -20,6 +21,21 @@
 
 namespace ps::benchmark {
 namespace {
+
+/** @brief Actual authority cannot be rebuilt as a public aggregate. */
+static_assert(!std::is_aggregate_v<B1StorageActualObservation>);
+
+/** @brief Actual authority has no public empty minting path. */
+static_assert(!std::is_default_constructible_v<B1StorageActualObservation>);
+
+/** @brief Typed output receipts cannot be rebuilt as public aggregates. */
+static_assert(!std::is_aggregate_v<B1OutputCommitReceipt>);
+
+/** @brief Typed output receipts have no public empty minting path. */
+static_assert(!std::is_default_constructible_v<B1OutputCommitReceipt>);
+
+/** @brief Root authority has no public empty minting path. */
+static_assert(!std::is_default_constructible_v<B1OutputStoreRootAuthority>);
 
 /**
  * @brief Owns one unique test-only filesystem root.
@@ -863,6 +879,49 @@ TEST(B1Environment, CanonicalRawProofReplayRejectsEveryEvidenceBoundaryDrift) {
                                             B1StorageRawProof{proof_bytes})
                 .reasons,
             std::vector<std::string>{"raw-observation-proof-incomplete"});
+}
+
+/**
+ * @brief Proves parsed retained bytes cannot mint opaque actual authority.
+ * @throws Test fixture, parsing, encoding, and framework failures unchanged.
+ */
+TEST(B1Environment, ParsedRetainedProofCannotMintActualAuthority) {
+  B1EnvironmentEvidence retained_only =
+      testing::make_b1_test_environment(8U, 1U);
+  ASSERT_TRUE(retained_only.storage_raw_proof.has_value());
+  ASSERT_TRUE(retained_only.storage_manifest.has_value());
+  const B1StorageRawEvidence parsed = parse_b1_storage_raw_proof(
+      retained_only.storage_raw_proof->canonical_bytes);
+  retained_only.storage_raw_proof =
+      B1StorageRawProof{encode_b1_storage_raw_proof(parsed)};
+  retained_only.storage_eligibility = evaluate_b1_storage_eligibility(
+      *retained_only.storage_manifest, *retained_only.storage_raw_proof);
+  retained_only.storage_actual_observation.reset();
+
+  ASSERT_TRUE(retained_only.storage_eligibility->eligible);
+  ASSERT_TRUE(retained_only.storage_eligibility->reasons.empty());
+  EXPECT_FALSE(b1_storage_actual_observation_matches(retained_only));
+  EXPECT_FALSE(compatible_b1_environments(
+      retained_only, retained_only, B1EnvironmentRelation::CandidateReference));
+}
+
+/**
+ * @brief Proves validation re-observes the live source after minting.
+ * @throws Test fixture, validation, and framework failures unchanged.
+ */
+TEST(B1Environment, ActualAuthorityReobservesLiveSourceOnEveryValidation) {
+  testing::B1TestStorageAuthorityFixture authority =
+      testing::b1_test_storage_authority_fixture();
+  B1EnvironmentEvidence evidence = testing::make_b1_test_environment(8U, 1U);
+  evidence.storage_actual_observation = authority.observation;
+  ASSERT_TRUE(b1_storage_actual_observation_matches(evidence));
+  ASSERT_EQ(evidence.storage_actual_observation->root_authority_identity(),
+            "root-authority-1");
+
+  authority.source->root.root_authority_identity = "root-authority-drift";
+  EXPECT_FALSE(b1_storage_actual_observation_matches(evidence));
+  EXPECT_EQ(evidence.storage_actual_observation->root_authority_identity(),
+            "root-authority-1");
 }
 
 /**

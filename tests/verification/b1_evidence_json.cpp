@@ -508,25 +508,25 @@ Json optional_receipt_json(const std::optional<B1OutputCommitReceipt>& value) {
     return nullptr;
   }
   return Json{
-      {"commit_id", value->commit_id},
-      {"resolved_root", value->resolved_root.string()},
-      {"rooted_slot", value->rooted_slot.generic_string()},
-      {"job", job_json(value->job)},
-      {"logical_descriptor", value->logical_descriptor},
+      {"commit_id", value->commit_id()},
+      {"resolved_root", value->resolved_root().string()},
+      {"rooted_slot", value->rooted_slot().generic_string()},
+      {"job", job_json(value->job())},
+      {"logical_descriptor", value->logical_descriptor()},
       {"logical_content_digest",
-       content_digest_json(value->logical_content_digest)},
-      {"committed_generation", value->committed_generation},
-      {"payload_name", value->payload_name},
-      {"manifest_name", value->manifest_name},
-      {"payload_length", value->payload_length},
-      {"manifest_length", value->manifest_length},
-      {"payload_digest", sha256_json(value->payload_digest)},
-      {"manifest_digest", sha256_json(value->manifest_digest)},
+       content_digest_json(value->logical_content_digest())},
+      {"committed_generation", value->committed_generation()},
+      {"payload_name", value->payload_name()},
+      {"manifest_name", value->manifest_name()},
+      {"payload_length", value->payload_length()},
+      {"manifest_length", value->manifest_length()},
+      {"payload_digest", sha256_json(value->payload_digest())},
+      {"manifest_digest", sha256_json(value->manifest_digest())},
       {"requested_durability",
-       static_cast<std::uint32_t>(value->requested_durability)},
+       static_cast<std::uint32_t>(value->requested_durability())},
       {"achieved_durability",
-       static_cast<std::uint32_t>(value->achieved_durability)},
-      {"published_manifest_identity", value->published_manifest_identity}};
+       static_cast<std::uint32_t>(value->achieved_durability())},
+      {"published_manifest_identity", value->published_manifest_identity()}};
 }
 
 /**
@@ -782,8 +782,9 @@ Json optional_storage_raw_proof_json(
  * @return Readable live facts, probe digest, and re-observation policy or null.
  * @throws Canonical encoding, nlohmann, or allocation failures unchanged.
  * @note The complete probe bytes are deliberately not serialized a second
- * time. A later validator must reopen the root and re-observe receipts; editing
- * this JSON can never recreate the in-process authority object.
+ * time. Validation of the same capability re-observes its held descriptor,
+ * typed receipts, and trusted adapter; a new process must mint new authority
+ * from equivalent live sources. Editing this JSON can never do so.
  */
 Json optional_storage_actual_observation_json(
     const std::optional<B1StorageActualObservation>& value) {
@@ -791,7 +792,8 @@ Json optional_storage_actual_observation_json(
     return nullptr;
   }
   Json receipts = Json::array();
-  for (const B1StorageReceiptAuthorityObservation& receipt : value->receipts) {
+  for (const B1StorageReceiptDiagnostic& receipt :
+       value->receipt_diagnostics()) {
     receipts.push_back(Json{
         {"commit_id", receipt.commit_id},
         {"resolved_root", receipt.resolved_root.generic_string()},
@@ -801,20 +803,18 @@ Json optional_storage_actual_observation_json(
         {"achieved_durability", receipt.achieved_durability}});
   }
   Json complete_probe_digest = nullptr;
-  if (value->complete_probe.has_value()) {
-    const std::string canonical =
-        encode_b1_storage_raw_proof(*value->complete_probe);
-    complete_probe_digest = sha256_json(b1_sha256(canonical));
+  if (value->complete_probe_digest().has_value()) {
+    complete_probe_digest = sha256_json(*value->complete_probe_digest());
   }
   return Json{
       {"authority_rehydration", "live-process-required"},
-      {"selected_root", value->selected_root.generic_string()},
-      {"resolved_root", value->resolved_root.generic_string()},
-      {"root_authority_identity", value->root_authority_identity},
-      {"filesystem_type", value->filesystem_type},
+      {"selected_root", value->selected_root().generic_string()},
+      {"resolved_root", value->resolved_root().generic_string()},
+      {"root_authority_identity", value->root_authority_identity()},
+      {"filesystem_type", value->filesystem_type()},
       {"receipts", std::move(receipts)},
       {"complete_probe_digest", std::move(complete_probe_digest)},
-      {"unverified_external_fields", value->unverified_external_fields}};
+      {"unverified_external_fields", value->unverified_external_fields()}};
 }
 
 /**

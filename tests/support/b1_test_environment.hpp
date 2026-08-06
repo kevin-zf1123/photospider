@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -309,6 +310,160 @@ inline B1StorageRawProof b1_test_storage_raw_proof() {
 }
 
 /**
+ * @brief Isolated test-only access to mint and mutate opaque output receipts.
+ * @note This friend is defined only in test support. Product code has no
+ * callable factory that accepts serialized receipt fields.
+ */
+struct B1OutputCommitReceiptTestAccess final {
+  /**
+   * @brief Mints one typed receipt for deterministic evaluator fixtures.
+   * @param commit_id Stable lowercase commit identity.
+   * @param resolved_root Canonical output root.
+   * @param rooted_slot Root-relative occurrence slot.
+   * @param job Complete occurrence identity.
+   * @param logical_descriptor Fixed logical descriptor.
+   * @param logical_content_digest Typed logical digest.
+   * @param committed_generation Committed immutable generation.
+   * @param payload_name Exact payload leaf.
+   * @param manifest_name Exact manifest leaf.
+   * @param payload_length Exact payload length.
+   * @param manifest_length Exact manifest length.
+   * @param payload_digest Exact raw payload digest.
+   * @param manifest_digest Exact canonical manifest digest.
+   * @param requested_durability Typed requested durability.
+   * @param achieved_durability Typed achieved durability.
+   * @param published_manifest_identity Published manifest identity.
+   * @return Opaque typed receipt accepted by test-only live authority.
+   * @throws Allocation failures from owned fixture fields unchanged.
+   */
+  static B1OutputCommitReceipt mint(
+      std::string commit_id, std::filesystem::path resolved_root,
+      std::filesystem::path rooted_slot, B1JobInstance job,
+      std::string logical_descriptor, ContentDigest logical_content_digest,
+      std::uint64_t committed_generation, std::string payload_name,
+      std::string manifest_name, std::uint64_t payload_length,
+      std::uint64_t manifest_length, B1Sha256Digest payload_digest,
+      B1Sha256Digest manifest_digest, B1OutputDurability requested_durability,
+      B1OutputDurability achieved_durability,
+      std::string published_manifest_identity) {
+    return B1OutputCommitReceipt(B1OutputCommitReceipt::Fields{
+        std::move(commit_id), std::move(resolved_root), std::move(rooted_slot),
+        std::move(job), std::move(logical_descriptor),
+        std::move(logical_content_digest), committed_generation,
+        std::move(payload_name), std::move(manifest_name), payload_length,
+        manifest_length, std::move(payload_digest), std::move(manifest_digest),
+        requested_durability, achieved_durability,
+        std::move(published_manifest_identity)});
+  }
+
+  /**
+   * @brief Mutates one receipt digest for a negative evaluator test.
+   * @param receipt Existing test-minted receipt.
+   * @param digest Replacement manifest digest.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Product callers cannot mutate immutable receipt fields.
+   */
+  static void set_manifest_digest(B1OutputCommitReceipt* receipt,
+                                  B1Sha256Digest digest) noexcept {
+    receipt->fields_.manifest_digest = std::move(digest);
+  }
+};
+
+/**
+ * @brief Isolated mutable live source behind one test authority capability.
+ * @throws Allocation failures from copied fixture storage unchanged.
+ * @note Tests may mutate this source after minting to prove validation performs
+ * a new observation rather than trusting construction-time diagnostics.
+ * Mutations are serialized between matcher calls and are never concurrent.
+ */
+struct B1TestStorageAuthoritySource final {
+  /** @brief Selected root returned by the trusted test adapter. */
+  std::filesystem::path selected_root;
+  /** @brief Fresh root facts returned by each test observation. */
+  B1OutputStoreRootObservation root;
+  /** @brief Opaque typed receipts returned by each test observation. */
+  std::vector<B1OutputCommitReceipt> receipts;
+  /** @brief Fresh complete probe result returned by each observation. */
+  std::optional<B1StorageRawEvidence> complete_probe;
+  /** @brief Fresh external fields lacking authority. */
+  std::vector<std::string> unverified_external_fields;
+};
+
+/**
+ * @brief Isolated test-only mint seam for actual storage authority.
+ * @note The product header only grants friendship to this support type; no
+ * production function accepts raw evidence as an authority source.
+ */
+struct B1StorageActualObservationTestAccess final {
+  /**
+   * @brief Mints a capability over one mutable test-owned live source.
+   * @param source Non-null source re-read on every validation call.
+   * @return Opaque actual storage observation.
+   * @throws std::invalid_argument when `source` is null.
+   * @throws Initial observation, canonical encoding, or allocation failures
+   * unchanged.
+   */
+  static B1StorageActualObservation mint(
+      std::shared_ptr<B1TestStorageAuthoritySource> source) {
+    if (!source) {
+      throw std::invalid_argument("B1 test authority source is missing");
+    }
+    return B1StorageActualObservation(
+        [source]() -> B1StorageActualObservation::AuthoritySnapshot {
+          return B1StorageActualObservation::AuthoritySnapshot{
+              source->selected_root, source->root, source->receipts,
+              source->complete_probe, source->unverified_external_fields};
+        });
+  }
+};
+
+/**
+ * @brief Test capability plus its independently mutable live source.
+ * @throws Allocation failures from capability/source movement unchanged.
+ */
+struct B1TestStorageAuthorityFixture final {
+  /** @brief Opaque capability copied into environment evidence. */
+  B1StorageActualObservation observation;
+  /** @brief Test-only source retained for live-drift injection. */
+  std::shared_ptr<B1TestStorageAuthoritySource> source;
+};
+
+/**
+ * @brief Builds a complete independently mutable test authority fixture.
+ * @return Opaque observation plus the source it re-observes.
+ * @throws Validation or allocation failures unchanged.
+ * @note Raw evidence initializes only the isolated test source, never a
+ * production authority factory.
+ */
+inline B1TestStorageAuthorityFixture b1_test_storage_authority_fixture() {
+  auto source = std::make_shared<B1TestStorageAuthoritySource>();
+  source->complete_probe = b1_test_storage_raw_evidence();
+  const B1StorageRawEvidence& probe = *source->complete_probe;
+  const B1StorageTransactionRawObservation& transaction = probe.transaction;
+  const B1JobInstance job{kB1WorkloadId, 1U, B1JobPhase::Measured, 0U, 0U, 1U};
+  const B1JobGolden golden = b1_frozen_job_golden(job.job_index);
+  const std::string manifest =
+      b1_artifact_manifest(job.job_index, golden.raw_payload_digest);
+  source->selected_root = probe.backend.selected_root;
+  source->root = B1OutputStoreRootObservation{
+      probe.backend.resolved_root, probe.containment.root_authority_identity,
+      probe.backend.fields.at("filesystem_type").payload};
+  source->receipts.push_back(B1OutputCommitReceiptTestAccess::mint(
+      transaction.receipt_commit_id, transaction.receipt_root,
+      transaction.receipt_slot, job, "dense-tensor-hwc-fp32-rgba-2048x2048",
+      golden.logical_digest, 1U, "output.rgba32le", "manifest.txt",
+      kB1PayloadBytes, b1_manifest_length(job.job_index),
+      golden.raw_payload_digest, b1_sha256(manifest),
+      B1OutputDurability::CrashDurable, B1OutputDurability::CrashDurable,
+      transaction.published_manifest_identity));
+  B1StorageActualObservation observation =
+      B1StorageActualObservationTestAccess::mint(source);
+  return B1TestStorageAuthorityFixture{std::move(observation),
+                                       std::move(source)};
+}
+
+/**
  * @brief Builds independent process-private authority for the test probe.
  * @return Complete live-root/receipt facts plus the separately initialized raw
  * observation.
@@ -317,19 +472,7 @@ inline B1StorageRawProof b1_test_storage_raw_proof() {
  * environment evidence so synchronized evidence recasting cannot change it.
  */
 inline B1StorageActualObservation b1_test_storage_actual_observation() {
-  B1StorageRawEvidence probe = b1_test_storage_raw_evidence();
-  const B1StorageTransactionRawObservation& transaction = probe.transaction;
-  B1StorageActualObservation actual;
-  actual.selected_root = probe.backend.selected_root;
-  actual.resolved_root = probe.backend.resolved_root;
-  actual.root_authority_identity = probe.containment.root_authority_identity;
-  actual.filesystem_type = probe.backend.fields.at("filesystem_type").payload;
-  actual.receipts.push_back(B1StorageReceiptAuthorityObservation{
-      transaction.receipt_commit_id, transaction.receipt_root,
-      transaction.receipt_slot, transaction.published_manifest_identity,
-      transaction.requested_durability, transaction.achieved_durability});
-  actual.complete_probe = std::move(probe);
-  return actual;
+  return b1_test_storage_authority_fixture().observation;
 }
 
 /**

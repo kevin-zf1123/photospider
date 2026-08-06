@@ -239,23 +239,14 @@ B1JobEvidence make_valid_job(const B1JobInstance& job,
   const std::string manifest =
       b1_artifact_manifest(job.job_index, evidence.golden.raw_payload_digest);
   evidence.output.status = B1OutputCommitStatus::Succeeded;
-  evidence.output.receipt = B1OutputCommitReceipt{
-      commit_id,
-      std::filesystem::path("/tmp/photospider-b1-test-output"),
-      std::filesystem::path("occurrence-" + commit_id),
-      job,
-      "dense-tensor-hwc-fp32-rgba-2048x2048",
-      evidence.golden.logical_digest,
-      1U,
-      "output.rgba32le",
-      "manifest.txt",
-      kB1PayloadBytes,
-      b1_manifest_length(job.job_index),
-      evidence.golden.raw_payload_digest,
-      b1_sha256(manifest),
-      B1OutputDurability::CrashDurable,
-      B1OutputDurability::CrashDurable,
-      "dev=1;ino=1"};
+  evidence.output.receipt = testing::B1OutputCommitReceiptTestAccess::mint(
+      commit_id, std::filesystem::path("/tmp/photospider-b1-test-output"),
+      std::filesystem::path("occurrence-" + commit_id), job,
+      "dense-tensor-hwc-fp32-rgba-2048x2048", evidence.golden.logical_digest,
+      1U, "output.rgba32le", "manifest.txt", kB1PayloadBytes,
+      b1_manifest_length(job.job_index), evidence.golden.raw_payload_digest,
+      b1_sha256(manifest), B1OutputDurability::CrashDurable,
+      B1OutputDurability::CrashDurable, "dev=1;ino=1");
   evidence.output.io_observations = make_io_observations(job);
   return evidence;
 }
@@ -392,14 +383,16 @@ TEST(B1Evidence, VerificationJsonRetainsAllOccurrencesAndClosedIdentity) {
  */
 TEST(B1Evidence, PortableRunnerAuthorityFailsClosedAndJsonIsDiagnostic) {
   B1InnerRowInput input = make_valid_row_input(8U, 1U);
-  ASSERT_TRUE(input.environment.storage_actual_observation.has_value());
-  B1StorageActualObservation& complete =
-      *input.environment.storage_actual_observation;
+  testing::B1TestStorageAuthorityFixture authority =
+      testing::b1_test_storage_authority_fixture();
+  authority.source->complete_probe.reset();
+  authority.source->unverified_external_fields = {
+      "b1_performance_configuration", "hardware_write_cache_policy",
+      "mount_effective_options",      "mount_identity",
+      "power_loss_protection_policy", "transaction_observation.events",
+  };
   input.environment.storage_actual_observation =
-      make_b1_portable_runner_storage_observation(
-          complete.selected_root, complete.resolved_root,
-          complete.root_authority_identity, complete.filesystem_type,
-          complete.receipts);
+      testing::B1StorageActualObservationTestAccess::mint(authority.source);
 
   const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
   EXPECT_EQ(row.throughput_verdict, I1Verdict::Invalid);
@@ -652,8 +645,8 @@ TEST(B1Evidence, CrossRowDeterminismRequiresAllCapsAndReplicates) {
   EXPECT_EQ(summary.mismatch_count, 0U);
   EXPECT_EQ(summary.verdict, I1Verdict::Pass);
 
-  rows.back().evidence.jobs.back().output.receipt->manifest_digest =
-      b1_sha256("mismatch");
+  testing::B1OutputCommitReceiptTestAccess::set_manifest_digest(
+      &*rows.back().evidence.jobs.back().output.receipt, b1_sha256("mismatch"));
   summary = evaluate_b1_cross_row_determinism(rows);
   EXPECT_EQ(summary.verdict, I1Verdict::Fail);
   EXPECT_EQ(summary.mismatch_count, 1U);

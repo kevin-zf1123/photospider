@@ -602,32 +602,34 @@ B1DeterministicEvaluation evaluate_b1_deterministic_evidence(
     const B1JobGolden frozen = b1_frozen_job_golden(evidence.job.job_index);
     const std::string commit_id = expected_b1_commit_id(evidence.job);
     const std::string manifest =
-        b1_artifact_manifest(evidence.job.job_index, receipt.payload_digest);
+        b1_artifact_manifest(evidence.job.job_index, receipt.payload_digest());
     result.artifact_valid =
-        receipt.commit_id == commit_id && receipt.job == evidence.job &&
-        receipt.logical_descriptor == "dense-tensor-hwc-fp32-rgba-2048x2048" &&
-        receipt.committed_generation == 1U &&
-        receipt.payload_name == "output.rgba32le" &&
-        receipt.manifest_name == "manifest.txt" &&
-        receipt.payload_length == kB1PayloadBytes &&
-        receipt.manifest_length == b1_manifest_length(evidence.job.job_index) &&
-        receipt.requested_durability == B1OutputDurability::CrashDurable &&
-        receipt.achieved_durability == B1OutputDurability::CrashDurable &&
-        !receipt.published_manifest_identity.empty() &&
-        valid_b1_rooted_slot(receipt.rooted_slot) &&
-        receipt.rooted_slot ==
+        receipt.commit_id() == commit_id && receipt.job() == evidence.job &&
+        receipt.logical_descriptor() ==
+            "dense-tensor-hwc-fp32-rgba-2048x2048" &&
+        receipt.committed_generation() == 1U &&
+        receipt.payload_name() == "output.rgba32le" &&
+        receipt.manifest_name() == "manifest.txt" &&
+        receipt.payload_length() == kB1PayloadBytes &&
+        receipt.manifest_length() ==
+            b1_manifest_length(evidence.job.job_index) &&
+        receipt.requested_durability() == B1OutputDurability::CrashDurable &&
+        receipt.achieved_durability() == B1OutputDurability::CrashDurable &&
+        !receipt.published_manifest_identity().empty() &&
+        valid_b1_rooted_slot(receipt.rooted_slot()) &&
+        receipt.rooted_slot() ==
             std::filesystem::path("occurrence-" + commit_id) &&
-        receipt.resolved_root.is_absolute();
-    result.manifest_match = receipt.manifest_length == manifest.size() &&
-                            receipt.manifest_digest == b1_sha256(manifest);
+        receipt.resolved_root().is_absolute();
+    result.manifest_match = receipt.manifest_length() == manifest.size() &&
+                            receipt.manifest_digest() == b1_sha256(manifest);
     result.logical_match =
         evidence.golden.job_index == evidence.job.job_index &&
         evidence.golden.logical_digest == frozen.logical_digest &&
-        receipt.logical_content_digest == frozen.logical_digest;
+        receipt.logical_content_digest() == frozen.logical_digest;
     result.raw_match =
         evidence.golden.job_index == evidence.job.job_index &&
         evidence.golden.raw_payload_digest == frozen.raw_payload_digest &&
-        receipt.payload_digest == frozen.raw_payload_digest;
+        receipt.payload_digest() == frozen.raw_payload_digest;
   } catch (const std::exception&) {
     result.artifact_valid = false;
   }
@@ -1169,8 +1171,8 @@ auto b1_comparison_identity(const B1JobEvidence& job) {
     throw std::invalid_argument("B1 comparison job lacks an output receipt.");
   }
   const B1OutputCommitReceipt& receipt = *job.output.receipt;
-  return std::tuple(receipt.logical_content_digest, receipt.payload_digest,
-                    receipt.manifest_digest, job.semantic_trace_digest,
+  return std::tuple(receipt.logical_content_digest(), receipt.payload_digest(),
+                    receipt.manifest_digest(), job.semantic_trace_digest,
                     job.golden.logical_digest, job.golden.raw_payload_digest);
 }
 
@@ -1744,7 +1746,7 @@ B1InnerRow evaluate_b1_inner_row(B1InnerRowInput input) {
             ContentDigestState::Available &&
         evidence.physical_trace.visible_content_digest.digest.has_value() &&
         *evidence.physical_trace.visible_content_digest.digest ==
-            evidence.output.receipt->logical_content_digest;
+            evidence.output.receipt->logical_content_digest();
     const bool verified =
         physical.structurally_valid && physical.complete_plan &&
         physical.successful_visible_run && deterministic.trace_valid &&

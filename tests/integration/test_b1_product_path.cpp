@@ -265,8 +265,8 @@ TEST(B1ProductPath, ExactJobClosesLifecycleResourcesGoldenAndDurableOutput) {
   EXPECT_EQ(*local_task_ids.rbegin(), kB1TasksPerJob - 1U);
 
   ASSERT_TRUE(output.receipt.has_value());
-  EXPECT_EQ(output.receipt->logical_content_digest, golden.logical_digest);
-  EXPECT_EQ(output.receipt->payload_digest, golden.raw_payload_digest);
+  EXPECT_EQ(output.receipt->logical_content_digest(), golden.logical_digest);
+  EXPECT_EQ(output.receipt->payload_digest(), golden.raw_payload_digest);
   ASSERT_FALSE(output.io_observations.empty());
   EXPECT_EQ(output.io_observations.front().point,
             B1IoObservationPoint::Initial);

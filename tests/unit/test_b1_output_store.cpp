@@ -232,33 +232,40 @@ void replace_root_after_verification(void* opaque,
 }
 
 /**
- * @brief Finds the one test-owned private staging anchor below an output root.
- * @param root Existing test output root.
- * @return Private anchor path, or empty when no staging anchor is visible.
- * @throws Filesystem iteration failures unchanged.
+ * @brief Computes the exact deterministic commit id for one test occurrence.
+ * @param job Complete immutable occurrence identity.
+ * @return Lowercase SHA-256 commit id used by all private/public names.
+ * @throws Digest, validation, or allocation failures unchanged.
  */
-std::filesystem::path find_private_staging_anchor(
-    const std::filesystem::path& root) {
-  for (const std::filesystem::directory_entry& entry :
-       std::filesystem::directory_iterator(root)) {
-    const std::string name = entry.path().filename().string();
-    if (name.rfind(".b1-staging-", 0U) == 0U) {
-      return entry.path();
-    }
-  }
-  return {};
+std::string commit_id_for_job(const B1JobInstance& job) {
+  B1Sha256 hash;
+  hash.update("execution-profile-output-commit-id-v1\n");
+  hash.update(encode_b1_job_instance(job));
+  return b1_digest_hex(hash.finish());
 }
 
 /**
- * @brief Finds the reserved private slot below the one visible staging anchor.
- * @param root Existing test output root.
- * @return Anchor plus `slot`, or empty when no anchor is visible.
- * @throws Filesystem iteration failures unchanged.
+ * @brief Computes the exact private staging anchor for one test occurrence.
+ * @param root Existing selected output root.
+ * @param job Complete immutable occurrence identity.
+ * @return Root plus the exact `.b1-staging-<commit-id>` leaf.
+ * @throws Digest, validation, or allocation failures unchanged.
  */
-std::filesystem::path find_private_staging_slot(
-    const std::filesystem::path& root) {
-  const std::filesystem::path anchor = find_private_staging_anchor(root);
-  return anchor.empty() ? std::filesystem::path{} : anchor / "slot";
+std::filesystem::path private_anchor_for_job(const std::filesystem::path& root,
+                                             const B1JobInstance& job) {
+  return root / (".b1-staging-" + commit_id_for_job(job));
+}
+
+/**
+ * @brief Computes the exact private slot for one test occurrence.
+ * @param root Existing selected output root.
+ * @param job Complete immutable occurrence identity.
+ * @return Exact private anchor plus `slot`.
+ * @throws Digest, validation, or allocation failures unchanged.
+ */
+std::filesystem::path private_slot_for_job(const std::filesystem::path& root,
+                                           const B1JobInstance& job) {
+  return private_anchor_for_job(root, job) / "slot";
 }
 
 /**
@@ -286,9 +293,15 @@ enum class OutputNamespaceMutation : std::uint8_t {
 struct OutputNamespaceMutationContext final {
   /** @brief Existing test output root. */
   std::filesystem::path root;
+  /** @brief Exact deterministic private staging anchor. */
+  std::filesystem::path private_anchor;
+  /** @brief Exact deterministic private slot. */
+  std::filesystem::path private_slot;
   /** @brief Exact public occurrence path for publication collision tests. */
   std::filesystem::path public_slot;
-  /** @brief Test-owned path retaining a displaced pre-guard anchor. */
+  /** @brief Exact path receiving the fresh replacement object. */
+  std::filesystem::path replacement_namespace;
+  /** @brief Exact path retaining the displaced original inode. */
   std::filesystem::path displaced_namespace;
   /** @brief Selected deterministic mutation. */
   OutputNamespaceMutation mutation =
@@ -315,28 +328,32 @@ void mutate_output_namespace(void* opaque, B1OutputStoreFaultPoint point) {
     return;
   }
   context->mutated = true;
-  const std::filesystem::path private_anchor =
-      find_private_staging_anchor(context->root);
-  const std::filesystem::path private_slot =
-      find_private_staging_slot(context->root);
   switch (context->mutation) {
     case OutputNamespaceMutation::ReplacePrivateAnchor:
-      if (private_anchor.empty()) {
-        throw std::runtime_error("failed to find private B1 anchor");
+      if (context->replacement_namespace != context->private_anchor ||
+          context->displaced_namespace.empty()) {
+        throw std::runtime_error("B1 anchor replacement paths are incomplete");
       }
-      context->displaced_namespace = private_anchor.string() + "-displaced";
-      std::filesystem::rename(private_anchor, context->displaced_namespace);
-      if (!std::filesystem::create_directory(private_anchor)) {
+      std::filesystem::rename(context->replacement_namespace,
+                              context->displaced_namespace);
+      if (!std::filesystem::create_directory(context->replacement_namespace)) {
         throw std::runtime_error("failed to replace private B1 anchor");
       }
-      std::ofstream(private_anchor / "replacement-marker") << "replacement";
+      std::ofstream(context->replacement_namespace / "replacement-marker")
+          << "replacement";
       break;
     case OutputNamespaceMutation::ReplacePrivateSlot:
-      if (private_slot.empty() || !std::filesystem::remove(private_slot) ||
-          !std::filesystem::create_directory(private_slot)) {
+      if (context->replacement_namespace != context->private_slot ||
+          context->displaced_namespace.empty()) {
+        throw std::runtime_error("B1 slot replacement paths are incomplete");
+      }
+      std::filesystem::rename(context->replacement_namespace,
+                              context->displaced_namespace);
+      if (!std::filesystem::create_directory(context->replacement_namespace)) {
         throw std::runtime_error("failed to replace private B1 slot");
       }
-      std::ofstream(private_slot / "replacement-marker") << "replacement";
+      std::ofstream(context->replacement_namespace / "replacement-marker")
+          << "replacement";
       break;
     case OutputNamespaceMutation::InstallPublicSlot:
       if (!std::filesystem::create_directory(context->public_slot)) {
@@ -346,12 +363,12 @@ void mutate_output_namespace(void* opaque, B1OutputStoreFaultPoint point) {
           << "replacement";
       break;
     case OutputNamespaceMutation::AddExtraLeaf:
-      std::ofstream(private_slot / "unowned-extra") << "extra";
+      std::ofstream(context->private_slot / "unowned-extra") << "extra";
       break;
     case OutputNamespaceMutation::ReplacePayloadType:
-      std::filesystem::rename(private_slot / "output.rgba32le",
-                              private_slot / "displaced-payload");
-      if (!std::filesystem::create_directory(private_slot /
+      std::filesystem::rename(context->private_slot / "output.rgba32le",
+                              context->private_slot / "displaced-payload");
+      if (!std::filesystem::create_directory(context->private_slot /
                                              "output.rgba32le")) {
         throw std::runtime_error("failed to replace B1 payload type");
       }
@@ -382,8 +399,10 @@ enum class CleanupMutation : std::uint8_t {
  * @throws Nothing for aggregate construction except path allocation.
  */
 struct CleanupMutationContext final {
-  /** @brief Existing test output root used to find the private slot. */
+  /** @brief Existing test output root used for settlement marker evidence. */
   std::filesystem::path root;
+  /** @brief Exact deterministic private slot targeted by cleanup mutation. */
+  std::filesystem::path private_slot;
   /** @brief Executor whose accepted charge must already be settled. */
   execution::ComputeIoExecutor* executor = nullptr;
   /** @brief Exact cleanup object at which to inject. */
@@ -430,9 +449,10 @@ int mutate_strict_cleanup(void* opaque,
     return context->injected_errno;
   }
   try {
-    const std::filesystem::path slot = find_private_staging_slot(context->root);
-    const std::filesystem::path payload = slot / "output.rgba32le";
-    const std::filesystem::path displaced = slot / "payload-displaced";
+    const std::filesystem::path payload =
+        context->private_slot / "output.rgba32le";
+    const std::filesystem::path displaced =
+        context->private_slot / "payload-displaced";
     std::filesystem::rename(payload, displaced);
     if (context->mutation == CleanupMutation::RestoreSameIdentity) {
       std::filesystem::rename(displaced, payload);
@@ -458,10 +478,7 @@ int mutate_strict_cleanup(void* opaque,
  */
 std::filesystem::path public_slot_for_job(const std::filesystem::path& root,
                                           const B1JobInstance& job) {
-  B1Sha256 hash;
-  hash.update("execution-profile-output-commit-id-v1\n");
-  hash.update(encode_b1_job_instance(job));
-  return root / ("occurrence-" + b1_digest_hex(hash.finish()));
+  return root / ("occurrence-" + commit_id_for_job(job));
 }
 
 /**
@@ -643,9 +660,15 @@ TEST(B1OutputStore, HoldsExclusiveRootOwnershipAndObservesLiveAuthority) {
       {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
   B1OutputStore store(output_root.root(), executor);
   const B1OutputStoreRootObservation observed = store.observe_root_authority();
+  const B1OutputStoreRootAuthority retained = store.retain_root_authority();
+  const B1OutputStoreRootObservation reobserved = retained.observe();
   EXPECT_EQ(observed.resolved_root,
             std::filesystem::canonical(output_root.root()));
   EXPECT_FALSE(observed.root_authority_identity.empty());
+  EXPECT_EQ(reobserved.resolved_root, observed.resolved_root);
+  EXPECT_EQ(reobserved.root_authority_identity,
+            observed.root_authority_identity);
+  EXPECT_EQ(reobserved.filesystem_type, observed.filesystem_type);
 #if defined(__APPLE__)
   EXPECT_EQ(observed.filesystem_type.rfind("darwin-", 0U), 0U);
 #elif defined(__linux__)
@@ -660,6 +683,35 @@ TEST(B1OutputStore, HoldsExclusiveRootOwnershipAndObservesLiveAuthority) {
         static_cast<void>(competing);
       },
       std::system_error);
+}
+
+/**
+ * @brief Proves retained root capability copies extend lock and fd lifetime.
+ * @throws Test framework, filesystem, descriptor, and executor failures.
+ */
+TEST(B1OutputStore, RetainedRootAuthorityOutlivesStoreAndKeepsOwnership) {
+  ScopedB1OutputRoot output_root;
+  execution::ComputeIoExecutor executor(
+      {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+  std::optional<B1OutputStoreRootAuthority> retained;
+  {
+    B1OutputStore store(output_root.root(), executor);
+    retained = store.retain_root_authority();
+  }
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_EQ(retained->observe().resolved_root,
+            std::filesystem::canonical(output_root.root()));
+  EXPECT_THROW(
+      {
+        B1OutputStore competing(output_root.root(), executor);
+        static_cast<void>(competing);
+      },
+      std::system_error);
+
+  retained.reset();
+  B1OutputStore reacquired(output_root.root(), executor);
+  EXPECT_EQ(reacquired.observe_root_authority().resolved_root,
+            std::filesystem::canonical(output_root.root()));
 }
 
 /**
@@ -678,28 +730,28 @@ TEST(B1OutputStore, CommitsExactPayloadAndPublishesManifestLastWithoutReplace) {
   ASSERT_TRUE(committed.receipt.has_value());
   const B1OutputCommitReceipt& receipt = *committed.receipt;
   const B1JobGolden golden = b1_frozen_job_golden(0U);
-  EXPECT_EQ(receipt.job, job);
-  EXPECT_EQ(receipt.resolved_root,
+  EXPECT_EQ(receipt.job(), job);
+  EXPECT_EQ(receipt.resolved_root(),
             std::filesystem::canonical(output_root.root()));
-  EXPECT_EQ(receipt.commit_id.size(), 64U);
-  EXPECT_EQ(receipt.logical_content_digest, golden.logical_digest);
-  EXPECT_EQ(receipt.payload_digest, golden.raw_payload_digest);
-  EXPECT_EQ(receipt.payload_length, kB1PayloadBytes);
-  EXPECT_EQ(receipt.manifest_length, b1_manifest_length(0U));
-  EXPECT_EQ(receipt.requested_durability, B1OutputDurability::CrashDurable);
-  EXPECT_EQ(receipt.achieved_durability, B1OutputDurability::CrashDurable);
-  EXPECT_FALSE(receipt.published_manifest_identity.empty());
+  EXPECT_EQ(receipt.commit_id().size(), 64U);
+  EXPECT_EQ(receipt.logical_content_digest(), golden.logical_digest);
+  EXPECT_EQ(receipt.payload_digest(), golden.raw_payload_digest);
+  EXPECT_EQ(receipt.payload_length(), kB1PayloadBytes);
+  EXPECT_EQ(receipt.manifest_length(), b1_manifest_length(0U));
+  EXPECT_EQ(receipt.requested_durability(), B1OutputDurability::CrashDurable);
+  EXPECT_EQ(receipt.achieved_durability(), B1OutputDurability::CrashDurable);
+  EXPECT_FALSE(receipt.published_manifest_identity().empty());
 
   const std::filesystem::path slot =
-      receipt.resolved_root / receipt.rooted_slot;
-  const std::filesystem::path payload = slot / receipt.payload_name;
-  const std::filesystem::path manifest = slot / receipt.manifest_name;
+      receipt.resolved_root() / receipt.rooted_slot();
+  const std::filesystem::path payload = slot / receipt.payload_name();
+  const std::filesystem::path manifest = slot / receipt.manifest_name();
   EXPECT_EQ(std::filesystem::file_size(payload), kB1PayloadBytes);
-  EXPECT_EQ(std::filesystem::file_size(manifest), receipt.manifest_length);
+  EXPECT_EQ(std::filesystem::file_size(manifest), receipt.manifest_length());
   const std::string expected_manifest =
       b1_artifact_manifest(0U, golden.raw_payload_digest);
   EXPECT_EQ(read_text_file(manifest), expected_manifest);
-  EXPECT_EQ(receipt.manifest_digest, b1_sha256(expected_manifest));
+  EXPECT_EQ(receipt.manifest_digest(), b1_sha256(expected_manifest));
   EXPECT_FALSE(std::filesystem::exists(slot / ".manifest.private"));
 
   ASSERT_EQ(committed.io_observations.size(), 6U);
@@ -888,6 +940,7 @@ TEST(B1OutputStore,
   options.fault_injector = &replace_root_after_verification;
   options.fault_injector_context = &context;
   B1OutputStore store(output_root.root(), executor, options);
+  const B1OutputStoreRootAuthority retained = store.retain_root_authority();
 
   const B1OutputCommitResult failed =
       store.commit(measured_job_zero(), seed_zero_image());
@@ -898,8 +951,10 @@ TEST(B1OutputStore,
   EXPECT_TRUE(std::filesystem::is_empty(context.displaced()));
   EXPECT_EQ(executor.snapshot().active_tasks, 0U);
   EXPECT_EQ(executor.snapshot().active_planned_bytes, 0U);
+  EXPECT_THROW(static_cast<void>(retained.observe()), std::runtime_error);
 
   context.restore();
+  EXPECT_NO_THROW(static_cast<void>(retained.observe()));
   const B1OutputCommitResult retried =
       store.commit(measured_job_zero(), seed_zero_image());
   EXPECT_TRUE(retried.succeeded()) << retried.diagnostic;
@@ -915,8 +970,14 @@ TEST(B1OutputStore,
   ScopedB1OutputRoot output_root;
   execution::ComputeIoExecutor executor(
       {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+  const B1JobInstance job = measured_job_zero();
   OutputNamespaceMutationContext context;
   context.root = output_root.root();
+  context.private_anchor = private_anchor_for_job(output_root.root(), job);
+  context.private_slot = private_slot_for_job(output_root.root(), job);
+  context.replacement_namespace = context.private_anchor;
+  context.displaced_namespace =
+      output_root.root() / (".b1-displaced-" + commit_id_for_job(job));
   context.mutation = OutputNamespaceMutation::ReplacePrivateAnchor;
   context.point = B1OutputStoreFaultPoint::AfterStagingAnchorMkdirBeforeOpen;
   B1OutputStoreOptions options;
@@ -924,15 +985,13 @@ TEST(B1OutputStore,
   options.fault_injector_context = &context;
   B1OutputStore store(output_root.root(), executor, options);
 
-  EXPECT_THROW(
-      static_cast<void>(store.commit(measured_job_zero(), seed_zero_image())),
-      std::runtime_error);
-  const std::filesystem::path replacement =
-      find_private_staging_anchor(output_root.root());
-  ASSERT_FALSE(replacement.empty());
-  EXPECT_TRUE(std::filesystem::exists(replacement / "replacement-marker"));
+  EXPECT_THROW(static_cast<void>(store.commit(job, seed_zero_image())),
+               std::runtime_error);
+  EXPECT_TRUE(std::filesystem::exists(context.replacement_namespace /
+                                      "replacement-marker"));
   EXPECT_TRUE(std::filesystem::is_directory(context.displaced_namespace));
-  EXPECT_FALSE(std::filesystem::exists(replacement / "output.rgba32le"));
+  EXPECT_FALSE(std::filesystem::exists(context.replacement_namespace /
+                                       "output.rgba32le"));
   EXPECT_EQ(executor.snapshot().active_tasks, 0U);
   EXPECT_EQ(executor.snapshot().active_planned_bytes, 0U);
 }
@@ -947,8 +1006,13 @@ TEST(B1OutputStore,
      PrivateSlotHandoffReplacementFailsStopAndPreservesReplacementDirectory) {
   ScopedB1OutputRoot output_root;
   static_cast<void>(seed_zero_image());
+  const B1JobInstance job = measured_job_zero();
   OutputNamespaceMutationContext context;
   context.root = output_root.root();
+  context.private_anchor = private_anchor_for_job(output_root.root(), job);
+  context.private_slot = private_slot_for_job(output_root.root(), job);
+  context.replacement_namespace = context.private_slot;
+  context.displaced_namespace = context.private_anchor / "slot-displaced";
   context.mutation = OutputNamespaceMutation::ReplacePrivateSlot;
   context.point = B1OutputStoreFaultPoint::AfterStagingSlotMkdirBeforeOpen;
 
@@ -960,15 +1024,15 @@ TEST(B1OutputStore,
         options.fault_injector = &mutate_output_namespace;
         options.fault_injector_context = &context;
         B1OutputStore store(output_root.root(), executor, options);
-        static_cast<void>(store.commit(measured_job_zero(), seed_zero_image()));
+        static_cast<void>(store.commit(job, seed_zero_image()));
       },
       ".*");
-  const std::filesystem::path replacement =
-      find_private_staging_slot(output_root.root());
-  ASSERT_FALSE(replacement.empty());
-  EXPECT_TRUE(std::filesystem::is_directory(replacement));
-  EXPECT_TRUE(std::filesystem::exists(replacement / "replacement-marker"));
-  EXPECT_FALSE(std::filesystem::exists(replacement / "output.rgba32le"));
+  EXPECT_TRUE(std::filesystem::is_directory(context.replacement_namespace));
+  EXPECT_TRUE(std::filesystem::exists(context.replacement_namespace /
+                                      "replacement-marker"));
+  EXPECT_TRUE(std::filesystem::is_directory(context.displaced_namespace));
+  EXPECT_FALSE(std::filesystem::exists(context.replacement_namespace /
+                                       "output.rgba32le"));
 }
 #endif
 
@@ -1024,6 +1088,10 @@ TEST(B1OutputStore, StrictCleanupFailsStopOnExtraLeafAndTypeReplacement) {
     ScopedB1OutputRoot output_root;
     OutputNamespaceMutationContext context;
     context.root = output_root.root();
+    context.private_anchor =
+        private_anchor_for_job(output_root.root(), measured_job_zero());
+    context.private_slot =
+        private_slot_for_job(output_root.root(), measured_job_zero());
     context.mutation = mutation;
     context.point = B1OutputStoreFaultPoint::AfterTaskSettled;
     context.throw_after = true;
@@ -1054,6 +1122,8 @@ TEST(B1OutputStore, StrictCleanupFailsStopOnInjectedUnlinkErrors) {
     ScopedB1OutputRoot output_root;
     CleanupMutationContext cleanup;
     cleanup.root = output_root.root();
+    cleanup.private_slot =
+        private_slot_for_job(output_root.root(), measured_job_zero());
     cleanup.mutation = CleanupMutation::InjectErrno;
     cleanup.injected_errno = injected_errno;
     ThrowingFaultContext failure{B1OutputStoreFaultPoint::AfterTaskSettled,
@@ -1091,6 +1161,8 @@ TEST(B1OutputStore, FinalCleanupBoundaryFailurePrecedesNameRemoval) {
   static_cast<void>(seed_zero_image());
   CleanupMutationContext cleanup;
   cleanup.root = output_root.root();
+  cleanup.private_slot =
+      private_slot_for_job(output_root.root(), measured_job_zero());
   cleanup.mutation = CleanupMutation::InstallDifferentIdentityThenFail;
   cleanup.injected_errno = EIO;
   ThrowingFaultContext failure{B1OutputStoreFaultPoint::AfterTaskSettled, true};
@@ -1110,18 +1182,16 @@ TEST(B1OutputStore, FinalCleanupBoundaryFailurePrecedesNameRemoval) {
       ".*");
   EXPECT_TRUE(
       std::filesystem::exists(output_root.root() / ".cleanup-charge-settled"));
-  const std::filesystem::path private_slot =
-      find_private_staging_slot(output_root.root());
-  ASSERT_FALSE(private_slot.empty());
-  const std::filesystem::path payload = private_slot / "output.rgba32le";
+  const std::filesystem::path payload =
+      cleanup.private_slot / "output.rgba32le";
   EXPECT_TRUE(std::filesystem::is_regular_file(payload));
   std::ifstream replacement(payload, std::ios::binary);
   ASSERT_TRUE(replacement.good());
   std::ostringstream replacement_bytes;
   replacement_bytes << replacement.rdbuf();
   EXPECT_EQ(replacement_bytes.str(), "different-identity");
-  EXPECT_TRUE(
-      std::filesystem::is_regular_file(private_slot / "payload-displaced"));
+  EXPECT_TRUE(std::filesystem::is_regular_file(cleanup.private_slot /
+                                               "payload-displaced"));
 }
 #endif
 
@@ -1135,6 +1205,8 @@ TEST(B1OutputStore, StrictCleanupAcceptsSameIdentityRaceAfterSettlement) {
       {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
   CleanupMutationContext cleanup;
   cleanup.root = output_root.root();
+  cleanup.private_slot =
+      private_slot_for_job(output_root.root(), measured_job_zero());
   cleanup.executor = &executor;
   cleanup.mutation = CleanupMutation::RestoreSameIdentity;
   ThrowingFaultContext failure{B1OutputStoreFaultPoint::AfterTaskSettled, true};
@@ -1168,6 +1240,8 @@ TEST(B1OutputStore, StrictCleanupFailsStopOnDifferentIdentityRace) {
   static_cast<void>(seed_zero_image());
   CleanupMutationContext cleanup;
   cleanup.root = output_root.root();
+  cleanup.private_slot =
+      private_slot_for_job(output_root.root(), measured_job_zero());
   cleanup.mutation = CleanupMutation::InstallDifferentIdentity;
   ThrowingFaultContext failure{B1OutputStoreFaultPoint::AfterTaskSettled, true};
   EXPECT_DEATH(
@@ -1186,12 +1260,10 @@ TEST(B1OutputStore, StrictCleanupFailsStopOnDifferentIdentityRace) {
       ".*");
   EXPECT_TRUE(
       std::filesystem::exists(output_root.root() / ".cleanup-charge-settled"));
-  const std::filesystem::path private_slot =
-      find_private_staging_slot(output_root.root());
-  ASSERT_FALSE(private_slot.empty());
+  EXPECT_TRUE(std::filesystem::is_regular_file(cleanup.private_slot /
+                                               "output.rgba32le"));
   EXPECT_TRUE(
-      std::filesystem::is_regular_file(private_slot / "output.rgba32le"));
-  EXPECT_TRUE(std::filesystem::exists(private_slot / "payload-displaced"));
+      std::filesystem::exists(cleanup.private_slot / "payload-displaced"));
 }
 #endif
 

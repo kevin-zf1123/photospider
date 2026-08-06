@@ -7,15 +7,23 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "benchmark/b1_profile.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1_output_store.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1_profile.hpp"       // NOLINT(build/include_subdir)
 
 namespace ps::benchmark {
+
+struct B1EnvironmentEvidence;
+
+namespace testing {
+struct B1StorageActualObservationTestAccess;
+}  // namespace testing
 
 /**
  * @brief Closed observation state carried by every environment field.
@@ -341,59 +349,164 @@ struct B1StorageRawProof final {
 };
 
 /**
- * @brief One receipt fact observed from an actual `B1OutputStore` execution.
+ * @brief Serializable receipt metadata exposed only for diagnostics.
  * @throws Nothing for ordinary movement except owned path/string allocation.
- * @note This process-private value is never reconstructed from retained proof
- * bytes. It is populated from a typed successful output receipt while the
- * validating process still owns the corresponding root authority.
+ * @note This aggregate is explicitly not receipt authority. Validation uses
+ * the opaque typed `B1OutputCommitReceipt` retained by a live source instead.
  */
-struct B1StorageReceiptAuthorityObservation final {
-  /** @brief Stable commit id minted by the actual output transaction. */
+struct B1StorageReceiptDiagnostic final {
+  /** @brief Stable commit id copied from the typed receipt. */
   std::string commit_id;
-  /** @brief Canonical root returned by the actual output receipt. */
+  /** @brief Canonical root copied from the typed receipt. */
   std::filesystem::path resolved_root;
-  /** @brief Root-relative occurrence slot returned by the receipt. */
+  /** @brief Root-relative occurrence slot copied from the typed receipt. */
   std::filesystem::path rooted_slot;
-  /** @brief Actual published-manifest filesystem identity. */
+  /** @brief Published-manifest identity copied from the typed receipt. */
   std::string published_manifest_identity;
-  /** @brief Exact requested durability token derived from the typed receipt. */
+  /** @brief Requested durability token copied from the typed receipt. */
   std::string requested_durability;
-  /** @brief Exact achieved durability token derived from the typed receipt. */
+  /** @brief Achieved durability token copied from the typed receipt. */
   std::string achieved_durability;
 };
 
 /**
- * @brief Source-private actual observation independent of retained evidence.
- * @throws std::bad_alloc when copied paths, receipts, or probe state allocate.
- * @note `complete_probe` may be present only when an in-process probe or a
- * concretely verified attestation has produced every raw field, mount,
- * performance, transaction, and containment observation. Parsing a retained
- * proof file must never initialize it. When a portable probe cannot verify an
- * external declaration, its exact field name is retained in
- * `unverified_external_fields` and machine conformance is ineligible.
+ * @brief Opaque source-private actual storage authority.
+ *
+ * The object is a copyable capability over one live authority observer. Every
+ * validation re-invokes that observer to recheck the held root descriptor,
+ * immutable typed receipts, trusted-probe source, and unverified-field state.
+ * Public accessors expose only the construction-time diagnostic snapshot.
+ * Retained proof bytes, parsed `B1StorageRawEvidence`, JSON, or copied strings
+ * cannot call the private constructor or mint the observer.
+ *
+ * @throws std::bad_alloc when copied observer/diagnostic storage allocates.
+ * @note Copies inside `B1InnerRowInput` and `B1InnerRow` share the same live
+ * capability and therefore extend its descriptor/probe-source lifetime. A
+ * future trusted adapter must own a live re-observation source rather than
+ * caching `B1StorageRawEvidence` as authority.
+ * @note Validation is synchronous. A source that supports test/adapter drift
+ * must serialize its mutations between validation calls; concurrent mutation
+ * during one observation is outside this capability contract.
  */
-struct B1StorageActualObservation final {
-  /** @brief Initial/final verified selected root spelling. */
-  std::filesystem::path selected_root;
-  /** @brief Initial/final verified canonical root. */
-  std::filesystem::path resolved_root;
-  /** @brief Identity produced from the held root descriptor. */
-  std::string root_authority_identity;
-  /** @brief Filesystem type observed through the held root descriptor. */
-  std::string filesystem_type;
-  /** @brief Actual successful receipts observed during this row. */
-  std::vector<B1StorageReceiptAuthorityObservation> receipts;
+class B1StorageActualObservation final {
+ public:
+  /** @brief Copies one existing live authority capability. */
+  B1StorageActualObservation(const B1StorageActualObservation&) = default;
+
+  /** @brief Moves one existing live authority capability. */
+  B1StorageActualObservation(B1StorageActualObservation&&) noexcept = default;
+
+  /** @brief Copies one existing live authority capability. */
+  B1StorageActualObservation& operator=(const B1StorageActualObservation&) =
+      default;
+
+  /** @brief Moves one existing live authority capability. */
+  B1StorageActualObservation& operator=(B1StorageActualObservation&&) noexcept =
+      default;
+
+  /** @brief Releases one observer owner and diagnostic snapshot. */
+  ~B1StorageActualObservation() = default;
+
+  /** @brief Returns the diagnostic selected-root spelling. */
+  const std::filesystem::path& selected_root() const noexcept {
+    return selected_root_;
+  }
+
+  /** @brief Returns the diagnostic canonical root. */
+  const std::filesystem::path& resolved_root() const noexcept {
+    return resolved_root_;
+  }
+
+  /** @brief Returns the diagnostic descriptor identity. */
+  const std::string& root_authority_identity() const noexcept {
+    return root_authority_identity_;
+  }
+
+  /** @brief Returns the diagnostic descriptor-derived filesystem type. */
+  const std::string& filesystem_type() const noexcept {
+    return filesystem_type_;
+  }
+
+  /** @brief Returns diagnostic copies of the typed receipt facts. */
+  const std::vector<B1StorageReceiptDiagnostic>& receipt_diagnostics()
+      const noexcept {
+    return receipt_diagnostics_;
+  }
+
+  /** @brief Returns the diagnostic trusted-probe digest, when one existed. */
+  const std::optional<B1Sha256Digest>& complete_probe_digest() const noexcept {
+    return complete_probe_digest_;
+  }
+
+  /** @brief Returns diagnostic unverified external-field names. */
+  const std::vector<std::string>& unverified_external_fields() const noexcept {
+    return unverified_external_fields_;
+  }
+
+ private:
   /**
-   * @brief Complete independently produced raw observation, when available.
-   * @note Its canonical encoding must equal the retained proof exactly, but it
-   * is deliberately not serializable as reusable authority.
+   * @brief One fresh observation returned by the opaque live source.
+   * @throws std::bad_alloc when receipt/probe storage is copied.
+   * @note The complete probe is an observation result, never the authority
+   * itself; the non-serializable observer that produced it is the capability.
    */
-  std::optional<B1StorageRawEvidence> complete_probe;
+  struct AuthoritySnapshot final {
+    /** @brief Selected-root spelling bound by the live source. */
+    std::filesystem::path selected_root;
+    /** @brief Fresh descriptor-derived root facts. */
+    B1OutputStoreRootObservation root;
+    /** @brief Store/test-owner-minted immutable typed receipts. */
+    std::vector<B1OutputCommitReceipt> receipts;
+    /** @brief Fresh complete trusted-probe observation, when supported. */
+    std::optional<B1StorageRawEvidence> complete_probe;
+    /** @brief Fresh sorted unverified-field set. */
+    std::vector<std::string> unverified_external_fields;
+  };
+
+  /** @brief Non-serializable callable that must produce a fresh snapshot. */
+  using AuthorityObserver = std::function<AuthoritySnapshot()>;
+
   /**
-   * @brief Sorted unique fields whose external facts lack trusted authority.
-   * @note Any entry makes required-storage machine conformance ineligible.
+   * @brief Mints diagnostics plus a retained live observer capability.
+   * @param observer Nonempty source-private observer.
+   * @throws std::invalid_argument for an empty observer.
+   * @throws Observation, canonical encoding, and allocation failures from the
+   * initial diagnostic snapshot unchanged.
+   * @note Only the portable owner and isolated test access are friends; no
+   * retained-proof or JSON parser can invoke this constructor.
    */
-  std::vector<std::string> unverified_external_fields;
+  explicit B1StorageActualObservation(AuthorityObserver observer);
+
+  /**
+   * @brief Re-observes the complete live authority source.
+   * @return Fresh root, receipt, probe, and verification facts.
+   * @throws Any source observation failure unchanged.
+   */
+  AuthoritySnapshot reobserve_authority() const;
+
+  /** @brief Construction-time selected-root diagnostic. */
+  std::filesystem::path selected_root_;
+  /** @brief Construction-time canonical-root diagnostic. */
+  std::filesystem::path resolved_root_;
+  /** @brief Construction-time root-identity diagnostic. */
+  std::string root_authority_identity_;
+  /** @brief Construction-time filesystem-type diagnostic. */
+  std::string filesystem_type_;
+  /** @brief Construction-time typed-receipt diagnostics. */
+  std::vector<B1StorageReceiptDiagnostic> receipt_diagnostics_;
+  /** @brief Construction-time trusted-probe digest diagnostic. */
+  std::optional<B1Sha256Digest> complete_probe_digest_;
+  /** @brief Construction-time unverified-field diagnostics. */
+  std::vector<std::string> unverified_external_fields_;
+  /** @brief Opaque live root/receipt/probe re-observation capability. */
+  AuthorityObserver authority_observer_;
+
+  friend bool b1_storage_actual_observation_matches(
+      const B1EnvironmentEvidence& evidence) noexcept;
+  friend B1StorageActualObservation make_b1_portable_runner_storage_observation(
+      B1OutputStoreRootAuthority root_authority,
+      std::vector<B1OutputCommitReceipt> receipts);
+  friend struct testing::B1StorageActualObservationTestAccess;
 };
 
 /**
@@ -655,23 +768,18 @@ bool b1_storage_actual_observation_matches(
 
 /**
  * @brief Builds the exact incomplete observation used by the portable runner.
- * @param selected_root Initial/final verified selected root spelling.
- * @param resolved_root Initial/final verified canonical root.
- * @param root_authority_identity Held-root descriptor identity.
- * @param filesystem_type Descriptor-derived filesystem type.
+ * @param root_authority Store-minted live held-root descriptor capability.
  * @param receipts Actual typed successful output receipts from the row.
  * @return Process-private root/receipt facts with no complete probe and the
  * exact sorted set of external declarations the portable path cannot verify.
- * @throws std::bad_alloc when owned paths, strings, receipts, or field names
- * allocate.
+ * @throws Root re-observation and allocation failures unchanged.
  * @note This is the manual runner's production construction path. It always
  * remains machine-ineligible until a separate trusted adapter supplies a
- * complete probe; retained proof bytes are not an input.
+ * complete live probe source; retained proof bytes are not an input.
  */
 B1StorageActualObservation make_b1_portable_runner_storage_observation(
-    std::filesystem::path selected_root, std::filesystem::path resolved_root,
-    std::string root_authority_identity, std::string filesystem_type,
-    std::vector<B1StorageReceiptAuthorityObservation> receipts);
+    B1OutputStoreRootAuthority root_authority,
+    std::vector<B1OutputCommitReceipt> receipts);
 
 /**
  * @brief Proves every destination resolves below one selected canonical root.
