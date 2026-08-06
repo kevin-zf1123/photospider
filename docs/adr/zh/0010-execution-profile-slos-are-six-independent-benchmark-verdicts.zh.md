@@ -520,21 +520,29 @@ task，稳定 charge identity 分别为
 值，同一 identity 的全部 attempt 必须使用相同 charge。64-task 与
 268,435,456-byte summed-planned-byte limit 适用于每次 accepted admission。
 
-`planned_bytes` 是 task-retained byte 的稳定 admission estimate。它不是 physical
-allocation measurement、memory ownership 证明；同时，它是 Compute I/O admission、
-snapshot high-water 与 final settlement 的强制性权威证据。它不能替代 process RSS
-或 ledger/device ownership evidence。Capacity rejection 让已 offered job 保持
-eligible、同一个 task 保持 pending；所有 admission attempt 与 typed status 都会
-保留。在无故障 B1 中，每个 task 只能被接受并启动一次，不允许 output retry、
-duplicate task 或改变 charge identity。
+`planned_bytes` 是 task-retained byte 的稳定 admission estimate。每个 offer 都会在与
+decision 相同的 executor mutex 下取得不可变 admission event，其中包含单调非零
+sequence、精确 charged task/byte delta、typed status 与结果 process-global snapshot。
+每个 accepted task 都会在与精确 release 相同的 mutex 下取得关联该 admission 的
+settlement event，其中包含精确 released delta 与结果 snapshot。这些单 task event 是
+Compute I/O admission、snapshot high-water 与该 task settlement 的强制性权威证据，
+但不是 physical allocation measurement 或 memory ownership 证明，也不能替代 process
+RSS 或 ledger/device ownership evidence。Capacity rejection 让已 offered job 保持
+eligible、同一个 task 保持 pending；所有 admission attempt 与 typed status 都会保留。
+在无故障 B1 中，每个 task 只能被接受并启动一次，不允许 output retry、duplicate task
+或改变 charge identity。
 
 Retained Compute I/O evidence 是一个精确状态机：`Initial` 最先；payload attempt-zero
 offer/admission；payload settlement；manifest attempt-zero offer/admission；manifest
 settlement；`Final` 最后。Capacity rejection 只能在当前 offer state 重复，最多达到
 64-attempt bound。每个 event 都绑定 expected job、stage、attempt、charge、typed
-status 与一致的 event-aligned snapshot。缺失、重复、重排、gap、identity 错误、
-status 错误、snapshot 无效或 `Final` 后 evidence 会同时使 throughput、determinism、
-waste 与 memory invalid。
+status 与一致的 event-aligned snapshot。Accepted admission 精确 charge 一个 task 与
+offered byte；其关联 settlement 精确 release 同一 charge，而 rejected admission 的
+charge 为零。Global snapshot 可以包含无关并发 job，也可以在当前 job 的 `Final` 时
+保持非零；单 task delta 证明归属，row boundary 仍结算到要求的 process baseline。
+缺失、重复、重排、gap、identity 错误、status 错误、undercharge、伪造零值、event/
+snapshot 无效或 `Final` 后 evidence 会同时使 throughput、determinism、waste 与 memory
+invalid。
 
 Payload-stage task 在结算前必须完整写入、hash、同步并重新验证 private payload
 stage。只有这样，manifest-commit 才可以写入并同步 private canonical manifest，
@@ -544,6 +552,14 @@ typed achieved `crash-durable`；只有 atomic visibility 并不成功。不支�
 synchronization、directory barrier 或 atomic no-replace publication、achieved class
 较弱，或者任一 transaction failure，都会使 job 无效，且不得生成成功的
 crash-durable receipt。
+
+所选 canonical root 以不跟随链接的方式打开，其 directory descriptor 与全新 slot
+descriptor 始终作为 transaction 的 namespace authority。Slot/payload/manifest
+mutation、publication、barrier、revalidation 与 cleanup 都是 descriptor-relative。
+Pathname replacement 或 symlink 只能使最终 path-to-descriptor binding 失败，不能
+重定向写入。Allocation-free guard 在 slot 创建后立即接管它，在后续工作可能抛异常前
+接纳任意 accepted completion，并在异常退出时先 cancel/wait 到精确 charge 退休，再
+进行 identity-verified cleanup。相同 commit identity 保持可重试。
 
 `OutputCommitReceipt` evidence 至少绑定稳定 `OutputCommitId`、rooted namespace/
 output slot、完整 `job_instance_id`、job index、descriptor 与 logical content
@@ -1008,7 +1024,10 @@ reason 相同，payload 为空。任何行都不遗漏四条 record 中的任意
 各自独立解析 retained base、可选 storage 与 class manifest，并从实际 byte 复算全部
 适用 digest。Class base-digest payload 必须等于复算 base 及其 claim。B1/M1 必须把
 `required`/`none` 与 known class storage-digest payload 绑定到存在且 eligible 的
-storage byte、其复算 digest 及其 claim。I1/I2 必须把 `not-applicable`/
+storage byte、其复算 digest 及其 claim，并保留精确 raw storage proof。每一侧都必须
+从自己的 retained storage byte 加该 proof 独立复算完整 eligibility result，并要求与
+retained eligible flag 及有序 reason list 精确相等。Proof 缺失、不完整、陈旧或漂移，
+以及 stale eligibility，都必须使 binding 失败。I1/I2 必须把 `not-applicable`/
 `row-has-no-output-commit` 与精确 N/A state/reason/empty payload 绑定到全部 storage
 evidence object 均不存在。复算 class digest 必须匹配其 claim，但合法 class self-hash
 不能修复不匹配的内嵌 base 或 storage digest payload。

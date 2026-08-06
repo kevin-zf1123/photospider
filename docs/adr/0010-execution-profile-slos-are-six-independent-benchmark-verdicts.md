@@ -605,24 +605,34 @@ Checked arithmetic must produce those values before every `try_submit`, and
 all attempts for one identity must use the same charge. The 64-task and
 268,435,456-byte summed-planned-byte limits apply at every accepted admission.
 
-`planned_bytes` is a stable admission estimate of task-retained bytes. It is
-mandatory and authoritative evidence for Compute I/O admission, snapshot
-high-water, and final settlement, but it is not a measurement of physical
-allocation or proof of memory ownership. It does not replace process RSS or
-the ledger/device ownership evidence. Capacity rejection leaves the already
-offered job eligible and the same task pending; every admission attempt and
-typed status is retained. In fault-free B1 each task may be accepted and
-started only once, and no output retry, duplicate task, or changed charge
-identity is permitted.
+`planned_bytes` is a stable admission estimate of task-retained bytes. Under
+the same executor mutex as the decision, each offer receives an immutable
+admission event with a monotonic nonzero sequence, exact charged task/byte
+delta, typed status, and resulting process-global snapshot. Under the same
+mutex as exact release, each accepted task receives a settlement event linked
+to that admission and carrying the exact released delta plus resulting
+snapshot. These per-task events are mandatory and authoritative evidence for
+Compute I/O admission, snapshot high-water, and that task's settlement, but
+they are not a measurement of physical allocation or proof of memory ownership.
+They do not replace process RSS or the ledger/device ownership evidence.
+Capacity rejection leaves the already offered job eligible and the same task
+pending; every admission attempt and typed status is retained. In fault-free B1
+each task may be accepted and started only once, and no output retry, duplicate
+task, or changed charge identity is permitted.
 
 The retained Compute I/O evidence is one exact state machine: `Initial` first;
 payload attempt-zero offer/admission; payload settlement; manifest attempt-zero
 offer/admission; manifest settlement; and `Final` last. Capacity rejections may
 repeat only in the current offer state up to the 64-attempt bound. Every event
 binds the expected job, stage, attempt, charge, typed status, and coherent
-event-aligned snapshot. Missing, duplicate, reordered, gapped, wrong-identity,
-wrong-status, invalid-snapshot, or post-final evidence invalidates throughput,
-determinism, waste, and memory together.
+event-aligned snapshot. Accepted admission charges exactly one task and the
+offered bytes; its linked settlement releases exactly that charge, while a
+rejected admission charges zero. Global snapshots may include unrelated
+concurrent jobs and may remain nonzero at this job's `Final`; the per-task delta
+proves attribution, and the row boundary still settles to its required process
+baseline. Missing, duplicate, reordered, gapped, wrong-identity, wrong-status,
+undercharged, forged-zero, invalid-event/snapshot, or post-final evidence
+invalidates throughput, determinism, waste, and memory together.
 
 The payload-stage task completely writes, hashes, synchronizes, and revalidates
 the private payload stage before it settles. Only then may manifest-commit
@@ -633,6 +643,16 @@ and accepts only typed achieved `crash-durable`; atomic visibility alone is not
 success. Unsupported file synchronization, directory barriers, atomic
 no-replace publication, a weaker achieved class, or any transaction failure
 makes the job invalid and yields no successful crash-durable receipt.
+
+The selected canonical root is opened without following links and its directory
+descriptor, plus the fresh slot descriptor, remains the transaction's namespace
+authority. Slot/payload/manifest mutation, publication, barriers, revalidation,
+and cleanup are descriptor-relative. A pathname replacement or symlink can only
+make the final path-to-descriptor binding fail; it cannot redirect writes. An
+allocation-free guard owns the slot immediately after creation, adopts any
+accepted completion before later work can throw, and on exceptional exit first
+cancels/waits for exact charge retirement before identity-verified cleanup. The
+same commit identity remains retryable.
 
 The `OutputCommitReceipt` evidence binds at least the stable `OutputCommitId`,
 rooted namespace/output slot, complete `job_instance_id`, job index, descriptor
@@ -1145,8 +1165,12 @@ accepted, each side independently parses its retained base, optional storage,
 and class manifests and recomputes every applicable digest from the actual
 bytes. The class base-digest payload must equal the recomputed base and its
 claim. B1/M1 must bind `required`/`none` and the known class storage-digest
-payload to present eligible storage bytes, their recomputed digest, and their
-claim. I1/I2 must bind `not-applicable`/`row-has-no-output-commit` and the exact
+payload to present storage bytes, their recomputed digest, and their claim, and
+must retain the exact raw storage proof. Each side independently recomputes the
+complete eligibility result from its retained storage bytes plus that proof and
+requires exact equality with the retained eligible flag and ordered reason
+list. Missing, incomplete, stale, or drifting proof and stale eligibility fail
+the binding. I1/I2 must bind `not-applicable`/`row-has-no-output-commit` and the exact
 N/A state/reason/empty payload to the absence of every storage evidence object.
 The recomputed class digest must match its claim, but a valid class self-hash
 does not repair a mismatched embedded base or storage digest payload.

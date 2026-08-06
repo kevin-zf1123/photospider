@@ -311,6 +311,12 @@ filesystem mutation 或 codec entry，同时计入 task 数与正数 estimated-r
 cancellation、running late cancellation、construction rollback 与 graceful shutdown 最终都会
 恰好一次释放账本。
 
+Executor 会在这些相同 accounting linearization point 签发不可变 attribution event。
+Admission 记录单调非零 sequence、typed decision、精确 charged task/byte delta 与同锁
+process snapshot；settlement 关联该 admission，并记录精确 released delta 与其同锁
+snapshot。Rejection 的 delta 为零。Process snapshot 可以包含无关并发 user；当 consumer
+只观察其中一部分时，sequence gap 也合法，这两点都不会削弱精确单 task proof。
+
 Worker 与 completion 边界会阻止按 identity 生效的 self-blocking。当准入仍开放时，owning
 I/O worker 的 nested submission 会在改变任一 budget 或 lazy factory 前返回 inactive
 `InvalidRequest`；若并发 admission stop 已发生，则 `ShuttingDown` 保持更高优先级。
@@ -535,20 +541,26 @@ ledger 与 `ExecutionService` path。该私有 view 还会暴露唯一真实进�
 scheduler、worker pool、ledger、Graph authority 或 public request。
 
 `B1OutputStore` 是 B1 manual/release output owner，而不是 ADR 0009 中仍属目标的通用
-产品 `OutputStore`。它会在一个预先选择的 canonical root 下创建全新的 no-replace
-occurrence slot，再把精确 67,108,864-byte payload charge 与精确 manifest charge 作为
-两个有序 task 提交给进程 executor。它写入紧密 little-endian RGBA binary32 byte，
-同步并重验 payload，以 no-replace 方式最后发布 canonical manifest，完成 leaf-to-root
-directory barrier，然后才返回类型化 crash-durable receipt。每次 accepted admission 与
-settlement 都保留完整 occurrence/task identity 和 event-aligned I/O snapshot；capacity
-retry 保持 attempt zero 与相同 charge。Planned byte 只对 Compute I/O admission、high-water
-与 final settlement 具有权威性，不能证明 physical memory ownership、durability、RSS 或
-ledger/device evidence。
+产品 `OutputStore`。它会在一个预先选择的 canonical root 下保留 no-follow root
+descriptor，创建并保留全新的 no-replace occurrence-slot descriptor，再把精确
+67,108,864-byte payload charge 与精确 manifest charge 作为两个有序 task 提交给进程
+executor。每个 slot/payload/manifest mutation、barrier、revalidation 与 cleanup 都保持
+descriptor-relative，因此 pathname replacement 只会使最终 binding 失败，而不会重定向
+写入。Allocation-free transaction guard 会在 identity-verified exception cleanup 前结算
+accepted work，并使相同 commit identity 保持可重试。Store 写入紧密 little-endian RGBA
+binary32 byte、同步并重验 payload、以 no-replace 方式最后发布 canonical manifest、完成
+leaf-to-root directory barrier，然后才返回类型化 crash-durable receipt。每次 offer 与
+settlement 都保留完整 occurrence/task identity、executor 签发的精确 delta 与同锁 I/O
+snapshot；capacity retry 保持 attempt zero 与相同 charge。Planned byte 与单 task event 只
+对 Compute I/O admission、high-water 与精确 task settlement 具有权威性，不能证明 physical
+memory ownership、durability、RSS 或 ledger/device evidence。
 
 Source-private B1 profile、environment validator 与 evidence evaluator 还实现不可变
 34-seed logical/raw golden table、canonical semantic trace、精确 21/24/4-field environment
 schema、raw backend/mount/performance proof mapping、eligibility/root-containment/
-compatibility，以及四项相互独立的 inner verdict。`b1_immutable_benchmark` 为
+compatibility，以及四项相互独立的 inner verdict。适用 evidence 与 JSON 会保留 raw
+storage proof；每一侧 compatibility 都从自身 retained canonical byte 加该 proof 复算
+eligibility，并与 retained claim 精确匹配。`b1_immutable_benchmark` 为
 `EXCLUDE_FROM_ALL`，不属于 CTest，只会在 caller 选择的 eligible root 下写入一条精确
 34-job inner row。构建该 target、显示 help 或通过 deterministic test 都不构成 B1 机器
 符合性结果；本文既不声明已完成精确三 replicate 机器运行，也不声明 #96 outer row/bundle/

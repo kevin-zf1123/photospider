@@ -1876,29 +1876,44 @@ Every B1 job writes the exact ADR 0010 `output.rgba32le` payload and fixed-order
 `242 + decimal_digit_count(job)` manifest length: 243 bytes for jobs `0..9`,
 244 bytes for jobs `10..99`, and 245 bytes for jobs `100..255`. Thus measured
 jobs `0..29` use 243 or 244 bytes and cold/warmup jobs `252..255` use 245 bytes.
-Samples immediately after every accepted admission/settlement must prove <=64
-active tasks, <=268,435,456 active planned bytes, both high-water marks, and
-exact zero final settlement. Every active planned-byte total is the checked sum
-of the true per-job charges. Planned bytes are mandatory, authoritative
-evidence for Compute I/O admission, planned-byte high-water, and final
-settlement, but are estimates rather than physical memory ownership evidence;
-they do not replace RSS or ledger/device ownership evidence.
+Each offer/settlement must retain the executor-authored immutable event minted
+under the same mutex as its charge/release. The event supplies a monotonic
+nonzero sequence, exact charged/released task and byte delta, linked admission
+identity where applicable, and the resulting process-global snapshot. Samples
+must prove <=64 active tasks, <=268,435,456 active planned bytes, both high-water
+marks, and the current task's exact settlement. Global snapshots may contain
+unrelated concurrent jobs and may remain nonzero at a job's `Final`; the row
+boundary still settles to its required process baseline. Every active planned-
+byte total is the checked sum of true admitted charges. Planned bytes and
+per-task events are mandatory, authoritative evidence for Compute I/O
+admission, planned-byte high-water, and task settlement, but are estimates
+rather than physical memory ownership evidence; they do not replace RSS or
+ledger/device ownership evidence.
 
 Validate the retained event stream as an exact state machine: `Initial` first;
 payload offer/admission then settlement; manifest offer/admission then
 settlement; `Final` last. Capacity-rejection rows may repeat only in the current
 offer state and keep attempt zero and the same charge. Check every row's job,
-stage, attempt, planned bytes, admission/completion status, and snapshot limits/
-phase totals, plus the terminal I/O-path-to-output-status/receipt relation.
-Missing, duplicate, reordered, wrong-stage/job/status, attempt-gap, invalid-
-snapshot, and post-final mutation cases must make all four B1 axes `Invalid`.
+stage, attempt, planned bytes, admission/completion status, exact event delta/
+linkage/sequence, and snapshot limits/phase totals, plus the terminal I/O-path-
+to-output-status/receipt relation. Accepted admission must charge one task and
+the offered bytes, its settlement must release that same charge, and rejection
+must charge zero. Missing, duplicate, reordered, wrong-stage/job/status,
+attempt-gap, undercharge, forged accepted-zero, wrong settlement linkage,
+invalid event/snapshot, and post-final mutation cases must make all four B1
+axes `Invalid`.
 
 The target `OutputStore` requests and must achieve typed `crash-durable`; it
 settles the payload, publishes the canonical manifest no-replace and last,
 completes all leaf-to-root barriers, then returns the ADR 0009 receipt. Weaker,
 unsupported, or failed durability is invalid. The commit id, rooted no-replace
 slot, and receipt bind the complete job instance as well as its fixture job
-index. A B1 job contributes throughput
+index. The store holds root and slot directory descriptors and performs every
+slot/payload/manifest mutation, barrier, revalidation, and cleanup relative to
+them. Root pathname replacement or symlink substitution must fail closed with
+no redirected artifact. A post-slot exception guard cancels/waits for accepted
+work before identity-verified cleanup, proves exact charge retirement, and
+leaves an exact-identity retry possible. A B1 job contributes throughput
 only after that receipt and both logical/raw golden checks. Every I2
 twelfth-edit (`edit_index=11`) preview/final is
 acquired twice through the same Host binding. A configured Metal device permits
@@ -2256,7 +2271,8 @@ The independent validator performs these steps in order:
    performance components, and cross-field consistency; if step 1 or 2 fails,
    return exactly `canonical-schema-invalid` and stop before raw-proof, digest,
    environment-class, or other eligibility evaluation;
-3. bind each normalized field to retained raw observation/proof and validate
+3. require the complete raw proof to be retained in durable evidence and JSON,
+   bind each normalized field to that exact raw observation/proof, and validate
    every field-specific N/A claim, mount normalization decision, stable
    instance/endpoint/anchor identity, fixed performance configuration,
    excluded-option no-effect proof, and root-containment proof;
@@ -2265,7 +2281,10 @@ The independent validator performs these steps in order:
 5. parse the exact four-field environment-class manifest and recompute
    `environment_class_digest`; independently bind its base-digest payload to
    the retained/recomputed base, bind B1/M1 known `required`/`none` and storage-
-   digest payload to present eligible retained/recomputed storage, and bind
+   digest payload to present retained/recomputed storage, independently
+   recompute the complete eligibility result from the retained storage bytes
+   plus raw proof, exact-compare its eligible flag and ordered reasons with the
+   retained claim, and bind
    I1/I2 known `not-applicable`/`row-has-no-output-commit` plus the exact N/A
    state/reason/empty payload to complete storage-evidence absence; a recomputed
    class self-hash never substitutes for these bindings; and
@@ -2282,14 +2301,17 @@ exact base compatibility and the fixed storage-N/A environment manifest.
 Candidate/reference B1/M1, B1 cap-1/cap-8, and M1/paired-B1-cap-8 use exact
 base, storage, and full environment-class compatibility. M1/paired-I1 compares
 only exact base manifests/digests; its environment manifests intentionally
-differ. A missing raw field/proof, invalid state, byte/digest mismatch, or
-failed containment makes the affected relative verdict `invalid`.
+differ. A missing/drifting raw field/proof, stale retained eligibility, invalid
+state, byte/digest mismatch, or failed containment makes the affected relative
+verdict `invalid`.
 
 Run that four-field binding check for self-validation, cap-one/cap-eight,
 candidate/reference, and mixed relations before comparing peers. Mechanism
 tests must alter the embedded base or storage digest payload and recompute the
 environment-class self-hash while leaving the actual retained manifest
-unchanged; both mutations remain incompatible.
+unchanged; both mutations remain incompatible. Additional cases remove or drift
+the retained proof and alter canonical storage bytes while recomputing storage/
+class digests but retaining stale eligibility; every case remains incompatible.
 
 Issue #95 now adds deterministic mechanism tests covering fixed field/type/
 enum/cardinality rejection; every state/reason/payload combination; NFC/text
@@ -2619,9 +2641,12 @@ goldens; actual-observation-backed canonical semantic trace and dependency/
 resource/outcome drift rejection; stable NFC text and exact 21/24/4-field
 schemas; scalar, collection, fixed-record, mount, all 37 performance-component
 and raw-proof rules; the eleven-reason eligibility truth set and pair
-compatibility, including embedded digest tamper plus recomputed class self-hash;
-two charged no-replace crash-durable output stages, 64-attempt exhaustion/
-cleanup, and receipt; the exact Compute I/O FSM mutation matrix; all four
+compatibility, including embedded digest tamper plus recomputed class self-hash,
+proof missing/drift, and stale eligibility after byte/digest recomputation; two
+charged no-replace crash-durable output stages, 64-attempt exhaustion/cleanup,
+post-slot fault rollback/retry, root replacement fail-closed behavior, and
+receipt; executor-authored exact charge/release under real concurrency plus the
+undercharge/forged-zero Compute I/O FSM mutation matrix; all four
 independent inner verdicts; and exact real-Host Throughput QoS,
 cap-one/cap-eight, Graph A/B predecessor, content/trace, lifecycle, resource,
 and Compute I/O closure. They use disposable roots and no machine-dependent

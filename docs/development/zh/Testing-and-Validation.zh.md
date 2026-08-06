@@ -1513,27 +1513,39 @@ ADR 0010 规定的精确
 `planned_bytes=67,108,864`，manifest-commit 的 planned byte 是该 job 的精确
 `242 + decimal_digit_count(job)` manifest 长度：job `0..9` 为 243 byte，job
 `10..99` 为 244 byte，job `100..255` 为 245 byte。因此 measured job `0..29` 使用
-243 或 244 byte，cold/warmup job `252..255` 使用 245 byte。每次 accepted admission/
-settlement 后立即采样，必须证明 active task <=64、active planned byte
-<=268,435,456，保留两种 high-water，并最终精确结算为零。每个 active planned-byte
-total 都是对真实 per-job charge 的 checked sum。Planned byte 是 Compute I/O
-admission、planned-byte high-water 与 final settlement 的强制性权威证据，但它仍是
+243 或 244 byte，cold/warmup job `252..255` 使用 245 byte。每个 offer/settlement 都
+必须保留 executor 在与 charge/release 相同的 mutex 下签发的不可变 event。Event 提供
+单调非零 sequence、精确 charged/released task 与 byte delta、适用时关联的 admission
+identity，以及结果 process-global snapshot。采样必须证明 active task <=64、active
+planned byte <=268,435,456、保留两种 high-water，并证明当前 task 精确 settlement。
+Global snapshot 可以包含无关并发 job，也可以在某 job 的 `Final` 时保持非零；row
+boundary 仍必须结算到要求的 process baseline。每个 active planned-byte total 都是
+真实 admitted charge 的 checked sum。Planned byte 与单 task event 是 Compute I/O
+admission、planned-byte high-water 与 task settlement 的强制性权威证据，但仍是
 estimate，不证明 physical memory ownership，也不能替代 RSS 或 ledger/device
 ownership evidence。
 
 必须把 retained event stream 验证为精确状态机：`Initial` 最先；payload offer/
 admission 后接 settlement；manifest offer/admission 后接 settlement；`Final` 最后。
 Capacity-rejection row 只能在当前 offer state 重复，并保持 attempt zero 与相同 charge。
-检查每条 row 的 job、stage、attempt、planned byte、admission/completion status 与
-snapshot limit/phase total，以及 terminal I/O path 与 output status/receipt 的关系。
-缺失、重复、重排、stage/job/status 错误、attempt gap、无效 snapshot 与 `Final` 后
-mutation case 必须使 B1 四个 axis 全部为 `Invalid`。
+检查每条 row 的 job、stage、attempt、planned byte、admission/completion status、精确
+event delta/linkage/sequence 与 snapshot limit/phase total，以及 terminal I/O path 与
+output status/receipt 的关系。Accepted admission 必须 charge 一个 task 与 offered byte，
+其 settlement 必须 release 同一 charge，rejection 必须 charge 零。缺失、重复、重排、
+stage/job/status 错误、attempt gap、undercharge、伪造 accepted-zero、settlement linkage
+错误、无效 event/snapshot 与 `Final` 后 mutation case，必须使 B1 四个 axis 全部为
+`Invalid`。
 
 目标 `OutputStore` 请求并且必须达到 typed `crash-durable`；它结算 payload，最后
 以 no-replace 方式发布 canonical manifest，完成全部 leaf-to-root barrier，然后返回
 ADR 0009 receipt。较弱、不支持或失败的 durability 都会使结果无效。一个 B1 job
 的 commit id、rooted no-replace slot 与 receipt 会绑定完整 job instance 及其 fixture
-job index。只有在该 receipt 和 logical/raw 两种 golden check 后才贡献 throughput。每个 I2
+job index。Store 持有 root 与 slot directory descriptor，并相对于它们执行每个
+slot/payload/manifest mutation、barrier、revalidation 与 cleanup。Root pathname
+replacement 或 symlink substitution 必须 fail closed，不得产生 redirected artifact。
+Slot 创建后的 exception guard 必须先 cancel/wait accepted work，再进行 identity-
+verified cleanup，证明精确 charge 已退休，并允许 exact-identity retry。只有在该 receipt
+和 logical/raw 两种 golden check 后才贡献 throughput。每个 I2
 第十二次 edit（`edit_index=11`）preview/final 都通过相同 Host
 binding 获取两次。已配置 Metal device 允许每个不同 preview/final revision 的
 首次 access 执行一次精确大小的 upload；第二次必须命中相同 residency。该命中不是 broad
@@ -1846,16 +1858,18 @@ environment-digest 输入，但必须可以独立复现。
    resource、全部 37 个 performance component 与 cross-field consistency；如果步骤
    1 或 2 失败，则精确返回 `canonical-schema-invalid`，并在 raw-proof、digest、
    environment-class 或其他 eligibility evaluation 之前停止；
-3. 把每个规范化 field 绑定到保留的 raw observation/proof，并验证每个 field-specific
-   N/A claim、mount normalization decision、稳定 instance/endpoint/anchor identity、
-   固定 performance configuration、被排除 option 的 no-effect proof 与 root-
-   containment proof；
+3. 要求完整 raw proof 保留在 durable evidence 与 JSON 中，把每个规范化 field 绑定到
+   该精确 raw observation/proof，并验证每个 field-specific N/A claim、mount
+   normalization decision、稳定 instance/endpoint/anchor identity、固定 performance
+   configuration、被排除 option 的 no-effect proof 与 root-containment proof；
 4. 对完整精确 manifest byte 计算小写 SHA-256，从而复算
    `storage_environment_digest` 与 `base_environment_digest`；
 5. 解析精确四 field environment-class manifest 并复算
    `environment_class_digest`；独立把其 base-digest payload 绑定到 retained/复算 base，
-   把 B1/M1 known `required`/`none` 与 storage-digest payload 绑定到存在且 eligible 的
-   retained/复算 storage，并把 I1/I2 known `not-applicable`/
+   把 B1/M1 known `required`/`none` 与 storage-digest payload 绑定到存在的 retained/
+   复算 storage，从 retained storage byte 加 raw proof 独立复算完整 eligibility result，
+   将其 eligible flag 与有序 reason 同 retained claim 精确比较，并把 I1/I2 known
+   `not-applicable`/
    `row-has-no-output-commit` 及精确 N/A state/reason/empty payload 绑定到 storage
    evidence 完全不存在；复算 class self-hash 绝不能替代这些 binding；以及
 6. 评估表中每个 canonical-manifest predicate，只输出所有为真的 reason token，每项
@@ -1868,13 +1882,16 @@ performance record。仅 digest 相等不够。Candidate/reference I1/I2 使用�
 compatibility 与固定 storage-N/A environment manifest。Candidate/reference B1/M1、
 B1 cap-1/cap-8 与 M1/paired-B1-cap-8 使用精确 base、storage 和完整 environment-
 class compatibility。M1/paired-I1 只比较精确 base manifest/digest；二者的
-environment manifest 有意不同。Raw field/proof 缺失、state invalid、byte/digest
-mismatch 或 containment 失败，都会使受影响 relative verdict 成为 `invalid`。
+environment manifest 有意不同。Raw field/proof 缺失或漂移、retained eligibility
+陈旧、state invalid、byte/digest mismatch 或 containment 失败，都会使受影响 relative
+verdict 成为 `invalid`。
 
 在比较 peer 前，对 self-validation、cap-one/cap-eight、candidate/reference 与 mixed
 relation 执行该四 field binding check。Mechanism test 必须修改内嵌 base 或 storage
 digest payload，并在实际 retained manifest 不变时复算 environment-class self-hash；
-两种 mutation 仍必须 incompatible。
+两种 mutation 仍必须 incompatible。附加 case 会移除或漂移 retained proof，以及修改
+canonical storage byte 并复算 storage/class digest、但保留 stale eligibility；每种 case
+仍必须 incompatible。
 
 Issue #95 现已增加长期确定性机制测试，覆盖固定 field/type/enum/cardinality 拒绝；
 每种 state/reason/payload 组合；NFC/text 与 scalar encoding，包括接受 uint64 `0`、
@@ -2155,8 +2172,11 @@ binary32-RNE golden、由实际 observation 支撑的 canonical semantic trace �
 resource/outcome drift rejection、stable NFC text 与精确 21/24/4-field schema、
 scalar/collection/fixed-record/mount/全部 37 个 performance component 与 raw-proof rule、
 十一 reason eligibility truth set 与 pair compatibility（包括篡改内嵌 digest 后复算
-class self-hash）、两个带 charge 的 no-replace crash-durable output stage、64-attempt
-exhaustion/cleanup 与 receipt、精确 Compute I/O FSM mutation matrix、四项相互独立的
+class self-hash、proof 缺失/漂移，以及 byte/digest 复算后 eligibility 陈旧）、两个带
+charge 的 no-replace crash-durable output stage、64-attempt exhaustion/cleanup、slot
+创建后 fault rollback/retry、root replacement fail-closed 行为与 receipt、真实并发下
+executor 签发的精确 charge/release，以及 undercharge/伪造零值 Compute I/O FSM mutation
+matrix、四项相互独立的
 inner verdict，以及真实 Host 上精确
 Throughput QoS、cap-1/cap-8、Graph A/B predecessor、content/trace、lifecycle、resource 与
 Compute I/O closure。它们使用 disposable root，不包含机器相关 throughput 或 candidate/

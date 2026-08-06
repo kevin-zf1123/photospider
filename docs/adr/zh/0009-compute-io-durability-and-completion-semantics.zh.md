@@ -184,6 +184,16 @@ output intent/value；只有 `OutputStore` 编排能在 Run 结果已知后发�
 9. 恢复时识别已提交 manifest，重建 commit index，并保守删除或隔离未完成
    stage 和 orphan。
 
+具体 transaction 会保留已打开的所选 canonical root descriptor 与每个全新 private
+slot descriptor；所选 root pathname 是 evidence，不是持续 mutation authority。
+Creation、file access、publication、barrier、revalidation 与 cleanup 始终采用
+descriptor-relative 操作，并验证预期 filesystem identity。因此 root path replacement
+或 symlink substitution 会使最终 binding 失败，而不会重定向写入。Allocation-free
+transaction guard 在 slot 创建后立即接管 ownership。若后续 factory、observation、
+wait 或 receipt 工作抛异常，guard 会先 cancel 并等待每个 accepted Compute I/O task，
+证明其精确 charge 已退休，再只删除 identity-verified private leaf 与 slot。原 commit
+identity 保持可重试。
+
 回执标识 commit、descriptor/content、namespace、version 与达到的 durability。
 它不是可变 cache 或 staging path。默认策略绝不覆盖已提交输出；替换使用显式
 新 version/commit identity。
@@ -248,6 +258,14 @@ Run/transaction lifetime token，并返回 `Succeeded`、`Failed` 或 `Cancelled
 typed completion。Cancellation、callback failure、late return 与 graceful shutdown
 都会恰好一次释放该 token 与两项账本。CPU compute worker 不能同步等待 completion。
 
+executor 还负责签发归属 proof。它在与每次 admission decision 相同的 mutex 下签发
+不可变 event，其中包含单调非零 sequence、精确 task/byte charge delta、类型化 decision
+与结果 process-global snapshot；又在与 settlement release 相同的 mutex 下签发第二个
+不可变 event，关联该 admission，并携带精确 released delta 与结果 snapshot。Rejected
+offer 的 delta 为零。Snapshot 可以包含无关并发工作，可用于 limit/high-water 验证，
+但不能替代该 task 自己的 charge/release event。当 consumer 只观察部分 process work
+时，event sequence 允许存在 gap。
+
 唯一 I/O worker 不能向自身 owning executor 准入另一个任务：准入仍开放时，该调用
 会在改变任一 budget 或 lazy factory 前返回 inactive `InvalidRequest`。Owning worker
 上的 completion wait 可以复制已经 terminal 的 fact，但会在 condition-variable wait 前
@@ -283,10 +301,11 @@ admission，不决定该 policy。
 
 ### 安全与 durability 能力是显式的
 
-持久化 owner 在调用方授权 root 下解析归一化路径，防止 symlink escape，以
-no-follow 方式创建私有同目录 stage，校验文件系统 identity，并统计 in-flight
-与 retained quota。不受信任的 plugin/codec 只能取得 stage access，绝不取得
-发布权威。
+持久化 owner 在调用方授权 root 下解析归一化路径，以 no-follow 方式打开并保留这些
+root/slot directory authority，防止 symlink escape，通过 descriptor-relative
+operation 创建和修改私有同目录 stage，校验文件系统 identity 与最终 path-to-
+descriptor binding，并统计 in-flight 与 retained quota。不受信任的 plugin/codec
+只能取得 stage access，绝不取得发布权威。
 
 回执至少区分：
 

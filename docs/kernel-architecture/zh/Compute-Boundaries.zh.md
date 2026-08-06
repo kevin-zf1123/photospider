@@ -467,16 +467,20 @@ collector；#96 必须增加剩余 M1 composition。任何 placeholder zero valu
 timestamp。I2 使用合法 RT-preview/HP-final child descriptor，记录 preview
 admission/visible、final trigger/admission/visible 与 generation-current check。Logical
 equality 是 typed available `ContentDigest`。B1 记录每个 `ComputeIoExecutor` task
-charge、accepted admission/settlement snapshot、planned-byte high-water、ADR 0009
-requested/achieved durability、完整 output receipt、raw payload/manifest hash，以及
-独立 canonical semantic trace。M1 除 candidate/reference comparison provenance 外，
-还记录两个 same-ordinal isolated pair reference。
+charge、带 executor 签发的精确 delta/linkage/sequence 与同锁 process snapshot 的
+accepted admission/settlement event、planned-byte high-water、ADR 0009 requested/
+achieved durability、完整 output receipt、raw payload/manifest hash，以及独立 canonical
+semantic trace。适用 B1/M1 environment evidence 还会保留 raw storage proof，使每一侧
+compatibility 都能复算并精确匹配 eligibility。M1 除 candidate/reference comparison
+provenance 外，还记录两个 same-ordinal isolated pair reference。
 
-这些仍是画像 harness/evidence 语义。精确 per-job planned-byte charge 及其 event-
-aligned snapshot 是 Compute I/O admission、planned-byte high-water 与 final settlement
-的强制性权威证据。它们不会向当前 `BenchmarkResult` 增加 field、改变 `ComputeRun`、
-证明 physical memory ownership、替代 diagnostic RSS 或 ledger/device ownership
-evidence，也不会把当前 IPC delivery store 提升为 durable output authority。
+这些仍是画像 harness/evidence 语义。精确 per-job planned-byte charge 与 executor 签发的
+admission/settlement delta 是 Compute I/O admission、planned-byte high-water 与该 task
+settlement 的强制性权威证据。同锁 process snapshot 可以包含无关 work，也可以在单个
+job 的 final observation 时保持非零；row teardown 仍必须返回要求的 baseline。这些事实
+不会向当前 `BenchmarkResult` 增加 field、改变 `ComputeRun`、证明 physical memory
+ownership、替代 diagnostic RSS 或 ledger/device ownership evidence，也不会把当前 IPC
+delivery store 提升为 durable output authority。
 
 Ready store 对每次 dispatch 按
 `work_units + ceil(complete_ready_grant_bytes / 4096)` 计费。每个 Graph 都在已选 service class

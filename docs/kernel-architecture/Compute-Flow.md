@@ -498,11 +498,15 @@ Issue #95 adds one deliberately narrower source-private exception for the B1
 manual/release profile. `B1OutputStore` reuses the current process
 `ComputeIoExecutor` to perform two exact charged tasks, then proves synchronized
 payload bytes, manifest-last no-replace publication, directory barriers, and a
-typed crash-durable receipt below a selected canonical root. This path is
-invoked only after the B1 Run result is acquired through the ordinary embedded
-Host compute path. It does not move general HP cache persistence after Graph
-publication, replace the daemon delivery store, or make durable output part of
-public Host/CLI/IPC success.
+typed crash-durable receipt below a selected canonical root. It retains no-
+follow root/slot directory descriptors for all mutation, revalidation, barrier,
+and cleanup authority; root-path replacement cannot redirect writes. A post-
+slot transaction guard settles accepted Compute I/O charge before identity-safe
+exception cleanup and exact-identity retry. This path is invoked only after the
+B1 Run result is acquired through the ordinary embedded Host compute path. It
+does not move general HP cache persistence after Graph publication, replace the
+daemon delivery store, or make durable output part of public Host/CLI/IPC
+success.
 
 ## GlobalHighPrecision
 

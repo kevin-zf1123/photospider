@@ -225,6 +225,18 @@ The authority performs this protocol:
 9. on recovery, recognize committed manifests, reconstruct the commit index,
    and conservatively remove or quarantine incomplete stages and orphans.
 
+A concrete transaction retains an opened descriptor for the selected canonical
+root and for each fresh private slot; the selected root pathname is evidence,
+not continuing mutation authority. Creation, file access, publication,
+barriers, revalidation, and cleanup remain descriptor-relative and verify the
+expected filesystem identities. A root-path replacement or symlink
+substitution therefore fails the final binding instead of redirecting writes.
+An allocation-free transaction guard takes ownership immediately after slot
+creation. If later factory, observation, wait, or receipt work throws, the guard
+first cancels and waits for every accepted Compute I/O task, proves its exact
+charge retired, then removes only identity-verified private leaves and the slot.
+The original commit identity remains retryable.
+
 The receipt identifies commit, descriptor/content, namespace, version, and
 achieved durability. It is not a mutable cache or staging path. The default
 policy never overwrites a committed output; replacement uses an explicit new
@@ -306,6 +318,17 @@ callback failure, late return, and graceful shutdown release that token and
 both accounts exactly once. CPU compute workers cannot synchronously wait on
 the completion.
 
+The executor also authors the attribution proof. Under the same mutex as every
+admission decision it mints an immutable event containing a monotonic nonzero
+sequence, exact task/byte charge delta, typed decision, and the resulting
+process-global snapshot. Under the same mutex as settlement release it mints a
+second immutable event linked to that admission and carrying the exact released
+delta plus resulting snapshot. A rejected offer has zero delta. The snapshot
+may include unrelated concurrent work and is useful for limit/high-water
+validation, but it is not a substitute for the task's own charge or release
+event. Event sequences may contain gaps when consumers observe only a subset of
+process work.
+
 The sole I/O worker cannot admit another task to its owning executor: while
 admission remains open, that call returns inactive `InvalidRequest` before
 either budget or the lazy factory changes. A completion wait on the owning
@@ -352,10 +375,11 @@ transaction owner.
 ### Security and durability capability are explicit
 
 Persistence owners resolve normalized paths below caller-authorized roots,
-prevent symlink escape, create private same-directory stages without following
-links, verify filesystem identity, and account for in-flight and retained
-quota. Untrusted plugins/codecs receive stage access only, never publication
-authority.
+open and retain those root/slot directory authorities without following links,
+prevent symlink escape, create and mutate private same-directory stages through
+descriptor-relative operations, verify filesystem identity and the final
+path-to-descriptor binding, and account for in-flight and retained quota.
+Untrusted plugins/codecs receive stage access only, never publication authority.
 
 Receipts distinguish at least:
 

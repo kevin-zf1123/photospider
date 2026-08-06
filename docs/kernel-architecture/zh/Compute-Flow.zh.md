@@ -387,10 +387,13 @@ output commit 尚未实现。
 Issue #95 增加了一个有意更窄、只用于 B1 manual/release profile 的源码私有例外。
 `B1OutputStore` 会复用当前进程 `ComputeIoExecutor` 执行两个带精确 charge 的 task，随后
 证明 payload byte 已同步、manifest-last no-replace publication、directory barrier 与位于所选
-canonical root 下的类型化 crash-durable receipt。该路径只会在 B1 Run result 已通过普通
-embedded Host compute path 获取之后调用。它不会把通用 HP cache persistence 移到 Graph
-publication 之后，不会替换 daemon delivery store，也不会让 durable output 成为 public
-Host/CLI/IPC success 的一部分。
+canonical root 下的类型化 crash-durable receipt。它会保留 no-follow root/slot directory
+descriptor，作为全部 mutation、revalidation、barrier 与 cleanup authority；root-path
+replacement 不能重定向写入。Slot 创建后的 transaction guard 会先结算 accepted Compute
+I/O charge，再进行 identity-safe exception cleanup 与 exact-identity retry。该路径只会在 B1
+Run result 已通过普通 embedded Host compute path 获取之后调用。它不会把通用 HP cache
+persistence 移到 Graph publication 之后，不会替换 daemon delivery store，也不会让 durable
+output 成为 public Host/CLI/IPC success 的一部分。
 
 ## GlobalHighPrecision
 

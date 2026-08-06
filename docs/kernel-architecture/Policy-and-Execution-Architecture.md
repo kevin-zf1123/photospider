@@ -380,6 +380,14 @@ retains an explicit transaction lifetime token and returns a typed completion.
 Success, failure, queued cancellation, running late cancellation, construction
 rollback, and graceful shutdown converge on exactly-once account release.
 
+The executor authors immutable attribution events at those same accounting
+linearization points. Admission records a monotonic nonzero sequence, typed
+decision, exact charged task/byte delta, and same-lock process snapshot;
+settlement links back to that admission and records the exact released delta
+plus its same-lock snapshot. Rejection has zero delta. Process snapshots can
+include unrelated concurrent users and sequence gaps are valid for a consumer
+that observes only a subset; neither fact weakens the exact per-task proof.
+
 The worker and completion boundaries prevent identity-specific self-blocking.
 While admission remains open, the owning I/O worker's nested submission returns
 inactive `InvalidRequest` before either budget or the lazy factory changes; a
@@ -667,23 +675,31 @@ no second scheduler, worker pool, ledger, Graph authority, or public request.
 
 `B1OutputStore` is the B1 manual/release output owner, not the still-target
 general product `OutputStore` from ADR 0009. Under one preselected canonical
-root it creates a fresh no-replace occurrence slot, then submits the exact
-67,108,864-byte payload charge and exact manifest charge as two ordered tasks
-to the process executor. It writes tight little-endian RGBA binary32 bytes,
-syncs and revalidates the payload, publishes the canonical manifest last and
-without replacement, completes leaf-to-root directory barriers, and only then
-returns a typed crash-durable receipt. Every accepted admission and settlement
-retains the complete occurrence/task identity and an event-aligned I/O
-snapshot; capacity retry keeps attempt zero and the same charge. Planned bytes
-are authoritative only for Compute I/O admission, high-water, and final
-settlement, not physical memory ownership, durability, RSS, or ledger/device
-evidence.
+root it retains a no-follow root descriptor, creates and retains a fresh
+no-replace occurrence-slot descriptor, then submits the exact 67,108,864-byte
+payload charge and exact manifest charge as two ordered tasks to the process
+executor. Every slot/payload/manifest mutation, barrier, revalidation, and
+cleanup remains descriptor-relative, so pathname replacement fails the final
+binding instead of redirecting writes. An allocation-free transaction guard
+settles accepted work before identity-verified exception cleanup and keeps the
+same commit identity retryable. The store writes tight little-endian RGBA
+binary32 bytes, syncs and revalidates the payload, publishes the canonical
+manifest last and without replacement, completes leaf-to-root directory
+barriers, and only then returns a typed crash-durable receipt. Every offer and
+settlement retains the complete occurrence/task identity and executor-authored
+exact delta plus same-lock I/O snapshot; capacity retry keeps attempt zero and
+the same charge. Planned bytes and per-task events are authoritative only for
+Compute I/O admission, high-water, and exact task settlement, not physical
+memory ownership, durability, RSS, or ledger/device evidence.
 
 The source-private B1 profile, environment validator, and evidence evaluator
 also implement the immutable 34-seed logical/raw golden table, canonical
 semantic trace, exact 21/24/4-field environment schemas, raw backend/mount/
 performance proof mappings, eligibility/root-containment/compatibility, and
-four independent inner verdicts. `b1_immutable_benchmark` is
+four independent inner verdicts. Applicable evidence and JSON retain the raw
+storage proof; every compatibility side recomputes eligibility from its own
+retained canonical bytes plus that proof and exact-matches the retained claim.
+`b1_immutable_benchmark` is
 `EXCLUDE_FROM_ALL`, absent from CTest, and writes one exact 34-job inner row
 below a caller-selected eligible root. Building it, showing its help, or
 passing deterministic tests is not a B1 machine-conformance result; this
