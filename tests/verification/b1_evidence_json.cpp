@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -593,25 +594,185 @@ Json optional_eligibility_json(
 }
 
 /**
+ * @brief Returns the closed observation-state token for JSON evidence.
+ * @param state Retained raw field state.
+ * @return Process-lifetime exact token.
+ * @throws std::logic_error for an invalid enum representation.
+ */
+const char* observation_state_text(B1ObservationState state) {
+  switch (state) {
+    case B1ObservationState::Known:
+      return "known";
+    case B1ObservationState::Unknown:
+      return "unknown";
+    case B1ObservationState::Unobserved:
+      return "unobserved";
+    case B1ObservationState::NotApplicable:
+      return "not-applicable";
+    case B1ObservationState::Unsupported:
+      return "unsupported";
+    case B1ObservationState::Unprovable:
+      return "unprovable";
+  }
+  throw std::logic_error("invalid B1 observation state");
+}
+
+/**
+ * @brief Returns the closed backend token for JSON evidence.
+ * @param backend Retained raw backend kind.
+ * @return Process-lifetime exact token.
+ * @throws std::logic_error for an invalid enum representation.
+ */
+const char* storage_backend_text(B1StorageBackendKind backend) {
+  switch (backend) {
+    case B1StorageBackendKind::Filesystem:
+      return "filesystem";
+    case B1StorageBackendKind::NetworkFilesystem:
+      return "network-filesystem";
+    case B1StorageBackendKind::ObjectStore:
+      return "object-store";
+    case B1StorageBackendKind::MemoryStore:
+      return "memory-store";
+    case B1StorageBackendKind::Composite:
+      return "composite";
+  }
+  throw std::logic_error("invalid B1 storage backend");
+}
+
+/**
+ * @brief Encodes complete typed raw storage observations for readable JSON.
+ * @param evidence Strictly parsed canonical raw evidence.
+ * @return Backend, fields, mount, performance, transaction, and containment.
+ * @throws nlohmann/std allocation failures unchanged.
+ */
+Json storage_raw_evidence_json(const B1StorageRawEvidence& evidence) {
+  Json fields = Json::array();
+  for (const auto& [name, observation] : evidence.backend.fields) {
+    fields.push_back(Json{{"name", name},
+                          {"state", observation_state_text(observation.state)},
+                          {"reason", observation.reason},
+                          {"type", observation.type},
+                          {"mapped_payload", observation.payload},
+                          {"raw_payload", observation.raw_payload},
+                          {"proof_kind", observation.proof_kind},
+                          {"proof_identity", observation.proof_identity}});
+  }
+  Json native_options = Json::array();
+  for (const B1NativeMountOption& option : evidence.mount.options) {
+    native_options.push_back(
+        Json{{"key", option.key}, {"value", option.value}});
+  }
+  Json defaults = Json::array();
+  for (const auto& [key, value] : evidence.mount.defaults) {
+    defaults.push_back(Json{{"key", key}, {"value", value}});
+  }
+  Json excluded_options = Json::array();
+  for (const B1ExcludedMountOptionProof& proof :
+       evidence.mount.excluded_options) {
+    excluded_options.push_back(Json{{"key", proof.option.key},
+                                    {"value", proof.option.value},
+                                    {"proof_identity", proof.proof_identity}});
+  }
+  Json events = Json::array();
+  for (const B1StorageTransactionEvent& event : evidence.transaction.events) {
+    events.push_back(
+        Json{{"kind", event.kind},
+             {"observation_identity", event.observation_identity}});
+  }
+  Json destinations = Json::array();
+  for (const B1ContainmentDestinationObservation& destination :
+       evidence.containment.destinations) {
+    destinations.push_back(
+        Json{{"spelling", destination.spelling.generic_string()},
+             {"resolved", destination.resolved.generic_string()},
+             {"root_authority_identity", destination.root_authority_identity},
+             {"owner_kind", destination.owner_kind},
+             {"owner_identity", destination.owner_identity}});
+  }
+  const B1StorageTransactionRawObservation& transaction = evidence.transaction;
+  return Json{
+      {"backend",
+       Json{{"kind", storage_backend_text(evidence.backend.backend)},
+            {"selected_root", evidence.backend.selected_root.generic_string()},
+            {"resolved_root", evidence.backend.resolved_root.generic_string()},
+            {"fields", std::move(fields)}}},
+      {"mount",
+       Json{{"native_options", std::move(native_options)},
+            {"defaults", std::move(defaults)},
+            {"case_mode",
+             evidence.mount.case_mode == B1MountCaseMode::CaseSensitive
+                 ? "case-sensitive"
+                 : "ascii-case-insensitive"},
+            {"duplicate_policy", evidence.mount.duplicate_policy ==
+                                         B1MountDuplicatePolicy::RejectConflicts
+                                     ? "reject-conflicts"
+                                     : "last-wins"},
+            {"excluded_options", std::move(excluded_options)},
+            {"observation_identity", evidence.mount.observation_identity}}},
+      {"performance",
+       Json{{"initial_components", evidence.performance_components},
+            {"final_components", evidence.performance_proofs.final_components},
+            {"proof_kinds", evidence.performance_proofs.proof_kinds},
+            {"initial_observation_identity",
+             evidence.performance_proofs.initial_observation_identity},
+            {"final_observation_identity",
+             evidence.performance_proofs.final_observation_identity},
+            {"mapped_option_proof_identities",
+             evidence.performance_proofs.mapped_option_proof_identities},
+            {"conflicting_components",
+             evidence.performance_proofs.conflicting_components}}},
+      {"transaction",
+       Json{
+           {"output_store_contract_id", transaction.output_store_contract_id},
+           {"output_store_contract_generation",
+            transaction.output_store_contract_generation},
+           {"backend_semantics_id", transaction.backend_semantics_id},
+           {"backend_semantics_generation",
+            transaction.backend_semantics_generation},
+           {"backend_instance_payload", transaction.backend_instance_payload},
+           {"mount_identity_payload", transaction.mount_identity_payload},
+           {"durability_endpoint_payload",
+            transaction.durability_endpoint_payload},
+           {"durability_anchor_payload", transaction.durability_anchor_payload},
+           {"commit_semantics_payload", transaction.commit_semantics_payload},
+           {"durability_capabilities_payload",
+            transaction.durability_capabilities_payload},
+           {"requested_durability", transaction.requested_durability},
+           {"achieved_durability", transaction.achieved_durability},
+           {"receipt_commit_id", transaction.receipt_commit_id},
+           {"receipt_root", transaction.receipt_root.generic_string()},
+           {"receipt_slot", transaction.receipt_slot.generic_string()},
+           {"published_manifest_identity",
+            transaction.published_manifest_identity},
+           {"events", std::move(events)}}},
+      {"containment",
+       Json{{"selected_root",
+             evidence.containment.selected_root.generic_string()},
+            {"resolved_root",
+             evidence.containment.resolved_root.generic_string()},
+            {"root_authority_identity",
+             evidence.containment.root_authority_identity},
+            {"destinations", std::move(destinations)}}}};
+}
+
+/**
  * @brief Encodes one optional independently retained storage raw proof.
- * @param value Optional seven-predicate proof used for eligibility derivation.
- * @return Complete proof object or null.
- * @throws nlohmann allocation failures unchanged.
+ * @param value Optional canonical proof bytes used for eligibility replay.
+ * @return Canonical bytes, digest, and complete readable raw evidence or null.
+ * @throws Parsing, nlohmann, and standard allocation failures unchanged.
  */
 Json optional_storage_raw_proof_json(
     const std::optional<B1StorageRawProof>& value) {
   if (!value.has_value()) {
     return nullptr;
   }
+  const B1StorageRawEvidence evidence =
+      parse_b1_storage_raw_proof(value->canonical_bytes);
   return Json{
-      {"raw_mapping_complete", value->raw_mapping_complete},
-      {"commit_semantics_consistent", value->commit_semantics_consistent},
-      {"durability_path_consistent", value->durability_path_consistent},
-      {"mount_normalization_proved", value->mount_normalization_proved},
-      {"not_applicable_proofs_valid", value->not_applicable_proofs_valid},
-      {"performance_configuration_proved",
-       value->performance_configuration_proved},
-      {"root_containment_proved", value->root_containment_proved}};
+      {"schema", "execution-profile-b1-storage-raw-proof-v1"},
+      {"canonical_bytes", value->canonical_bytes},
+      {"canonical_digest", sha256_json(b1_sha256(value->canonical_bytes))},
+      {"raw_evidence", storage_raw_evidence_json(evidence)}};
 }
 
 /**

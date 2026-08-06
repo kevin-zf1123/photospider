@@ -172,7 +172,9 @@ enum class B1OutputStoreFaultPoint : std::uint8_t {
   /** @brief Root binding passed immediately before fd-relative slot creation.
    */
   AfterRootBindingVerified,
-  /** @brief Slot and retained slot descriptor exist, before task-state setup.
+  /** @brief Private slot name exists, before descriptor acquisition/recheck. */
+  AfterStagingSlotMkdirBeforeOpen,
+  /** @brief Private slot and retained descriptor exist, before task setup.
    */
   AfterSlotCreated,
   /** @brief Accepted budget is charged and the lazy task factory is entered. */
@@ -184,9 +186,28 @@ enum class B1OutputStoreFaultPoint : std::uint8_t {
   BeforeTaskWork,
   /** @brief Accepted task settled and the transaction no longer owns a wait. */
   AfterTaskSettled,
+  /** @brief Both tasks settled and the private slot is ready to publish. */
+  BeforeSlotPublication,
   /** @brief Both I/O tasks succeeded immediately before receipt construction.
    */
   BeforeReceiptAssembly,
+};
+
+/**
+ * @brief Closed strict-cleanup operation vocabulary for fault/race tests.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class B1OutputStoreCleanupOperation : std::uint8_t {
+  /** @brief Exact private manifest leaf, when still present. */
+  PrivateManifestLeaf,
+  /** @brief Exact published manifest leaf inside the transaction slot. */
+  ManifestLeaf,
+  /** @brief Exact payload leaf inside the transaction slot. */
+  PayloadLeaf,
+  /** @brief Exact transaction slot directory in its current namespace. */
+  SlotDirectory,
+  /** @brief Exact private staging-anchor directory under the held root. */
+  StagingAnchorDirectory,
 };
 
 /**
@@ -237,6 +258,25 @@ struct B1OutputStoreOptions final {
 
   /** @brief Borrowed context paired with `fault_injector`. */
   void* fault_injector_context = nullptr;
+
+  /**
+   * @brief Optional strict-cleanup race/error injection callback.
+   * @param context Borrowed caller context valid through `commit()`.
+   * @param operation Exact identity-verified object about to be removed.
+   * @return Zero to continue, otherwise an errno value to inject.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The callback runs only after accepted work has settled and after the
+   * first identity check. Production leaves it null. A test may rename an
+   * object away and back to exercise the mandatory second identity check.
+   */
+  using CleanupInjector =
+      int (*)(void* context, B1OutputStoreCleanupOperation operation) noexcept;
+
+  /** @brief Optional strict-cleanup injector; production leaves null. */
+  CleanupInjector cleanup_injector = nullptr;
+
+  /** @brief Borrowed context paired with `cleanup_injector`. */
+  void* cleanup_injector_context = nullptr;
 };
 
 /**

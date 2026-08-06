@@ -28,6 +28,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <stdio.h>
+#elif defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #endif
 
 #include "core/value_image_adapter.hpp"  // NOLINT(build/include_subdir)
@@ -87,6 +92,21 @@ class B1RootBindingError final : public std::runtime_error {
    */
   explicit B1RootBindingError(const std::string& message)
       : std::runtime_error(message) {}
+};
+
+/**
+ * @brief Typed internal failure for an occupied immutable public slot.
+ * @throws Nothing beyond standard runtime-error string allocation.
+ */
+class B1SlotExistsError final : public std::runtime_error {
+ public:
+  /**
+   * @brief Creates the closed no-replace collision failure.
+   * @throws std::bad_alloc when diagnostic storage cannot allocate.
+   */
+  B1SlotExistsError()
+      : std::runtime_error("The immutable B1 occurrence slot already exists.") {
+  }
 };
 
 /**
@@ -406,8 +426,14 @@ struct B1CommitTaskState final {
   std::string manifest;
   /** @brief Verified payload digest written by the payload task. */
   B1Sha256Digest payload_digest;
+  /** @brief Creation-time payload identity, once the fd has been verified. */
+  std::optional<B1FileIdentity> payload_identity;
   /** @brief Verified manifest digest written by the commit task. */
   B1Sha256Digest manifest_digest;
+  /** @brief Private-manifest identity while its private name exists. */
+  std::optional<B1FileIdentity> private_manifest_identity;
+  /** @brief Published manifest identity after its no-replace hard link. */
+  std::optional<B1FileIdentity> manifest_identity;
   /** @brief Stable published manifest filesystem identity. */
   std::string published_identity;
 };
@@ -432,6 +458,7 @@ void write_and_validate_payload(B1CommitTaskState* state) {
   ScopedFileDescriptor owner(descriptor);
   const B1FileIdentity created_identity =
       file_identity(regular_file_stat(owner.get(), "fstat new B1 payload"));
+  state->payload_identity = created_identity;
   B1Sha256 write_hash;
   std::vector<std::byte> converted;
   if (!native_little_endian()) {
@@ -567,23 +594,14 @@ B1Sha256Digest validate_exact_file_at(
 }
 
 /**
- * @brief Writes, publishes, barriers, and revalidates a slot-relative manifest.
+ * @brief Writes, links, barriers, and revalidates a private-slot manifest.
  * @param state Complete task state with verified payload digest/manifest.
- * @param root_descriptor Held original root directory capability.
- * @param root Canonical root spelling retained only for binding proof.
- * @param root_device Constructor-time root device.
- * @param root_inode Constructor-time root inode.
- * @param slot_name Root-relative occurrence slot leaf.
- * @param slot_identity Creation-time held slot identity.
- * @return Nothing after leaf-to-root barriers and final binding revalidation.
- * @throws File, durability, root-binding, and revalidation failures unchanged.
+ * @return Nothing after both leaves and the private slot are durable and exact.
+ * @throws File, durability, and revalidation failures unchanged.
+ * @note Public visibility is a later atomic directory publication after this
+ * accepted task settles and releases its executor charge.
  */
-void commit_and_validate_manifest(B1CommitTaskState* state, int root_descriptor,
-                                  const std::filesystem::path& root,
-                                  std::uint64_t root_device,
-                                  std::uint64_t root_inode,
-                                  const std::string& slot_name,
-                                  const B1FileIdentity& slot_identity) {
+void commit_and_validate_manifest(B1CommitTaskState* state) {
   if (state == nullptr || state->slot_descriptor < 0) {
     throw std::invalid_argument("B1 manifest task state is invalid.");
   }
@@ -596,6 +614,7 @@ void commit_and_validate_manifest(B1CommitTaskState* state, int root_descriptor,
   ScopedFileDescriptor owner(descriptor);
   const B1FileIdentity private_identity = file_identity(
       regular_file_stat(owner.get(), "fstat private B1 manifest"));
+  state->private_manifest_identity = private_identity;
   write_all(owner.get(),
             reinterpret_cast<const std::byte*>(state->manifest.data()),
             state->manifest.size());
@@ -609,9 +628,11 @@ void commit_and_validate_manifest(B1CommitTaskState* state, int root_descriptor,
     }
     throw_errno("linkat publish B1 manifest no-replace");
   }
+  state->manifest_identity = private_identity;
   if (::unlinkat(state->slot_descriptor, kPrivateManifestName, 0) != 0) {
     throw_errno("unlinkat private B1 manifest after publication");
   }
+  state->private_manifest_identity.reset();
 
   B1FileIdentity published_identity;
   state->manifest_digest = validate_exact_file_at(
@@ -623,10 +644,6 @@ void commit_and_validate_manifest(B1CommitTaskState* state, int root_descriptor,
   state->published_identity = identity_text.str();
 
   synchronize_descriptor(state->slot_descriptor, "directory");
-  synchronize_descriptor(root_descriptor, "directory");
-  verify_slot_binding(root_descriptor, state->slot_descriptor, slot_name,
-                      slot_identity);
-  verify_root_binding(root, root_descriptor, root_device, root_inode);
   const B1Sha256Digest after_barrier =
       validate_exact_file_at(state->slot_descriptor, kManifestName,
                              state->manifest, &published_identity);
@@ -637,72 +654,251 @@ void commit_and_validate_manifest(B1CommitTaskState* state, int root_descriptor,
 }
 
 /**
- * @brief Removes one known slot-relative leaf while containing all failures.
- * @param slot_descriptor Held occurrence-slot directory.
- * @param leaf One fixed store-owned leaf.
- * @return Nothing; absence and cleanup failures are contained.
- * @throws Nothing.
+ * @brief Creates, observes, opens, and revalidates one private directory.
+ * @param parent_descriptor Held trusted parent directory.
+ * @param name Single private child name.
+ * @param options Source-private fault seam policy.
+ * @param expose_handoff_seam Whether to invoke the slot replacement seam.
+ * @param identity Output for the pre-open and descriptor-matched identity.
+ * @return Newly owned directory descriptor.
+ * @throws File, hook, or revalidation failures unchanged.
+ * @note No child mutation occurs before the named pre-open identity equals the
+ * opened descriptor identity. Failure never removes the current name because
+ * it may already denote an unowned replacement.
  */
-void unlink_known_leaf_noexcept(int slot_descriptor,
-                                const char* leaf) noexcept {
-  if (::unlinkat(slot_descriptor, leaf, 0) != 0 && errno != ENOENT) {
-    return;
+int create_and_open_private_directory(int parent_descriptor,
+                                      const std::string& name,
+                                      const B1OutputStoreOptions& options,
+                                      bool expose_handoff_seam,
+                                      B1FileIdentity* identity) {
+  if (identity == nullptr) {
+    throw std::invalid_argument(
+        "B1 private directory identity output is null.");
   }
-}
-
-/**
- * @brief Best-effort removes one exact verified occurrence slot fd-relatively.
- * @param root_descriptor Held original root directory.
- * @param slot_descriptor Held occurrence-slot directory.
- * @param slot_name Exact root-relative leaf.
- * @param expected Exact creation-time slot identity.
- * @return Nothing.
- * @throws Nothing; identity drift refuses broad or redirected cleanup.
- */
-void cleanup_failed_slot(int root_descriptor, int slot_descriptor,
-                         const std::string& slot_name,
-                         const B1FileIdentity& expected) noexcept {
-  struct stat held{};
+  if (::mkdirat(parent_descriptor, name.c_str(), S_IRWXU) != 0) {
+    if (errno == EEXIST) {
+      throw B1RevalidationError("B1 private staging namespace already exists.");
+    }
+    throw_errno("mkdirat B1 private staging directory");
+  }
   struct stat named{};
-  if (::fstat(slot_descriptor, &held) != 0 || !S_ISDIR(held.st_mode) ||
-      file_identity(held) != expected ||
-      ::fstatat(root_descriptor, slot_name.c_str(), &named,
-                AT_SYMLINK_NOFOLLOW) != 0 ||
-      !S_ISDIR(named.st_mode) || file_identity(named) != expected) {
-    return;
+  if (::fstatat(parent_descriptor, name.c_str(), &named, AT_SYMLINK_NOFOLLOW) !=
+          0 ||
+      !S_ISDIR(named.st_mode)) {
+    throw B1RevalidationError(
+        "B1 private staging directory cannot be observed safely.");
   }
-  unlink_known_leaf_noexcept(slot_descriptor, kPrivateManifestName);
-  unlink_known_leaf_noexcept(slot_descriptor, kManifestName);
-  unlink_known_leaf_noexcept(slot_descriptor, kPayloadName);
-  static_cast<void>(
-      ::unlinkat(root_descriptor, slot_name.c_str(), AT_REMOVEDIR));
+  const B1FileIdentity before_open = file_identity(named);
+  if (expose_handoff_seam) {
+    invoke_fault_injector(
+        options, B1OutputStoreFaultPoint::AfterStagingSlotMkdirBeforeOpen);
+  }
+  const int descriptor =
+      ::openat(parent_descriptor, name.c_str(),
+               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (descriptor < 0) {
+    throw B1RevalidationError(
+        "B1 private staging directory changed before descriptor takeover.");
+  }
+  ScopedFileDescriptor owner(descriptor);
+  const B1FileIdentity after_open = file_identity(
+      directory_stat(owner.get(), "fstat B1 private staging directory"));
+  if (after_open != before_open) {
+    throw B1RevalidationError(
+        "B1 private staging directory identity changed during takeover.");
+  }
+  *identity = after_open;
+  return owner.release();
 }
 
 /**
- * @brief Owns failed-slot cleanup and at most one accepted task settlement.
+ * @brief Atomically publishes one complete private directory without replace.
+ * @param staging_descriptor Held private staging anchor.
+ * @param staging_name Exact private child slot.
+ * @param root_descriptor Held selected public root.
+ * @param slot_name Exact immutable public occurrence name.
+ * @return Nothing only after one atomic no-replace namespace transition.
+ * @throws B1SlotExistsError when the public destination is occupied.
+ * @throws B1DurabilityError when the platform primitive is unavailable.
+ * @throws std::system_error for other publication failures.
+ */
+void publish_private_directory_no_replace(int staging_descriptor,
+                                          const std::string& staging_name,
+                                          int root_descriptor,
+                                          const std::string& slot_name) {
+  int result = -1;
+#if defined(__APPLE__)
+  result = ::renameatx_np(staging_descriptor, staging_name.c_str(),
+                          root_descriptor, slot_name.c_str(), RENAME_EXCL);
+#elif defined(__linux__)
+  result = static_cast<int>(::syscall(SYS_renameat2, staging_descriptor,
+                                      staging_name.c_str(), root_descriptor,
+                                      slot_name.c_str(), 1U));
+#else
+  throw B1DurabilityError(
+      "B1 atomic directory no-replace publication is unsupported.");
+#endif
+  if (result == 0) {
+    return;
+  }
+  if (errno == EEXIST || errno == ENOTEMPTY) {
+    throw B1SlotExistsError();
+  }
+  if (errno == ENOSYS || errno == EINVAL || errno == ENOTSUP ||
+      errno == EOPNOTSUPP) {
+    throw B1DurabilityError(
+        "B1 atomic directory no-replace publication is unsupported.");
+  }
+  throw_errno("publish B1 occurrence directory no-replace");
+}
+
+/**
+ * @brief Runs the optional cleanup seam after one exact identity check.
+ * @param options Source-private cleanup policy.
+ * @param operation Exact object about to be removed.
+ * @return Nothing when removal should proceed.
+ * @throws std::system_error for an injected errno.
+ */
+void invoke_cleanup_injector(const B1OutputStoreOptions& options,
+                             B1OutputStoreCleanupOperation operation) {
+  if (options.cleanup_injector == nullptr) {
+    return;
+  }
+  const int injected =
+      options.cleanup_injector(options.cleanup_injector_context, operation);
+  if (injected != 0) {
+    throw std::system_error(injected, std::generic_category(),
+                            "injected B1 strict cleanup failure");
+  }
+}
+
+/**
+ * @brief Strictly removes one optional exact store-owned regular leaf.
+ * @param directory_descriptor Held owning directory.
+ * @param leaf Exact fixed leaf name.
+ * @param expected Recorded creation identity, or empty before creation.
+ * @param operation Closed cleanup operation for deterministic injection.
+ * @param options Source-private cleanup policy.
+ * @return Nothing after proving the name absent.
+ * @throws Revalidation, system, or injected failures unchanged.
+ * @note A second identity check after the test seam prevents deletion of a
+ * different replacement. Absence is accepted; an unexpected present leaf is
+ * never removed.
+ */
+void strictly_remove_leaf(int directory_descriptor, const char* leaf,
+                          const std::optional<B1FileIdentity>& expected,
+                          B1OutputStoreCleanupOperation operation,
+                          const B1OutputStoreOptions& options) {
+  struct stat named{};
+  if (::fstatat(directory_descriptor, leaf, &named, AT_SYMLINK_NOFOLLOW) != 0) {
+    if (errno == ENOENT) {
+      return;
+    }
+    throw_errno("fstatat B1 strict cleanup leaf");
+  }
+  if (!expected.has_value() || !S_ISREG(named.st_mode) ||
+      file_identity(named) != *expected) {
+    throw B1RevalidationError(
+        "B1 strict cleanup refused an unowned leaf replacement.");
+  }
+  invoke_cleanup_injector(options, operation);
+  struct stat rechecked{};
+  if (::fstatat(directory_descriptor, leaf, &rechecked, AT_SYMLINK_NOFOLLOW) !=
+          0 ||
+      !S_ISREG(rechecked.st_mode) || file_identity(rechecked) != *expected) {
+    throw B1RevalidationError(
+        "B1 cleanup leaf identity changed after verification.");
+  }
+  if (::unlinkat(directory_descriptor, leaf, 0) != 0) {
+    throw_errno("unlinkat B1 strict cleanup leaf");
+  }
+  if (::fstatat(directory_descriptor, leaf, &rechecked, AT_SYMLINK_NOFOLLOW) ==
+          0 ||
+      errno != ENOENT) {
+    throw B1RevalidationError(
+        "B1 strict cleanup could not prove leaf-name absence.");
+  }
+}
+
+/**
+ * @brief Strictly removes one exact held directory by its current name.
+ * @param parent_descriptor Held current namespace parent.
+ * @param directory_descriptor Held directory being removed.
+ * @param name Exact current child name.
+ * @param expected Creation-time directory identity.
+ * @param operation Closed cleanup operation for deterministic injection.
+ * @param options Source-private cleanup policy.
+ * @return Nothing after proving exact removal and name absence.
+ * @throws Revalidation, system, injected, or nonempty failures unchanged.
+ */
+void strictly_remove_directory(int parent_descriptor, int directory_descriptor,
+                               const std::string& name,
+                               const B1FileIdentity& expected,
+                               B1OutputStoreCleanupOperation operation,
+                               const B1OutputStoreOptions& options) {
+  const struct stat held =
+      directory_stat(directory_descriptor, "fstat B1 strict cleanup directory");
+  if (file_identity(held) != expected) {
+    throw B1RevalidationError("B1 held cleanup directory identity drifted.");
+  }
+  struct stat named{};
+  if (::fstatat(parent_descriptor, name.c_str(), &named, AT_SYMLINK_NOFOLLOW) !=
+          0 ||
+      !S_ISDIR(named.st_mode) || file_identity(named) != expected) {
+    throw B1RevalidationError(
+        "B1 strict cleanup refused a directory-name replacement.");
+  }
+  invoke_cleanup_injector(options, operation);
+  struct stat rechecked{};
+  if (::fstatat(parent_descriptor, name.c_str(), &rechecked,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+      !S_ISDIR(rechecked.st_mode) || file_identity(rechecked) != expected) {
+    throw B1RevalidationError(
+        "B1 cleanup directory identity changed after verification.");
+  }
+  if (::unlinkat(parent_descriptor, name.c_str(), AT_REMOVEDIR) != 0) {
+    throw_errno("unlinkat B1 strict cleanup directory");
+  }
+  if (::fstatat(parent_descriptor, name.c_str(), &rechecked,
+                AT_SYMLINK_NOFOLLOW) == 0 ||
+      errno != ENOENT) {
+    throw B1RevalidationError(
+        "B1 strict cleanup could not prove directory-name absence.");
+  }
+}
+
+/**
+ * @brief Owns strict cleanup and at most one accepted task settlement.
  *
  * @throws Nothing from destruction; cancellation/wait/cleanup invariant
  * failures terminate because descriptor lifetime cannot otherwise be proved.
- * @note The guard is created immediately after slot fd acquisition. On every
- * exceptional or typed-failure exit it waits accepted work before unlinking.
+ * @note The guard is created immediately after staging-anchor fd acquisition.
+ * On every exit it settles accepted work first, then removes only identities
+ * proved to be transaction-owned. The anchor is always removed exactly.
  */
 class B1CommitTransactionGuard final {
  public:
   /**
-   * @brief Adopts one newly created verified occurrence slot.
+   * @brief Adopts one newly created verified private staging anchor.
    * @param root_descriptor Held original root directory.
-   * @param slot_descriptor Held occurrence-slot directory.
-   * @param slot_name Exact root-relative slot leaf retained by the caller.
-   * @param slot_identity Creation-time slot device/inode.
+   * @param anchor_descriptor Held private staging anchor.
+   * @param anchor_name Exact root-relative private anchor name.
+   * @param anchor_identity Creation-time anchor identity.
+   * @param state Mutable task state retaining exact leaf identities.
+   * @param options Source-private cleanup/fault policy.
    * @throws Nothing.
    */
-  B1CommitTransactionGuard(int root_descriptor, int slot_descriptor,
-                           const std::string& slot_name,
-                           B1FileIdentity slot_identity) noexcept
+  B1CommitTransactionGuard(int root_descriptor, int anchor_descriptor,
+                           const std::string& anchor_name,
+                           B1FileIdentity anchor_identity,
+                           B1CommitTaskState* state,
+                           const B1OutputStoreOptions& options) noexcept
       : root_descriptor_(root_descriptor),
-        slot_descriptor_(slot_descriptor),
-        slot_name_(slot_name),
-        slot_identity_(slot_identity) {}
+        anchor_descriptor_(anchor_descriptor),
+        anchor_name_(anchor_name),
+        anchor_identity_(anchor_identity),
+        state_(state),
+        options_(options) {}
 
   /**
    * @brief Cancels/waits accepted work, then cleans an uncommitted slot.
@@ -715,10 +911,36 @@ class B1CommitTransactionGuard final {
         static_cast<void>(completion_.wait());
         completion_active_ = false;
       }
-      if (cleanup_required_) {
-        cleanup_failed_slot(root_descriptor_, slot_descriptor_, slot_name_,
-                            slot_identity_);
+      if (slot_cleanup_required_) {
+        if (slot_descriptor_ < 0 || state_ == nullptr) {
+          std::terminate();
+        }
+        strictly_remove_leaf(slot_descriptor_, kPrivateManifestName,
+                             state_->private_manifest_identity,
+                             B1OutputStoreCleanupOperation::PrivateManifestLeaf,
+                             options_);
+        strictly_remove_leaf(
+            slot_descriptor_, kManifestName, state_->manifest_identity,
+            B1OutputStoreCleanupOperation::ManifestLeaf, options_);
+        strictly_remove_leaf(
+            slot_descriptor_, kPayloadName, state_->payload_identity,
+            B1OutputStoreCleanupOperation::PayloadLeaf, options_);
+        synchronize_descriptor(slot_descriptor_, "cleanup directory");
+        strictly_remove_directory(slot_parent_descriptor_, slot_descriptor_,
+                                  slot_name_, slot_identity_,
+                                  B1OutputStoreCleanupOperation::SlotDirectory,
+                                  options_);
+        synchronize_descriptor(slot_parent_descriptor_,
+                               "cleanup parent directory");
       }
+      strictly_remove_directory(
+          root_descriptor_, anchor_descriptor_, anchor_name_, anchor_identity_,
+          B1OutputStoreCleanupOperation::StagingAnchorDirectory, options_);
+      synchronize_descriptor(root_descriptor_, "cleanup root directory");
+      if (slot_descriptor_ >= 0 && ::close(slot_descriptor_) != 0) {
+        std::terminate();
+      }
+      slot_descriptor_ = -1;
     } catch (...) {
       std::terminate();
     }
@@ -729,6 +951,52 @@ class B1CommitTransactionGuard final {
 
   /** @brief Transaction ownership cannot be assigned. */
   B1CommitTransactionGuard& operator=(const B1CommitTransactionGuard&) = delete;
+
+  /**
+   * @brief Adopts the verified private slot fd before artifact mutation.
+   * @param slot_descriptor Owned private slot directory descriptor.
+   * @param slot_name Exact child name under the staging anchor.
+   * @param slot_identity Creation-time slot identity.
+   * @return Nothing.
+   * @throws Nothing; duplicate adoption terminates as an invariant breach.
+   */
+  void adopt_slot(int slot_descriptor, const std::string& slot_name,
+                  B1FileIdentity slot_identity) noexcept {
+    if (slot_descriptor_ >= 0 || slot_descriptor < 0) {
+      std::terminate();
+    }
+    slot_descriptor_ = slot_descriptor;
+    slot_parent_descriptor_ = anchor_descriptor_;
+    slot_name_ = slot_name;
+    slot_identity_ = slot_identity;
+    slot_cleanup_required_ = true;
+  }
+
+  /**
+   * @brief Returns the held slot descriptor after successful adoption.
+   * @return Nonnegative transaction-owned slot capability.
+   * @throws Nothing; use before adoption is an invariant breach.
+   */
+  int slot_descriptor() const noexcept {
+    if (slot_descriptor_ < 0) {
+      std::terminate();
+    }
+    return slot_descriptor_;
+  }
+
+  /**
+   * @brief Moves cleanup authority to the atomically published public name.
+   * @param slot_name Exact public immutable occurrence leaf.
+   * @return Nothing.
+   * @throws Nothing; missing slot adoption terminates.
+   */
+  void mark_slot_published(const std::string& slot_name) noexcept {
+    if (slot_descriptor_ < 0) {
+      std::terminate();
+    }
+    slot_parent_descriptor_ = root_descriptor_;
+    slot_name_ = slot_name;
+  }
 
   /**
    * @brief Adopts one accepted completion before any subsequent allocation.
@@ -766,24 +1034,36 @@ class B1CommitTransactionGuard final {
     if (completion_active_) {
       std::terminate();
     }
-    cleanup_required_ = false;
+    slot_cleanup_required_ = false;
   }
 
  private:
   /** @brief Held original root directory descriptor. */
   int root_descriptor_ = -1;
-  /** @brief Held occurrence-slot directory descriptor. */
+  /** @brief Held private staging-anchor descriptor. */
+  int anchor_descriptor_ = -1;
+  /** @brief Exact private staging-anchor name under the selected root. */
+  const std::string& anchor_name_;
+  /** @brief Creation-time private anchor identity. */
+  B1FileIdentity anchor_identity_;
+  /** @brief Held occurrence-slot directory descriptor after adoption. */
   int slot_descriptor_ = -1;
-  /** @brief Borrowed root-relative slot leaf valid past guard destruction. */
-  const std::string& slot_name_;
+  /** @brief Current held parent of `slot_name_`. */
+  int slot_parent_descriptor_ = -1;
+  /** @brief Current private or public slot leaf. */
+  std::string slot_name_;
   /** @brief Creation-time slot identity. */
   B1FileIdentity slot_identity_;
+  /** @brief Borrowed task state valid past guard destruction. */
+  B1CommitTaskState* state_ = nullptr;
+  /** @brief Borrowed store options valid past guard destruction. */
+  const B1OutputStoreOptions& options_;
   /** @brief Current accepted task completion, when any. */
   execution::ComputeIoCompletion completion_;
   /** @brief Whether destruction must cancel/wait `completion_`. */
   bool completion_active_ = false;
   /** @brief Whether destruction must remove the occurrence slot. */
-  bool cleanup_required_ = true;
+  bool slot_cleanup_required_ = false;
 };
 
 /**
@@ -909,6 +1189,13 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
   }
   invoke_fault_injector(options_,
                         B1OutputStoreFaultPoint::AfterRootBindingVerified);
+  try {
+    verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
+  } catch (const std::exception& error) {
+    result.status = B1OutputCommitStatus::RootUnavailable;
+    result.diagnostic = error.what();
+    return result;
+  }
 
   B1Sha256 commit_hash;
   commit_hash.update("execution-profile-output-commit-id-v1\n");
@@ -916,44 +1203,40 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
   const std::string commit_id = b1_digest_hex(commit_hash.finish());
   const std::filesystem::path rooted_slot = "occurrence-" + commit_id;
   const std::string slot_name = rooted_slot.string();
-  if (::mkdirat(root_descriptor_, slot_name.c_str(), S_IRWXU) != 0) {
-    result.status = errno == EEXIST ? B1OutputCommitStatus::SlotExists
-                                    : B1OutputCommitStatus::RootUnavailable;
-    result.diagnostic = errno == EEXIST
-                            ? "The immutable B1 occurrence slot already exists."
-                            : "Cannot create the B1 occurrence slot: " +
-                                  std::string(std::strerror(errno));
+  struct stat existing_slot{};
+  if (::fstatat(root_descriptor_, slot_name.c_str(), &existing_slot,
+                AT_SYMLINK_NOFOLLOW) == 0) {
+    result.status = B1OutputCommitStatus::SlotExists;
+    result.diagnostic = "The immutable B1 occurrence slot already exists.";
     return result;
   }
-
-  const int slot_raw =
-      ::openat(root_descriptor_, slot_name.c_str(),
-               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-  if (slot_raw < 0) {
-    const int open_error = errno;
-    static_cast<void>(
-        ::unlinkat(root_descriptor_, slot_name.c_str(), AT_REMOVEDIR));
+  if (errno != ENOENT) {
     result.status = B1OutputCommitStatus::RootUnavailable;
-    result.diagnostic = "Cannot retain the B1 occurrence slot descriptor: " +
-                        std::string(std::strerror(open_error));
+    result.diagnostic = "Cannot inspect the B1 occurrence slot: " +
+                        std::string(std::strerror(errno));
     return result;
   }
-  ScopedFileDescriptor slot_owner(slot_raw);
-  B1FileIdentity slot_identity;
-  try {
-    slot_identity = file_identity(
-        directory_stat(slot_owner.get(), "fstat new B1 occurrence slot"));
-  } catch (...) {
-    static_cast<void>(
-        ::unlinkat(root_descriptor_, slot_name.c_str(), AT_REMOVEDIR));
-    throw;
-  }
-  B1CommitTransactionGuard transaction(root_descriptor_, slot_owner.get(),
-                                       slot_name, slot_identity);
-  invoke_fault_injector(options_, B1OutputStoreFaultPoint::AfterSlotCreated);
 
   auto state = std::make_shared<B1CommitTaskState>();
-  state->slot_descriptor = slot_owner.get();
+  const std::string anchor_name = ".b1-staging-" + commit_id;
+  B1FileIdentity anchor_identity;
+  const int anchor_raw = create_and_open_private_directory(
+      root_descriptor_, anchor_name, options_, false, &anchor_identity);
+  ScopedFileDescriptor anchor_owner(anchor_raw);
+  B1CommitTransactionGuard transaction(root_descriptor_, anchor_owner.get(),
+                                       anchor_name, anchor_identity,
+                                       state.get(), options_);
+
+  const std::string staging_slot_name = "slot";
+  B1FileIdentity slot_identity;
+  const int slot_raw = create_and_open_private_directory(
+      anchor_owner.get(), staging_slot_name, options_, true, &slot_identity);
+  ScopedFileDescriptor slot_owner(slot_raw);
+  transaction.adopt_slot(slot_owner.release(), staging_slot_name,
+                         slot_identity);
+  invoke_fault_injector(options_, B1OutputStoreFaultPoint::AfterSlotCreated);
+
+  state->slot_descriptor = transaction.slot_descriptor();
   state->image = image;
 
   B1ComputeIoObservation initial;
@@ -1086,11 +1369,7 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
   const B1IoTaskIdentity manifest_identity{job, B1IoStage::ManifestCommit, 0U};
   const auto manifest =
       run_task(manifest_identity, b1_manifest_length(job.job_index),
-               [this, state, slot_name, slot_identity]() {
-                 commit_and_validate_manifest(state.get(), root_descriptor_,
-                                              root_, root_device_, root_inode_,
-                                              slot_name, slot_identity);
-               });
+               [state]() { commit_and_validate_manifest(state.get()); });
   if (!manifest.has_value()) {
     result.status = B1OutputCommitStatus::AdmissionFailed;
     result.diagnostic = "B1 manifest admission failed after at most " +
@@ -1113,8 +1392,6 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
   try {
     invoke_fault_injector(options_,
                           B1OutputStoreFaultPoint::BeforeReceiptAssembly);
-    verify_slot_binding(root_descriptor_, slot_owner.get(), slot_name,
-                        slot_identity);
     verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
     const Value candidate =
         value_image_adapter::snapshot_cpu_image_value(image);
@@ -1123,6 +1400,28 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
         !logical.digest.has_value()) {
       throw B1RevalidationError("B1 candidate logical digest is unavailable: " +
                                 logical.diagnostic);
+    }
+    invoke_fault_injector(options_,
+                          B1OutputStoreFaultPoint::BeforeSlotPublication);
+    verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
+    publish_private_directory_no_replace(anchor_owner.get(), staging_slot_name,
+                                         root_descriptor_, slot_name);
+    transaction.mark_slot_published(slot_name);
+    synchronize_descriptor(anchor_owner.get(), "directory");
+    synchronize_descriptor(root_descriptor_, "directory");
+    verify_slot_binding(root_descriptor_, transaction.slot_descriptor(),
+                        slot_name, slot_identity);
+    verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
+    if (!state->manifest_identity.has_value()) {
+      throw B1RevalidationError(
+          "B1 published manifest identity was not retained.");
+    }
+    const B1Sha256Digest after_publication =
+        validate_exact_file_at(transaction.slot_descriptor(), kManifestName,
+                               state->manifest, &*state->manifest_identity);
+    if (after_publication != state->manifest_digest) {
+      throw B1RevalidationError(
+          "B1 manifest digest changed after directory publication.");
     }
     result.receipt =
         B1OutputCommitReceipt{commit_id,
@@ -1144,8 +1443,16 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
     result.status = B1OutputCommitStatus::Succeeded;
     transaction.preserve_slot();
     return result;
+  } catch (const B1SlotExistsError& error) {
+    result.status = B1OutputCommitStatus::SlotExists;
+    result.diagnostic = error.what();
+    return result;
   } catch (const B1RootBindingError& error) {
     result.status = B1OutputCommitStatus::RootUnavailable;
+    result.diagnostic = error.what();
+    return result;
+  } catch (const B1DurabilityError& error) {
+    result.status = B1OutputCommitStatus::DurabilityUnsupported;
     result.diagnostic = error.what();
     return result;
   } catch (const std::exception& error) {

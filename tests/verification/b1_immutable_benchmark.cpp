@@ -407,50 +407,16 @@ void require_success(std::string_view operation,
 }
 
 /**
- * @brief Parses one exact six-boolean retained storage proof document.
- * @param path Caller-supplied JSON proof path.
- * @return Proof facts excluding runner-derived root containment.
- * @throws JSON, validation, allocation, or file failures unchanged.
- * @note The document must contain no extension keys.
+ * @brief Reads one exact canonical retained raw-storage proof document.
+ * @param path Caller-supplied canonical proof path.
+ * @return Complete proof bytes after independent strict parsing.
+ * @throws Validation, allocation, or file failures unchanged.
+ * @note The proof uses the same field/framing grammar as environment
+ * manifests. JSON booleans and runner-added proof flags are not accepted.
  */
 B1StorageRawProof read_storage_proof(const std::filesystem::path& path) {
-  const Json proof = Json::parse(read_binary_file(path));
-  constexpr std::array<const char*, 7U> kKeys{
-      "schema",
-      "raw_mapping_complete",
-      "commit_semantics_consistent",
-      "durability_path_consistent",
-      "mount_normalization_proved",
-      "not_applicable_proofs_valid",
-      "performance_configuration_proved"};
-  if (!proof.is_object() || proof.size() != kKeys.size()) {
-    throw std::invalid_argument(
-        "B1 storage proof must contain exactly seven closed fields");
-  }
-  for (const char* key : kKeys) {
-    if (!proof.contains(key)) {
-      throw std::invalid_argument("B1 storage proof is missing field: " +
-                                  std::string(key));
-    }
-  }
-  if (!proof.at("schema").is_string() ||
-      proof.at("schema").get<std::string>() !=
-          "execution-profile-b1-storage-proof-v1") {
-    throw std::invalid_argument("B1 storage proof schema is invalid");
-  }
-  for (std::size_t index = 1U; index < kKeys.size(); ++index) {
-    if (!proof.at(kKeys[index]).is_boolean()) {
-      throw std::invalid_argument("B1 storage proof field is not boolean: " +
-                                  std::string(kKeys[index]));
-    }
-  }
-  B1StorageRawProof result;
-  result.raw_mapping_complete = proof.at(kKeys[1U]).get<bool>();
-  result.commit_semantics_consistent = proof.at(kKeys[2U]).get<bool>();
-  result.durability_path_consistent = proof.at(kKeys[3U]).get<bool>();
-  result.mount_normalization_proved = proof.at(kKeys[4U]).get<bool>();
-  result.not_applicable_proofs_valid = proof.at(kKeys[5U]).get<bool>();
-  result.performance_configuration_proved = proof.at(kKeys[6U]).get<bool>();
+  B1StorageRawProof result{read_binary_file(path)};
+  static_cast<void>(parse_b1_storage_raw_proof(result.canonical_bytes));
   return result;
 }
 
@@ -742,13 +708,40 @@ B1EnvironmentEvidence make_runner_environment(
   (void)parse_b1_environment_manifest(environment_class);
 
   B1StorageRawProof proof = read_storage_proof(options.storage_proof_path);
-  proof.root_containment_proved = prove_b1_root_containment(
+  const B1StorageRawEvidence retained =
+      parse_b1_storage_raw_proof(proof.canonical_bytes);
+  const std::filesystem::path selected_root =
+      std::filesystem::canonical(output_directory);
+  if (retained.containment.selected_root != selected_root ||
+      retained.containment.resolved_root != selected_root) {
+    throw std::invalid_argument(
+        "retained B1 raw proof is not bound to the selected output root");
+  }
+  const std::array<std::filesystem::path, 10U> required_destinations{
       output_directory,
-      {output_directory, output_directory / "graph-A.yaml",
-       output_directory / "graph-B.yaml", output_directory / "sessions-A",
-       output_directory / "sessions-B", output_directory / "cache-A",
-       output_directory / "cache-B", output_directory / "invocation.json",
-       output_directory / "row.json", output_directory / "failure.json"});
+      output_directory / "graph-A.yaml",
+      output_directory / "graph-B.yaml",
+      output_directory / "sessions-A",
+      output_directory / "sessions-B",
+      output_directory / "cache-A",
+      output_directory / "cache-B",
+      output_directory / "invocation.json",
+      output_directory / "row.json",
+      output_directory / "failure.json"};
+  for (const std::filesystem::path& required : required_destinations) {
+    const std::filesystem::path resolved =
+        std::filesystem::weakly_canonical(required);
+    const auto found = std::find_if(
+        retained.containment.destinations.begin(),
+        retained.containment.destinations.end(),
+        [&resolved](const B1ContainmentDestinationObservation& destination) {
+          return destination.resolved == resolved;
+        });
+    if (found == retained.containment.destinations.end()) {
+      throw std::invalid_argument(
+          "retained B1 raw proof omits a runner output destination");
+    }
+  }
   const B1StorageEligibility eligibility =
       evaluate_b1_storage_eligibility(storage, proof);
   if (!eligibility.eligible || !eligibility.reasons.empty()) {

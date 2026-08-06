@@ -97,20 +97,25 @@ std::string encode_test_record_list(const std::vector<std::string>& records) {
 }
 
 /**
- * @brief Returns fully passing independent raw eligibility facts.
- * @return All seven proof predicates set true.
- * @throws Nothing.
+ * @brief Returns a complete canonical raw eligibility proof document.
+ * @return Independently replayable backend-to-receipt evidence bytes.
+ * @throws Validation and allocation failures unchanged.
  */
-B1StorageRawProof complete_test_storage_proof() noexcept {
-  B1StorageRawProof proof;
-  proof.raw_mapping_complete = true;
-  proof.commit_semantics_consistent = true;
-  proof.durability_path_consistent = true;
-  proof.mount_normalization_proved = true;
-  proof.not_applicable_proofs_valid = true;
-  proof.performance_configuration_proved = true;
-  proof.root_containment_proved = true;
-  return proof;
+B1StorageRawProof complete_test_storage_proof() {
+  return testing::b1_test_storage_raw_proof();
+}
+
+/**
+ * @brief Rebinds the final performance cut to one candidate component array.
+ * @param components Exact candidate pre-warmup observation.
+ * @return Complete test proof with an equal post-replicate cut.
+ * @throws std::bad_alloc when component strings are copied.
+ */
+B1PerformanceProofs stable_performance_proofs(
+    const std::array<std::string, 37U>& components) {
+  B1PerformanceProofs proofs = testing::b1_test_performance_proofs();
+  proofs.final_components.assign(components.begin(), components.end());
+  return proofs;
 }
 
 /**
@@ -365,7 +370,7 @@ TEST(B1Environment, CollectionAndFixedRecordBindingsRejectDrift) {
  * @throws Test-framework failures only.
  */
 TEST(B1Environment, MountNormalizationUsesProvedEffectiveRules) {
-  B1MountNormalizationInput input;
+  B1MountRawObservation input;
   input.options = {{"ACCESS_MODE", "READ-WRITE"},
                    {"ATIME_POLICY", "STRICT"},
                    {"ATIME_POLICY", "NONE"}};
@@ -374,14 +379,15 @@ TEST(B1Environment, MountNormalizationUsesProvedEffectiveRules) {
       {"cache_coherence", "host-local"},     {"copy_on_write_mode", "disabled"},
       {"data_write_mode", "synchronous"},    {"journal_mode", "ordered"},
       {"metadata_write_mode", "synchronous"}};
-  input.ascii_case_insensitive = true;
-  input.duplicate_last_wins_proved = true;
-  input.unknown_options_no_effect_proved = true;
+  input.case_mode = B1MountCaseMode::AsciiCaseInsensitive;
+  input.duplicate_policy = B1MountDuplicatePolicy::LastWins;
+  input.observation_identity = "mount-observation";
   const B1RawFieldObservation normalized = normalize_b1_mount_options(input);
   EXPECT_EQ(normalized.state, B1ObservationState::Known);
-  EXPECT_TRUE(normalized.mapping_proved);
+  EXPECT_EQ(normalized.raw_payload, normalized.payload);
+  EXPECT_EQ(normalized.proof_identity, input.observation_identity);
 
-  B1MountNormalizationInput explicit_defaults = input;
+  B1MountRawObservation explicit_defaults = input;
   explicit_defaults.options = {{"metadata_write_mode", "synchronous"},
                                {"journal_mode", "ordered"},
                                {"data_write_mode", "synchronous"},
@@ -392,23 +398,24 @@ TEST(B1Environment, MountNormalizationUsesProvedEffectiveRules) {
   EXPECT_EQ(normalize_b1_mount_options(explicit_defaults).payload,
             normalized.payload);
 
-  B1MountNormalizationInput repeated_same = input;
+  B1MountRawObservation repeated_same = input;
   repeated_same.options = {{"ACCESS_MODE", "READ-WRITE"},
                            {"ACCESS_MODE", "READ-WRITE"},
                            {"ATIME_POLICY", "NONE"}};
-  repeated_same.duplicate_last_wins_proved = false;
+  repeated_same.duplicate_policy = B1MountDuplicatePolicy::RejectConflicts;
   EXPECT_EQ(normalize_b1_mount_options(repeated_same).payload,
             normalized.payload);
 
-  input.duplicate_last_wins_proved = false;
+  input.duplicate_policy = B1MountDuplicatePolicy::RejectConflicts;
   EXPECT_EQ(normalize_b1_mount_options(input).state,
             B1ObservationState::Unprovable);
-  input.duplicate_last_wins_proved = true;
+  input.duplicate_policy = B1MountDuplicatePolicy::LastWins;
   input.options.push_back({"unknown", "value"});
-  input.unknown_options_no_effect_proved = false;
   EXPECT_EQ(normalize_b1_mount_options(input).state,
             B1ObservationState::Unprovable);
-  input.unknown_options_no_effect_proved = true;
+  input.excluded_options.push_back(
+      B1ExcludedMountOptionProof{{"unknown", "value"},
+                                 "unknown-option-no-effect"});
   EXPECT_EQ(normalize_b1_mount_options(input).payload, normalized.payload);
 
   input.options = {{"ACCESS_MODE", "READ-WRITE"}, {"bad\xc3\xa9", "value"}};
@@ -423,7 +430,7 @@ TEST(B1Environment, PerformanceMappingRequiresEveryZeroAndAbsenceProof) {
   const B1RawFieldObservation valid =
       testing::b1_test_performance_observation();
   EXPECT_EQ(valid.state, B1ObservationState::Known);
-  EXPECT_TRUE(valid.mapping_proved);
+  EXPECT_EQ(valid.raw_payload, valid.payload);
 
   const std::array<std::string, 37U> components =
       testing::b1_test_performance_components();
@@ -439,19 +446,19 @@ TEST(B1Environment, PerformanceMappingRequiresEveryZeroAndAbsenceProof) {
   }
 
   B1PerformanceProofs incomplete = proofs;
-  incomplete.one_frozen_observation = false;
+  incomplete.initial_observation_identity.clear();
   EXPECT_EQ(map_b1_performance_configuration(components, incomplete).state,
             B1ObservationState::Unprovable);
   incomplete = proofs;
-  incomplete.complete_option_mapping = false;
+  incomplete.mapped_option_proof_identities.clear();
   EXPECT_EQ(map_b1_performance_configuration(components, incomplete).state,
             B1ObservationState::Unprovable);
   incomplete = proofs;
-  incomplete.stable_through_replicate = false;
+  incomplete.final_components.back() = "drifted";
   EXPECT_EQ(map_b1_performance_configuration(components, incomplete).state,
             B1ObservationState::Unprovable);
   incomplete = proofs;
-  incomplete.conflicting_values = true;
+  incomplete.conflicting_components = {"journal-mode"};
   const B1RawFieldObservation conflicting =
       map_b1_performance_configuration(components, incomplete);
   EXPECT_EQ(conflicting.state, B1ObservationState::Unprovable);
@@ -462,13 +469,15 @@ TEST(B1Environment, PerformanceMappingRequiresEveryZeroAndAbsenceProof) {
   enabled_compression[1U] = "zstd";
   enabled_compression[2U] = "3";
   enabled_compression[3U] = "btrfs-zstd-3";
-  const B1RawFieldObservation enabled =
-      map_b1_performance_configuration(enabled_compression, proofs);
+  const B1RawFieldObservation enabled = map_b1_performance_configuration(
+      enabled_compression, stable_performance_proofs(enabled_compression));
   EXPECT_EQ(enabled.state, B1ObservationState::Known);
   EXPECT_NE(enabled.payload, valid.payload);
   enabled_compression[3U] = "none";
-  EXPECT_THROW(map_b1_performance_configuration(enabled_compression, proofs),
-               std::invalid_argument);
+  EXPECT_THROW(
+      map_b1_performance_configuration(
+          enabled_compression, stable_performance_proofs(enabled_compression)),
+      std::invalid_argument);
 
   std::array<std::string, 37U> provider = components;
   provider[15U] = "provider-managed";
@@ -477,7 +486,9 @@ TEST(B1Environment, PerformanceMappingRequiresEveryZeroAndAbsenceProof) {
   provider[18U] = "1";
   provider[19U] = "4096";
   provider[20U] = "provider-layout-a";
-  EXPECT_EQ(map_b1_performance_configuration(provider, proofs).state,
+  EXPECT_EQ(map_b1_performance_configuration(
+                provider, stable_performance_proofs(provider))
+                .state,
             B1ObservationState::Known);
   const std::array<std::pair<std::size_t, const char*>, 4U> geometry{{
       {16U, "provider-layout-data-units-absent"},
@@ -489,13 +500,18 @@ TEST(B1Environment, PerformanceMappingRequiresEveryZeroAndAbsenceProof) {
     SCOPED_TRACE(proof_kind);
     std::array<std::string, 37U> absent = provider;
     absent[index] = "0";
-    EXPECT_EQ(map_b1_performance_configuration(absent, proofs).state,
-              B1ObservationState::Unprovable);
-    B1PerformanceProofs proved_absent = proofs;
+    B1PerformanceProofs absent_without_proof =
+        stable_performance_proofs(absent);
+    EXPECT_EQ(
+        map_b1_performance_configuration(absent, absent_without_proof).state,
+        B1ObservationState::Unprovable);
+    B1PerformanceProofs proved_absent = absent_without_proof;
     proved_absent.proof_kinds.emplace_back(proof_kind);
     EXPECT_EQ(map_b1_performance_configuration(absent, proved_absent).state,
               B1ObservationState::Known);
-    EXPECT_EQ(map_b1_performance_configuration(provider, proved_absent).reason,
+    B1PerformanceProofs contradictory = stable_performance_proofs(provider);
+    contradictory.proof_kinds.emplace_back(proof_kind);
+    EXPECT_EQ(map_b1_performance_configuration(provider, contradictory).reason,
               "conflicting-effective-values");
   }
 
@@ -506,9 +522,12 @@ TEST(B1Environment, PerformanceMappingRequiresEveryZeroAndAbsenceProof) {
     SCOPED_TRACE(proof_kind);
     std::array<std::string, 37U> absent = components;
     absent[component_index] = "not-applicable";
-    EXPECT_EQ(map_b1_performance_configuration(absent, proofs).state,
-              B1ObservationState::Unprovable);
-    B1PerformanceProofs proved_absent = proofs;
+    B1PerformanceProofs absent_without_proof =
+        stable_performance_proofs(absent);
+    EXPECT_EQ(
+        map_b1_performance_configuration(absent, absent_without_proof).state,
+        B1ObservationState::Unprovable);
+    B1PerformanceProofs proved_absent = absent_without_proof;
     proved_absent.proof_kinds.push_back(proof_kind);
     EXPECT_EQ(map_b1_performance_configuration(absent, proved_absent).state,
               B1ObservationState::Known);
@@ -561,7 +580,9 @@ TEST(B1Environment, PerformanceCrossComponentMatrixFailsClosed) {
     SCOPED_TRACE(layout[0U]);
     candidate = valid;
     std::copy(layout.begin(), layout.end(), candidate.begin() + 15U);
-    EXPECT_EQ(map_b1_performance_configuration(candidate, proofs).state,
+    EXPECT_EQ(map_b1_performance_configuration(
+                  candidate, stable_performance_proofs(candidate))
+                  .state,
               B1ObservationState::Known);
   }
   candidate = valid;
@@ -587,29 +608,36 @@ TEST(B1Environment, PerformanceCrossComponentMatrixFailsClosed) {
   candidate[31U] = "1500";
   candidate[32U] = "default";
   candidate[33U] = "local";
-  B1PerformanceProofs network_proofs = proofs;
+  B1PerformanceProofs network_proofs = stable_performance_proofs(candidate);
   network_proofs.proof_kinds.erase(std::find(network_proofs.proof_kinds.begin(),
                                              network_proofs.proof_kinds.end(),
                                              "network-path-absent"));
   EXPECT_EQ(map_b1_performance_configuration(candidate, network_proofs).state,
             B1ObservationState::Known);
-  EXPECT_EQ(map_b1_performance_configuration(candidate, proofs).reason,
+  EXPECT_EQ(map_b1_performance_configuration(
+                candidate, stable_performance_proofs(candidate))
+                .reason,
             "conflicting-effective-values");
   candidate[31U] = "0";
+  network_proofs.final_components.assign(candidate.begin(), candidate.end());
   EXPECT_THROW(map_b1_performance_configuration(candidate, network_proofs),
                std::invalid_argument);
 
   candidate = valid;
   candidate[9U] = "4096";
-  EXPECT_EQ(map_b1_performance_configuration(candidate, proofs).reason,
+  EXPECT_EQ(map_b1_performance_configuration(
+                candidate, stable_performance_proofs(candidate))
+                .reason,
             "conflicting-effective-values");
 
   candidate = valid;
   candidate[21U] = "disabled";
   candidate[22U] = "none";
-  EXPECT_EQ(map_b1_performance_configuration(candidate, proofs).reason,
+  EXPECT_EQ(map_b1_performance_configuration(
+                candidate, stable_performance_proofs(candidate))
+                .reason,
             "conflicting-effective-values");
-  B1PerformanceProofs no_upper_absence = proofs;
+  B1PerformanceProofs no_upper_absence = stable_performance_proofs(candidate);
   no_upper_absence.proof_kinds.erase(std::find(
       no_upper_absence.proof_kinds.begin(), no_upper_absence.proof_kinds.end(),
       "upper-write-cache-absent"));
@@ -618,11 +646,12 @@ TEST(B1Environment, PerformanceCrossComponentMatrixFailsClosed) {
 
   candidate = valid;
   candidate[35U] = "not-applicable";
-  B1PerformanceProofs tier_absent = proofs;
+  B1PerformanceProofs tier_absent = stable_performance_proofs(candidate);
   tier_absent.proof_kinds.push_back("backend-performance-tier-absent");
   EXPECT_EQ(map_b1_performance_configuration(candidate, tier_absent).state,
             B1ObservationState::Known);
   candidate[35U] = "standard";
+  tier_absent.final_components.assign(candidate.begin(), candidate.end());
   EXPECT_EQ(map_b1_performance_configuration(candidate, tier_absent).reason,
             "conflicting-effective-values");
 
@@ -639,34 +668,24 @@ TEST(B1Environment, PerformanceCrossComponentMatrixFailsClosed) {
 TEST(B1Environment, RawBackendAdapterRejectsTypeAndBackendDrift) {
   const std::vector<B1CanonicalField> fields =
       testing::b1_test_storage_fields();
-  B1RawStorageObservation raw;
-  raw.backend = B1StorageBackendKind::Filesystem;
-  for (const B1CanonicalField& field : fields) {
-    raw.fields.emplace(
-        field.name, B1RawFieldObservation{field.state, field.reason, field.type,
-                                          field.payload, true, true});
-  }
-  B1AdaptedStorageObservation adapted = adapt_b1_storage_observation(raw);
+  B1BackendRawObservation raw = testing::b1_test_storage_raw_evidence().backend;
+  const B1AdaptedStorageObservation adapted = adapt_b1_storage_observation(raw);
   EXPECT_EQ(adapted.fields, fields);
-  EXPECT_TRUE(adapted.raw_mapping_complete);
-  EXPECT_TRUE(adapted.not_applicable_proofs_valid);
 
-  raw.fields.at("filesystem_type").mapping_proved = false;
-  adapted = adapt_b1_storage_observation(raw);
-  EXPECT_FALSE(adapted.raw_mapping_complete);
-  EXPECT_TRUE(adapted.not_applicable_proofs_valid);
-  raw.fields.at("filesystem_type").mapping_proved = true;
+  raw.fields.at("filesystem_type").raw_payload = "drifted";
+  EXPECT_THROW(adapt_b1_storage_observation(raw), std::invalid_argument);
+  raw.fields.at("filesystem_type").raw_payload =
+      raw.fields.at("filesystem_type").payload;
 
   B1RawFieldObservation& cache = raw.fields.at("hardware_write_cache_policy");
   cache.state = B1ObservationState::NotApplicable;
   cache.reason = "hardware-write-cache-layer-absent";
   cache.payload.clear();
-  cache.absence_proved = false;
-  adapted = adapt_b1_storage_observation(raw);
-  EXPECT_TRUE(adapted.raw_mapping_complete);
-  EXPECT_FALSE(adapted.not_applicable_proofs_valid);
-  cache.absence_proved = true;
-  EXPECT_TRUE(adapt_b1_storage_observation(raw).not_applicable_proofs_valid);
+  cache.raw_payload.clear();
+  cache.proof_kind = "probe-state-observed";
+  EXPECT_THROW(adapt_b1_storage_observation(raw), std::invalid_argument);
+  cache.proof_kind = "complete-path-layer-absent";
+  EXPECT_NO_THROW(adapt_b1_storage_observation(raw));
 
   raw.backend = B1StorageBackendKind::ObjectStore;
   EXPECT_THROW(adapt_b1_storage_observation(raw), std::invalid_argument);
@@ -749,6 +768,104 @@ TEST(B1Environment, EligibilityReturnsCompleteOrderedTruthSet) {
 }
 
 /**
+ * @brief Proves canonical raw bytes replay independently and every missing,
+ * stale, unknown, duplicate, or cross-observation drift fails closed.
+ * @throws Test fixture, validation, allocation, and framework failures.
+ */
+TEST(B1Environment, CanonicalRawProofReplayRejectsEveryEvidenceBoundaryDrift) {
+  const std::vector<B1CanonicalField> fields =
+      testing::b1_test_storage_fields();
+  const std::string storage = encode_b1_storage_environment(fields);
+  const B1StorageRawEvidence complete = testing::b1_test_storage_raw_evidence();
+  const std::string proof_bytes = encode_b1_storage_raw_proof(complete);
+  EXPECT_EQ(
+      encode_b1_storage_raw_proof(parse_b1_storage_raw_proof(proof_bytes)),
+      proof_bytes);
+  EXPECT_TRUE(
+      evaluate_b1_storage_eligibility(storage, B1StorageRawProof{proof_bytes})
+          .eligible);
+
+  B1StorageRawEvidence drift = complete;
+  drift.backend.fields.at("filesystem_type").raw_payload = "different-raw";
+  const B1StorageEligibility raw_payload_drift =
+      evaluate_b1_storage_eligibility(
+          storage, B1StorageRawProof{encode_b1_storage_raw_proof(drift)});
+  EXPECT_NE(std::find(raw_payload_drift.reasons.begin(),
+                      raw_payload_drift.reasons.end(),
+                      "raw-observation-proof-incomplete"),
+            raw_payload_drift.reasons.end());
+
+  drift = complete;
+  drift.mount.options.front().value = "read-only";
+  const B1StorageEligibility mount_drift = evaluate_b1_storage_eligibility(
+      storage, B1StorageRawProof{encode_b1_storage_raw_proof(drift)});
+  EXPECT_NE(std::find(mount_drift.reasons.begin(), mount_drift.reasons.end(),
+                      "mount-normalization-unprovable"),
+            mount_drift.reasons.end());
+
+  drift = complete;
+  drift.performance_proofs.final_components.back() = "stale-device";
+  const B1StorageEligibility performance_drift =
+      evaluate_b1_storage_eligibility(
+          storage, B1StorageRawProof{encode_b1_storage_raw_proof(drift)});
+  EXPECT_NE(std::find(performance_drift.reasons.begin(),
+                      performance_drift.reasons.end(),
+                      "performance-configuration-unprovable"),
+            performance_drift.reasons.end());
+
+  drift = complete;
+  drift.transaction.events.pop_back();
+  const B1StorageEligibility missing_event = evaluate_b1_storage_eligibility(
+      storage, B1StorageRawProof{encode_b1_storage_raw_proof(drift)});
+  EXPECT_NE(
+      std::find(missing_event.reasons.begin(), missing_event.reasons.end(),
+                "commit-semantics-inconsistent"),
+      missing_event.reasons.end());
+
+  drift = complete;
+  drift.transaction.events.push_back(drift.transaction.events.front());
+  EXPECT_THROW(encode_b1_storage_raw_proof(drift), std::invalid_argument);
+  drift = complete;
+  drift.transaction.events.front().kind = "unknown-event";
+  EXPECT_THROW(encode_b1_storage_raw_proof(drift), std::invalid_argument);
+
+  std::string unknown_field = proof_bytes;
+  const std::string known_name = "backend_observation";
+  const std::size_t known_position = unknown_field.find(known_name);
+  ASSERT_NE(known_position, std::string::npos);
+  unknown_field.replace(known_position, known_name.size(),
+                        "backend_observatiox");
+  EXPECT_THROW(parse_b1_storage_raw_proof(unknown_field),
+               std::invalid_argument);
+
+  const std::size_t first_field = proof_bytes.find('\n') + 1U;
+  const std::size_t first_field_end = proof_bytes.find('\n', first_field);
+  ASSERT_NE(first_field_end, std::string::npos);
+  const std::string first_field_line =
+      proof_bytes.substr(first_field, first_field_end - first_field + 1U);
+  std::string duplicated_field = proof_bytes;
+  duplicated_field.insert(first_field_end + 1U, first_field_line);
+  EXPECT_THROW(parse_b1_storage_raw_proof(duplicated_field),
+               std::invalid_argument);
+  std::string missing_field = proof_bytes;
+  missing_field.erase(first_field, first_field_line.size());
+  EXPECT_THROW(parse_b1_storage_raw_proof(missing_field),
+               std::invalid_argument);
+
+  std::vector<B1CanonicalField> valid_drifted_fields = fields;
+  find_test_field(&valid_drifted_fields, "storage_class").payload =
+      "remote-block";
+  const std::string valid_drifted_storage =
+      encode_b1_storage_environment(valid_drifted_fields);
+  EXPECT_NE(digest_b1_environment_manifest(valid_drifted_storage),
+            digest_b1_environment_manifest(storage));
+  EXPECT_EQ(evaluate_b1_storage_eligibility(valid_drifted_storage,
+                                            B1StorageRawProof{proof_bytes})
+                .reasons,
+            std::vector<std::string>{"raw-observation-proof-incomplete"});
+}
+
+/**
  * @brief Proves containment and exact cap/reference compatibility relations.
  * @throws Test fixture, filesystem, validation, and framework failures.
  */
@@ -791,7 +908,12 @@ TEST(B1Environment, ContainmentAndCompatibilityUseExactBytesAndRelations) {
       cap_one, drift, B1EnvironmentRelation::CandidateReference));
 
   drift = cap_one;
-  drift.storage_raw_proof->durability_path_consistent = false;
+  B1StorageRawEvidence drifted_raw =
+      parse_b1_storage_raw_proof(drift.storage_raw_proof->canonical_bytes);
+  drifted_raw.transaction.durability_anchor_payload =
+      encode_b1_normalized_text("different-anchor");
+  drift.storage_raw_proof->canonical_bytes =
+      encode_b1_storage_raw_proof(drifted_raw);
   EXPECT_FALSE(compatible_b1_environments(
       cap_one, drift, B1EnvironmentRelation::CandidateReference));
 

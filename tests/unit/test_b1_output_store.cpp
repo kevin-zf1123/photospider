@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -228,6 +229,204 @@ void replace_root_after_verification(void* opaque,
       point == B1OutputStoreFaultPoint::AfterRootBindingVerified) {
     context->replace();
   }
+}
+
+/**
+ * @brief Finds the one test-owned private staging slot below an output root.
+ * @param root Existing test output root.
+ * @return Private `slot` path, or empty when no staging anchor is visible.
+ * @throws Filesystem iteration failures unchanged.
+ */
+std::filesystem::path find_private_staging_slot(
+    const std::filesystem::path& root) {
+  for (const std::filesystem::directory_entry& entry :
+       std::filesystem::directory_iterator(root)) {
+    const std::string name = entry.path().filename().string();
+    if (name.rfind(".b1-staging-", 0U) == 0U) {
+      return entry.path() / "slot";
+    }
+  }
+  return {};
+}
+
+/**
+ * @brief Closed filesystem mutation selected at an output-store fault seam.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class OutputNamespaceMutation : std::uint8_t {
+  /** @brief Replace the just-created private slot with a real directory. */
+  ReplacePrivateSlot,
+  /** @brief Install a real public destination immediately before publication.
+   */
+  InstallPublicSlot,
+  /** @brief Add one unowned extra leaf before strict rollback. */
+  AddExtraLeaf,
+  /** @brief Replace the owned payload with a directory before rollback. */
+  ReplacePayloadType,
+};
+
+/**
+ * @brief Test-owned namespace mutation and optional post-mutation exception.
+ * @throws Nothing for aggregate construction except path/string allocation.
+ */
+struct OutputNamespaceMutationContext final {
+  /** @brief Existing test output root. */
+  std::filesystem::path root;
+  /** @brief Exact public occurrence path for publication collision tests. */
+  std::filesystem::path public_slot;
+  /** @brief Selected deterministic mutation. */
+  OutputNamespaceMutation mutation =
+      OutputNamespaceMutation::ReplacePrivateSlot;
+  /** @brief Boundary at which the mutation is performed. */
+  B1OutputStoreFaultPoint point =
+      B1OutputStoreFaultPoint::AfterStagingSlotMkdirBeforeOpen;
+  /** @brief Whether to throw after mutation to enter rollback. */
+  bool throw_after = false;
+  /** @brief Exact-once guard for repeated task-settlement boundaries. */
+  bool mutated = false;
+};
+
+/**
+ * @brief Applies one deterministic real-filesystem namespace mutation.
+ * @param opaque Borrowed `OutputNamespaceMutationContext`.
+ * @param point Exact store seam.
+ * @return Nothing outside the selected or already-used seam.
+ * @throws Filesystem failures or `B1OutputFaultSentinel` after mutation.
+ */
+void mutate_output_namespace(void* opaque, B1OutputStoreFaultPoint point) {
+  auto* context = static_cast<OutputNamespaceMutationContext*>(opaque);
+  if (context == nullptr || context->mutated || context->point != point) {
+    return;
+  }
+  context->mutated = true;
+  const std::filesystem::path private_slot =
+      find_private_staging_slot(context->root);
+  switch (context->mutation) {
+    case OutputNamespaceMutation::ReplacePrivateSlot:
+      if (private_slot.empty() || !std::filesystem::remove(private_slot) ||
+          !std::filesystem::create_directory(private_slot)) {
+        throw std::runtime_error("failed to replace private B1 slot");
+      }
+      std::ofstream(private_slot / "replacement-marker") << "replacement";
+      break;
+    case OutputNamespaceMutation::InstallPublicSlot:
+      if (!std::filesystem::create_directory(context->public_slot)) {
+        throw std::runtime_error("failed to install public B1 slot collision");
+      }
+      std::ofstream(context->public_slot / "replacement-marker")
+          << "replacement";
+      break;
+    case OutputNamespaceMutation::AddExtraLeaf:
+      std::ofstream(private_slot / "unowned-extra") << "extra";
+      break;
+    case OutputNamespaceMutation::ReplacePayloadType:
+      std::filesystem::rename(private_slot / "output.rgba32le",
+                              private_slot / "displaced-payload");
+      if (!std::filesystem::create_directory(private_slot /
+                                             "output.rgba32le")) {
+        throw std::runtime_error("failed to replace B1 payload type");
+      }
+      break;
+  }
+  if (context->throw_after) {
+    throw B1OutputFaultSentinel();
+  }
+}
+
+/**
+ * @brief Closed mutation/error selected at one strict-cleanup seam.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class CleanupMutation : std::uint8_t {
+  /** @brief Return a caller-selected errno without invoking unlink. */
+  InjectErrno,
+  /** @brief Rename the exact inode away and back under the same name. */
+  RestoreSameIdentity,
+  /** @brief Replace the exact name with a different regular-file inode. */
+  InstallDifferentIdentity,
+};
+
+/**
+ * @brief Test state for identity-safe strict-cleanup mutation and accounting.
+ * @throws Nothing for aggregate construction except path allocation.
+ */
+struct CleanupMutationContext final {
+  /** @brief Existing test output root used to find the private slot. */
+  std::filesystem::path root;
+  /** @brief Executor whose accepted charge must already be settled. */
+  execution::ComputeIoExecutor* executor = nullptr;
+  /** @brief Exact cleanup object at which to inject. */
+  B1OutputStoreCleanupOperation selected =
+      B1OutputStoreCleanupOperation::PayloadLeaf;
+  /** @brief Selected cleanup mutation. */
+  CleanupMutation mutation = CleanupMutation::InjectErrno;
+  /** @brief Errno returned for `InjectErrno`. */
+  int injected_errno = EIO;
+  /** @brief Exact-once guard. */
+  bool invoked = false;
+  /** @brief True when the executor carried no active transaction charge. */
+  bool charge_was_settled = false;
+};
+
+/**
+ * @brief Injects one cleanup errno or real same/different-identity race.
+ * @param opaque Borrowed `CleanupMutationContext`.
+ * @param operation Exact identity-verified cleanup object.
+ * @return Zero after a namespace mutation, selected errno for injected error.
+ * @throws Nothing; filesystem failures collapse to `EIO`.
+ */
+int mutate_strict_cleanup(void* opaque,
+                          B1OutputStoreCleanupOperation operation) noexcept {
+  auto* context = static_cast<CleanupMutationContext*>(opaque);
+  if (context == nullptr || context->invoked ||
+      context->selected != operation) {
+    return 0;
+  }
+  context->invoked = true;
+  if (context->executor != nullptr) {
+    const execution::ComputeIoExecutorSnapshot snapshot =
+        context->executor->snapshot();
+    context->charge_was_settled =
+        snapshot.active_tasks == 0U && snapshot.active_planned_bytes == 0U;
+  }
+  if (!context->charge_was_settled) {
+    return EBUSY;
+  }
+  if (context->mutation != CleanupMutation::RestoreSameIdentity) {
+    std::ofstream(context->root / ".cleanup-charge-settled") << "settled";
+  }
+  if (context->mutation == CleanupMutation::InjectErrno) {
+    return context->injected_errno;
+  }
+  try {
+    const std::filesystem::path slot = find_private_staging_slot(context->root);
+    const std::filesystem::path payload = slot / "output.rgba32le";
+    const std::filesystem::path displaced = slot / "payload-displaced";
+    std::filesystem::rename(payload, displaced);
+    if (context->mutation == CleanupMutation::RestoreSameIdentity) {
+      std::filesystem::rename(displaced, payload);
+      return 0;
+    }
+    std::ofstream(payload) << "different-identity";
+    return 0;
+  } catch (...) {
+    return EIO;
+  }
+}
+
+/**
+ * @brief Computes the exact public occurrence path for one test job.
+ * @param root Existing selected output root.
+ * @param job Exact occurrence identity.
+ * @return Root plus deterministic immutable occurrence leaf.
+ * @throws Digest or allocation failures unchanged.
+ */
+std::filesystem::path public_slot_for_job(const std::filesystem::path& root,
+                                          const B1JobInstance& job) {
+  B1Sha256 hash;
+  hash.update("execution-profile-output-commit-id-v1\n");
+  hash.update(encode_b1_job_instance(job));
+  return root / ("occurrence-" + b1_digest_hex(hash.finish()));
 }
 
 /**
@@ -636,6 +835,218 @@ TEST(B1OutputStore,
       store.commit(measured_job_zero(), seed_zero_image());
   EXPECT_TRUE(retried.succeeded()) << retried.diagnostic;
 }
+
+#if GTEST_HAS_DEATH_TEST
+/**
+ * @brief Proves mkdir-to-open replacement is detected before any artifact
+ * write and its real-directory replacement is never deleted by name.
+ * @throws Test framework, oracle, executor, and filesystem failures unchanged.
+ */
+TEST(B1OutputStore,
+     PrivateSlotHandoffReplacementFailsStopAndPreservesReplacementDirectory) {
+  ScopedB1OutputRoot output_root;
+  static_cast<void>(seed_zero_image());
+  OutputNamespaceMutationContext context;
+  context.root = output_root.root();
+  context.mutation = OutputNamespaceMutation::ReplacePrivateSlot;
+  context.point = B1OutputStoreFaultPoint::AfterStagingSlotMkdirBeforeOpen;
+
+  EXPECT_DEATH(
+      {
+        execution::ComputeIoExecutor executor(
+            {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+        B1OutputStoreOptions options;
+        options.fault_injector = &mutate_output_namespace;
+        options.fault_injector_context = &context;
+        B1OutputStore store(output_root.root(), executor, options);
+        static_cast<void>(store.commit(measured_job_zero(), seed_zero_image()));
+      },
+      ".*");
+  const std::filesystem::path replacement =
+      find_private_staging_slot(output_root.root());
+  ASSERT_FALSE(replacement.empty());
+  EXPECT_TRUE(std::filesystem::is_directory(replacement));
+  EXPECT_TRUE(std::filesystem::exists(replacement / "replacement-marker"));
+  EXPECT_FALSE(std::filesystem::exists(replacement / "output.rgba32le"));
+}
+#endif
+
+/**
+ * @brief Proves a real destination installed just before publication wins,
+ * remains untouched, and leaves a fully retryable private cleanup.
+ * @throws Test framework, oracle, executor, and filesystem failures unchanged.
+ */
+TEST(B1OutputStore,
+     AtomicNoReplacePublicationPreservesRealDirectoryCollisionAndRetries) {
+  ScopedB1OutputRoot output_root;
+  execution::ComputeIoExecutor executor(
+      {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+  const B1JobInstance job = measured_job_zero();
+  OutputNamespaceMutationContext context;
+  context.root = output_root.root();
+  context.public_slot = public_slot_for_job(output_root.root(), job);
+  context.mutation = OutputNamespaceMutation::InstallPublicSlot;
+  context.point = B1OutputStoreFaultPoint::BeforeSlotPublication;
+  B1OutputStoreOptions options;
+  options.fault_injector = &mutate_output_namespace;
+  options.fault_injector_context = &context;
+  B1OutputStore store(output_root.root(), executor, options);
+
+  const B1OutputCommitResult collided = store.commit(job, seed_zero_image());
+  EXPECT_EQ(collided.status, B1OutputCommitStatus::SlotExists)
+      << collided.diagnostic;
+  EXPECT_TRUE(std::filesystem::is_directory(context.public_slot));
+  EXPECT_TRUE(
+      std::filesystem::exists(context.public_slot / "replacement-marker"));
+  EXPECT_FALSE(
+      std::filesystem::exists(context.public_slot / "output.rgba32le"));
+  EXPECT_EQ(executor.snapshot().active_tasks, 0U);
+  EXPECT_EQ(executor.snapshot().active_planned_bytes, 0U);
+  ASSERT_GT(std::filesystem::remove_all(context.public_slot), 0U);
+
+  const B1OutputCommitResult retried = store.commit(job, seed_zero_image());
+  EXPECT_TRUE(retried.succeeded()) << retried.diagnostic;
+}
+
+#if GTEST_HAS_DEATH_TEST
+/**
+ * @brief Proves unowned extra leaves and type replacements cannot be silently
+ * swallowed during rollback after the accepted charge has settled.
+ * @throws Test framework, oracle, executor, and filesystem failures unchanged.
+ */
+TEST(B1OutputStore, StrictCleanupFailsStopOnExtraLeafAndTypeReplacement) {
+  static_cast<void>(seed_zero_image());
+  for (const OutputNamespaceMutation mutation :
+       {OutputNamespaceMutation::AddExtraLeaf,
+        OutputNamespaceMutation::ReplacePayloadType}) {
+    SCOPED_TRACE(static_cast<std::uint32_t>(mutation));
+    ScopedB1OutputRoot output_root;
+    OutputNamespaceMutationContext context;
+    context.root = output_root.root();
+    context.mutation = mutation;
+    context.point = B1OutputStoreFaultPoint::AfterTaskSettled;
+    context.throw_after = true;
+    EXPECT_DEATH(
+        {
+          execution::ComputeIoExecutor executor(
+              {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+          B1OutputStoreOptions options;
+          options.fault_injector = &mutate_output_namespace;
+          options.fault_injector_context = &context;
+          B1OutputStore store(output_root.root(), executor, options);
+          static_cast<void>(
+              store.commit(measured_job_zero(), seed_zero_image()));
+        },
+        ".*");
+  }
+}
+
+/**
+ * @brief Proves injected unlink `EIO`/`EROFS` are fail-stop only after the
+ * accepted executor charge has settled.
+ * @throws Test framework, oracle, executor, and filesystem failures unchanged.
+ */
+TEST(B1OutputStore, StrictCleanupFailsStopOnInjectedUnlinkErrors) {
+  static_cast<void>(seed_zero_image());
+  for (const int injected_errno : {EIO, EROFS}) {
+    SCOPED_TRACE(injected_errno);
+    ScopedB1OutputRoot output_root;
+    CleanupMutationContext cleanup;
+    cleanup.root = output_root.root();
+    cleanup.mutation = CleanupMutation::InjectErrno;
+    cleanup.injected_errno = injected_errno;
+    ThrowingFaultContext failure{B1OutputStoreFaultPoint::AfterTaskSettled,
+                                 true};
+    EXPECT_DEATH(
+        {
+          execution::ComputeIoExecutor executor(
+              {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+          cleanup.executor = &executor;
+          B1OutputStoreOptions options;
+          options.fault_injector = &throw_selected_output_fault;
+          options.fault_injector_context = &failure;
+          options.cleanup_injector = &mutate_strict_cleanup;
+          options.cleanup_injector_context = &cleanup;
+          B1OutputStore store(output_root.root(), executor, options);
+          static_cast<void>(
+              store.commit(measured_job_zero(), seed_zero_image()));
+        },
+        ".*");
+    EXPECT_TRUE(std::filesystem::exists(output_root.root() /
+                                        ".cleanup-charge-settled"));
+  }
+}
+#endif
+
+/**
+ * @brief Proves a same-inode rename-away/back remains removable and retryable.
+ * @throws Test framework, oracle, executor, and filesystem failures unchanged.
+ */
+TEST(B1OutputStore, StrictCleanupAcceptsSameIdentityRaceAfterSettlement) {
+  ScopedB1OutputRoot output_root;
+  execution::ComputeIoExecutor executor(
+      {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+  CleanupMutationContext cleanup;
+  cleanup.root = output_root.root();
+  cleanup.executor = &executor;
+  cleanup.mutation = CleanupMutation::RestoreSameIdentity;
+  ThrowingFaultContext failure{B1OutputStoreFaultPoint::AfterTaskSettled, true};
+  B1OutputStoreOptions options;
+  options.fault_injector = &throw_selected_output_fault;
+  options.fault_injector_context = &failure;
+  options.cleanup_injector = &mutate_strict_cleanup;
+  options.cleanup_injector_context = &cleanup;
+  B1OutputStore store(output_root.root(), executor, options);
+
+  EXPECT_THROW(
+      static_cast<void>(store.commit(measured_job_zero(), seed_zero_image())),
+      B1OutputFaultSentinel);
+  EXPECT_TRUE(cleanup.invoked);
+  EXPECT_TRUE(cleanup.charge_was_settled);
+  EXPECT_TRUE(std::filesystem::is_empty(output_root.root()));
+  failure.enabled = false;
+  const B1OutputCommitResult retried =
+      store.commit(measured_job_zero(), seed_zero_image());
+  EXPECT_TRUE(retried.succeeded()) << retried.diagnostic;
+}
+
+#if GTEST_HAS_DEATH_TEST
+/**
+ * @brief Proves a different-inode replacement after the first identity check
+ * is preserved and forces fail-stop instead of redirected deletion.
+ * @throws Test framework, oracle, executor, and filesystem failures unchanged.
+ */
+TEST(B1OutputStore, StrictCleanupFailsStopOnDifferentIdentityRace) {
+  ScopedB1OutputRoot output_root;
+  static_cast<void>(seed_zero_image());
+  CleanupMutationContext cleanup;
+  cleanup.root = output_root.root();
+  cleanup.mutation = CleanupMutation::InstallDifferentIdentity;
+  ThrowingFaultContext failure{B1OutputStoreFaultPoint::AfterTaskSettled, true};
+  EXPECT_DEATH(
+      {
+        execution::ComputeIoExecutor executor(
+            {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+        cleanup.executor = &executor;
+        B1OutputStoreOptions options;
+        options.fault_injector = &throw_selected_output_fault;
+        options.fault_injector_context = &failure;
+        options.cleanup_injector = &mutate_strict_cleanup;
+        options.cleanup_injector_context = &cleanup;
+        B1OutputStore store(output_root.root(), executor, options);
+        static_cast<void>(store.commit(measured_job_zero(), seed_zero_image()));
+      },
+      ".*");
+  EXPECT_TRUE(
+      std::filesystem::exists(output_root.root() / ".cleanup-charge-settled"));
+  const std::filesystem::path private_slot =
+      find_private_staging_slot(output_root.root());
+  ASSERT_FALSE(private_slot.empty());
+  EXPECT_TRUE(
+      std::filesystem::is_regular_file(private_slot / "output.rgba32le"));
+  EXPECT_TRUE(std::filesystem::exists(private_slot / "payload-displaced"));
+}
+#endif
 
 /**
  * @brief Proves a real concurrent charge survives one B1 task's settlement cut.

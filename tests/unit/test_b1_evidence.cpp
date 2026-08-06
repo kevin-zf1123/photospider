@@ -340,11 +340,18 @@ TEST(B1Evidence, VerificationJsonRetainsAllOccurrencesAndClosedIdentity) {
                 .at("service_starts")
                 .size(),
             kB1TasksPerJob);
-  EXPECT_TRUE(encoded.at("evidence")
-                  .at("environment")
-                  .at("storage_raw_proof")
-                  .at("root_containment_proved")
-                  .get<bool>());
+  const nlohmann::json& raw_proof =
+      encoded.at("evidence").at("environment").at("storage_raw_proof");
+  EXPECT_EQ(raw_proof.at("schema"),
+            "execution-profile-b1-storage-raw-proof-v1");
+  EXPECT_EQ(raw_proof.at("canonical_bytes"),
+            row.evidence.environment.storage_raw_proof->canonical_bytes);
+  EXPECT_FALSE(raw_proof.at("raw_evidence")
+                   .at("containment")
+                   .at("destinations")
+                   .empty());
+  EXPECT_EQ(raw_proof.at("raw_evidence").at("transaction").at("events").size(),
+            7U);
   EXPECT_EQ(encoded.at("evidence")
                 .at("jobs")
                 .at(0U)

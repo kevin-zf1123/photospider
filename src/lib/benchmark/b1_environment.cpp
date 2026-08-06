@@ -35,6 +35,10 @@ constexpr char kBaseSchema[] = "execution-profile-base-environment-v1";
 constexpr char kEnvironmentClassSchema[] =
     "execution-profile-environment-class-v1";  // NOLINT(whitespace/indent_namespace)
 
+/** @brief Exact retained raw-proof header without its LF. */
+constexpr char kStorageRawProofSchema[] =
+    "execution-profile-b1-storage-raw-proof-v1";  // NOLINT(whitespace/indent_namespace)
+
 /** @brief Name/type pair in one closed manifest schema. */
 struct FieldSchema final {
   /** @brief Exact field name. */
@@ -104,6 +108,16 @@ constexpr std::array<FieldSchema, 4U> kEnvironmentClassFields{{
     {"storage_environment_digest", "sha256"},
 }};
 
+/** @brief Exact six-field retained raw-proof schema in canonical order. */
+constexpr std::array<FieldSchema, 6U> kStorageRawProofFields{{
+    {"backend_observation", "backend-raw-observation-v1"},
+    {"field_observations", "storage-field-observation-list-v1"},
+    {"mount_observation", "mount-raw-observation-v1"},
+    {"performance_observation", "performance-raw-observation-v1"},
+    {"transaction_observation", "storage-transaction-observation-v1"},
+    {"containment_observation", "root-containment-observation-v1"},
+}};
+
 /** @brief Exact performance component type sequence. */
 constexpr std::array<std::string_view, 37U> kPerformanceTypes{{
     "enum",       "identifier", "uint64",     "identifier", "enum",
@@ -126,6 +140,29 @@ const std::vector<std::string> kDurabilityCapabilities{
     "manifest-sync",
     "namespace-durability-barrier",
     "payload-sync"};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Closed raw-proof kinds accepted by the performance mapper. */
+const std::vector<std::string> kPerformanceProofKinds{
+    "allocation-unit-bytes-absent",
+    "backend-performance-tier-absent",
+    "device-performance-profile-absent",
+    "logical-block-bytes-absent",
+    "network-path-absent",
+    "physical-block-bytes-absent",
+    "provider-layout-data-units-absent",
+    "provider-layout-parity-units-absent",
+    "provider-layout-replica-count-absent",
+    "provider-layout-stripe-unit-absent",
+    "record-bytes-absent",
+    "upper-write-cache-absent"};  // NOLINT(whitespace/indent_namespace)
+
+/** @brief Exact transaction-event universe in canonical unsigned-ASCII order.
+ */
+const std::vector<std::string> kStorageTransactionEventKinds{
+    "manifest-published-no-replace", "manifest-revalidated",
+    "manifest-synchronized",         "payload-revalidated",
+    "payload-synchronized",          "root-directory-synchronized",
+    "slot-directory-synchronized"};  // NOLINT(whitespace/indent_namespace)
 
 /** @brief Exact storage eligibility reason order. */
 constexpr std::array<std::string_view, 11U> kEligibilityReasonOrder{{
@@ -459,7 +496,7 @@ bool fields_known(const B1CanonicalManifest& manifest,
 }  // namespace
 
 B1RawFieldObservation normalize_b1_mount_options(
-    const B1MountNormalizationInput& input) {
+    const B1MountRawObservation& input) {
   const std::vector<std::pair<std::string_view, std::vector<std::string_view>>>
       schema{
           {"access_mode", {"read-only", "read-write"}},
@@ -472,17 +509,33 @@ B1RawFieldObservation normalize_b1_mount_options(
            {"none", "writeback", "ordered", "full", "provider-managed"}},
           {"metadata_write_mode", {"buffered", "synchronous"}}};
   std::map<std::string, std::string> effective;
-  bool unknown_seen = false;
+  const bool case_insensitive =
+      input.case_mode == B1MountCaseMode::AsciiCaseInsensitive;
   for (const B1NativeMountOption& option : input.options) {
     const std::string key =
-        input.ascii_case_insensitive ? ascii_lower(option.key) : option.key;
+        case_insensitive ? ascii_lower(option.key) : option.key;
     const std::string value =
-        input.ascii_case_insensitive ? ascii_lower(option.value) : option.value;
+        case_insensitive ? ascii_lower(option.value) : option.value;
     const auto schema_iterator =
         std::find_if(schema.begin(), schema.end(),
                      [&key](const auto& entry) { return entry.first == key; });
     if (schema_iterator == schema.end()) {
-      unknown_seen = true;
+      const auto excluded = std::find_if(
+          input.excluded_options.begin(), input.excluded_options.end(),
+          [&option](const B1ExcludedMountOptionProof& proof) {
+            return proof.option.key == option.key &&
+                   proof.option.value == option.value &&
+                   valid_identifier(proof.proof_identity);
+          });
+      if (excluded == input.excluded_options.end()) {
+        return B1RawFieldObservation{B1ObservationState::Unprovable,
+                                     "evidence-chain-incomplete",
+                                     "mount-map-v1",
+                                     "",
+                                     "",
+                                     "probe-state-observed",
+                                     input.observation_identity};
+      }
       continue;
     }
     if (!in_domain(value, schema_iterator->second)) {
@@ -490,28 +543,31 @@ B1RawFieldObservation normalize_b1_mount_options(
                                    "conflicting-effective-values",
                                    "mount-map-v1",
                                    "",
-                                   false,
-                                   false};
+                                   "",
+                                   "probe-state-observed",
+                                   input.observation_identity};
     }
     const auto prior = effective.find(key);
     if (prior != effective.end() && prior->second != value &&
-        !input.duplicate_last_wins_proved) {
+        input.duplicate_policy != B1MountDuplicatePolicy::LastWins) {
       return B1RawFieldObservation{B1ObservationState::Unprovable,
                                    "conflicting-effective-values",
                                    "mount-map-v1",
                                    "",
-                                   false,
-                                   false};
+                                   "",
+                                   "probe-state-observed",
+                                   input.observation_identity};
     }
     effective[key] = value;
   }
-  if (unknown_seen && !input.unknown_options_no_effect_proved) {
+  if (!valid_identifier(input.observation_identity)) {
     return B1RawFieldObservation{B1ObservationState::Unprovable,
                                  "evidence-chain-incomplete",
                                  "mount-map-v1",
                                  "",
-                                 false,
-                                 false};
+                                 "",
+                                 "probe-state-observed",
+                                 input.observation_identity};
   }
   for (const auto& [key_view, domain] : schema) {
     const std::string key(key_view);
@@ -524,10 +580,11 @@ B1RawFieldObservation normalize_b1_mount_options(
                                    "evidence-chain-incomplete",
                                    "mount-map-v1",
                                    "",
-                                   false,
-                                   false};
+                                   "",
+                                   "probe-state-observed",
+                                   input.observation_identity};
     }
-    const std::string value = input.ascii_case_insensitive
+    const std::string value = case_insensitive
                                   ? ascii_lower(default_iterator->second)
                                   : default_iterator->second;
     if (!in_domain(value, domain)) {
@@ -535,16 +592,22 @@ B1RawFieldObservation normalize_b1_mount_options(
                                    "conflicting-effective-values",
                                    "mount-map-v1",
                                    "",
-                                   false,
-                                   false};
+                                   "",
+                                   "probe-state-observed",
+                                   input.observation_identity};
     }
     effective.emplace(key, value);
   }
   std::vector<std::pair<std::string, std::string>> entries(effective.begin(),
                                                            effective.end());
-  return B1RawFieldObservation{
-      B1ObservationState::Known, "none", "mount-map-v1",
-      encode_b1_map(entries),    true,   false};
+  const std::string payload = encode_b1_map(entries);
+  return B1RawFieldObservation{B1ObservationState::Known,
+                               "none",
+                               "mount-map-v1",
+                               payload,
+                               payload,
+                               "raw-value-observed",
+                               input.observation_identity};
 }
 
 B1RawFieldObservation map_b1_performance_configuration(
@@ -553,22 +616,38 @@ B1RawFieldObservation map_b1_performance_configuration(
   std::vector<std::string> values(components.begin(), components.end());
   const std::string payload = encode_b1_fixed_record(values);
   static_cast<void>(validate_performance_payload(payload));
-  if (proofs.conflicting_values) {
+  const auto unprovable = [&proofs](std::string reason) {
     return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                 "conflicting-effective-values",
+                                 std::move(reason),
                                  "b1-performance-configuration-v1",
                                  "",
-                                 false,
-                                 false};
+                                 "",
+                                 "probe-state-observed",
+                                 proofs.initial_observation_identity};
+  };
+  if (!proofs.conflicting_components.empty()) {
+    return unprovable("conflicting-effective-values");
   }
-  if (!proofs.one_frozen_observation || !proofs.complete_option_mapping ||
-      !proofs.stable_through_replicate) {
-    return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                 "evidence-chain-incomplete",
-                                 "b1-performance-configuration-v1",
-                                 "",
-                                 false,
-                                 false};
+  if (!valid_identifier(proofs.initial_observation_identity) ||
+      !valid_identifier(proofs.final_observation_identity) ||
+      proofs.final_components.size() != components.size() ||
+      !std::equal(proofs.final_components.begin(),
+                  proofs.final_components.end(), components.begin()) ||
+      proofs.mapped_option_proof_identities.empty() ||
+      !std::all_of(proofs.mapped_option_proof_identities.begin(),
+                   proofs.mapped_option_proof_identities.end(),
+                   [](const std::string& identity) {
+                     return valid_identifier(identity);
+                   })) {
+    return unprovable("evidence-chain-incomplete");
+  }
+  if (!std::is_sorted(proofs.mapped_option_proof_identities.begin(),
+                      proofs.mapped_option_proof_identities.end()) ||
+      std::adjacent_find(proofs.mapped_option_proof_identities.begin(),
+                         proofs.mapped_option_proof_identities.end()) !=
+          proofs.mapped_option_proof_identities.end()) {
+    throw std::invalid_argument(
+        "B1 performance option proof identities are not sorted/unique.");
   }
   std::vector<std::string> proof_kinds = proofs.proof_kinds;
   std::sort(proof_kinds.begin(), proof_kinds.end());
@@ -576,6 +655,14 @@ B1RawFieldObservation map_b1_performance_configuration(
       proof_kinds.end()) {
     throw std::invalid_argument(
         "B1 performance proof kinds contain duplicate.");
+  }
+  if (!std::all_of(proof_kinds.begin(), proof_kinds.end(),
+                   [](const std::string& proof) {
+                     return std::find(kPerformanceProofKinds.begin(),
+                                      kPerformanceProofKinds.end(),
+                                      proof) != kPerformanceProofKinds.end();
+                   })) {
+    throw std::invalid_argument("B1 performance proof kind is unknown.");
   }
   const auto has_proof = [&proof_kinds](std::string_view proof) {
     return std::binary_search(proof_kinds.begin(), proof_kinds.end(), proof);
@@ -590,20 +677,10 @@ B1RawFieldObservation map_b1_performance_configuration(
     const bool zero = parse_uint64(components[index]) == 0U;
     const bool proved_absent = has_proof(proof);
     if (zero && !proved_absent) {
-      return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                   "evidence-chain-incomplete",
-                                   "b1-performance-configuration-v1",
-                                   "",
-                                   false,
-                                   false};
+      return unprovable("evidence-chain-incomplete");
     }
     if (!zero && proved_absent) {
-      return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                   "conflicting-effective-values",
-                                   "b1-performance-configuration-v1",
-                                   "",
-                                   false,
-                                   false};
+      return unprovable("conflicting-effective-values");
     }
   }
   if (components[15U] == "provider-managed") {
@@ -616,24 +693,14 @@ B1RawFieldObservation map_b1_performance_configuration(
     for (const auto& [index, proof] : geometry) {
       const bool zero = parse_uint64(components[index]) == 0U;
       if (zero != has_proof(proof)) {
-        return B1RawFieldObservation{
-            B1ObservationState::Unprovable,
-            zero ? "evidence-chain-incomplete" : "conflicting-effective-values",
-            "b1-performance-configuration-v1",
-            "",
-            false,
-            false};
+        return unprovable(zero ? "evidence-chain-incomplete"
+                               : "conflicting-effective-values");
       }
     }
   }
   const bool upper_cache_absence_proved = has_proof("upper-write-cache-absent");
   if (components[21U] != "absent" && upper_cache_absence_proved) {
-    return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                 "conflicting-effective-values",
-                                 "b1-performance-configuration-v1",
-                                 "",
-                                 false,
-                                 false};
+    return unprovable("conflicting-effective-values");
   }
   if ((components[21U] == "absent" &&
        (components[22U] != "not-applicable" || !upper_cache_absence_proved)) ||
@@ -641,29 +708,14 @@ B1RawFieldObservation map_b1_performance_configuration(
       ((components[21U] == "write-through" || components[21U] == "write-back" ||
         components[21U] == "provider-managed") &&
        components[22U] == "none")) {
-    return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                 "evidence-chain-incomplete",
-                                 "b1-performance-configuration-v1",
-                                 "",
-                                 false,
-                                 false};
+    return unprovable("evidence-chain-incomplete");
   }
   const bool network_absence_proved = has_proof("network-path-absent");
   if (components[28U] != "not-applicable" && network_absence_proved) {
-    return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                 "conflicting-effective-values",
-                                 "b1-performance-configuration-v1",
-                                 "",
-                                 false,
-                                 false};
+    return unprovable("conflicting-effective-values");
   }
   if (components[28U] == "not-applicable" && !network_absence_proved) {
-    return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                 "evidence-chain-incomplete",
-                                 "b1-performance-configuration-v1",
-                                 "",
-                                 false,
-                                 false};
+    return unprovable("evidence-chain-incomplete");
   }
   const bool backend_tier_absence_proved =
       has_proof("backend-performance-tier-absent");
@@ -671,40 +723,29 @@ B1RawFieldObservation map_b1_performance_configuration(
       has_proof("device-performance-profile-absent");
   if ((components[35U] != "not-applicable" && backend_tier_absence_proved) ||
       (components[36U] != "not-applicable" && device_profile_absence_proved)) {
-    return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                 "conflicting-effective-values",
-                                 "b1-performance-configuration-v1",
-                                 "",
-                                 false,
-                                 false};
+    return unprovable("conflicting-effective-values");
   }
   if ((components[35U] == "not-applicable" && !backend_tier_absence_proved) ||
       (components[36U] == "not-applicable" && !device_profile_absence_proved)) {
-    return B1RawFieldObservation{B1ObservationState::Unprovable,
-                                 "evidence-chain-incomplete",
-                                 "b1-performance-configuration-v1",
-                                 "",
-                                 false,
-                                 false};
+    return unprovable("evidence-chain-incomplete");
   }
   return B1RawFieldObservation{B1ObservationState::Known,
                                "none",
                                "b1-performance-configuration-v1",
                                payload,
-                               true,
-                               false};
+                               payload,
+                               "raw-value-observed",
+                               proofs.initial_observation_identity};
 }
 
 B1AdaptedStorageObservation adapt_b1_storage_observation(
-    const B1RawStorageObservation& raw) {
+    const B1BackendRawObservation& raw) {
   if (raw.fields.size() != kStorageFields.size()) {
     throw std::invalid_argument(
         "Raw storage observation does not contain exactly 21 fields.");
   }
   std::vector<B1CanonicalField> fields;
   fields.reserve(kStorageFields.size());
-  bool raw_mapping_complete = true;
-  bool not_applicable_proofs_valid = true;
   for (const FieldSchema& schema : kStorageFields) {
     const auto iterator = raw.fields.find(std::string(schema.name));
     if (iterator == raw.fields.end() || iterator->second.type != schema.type) {
@@ -715,14 +756,29 @@ B1AdaptedStorageObservation adapt_b1_storage_observation(
         B1CanonicalField{std::string(schema.name), iterator->second.state,
                          iterator->second.reason, iterator->second.type,
                          iterator->second.payload});
-    if ((iterator->second.state == B1ObservationState::Known ||
-         iterator->second.state == B1ObservationState::NotApplicable) &&
-        !iterator->second.mapping_proved) {
-      raw_mapping_complete = false;
+    const B1RawFieldObservation& observation = iterator->second;
+    if (!valid_identifier(observation.proof_identity)) {
+      throw std::invalid_argument(
+          "Raw storage field lacks a stable proof identity.");
     }
-    if (iterator->second.state == B1ObservationState::NotApplicable &&
-        !iterator->second.absence_proved) {
-      not_applicable_proofs_valid = false;
+    if (observation.state == B1ObservationState::Known &&
+        (observation.proof_kind != "raw-value-observed" ||
+         observation.raw_payload != observation.payload)) {
+      throw std::invalid_argument(
+          "Known raw storage field does not bind its mapped payload.");
+    }
+    if (observation.state == B1ObservationState::NotApplicable &&
+        (observation.proof_kind != "complete-path-layer-absent" ||
+         !observation.raw_payload.empty())) {
+      throw std::invalid_argument(
+          "Raw storage N/A field lacks complete-path absence evidence.");
+    }
+    if (observation.state != B1ObservationState::Known &&
+        observation.state != B1ObservationState::NotApplicable &&
+        (observation.proof_kind != "probe-state-observed" ||
+         !observation.raw_payload.empty())) {
+      throw std::invalid_argument(
+          "Ineligible raw storage field proof does not match its state.");
     }
   }
   const std::string_view expected_backend = [&raw]() -> std::string_view {
@@ -747,8 +803,387 @@ B1AdaptedStorageObservation adapt_b1_storage_observation(
   }
   validate_fields(fields, kStorageFields);
   validate_storage_cross_fields(fields);
-  return B1AdaptedStorageObservation{std::move(fields), raw_mapping_complete,
-                                     not_applicable_proofs_valid};
+  return B1AdaptedStorageObservation{std::move(fields)};
+}
+
+namespace {
+
+/**
+ * @brief Encodes one generic list of complete fixed-record payloads.
+ * @param records Records in already selected canonical order.
+ * @return Count plus one frame around every record.
+ * @throws std::bad_alloc when output allocation fails.
+ */
+std::string encode_raw_record_list(const std::vector<std::string>& records) {
+  std::string output = std::to_string(records.size()) + ":";
+  for (const std::string& record : records) {
+    output.append(b1_environment_frame(record));
+  }
+  return output;
+}
+
+/**
+ * @brief Encodes a sorted unique list of identifier payloads.
+ * @param identities Candidate proof identities.
+ * @return Canonical count/framed list.
+ * @throws std::invalid_argument for lexical or duplicate drift.
+ * @throws std::bad_alloc when staging/output allocation fails.
+ */
+std::string encode_raw_identifier_list(std::vector<std::string> identities) {
+  if (!std::all_of(identities.begin(), identities.end(),
+                   [](const std::string& identity) {
+                     return valid_identifier(identity);
+                   })) {
+    throw std::invalid_argument("Raw proof identity list is invalid.");
+  }
+  std::sort(identities.begin(), identities.end());
+  if (std::adjacent_find(identities.begin(), identities.end()) !=
+      identities.end()) {
+    throw std::invalid_argument("Raw proof identity list has a duplicate.");
+  }
+  return encode_raw_record_list(identities);
+}
+
+/**
+ * @brief Decodes one canonical lowercase-hex UTF-8 text payload.
+ * @param payload Candidate canonical text payload.
+ * @return Exact decoded string bytes.
+ * @throws std::invalid_argument for invalid hexadecimal, UTF-8, or NFC.
+ * @throws std::bad_alloc when decoded ownership allocates.
+ */
+std::string decode_raw_text(std::string_view payload) {
+  const std::vector<std::uint8_t> decoded = decode_hex(payload);
+  if (!valid_nfc_utf8(decoded)) {
+    throw std::invalid_argument("Raw proof text is invalid or non-NFC.");
+  }
+  return std::string(reinterpret_cast<const char*>(decoded.data()),
+                     decoded.size());
+}
+
+/**
+ * @brief Encodes arbitrary provider bytes without text normalization.
+ * @param bytes Exact borrowed bytes, including an allowed empty observation.
+ * @return Lowercase hexadecimal preserving every byte.
+ * @throws std::bad_alloc when output allocation fails.
+ */
+std::string encode_raw_bytes(std::string_view bytes) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(bytes.size() * 2U);
+  for (const unsigned char value : bytes) {
+    encoded.push_back(kHex[value >> 4U]);
+    encoded.push_back(kHex[value & 0x0fU]);
+  }
+  return encoded;
+}
+
+/**
+ * @brief Decodes arbitrary provider bytes from their canonical hex envelope.
+ * @param payload Empty or even lowercase hexadecimal bytes.
+ * @return Exact owned provider bytes.
+ * @throws std::invalid_argument for malformed hexadecimal.
+ * @throws std::bad_alloc when decoded storage allocates.
+ */
+std::string decode_raw_bytes(std::string_view payload) {
+  if (payload.empty()) {
+    return {};
+  }
+  const std::vector<std::uint8_t> decoded = decode_hex(payload);
+  return std::string(reinterpret_cast<const char*>(decoded.data()),
+                     decoded.size());
+}
+
+/**
+ * @brief Encodes one nonempty path spelling through canonical text.
+ * @param path Candidate path.
+ * @return Lowercase-hex NFC UTF-8 generic spelling.
+ * @throws std::invalid_argument for empty/invalid/non-NFC path bytes.
+ * @throws std::bad_alloc when string ownership allocates.
+ */
+std::string encode_raw_path(const std::filesystem::path& path) {
+  if (path.empty()) {
+    throw std::invalid_argument("Raw proof path is empty.");
+  }
+  return encode_b1_normalized_text(path.generic_string());
+}
+
+/**
+ * @brief Returns the closed backend token for one raw adapter kind.
+ * @param backend Valid backend enum.
+ * @return Process-lifetime token.
+ * @throws std::invalid_argument for an invalid enum representation.
+ */
+const char* backend_kind_name(B1StorageBackendKind backend) {
+  switch (backend) {
+    case B1StorageBackendKind::Filesystem:
+      return "filesystem";
+    case B1StorageBackendKind::NetworkFilesystem:
+      return "network-filesystem";
+    case B1StorageBackendKind::ObjectStore:
+      return "object-store";
+    case B1StorageBackendKind::MemoryStore:
+      return "memory-store";
+    case B1StorageBackendKind::Composite:
+      return "composite";
+  }
+  throw std::invalid_argument("Raw proof backend kind is invalid.");
+}
+
+/**
+ * @brief Parses one closed backend token.
+ * @param token Candidate token.
+ * @return Exact backend enum.
+ * @throws std::invalid_argument for an unknown token.
+ */
+B1StorageBackendKind parse_backend_kind(std::string_view token) {
+  if (token == "filesystem") {
+    return B1StorageBackendKind::Filesystem;
+  }
+  if (token == "network-filesystem") {
+    return B1StorageBackendKind::NetworkFilesystem;
+  }
+  if (token == "object-store") {
+    return B1StorageBackendKind::ObjectStore;
+  }
+  if (token == "memory-store") {
+    return B1StorageBackendKind::MemoryStore;
+  }
+  if (token == "composite") {
+    return B1StorageBackendKind::Composite;
+  }
+  throw std::invalid_argument("Raw proof backend kind is unknown.");
+}
+
+/**
+ * @brief Encodes native option records while preserving provider order.
+ * @param options Native option observations.
+ * @return Counted record list with canonical text components.
+ * @throws Validation/allocation failures unchanged.
+ */
+std::string encode_native_options(
+    const std::vector<B1NativeMountOption>& options) {
+  std::vector<std::string> records;
+  records.reserve(options.size());
+  for (const B1NativeMountOption& option : options) {
+    records.push_back(
+        encode_b1_fixed_record({encode_b1_normalized_text(option.key),
+                                encode_b1_normalized_text(option.value)}));
+  }
+  return encode_raw_record_list(records);
+}
+
+/**
+ * @brief Encodes exact mount defaults in sorted key order.
+ * @param defaults Native effective defaults.
+ * @return Counted fixed-record list.
+ * @throws Validation/allocation failures unchanged.
+ */
+std::string encode_mount_defaults(
+    const std::map<std::string, std::string>& defaults) {
+  std::vector<std::string> records;
+  records.reserve(defaults.size());
+  for (const auto& [key, value] : defaults) {
+    records.push_back(encode_b1_fixed_record(
+        {encode_b1_normalized_text(key), encode_b1_normalized_text(value)}));
+  }
+  return encode_raw_record_list(records);
+}
+
+/**
+ * @brief Encodes sorted unique excluded-option no-effect proofs.
+ * @param excluded Concrete option/proof records.
+ * @return Canonical counted record list.
+ * @throws std::invalid_argument for invalid or duplicate proof records.
+ * @throws std::bad_alloc when staging/output allocation fails.
+ */
+std::string encode_excluded_options(
+    const std::vector<B1ExcludedMountOptionProof>& excluded) {
+  std::vector<std::string> records;
+  records.reserve(excluded.size());
+  for (const B1ExcludedMountOptionProof& proof : excluded) {
+    if (!valid_identifier(proof.proof_identity)) {
+      throw std::invalid_argument(
+          "Excluded mount option proof identity is invalid.");
+    }
+    records.push_back(encode_b1_fixed_record(
+        {encode_b1_normalized_text(proof.option.key),
+         encode_b1_normalized_text(proof.option.value), proof.proof_identity}));
+  }
+  std::sort(records.begin(), records.end());
+  if (std::adjacent_find(records.begin(), records.end()) != records.end()) {
+    throw std::invalid_argument("Excluded mount option proof is duplicate.");
+  }
+  return encode_raw_record_list(records);
+}
+
+/**
+ * @brief Builds the exact six canonical proof fields from typed evidence.
+ * @param evidence Complete typed raw evidence.
+ * @return Fields ready for the shared manifest encoder.
+ * @throws std::invalid_argument for lexical/cardinality/uniqueness drift.
+ * @throws std::bad_alloc when canonical staging allocates.
+ */
+std::vector<B1CanonicalField> storage_raw_proof_fields(
+    const B1StorageRawEvidence& evidence) {
+  if (evidence.backend.fields.size() != kStorageFields.size()) {
+    throw std::invalid_argument(
+        "Raw proof must contain exactly 21 field observations.");
+  }
+  const std::string backend_payload =
+      encode_b1_fixed_record({backend_kind_name(evidence.backend.backend),
+                              encode_raw_path(evidence.backend.selected_root),
+                              encode_raw_path(evidence.backend.resolved_root)});
+
+  std::vector<std::string> field_records;
+  field_records.reserve(kStorageFields.size());
+  for (const FieldSchema& schema : kStorageFields) {
+    const auto found = evidence.backend.fields.find(std::string(schema.name));
+    if (found == evidence.backend.fields.end() ||
+        found->second.type != schema.type) {
+      throw std::invalid_argument("Raw proof field/type set drifted.");
+    }
+    const B1RawFieldObservation& observation = found->second;
+    if (!valid_identifier(observation.proof_identity) ||
+        !in_domain(observation.proof_kind,
+                   std::vector<std::string_view>{"raw-value-observed",
+                                                 "complete-path-layer-absent",
+                                                 "probe-state-observed"})) {
+      throw std::invalid_argument("Raw proof field identity/kind is invalid.");
+    }
+    field_records.push_back(encode_b1_fixed_record(
+        {std::string(schema.name), state_name(observation.state),
+         observation.reason, observation.type, observation.payload,
+         encode_raw_bytes(observation.raw_payload), observation.proof_kind,
+         observation.proof_identity}));
+  }
+
+  const std::string case_mode =
+      evidence.mount.case_mode == B1MountCaseMode::CaseSensitive
+          ? "case-sensitive"
+          : "ascii-case-insensitive";
+  const std::string duplicate_policy =
+      evidence.mount.duplicate_policy == B1MountDuplicatePolicy::RejectConflicts
+          ? "reject-conflicts"
+          : "last-wins";
+  if (!valid_identifier(evidence.mount.observation_identity)) {
+    throw std::invalid_argument("Raw mount observation identity is invalid.");
+  }
+  const std::string mount_payload = encode_b1_fixed_record(
+      {encode_native_options(evidence.mount.options),
+       encode_mount_defaults(evidence.mount.defaults), case_mode,
+       duplicate_policy,
+       encode_excluded_options(evidence.mount.excluded_options),
+       evidence.mount.observation_identity});
+
+  const std::vector<std::string> performance_values(
+      evidence.performance_components.begin(),
+      evidence.performance_components.end());
+  const std::string performance_payload = encode_b1_fixed_record(
+      {encode_b1_fixed_record(performance_values),
+       encode_b1_fixed_record(evidence.performance_proofs.final_components),
+       encode_b1_token_set(evidence.performance_proofs.proof_kinds,
+                           kPerformanceProofKinds),
+       encode_raw_identifier_list(
+           evidence.performance_proofs.mapped_option_proof_identities),
+       evidence.performance_proofs.initial_observation_identity,
+       evidence.performance_proofs.final_observation_identity,
+       encode_raw_identifier_list(
+           evidence.performance_proofs.conflicting_components)});
+
+  std::vector<std::string> event_records;
+  event_records.reserve(evidence.transaction.events.size());
+  for (const B1StorageTransactionEvent& event : evidence.transaction.events) {
+    if (std::find(kStorageTransactionEventKinds.begin(),
+                  kStorageTransactionEventKinds.end(),
+                  event.kind) == kStorageTransactionEventKinds.end() ||
+        !valid_identifier(event.observation_identity)) {
+      throw std::invalid_argument("Raw transaction event is invalid.");
+    }
+    event_records.push_back(
+        encode_b1_fixed_record({event.kind, event.observation_identity}));
+  }
+  std::sort(event_records.begin(), event_records.end());
+  if (std::adjacent_find(event_records.begin(), event_records.end()) !=
+      event_records.end()) {
+    throw std::invalid_argument("Raw transaction event is duplicate.");
+  }
+  const B1StorageTransactionRawObservation& transaction = evidence.transaction;
+  const std::string transaction_payload = encode_b1_fixed_record(
+      {transaction.output_store_contract_id,
+       std::to_string(transaction.output_store_contract_generation),
+       transaction.backend_semantics_id,
+       std::to_string(transaction.backend_semantics_generation),
+       transaction.backend_instance_payload,
+       transaction.mount_identity_payload.empty()
+           ? std::string("not-applicable")
+           : transaction.mount_identity_payload,
+       transaction.durability_endpoint_payload,
+       transaction.durability_anchor_payload,
+       transaction.commit_semantics_payload,
+       transaction.durability_capabilities_payload,
+       transaction.requested_durability, transaction.achieved_durability,
+       transaction.receipt_commit_id, encode_raw_path(transaction.receipt_root),
+       encode_raw_path(transaction.receipt_slot),
+       encode_b1_normalized_text(transaction.published_manifest_identity),
+       encode_raw_record_list(event_records)});
+
+  std::vector<std::string> destination_records;
+  destination_records.reserve(evidence.containment.destinations.size());
+  for (const B1ContainmentDestinationObservation& destination :
+       evidence.containment.destinations) {
+    if (!in_domain(destination.owner_kind,
+                   std::vector<std::string_view>{"transaction-receipt",
+                                                 "runner-artifact"}) ||
+        destination.root_authority_identity.empty() ||
+        destination.owner_identity.empty()) {
+      throw std::invalid_argument("Raw containment destination is invalid.");
+    }
+    destination_records.push_back(encode_b1_fixed_record(
+        {encode_raw_path(destination.spelling),
+         encode_raw_path(destination.resolved),
+         encode_b1_normalized_text(destination.root_authority_identity),
+         destination.owner_kind,
+         encode_b1_normalized_text(destination.owner_identity)}));
+  }
+  std::sort(destination_records.begin(), destination_records.end());
+  if (destination_records.empty() ||
+      std::adjacent_find(destination_records.begin(),
+                         destination_records.end()) !=
+          destination_records.end()) {
+    throw std::invalid_argument(
+        "Raw containment destination list is empty or duplicate.");
+  }
+  const std::string containment_payload = encode_b1_fixed_record(
+      {encode_raw_path(evidence.containment.selected_root),
+       encode_raw_path(evidence.containment.resolved_root),
+       encode_b1_normalized_text(evidence.containment.root_authority_identity),
+       encode_raw_record_list(destination_records)});
+
+  return {
+      B1CanonicalField{"backend_observation", B1ObservationState::Known, "none",
+                       "backend-raw-observation-v1", backend_payload},
+      B1CanonicalField{"field_observations", B1ObservationState::Known, "none",
+                       "storage-field-observation-list-v1",
+                       encode_raw_record_list(field_records)},
+      B1CanonicalField{"mount_observation", B1ObservationState::Known, "none",
+                       "mount-raw-observation-v1", mount_payload},
+      B1CanonicalField{"performance_observation", B1ObservationState::Known,
+                       "none", "performance-raw-observation-v1",
+                       performance_payload},
+      B1CanonicalField{"transaction_observation", B1ObservationState::Known,
+                       "none", "storage-transaction-observation-v1",
+                       transaction_payload},
+      B1CanonicalField{"containment_observation", B1ObservationState::Known,
+                       "none", "root-containment-observation-v1",
+                       containment_payload},
+  };
+}
+
+}  // namespace
+
+std::string encode_b1_storage_raw_proof(const B1StorageRawEvidence& evidence) {
+  return encode_manifest(kStorageRawProofSchema,
+                         storage_raw_proof_fields(evidence));
 }
 
 std::string encode_b1_storage_environment(
@@ -821,6 +1256,20 @@ B1CanonicalManifest parse_b1_environment_manifest(std::string_view bytes) {
   } else if (manifest.schema == kEnvironmentClassSchema) {
     validate_fields(manifest.fields, kEnvironmentClassFields);
     validate_environment_class_cross_fields(manifest.fields);
+  } else if (manifest.schema == kStorageRawProofSchema) {
+    if (manifest.fields.size() != kStorageRawProofFields.size()) {
+      throw std::invalid_argument("Raw storage proof field count drifted.");
+    }
+    for (std::size_t index = 0U; index < manifest.fields.size(); ++index) {
+      if (manifest.fields[index].name != kStorageRawProofFields[index].name ||
+          manifest.fields[index].type != kStorageRawProofFields[index].type ||
+          manifest.fields[index].state != B1ObservationState::Known ||
+          manifest.fields[index].reason != "none" ||
+          manifest.fields[index].payload.empty()) {
+        throw std::invalid_argument(
+            "Raw storage proof field envelope drifted.");
+      }
+    }
   } else {
     throw std::invalid_argument("Environment manifest schema is unknown.");
   }
@@ -828,9 +1277,480 @@ B1CanonicalManifest parse_b1_environment_manifest(std::string_view bytes) {
   return manifest;
 }
 
+namespace {
+
+/**
+ * @brief Parses one sorted unique identifier list from the shared grammar.
+ * @param payload Counted framed identifier payload.
+ * @return Owned identifiers in canonical order.
+ * @throws std::invalid_argument for lexical/order/duplicate drift.
+ * @throws std::bad_alloc when result storage allocates.
+ */
+std::vector<std::string> parse_raw_identifier_list(std::string_view payload) {
+  const std::vector<std::string_view> frames =
+      parse_counted_frames(payload, 1U);
+  if (!std::is_sorted(frames.begin(), frames.end()) ||
+      std::adjacent_find(frames.begin(), frames.end()) != frames.end() ||
+      !std::all_of(frames.begin(), frames.end(), valid_identifier)) {
+    throw std::invalid_argument("Raw proof identifier list is not canonical.");
+  }
+  std::vector<std::string> result;
+  result.reserve(frames.size());
+  for (const std::string_view frame : frames) {
+    result.emplace_back(frame);
+  }
+  return result;
+}
+
+/**
+ * @brief Parses provider-ordered native option records.
+ * @param payload Counted list of two-component fixed records.
+ * @return Exact decoded option sequence.
+ * @throws Validation/allocation failures unchanged.
+ */
+std::vector<B1NativeMountOption> parse_native_options(
+    std::string_view payload) {
+  const std::vector<std::string_view> records =
+      parse_counted_frames(payload, 1U);
+  std::vector<B1NativeMountOption> result;
+  result.reserve(records.size());
+  for (const std::string_view record : records) {
+    const std::vector<std::string_view> components =
+        parse_fixed_frames(record, 2U);
+    result.push_back(B1NativeMountOption{decode_raw_text(components[0U]),
+                                         decode_raw_text(components[1U])});
+  }
+  return result;
+}
+
+}  // namespace
+
+B1StorageRawEvidence parse_b1_storage_raw_proof(std::string_view bytes) {
+  const B1CanonicalManifest manifest = parse_b1_environment_manifest(bytes);
+  if (manifest.schema != kStorageRawProofSchema ||
+      manifest.fields.size() != kStorageRawProofFields.size()) {
+    throw std::invalid_argument("Input is not a B1 raw storage proof.");
+  }
+  B1StorageRawEvidence evidence;
+
+  const std::vector<std::string_view> backend =
+      parse_fixed_frames(manifest.fields[0U].payload, 3U);
+  evidence.backend.backend = parse_backend_kind(backend[0U]);
+  evidence.backend.selected_root = decode_raw_text(backend[1U]);
+  evidence.backend.resolved_root = decode_raw_text(backend[2U]);
+
+  const std::vector<std::string_view> field_records =
+      parse_counted_frames(manifest.fields[1U].payload, 1U);
+  if (field_records.size() != kStorageFields.size()) {
+    throw std::invalid_argument("Raw proof field observation count drifted.");
+  }
+  for (std::size_t index = 0U; index < field_records.size(); ++index) {
+    const std::vector<std::string_view> components =
+        parse_fixed_frames(field_records[index], 8U);
+    if (components[0U] != kStorageFields[index].name ||
+        components[3U] != kStorageFields[index].type) {
+      throw std::invalid_argument(
+          "Raw proof field observation order/type drifted.");
+    }
+    B1RawFieldObservation observation;
+    observation.state = parse_state(components[1U]);
+    observation.reason = std::string(components[2U]);
+    observation.type = std::string(components[3U]);
+    observation.payload = std::string(components[4U]);
+    observation.raw_payload = decode_raw_bytes(components[5U]);
+    observation.proof_kind = std::string(components[6U]);
+    observation.proof_identity = std::string(components[7U]);
+    validate_field_envelope(B1CanonicalField{
+        std::string(components[0U]), observation.state, observation.reason,
+        observation.type, observation.payload});
+    evidence.backend.fields.emplace(std::string(components[0U]),
+                                    std::move(observation));
+  }
+
+  const std::vector<std::string_view> mount =
+      parse_fixed_frames(manifest.fields[2U].payload, 6U);
+  evidence.mount.options = parse_native_options(mount[0U]);
+  const std::vector<std::string_view> default_records =
+      parse_counted_frames(mount[1U], 1U);
+  std::string prior_default;
+  for (const std::string_view record : default_records) {
+    const std::vector<std::string_view> components =
+        parse_fixed_frames(record, 2U);
+    const std::string key = decode_raw_text(components[0U]);
+    const std::string value = decode_raw_text(components[1U]);
+    if ((!prior_default.empty() && prior_default >= key) ||
+        !evidence.mount.defaults.emplace(key, value).second) {
+      throw std::invalid_argument("Raw mount defaults are not sorted/unique.");
+    }
+    prior_default = key;
+  }
+  if (mount[2U] == "case-sensitive") {
+    evidence.mount.case_mode = B1MountCaseMode::CaseSensitive;
+  } else if (mount[2U] == "ascii-case-insensitive") {
+    evidence.mount.case_mode = B1MountCaseMode::AsciiCaseInsensitive;
+  } else {
+    throw std::invalid_argument("Raw mount case mode is invalid.");
+  }
+  if (mount[3U] == "reject-conflicts") {
+    evidence.mount.duplicate_policy = B1MountDuplicatePolicy::RejectConflicts;
+  } else if (mount[3U] == "last-wins") {
+    evidence.mount.duplicate_policy = B1MountDuplicatePolicy::LastWins;
+  } else {
+    throw std::invalid_argument("Raw mount duplicate policy is invalid.");
+  }
+  const std::vector<std::string_view> excluded_records =
+      parse_counted_frames(mount[4U], 1U);
+  std::string prior_excluded;
+  for (const std::string_view record : excluded_records) {
+    if (!prior_excluded.empty() && prior_excluded >= record) {
+      throw std::invalid_argument(
+          "Raw excluded mount options are not sorted/unique.");
+    }
+    prior_excluded = std::string(record);
+    const std::vector<std::string_view> components =
+        parse_fixed_frames(record, 3U);
+    evidence.mount.excluded_options.push_back(B1ExcludedMountOptionProof{
+        B1NativeMountOption{decode_raw_text(components[0U]),
+                            decode_raw_text(components[1U])},
+        std::string(components[2U])});
+  }
+  evidence.mount.observation_identity = std::string(mount[5U]);
+
+  const std::vector<std::string_view> performance =
+      parse_fixed_frames(manifest.fields[3U].payload, 7U);
+  const std::vector<std::string_view> initial_components =
+      parse_fixed_frames(performance[0U], 37U);
+  const std::vector<std::string_view> final_components =
+      parse_fixed_frames(performance[1U], 37U);
+  for (std::size_t index = 0U; index < initial_components.size(); ++index) {
+    evidence.performance_components[index] = initial_components[index];
+    evidence.performance_proofs.final_components.emplace_back(
+        final_components[index]);
+  }
+  const std::vector<std::string_view> proof_kinds =
+      parse_counted_frames(performance[2U], 1U);
+  if (!std::is_sorted(proof_kinds.begin(), proof_kinds.end()) ||
+      std::adjacent_find(proof_kinds.begin(), proof_kinds.end()) !=
+          proof_kinds.end()) {
+    throw std::invalid_argument(
+        "Raw performance proof kinds are not sorted/unique.");
+  }
+  for (const std::string_view proof_kind : proof_kinds) {
+    if (std::find(kPerformanceProofKinds.begin(), kPerformanceProofKinds.end(),
+                  proof_kind) == kPerformanceProofKinds.end()) {
+      throw std::invalid_argument("Raw performance proof kind is unknown.");
+    }
+    evidence.performance_proofs.proof_kinds.emplace_back(proof_kind);
+  }
+  evidence.performance_proofs.mapped_option_proof_identities =
+      parse_raw_identifier_list(performance[3U]);
+  evidence.performance_proofs.initial_observation_identity = performance[4U];
+  evidence.performance_proofs.final_observation_identity = performance[5U];
+  evidence.performance_proofs.conflicting_components =
+      parse_raw_identifier_list(performance[6U]);
+
+  const std::vector<std::string_view> transaction =
+      parse_fixed_frames(manifest.fields[4U].payload, 17U);
+  B1StorageTransactionRawObservation& transaction_result = evidence.transaction;
+  transaction_result.output_store_contract_id = transaction[0U];
+  transaction_result.output_store_contract_generation =
+      parse_uint64(transaction[1U]);
+  transaction_result.backend_semantics_id = transaction[2U];
+  transaction_result.backend_semantics_generation =
+      parse_uint64(transaction[3U]);
+  transaction_result.backend_instance_payload = transaction[4U];
+  transaction_result.mount_identity_payload =
+      transaction[5U] == "not-applicable" ? "" : std::string(transaction[5U]);
+  transaction_result.durability_endpoint_payload = transaction[6U];
+  transaction_result.durability_anchor_payload = transaction[7U];
+  transaction_result.commit_semantics_payload = transaction[8U];
+  transaction_result.durability_capabilities_payload = transaction[9U];
+  transaction_result.requested_durability = transaction[10U];
+  transaction_result.achieved_durability = transaction[11U];
+  transaction_result.receipt_commit_id = transaction[12U];
+  transaction_result.receipt_root = decode_raw_text(transaction[13U]);
+  transaction_result.receipt_slot = decode_raw_text(transaction[14U]);
+  transaction_result.published_manifest_identity =
+      decode_raw_text(transaction[15U]);
+  const std::vector<std::string_view> transaction_events =
+      parse_counted_frames(transaction[16U], 1U);
+  std::string prior_event;
+  for (const std::string_view record : transaction_events) {
+    if (!prior_event.empty() && prior_event >= record) {
+      throw std::invalid_argument(
+          "Raw transaction events are not sorted/unique.");
+    }
+    prior_event = std::string(record);
+    const std::vector<std::string_view> components =
+        parse_fixed_frames(record, 2U);
+    transaction_result.events.push_back(B1StorageTransactionEvent{
+        std::string(components[0U]), std::string(components[1U])});
+  }
+
+  const std::vector<std::string_view> containment =
+      parse_fixed_frames(manifest.fields[5U].payload, 4U);
+  evidence.containment.selected_root = decode_raw_text(containment[0U]);
+  evidence.containment.resolved_root = decode_raw_text(containment[1U]);
+  evidence.containment.root_authority_identity =
+      decode_raw_text(containment[2U]);
+  const std::vector<std::string_view> destinations =
+      parse_counted_frames(containment[3U], 1U);
+  std::string prior_destination;
+  for (const std::string_view record : destinations) {
+    if (!prior_destination.empty() && prior_destination >= record) {
+      throw std::invalid_argument(
+          "Raw containment destinations are not sorted/unique.");
+    }
+    prior_destination = std::string(record);
+    const std::vector<std::string_view> components =
+        parse_fixed_frames(record, 5U);
+    evidence.containment.destinations.push_back(
+        B1ContainmentDestinationObservation{
+            decode_raw_text(components[0U]), decode_raw_text(components[1U]),
+            decode_raw_text(components[2U]), std::string(components[3U]),
+            decode_raw_text(components[4U])});
+  }
+
+  if (encode_b1_storage_raw_proof(evidence) != bytes) {
+    throw std::invalid_argument(
+        "Raw storage proof bytes are not the unique canonical encoding.");
+  }
+  return evidence;
+}
+
 B1Sha256Digest digest_b1_environment_manifest(std::string_view bytes) {
   return b1_sha256(bytes);
 }
+
+namespace {
+
+/**
+ * @brief Ephemeral predicates reconstructed from one retained raw proof.
+ * @throws Nothing for default construction and scalar comparison.
+ * @note These values are deliberately not serializable proof inputs.
+ */
+struct B1ReplayedStoragePredicates final {
+  /** @brief Exact 21-field adapter output matches the storage manifest. */
+  bool raw_mapping_complete = false;
+  /** @brief Commit map and every required transaction event are bound. */
+  bool commit_semantics_consistent = false;
+  /** @brief Contract, durability, receipt, and manifest identities agree. */
+  bool durability_path_consistent = false;
+  /** @brief Native mount observations reproduce the canonical mount map. */
+  bool mount_normalization_proved = false;
+  /** @brief Every retained N/A field has a complete-path absence proof. */
+  bool not_applicable_proofs_valid = false;
+  /** @brief Both performance cuts reproduce the canonical 37-field value. */
+  bool performance_configuration_proved = false;
+  /** @brief Every retained destination is below the one resolved root. */
+  bool root_containment_proved = false;
+};
+
+/**
+ * @brief Compares one raw mapped observation with a canonical field.
+ * @param observation Retained raw observation and mapped value.
+ * @param field Canonical manifest field.
+ * @return True only when state/reason/type/payload are exact.
+ * @throws Nothing.
+ */
+bool raw_observation_matches(const B1RawFieldObservation& observation,
+                             const B1CanonicalField& field) noexcept {
+  return observation.state == field.state &&
+         observation.reason == field.reason && observation.type == field.type &&
+         observation.payload == field.payload;
+}
+
+/**
+ * @brief Tests an exact canonical absolute path spelling.
+ * @param path Persisted resolved path.
+ * @return True only for a normalized absolute path without dot components.
+ * @throws Nothing.
+ */
+bool canonical_absolute_path(const std::filesystem::path& path) noexcept {
+  if (path.empty() || !path.is_absolute() || path != path.lexically_normal()) {
+    return false;
+  }
+  return std::none_of(path.begin(), path.end(),
+                      [](const std::filesystem::path& component) {
+                        return component == "." || component == "..";
+                      });
+}
+
+/**
+ * @brief Tests one safe nonempty root-relative path spelling.
+ * @param path Persisted receipt slot.
+ * @return True only for normalized relative components without dot traversal.
+ * @throws Nothing.
+ */
+bool safe_relative_path(const std::filesystem::path& path) noexcept {
+  if (path.empty() || path.is_absolute() || path != path.lexically_normal()) {
+    return false;
+  }
+  return std::none_of(
+      path.begin(), path.end(), [](const std::filesystem::path& component) {
+        return component.empty() || component == "." || component == "..";
+      });
+}
+
+/**
+ * @brief Tests component-wise containment under one canonical root.
+ * @param root Canonical absolute root.
+ * @param destination Canonical absolute destination.
+ * @return True when `root` is a complete component prefix.
+ * @throws Nothing.
+ */
+bool path_is_below(const std::filesystem::path& root,
+                   const std::filesystem::path& destination) noexcept {
+  if (!canonical_absolute_path(root) || !canonical_absolute_path(destination)) {
+    return false;
+  }
+  auto root_component = root.begin();
+  auto destination_component = destination.begin();
+  for (; root_component != root.end() &&
+         destination_component != destination.end();
+       ++root_component, ++destination_component) {
+    if (*root_component != *destination_component) {
+      return false;
+    }
+  }
+  return root_component == root.end();
+}
+
+/**
+ * @brief Replays every proof predicate from typed canonical raw evidence.
+ * @param manifest Independently parsed canonical storage manifest.
+ * @param evidence Independently parsed retained raw proof.
+ * @return Ephemeral complete predicate set.
+ * @throws Validation and allocation failures unchanged.
+ */
+B1ReplayedStoragePredicates replay_storage_predicates(
+    const B1CanonicalManifest& manifest, const B1StorageRawEvidence& evidence) {
+  B1ReplayedStoragePredicates replayed;
+  const B1AdaptedStorageObservation adapted =
+      adapt_b1_storage_observation(evidence.backend);
+  replayed.not_applicable_proofs_valid = true;
+  replayed.raw_mapping_complete = adapted.fields == manifest.fields;
+
+  const B1CanonicalField& mount_identity =
+      find_field(manifest, "mount_identity");
+  const B1CanonicalField& mount_options =
+      find_field(manifest, "mount_effective_options");
+  const B1RawFieldObservation normalized_mount =
+      normalize_b1_mount_options(evidence.mount);
+  const B1RawFieldObservation& retained_mount =
+      evidence.backend.fields.at("mount_effective_options");
+  replayed.mount_normalization_proved =
+      raw_observation_matches(normalized_mount, mount_options) &&
+      raw_observation_matches(retained_mount, mount_options) &&
+      normalized_mount.proof_identity == retained_mount.proof_identity &&
+      normalized_mount.proof_identity == evidence.mount.observation_identity &&
+      (mount_identity.state != B1ObservationState::Known ||
+       evidence.transaction.mount_identity_payload == mount_identity.payload);
+
+  const B1CanonicalField& performance =
+      find_field(manifest, "b1_performance_configuration");
+  const B1RawFieldObservation mapped_performance =
+      map_b1_performance_configuration(evidence.performance_components,
+                                       evidence.performance_proofs);
+  const B1RawFieldObservation& retained_performance =
+      evidence.backend.fields.at("b1_performance_configuration");
+  replayed.performance_configuration_proved =
+      raw_observation_matches(mapped_performance, performance) &&
+      raw_observation_matches(retained_performance, performance) &&
+      mapped_performance.proof_identity ==
+          retained_performance.proof_identity &&
+      mapped_performance.proof_identity ==
+          evidence.performance_proofs.initial_observation_identity;
+
+  const B1StorageTransactionRawObservation& transaction = evidence.transaction;
+  const auto payload_matches = [&manifest](std::string_view field,
+                                           std::string_view payload) {
+    const B1CanonicalField& canonical = find_field(manifest, field);
+    return canonical.state == B1ObservationState::Known &&
+           canonical.payload == payload;
+  };
+  const bool contract_bindings =
+      payload_matches("output_store_contract_id",
+                      transaction.output_store_contract_id) &&
+      payload_matches(
+          "output_store_contract_generation",
+          std::to_string(transaction.output_store_contract_generation)) &&
+      payload_matches("backend_semantics_id",
+                      transaction.backend_semantics_id) &&
+      payload_matches(
+          "backend_semantics_generation",
+          std::to_string(transaction.backend_semantics_generation)) &&
+      payload_matches("backend_instance_id",
+                      transaction.backend_instance_payload) &&
+      payload_matches("durability_endpoint_identity",
+                      transaction.durability_endpoint_payload) &&
+      payload_matches("durability_anchor_identity",
+                      transaction.durability_anchor_payload);
+  const bool durability_bindings =
+      payload_matches("commit_semantics",
+                      transaction.commit_semantics_payload) &&
+      payload_matches("durability_capabilities",
+                      transaction.durability_capabilities_payload) &&
+      payload_matches("requested_durability",
+                      transaction.requested_durability) &&
+      payload_matches("achieved_durability", transaction.achieved_durability);
+  bool complete_events =
+      transaction.events.size() == kStorageTransactionEventKinds.size();
+  std::vector<std::string> observed_event_kinds;
+  observed_event_kinds.reserve(transaction.events.size());
+  for (const B1StorageTransactionEvent& event : transaction.events) {
+    complete_events =
+        complete_events && valid_identifier(event.observation_identity);
+    observed_event_kinds.push_back(event.kind);
+  }
+  std::sort(observed_event_kinds.begin(), observed_event_kinds.end());
+  complete_events =
+      complete_events && observed_event_kinds == kStorageTransactionEventKinds;
+  replayed.commit_semantics_consistent = durability_bindings && complete_events;
+
+  const bool receipt_identity_valid =
+      valid_lower_hex(transaction.receipt_commit_id, 32U) &&
+      !transaction.published_manifest_identity.empty() &&
+      canonical_absolute_path(transaction.receipt_root) &&
+      safe_relative_path(transaction.receipt_slot);
+
+  const B1RootContainmentRawObservation& containment = evidence.containment;
+  bool destinations_valid =
+      canonical_absolute_path(containment.resolved_root) &&
+      containment.selected_root == evidence.backend.selected_root &&
+      containment.resolved_root == evidence.backend.resolved_root &&
+      !containment.root_authority_identity.empty();
+  bool receipt_destination_seen = false;
+  for (const B1ContainmentDestinationObservation& destination :
+       containment.destinations) {
+    const std::filesystem::path expected_resolved =
+        destination.spelling.is_absolute()
+            ? destination.spelling.lexically_normal()
+            : (containment.resolved_root / destination.spelling)
+                  .lexically_normal();
+    destinations_valid =
+        destinations_valid && destination.resolved == expected_resolved &&
+        path_is_below(containment.resolved_root, destination.resolved) &&
+        destination.root_authority_identity ==
+            containment.root_authority_identity;
+    if (destination.owner_kind == "transaction-receipt" &&
+        destination.owner_identity == transaction.receipt_commit_id &&
+        destination.resolved ==
+            (transaction.receipt_root / transaction.receipt_slot)
+                .lexically_normal()) {
+      receipt_destination_seen = true;
+    }
+  }
+  replayed.root_containment_proved = destinations_valid;
+  replayed.durability_path_consistent =
+      contract_bindings && durability_bindings && receipt_identity_valid &&
+      complete_events &&
+      transaction.receipt_root == containment.resolved_root &&
+      receipt_destination_seen;
+  return replayed;
+}
+
+}  // namespace
 
 B1StorageEligibility evaluate_b1_storage_eligibility(
     std::string_view storage_bytes, const B1StorageRawProof& raw) {
@@ -844,10 +1764,20 @@ B1StorageEligibility evaluate_b1_storage_eligibility(
     return B1StorageEligibility{false, {"canonical-schema-invalid"}};
   }
 
+  B1ReplayedStoragePredicates replayed;
+  try {
+    replayed = replay_storage_predicates(
+        manifest, parse_b1_storage_raw_proof(raw.canonical_bytes));
+  } catch (const std::exception&) {
+    // A missing, stale, malformed, duplicate, or out-of-domain raw proof is
+    // not an alternate parser result. Every proof-dependent predicate remains
+    // false and the complete normative reason set is derived below.
+  }
+
   std::array<bool, kEligibilityReasonOrder.size()> predicates{};
   const B1CanonicalField& commit = find_field(manifest, "commit_semantics");
   predicates[1U] = commit.state == B1ObservationState::Known &&
-                   !raw.commit_semantics_consistent;
+                   !replayed.commit_semantics_consistent;
 
   const B1CanonicalField& requested =
       find_field(manifest, "requested_durability");
@@ -863,7 +1793,7 @@ B1StorageEligibility evaluate_b1_storage_eligibility(
                  "backend_semantics_id", "backend_semantics_generation",
                  "backend_instance_id", "durability_endpoint_identity",
                  "durability_anchor_identity", "commit_semantics"});
-  predicates[3U] = complete_known_path && !raw.durability_path_consistent;
+  predicates[3U] = complete_known_path && !replayed.durability_path_consistent;
 
   const B1CanonicalField& mount_identity =
       find_field(manifest, "mount_identity");
@@ -873,20 +1803,20 @@ B1StorageEligibility evaluate_b1_storage_eligibility(
                    mount_options.state == B1ObservationState::Unprovable ||
                    ((mount_identity.state == B1ObservationState::Known ||
                      mount_options.state == B1ObservationState::Known) &&
-                    !raw.mount_normalization_proved);
+                    !replayed.mount_normalization_proved);
 
   const bool has_not_applicable =
       std::any_of(manifest.fields.begin(), manifest.fields.end(),
                   [](const B1CanonicalField& field) {
                     return field.state == B1ObservationState::NotApplicable;
                   });
-  predicates[5U] = has_not_applicable && !raw.not_applicable_proofs_valid;
+  predicates[5U] = has_not_applicable && !replayed.not_applicable_proofs_valid;
 
   const B1CanonicalField& performance =
       find_field(manifest, "b1_performance_configuration");
   predicates[6U] = performance.state != B1ObservationState::Known ||
-                   !raw.performance_configuration_proved;
-  predicates[7U] = !raw.raw_mapping_complete;
+                   !replayed.performance_configuration_proved;
+  predicates[7U] = !replayed.raw_mapping_complete;
 
   bool capability_absent = false;
   if (mount_options.state == B1ObservationState::Known) {
@@ -917,7 +1847,7 @@ B1StorageEligibility evaluate_b1_storage_eligibility(
                            field.state == B1ObservationState::Unsupported ||
                            field.state == B1ObservationState::Unprovable;
                   });
-  predicates[10U] = !raw.root_containment_proved;
+  predicates[10U] = !replayed.root_containment_proved;
 
   B1StorageEligibility result;
   for (std::size_t index = 1U; index < predicates.size(); ++index) {

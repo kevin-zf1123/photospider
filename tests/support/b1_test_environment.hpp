@@ -7,7 +7,10 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -120,9 +123,16 @@ inline B1PerformanceProofs b1_test_performance_proofs() {
       "allocation-unit-bytes-absent", "logical-block-bytes-absent",
       "network-path-absent",          "physical-block-bytes-absent",
       "record-bytes-absent",          "upper-write-cache-absent"};
-  proofs.one_frozen_observation = true;
-  proofs.complete_option_mapping = true;
-  proofs.stable_through_replicate = true;
+  proofs.initial_observation_identity = "performance-before-warmup";
+  proofs.final_observation_identity = "performance-after-replicate";
+  const std::array<std::string, 37U> components =
+      b1_test_performance_components();
+  proofs.final_components.assign(components.begin(), components.end());
+  proofs.mapped_option_proof_identities = {
+      "option-access-mode",        "option-atime-policy",
+      "option-cache-coherence",    "option-copy-on-write-mode",
+      "option-data-write-mode",    "option-journal-mode",
+      "option-metadata-write-mode"};
   return proofs;
 }
 
@@ -195,6 +205,107 @@ inline std::vector<B1CanonicalField> b1_test_storage_fields() {
                      "write-back-protected"),
       known_b1_field("power_loss_protection_policy", "enum", "present"),
   };
+}
+
+/**
+ * @brief Builds complete independently replayable raw storage evidence.
+ * @return Backend, mount, performance, receipt, and containment observations.
+ * @throws Validation or allocation failures unchanged.
+ */
+inline B1StorageRawEvidence b1_test_storage_raw_evidence() {
+  const std::vector<B1CanonicalField> fields = b1_test_storage_fields();
+  B1StorageRawEvidence evidence;
+  evidence.backend.backend = B1StorageBackendKind::Filesystem;
+  evidence.backend.selected_root = "/b1-test-root";
+  evidence.backend.resolved_root = "/b1-test-root";
+  for (const B1CanonicalField& field : fields) {
+    const bool known = field.state == B1ObservationState::Known;
+    evidence.backend.fields.emplace(
+        field.name,
+        B1RawFieldObservation{
+            field.state, field.reason, field.type, field.payload,
+            known ? field.payload : std::string{},
+            known ? "raw-value-observed" : "complete-path-layer-absent",
+            "field-" + field.name});
+  }
+
+  evidence.mount.options = {
+      {"access_mode", "read-write"},         {"atime_policy", "none"},
+      {"cache_coherence", "host-local"},     {"copy_on_write_mode", "disabled"},
+      {"data_write_mode", "synchronous"},    {"journal_mode", "ordered"},
+      {"metadata_write_mode", "synchronous"}};
+  evidence.mount.defaults = {
+      {"access_mode", "read-write"},         {"atime_policy", "none"},
+      {"cache_coherence", "host-local"},     {"copy_on_write_mode", "disabled"},
+      {"data_write_mode", "synchronous"},    {"journal_mode", "ordered"},
+      {"metadata_write_mode", "synchronous"}};
+  evidence.mount.observation_identity = "mount-observation";
+  evidence.backend.fields.at("mount_effective_options").proof_identity =
+      evidence.mount.observation_identity;
+
+  evidence.performance_components = b1_test_performance_components();
+  evidence.performance_proofs = b1_test_performance_proofs();
+  evidence.backend.fields.at("b1_performance_configuration").proof_identity =
+      evidence.performance_proofs.initial_observation_identity;
+
+  const auto payload = [&fields](std::string_view name) -> const std::string& {
+    const auto found = std::find_if(
+        fields.begin(), fields.end(),
+        [name](const B1CanonicalField& field) { return field.name == name; });
+    if (found == fields.end()) {
+      throw std::logic_error("B1 test storage field lookup failed.");
+    }
+    return found->payload;
+  };
+  B1StorageTransactionRawObservation& transaction = evidence.transaction;
+  transaction.output_store_contract_id = payload("output_store_contract_id");
+  transaction.output_store_contract_generation = 1U;
+  transaction.backend_semantics_id = payload("backend_semantics_id");
+  transaction.backend_semantics_generation = 1U;
+  transaction.backend_instance_payload = payload("backend_instance_id");
+  transaction.mount_identity_payload = payload("mount_identity");
+  transaction.durability_endpoint_payload =
+      payload("durability_endpoint_identity");
+  transaction.durability_anchor_payload = payload("durability_anchor_identity");
+  transaction.commit_semantics_payload = payload("commit_semantics");
+  transaction.durability_capabilities_payload =
+      payload("durability_capabilities");
+  transaction.requested_durability = payload("requested_durability");
+  transaction.achieved_durability = payload("achieved_durability");
+  transaction.receipt_commit_id = b1_digest_hex(b1_sha256("b1-test-receipt"));
+  transaction.receipt_root = evidence.backend.resolved_root;
+  transaction.receipt_slot = "occurrence-" + transaction.receipt_commit_id;
+  transaction.published_manifest_identity = "dev=1;ino=2";
+  transaction.events = {
+      {"manifest-published-no-replace", "event-manifest-published"},
+      {"manifest-revalidated", "event-manifest-revalidated"},
+      {"manifest-synchronized", "event-manifest-synchronized"},
+      {"payload-revalidated", "event-payload-revalidated"},
+      {"payload-synchronized", "event-payload-synchronized"},
+      {"root-directory-synchronized", "event-root-synchronized"},
+      {"slot-directory-synchronized", "event-slot-synchronized"}};
+
+  evidence.containment.selected_root = evidence.backend.selected_root;
+  evidence.containment.resolved_root = evidence.backend.resolved_root;
+  evidence.containment.root_authority_identity = "root-authority-1";
+  const std::filesystem::path receipt_destination =
+      transaction.receipt_root / transaction.receipt_slot;
+  evidence.containment.destinations.push_back(
+      B1ContainmentDestinationObservation{
+          receipt_destination, receipt_destination,
+          evidence.containment.root_authority_identity, "transaction-receipt",
+          transaction.receipt_commit_id});
+  return evidence;
+}
+
+/**
+ * @brief Builds complete canonical raw proof bytes for test storage fields.
+ * @return Closed retained proof document.
+ * @throws Validation or allocation failures unchanged.
+ */
+inline B1StorageRawProof b1_test_storage_raw_proof() {
+  return B1StorageRawProof{
+      encode_b1_storage_raw_proof(b1_test_storage_raw_evidence())};
 }
 
 /**
@@ -285,14 +396,7 @@ inline B1EnvironmentEvidence make_b1_test_environment(
   };
   const std::string class_bytes =
       encode_b1_environment_class(environment_class);
-  B1StorageRawProof proof;
-  proof.raw_mapping_complete = true;
-  proof.commit_semantics_consistent = true;
-  proof.durability_path_consistent = true;
-  proof.mount_normalization_proved = true;
-  proof.not_applicable_proofs_valid = true;
-  proof.performance_configuration_proved = true;
-  proof.root_containment_proved = true;
+  const B1StorageRawProof proof = b1_test_storage_raw_proof();
   return B1EnvironmentEvidence{
       base,
       base_digest,

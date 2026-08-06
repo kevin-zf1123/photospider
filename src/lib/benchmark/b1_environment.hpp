@@ -104,10 +104,12 @@ struct B1RawFieldObservation final {
   std::string type;
   /** @brief Candidate canonical payload for known values. */
   std::string payload;
-  /** @brief Whether retained raw evidence proves this exact mapping. */
-  bool mapping_proved = false;
-  /** @brief Whether a permitted N/A claim has exact layer-absence proof. */
-  bool absence_proved = false;
+  /** @brief Exact provider/probe bytes from which `payload` was mapped. */
+  std::string raw_payload;
+  /** @brief Closed mapping proof kind for this observation. */
+  std::string proof_kind{"probe-state-observed"};
+  /** @brief Stable probe/receipt/path observation identity. */
+  std::string proof_identity;
 };
 
 /**
@@ -116,7 +118,7 @@ struct B1RawFieldObservation final {
  * @note `fields` must name exactly the 21 storage schema fields; provider
  * extension keys are rejected rather than copied into canonical bytes.
  */
-struct B1RawStorageObservation final {
+struct B1BackendRawObservation final {
   /** @brief Backend adapter selected from the observed path. */
   B1StorageBackendKind backend = B1StorageBackendKind::Filesystem;
   /** @brief Exact 21-field observation map before canonical ordering. */
@@ -128,19 +130,14 @@ struct B1RawStorageObservation final {
 };
 
 /**
- * @brief Canonical storage fields plus proof completeness retained by adapter.
+ * @brief Canonical storage fields reconstructed by one backend adapter.
  * @throws std::bad_alloc when copied field storage allocates.
- * @note The flags are derived from the same per-field observations used to
- * build `fields`; callers copy them into `B1StorageRawProof` rather than
- * making an unrelated aggregate claim.
+ * @note The adapter validates every retained per-field observation and never
+ * emits or accepts an aggregate proof-completeness boolean.
  */
 struct B1AdaptedStorageObservation final {
   /** @brief Exact 21 canonical fields in normative order. */
   std::vector<B1CanonicalField> fields;
-  /** @brief Whether every known or N/A field has mapping proof. */
-  bool raw_mapping_complete = false;
-  /** @brief Whether every syntactically permitted N/A has absence proof. */
-  bool not_applicable_proofs_valid = false;
 };
 
 /**
@@ -155,21 +152,58 @@ struct B1NativeMountOption final {
 };
 
 /**
- * @brief Complete native mount normalization input and retained proof flags.
+ * @brief Closed case behavior retained with native mount observations.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class B1MountCaseMode : std::uint8_t {
+  /** @brief Native option keys and values are case-sensitive. */
+  CaseSensitive,
+  /** @brief Native contract defines ASCII case-insensitive keys/values. */
+  AsciiCaseInsensitive,
+};
+
+/**
+ * @brief Closed duplicate-option winner policy retained from the platform.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class B1MountDuplicatePolicy : std::uint8_t {
+  /** @brief Equal duplicates are harmless; conflicting duplicates fail. */
+  RejectConflicts,
+  /** @brief The platform contract proves the last occurrence effective. */
+  LastWins,
+};
+
+/**
+ * @brief Concrete no-effect proof for one excluded native mount option.
+ * @throws Nothing for ordinary movement except owned-string allocation.
+ */
+struct B1ExcludedMountOptionProof final {
+  /** @brief Exact native option copied from the same mount observation. */
+  B1NativeMountOption option;
+  /** @brief Stable backend-semantics proof identity for complete-path no
+   * effect.
+   */
+  std::string proof_identity;
+};
+
+/**
+ * @brief Complete native mount observation used for deterministic replay.
  * @throws std::bad_alloc when copied collections allocate.
  */
-struct B1MountNormalizationInput final {
+struct B1MountRawObservation final {
   /** @brief Options in provider order, possibly with duplicates. */
   std::vector<B1NativeMountOption> options;
   /** @brief Exact defaults for omitted keys. */
   std::map<std::string, std::string> defaults;
-  /** @brief Whether the native contract declares ASCII case-insensitivity. */
-  bool ascii_case_insensitive = false;
-  /** @brief Whether last occurrence is the proved effective duplicate winner.
-   */
-  bool duplicate_last_wins_proved = false;
-  /** @brief Whether every unknown option has complete no-effect proof. */
-  bool unknown_options_no_effect_proved = false;
+  /** @brief Platform-declared case behavior bound to backend semantics. */
+  B1MountCaseMode case_mode = B1MountCaseMode::CaseSensitive;
+  /** @brief Platform-declared duplicate winner behavior. */
+  B1MountDuplicatePolicy duplicate_policy =
+      B1MountDuplicatePolicy::RejectConflicts;
+  /** @brief Concrete proof record for every excluded native option. */
+  std::vector<B1ExcludedMountOptionProof> excluded_options;
+  /** @brief Stable identity of the complete owning-mount observation cut. */
+  std::string observation_identity;
 };
 
 /**
@@ -179,35 +213,131 @@ struct B1MountNormalizationInput final {
 struct B1PerformanceProofs final {
   /** @brief Sorted unique retained raw proof-kind tokens. */
   std::vector<std::string> proof_kinds;
-  /** @brief Whether all 37 values came from one frozen complete path cut. */
-  bool one_frozen_observation = false;
-  /** @brief Whether all performance-affecting native options were mapped. */
-  bool complete_option_mapping = false;
-  /** @brief Whether the frozen configuration remained effective throughout. */
-  bool stable_through_replicate = false;
-  /** @brief Whether retained observations contain conflicting values. */
-  bool conflicting_values = false;
+  /** @brief Identity of the pre-warmup complete-path observation. */
+  std::string initial_observation_identity;
+  /** @brief Identity of the post-replicate stability observation. */
+  std::string final_observation_identity;
+  /** @brief Exact 37 post-replicate values independently compared to input. */
+  std::vector<std::string> final_components;
+  /** @brief Sorted unique identities for every mapped effective native option.
+   */
+  std::vector<std::string> mapped_option_proof_identities;
+  /** @brief Sorted unique component names with observed conflicting values. */
+  std::vector<std::string> conflicting_components;
 };
 
 /**
- * @brief Independent semantic/proof facts evaluated after canonical parsing.
- * @throws Nothing for scalar state; vectors/paths allocate when copied.
+ * @brief One retained transaction event proving a concrete commit stage.
+ * @throws Nothing for ordinary movement except owned-string allocation.
+ */
+struct B1StorageTransactionEvent final {
+  /** @brief Closed event kind in the required commit state machine. */
+  std::string kind;
+  /** @brief Stable descriptor/receipt observation identity. */
+  std::string observation_identity;
+};
+
+/**
+ * @brief Complete receipt-backed storage transaction observation.
+ * @throws std::bad_alloc when copied identity/event storage allocates.
+ */
+struct B1StorageTransactionRawObservation final {
+  /** @brief Contract id observed by the transaction authority. */
+  std::string output_store_contract_id;
+  /** @brief Contract generation observed by the transaction authority. */
+  std::uint64_t output_store_contract_generation = 0U;
+  /** @brief Backend normalization contract id used by the transaction. */
+  std::string backend_semantics_id;
+  /** @brief Backend normalization contract generation. */
+  std::uint64_t backend_semantics_generation = 0U;
+  /** @brief Exact canonical text payload for the backend instance. */
+  std::string backend_instance_payload;
+  /** @brief Exact canonical text payload for the mount or empty when absent. */
+  std::string mount_identity_payload;
+  /** @brief Exact canonical text payload for the durability endpoint. */
+  std::string durability_endpoint_payload;
+  /** @brief Exact canonical text payload for the durability anchor. */
+  std::string durability_anchor_payload;
+  /** @brief Exact six-entry canonical commit-semantics payload. */
+  std::string commit_semantics_payload;
+  /** @brief Exact canonical durability-capability token-set payload. */
+  std::string durability_capabilities_payload;
+  /** @brief Exact requested durability token. */
+  std::string requested_durability;
+  /** @brief Exact achieved durability token copied from the receipt. */
+  std::string achieved_durability;
+  /** @brief Stable lowercase SHA-256 commit identity from the receipt. */
+  std::string receipt_commit_id;
+  /** @brief Resolved receipt root spelling. */
+  std::filesystem::path receipt_root;
+  /** @brief Root-relative receipt slot. */
+  std::filesystem::path receipt_slot;
+  /** @brief Stable published-manifest filesystem identity. */
+  std::string published_manifest_identity;
+  /** @brief Complete required commit observations with concrete identities. */
+  std::vector<B1StorageTransactionEvent> events;
+};
+
+/**
+ * @brief One retained root-containment observation for a concrete destination.
+ * @throws Nothing for ordinary movement except owned path/string allocation.
+ */
+struct B1ContainmentDestinationObservation final {
+  /** @brief Caller/path spelling observed by the output owner. */
+  std::filesystem::path spelling;
+  /** @brief Resolved destination observed under the root authority. */
+  std::filesystem::path resolved;
+  /** @brief Exact root descriptor/volume identity used for resolution. */
+  std::string root_authority_identity;
+  /** @brief Closed owner kind: transaction receipt or runner artifact. */
+  std::string owner_kind;
+  /** @brief Concrete receipt commit id or runner-artifact identity. */
+  std::string owner_identity;
+};
+
+/**
+ * @brief Complete selected-root and destination containment observations.
+ * @throws std::bad_alloc when copied path/identity storage allocates.
+ */
+struct B1RootContainmentRawObservation final {
+  /** @brief Selected root spelling retained outside environment digest input.
+   */
+  std::filesystem::path selected_root;
+  /** @brief Canonically resolved root at the observation cut. */
+  std::filesystem::path resolved_root;
+  /** @brief Stable root descriptor/volume identity at that cut. */
+  std::string root_authority_identity;
+  /** @brief Every measured or retained artifact destination. */
+  std::vector<B1ContainmentDestinationObservation> destinations;
+};
+
+/**
+ * @brief Complete typed raw storage evidence before canonical serialization.
+ * @throws std::bad_alloc when copied observation storage allocates.
+ */
+struct B1StorageRawEvidence final {
+  /** @brief Backend fields, root spellings, and root identity. */
+  B1BackendRawObservation backend;
+  /** @brief Native mount/default/duplicate/exclusion observations. */
+  B1MountRawObservation mount;
+  /** @brief Exact pre-warmup 37-component performance observation. */
+  std::array<std::string, 37U> performance_components;
+  /** @brief Post-replicate values and concrete proof identities. */
+  B1PerformanceProofs performance_proofs;
+  /** @brief Concrete commit/receipt/event observations. */
+  B1StorageTransactionRawObservation transaction;
+  /** @brief Concrete root and every destination observation. */
+  B1RootContainmentRawObservation containment;
+};
+
+/**
+ * @brief Retained canonical raw proof bytes used for independent replay.
+ * @throws Nothing for ordinary movement except owned-byte allocation.
+ * @note No derived eligibility or proof-completeness boolean is retained.
  */
 struct B1StorageRawProof final {
-  /** @brief Complete raw-to-canonical proof for every required field. */
-  bool raw_mapping_complete = false;
-  /** @brief Six commit values agree with transaction/receipt behavior. */
-  bool commit_semantics_consistent = false;
-  /** @brief Contract/backend/path/receipt form one durability chain. */
-  bool durability_path_consistent = false;
-  /** @brief Present mount uniquely normalizes, or absence is proved. */
-  bool mount_normalization_proved = false;
-  /** @brief Every permitted N/A field has exact layer-absence proof. */
-  bool not_applicable_proofs_valid = false;
-  /** @brief Complete performance mapping is one stable frozen observation. */
-  bool performance_configuration_proved = false;
-  /** @brief Every measured/retained destination is below selected root. */
-  bool root_containment_proved = false;
+  /** @brief Complete closed proof document including header and final LF. */
+  std::string canonical_bytes;
 };
 
 /**
@@ -342,7 +472,7 @@ std::string encode_b1_normalized_text(std::string_view utf8);
  * @throws std::bad_alloc when normalization staging allocates.
  */
 B1RawFieldObservation normalize_b1_mount_options(
-    const B1MountNormalizationInput& input);
+    const B1MountRawObservation& input);
 
 /**
  * @brief Validates and encodes one exact 37-component performance record.
@@ -364,7 +494,29 @@ B1RawFieldObservation map_b1_performance_configuration(
  * @throws std::bad_alloc when ordered output allocates.
  */
 B1AdaptedStorageObservation adapt_b1_storage_observation(
-    const B1RawStorageObservation& raw);
+    const B1BackendRawObservation& raw);
+
+/**
+ * @brief Encodes complete raw storage evidence with the shared field grammar.
+ * @param evidence Backend/mount/performance/receipt/path observations.
+ * @return Closed canonical proof bytes including final LF.
+ * @throws std::invalid_argument for missing, duplicate, stale, or drifted raw
+ * evidence.
+ * @throws std::bad_alloc when canonical staging allocates.
+ * @note This is a proof document, not an alternate storage manifest; the
+ * canonical 21-field storage manifest remains the sole compatibility value.
+ */
+std::string encode_b1_storage_raw_proof(const B1StorageRawEvidence& evidence);
+
+/**
+ * @brief Parses and validates one complete canonical raw storage proof.
+ * @param bytes Exact retained proof bytes.
+ * @return Typed observations sufficient to replay every proof predicate.
+ * @throws std::invalid_argument for framing, schema, observation, or binding
+ * drift.
+ * @throws std::bad_alloc when parsed storage allocates.
+ */
+B1StorageRawEvidence parse_b1_storage_raw_proof(std::string_view bytes);
 
 /**
  * @brief Encodes exact 21-field storage environment bytes.
