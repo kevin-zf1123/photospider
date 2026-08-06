@@ -479,6 +479,13 @@ field 承载 backend 与全部 21 个 raw field observation、native mount evide
 eligibility。M1 除 candidate/reference comparison provenance 外，还记录两个 same-ordinal
 isolated pair reference。
 
+Required-storage actual authority 是不透明、可复制的 capability，而不是序列化的 root、receipt
+或 probe field。只有 `B1OutputStore` 能复制 held root descriptor 并签发不可变 typed receipt；
+可信 adapter 则拥有 live complete-probe source。每次 compatibility check 都会重新观察这三类
+source。复制 `B1InnerRowInput` 或 `B1InnerRow` 会共享该 capability，并可能延长 root descriptor、
+advisory lock 与 adapter 生命周期。JSON 只接收构造时 diagnostic 与 probe digest，因此不能
+签发或恢复 validation authority。
+
 这些仍是画像 harness/evidence 语义。精确 per-job planned-byte charge 与 executor 签发的
 admission/settlement delta 是 Compute I/O admission、planned-byte high-water 与该 task
 settlement 的强制性权威证据。同锁 process snapshot 可以包含无关 work，也可以在单个

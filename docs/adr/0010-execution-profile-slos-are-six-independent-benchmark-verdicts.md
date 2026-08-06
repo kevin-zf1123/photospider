@@ -662,12 +662,18 @@ pre-guard anchor handoff failure retains ambiguous residue and makes no
 retryability claim. Only checked removal and observed absence inside the
 precondition leave the same commit identity retryable.
 
+When evidence must outlive the store object, the store alone may mint an opaque
+retained-root capability by duplicating the held descriptor. Its copies share
+the open-file description and advisory-lock lifetime, so copying an inner row
+extends exclusive-root ownership until the last capability copy is released.
+
 The `OutputCommitReceipt` evidence binds at least the stable `OutputCommitId`,
 rooted namespace/output slot, complete `job_instance_id`, job index, descriptor
 and logical content
 identity, committed version/generation, payload and manifest names, exact byte
 counts and raw SHA-256 values, requested and achieved durability, and the
-published manifest identity. It is returned only after all requested barriers
+published manifest identity. It has no public field-based construction path and
+is minted as an immutable typed receipt only after all requested barriers
 succeed. This is ADR 0009's target `OutputStore` authority, not the current
 private IPC delivery store and not an expansion of #92 runtime behavior.
 
@@ -1177,12 +1183,16 @@ payload to present storage bytes, their recomputed digest, and their claim, and
 must retain the exact raw storage proof. Each side independently recomputes the
 complete eligibility result from its retained storage bytes plus that proof and
 requires exact equality with the retained eligible flag and ordered reason
-list. It must then bind those retained expected bytes to its own process-private
-actual storage observation: the held-root identity and descriptor-derived
-filesystem type, actual successful typed receipt, and an independently produced
-complete probe whose canonical encoding equals the retained proof. Missing,
-incomplete, stale, drifting, or retained-file-reconstructed authority fails the
-binding. I1/I2 must bind `not-applicable`/`row-has-no-output-commit` and the
+list. It must then bind those retained expected bytes to its own opaque process-
+private actual capability. Only the retained live descriptor capability,
+immutable store-minted typed receipts, and a trusted live adapter may mint that
+source. Every validation call obtains a fresh root/receipt/probe snapshot from
+the source; the complete probe value is an observation result and cannot mint
+authority by itself. Public aggregates, copied strings, retained proof bytes,
+and JSON cannot construct the capability. Missing, incomplete, stale, drifting,
+or retained-file-reconstructed authority fails the binding. Copies retained by
+an inner-row input or evaluated row share the live source and extend its
+lifetime. I1/I2 must bind `not-applicable`/`row-has-no-output-commit` and the
 exact N/A state/reason/empty payload to the absence of every storage evidence
 and actual-observation object. The recomputed class digest must match its claim,
 but a valid class self-hash does not repair a mismatched embedded base or
@@ -1214,8 +1224,9 @@ fails even when the 21-field manifest and all claimed/class digests have been
 recomputed to valid values. Durable JSON evidence carries the canonical proof
 bytes, their digest, and a complete readable decoding of the same observations;
 it does not introduce an alternate JSON proof grammar. JSON also carries only
-a diagnostic rendering and digest of the actual-observation object; it cannot
-rehydrate the live root/receipt/probe authority. If a platform adapter cannot
+a diagnostic construction-time rendering and probe digest of the actual-
+observation object; it cannot rehydrate the live root/receipt/probe authority or
+replace a fresh validation-time observation. If a platform adapter cannot
 independently verify an external declaration such as effective mount semantics,
 the complete performance cut, hardware write-cache policy, power-loss
 protection, or transaction-event attestation, it lists the exact unverified
@@ -1331,9 +1342,10 @@ each replicate records and freezes:
   capability/configuration observations.
 
 Those pre-warmup canonical bytes and proof are retained expected evidence. The
-process must also hold/re-observe the selected root descriptor across the row,
-collect actual typed receipts at transaction completion, and obtain the
-complete probe from a trusted source-private adapter. Compatibility is not
+process must also retain and re-observe the selected root descriptor across the
+row, collect opaque typed receipts at transaction completion, and obtain a
+fresh complete probe from a trusted source-private live adapter for each
+validation. Compatibility is not
 evaluated until those actual facts exact-match the retained expectations; any
 external field the adapter cannot verify makes the required-storage side
 machine-ineligible.

@@ -17,7 +17,8 @@ Issue #87 以决策与文档变更的形式接受本 ADR。Issue #88 现在只�
 Issue #95 现在实现了一条有意收窄的 source-private B1 手工/release 输出所有者。
 `B1OutputStore` 把 Issue #88 executor 与面向精确不可变 B1 artifact 的 rooted fresh-
 occurrence、manifest-last/no-replace 事务、类型化 crash-durable receipt 及 leaf-to-root
-barrier 组合起来。它不替代私有 IPC delivery store，不新增已安装输出 API，也不完成
+barrier 组合起来；receipt 只能私有签发，并且 store 可以保留不透明 root-descriptor
+capability。它不替代私有 IPC delivery store，不新增已安装输出 API，也不完成
 本 ADR 中通用 recovery、post-publication cache、Graph 文档与旧输出副作用目标。
 
 在 Primary head `c99c94b56065aee6d456337af8ee0aa45c12e0a1` 上对 Issue #118
@@ -189,6 +190,9 @@ slot descriptor；所选 root pathname 是 evidence，不是持续 mutation auth
 Creation、file access、publication、barrier、revalidation 与 cleanup 始终采用
 descriptor-relative 操作，并验证预期 filesystem identity。因此 root path replacement
 或 symlink substitution 会使最终 binding 失败，而不会重定向写入。
+对于 retained evidence，只有 store 能把该 root descriptor 复制为不透明、可复制的
+capability。副本共享 open-file description 与 lock 生命周期，因此可以让 exclusive-root
+ownership 延续到 store object 生命周期之后。
 
 源码私有的 B1 实现会在 store 生命周期内取得所选 root 的 nonblocking advisory
 exclusive lock，并创建 mode-`0700` 的同 root staging anchor 与一个 private child slot。
@@ -218,9 +222,10 @@ mutation 不在本 contract 内，设计也不声称永远不会删除这种 rep
 type/identity 漂移、`EIO`/`EROFS`、非空 directory 或无法证明 absence 都会 fail-stop。
 只有在该前提内完成 checked removal 并观察到 absence 后，原 commit identity 才保持可重试。
 
-回执标识 commit、descriptor/content、namespace、version 与达到的 durability。
-它不是可变 cache 或 staging path。默认策略绝不覆盖已提交输出；替换使用显式
-新 version/commit identity。
+回执标识 commit、descriptor/content、namespace、version 与达到的 durability。它没有 public
+aggregate 或 field-based construction path；只有 store 能在完整 revalidation 后签发其不可变
+typed field。它不是可变 cache 或 staging path。默认策略绝不覆盖已提交输出；替换使用显式新
+version/commit identity。
 
 实际达到的 durability 是类型化的。显式请求 atomic-visible 的事务只有在
 no-replace manifest 发布和 identity 校验后，才能返回仅声明原子可见性的回执。

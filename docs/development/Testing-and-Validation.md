@@ -1920,7 +1920,12 @@ absence. Because POSIX separates the final identity recheck from name removal,
 the deletion guarantee is scoped to that cooperating exclusive-owner contract;
 a non-cooperating same-UID mutation is outside the threat model. A pre-guard
 anchor handoff failure must retain ambiguous residue and must not claim
-retryability. Within the precondition, only checked removal and observed
+retryability. The deterministic handoff oracle derives the exact private anchor
+and slot from the job's commit identity; it never scans the staging prefix. A
+slot-replacement test renames the original slot to an explicit displaced path
+before creating the replacement, keeping the original inode live so the result
+does not depend on Darwin/Linux inode-reuse behavior. Within the precondition,
+only checked removal and observed
 absence leave an exact-identity retry possible. A B1 job contributes throughput
 only after that receipt and both logical/raw golden checks. Every I2
 twelfth-edit (`edit_index=11`) preview/final is
@@ -2287,12 +2292,16 @@ The independent validator performs these steps in order:
    containment proof;
 4. recompute `storage_environment_digest` and `base_environment_digest` as
    lowercase SHA-256 over their complete exact manifest bytes;
-5. for every required-storage side, require a process-private actual
-   observation produced independently from retained files: stable initial/final
-   held-root identity and descriptor-derived filesystem type, an actual typed
-   successful receipt, and a complete trusted probe whose canonical bytes equal
-   the retained raw proof; any named unverified external field makes that side
-   ineligible, and diagnostic JSON cannot rehydrate this authority;
+5. for every required-storage side, require an opaque process-private actual
+   capability produced independently from retained files. Only a duplicated
+   live held-root descriptor, immutable store-minted typed receipts, and a
+   trusted live probe adapter may mint its source; the complete raw probe is a
+   fresh observation result, not authority by itself. Every validation call
+   re-observes the root, receipts, probe, and unverified-field set. Any named
+   unverified external field makes that side ineligible; copied fields and
+   diagnostic JSON cannot rehydrate authority. Copies retained by
+   `B1InnerRowInput`/`B1InnerRow` share the capability and extend the live-source
+   lifetime;
 6. parse the exact four-field environment-class manifest and recompute
    `environment_class_digest`; independently bind its base-digest payload to
    the retained/recomputed base, bind B1/M1 known `required`/`none` and storage-
@@ -2333,9 +2342,12 @@ Synchronous storage-proof recasts must also be exercised after recomputing the
 storage digest, class digest, and retained eligibility: self, both cap sides,
 both candidate/reference sides, both M1/B1 sides, and the M1 side of M1/I1 all
 remain invalid because their independent actual observation did not change.
-JSON tests must prove it exposes only diagnostic authority metadata/digests, and
-runner tests must prove canonical input files never initialize the actual
-probe. When the portable runner cannot verify an external mount, performance,
+Type tests must also prove actual observations, root authorities, and typed
+receipts are not publicly default-constructible aggregates, while a live-source
+drift after construction must fail the next validation. JSON tests must prove
+it exposes only diagnostic authority metadata/digests, and runner tests must
+prove canonical input files never initialize the actual probe. When the
+portable runner cannot verify an external mount, performance,
 hardware-cache, power-loss-protection, or transaction-event fact, its exact
 field is reported and the row is Invalid rather than machine-conformant.
 
@@ -2679,6 +2691,9 @@ charged crash-durable output stages inside a verified private staging anchor,
 mkdir/open and public real-directory replacement races, post-slot fault
 rollback/retry, root replacement fail-closed behavior, strict cleanup for
 extra/type/different-identity leaves plus injected `EIO`/`EROFS`, and receipt;
+opaque receipt/root/actual-authority construction, retained descriptor/lock
+lifetime, fresh live-source re-observation, and retained-proof/JSON inability to
+mint authority;
 executor-authored exact charge/release under real concurrency plus the
 undercharge/forged-zero Compute I/O FSM mutation matrix; all four
 independent inner verdicts; and exact real-Host Throughput QoS,

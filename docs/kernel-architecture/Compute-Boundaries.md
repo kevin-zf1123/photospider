@@ -611,6 +611,15 @@ adapter, normalizer, mapper, binding, and containment predicate before exact-
 matching eligibility. M1 records two same-ordinal isolated pair references in
 addition to candidate/reference comparison provenance.
 
+Required-storage actual authority is an opaque copyable capability, not the
+serialized root, receipt, or probe fields. `B1OutputStore` alone duplicates the
+held root descriptor and mints immutable typed receipts; a trusted adapter owns
+the live complete-probe source. Each compatibility check re-observes all three
+sources. Copying `B1InnerRowInput` or `B1InnerRow` shares that capability and may
+extend the root descriptor, advisory lock, and adapter lifetime. JSON receives
+only construction-time diagnostics and a probe digest, so it cannot mint or
+rehydrate validation authority.
+
 These remain profile harness/evidence semantics. Exact per-job planned-byte
 charges and executor-authored admission/settlement deltas are mandatory,
 authoritative evidence for Compute I/O admission, planned-byte high-water, and

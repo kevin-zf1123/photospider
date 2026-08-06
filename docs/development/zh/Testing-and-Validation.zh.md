@@ -1549,7 +1549,10 @@ B1 staging 与 occurrence name 保留给单一 store owner。Slot 创建后的 e
 identity，并检查每次 removal 及随后 absence。由于 POSIX 会把最终 identity recheck 与按 name
 删除分开，删除保证仅限该协作式 exclusive-owner contract；不协作 same-UID mutation 不在
 threat model 内。Guard 建立前的 anchor handoff failure 必须保留含义不确定的 residue，且不得
-声称可重试。在该前提内，只有 checked removal 与观察到 absence 后才允许 exact-identity
+声称可重试。确定性 handoff oracle 会从 job 的 commit identity 推导精确 private anchor 与 slot，
+绝不扫描 staging prefix。Slot-replacement 测试会先把原 slot rename 到显式 displaced path，再
+创建 replacement，从而让原 inode 保持存活，使结果不依赖 Darwin/Linux 的 inode reuse 行为。
+在该前提内，只有 checked removal 与观察到 absence 后才允许 exact-identity
 retry。只有在该 receipt
 和 logical/raw 两种 golden check 后才贡献 throughput。每个 I2
 第十二次 edit（`edit_index=11`）preview/final 都通过相同 Host
@@ -1870,11 +1873,13 @@ environment-digest 输入，但必须可以独立复现。
    configuration、被排除 option 的 no-effect proof 与 root-containment proof；
 4. 对完整精确 manifest byte 计算小写 SHA-256，从而复算
    `storage_environment_digest` 与 `base_environment_digest`；
-5. 对每一个 required-storage 侧，要求存在独立于 retained file 产生的进程私有 actual
-   observation：稳定的 initial/final held-root identity、从 descriptor 得出的 filesystem type、
-   实际成功的 typed receipt，以及 canonical byte 等于 retained raw proof 的完整可信 probe；
-   任一列出的 unverified external field 都会使该侧 ineligible，diagnostic JSON 不能恢复该
-   authority；
+5. 对每一个 required-storage 侧，要求存在独立于 retained file 产生的不透明进程私有 actual
+   capability。只有重复的 live held-root descriptor、store 签发的不可变 typed receipt 与可信
+   live probe adapter 才能签发其 source；完整 raw probe 是新的 observation result，本身不是
+   authority。每次 validation call 都会重新观察 root、receipt、probe 与 unverified-field set。
+   任一列出的 unverified external field 都会使该侧 ineligible；复制字段与 diagnostic JSON
+   不能恢复 authority。`B1InnerRowInput`/`B1InnerRow` 中保留的副本会共享 capability 并延长
+   live-source 生命周期；
 6. 解析精确四 field environment-class manifest 并复算
    `environment_class_digest`；独立把其 base-digest payload 绑定到 retained/复算 base，
    把 B1/M1 known `required`/`none` 与 storage-digest payload 绑定到存在的 retained/
@@ -1907,8 +1912,10 @@ canonical storage byte 并复算 storage/class digest、但保留 stale eligibil
 测试还必须在复算 storage digest、class digest 与 retained eligibility 后执行同步 storage-
 proof recast：self、cap 两侧、candidate/reference 两侧、M1/B1 两侧，以及 M1/I1 的 M1 侧都
 必须因为其独立 actual observation 未改变而保持 invalid。JSON test 必须证明它只暴露
-diagnostic authority metadata/digest，runner test 必须证明 canonical input file 绝不会初始化
-actual probe。当 portable runner 无法验证 external mount、performance、hardware-cache、
+diagnostic authority metadata/digest；type test 还必须证明 actual observation、root authority
+与 typed receipt 都不是公开可 default-construct 的 aggregate，并且构造后的 live-source drift
+必须让下一次 validation 失败。Runner test 必须证明 canonical input file 绝不会初始化 actual
+probe。当 portable runner 无法验证 external mount、performance、hardware-cache、
 power-loss-protection 或 transaction-event fact 时，必须报告精确 field，并让 row 为 Invalid，
 而不是 machine-conformant。
 
@@ -2198,7 +2205,9 @@ charge、且位于已验证 private staging anchor 内的 crash-durable output s
 exhaustion/cleanup、atomic no-replace directory publication、mkdir/open 与 public
 real-directory replacement race、slot 创建后 fault rollback/retry、root replacement
 fail-closed 行为、针对 extra/type/different-identity leaf 与注入 `EIO`/`EROFS` 的严格
-cleanup，以及 receipt、真实并发下
+cleanup，以及 receipt、不透明 receipt/root/actual-authority construction、retained
+descriptor/lock 生命周期、每次重新观察 live source，以及 retained proof/JSON 无法签发
+authority；真实并发下
 executor 签发的精确 charge/release，以及 undercharge/伪造零值 Compute I/O FSM mutation
 matrix、四项相互独立的
 inner verdict，以及真实 Host 上精确

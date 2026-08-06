@@ -20,7 +20,8 @@ transactions, and legacy output-side-effect migration.
 Issue #95 now implements a deliberately narrow source-private B1 manual/release
 output owner. `B1OutputStore` composes the Issue #88 executor with a rooted
 fresh-occurrence, manifest-last/no-replace transaction, typed crash-durable
-receipt, and leaf-to-root barriers for the exact immutable B1 artifact. It does
+receipt with private minting, a retained opaque root-descriptor capability, and
+leaf-to-root barriers for the exact immutable B1 artifact. It does
 not replace the private IPC delivery store, add an installed output API, or
 complete the general recovery, post-publication cache, Graph-document, and
 legacy output-side-effect targets in this ADR.
@@ -231,6 +232,9 @@ not continuing mutation authority. Creation, file access, publication,
 barriers, revalidation, and cleanup remain descriptor-relative and verify the
 expected filesystem identities. A root-path replacement or symlink
 substitution therefore fails the final binding instead of redirecting writes.
+For retained evidence, only the store can duplicate that root descriptor into
+an opaque copyable capability. Copies share the open-file description and lock
+lifetime, so they can extend exclusive-root ownership beyond the store object.
 
 The source-private B1 realization acquires a nonblocking advisory exclusive
 lock on the selected root for the store lifetime and creates a mode-`0700`
@@ -270,9 +274,11 @@ terminates fail-stop. Only checked removal and observed absence within that
 precondition leave the original commit identity retryable.
 
 The receipt identifies commit, descriptor/content, namespace, version, and
-achieved durability. It is not a mutable cache or staging path. The default
-policy never overwrites a committed output; replacement uses an explicit new
-version/commit identity.
+achieved durability. It has no public aggregate or field-based construction
+path and only the store mints its immutable typed fields after complete
+revalidation. It is not a mutable cache or staging path. The default policy
+never overwrites a committed output; replacement uses an explicit new version/
+commit identity.
 
 The achieved durability is typed. An explicitly requested atomic-visible
 transaction can return only an atomic-visibility receipt after the no-replace

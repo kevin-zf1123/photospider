@@ -558,7 +558,11 @@ same-UID mutation 作出声明。Guard 建立前的 anchor handoff failure 会�
 且不声称可重试。只有在该前提内完成 checked removal 并观察到 absence 后，相同 commit
 identity 才保持可重试。Store 写入紧密 little-endian RGBA binary32
 byte、同步并重验 payload 与 manifest、一次性发布、完成 leaf-to-root directory barrier，
-然后才返回类型化 crash-durable receipt。每次 offer 与
+然后才返回类型化 crash-durable receipt。该 receipt 没有公开的 field-based constructor；
+只有 store 能在 revalidation 完成后签发其不可变类型化字段。Store 还可以保留一个由重复
+descriptor 支撑的不透明 root-authority capability；该 descriptor 与原 descriptor 共享同一个
+open-file description 和 advisory-lock 生命周期。因此，evaluated inner row 中的 capability
+副本即使在原始 store 销毁后，仍会让 descriptor 与 exclusive ownership 保持存活。每次 offer 与
 settlement 都保留完整 occurrence/task identity、executor 签发的精确 delta 与同锁 I/O
 snapshot；capacity retry 保持 attempt zero 与相同 charge。Planned byte 与单 task event 只
 对 Compute I/O admission、high-water 与精确 task settlement 具有权威性，不能证明 physical
@@ -572,10 +576,14 @@ storage proof，形式是唯一封闭的 canonical 六 field expected document�
 field observation、mount input、两次 performance cut、transaction/receipt event 与 root/
 destination observation；不会保留任何 derived proof boolean。每一侧 compatibility 都会
 重新解析这些 byte、重跑全部 mapping，并从自身 canonical storage byte 复算 eligibility，
-再与 retained claim 精确匹配。随后，它会把该 expected claim 独立绑定到来自 held root
-descriptor、其 filesystem observation、真实 typed receipt 与完整可信 probe 的源码私有实际
-authority。JSON 只增加可读解码与 diagnostic actual-observation digest，不引入另一套 proof
-grammar，也不提供可复用 authority。任一 external storage declaration 缺少可信 observation，
+再与 retained claim 精确匹配。随后，它会把该 expected claim 独立绑定到不透明的源码私有
+actual capability。只有 live held-root descriptor capability、store 签发的不可变 typed receipt
+与可信 live probe adapter 才能签发其输入；public aggregate、复制值与 retained proof byte 均
+不能做到这一点。每次 validation call 都会从该 live observer 取得新的 root/receipt/probe
+snapshot。完整 raw probe 是 observation result，而不是 minting authority；
+`B1InnerRowInput`/`B1InnerRow` 中的副本会共享 observer 并延长其 source 生命周期。JSON 只增加
+可读解码与 diagnostic initial-snapshot digest，不引入另一套 proof grammar，也不提供可复用
+authority。任一 external storage declaration 缺少可信 observation，
 都会使该侧 machine-ineligible；禁止把 retained proof 复制到 actual-observation path。
 `b1_immutable_benchmark` 为
 `EXCLUDE_FROM_ALL`，不属于 CTest，会在 caller 选择的 root 下执行一条精确 34-job inner row。

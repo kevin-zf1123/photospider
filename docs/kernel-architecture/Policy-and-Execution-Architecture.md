@@ -698,7 +698,12 @@ removal and observed absence inside the precondition keep the commit identity
 retryable. The store writes tight little-endian RGBA binary32 bytes,
 syncs and revalidates the payload and manifest, publishes once, completes
 leaf-to-root directory barriers, and only then returns a typed crash-durable
-receipt. Every offer and
+receipt. That receipt has no public field-based constructor: only the store can
+mint its immutable typed fields after revalidation. The store can also retain
+an opaque root-authority capability backed by a duplicated descriptor that
+shares the same open-file description and advisory-lock lifetime. Copies held
+by evaluated inner rows therefore keep the descriptor and exclusive ownership
+alive even after the originating store is destroyed. Every offer and
 settlement retains the complete occurrence/task identity and executor-authored
 exact delta plus same-lock I/O snapshot; capacity retry keeps attempt zero and
 the same charge. Planned bytes and per-task events are authoritative only for
@@ -716,10 +721,15 @@ transaction/receipt events, and root/destination observations. No derived
 proof boolean is retained. Every compatibility side reparses those bytes,
 reruns all mappings, and recomputes eligibility from its own canonical storage
 bytes before exact-matching the retained claim. It then independently binds
-that expected claim to source-private actual authority from the held root
-descriptor, its filesystem observation, real typed receipts, and a complete
-trusted probe. JSON adds a readable decoding and diagnostic actual-observation
-digest but no alternate proof grammar and no reusable authority. Missing
+that expected claim to an opaque source-private actual capability. Only a live
+held-root descriptor capability, immutable store-minted typed receipts, and a
+trusted live probe adapter can mint its inputs; public aggregates, copied
+values, and retained proof bytes cannot. Every validation call obtains a fresh
+root/receipt/probe snapshot from that live observer. The complete raw probe is
+an observation result rather than minting authority, and copies inside
+`B1InnerRowInput`/`B1InnerRow` share the observer and extend its source lifetime.
+JSON adds a readable decoding and diagnostic initial-snapshot digest but no
+alternate proof grammar and no reusable authority. Missing
 trusted observation for any external storage declaration makes that side
 machine-ineligible; copying the retained proof into the actual-observation path
 is forbidden.

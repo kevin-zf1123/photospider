@@ -566,12 +566,17 @@ cancel/wait 到精确 charge 退休，再进行 checked cleanup。POSIX 把最�
 anchor handoff failure 会保留含义不确定的 residue，且不声称可重试。只有在该前提内完成 checked
 removal 并观察到 absence 后，相同 commit identity 才保持可重试。
 
+当 evidence 必须比 store object 活得更久时，只有 store 能通过复制 held descriptor 签发不透明
+retained-root capability。其副本共享 open-file description 与 advisory-lock 生命周期，因此复制
+inner row 会延长 exclusive-root ownership，直到最后一个 capability 副本释放。
+
 `OutputCommitReceipt` evidence 至少绑定稳定 `OutputCommitId`、rooted namespace/
 output slot、完整 `job_instance_id`、job index、descriptor 与 logical content
 identity、committed version/
 generation、payload 与 manifest 名称、精确 byte count 与 raw SHA-256、requested 与
-achieved durability，以及 published manifest identity。只有所有请求的 barrier
-成功后才能返回 receipt。这是 ADR 0009 的目标 `OutputStore` authority，不是当前
+achieved durability，以及 published manifest identity。它没有公开的 field-based construction
+path，并且只有在全部请求的 barrier 成功后，才能签发为不可变 typed receipt。这是 ADR 0009
+的目标 `OutputStore` authority，不是当前
 private IPC delivery store，也不是 #92 对 runtime behavior 的扩展。
 
 每个 B1 artifact destination，无论采用显式 disposable path 还是 release-artifact
@@ -1032,10 +1037,13 @@ reason 相同，payload 为空。任何行都不遗漏四条 record 中的任意
 storage byte、其复算 digest 及其 claim，并保留精确 raw storage proof。每一侧都必须
 从自己的 retained storage byte 加该 proof 独立复算完整 eligibility result，并要求与
 retained eligible flag 及有序 reason list 精确相等。然后，它还必须把这些 retained expected
-byte 绑定到自己进程私有的实际 storage observation：held-root identity 与从 descriptor 得出的
-filesystem type、实际成功的 typed receipt，以及一个独立产生且 canonical encoding 与 retained
-proof 相等的完整 probe。缺失、不完整、陈旧、漂移或从 retained file 重建出来的 authority 都会
-使 binding 失败。I1/I2 必须把 `not-applicable`/`row-has-no-output-commit` 与精确 N/A
+byte 绑定到自己进程私有的不透明 actual capability。只有 retained live descriptor capability、
+store 签发的不可变 typed receipt 与可信 live adapter 才能签发该 source。每次 validation call
+都从 source 取得新的 root/receipt/probe snapshot；完整 probe value 是 observation result，本身
+不能签发 authority。Public aggregate、复制字符串、retained proof byte 与 JSON 都不能构造该
+capability。缺失、不完整、陈旧、漂移或从 retained file 重建出来的 authority 都会使 binding
+失败。Inner-row input 或 evaluated row 中保留的副本会共享 live source 并延长其生命周期。
+I1/I2 必须把 `not-applicable`/`row-has-no-output-commit` 与精确 N/A
 state/reason/empty payload 绑定到全部 storage evidence 与 actual-observation object 均不存在。
 复算 class digest 必须匹配其 claim，但合法 class self-hash 不能修复不匹配的内嵌 base 或
 storage digest payload。
@@ -1060,8 +1068,9 @@ receipt binding 与 component-wise containment check，以重建全部 predicate
 21-field manifest 与全部 claimed/class digest 已重新计算为合法值，缺失、未知、重复、
 malformed、stale 或内部漂移的 evidence 仍会失败。Durable JSON evidence 会携带 canonical
 proof byte、其 digest，以及同一 observation 的完整可读解码；它不会引入另一套 JSON
-proof grammar。JSON 还只会携带 actual-observation object 的 diagnostic rendering 与 digest，
-不能重新取得 live root/receipt/probe authority。如果 platform adapter 无法独立验证 effective
+proof grammar。JSON 还只会携带 actual-observation object 构造时的 diagnostic rendering 与
+probe digest，不能重新取得 live root/receipt/probe authority，也不能替代 validation 时的新
+observation。如果 platform adapter 无法独立验证 effective
 mount semantics、完整 performance cut、hardware write-cache policy、power-loss protection 或
 transaction-event attestation 等 external declaration，它必须列出精确的 unverified field，且该
 required-storage 侧为 machine-ineligible。Canonical input file 只是 expected claim，绝不能
@@ -1159,8 +1168,9 @@ replicate 都要记录并冻结：
   compatibility eligibility 与 raw capability/configuration observation。
 
 这些 warmup 前 canonical byte 与 proof 是 retained expected evidence。进程还必须跨越整行
-持有并重新观察 selected root descriptor，在 transaction completion 收集实际 typed receipt，
-并从可信 source-private adapter 取得完整 probe。在这些实际 fact 与 retained expectation 精确
+保留并重新观察 selected root descriptor，在 transaction completion 收集不透明 typed receipt，
+并在每次 validation 时从可信 source-private live adapter 取得新的完整 probe。在这些实际 fact
+与 retained expectation 精确
 匹配前不得评估 compatibility；adapter 无法验证的任一 external field 都会使 required-storage
 侧 machine-ineligible。
 
