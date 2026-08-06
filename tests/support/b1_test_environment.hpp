@@ -300,6 +300,7 @@ inline B1EnvironmentEvidence make_b1_test_environment(
       storage_digest,
       class_bytes,
       digest_b1_environment_manifest(class_bytes),
+      proof,
       evaluate_b1_storage_eligibility(storage, proof),
       kB1WorkloadId,
       b1_sha256("b1-test-fixture"),

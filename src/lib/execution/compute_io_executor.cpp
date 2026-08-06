@@ -134,13 +134,23 @@ struct ComputeIoTaskState final {
   /**
    * @brief Creates nonterminal completion state for one owning executor.
    * @param executor Shared executor identity observed weakly by `wait()`.
+   * @param accepted_admission_sequence Nonzero atomic admission event identity.
+   * @param accepted_planned_bytes Exact positive task byte charge.
    * @throws Nothing.
    * @note Weak ownership prevents a retained terminal completion from keeping
    * the process executor alive or causing address-reuse false positives.
    */
   explicit ComputeIoTaskState(
-      const std::shared_ptr<ComputeIoExecutorState>& executor) noexcept
-      : owning_executor(executor) {}
+      const std::shared_ptr<ComputeIoExecutorState>& executor,
+      std::uint64_t accepted_admission_sequence,
+      std::uint64_t accepted_planned_bytes) noexcept
+      : admission_sequence(accepted_admission_sequence),
+        planned_bytes(accepted_planned_bytes),
+        owning_executor(executor) {
+    if (admission_sequence == 0U || planned_bytes == 0U) {
+      std::terminate();
+    }
+  }
 
   /** @brief Internal nonterminal/terminal progress category. */
   enum class Phase : std::uint8_t {
@@ -167,6 +177,12 @@ struct ComputeIoTaskState final {
   /** @brief Immutable terminal result present exactly in Terminal. */
   std::optional<ComputeIoTaskResult> result;
 
+  /** @brief Executor event sequence that atomically admitted this task. */
+  const std::uint64_t admission_sequence = 0U;
+
+  /** @brief Exact immutable planned-byte charge admitted for this task. */
+  const std::uint64_t planned_bytes = 0U;
+
   /**
    * @brief Weak identity of the executor whose worker owns this completion.
    *
@@ -180,6 +196,7 @@ struct ComputeIoTaskState final {
    * @param status Exact terminal category.
    * @param failure Original callback exception when failed.
    * @param duration Time spent inside the provider callback.
+   * @param settlement_event Exact executor-authored charge-release proof.
    * @return Nothing.
    * @throws Nothing; duplicate publication terminates as an invariant breach.
    * @note The caller must hold `mutex` and release executor accounting before
@@ -187,11 +204,17 @@ struct ComputeIoTaskState final {
    */
   void publish_terminal(ComputeIoCompletionStatus status,
                         std::exception_ptr failure,
-                        std::chrono::nanoseconds duration) noexcept {
-    if (phase == Phase::Terminal || result.has_value()) {
+                        std::chrono::nanoseconds duration,
+                        ComputeIoSettlementEvent settlement_event) noexcept {
+    if (phase == Phase::Terminal || result.has_value() ||
+        settlement_event.admission_sequence != admission_sequence ||
+        settlement_event.status != status ||
+        settlement_event.released_tasks != 1U ||
+        settlement_event.released_planned_bytes != planned_bytes) {
       std::terminate();
     }
-    result = ComputeIoTaskResult(status, std::move(failure), duration);
+    result = ComputeIoTaskResult(status, std::move(failure), duration,
+                                 std::move(settlement_event));
     phase = Phase::Terminal;
   }
 };
@@ -275,9 +298,88 @@ struct ComputeIoExecutorState final {
 
   /** @brief True after the independent worker has been joined. */
   bool shutdown_complete = false;
+
+  /** @brief Next nonzero executor-authored admission/settlement sequence. */
+  std::uint64_t next_accounting_event_sequence = 1U;
 };
 
 namespace {
+
+/**
+ * @brief Copies executor counters while the complete state mutex is held.
+ * @param state Locked executor state.
+ * @return Atomic-cut authority-free snapshot.
+ * @throws Nothing.
+ */
+ComputeIoExecutorSnapshot snapshot_locked(
+    const ComputeIoExecutorState& state) noexcept {
+  return ComputeIoExecutorSnapshot{
+      state.limits.task_limit,  state.limits.planned_bytes_limit,
+      state.active_tasks,       state.active_planned_bytes,
+      state.constructing_tasks, state.queued_tasks,
+      state.running_tasks,      state.accepting,
+      state.shutdown_complete,
+  };
+}
+
+/**
+ * @brief Allocates one nonzero accounting-event sequence under executor lock.
+ * @param state Locked executor state.
+ * @return Unique monotonically increasing sequence.
+ * @throws Nothing; exhaustion terminates as an unrecoverable evidence breach.
+ */
+std::uint64_t next_accounting_event_sequence_locked(
+    ComputeIoExecutorState& state) noexcept {
+  if (state.next_accounting_event_sequence == 0U ||
+      state.next_accounting_event_sequence ==
+          std::numeric_limits<std::uint64_t>::max()) {
+    std::terminate();
+  }
+  return state.next_accounting_event_sequence++;
+}
+
+/**
+ * @brief Captures one exact admission decision at its locked linearization.
+ * @param state Locked executor state after any accepted charge mutation.
+ * @param status Exact typed admission decision.
+ * @param offered_planned_bytes Caller-provided estimate, possibly zero-invalid.
+ * @param charged Whether this exact decision committed both budgets.
+ * @return Executor-authored event and same-lock post-decision snapshot.
+ * @throws Nothing.
+ */
+ComputeIoAdmissionEvent make_admission_event_locked(
+    ComputeIoExecutorState& state, ComputeIoAdmissionStatus status,
+    std::uint64_t offered_planned_bytes, bool charged) noexcept {
+  return ComputeIoAdmissionEvent{
+      next_accounting_event_sequence_locked(state),
+      status,
+      offered_planned_bytes,
+      charged ? 1U : 0U,
+      charged ? offered_planned_bytes : 0U,
+      snapshot_locked(state),
+  };
+}
+
+/**
+ * @brief Captures one accepted task's exact release under executor lock.
+ * @param state Locked executor state after task/byte release.
+ * @param completion Accepted task identity and immutable charge.
+ * @param status Exact terminal category about to be published.
+ * @return Executor-authored settlement event and post-release snapshot.
+ * @throws Nothing.
+ */
+ComputeIoSettlementEvent make_settlement_event_locked(
+    ComputeIoExecutorState& state, const ComputeIoTaskState& completion,
+    ComputeIoCompletionStatus status) noexcept {
+  return ComputeIoSettlementEvent{
+      next_accounting_event_sequence_locked(state),
+      completion.admission_sequence,
+      status,
+      1U,
+      completion.planned_bytes,
+      snapshot_locked(state),
+  };
+}
 
 /**
  * @brief Releases one exact task/byte admission charge under executor lock.
@@ -386,7 +488,10 @@ void settle_entry_locked(ComputeIoExecutorState& state,
   }
   --state.running_tasks;
   release_admission_locked(state, planned_bytes);
-  completion.publish_terminal(status, std::move(failure), duration);
+  const ComputeIoSettlementEvent settlement_event =
+      make_settlement_event_locked(state, completion, status);
+  completion.publish_terminal(status, std::move(failure), duration,
+                              settlement_event);
 }
 
 /**
@@ -617,32 +722,55 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
     std::uint64_t planned_bytes,
     const std::shared_ptr<const void>& lifetime_token,
     const void* factory_context, TaskFactoryInvoker invoke) {
+  const std::shared_ptr<ComputeIoExecutorState> state = state_;
   if (planned_bytes == 0U || !lifetime_token || factory_context == nullptr ||
       invoke == nullptr) {
-    return ComputeIoSubmission(ComputeIoAdmissionStatus::InvalidRequest, {});
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return ComputeIoSubmission(
+        ComputeIoAdmissionStatus::InvalidRequest, {},
+        make_admission_event_locked(*state,
+                                    ComputeIoAdmissionStatus::InvalidRequest,
+                                    planned_bytes, false));
   }
 
-  const std::shared_ptr<ComputeIoExecutorState> state = state_;
+  ComputeIoAdmissionEvent admission_event;
   {
     std::lock_guard<std::mutex> lock(state->mutex);
     if (!state->accepting) {
-      return ComputeIoSubmission(ComputeIoAdmissionStatus::ShuttingDown, {});
+      return ComputeIoSubmission(
+          ComputeIoAdmissionStatus::ShuttingDown, {},
+          make_admission_event_locked(*state,
+                                      ComputeIoAdmissionStatus::ShuttingDown,
+                                      planned_bytes, false));
     }
     if (g_current_io_executor == state.get()) {
-      return ComputeIoSubmission(ComputeIoAdmissionStatus::InvalidRequest, {});
+      return ComputeIoSubmission(
+          ComputeIoAdmissionStatus::InvalidRequest, {},
+          make_admission_event_locked(*state,
+                                      ComputeIoAdmissionStatus::InvalidRequest,
+                                      planned_bytes, false));
     }
     if (state->active_tasks >= state->limits.task_limit) {
-      return ComputeIoSubmission(ComputeIoAdmissionStatus::TaskLimit, {});
+      return ComputeIoSubmission(
+          ComputeIoAdmissionStatus::TaskLimit, {},
+          make_admission_event_locked(*state,
+                                      ComputeIoAdmissionStatus::TaskLimit,
+                                      planned_bytes, false));
     }
     if (planned_bytes > state->limits.planned_bytes_limit ||
         state->active_planned_bytes >
             state->limits.planned_bytes_limit - planned_bytes) {
-      return ComputeIoSubmission(ComputeIoAdmissionStatus::PlannedByteLimit,
-                                 {});
+      return ComputeIoSubmission(
+          ComputeIoAdmissionStatus::PlannedByteLimit, {},
+          make_admission_event_locked(
+              *state, ComputeIoAdmissionStatus::PlannedByteLimit, planned_bytes,
+              false));
     }
     ++state->active_tasks;
     state->active_planned_bytes += planned_bytes;
     ++state->constructing_tasks;
+    admission_event = make_admission_event_locked(
+        *state, ComputeIoAdmissionStatus::Accepted, planned_bytes, true);
   }
 
   ComputeIoConstructionRollback rollback(state, planned_bytes);
@@ -656,7 +784,8 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
     throw std::invalid_argument(
         "Compute-I/O task factory returned an empty callback.");
   }
-  auto completion_state = std::make_shared<ComputeIoTaskState>(state);
+  auto completion_state = std::make_shared<ComputeIoTaskState>(
+      state, admission_event.sequence, planned_bytes);
   ComputeIoCompletion completion(completion_state);
   ComputeIoQueueEntry entry{completion_state, std::move(retained_lifetime),
                             std::move(task), planned_bytes};
@@ -687,8 +816,12 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
       --state->constructing_tasks;
       release_admission_locked(*state, planned_bytes);
       completion_state->cancellation_requested = true;
+      const ComputeIoSettlementEvent settlement_event =
+          make_settlement_event_locked(*state, *completion_state,
+                                       ComputeIoCompletionStatus::Cancelled);
       completion_state->publish_terminal(ComputeIoCompletionStatus::Cancelled,
-                                         nullptr, std::chrono::nanoseconds{0});
+                                         nullptr, std::chrono::nanoseconds{0},
+                                         settlement_event);
     }
   }
   rollback.release();
@@ -697,20 +830,14 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
     completion_state->completion_cv.notify_all();
   }
   return ComputeIoSubmission(ComputeIoAdmissionStatus::Accepted,
-                             std::move(completion));
+                             std::move(completion), std::move(admission_event));
 }
 
 /** @copydoc ComputeIoExecutor::snapshot */
 ComputeIoExecutorSnapshot ComputeIoExecutor::snapshot() const {
   const std::shared_ptr<ComputeIoExecutorState> state = state_;
   std::lock_guard<std::mutex> lock(state->mutex);
-  return ComputeIoExecutorSnapshot{
-      state->limits.task_limit,  state->limits.planned_bytes_limit,
-      state->active_tasks,       state->active_planned_bytes,
-      state->constructing_tasks, state->queued_tasks,
-      state->running_tasks,      state->accepting,
-      state->shutdown_complete,
-  };
+  return snapshot_locked(*state);
 }
 
 /** @copydoc ComputeIoExecutor::shutdown */

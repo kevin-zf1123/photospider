@@ -965,7 +965,9 @@ namespace {
  * @throws Parsing and allocation exceptions from canonical validation.
  * @note The four-field class bytes are not trusted as a self-contained claim:
  * both embedded digest payloads are compared with independently recomputed
- * manifest digests and their retained claims.
+ * manifest digests and their retained claims. Applicable storage additionally
+ * requires retained raw proof and exact equality between retained and
+ * independently recomputed eligibility.
  */
 bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
   const B1CanonicalManifest base =
@@ -994,16 +996,22 @@ bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
   if (applicability == "required") {
     if (!workload_requires_storage || !evidence.storage_manifest.has_value() ||
         !evidence.claimed_storage_digest.has_value() ||
+        !evidence.storage_raw_proof.has_value() ||
         !evidence.storage_eligibility.has_value() ||
-        !evidence.storage_eligibility->eligible ||
-        !evidence.storage_eligibility->reasons.empty()) {
+        !evidence.storage_eligibility->eligible) {
       return false;
     }
     const B1CanonicalManifest storage =
         parse_b1_environment_manifest(*evidence.storage_manifest);
     const B1Sha256Digest recomputed_storage =
         digest_b1_environment_manifest(*evidence.storage_manifest);
+    const B1StorageEligibility recomputed_eligibility =
+        evaluate_b1_storage_eligibility(*evidence.storage_manifest,
+                                        *evidence.storage_raw_proof);
     return storage.schema == kStorageSchema &&
+           recomputed_eligibility == *evidence.storage_eligibility &&
+           recomputed_eligibility.eligible &&
+           recomputed_eligibility.reasons.empty() &&
            recomputed_storage == *evidence.claimed_storage_digest &&
            environment_class.fields[3U].state == B1ObservationState::Known &&
            environment_class.fields[3U].payload ==
@@ -1013,6 +1021,7 @@ bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
     return workload_has_no_output_commit &&
            !evidence.storage_manifest.has_value() &&
            !evidence.claimed_storage_digest.has_value() &&
+           !evidence.storage_raw_proof.has_value() &&
            !evidence.storage_eligibility.has_value() &&
            environment_class.fields[3U].state ==
                B1ObservationState::NotApplicable &&
@@ -1452,6 +1461,11 @@ bool B1CanonicalField::operator==(
     const B1CanonicalField& other) const noexcept {
   return name == other.name && state == other.state && reason == other.reason &&
          type == other.type && payload == other.payload;
+}
+
+bool B1StorageEligibility::operator==(
+    const B1StorageEligibility& other) const noexcept {
+  return eligible == other.eligible && reasons == other.reasons;
 }
 
 std::string b1_environment_frame(std::string_view payload) {

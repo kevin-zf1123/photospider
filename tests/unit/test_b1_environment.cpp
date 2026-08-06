@@ -786,6 +786,39 @@ TEST(B1Environment, ContainmentAndCompatibilityUseExactBytesAndRelations) {
       cap_one, drift, B1EnvironmentRelation::CandidateReference));
 
   drift = cap_one;
+  drift.storage_raw_proof.reset();
+  EXPECT_FALSE(compatible_b1_environments(
+      cap_one, drift, B1EnvironmentRelation::CandidateReference));
+
+  drift = cap_one;
+  drift.storage_raw_proof->durability_path_consistent = false;
+  EXPECT_FALSE(compatible_b1_environments(
+      cap_one, drift, B1EnvironmentRelation::CandidateReference));
+
+  drift = cap_one;
+  std::vector<B1CanonicalField> weak_storage =
+      parse_b1_environment_manifest(*drift.storage_manifest).fields;
+  find_test_field(&weak_storage, "requested_durability").payload =
+      "atomic-visible";
+  find_test_field(&weak_storage, "achieved_durability").payload =
+      "atomic-visible";
+  drift.storage_manifest = encode_b1_storage_environment(weak_storage);
+  drift.claimed_storage_digest =
+      digest_b1_environment_manifest(*drift.storage_manifest);
+  B1CanonicalManifest weak_class =
+      parse_b1_environment_manifest(drift.environment_class_manifest);
+  find_test_field(&weak_class.fields, "storage_environment_digest").payload =
+      b1_digest_hex(*drift.claimed_storage_digest);
+  drift.environment_class_manifest =
+      encode_b1_environment_class(weak_class.fields);
+  drift.claimed_environment_class_digest =
+      digest_b1_environment_manifest(drift.environment_class_manifest);
+  ASSERT_TRUE(drift.storage_eligibility->eligible);
+  ASSERT_TRUE(drift.storage_eligibility->reasons.empty());
+  EXPECT_FALSE(compatible_b1_environments(
+      drift, drift, B1EnvironmentRelation::CandidateReference));
+
+  drift = cap_one;
   B1CanonicalManifest drifted_class =
       parse_b1_environment_manifest(drift.environment_class_manifest);
   find_test_field(&drifted_class.fields, "base_environment_digest").payload =
@@ -819,6 +852,7 @@ TEST(B1Environment, ContainmentAndCompatibilityUseExactBytesAndRelations) {
   paired_i1.workload_id = "I1-edit-storm-v1";
   paired_i1.storage_manifest.reset();
   paired_i1.claimed_storage_digest.reset();
+  paired_i1.storage_raw_proof.reset();
   paired_i1.storage_eligibility.reset();
   const std::vector<B1CanonicalField> i1_class{
       testing::known_b1_field("base_environment_digest", "sha256",

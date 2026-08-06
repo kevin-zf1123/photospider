@@ -433,6 +433,46 @@ Json optional_io_task_json(const std::optional<B1IoTaskIdentity>& value) {
 }
 
 /**
+ * @brief Encodes one optional executor-authored admission/charge event.
+ * @param value Optional exact decision linearization proof.
+ * @return Complete event object or null.
+ * @throws nlohmann allocation failures unchanged.
+ */
+Json optional_io_admission_event_json(
+    const std::optional<execution::ComputeIoAdmissionEvent>& value) {
+  if (!value.has_value()) {
+    return nullptr;
+  }
+  return Json{
+      {"sequence", value->sequence},
+      {"status", static_cast<std::uint32_t>(value->status)},
+      {"offered_planned_bytes", value->offered_planned_bytes},
+      {"charged_tasks", value->charged_tasks},
+      {"charged_planned_bytes", value->charged_planned_bytes},
+      {"snapshot_after", compute_io_snapshot_json(value->snapshot_after)}};
+}
+
+/**
+ * @brief Encodes one optional executor-authored exact settlement event.
+ * @param value Optional admission-bound release proof.
+ * @return Complete event object or null.
+ * @throws nlohmann allocation failures unchanged.
+ */
+Json optional_io_settlement_event_json(
+    const std::optional<execution::ComputeIoSettlementEvent>& value) {
+  if (!value.has_value()) {
+    return nullptr;
+  }
+  return Json{
+      {"sequence", value->sequence},
+      {"admission_sequence", value->admission_sequence},
+      {"status", static_cast<std::uint32_t>(value->status)},
+      {"released_tasks", value->released_tasks},
+      {"released_planned_bytes", value->released_planned_bytes},
+      {"snapshot_after", compute_io_snapshot_json(value->snapshot_after)}};
+}
+
+/**
  * @brief Encodes one complete B1 Compute I/O observation.
  * @param value Event-aligned admission/accounting record.
  * @return Closed event object.
@@ -449,6 +489,10 @@ Json io_observation_json(const B1ComputeIoObservation& value) {
       {"completion", value.completion.has_value()
                          ? Json(static_cast<std::uint32_t>(*value.completion))
                          : Json(nullptr)},
+      {"admission_event",
+       optional_io_admission_event_json(value.admission_event)},
+      {"settlement_event",
+       optional_io_settlement_event_json(value.settlement_event)},
       {"snapshot", compute_io_snapshot_json(value.snapshot)}};
 }
 
@@ -549,6 +593,28 @@ Json optional_eligibility_json(
 }
 
 /**
+ * @brief Encodes one optional independently retained storage raw proof.
+ * @param value Optional seven-predicate proof used for eligibility derivation.
+ * @return Complete proof object or null.
+ * @throws nlohmann allocation failures unchanged.
+ */
+Json optional_storage_raw_proof_json(
+    const std::optional<B1StorageRawProof>& value) {
+  if (!value.has_value()) {
+    return nullptr;
+  }
+  return Json{
+      {"raw_mapping_complete", value->raw_mapping_complete},
+      {"commit_semantics_consistent", value->commit_semantics_consistent},
+      {"durability_path_consistent", value->durability_path_consistent},
+      {"mount_normalization_proved", value->mount_normalization_proved},
+      {"not_applicable_proofs_valid", value->not_applicable_proofs_valid},
+      {"performance_configuration_proved",
+       value->performance_configuration_proved},
+      {"root_containment_proved", value->root_containment_proved}};
+}
+
+/**
  * @brief Encodes one complete B1 environment evidence value.
  * @param value Exact canonical bytes, claims, eligibility, and identities.
  * @return Closed environment object.
@@ -567,6 +633,8 @@ Json environment_json(const B1EnvironmentEvidence& value) {
               {"environment_class_manifest", value.environment_class_manifest},
               {"claimed_environment_class_digest",
                sha256_json(value.claimed_environment_class_digest)},
+              {"storage_raw_proof",
+               optional_storage_raw_proof_json(value.storage_raw_proof)},
               {"storage_eligibility",
                optional_eligibility_json(value.storage_eligibility)},
               {"workload_id", value.workload_id},

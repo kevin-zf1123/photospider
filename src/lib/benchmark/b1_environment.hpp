@@ -219,6 +219,14 @@ struct B1StorageEligibility final {
   bool eligible = false;
   /** @brief Complete truth set in the normative fixed order. */
   std::vector<std::string> reasons;
+
+  /**
+   * @brief Compares the complete derived eligibility truth set.
+   * @param other Candidate retained result.
+   * @return True only when the verdict and ordered reasons match exactly.
+   * @throws Nothing.
+   */
+  bool operator==(const B1StorageEligibility& other) const noexcept;
 };
 
 /**
@@ -238,7 +246,9 @@ struct B1EnvironmentEvidence final {
   std::string environment_class_manifest;
   /** @brief Claimed environment-class digest retained beside bytes. */
   B1Sha256Digest claimed_environment_class_digest;
-  /** @brief Applicable storage eligibility result. */
+  /** @brief Independent raw proof retained when storage is applicable. */
+  std::optional<B1StorageRawProof> storage_raw_proof;
+  /** @brief Applicable eligibility result derived from retained bytes/proof. */
   std::optional<B1StorageEligibility> storage_eligibility;
   /** @brief Frozen workload identity. */
   std::string workload_id;

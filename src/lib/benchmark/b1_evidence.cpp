@@ -308,6 +308,44 @@ bool valid_b1_io_snapshot(
 }
 
 /**
+ * @brief Compares every counter/flag in two executor snapshot cuts.
+ * @param lhs First snapshot.
+ * @param rhs Second snapshot.
+ * @return True only when all limits, counts, and flags match exactly.
+ * @throws Nothing.
+ */
+bool equal_b1_io_snapshot(
+    const execution::ComputeIoExecutorSnapshot& lhs,
+    const execution::ComputeIoExecutorSnapshot& rhs) noexcept {
+  return lhs.task_limit == rhs.task_limit &&
+         lhs.planned_bytes_limit == rhs.planned_bytes_limit &&
+         lhs.active_tasks == rhs.active_tasks &&
+         lhs.active_planned_bytes == rhs.active_planned_bytes &&
+         lhs.constructing_tasks == rhs.constructing_tasks &&
+         lhs.queued_tasks == rhs.queued_tasks &&
+         lhs.running_tasks == rhs.running_tasks &&
+         lhs.accepting == rhs.accepting &&
+         lhs.shutdown_complete == rhs.shutdown_complete;
+}
+
+/**
+ * @brief Compares one repeated executor-authored admission proof exactly.
+ * @param lhs First event.
+ * @param rhs Second event.
+ * @return True only for identical sequence/decision/charge/snapshot evidence.
+ * @throws Nothing.
+ */
+bool equal_b1_io_admission_event(
+    const execution::ComputeIoAdmissionEvent& lhs,
+    const execution::ComputeIoAdmissionEvent& rhs) noexcept {
+  return lhs.sequence == rhs.sequence && lhs.status == rhs.status &&
+         lhs.offered_planned_bytes == rhs.offered_planned_bytes &&
+         lhs.charged_tasks == rhs.charged_tasks &&
+         lhs.charged_planned_bytes == rhs.charged_planned_bytes &&
+         equal_b1_io_snapshot(lhs.snapshot_after, rhs.snapshot_after);
+}
+
+/**
  * @brief Returns the exact planned-byte charge for one B1 I/O stage.
  * @param task Valid complete task identity.
  * @return Payload bytes or the job-specific manifest length.
@@ -666,9 +704,13 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
   std::map<B1IoStage, std::size_t> accepted;
   std::map<B1IoStage, std::size_t> settled;
   std::map<B1IoStage, std::size_t> capacity_rejections;
+  std::map<B1IoStage, execution::ComputeIoAdmissionEvent> accepted_events;
+  std::uint64_t last_accounting_event_sequence = 0U;
   const auto boundary_fields_empty = [](const B1ComputeIoObservation& value) {
     return !value.task.has_value() && value.planned_bytes == 0U &&
-           !value.admission.has_value() && !value.completion.has_value();
+           !value.admission.has_value() && !value.completion.has_value() &&
+           !value.admission_event.has_value() &&
+           !value.settlement_event.has_value();
   };
 
   for (const B1ComputeIoObservation& observation :
@@ -700,12 +742,6 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
       if (state != StreamState::Final || !boundary_fields_empty(observation)) {
         structural_failure("Final is misplaced or contains task fields");
       }
-      if (terminal_path == TerminalPath::IoCompleted &&
-          (observation.snapshot.active_tasks != 0U ||
-           observation.snapshot.active_planned_bytes != 0U)) {
-        structural_failure(
-            "completed I/O path did not settle to an exact zero Final");
-      }
       state = StreamState::Complete;
       continue;
     }
@@ -733,14 +769,35 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
       structural_failure("task identity is invalid");
       continue;
     }
+    if (!observation.admission.has_value() ||
+        !observation.admission_event.has_value() ||
+        observation.admission_event->status != *observation.admission ||
+        observation.admission_event->offered_planned_bytes !=
+            observation.planned_bytes ||
+        observation.admission_event->sequence == 0U) {
+      structural_failure(
+          "task lacks an exact executor-authored admission event");
+      continue;
+    }
 
     if (state == StreamState::PayloadOffer ||
         state == StreamState::ManifestOffer) {
+      if (observation.settlement_event.has_value() ||
+          !equal_b1_io_snapshot(observation.snapshot,
+                                observation.admission_event->snapshot_after) ||
+          observation.admission_event->sequence <=
+              last_accounting_event_sequence) {
+        structural_failure(
+            "offer event sequence or same-lock snapshot is invalid");
+        continue;
+      }
+      last_accounting_event_sequence = observation.admission_event->sequence;
       if (observation.point == B1IoObservationPoint::OfferRejected) {
-        if (!observation.admission.has_value() ||
-            *observation.admission ==
+        if (*observation.admission ==
                 execution::ComputeIoAdmissionStatus::Accepted ||
-            observation.completion.has_value()) {
+            observation.completion.has_value() ||
+            observation.admission_event->charged_tasks != 0U ||
+            observation.admission_event->charged_planned_bytes != 0U) {
           structural_failure("offer rejection status is invalid");
           continue;
         }
@@ -763,7 +820,13 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
       if (observation.point != B1IoObservationPoint::AcceptedAdmission ||
           observation.admission !=
               execution::ComputeIoAdmissionStatus::Accepted ||
-          observation.completion.has_value()) {
+          observation.completion.has_value() ||
+          observation.admission_event->charged_tasks != 1U ||
+          observation.admission_event->charged_planned_bytes !=
+              observation.planned_bytes ||
+          observation.snapshot.active_tasks < 1U ||
+          observation.snapshot.active_planned_bytes <
+              observation.planned_bytes) {
         structural_failure("offer state did not contain a valid admission");
         continue;
       }
@@ -771,6 +834,7 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
         ++result.duplicate_admissions;
         structural_failure("task stage was admitted more than once");
       }
+      accepted_events[expected_stage] = *observation.admission_event;
       state = payload_stage ? StreamState::PayloadSettlement
                             : StreamState::ManifestSettlement;
       continue;
@@ -781,10 +845,30 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
       if (observation.point != B1IoObservationPoint::Settlement ||
           observation.admission !=
               execution::ComputeIoAdmissionStatus::Accepted ||
-          !observation.completion.has_value()) {
+          !observation.completion.has_value() ||
+          !observation.settlement_event.has_value()) {
         structural_failure("settlement state or status is invalid");
         continue;
       }
+      const auto accepted_event = accepted_events.find(expected_stage);
+      if (accepted_event == accepted_events.end() ||
+          !equal_b1_io_admission_event(accepted_event->second,
+                                       *observation.admission_event) ||
+          observation.settlement_event->sequence <=
+              last_accounting_event_sequence ||
+          observation.settlement_event->admission_sequence !=
+              accepted_event->second.sequence ||
+          observation.settlement_event->status != *observation.completion ||
+          observation.settlement_event->released_tasks != 1U ||
+          observation.settlement_event->released_planned_bytes !=
+              observation.planned_bytes ||
+          !equal_b1_io_snapshot(observation.snapshot,
+                                observation.settlement_event->snapshot_after)) {
+        structural_failure(
+            "settlement is not bound to the exact admitted task charge");
+        continue;
+      }
+      last_accounting_event_sequence = observation.settlement_event->sequence;
       if (++settled[expected_stage] > 1U) {
         structural_failure("task stage settled more than once");
       }
@@ -824,6 +908,7 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
   }
   const bool failed_task_status =
       evidence.output.status == B1OutputCommitStatus::TaskFailed ||
+      evidence.output.status == B1OutputCommitStatus::RootUnavailable ||
       evidence.output.status == B1OutputCommitStatus::DurabilityUnsupported ||
       evidence.output.status == B1OutputCommitStatus::RevalidationFailed;
   if ((terminal_path == TerminalPath::AdmissionRejected &&

@@ -90,6 +90,10 @@ struct B1ComputeIoObservation final {
   std::optional<execution::ComputeIoAdmissionStatus> admission;
   /** @brief Typed completion result when an accepted task settled. */
   std::optional<execution::ComputeIoCompletionStatus> completion;
+  /** @brief Same-lock executor admission event for offer boundaries. */
+  std::optional<execution::ComputeIoAdmissionEvent> admission_event;
+  /** @brief Exact executor settlement event for accepted task completion. */
+  std::optional<execution::ComputeIoSettlementEvent> settlement_event;
   /** @brief Authority-free process executor state at this exact boundary. */
   execution::ComputeIoExecutorSnapshot snapshot;
 };
@@ -159,6 +163,33 @@ struct B1OutputCommitResult final {
 };
 
 /**
+ * @brief Deterministic source-private exception/root-race injection boundary.
+ * @throws Nothing for value construction and comparison.
+ * @note Production leaves the associated hook null. The hook may mutate only
+ * test-owned external state or throw; it receives no descriptor or authority.
+ */
+enum class B1OutputStoreFaultPoint : std::uint8_t {
+  /** @brief Root binding passed immediately before fd-relative slot creation.
+   */
+  AfterRootBindingVerified,
+  /** @brief Slot and retained slot descriptor exist, before task-state setup.
+   */
+  AfterSlotCreated,
+  /** @brief Accepted budget is charged and the lazy task factory is entered. */
+  InsideTaskFactory,
+  /** @brief Submission returned Accepted and its completion was guarded. */
+  AfterTaskAccepted,
+  /** @brief I/O worker entered the accepted callback before artifact mutation.
+   */
+  BeforeTaskWork,
+  /** @brief Accepted task settled and the transaction no longer owns a wait. */
+  AfterTaskSettled,
+  /** @brief Both I/O tasks succeeded immediately before receipt construction.
+   */
+  BeforeReceiptAssembly,
+};
+
+/**
  * @brief Construction policy for one selected B1 output root.
  * @throws Nothing for value construction except path allocation.
  */
@@ -189,6 +220,23 @@ struct B1OutputStoreOptions final {
 
   /** @brief Borrowed context paired with `capacity_rejection_observer`. */
   void* capacity_rejection_observer_context = nullptr;
+
+  /**
+   * @brief Optional deterministic fault/root-race test callback.
+   * @param context Borrowed caller context valid for `commit()`.
+   * @param point Exact internal boundary currently reached.
+   * @return Nothing when execution should continue.
+   * @throws Any test-selected exception; the commit transaction first cancels
+   * and settles accepted work, removes the owned slot, then propagates it.
+   * @note The callback is source-private and cannot receive root/slot fds.
+   */
+  using FaultInjector = void (*)(void* context, B1OutputStoreFaultPoint point);
+
+  /** @brief Optional deterministic fault injector; production leaves null. */
+  FaultInjector fault_injector = nullptr;
+
+  /** @brief Borrowed context paired with `fault_injector`. */
+  void* fault_injector_context = nullptr;
 };
 
 /**
@@ -216,6 +264,12 @@ class B1OutputStore final {
   B1OutputStore(std::filesystem::path root,
                 execution::ComputeIoExecutor& executor,
                 B1OutputStoreOptions options = {});
+
+  /**
+   * @brief Releases the held root descriptor after every synchronous commit.
+   * @throws Nothing; descriptor-close failure terminates fail-stop.
+   */
+  ~B1OutputStore() noexcept;
 
   /** @brief Store ownership is unique and cannot be copied. */
   B1OutputStore(const B1OutputStore&) = delete;
@@ -256,6 +310,8 @@ class B1OutputStore final {
   std::uint64_t root_device_ = 0U;
   /** @brief Selected POSIX root inode identity, zero on unsupported hosts. */
   std::uint64_t root_inode_ = 0U;
+  /** @brief Held POSIX root directory descriptor, negative when unsupported. */
+  int root_descriptor_ = -1;
 };
 
 }  // namespace ps::benchmark

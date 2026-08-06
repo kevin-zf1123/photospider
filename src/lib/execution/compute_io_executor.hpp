@@ -33,6 +33,33 @@ struct ComputeIoExecutorLimits final {
 };
 
 /**
+ * @brief Immutable observation of bounded executor state.
+ *
+ * @throws Nothing for value construction.
+ * @note This grants no admission, cancellation, queue, or worker authority.
+ */
+struct ComputeIoExecutorSnapshot final {
+  /** @brief Configured immutable task limit. */
+  std::uint64_t task_limit = 0U;
+  /** @brief Configured immutable planned-byte limit. */
+  std::uint64_t planned_bytes_limit = 0U;
+  /** @brief Currently charged tasks across every active phase. */
+  std::uint64_t active_tasks = 0U;
+  /** @brief Currently charged estimated bytes. */
+  std::uint64_t active_planned_bytes = 0U;
+  /** @brief Admitted tasks whose lazy factory/queue publication is ongoing. */
+  std::uint64_t constructing_tasks = 0U;
+  /** @brief Published FIFO entries not yet selected by the worker. */
+  std::uint64_t queued_tasks = 0U;
+  /** @brief Callbacks currently entered on the sole I/O worker. */
+  std::uint64_t running_tasks = 0U;
+  /** @brief Whether new submissions may still be admitted. */
+  bool accepting = false;
+  /** @brief Whether graceful shutdown joined the worker. */
+  bool shutdown_complete = false;
+};
+
+/**
  * @brief Typed result of one compute-I/O admission attempt.
  *
  * @throws Nothing.
@@ -80,6 +107,54 @@ enum class ComputeIoCompletionStatus : std::uint8_t {
 };
 
 /**
+ * @brief Executor-authored proof of one admission decision and exact charge.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note `sequence`, the charge fields, and `snapshot_after` are captured while
+ * the executor mutex still owns the admission linearization point. Unrelated
+ * process work may be present in the snapshot, so consumers prove ownership
+ * from the explicit charge fields rather than a global counter delta.
+ */
+struct ComputeIoAdmissionEvent final {
+  /** @brief Process-executor monotonic event sequence, zero only when absent.
+   */
+  std::uint64_t sequence = 0U;
+  /** @brief Exact typed decision made at this linearization point. */
+  ComputeIoAdmissionStatus status = ComputeIoAdmissionStatus::InvalidRequest;
+  /** @brief Exact positive offered estimate, or zero for invalid input. */
+  std::uint64_t offered_planned_bytes = 0U;
+  /** @brief Exact task charge applied by this decision: zero or one. */
+  std::uint64_t charged_tasks = 0U;
+  /** @brief Exact planned-byte charge applied by this decision. */
+  std::uint64_t charged_planned_bytes = 0U;
+  /** @brief Process state captured atomically after this decision. */
+  ComputeIoExecutorSnapshot snapshot_after;
+};
+
+/**
+ * @brief Executor-authored proof of one accepted task's exact settlement.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note The event is published in the immutable task result only after task
+ * payload/lifetime retirement and exact charge release under the executor
+ * mutex. Other tasks may remain active in `snapshot_after`.
+ */
+struct ComputeIoSettlementEvent final {
+  /** @brief Process-executor monotonic event sequence, always nonzero. */
+  std::uint64_t sequence = 0U;
+  /** @brief Admission event sequence whose exact charge was released. */
+  std::uint64_t admission_sequence = 0U;
+  /** @brief Exact typed completion published with this settlement. */
+  ComputeIoCompletionStatus status = ComputeIoCompletionStatus::Cancelled;
+  /** @brief Exact released task charge; accepted tasks always release one. */
+  std::uint64_t released_tasks = 0U;
+  /** @brief Exact released planned-byte charge. */
+  std::uint64_t released_planned_bytes = 0U;
+  /** @brief Process state captured atomically after exact release. */
+  ComputeIoExecutorSnapshot snapshot_after;
+};
+
+/**
  * @brief Immutable typed completion fact for one accepted compute-I/O task.
  *
  * The result carries the exact terminal category, original callback exception
@@ -114,6 +189,15 @@ class ComputeIoTaskResult final {
   std::exception_ptr failure() const noexcept { return failure_; }
 
   /**
+   * @brief Returns the executor-authored exact settlement proof.
+   * @return Immutable event bound to this task's admission and completion.
+   * @throws Nothing.
+   */
+  const ComputeIoSettlementEvent& settlement_event() const noexcept {
+    return settlement_event_;
+  }
+
+  /**
    * @brief Rethrows the original callback exception when failed.
    * @return Nothing.
    * @throws The exact callback exception for `Failed`; nothing otherwise.
@@ -126,14 +210,17 @@ class ComputeIoTaskResult final {
    * @param status Exact terminal category.
    * @param failure Original callback exception for failure.
    * @param work_duration Time spent inside the callback.
+   * @param settlement_event Exact executor-authored release proof.
    * @throws Nothing.
    */
   ComputeIoTaskResult(ComputeIoCompletionStatus status,
                       std::exception_ptr failure,
-                      std::chrono::nanoseconds work_duration) noexcept
+                      std::chrono::nanoseconds work_duration,
+                      ComputeIoSettlementEvent settlement_event) noexcept
       : status_(status),
         failure_(std::move(failure)),
-        work_duration_(work_duration) {}
+        work_duration_(work_duration),
+        settlement_event_(std::move(settlement_event)) {}
 
   /** @brief Exact terminal category. */
   ComputeIoCompletionStatus status_ = ComputeIoCompletionStatus::Cancelled;
@@ -143,6 +230,9 @@ class ComputeIoTaskResult final {
 
   /** @brief Time spent in the independent worker callback. */
   std::chrono::nanoseconds work_duration_{0};
+
+  /** @brief Exact admission-bound task/byte release event. */
+  ComputeIoSettlementEvent settlement_event_;
 
   friend class ComputeIoExecutor;
   friend struct ComputeIoExecutorState;
@@ -263,16 +353,29 @@ class ComputeIoSubmission final {
    */
   const ComputeIoCompletion& completion() const noexcept { return completion_; }
 
+  /**
+   * @brief Returns the executor-authored admission decision and exact charge.
+   * @return Immutable event captured at the admission linearization point.
+   * @throws Nothing.
+   */
+  const ComputeIoAdmissionEvent& admission_event() const noexcept {
+    return admission_event_;
+  }
+
  private:
   /**
    * @brief Creates one typed submission result.
    * @param status Exact admission category.
    * @param completion Active only for Accepted.
+   * @param admission_event Exact executor-authored decision/charge proof.
    * @throws Nothing.
    */
   ComputeIoSubmission(ComputeIoAdmissionStatus status,
-                      ComputeIoCompletion completion) noexcept
-      : status_(status), completion_(std::move(completion)) {}
+                      ComputeIoCompletion completion,
+                      ComputeIoAdmissionEvent admission_event) noexcept
+      : status_(status),
+        completion_(std::move(completion)),
+        admission_event_(std::move(admission_event)) {}
 
   /** @brief Exact admission category. */
   ComputeIoAdmissionStatus status_ = ComputeIoAdmissionStatus::InvalidRequest;
@@ -280,34 +383,10 @@ class ComputeIoSubmission final {
   /** @brief Accepted task completion, otherwise inactive. */
   ComputeIoCompletion completion_;
 
-  friend class ComputeIoExecutor;
-};
+  /** @brief Exact atomic decision and own-charge evidence. */
+  ComputeIoAdmissionEvent admission_event_;
 
-/**
- * @brief Immutable observation of bounded executor state.
- *
- * @throws Nothing for value construction.
- * @note This grants no admission, cancellation, queue, or worker authority.
- */
-struct ComputeIoExecutorSnapshot final {
-  /** @brief Configured immutable task limit. */
-  std::uint64_t task_limit = 0U;
-  /** @brief Configured immutable planned-byte limit. */
-  std::uint64_t planned_bytes_limit = 0U;
-  /** @brief Currently charged tasks across every active phase. */
-  std::uint64_t active_tasks = 0U;
-  /** @brief Currently charged estimated bytes. */
-  std::uint64_t active_planned_bytes = 0U;
-  /** @brief Admitted tasks whose lazy factory/queue publication is ongoing. */
-  std::uint64_t constructing_tasks = 0U;
-  /** @brief Published FIFO entries not yet selected by the worker. */
-  std::uint64_t queued_tasks = 0U;
-  /** @brief Callbacks currently entered on the sole I/O worker. */
-  std::uint64_t running_tasks = 0U;
-  /** @brief Whether new submissions may still be admitted. */
-  bool accepting = false;
-  /** @brief Whether graceful shutdown joined the worker. */
-  bool shutdown_complete = false;
+  friend class ComputeIoExecutor;
 };
 
 /**

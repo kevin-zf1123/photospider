@@ -766,6 +766,7 @@ B1EnvironmentEvidence make_runner_environment(
       digest_b1_environment_manifest(storage),
       environment_class,
       digest_b1_environment_manifest(environment_class),
+      proof,
       eligibility,
       kB1WorkloadId,
       frozen_fixture_digest(),

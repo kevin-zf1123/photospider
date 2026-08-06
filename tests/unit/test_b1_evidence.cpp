@@ -106,23 +106,61 @@ std::vector<B1ComputeIoObservation> make_io_observations(
   const B1IoTaskIdentity payload{job, B1IoStage::PayloadStage, 0U};
   const B1IoTaskIdentity manifest{job, B1IoStage::ManifestCommit, 0U};
   const std::uint64_t manifest_bytes = b1_manifest_length(job.job_index);
+  const execution::ComputeIoExecutorSnapshot payload_charged =
+      make_io_snapshot(1U, kB1PayloadBytes);
+  const execution::ComputeIoExecutorSnapshot payload_released =
+      make_io_snapshot();
+  const execution::ComputeIoExecutorSnapshot manifest_charged =
+      make_io_snapshot(1U, manifest_bytes);
+  const execution::ComputeIoExecutorSnapshot manifest_released =
+      make_io_snapshot();
+  const execution::ComputeIoAdmissionEvent payload_admission{
+      1U,
+      execution::ComputeIoAdmissionStatus::Accepted,
+      kB1PayloadBytes,
+      1U,
+      kB1PayloadBytes,
+      payload_charged};
+  const execution::ComputeIoSettlementEvent payload_settlement{
+      2U,
+      payload_admission.sequence,
+      execution::ComputeIoCompletionStatus::Succeeded,
+      1U,
+      kB1PayloadBytes,
+      payload_released};
+  const execution::ComputeIoAdmissionEvent manifest_admission{
+      3U,
+      execution::ComputeIoAdmissionStatus::Accepted,
+      manifest_bytes,
+      1U,
+      manifest_bytes,
+      manifest_charged};
+  const execution::ComputeIoSettlementEvent manifest_settlement{
+      4U,
+      manifest_admission.sequence,
+      execution::ComputeIoCompletionStatus::Succeeded,
+      1U,
+      manifest_bytes,
+      manifest_released};
   return {
       {B1IoObservationPoint::Initial, std::nullopt, 0U, std::nullopt,
-       std::nullopt, make_io_snapshot()},
+       std::nullopt, std::nullopt, std::nullopt, make_io_snapshot()},
       {B1IoObservationPoint::AcceptedAdmission, payload, kB1PayloadBytes,
        execution::ComputeIoAdmissionStatus::Accepted, std::nullopt,
-       make_io_snapshot(1U, kB1PayloadBytes)},
+       payload_admission, std::nullopt, payload_charged},
       {B1IoObservationPoint::Settlement, payload, kB1PayloadBytes,
        execution::ComputeIoAdmissionStatus::Accepted,
-       execution::ComputeIoCompletionStatus::Succeeded, make_io_snapshot()},
+       execution::ComputeIoCompletionStatus::Succeeded, payload_admission,
+       payload_settlement, payload_released},
       {B1IoObservationPoint::AcceptedAdmission, manifest, manifest_bytes,
        execution::ComputeIoAdmissionStatus::Accepted, std::nullopt,
-       make_io_snapshot(1U, manifest_bytes)},
+       manifest_admission, std::nullopt, manifest_charged},
       {B1IoObservationPoint::Settlement, manifest, manifest_bytes,
        execution::ComputeIoAdmissionStatus::Accepted,
-       execution::ComputeIoCompletionStatus::Succeeded, make_io_snapshot()},
+       execution::ComputeIoCompletionStatus::Succeeded, manifest_admission,
+       manifest_settlement, manifest_released},
       {B1IoObservationPoint::Final, std::nullopt, 0U, std::nullopt,
-       std::nullopt, make_io_snapshot()},
+       std::nullopt, std::nullopt, std::nullopt, make_io_snapshot()},
   };
 }
 
@@ -302,6 +340,29 @@ TEST(B1Evidence, VerificationJsonRetainsAllOccurrencesAndClosedIdentity) {
                 .at("service_starts")
                 .size(),
             kB1TasksPerJob);
+  EXPECT_TRUE(encoded.at("evidence")
+                  .at("environment")
+                  .at("storage_raw_proof")
+                  .at("root_containment_proved")
+                  .get<bool>());
+  EXPECT_EQ(encoded.at("evidence")
+                .at("jobs")
+                .at(0U)
+                .at("output")
+                .at("io_observations")
+                .at(1U)
+                .at("admission_event")
+                .at("charged_planned_bytes"),
+            kB1PayloadBytes);
+  EXPECT_EQ(encoded.at("evidence")
+                .at("jobs")
+                .at(0U)
+                .at("output")
+                .at("io_observations")
+                .at(2U)
+                .at("settlement_event")
+                .at("released_planned_bytes"),
+            kB1PayloadBytes);
   EXPECT_EQ(encoded.at("verdicts").at("throughput"), "pass");
   EXPECT_FALSE(encoded.at("outer_canonical_envelope_claim").get<bool>());
   EXPECT_FALSE(b1_workload_contract_json()
@@ -447,15 +508,56 @@ TEST(B1Evidence,
       kB1ComputeIoTaskLimit + 1U;
   expect_row_invalid(std::move(invalid_snapshot));
 
-  B1InnerRowInput unsettled_final = make_valid_row_input(8U, 1U);
-  unsettled_final.jobs[4U].output.io_observations.back().snapshot.active_tasks =
-      1U;
-  expect_row_invalid(std::move(unsettled_final));
+  B1InnerRowInput admitted_undercharge = make_valid_row_input(8U, 1U);
+  admitted_undercharge.jobs[4U]
+      .output.io_observations[1U]
+      .admission_event->charged_planned_bytes = 0U;
+  expect_row_invalid(std::move(admitted_undercharge));
+
+  B1InnerRowInput fake_zero_admission = make_valid_row_input(8U, 1U);
+  B1ComputeIoObservation& fake =
+      fake_zero_admission.jobs[4U].output.io_observations[1U];
+  fake.snapshot = make_io_snapshot();
+  fake.admission_event->snapshot_after = fake.snapshot;
+  expect_row_invalid(std::move(fake_zero_admission));
+
+  B1InnerRowInput settlement_undercharge = make_valid_row_input(8U, 1U);
+  settlement_undercharge.jobs[4U]
+      .output.io_observations[2U]
+      .settlement_event->released_planned_bytes = 1U;
+  expect_row_invalid(std::move(settlement_undercharge));
+
+  B1InnerRowInput wrong_settlement_admission = make_valid_row_input(8U, 1U);
+  ++wrong_settlement_admission.jobs[4U]
+        .output.io_observations[2U]
+        .settlement_event->admission_sequence;
+  expect_row_invalid(std::move(wrong_settlement_admission));
 
   B1InnerRowInput post_final = make_valid_row_input(8U, 1U);
   post_final.jobs[4U].output.io_observations.push_back(
       post_final.jobs[4U].output.io_observations.front());
   expect_row_invalid(std::move(post_final));
+}
+
+/**
+ * @brief Proves unrelated process I/O may remain active at a job-local Final.
+ * @throws Test fixture, evaluation, and framework failures unchanged.
+ * @note Exact own-charge release remains proved by the settlement event; only
+ * the complete isolated row's final execution snapshot must be quiescent.
+ */
+TEST(B1Evidence, JobFinalAllowsUnrelatedActiveExecutorCharge) {
+  B1InnerRowInput input = make_valid_row_input(8U, 1U);
+  execution::ComputeIoExecutorSnapshot& final =
+      input.jobs[4U].output.io_observations.back().snapshot;
+  final.active_tasks = 1U;
+  final.active_planned_bytes = 7U;
+  final.queued_tasks = 1U;
+  const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
+  EXPECT_TRUE(row.validity_reasons.empty());
+  EXPECT_EQ(row.throughput_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.determinism_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
 }
 
 /**
