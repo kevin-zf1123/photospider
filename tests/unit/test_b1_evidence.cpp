@@ -352,6 +352,14 @@ TEST(B1Evidence, VerificationJsonRetainsAllOccurrencesAndClosedIdentity) {
                    .empty());
   EXPECT_EQ(raw_proof.at("raw_evidence").at("transaction").at("events").size(),
             7U);
+  const nlohmann::json& actual_observation =
+      encoded.at("evidence").at("environment").at("storage_actual_observation");
+  EXPECT_EQ(actual_observation.at("authority_rehydration"),
+            "live-process-required");
+  EXPECT_EQ(actual_observation.at("filesystem_type"), "testfs");
+  EXPECT_EQ(actual_observation.at("receipts").size(), 1U);
+  EXPECT_FALSE(actual_observation.at("complete_probe_digest").is_null());
+  EXPECT_TRUE(actual_observation.at("unverified_external_fields").empty());
   EXPECT_EQ(encoded.at("evidence")
                 .at("jobs")
                 .at(0U)
@@ -375,6 +383,47 @@ TEST(B1Evidence, VerificationJsonRetainsAllOccurrencesAndClosedIdentity) {
   EXPECT_FALSE(b1_workload_contract_json()
                    .at("outer_canonical_envelope_claim")
                    .get<bool>());
+}
+
+/**
+ * @brief Proves the portable-runner authority path stays Invalid and its JSON
+ * remains diagnostic rather than rehydratable authority.
+ * @throws Test fixture, evaluation, JSON, and framework failures unchanged.
+ */
+TEST(B1Evidence, PortableRunnerAuthorityFailsClosedAndJsonIsDiagnostic) {
+  B1InnerRowInput input = make_valid_row_input(8U, 1U);
+  ASSERT_TRUE(input.environment.storage_actual_observation.has_value());
+  B1StorageActualObservation& complete =
+      *input.environment.storage_actual_observation;
+  input.environment.storage_actual_observation =
+      make_b1_portable_runner_storage_observation(
+          complete.selected_root, complete.resolved_root,
+          complete.root_authority_identity, complete.filesystem_type,
+          complete.receipts);
+
+  const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
+  EXPECT_EQ(row.throughput_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.determinism_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_NE(std::find(row.validity_reasons.begin(), row.validity_reasons.end(),
+                      "B1 row storage is not bound to independent live "
+                      "authority"),
+            row.validity_reasons.end());
+
+  const nlohmann::json encoded = b1_inner_row_json(row);
+  const nlohmann::json& actual =
+      encoded.at("evidence").at("environment").at("storage_actual_observation");
+  EXPECT_TRUE(actual.at("complete_probe_digest").is_null());
+  EXPECT_EQ(actual.at("authority_rehydration"), "live-process-required");
+  const std::vector<std::string> expected_unverified{
+      "b1_performance_configuration", "hardware_write_cache_policy",
+      "mount_effective_options",      "mount_identity",
+      "power_loss_protection_policy", "transaction_observation.events",
+  };
+  EXPECT_EQ(
+      actual.at("unverified_external_fields").get<std::vector<std::string>>(),
+      expected_unverified);
 }
 
 /**
@@ -633,6 +682,46 @@ TEST(B1Evidence, ReferenceThroughputUsesThreeOrdinalRatios) {
   summary = evaluate_b1_reference_throughput(candidate, reference);
   EXPECT_EQ(summary.verdict, I1Verdict::Fail);
   EXPECT_DOUBLE_EQ(*summary.median_ratio, 1.0);
+}
+
+/**
+ * @brief Proves candidate/reference evaluation rejects a synchronized retained
+ * storage/proof/class recast on either comparison side.
+ * @throws Test fixture, environment encoding, evaluation, and framework
+ * failures unchanged.
+ */
+TEST(B1Evidence, ReferenceThroughputRequiresActualAuthorityOnEachSide) {
+  std::vector<B1InnerRow> candidate;
+  std::vector<B1InnerRow> reference;
+  for (std::uint64_t replicate = 1U; replicate <= 3U; ++replicate) {
+    B1InnerRowInput candidate_input = make_valid_row_input(8U, replicate);
+    if (replicate == 1U) {
+      candidate_input.environment =
+          testing::synchronously_recast_b1_test_storage(
+              std::move(candidate_input.environment), "forgedfs");
+    }
+    candidate.push_back(evaluate_b1_inner_row(std::move(candidate_input)));
+    reference.push_back(
+        evaluate_b1_inner_row(make_valid_row_input(8U, replicate)));
+  }
+  EXPECT_EQ(evaluate_b1_reference_throughput(candidate, reference).verdict,
+            I1Verdict::Invalid);
+
+  candidate.clear();
+  reference.clear();
+  for (std::uint64_t replicate = 1U; replicate <= 3U; ++replicate) {
+    candidate.push_back(
+        evaluate_b1_inner_row(make_valid_row_input(8U, replicate)));
+    B1InnerRowInput reference_input = make_valid_row_input(8U, replicate);
+    if (replicate == 2U) {
+      reference_input.environment =
+          testing::synchronously_recast_b1_test_storage(
+              std::move(reference_input.environment), "forgedfs");
+    }
+    reference.push_back(evaluate_b1_inner_row(std::move(reference_input)));
+  }
+  EXPECT_EQ(evaluate_b1_reference_throughput(candidate, reference).verdict,
+            I1Verdict::Invalid);
 }
 
 }  // namespace

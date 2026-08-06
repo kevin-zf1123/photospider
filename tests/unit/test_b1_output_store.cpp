@@ -232,21 +232,33 @@ void replace_root_after_verification(void* opaque,
 }
 
 /**
- * @brief Finds the one test-owned private staging slot below an output root.
+ * @brief Finds the one test-owned private staging anchor below an output root.
  * @param root Existing test output root.
- * @return Private `slot` path, or empty when no staging anchor is visible.
+ * @return Private anchor path, or empty when no staging anchor is visible.
  * @throws Filesystem iteration failures unchanged.
  */
-std::filesystem::path find_private_staging_slot(
+std::filesystem::path find_private_staging_anchor(
     const std::filesystem::path& root) {
   for (const std::filesystem::directory_entry& entry :
        std::filesystem::directory_iterator(root)) {
     const std::string name = entry.path().filename().string();
     if (name.rfind(".b1-staging-", 0U) == 0U) {
-      return entry.path() / "slot";
+      return entry.path();
     }
   }
   return {};
+}
+
+/**
+ * @brief Finds the reserved private slot below the one visible staging anchor.
+ * @param root Existing test output root.
+ * @return Anchor plus `slot`, or empty when no anchor is visible.
+ * @throws Filesystem iteration failures unchanged.
+ */
+std::filesystem::path find_private_staging_slot(
+    const std::filesystem::path& root) {
+  const std::filesystem::path anchor = find_private_staging_anchor(root);
+  return anchor.empty() ? std::filesystem::path{} : anchor / "slot";
 }
 
 /**
@@ -254,6 +266,8 @@ std::filesystem::path find_private_staging_slot(
  * @throws Nothing for value construction and comparison.
  */
 enum class OutputNamespaceMutation : std::uint8_t {
+  /** @brief Replace the just-created pre-guard private staging anchor. */
+  ReplacePrivateAnchor,
   /** @brief Replace the just-created private slot with a real directory. */
   ReplacePrivateSlot,
   /** @brief Install a real public destination immediately before publication.
@@ -274,6 +288,8 @@ struct OutputNamespaceMutationContext final {
   std::filesystem::path root;
   /** @brief Exact public occurrence path for publication collision tests. */
   std::filesystem::path public_slot;
+  /** @brief Test-owned path retaining a displaced pre-guard anchor. */
+  std::filesystem::path displaced_namespace;
   /** @brief Selected deterministic mutation. */
   OutputNamespaceMutation mutation =
       OutputNamespaceMutation::ReplacePrivateSlot;
@@ -299,9 +315,22 @@ void mutate_output_namespace(void* opaque, B1OutputStoreFaultPoint point) {
     return;
   }
   context->mutated = true;
+  const std::filesystem::path private_anchor =
+      find_private_staging_anchor(context->root);
   const std::filesystem::path private_slot =
       find_private_staging_slot(context->root);
   switch (context->mutation) {
+    case OutputNamespaceMutation::ReplacePrivateAnchor:
+      if (private_anchor.empty()) {
+        throw std::runtime_error("failed to find private B1 anchor");
+      }
+      context->displaced_namespace = private_anchor.string() + "-displaced";
+      std::filesystem::rename(private_anchor, context->displaced_namespace);
+      if (!std::filesystem::create_directory(private_anchor)) {
+        throw std::runtime_error("failed to replace private B1 anchor");
+      }
+      std::ofstream(private_anchor / "replacement-marker") << "replacement";
+      break;
     case OutputNamespaceMutation::ReplacePrivateSlot:
       if (private_slot.empty() || !std::filesystem::remove(private_slot) ||
           !std::filesystem::create_directory(private_slot)) {
@@ -344,6 +373,8 @@ enum class CleanupMutation : std::uint8_t {
   RestoreSameIdentity,
   /** @brief Replace the exact name with a different regular-file inode. */
   InstallDifferentIdentity,
+  /** @brief Replace the final-checked name, then fail before store removal. */
+  InstallDifferentIdentityThenFail,
 };
 
 /**
@@ -408,6 +439,10 @@ int mutate_strict_cleanup(void* opaque,
       return 0;
     }
     std::ofstream(payload) << "different-identity";
+    if (context->mutation ==
+        CleanupMutation::InstallDifferentIdentityThenFail) {
+      return context->injected_errno;
+    }
     return 0;
   } catch (...) {
     return EIO;
@@ -575,22 +610,56 @@ TEST(B1OutputStore, RejectsWeakerDurabilityAndInvalidCandidateFailClosed) {
       {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
   const B1JobInstance job = measured_job_zero();
 
-  B1OutputStore weaker(
-      output_root.root(), executor,
-      B1OutputStoreOptions{B1OutputDurability::AtomicVisible, true});
-  EXPECT_EQ(weaker.commit(job, ImageBuffer{}).status,
-            B1OutputCommitStatus::InvalidRequest);
+  {
+    B1OutputStore weaker(
+        output_root.root(), executor,
+        B1OutputStoreOptions{B1OutputDurability::AtomicVisible, true});
+    EXPECT_EQ(weaker.commit(job, ImageBuffer{}).status,
+              B1OutputCommitStatus::InvalidRequest);
+  }
 
-  B1OutputStore unsupported(
-      output_root.root(), executor,
-      B1OutputStoreOptions{B1OutputDurability::CrashDurable, false});
-  EXPECT_EQ(unsupported.commit(job, ImageBuffer{}).status,
-            B1OutputCommitStatus::DurabilityUnsupported);
+  {
+    B1OutputStore unsupported(
+        output_root.root(), executor,
+        B1OutputStoreOptions{B1OutputDurability::CrashDurable, false});
+    EXPECT_EQ(unsupported.commit(job, ImageBuffer{}).status,
+              B1OutputCommitStatus::DurabilityUnsupported);
+  }
 
   B1OutputStore store(output_root.root(), executor);
   EXPECT_EQ(store.commit(job, ImageBuffer{}).status,
             B1OutputCommitStatus::InvalidImage);
   EXPECT_TRUE(std::filesystem::is_empty(output_root.root()));
+}
+
+/**
+ * @brief Proves the selected root has one cooperating store owner and exposes
+ * descriptor-derived identity/filesystem facts.
+ * @throws Test framework, filesystem, descriptor, and executor failures.
+ */
+TEST(B1OutputStore, HoldsExclusiveRootOwnershipAndObservesLiveAuthority) {
+  ScopedB1OutputRoot output_root;
+  execution::ComputeIoExecutor executor(
+      {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+  B1OutputStore store(output_root.root(), executor);
+  const B1OutputStoreRootObservation observed = store.observe_root_authority();
+  EXPECT_EQ(observed.resolved_root,
+            std::filesystem::canonical(output_root.root()));
+  EXPECT_FALSE(observed.root_authority_identity.empty());
+#if defined(__APPLE__)
+  EXPECT_EQ(observed.filesystem_type.rfind("darwin-", 0U), 0U);
+#elif defined(__linux__)
+  EXPECT_EQ(observed.filesystem_type.rfind("linux-fs-", 0U), 0U);
+#endif
+
+  execution::ComputeIoExecutor competing_executor(
+      {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+  EXPECT_THROW(
+      {
+        B1OutputStore competing(output_root.root(), competing_executor);
+        static_cast<void>(competing);
+      },
+      std::system_error);
 }
 
 /**
@@ -836,6 +905,38 @@ TEST(B1OutputStore,
   EXPECT_TRUE(retried.succeeded()) << retried.diagnostic;
 }
 
+/**
+ * @brief Proves a pre-guard anchor takeover propagates and preserves ambiguous
+ * replacement/displaced residue without claiming same-identity retryability.
+ * @throws Test framework, oracle, executor, and filesystem failures unchanged.
+ */
+TEST(B1OutputStore,
+     PreGuardAnchorHandoffFailurePreservesResidueAndDoesNotReturnSuccess) {
+  ScopedB1OutputRoot output_root;
+  execution::ComputeIoExecutor executor(
+      {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+  OutputNamespaceMutationContext context;
+  context.root = output_root.root();
+  context.mutation = OutputNamespaceMutation::ReplacePrivateAnchor;
+  context.point = B1OutputStoreFaultPoint::AfterStagingAnchorMkdirBeforeOpen;
+  B1OutputStoreOptions options;
+  options.fault_injector = &mutate_output_namespace;
+  options.fault_injector_context = &context;
+  B1OutputStore store(output_root.root(), executor, options);
+
+  EXPECT_THROW(
+      static_cast<void>(store.commit(measured_job_zero(), seed_zero_image())),
+      std::runtime_error);
+  const std::filesystem::path replacement =
+      find_private_staging_anchor(output_root.root());
+  ASSERT_FALSE(replacement.empty());
+  EXPECT_TRUE(std::filesystem::exists(replacement / "replacement-marker"));
+  EXPECT_TRUE(std::filesystem::is_directory(context.displaced_namespace));
+  EXPECT_FALSE(std::filesystem::exists(replacement / "output.rgba32le"));
+  EXPECT_EQ(executor.snapshot().active_tasks, 0U);
+  EXPECT_EQ(executor.snapshot().active_planned_bytes, 0U);
+}
+
 #if GTEST_HAS_DEATH_TEST
 /**
  * @brief Proves mkdir-to-open replacement is detected before any artifact
@@ -975,6 +1076,52 @@ TEST(B1OutputStore, StrictCleanupFailsStopOnInjectedUnlinkErrors) {
     EXPECT_TRUE(std::filesystem::exists(output_root.root() /
                                         ".cleanup-charge-settled"));
   }
+}
+
+/**
+ * @brief Proves the final-recheck/pre-unlink seam can mutate then fail-stop.
+ * @throws Test framework, oracle, executor, and filesystem failures unchanged.
+ * @note This deliberately models an out-of-contract same-UID mutation but
+ * returns `EIO` before the store's name removal. It proves only that the final
+ * seam is deterministic and failure precedes `unlinkat`; it does not claim an
+ * atomic identity-selected POSIX removal.
+ */
+TEST(B1OutputStore, FinalCleanupBoundaryFailurePrecedesNameRemoval) {
+  ScopedB1OutputRoot output_root;
+  static_cast<void>(seed_zero_image());
+  CleanupMutationContext cleanup;
+  cleanup.root = output_root.root();
+  cleanup.mutation = CleanupMutation::InstallDifferentIdentityThenFail;
+  cleanup.injected_errno = EIO;
+  ThrowingFaultContext failure{B1OutputStoreFaultPoint::AfterTaskSettled, true};
+  EXPECT_DEATH(
+      {
+        execution::ComputeIoExecutor executor(
+            {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+        cleanup.executor = &executor;
+        B1OutputStoreOptions options;
+        options.fault_injector = &throw_selected_output_fault;
+        options.fault_injector_context = &failure;
+        options.final_cleanup_injector = &mutate_strict_cleanup;
+        options.final_cleanup_injector_context = &cleanup;
+        B1OutputStore store(output_root.root(), executor, options);
+        static_cast<void>(store.commit(measured_job_zero(), seed_zero_image()));
+      },
+      ".*");
+  EXPECT_TRUE(
+      std::filesystem::exists(output_root.root() / ".cleanup-charge-settled"));
+  const std::filesystem::path private_slot =
+      find_private_staging_slot(output_root.root());
+  ASSERT_FALSE(private_slot.empty());
+  const std::filesystem::path payload = private_slot / "output.rgba32le";
+  EXPECT_TRUE(std::filesystem::is_regular_file(payload));
+  std::ifstream replacement(payload, std::ios::binary);
+  ASSERT_TRUE(replacement.good());
+  std::ostringstream replacement_bytes;
+  replacement_bytes << replacement.rdbuf();
+  EXPECT_EQ(replacement_bytes.str(), "different-identity");
+  EXPECT_TRUE(
+      std::filesystem::is_regular_file(private_slot / "payload-displaced"));
 }
 #endif
 

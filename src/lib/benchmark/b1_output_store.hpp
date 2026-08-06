@@ -33,6 +33,21 @@ enum class B1OutputDurability : std::uint8_t {
 };
 
 /**
+ * @brief Live root facts observed through the held `B1OutputStore` descriptor.
+ * @throws Nothing for ordinary movement except owned path/string allocation.
+ * @note The observation is source-private authority for the current process;
+ * copying its diagnostic strings into a file does not preserve that authority.
+ */
+struct B1OutputStoreRootObservation final {
+  /** @brief Canonical selected root still bound to the held descriptor. */
+  std::filesystem::path resolved_root;
+  /** @brief Stable descriptor-derived device/inode authority identity. */
+  std::string root_authority_identity;
+  /** @brief Normalized filesystem type returned by descriptor `fstatfs`. */
+  std::string filesystem_type;
+};
+
+/**
  * @brief Closed terminal result of one B1 commit request.
  * @throws Nothing for value construction and comparison.
  */
@@ -172,6 +187,8 @@ enum class B1OutputStoreFaultPoint : std::uint8_t {
   /** @brief Root binding passed immediately before fd-relative slot creation.
    */
   AfterRootBindingVerified,
+  /** @brief Private anchor exists, before descriptor acquisition/recheck. */
+  AfterStagingAnchorMkdirBeforeOpen,
   /** @brief Private slot name exists, before descriptor acquisition/recheck. */
   AfterStagingSlotMkdirBeforeOpen,
   /** @brief Private slot and retained descriptor exist, before task setup.
@@ -277,6 +294,28 @@ struct B1OutputStoreOptions final {
 
   /** @brief Borrowed context paired with `cleanup_injector`. */
   void* cleanup_injector_context = nullptr;
+
+  /**
+   * @brief Optional failure seam after the final identity recheck and before
+   * name-based removal.
+   * @param context Borrowed caller context valid through `commit()`.
+   * @param operation Exact rechecked object awaiting removal.
+   * @return Zero to continue, otherwise an errno value to fail-stop before
+   * `unlinkat`/`rmdir` is attempted.
+   * @throws Nothing; implementations must contain every failure.
+   * @note This seam makes the unavoidable POSIX check-to-remove boundary
+   * deterministic in tests. It does not authorize namespace mutation. A
+   * non-cooperating same-UID actor that mutates a reserved name at this point
+   * violates the class ownership precondition and is outside the contract.
+   */
+  using FinalCleanupInjector =
+      int (*)(void* context, B1OutputStoreCleanupOperation operation) noexcept;
+
+  /** @brief Optional final-recheck failure injector; production leaves null. */
+  FinalCleanupInjector final_cleanup_injector = nullptr;
+
+  /** @brief Borrowed context paired with `final_cleanup_injector`. */
+  void* final_cleanup_injector_context = nullptr;
 };
 
 /**
@@ -290,7 +329,15 @@ struct B1OutputStoreOptions final {
  * @throws std::invalid_argument for a missing/non-directory root.
  * @throws std::filesystem::filesystem_error when canonical root selection
  * fails.
+ * @throws std::system_error when descriptor acquisition, identity observation,
+ * or nonblocking exclusive lock acquisition fails.
  * @note The executor and selected root must outlive this store and every call.
+ * The store holds a nonblocking exclusive advisory lock on the selected root
+ * for its lifetime. All cooperating processes and threads must honor that lock
+ * and reserve `.b1-staging-*` plus `occurrence-*` names exclusively to the one
+ * store owner during commit and cleanup. Arbitrary non-cooperating same-UID
+ * namespace mutation is not covered because Darwin/Linux provide no portable
+ * atomic identity-selected unlink/rmdir primitive.
  */
 class B1OutputStore final {
  public:
@@ -325,6 +372,16 @@ class B1OutputStore final {
   const std::filesystem::path& resolved_root() const noexcept { return root_; }
 
   /**
+   * @brief Re-observes root identity and filesystem type through the held fd.
+   * @return Descriptor-derived root facts after path/fd binding verification.
+   * @throws std::system_error for `fstatfs` failure.
+   * @throws std::runtime_error for root binding or unsupported platform drift.
+   * @note Call before and after a row to bind retained expected storage input
+   * to the actual output namespace. Serialized strings are diagnostic only.
+   */
+  B1OutputStoreRootObservation observe_root_authority() const;
+
+  /**
    * @brief Commits one exact candidate image using two ordered I/O tasks.
    * @param job Complete immutable occurrence allocated before offer.
    * @param image Exact candidate CPU FP32 RGBA image.
@@ -335,6 +392,9 @@ class B1OutputStore final {
    * exactly `kB1CapacityAdmissionAttemptLimit` total attempts. Exhaustion or a
    * non-capacity rejection returns `AdmissionFailed`, cleans the occurrence
    * slot, and records the final observation without a timing-derived policy.
+   * Cleanup retryability assumes the cooperative exclusive namespace contract.
+   * A pre-guard anchor takeover throws and preserves the ambiguous name;
+   * post-anchor slot takeover or detected cleanup drift terminates fail-stop.
    */
   B1OutputCommitResult commit(const B1JobInstance& job,
                               const ImageBuffer& image);

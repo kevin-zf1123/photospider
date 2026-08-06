@@ -1606,6 +1606,12 @@ B1InnerRow evaluate_b1_inner_row(B1InnerRowInput input) {
     throughput_invalid = determinism_invalid = waste_invalid = memory_invalid =
         true;
   }
+  if (!b1_storage_actual_observation_matches(row.evidence.environment)) {
+    invalidate_b1(&row.validity_reasons,
+                  "B1 row storage is not bound to independent live authority");
+    throughput_invalid = determinism_invalid = waste_invalid = memory_invalid =
+        true;
+  }
   if (row.evidence.environment.workload_id != kB1WorkloadId ||
       row.evidence.environment.replicate_ordinal !=
           row.evidence.replicate_ordinal ||

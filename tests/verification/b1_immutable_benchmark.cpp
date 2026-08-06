@@ -70,6 +70,26 @@ struct B1RunnerOptions final {
 };
 
 /**
+ * @brief Canonical caller inputs retained only as expected environment claims.
+ * @throws Nothing for ordinary movement except owned byte allocation.
+ * @note These bytes do not acquire observation authority by being mutually
+ * consistent. The runner binds them to live root/receipt facts only after the
+ * actual B1 transactions have executed.
+ */
+struct B1RunnerExpectedEnvironment final {
+  /** @brief Expected canonical 24-field base manifest bytes. */
+  std::string base_manifest;
+  /** @brief Expected canonical 21-field storage manifest bytes. */
+  std::string storage_manifest;
+  /** @brief Expected canonical four-field environment-class bytes. */
+  std::string environment_class_manifest;
+  /** @brief Expected retained raw proof bytes, never live authority. */
+  B1StorageRawProof storage_raw_proof;
+  /** @brief Eligibility replayed only from the expected bytes/proof. */
+  B1StorageEligibility storage_eligibility;
+};
+
+/**
  * @brief Prints the exact manual-runner invocation contract.
  * @param output Destination stream.
  * @return Nothing.
@@ -82,10 +102,11 @@ void print_usage(std::ostream& output) {
             "--run-cap 1|8 [--replicate-ordinal 1|2|3]\n"
          << "Runs one exact 34-job B1-immutable-v1 isolated row. The selected "
             "output root must already exist, be empty, and be outside the "
-            "Photospider "
-            "checkout, and described by eligible canonical environment/proof "
-            "inputs. This manual target writes only below that root and makes "
-            "no canonical outer row or bundle claim.\n";
+            "Photospider checkout. Canonical environment/proof files are "
+            "expected claims only; actual live root, receipt, and complete "
+            "trusted probe authority is required independently, otherwise "
+            "the row is Invalid. This manual target writes only below that "
+            "root and makes no canonical outer row or bundle claim.\n";
 }
 
 /**
@@ -688,17 +709,17 @@ B1JobEvidence run_b1_job(Host& host, B1Host& b1_host,
 }
 
 /**
- * @brief Builds checked eligible environment evidence for this exact row.
+ * @brief Loads canonical environment inputs as expected claims only.
  * @param options Validated paths/cap/replicate.
  * @param output_directory Selected canonical root.
- * @param initial_snapshot Authoritative pre-cold resource state.
- * @return Complete self-compatible environment evidence.
+ * @return Parsed expected bytes, proof, and self-replayed eligibility.
  * @throws Canonical parse, proof, eligibility, containment, and I/O failures.
+ * @note This phase performs no compatibility decision and creates no actual
+ * observation. All four files remain attacker-editable expected input.
  */
-B1EnvironmentEvidence make_runner_environment(
+B1RunnerExpectedEnvironment load_runner_expected_environment(
     const B1RunnerOptions& options,
-    const std::filesystem::path& output_directory,
-    const B1ExecutionSnapshot& initial_snapshot) {
+    const std::filesystem::path& output_directory) {
   const std::string base = read_binary_file(options.base_manifest_path);
   const std::string storage = read_binary_file(options.storage_manifest_path);
   const std::string environment_class =
@@ -752,26 +773,76 @@ B1EnvironmentEvidence make_runner_environment(
     throw std::runtime_error(diagnostic);
   }
 
-  B1EnvironmentEvidence environment{
-      base,
-      digest_b1_environment_manifest(base),
-      storage,
-      digest_b1_environment_manifest(storage),
-      environment_class,
-      digest_b1_environment_manifest(environment_class),
-      proof,
-      eligibility,
+  return B1RunnerExpectedEnvironment{base, storage, environment_class,
+                                     std::move(proof), eligibility};
+}
+
+/**
+ * @brief Returns the exact manifest token for typed output durability.
+ * @param durability Actual typed receipt value.
+ * @return Process-lifetime `atomic-visible` or `crash-durable` token.
+ * @throws Nothing.
+ */
+const char* output_durability_token(B1OutputDurability durability) noexcept {
+  return durability == B1OutputDurability::CrashDurable ? "crash-durable"
+                                                        : "atomic-visible";
+}
+
+/**
+ * @brief Forms row evidence from expected input plus actual root/receipts.
+ * @param options Validated cap/replicate controls.
+ * @param expected Canonical caller input retained only as expected claims.
+ * @param initial_snapshot Authoritative pre-cold resource state.
+ * @param root Actual descriptor-derived root observation stable across the row.
+ * @param jobs Complete actual job evidence carrying typed output receipts.
+ * @return Environment evidence whose live authority remains explicitly
+ * incomplete when portable probes cannot verify external storage declarations.
+ * @throws Canonical, digest, or allocation failures unchanged.
+ * @note The built-in Darwin/Linux probe binds the selected root, filesystem
+ * type, and real transaction receipts. It cannot portably prove mount
+ * semantics, the full performance record, hardware write-cache policy, PLP,
+ * or the seven event attestations. Those fields therefore remain listed as
+ * unverified and machine conformance fails closed until a trusted source-
+ * private adapter supplies a complete probe. Retained proof bytes are never
+ * copied into `complete_probe`.
+ */
+B1EnvironmentEvidence make_runner_environment(
+    const B1RunnerOptions& options, const B1RunnerExpectedEnvironment& expected,
+    const B1ExecutionSnapshot& initial_snapshot,
+    const B1OutputStoreRootObservation& root,
+    const std::vector<B1JobEvidence>& jobs) {
+  std::vector<B1StorageReceiptAuthorityObservation> receipts;
+  for (const B1JobEvidence& job : jobs) {
+    if (!job.output.receipt.has_value()) {
+      continue;
+    }
+    const B1OutputCommitReceipt& receipt = *job.output.receipt;
+    receipts.push_back(B1StorageReceiptAuthorityObservation{
+        receipt.commit_id, receipt.resolved_root, receipt.rooted_slot,
+        receipt.published_manifest_identity,
+        output_durability_token(receipt.requested_durability),
+        output_durability_token(receipt.achieved_durability)});
+  }
+  B1StorageActualObservation actual =
+      make_b1_portable_runner_storage_observation(
+          root.resolved_root, root.resolved_root, root.root_authority_identity,
+          root.filesystem_type, std::move(receipts));
+
+  return B1EnvironmentEvidence{
+      expected.base_manifest,
+      digest_b1_environment_manifest(expected.base_manifest),
+      expected.storage_manifest,
+      digest_b1_environment_manifest(expected.storage_manifest),
+      expected.environment_class_manifest,
+      digest_b1_environment_manifest(expected.environment_class_manifest),
+      expected.storage_raw_proof,
+      expected.storage_eligibility,
       kB1WorkloadId,
       frozen_fixture_digest(),
       resource_identity(initial_snapshot),
       options.run_cap,
-      options.replicate_ordinal};
-  if (!compatible_b1_environments(environment, environment,
-                                  B1EnvironmentRelation::CandidateReference)) {
-    throw std::runtime_error(
-        "B1 environment class/digest/eligibility relation is inconsistent");
-  }
-  return environment;
+      options.replicate_ordinal,
+      std::move(actual)};
 }
 
 /**
@@ -817,8 +888,10 @@ B1InnerRow run_exact_row(const B1RunnerOptions& options,
       capture_b1_execution_snapshot(*b1_host, &initial_cursor);
   std::uint64_t graph_a_cursor = initial_cursor;
   std::uint64_t graph_b_cursor = initial_cursor;
-  input.environment = make_runner_environment(options, output_directory,
-                                              input.initial_snapshot);
+  const B1OutputStoreRootObservation initial_root =
+      output_store.observe_root_authority();
+  const B1RunnerExpectedEnvironment expected_environment =
+      load_runner_expected_environment(options, output_directory);
   const Json invocation{
       {"schema", "execution-profile-b1-manual-invocation-v1"},
       {"workload_id", kB1WorkloadId},
@@ -831,6 +904,8 @@ B1InnerRow run_exact_row(const B1RunnerOptions& options,
       {"environment_class_manifest_source",
        options.environment_class_manifest_path.string()},
       {"storage_proof_source", options.storage_proof_path.string()},
+      {"environment_input_role", "expected-only"},
+      {"actual_authority_policy", "live-root-and-receipts-required"},
       {"workload_contract", b1_workload_contract_json()},
       {"outer_canonical_envelope_claim", false},
   };
@@ -913,6 +988,18 @@ B1InnerRow run_exact_row(const B1RunnerOptions& options,
                     std::make_move_iterator(graph_a_measured.end()));
   std::uint64_t final_cursor = std::max(graph_a_cursor, graph_b_cursor);
   input.final_snapshot = capture_b1_execution_snapshot(*b1_host, &final_cursor);
+  const B1OutputStoreRootObservation final_root =
+      output_store.observe_root_authority();
+  if (final_root.resolved_root != initial_root.resolved_root ||
+      final_root.root_authority_identity !=
+          initial_root.root_authority_identity ||
+      final_root.filesystem_type != initial_root.filesystem_type) {
+    throw std::runtime_error(
+        "B1 live root authority drifted during the replicate");
+  }
+  input.environment =
+      make_runner_environment(options, expected_environment,
+                              input.initial_snapshot, final_root, input.jobs);
 
   B1InnerRow row = evaluate_b1_inner_row(std::move(input));
   write_fresh_text_file(output_directory / "row.json",

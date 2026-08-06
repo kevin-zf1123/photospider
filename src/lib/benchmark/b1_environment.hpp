@@ -341,6 +341,62 @@ struct B1StorageRawProof final {
 };
 
 /**
+ * @brief One receipt fact observed from an actual `B1OutputStore` execution.
+ * @throws Nothing for ordinary movement except owned path/string allocation.
+ * @note This process-private value is never reconstructed from retained proof
+ * bytes. It is populated from a typed successful output receipt while the
+ * validating process still owns the corresponding root authority.
+ */
+struct B1StorageReceiptAuthorityObservation final {
+  /** @brief Stable commit id minted by the actual output transaction. */
+  std::string commit_id;
+  /** @brief Canonical root returned by the actual output receipt. */
+  std::filesystem::path resolved_root;
+  /** @brief Root-relative occurrence slot returned by the receipt. */
+  std::filesystem::path rooted_slot;
+  /** @brief Actual published-manifest filesystem identity. */
+  std::string published_manifest_identity;
+  /** @brief Exact requested durability token derived from the typed receipt. */
+  std::string requested_durability;
+  /** @brief Exact achieved durability token derived from the typed receipt. */
+  std::string achieved_durability;
+};
+
+/**
+ * @brief Source-private actual observation independent of retained evidence.
+ * @throws std::bad_alloc when copied paths, receipts, or probe state allocate.
+ * @note `complete_probe` may be present only when an in-process probe or a
+ * concretely verified attestation has produced every raw field, mount,
+ * performance, transaction, and containment observation. Parsing a retained
+ * proof file must never initialize it. When a portable probe cannot verify an
+ * external declaration, its exact field name is retained in
+ * `unverified_external_fields` and machine conformance is ineligible.
+ */
+struct B1StorageActualObservation final {
+  /** @brief Initial/final verified selected root spelling. */
+  std::filesystem::path selected_root;
+  /** @brief Initial/final verified canonical root. */
+  std::filesystem::path resolved_root;
+  /** @brief Identity produced from the held root descriptor. */
+  std::string root_authority_identity;
+  /** @brief Filesystem type observed through the held root descriptor. */
+  std::string filesystem_type;
+  /** @brief Actual successful receipts observed during this row. */
+  std::vector<B1StorageReceiptAuthorityObservation> receipts;
+  /**
+   * @brief Complete independently produced raw observation, when available.
+   * @note Its canonical encoding must equal the retained proof exactly, but it
+   * is deliberately not serializable as reusable authority.
+   */
+  std::optional<B1StorageRawEvidence> complete_probe;
+  /**
+   * @brief Sorted unique fields whose external facts lack trusted authority.
+   * @note Any entry makes required-storage machine conformance ineligible.
+   */
+  std::vector<std::string> unverified_external_fields;
+};
+
+/**
  * @brief Exact eligibility result derived from canonical bytes and raw proof.
  * @throws std::bad_alloc when reason storage allocates.
  */
@@ -390,6 +446,13 @@ struct B1EnvironmentEvidence final {
   std::uint64_t run_cap = 0U;
   /** @brief Fresh-process replicate ordinal. */
   std::uint64_t replicate_ordinal = 0U;
+  /**
+   * @brief Process-private actual storage authority for required-storage rows.
+   * @note Retained manifests, raw-proof bytes, JSON, or arbitrary identity
+   * strings cannot initialize this authority. Every self/cap/reference/mixed
+   * comparison validates each side against its own observation.
+   */
+  std::optional<B1StorageActualObservation> storage_actual_observation;
 };
 
 /**
@@ -575,6 +638,40 @@ B1Sha256Digest digest_b1_environment_manifest(std::string_view bytes);
  */
 B1StorageEligibility evaluate_b1_storage_eligibility(
     std::string_view storage_bytes, const B1StorageRawProof& raw);
+
+/**
+ * @brief Checks retained required-storage evidence against actual authority.
+ * @param evidence Complete retained evidence plus process-private observation.
+ * @return True only when a complete independent probe, live root facts, and at
+ * least one actual receipt bind the retained storage bytes and raw proof.
+ * @throws Nothing; missing, incomplete, malformed, or drifting authority fails
+ * closed as false.
+ * @note Durable evidence files alone can never make this return true. A caller
+ * must re-observe the selected root and transaction receipts in the validating
+ * process or supply a concretely verified attestation adapter.
+ */
+bool b1_storage_actual_observation_matches(
+    const B1EnvironmentEvidence& evidence) noexcept;
+
+/**
+ * @brief Builds the exact incomplete observation used by the portable runner.
+ * @param selected_root Initial/final verified selected root spelling.
+ * @param resolved_root Initial/final verified canonical root.
+ * @param root_authority_identity Held-root descriptor identity.
+ * @param filesystem_type Descriptor-derived filesystem type.
+ * @param receipts Actual typed successful output receipts from the row.
+ * @return Process-private root/receipt facts with no complete probe and the
+ * exact sorted set of external declarations the portable path cannot verify.
+ * @throws std::bad_alloc when owned paths, strings, receipts, or field names
+ * allocate.
+ * @note This is the manual runner's production construction path. It always
+ * remains machine-ineligible until a separate trusted adapter supplies a
+ * complete probe; retained proof bytes are not an input.
+ */
+B1StorageActualObservation make_b1_portable_runner_storage_observation(
+    std::filesystem::path selected_root, std::filesystem::path resolved_root,
+    std::string root_authority_identity, std::string filesystem_type,
+    std::vector<B1StorageReceiptAuthorityObservation> receipts);
 
 /**
  * @brief Proves every destination resolves below one selected canonical root.

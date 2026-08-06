@@ -776,33 +776,78 @@ Json optional_storage_raw_proof_json(
 }
 
 /**
+ * @brief Encodes process-observed root and receipt diagnostics without
+ * promoting durable JSON back into validation authority.
+ * @param value Optional source-private actual observation.
+ * @return Readable live facts, probe digest, and re-observation policy or null.
+ * @throws Canonical encoding, nlohmann, or allocation failures unchanged.
+ * @note The complete probe bytes are deliberately not serialized a second
+ * time. A later validator must reopen the root and re-observe receipts; editing
+ * this JSON can never recreate the in-process authority object.
+ */
+Json optional_storage_actual_observation_json(
+    const std::optional<B1StorageActualObservation>& value) {
+  if (!value.has_value()) {
+    return nullptr;
+  }
+  Json receipts = Json::array();
+  for (const B1StorageReceiptAuthorityObservation& receipt : value->receipts) {
+    receipts.push_back(Json{
+        {"commit_id", receipt.commit_id},
+        {"resolved_root", receipt.resolved_root.generic_string()},
+        {"rooted_slot", receipt.rooted_slot.generic_string()},
+        {"published_manifest_identity", receipt.published_manifest_identity},
+        {"requested_durability", receipt.requested_durability},
+        {"achieved_durability", receipt.achieved_durability}});
+  }
+  Json complete_probe_digest = nullptr;
+  if (value->complete_probe.has_value()) {
+    const std::string canonical =
+        encode_b1_storage_raw_proof(*value->complete_probe);
+    complete_probe_digest = sha256_json(b1_sha256(canonical));
+  }
+  return Json{
+      {"authority_rehydration", "live-process-required"},
+      {"selected_root", value->selected_root.generic_string()},
+      {"resolved_root", value->resolved_root.generic_string()},
+      {"root_authority_identity", value->root_authority_identity},
+      {"filesystem_type", value->filesystem_type},
+      {"receipts", std::move(receipts)},
+      {"complete_probe_digest", std::move(complete_probe_digest)},
+      {"unverified_external_fields", value->unverified_external_fields}};
+}
+
+/**
  * @brief Encodes one complete B1 environment evidence value.
  * @param value Exact canonical bytes, claims, eligibility, and identities.
  * @return Closed environment object.
  * @throws nlohmann/std allocation failures unchanged.
  */
 Json environment_json(const B1EnvironmentEvidence& value) {
-  return Json{{"base_manifest", value.base_manifest},
-              {"claimed_base_digest", sha256_json(value.claimed_base_digest)},
-              {"storage_manifest", value.storage_manifest.has_value()
-                                       ? Json(*value.storage_manifest)
-                                       : Json(nullptr)},
-              {"claimed_storage_digest",
-               value.claimed_storage_digest.has_value()
-                   ? sha256_json(*value.claimed_storage_digest)
-                   : Json(nullptr)},
-              {"environment_class_manifest", value.environment_class_manifest},
-              {"claimed_environment_class_digest",
-               sha256_json(value.claimed_environment_class_digest)},
-              {"storage_raw_proof",
-               optional_storage_raw_proof_json(value.storage_raw_proof)},
-              {"storage_eligibility",
-               optional_eligibility_json(value.storage_eligibility)},
-              {"workload_id", value.workload_id},
-              {"fixture_digest", sha256_json(value.fixture_digest)},
-              {"resource_identity", sha256_json(value.resource_identity)},
-              {"run_cap", value.run_cap},
-              {"replicate_ordinal", value.replicate_ordinal}};
+  return Json{
+      {"base_manifest", value.base_manifest},
+      {"claimed_base_digest", sha256_json(value.claimed_base_digest)},
+      {"storage_manifest", value.storage_manifest.has_value()
+                               ? Json(*value.storage_manifest)
+                               : Json(nullptr)},
+      {"claimed_storage_digest",
+       value.claimed_storage_digest.has_value()
+           ? sha256_json(*value.claimed_storage_digest)
+           : Json(nullptr)},
+      {"environment_class_manifest", value.environment_class_manifest},
+      {"claimed_environment_class_digest",
+       sha256_json(value.claimed_environment_class_digest)},
+      {"storage_raw_proof",
+       optional_storage_raw_proof_json(value.storage_raw_proof)},
+      {"storage_eligibility",
+       optional_eligibility_json(value.storage_eligibility)},
+      {"storage_actual_observation", optional_storage_actual_observation_json(
+                                         value.storage_actual_observation)},
+      {"workload_id", value.workload_id},
+      {"fixture_digest", sha256_json(value.fixture_digest)},
+      {"resource_identity", sha256_json(value.resource_identity)},
+      {"run_cap", value.run_cap},
+      {"replicate_ordinal", value.replicate_ordinal}};
 }
 
 /**

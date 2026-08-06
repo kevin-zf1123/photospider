@@ -309,6 +309,30 @@ inline B1StorageRawProof b1_test_storage_raw_proof() {
 }
 
 /**
+ * @brief Builds independent process-private authority for the test probe.
+ * @return Complete live-root/receipt facts plus the separately initialized raw
+ * observation.
+ * @throws Validation or allocation failures unchanged.
+ * @note Tests deliberately initialize this value separately from retained
+ * environment evidence so synchronized evidence recasting cannot change it.
+ */
+inline B1StorageActualObservation b1_test_storage_actual_observation() {
+  B1StorageRawEvidence probe = b1_test_storage_raw_evidence();
+  const B1StorageTransactionRawObservation& transaction = probe.transaction;
+  B1StorageActualObservation actual;
+  actual.selected_root = probe.backend.selected_root;
+  actual.resolved_root = probe.backend.resolved_root;
+  actual.root_authority_identity = probe.containment.root_authority_identity;
+  actual.filesystem_type = probe.backend.fields.at("filesystem_type").payload;
+  actual.receipts.push_back(B1StorageReceiptAuthorityObservation{
+      transaction.receipt_commit_id, transaction.receipt_root,
+      transaction.receipt_slot, transaction.published_manifest_identity,
+      transaction.requested_durability, transaction.achieved_durability});
+  actual.complete_probe = std::move(probe);
+  return actual;
+}
+
+/**
  * @brief Builds exact fixed base-environment fields for focused tests.
  * @return Twenty-four fields in normative order.
  * @throws Validation or allocation errors unchanged.
@@ -411,7 +435,71 @@ inline B1EnvironmentEvidence make_b1_test_environment(
       b1_sha256("b1-test-resources"),
       run_cap,
       replicate_ordinal,
+      b1_test_storage_actual_observation(),
   };
+}
+
+/**
+ * @brief Synchronously recasts every retained storage claim around a new
+ * filesystem type while preserving independent actual authority unchanged.
+ * @param evidence Complete required-storage environment to recast.
+ * @param filesystem_type New valid canonical identifier.
+ * @return Self-consistent retained storage/proof/class/digest/eligibility
+ * claims whose actual observation still describes the original filesystem.
+ * @throws std::invalid_argument for missing/malformed required evidence.
+ * @throws Allocation or canonical encoding failures unchanged.
+ * @note This models an actor that can edit every durable evidence input but
+ * cannot alter the validating process, root descriptor, or actual receipts.
+ */
+inline B1EnvironmentEvidence synchronously_recast_b1_test_storage(
+    B1EnvironmentEvidence evidence, std::string filesystem_type) {
+  if (!evidence.storage_manifest.has_value() ||
+      !evidence.storage_raw_proof.has_value()) {
+    throw std::invalid_argument(
+        "B1 synchronized recast requires retained storage evidence");
+  }
+  B1CanonicalManifest storage =
+      parse_b1_environment_manifest(*evidence.storage_manifest);
+  const auto storage_field =
+      std::find_if(storage.fields.begin(), storage.fields.end(),
+                   [](const B1CanonicalField& field) {
+                     return field.name == "filesystem_type";
+                   });
+  if (storage_field == storage.fields.end()) {
+    throw std::invalid_argument("B1 synchronized recast lacks filesystem_type");
+  }
+  storage_field->payload = filesystem_type;
+  evidence.storage_manifest = encode_b1_storage_environment(storage.fields);
+  evidence.claimed_storage_digest =
+      digest_b1_environment_manifest(*evidence.storage_manifest);
+
+  B1StorageRawEvidence proof =
+      parse_b1_storage_raw_proof(evidence.storage_raw_proof->canonical_bytes);
+  B1RawFieldObservation& raw = proof.backend.fields.at("filesystem_type");
+  raw.payload = filesystem_type;
+  raw.raw_payload = filesystem_type;
+  evidence.storage_raw_proof =
+      B1StorageRawProof{encode_b1_storage_raw_proof(proof)};
+  evidence.storage_eligibility = evaluate_b1_storage_eligibility(
+      *evidence.storage_manifest, *evidence.storage_raw_proof);
+
+  B1CanonicalManifest environment_class =
+      parse_b1_environment_manifest(evidence.environment_class_manifest);
+  const auto class_field = std::find_if(
+      environment_class.fields.begin(), environment_class.fields.end(),
+      [](const B1CanonicalField& field) {
+        return field.name == "storage_environment_digest";
+      });
+  if (class_field == environment_class.fields.end()) {
+    throw std::invalid_argument(
+        "B1 synchronized recast lacks class storage digest");
+  }
+  class_field->payload = b1_digest_hex(*evidence.claimed_storage_digest);
+  evidence.environment_class_manifest =
+      encode_b1_environment_class(environment_class.fields);
+  evidence.claimed_environment_class_digest =
+      digest_b1_environment_manifest(evidence.environment_class_manifest);
+  return evidence;
 }
 
 }  // namespace ps::benchmark::testing

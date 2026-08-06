@@ -25,13 +25,16 @@
 
 #if !defined(_WIN32)
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <stdio.h>
+#include <sys/mount.h>
 #elif defined(__linux__)
 #include <sys/syscall.h>
+#include <sys/vfs.h>
 #endif
 #endif
 
@@ -385,6 +388,51 @@ void verify_root_binding(const std::filesystem::path& root, int root_descriptor,
 }
 
 /**
+ * @brief Returns a closed identifier for the filesystem behind a held root.
+ * @param root_descriptor Held selected root descriptor.
+ * @return `darwin-<fstypename>` or `linux-fs-<unsigned-hex-magic>`.
+ * @throws std::system_error when `fstatfs` fails.
+ * @throws B1RevalidationError for an empty or unsupported observation.
+ * @throws std::bad_alloc when identifier construction allocates.
+ * @note The value comes from the descriptor, never from retained evidence or a
+ * caller-selected pathname string.
+ */
+std::string filesystem_type_from_descriptor(int root_descriptor) {
+  struct statfs value{};
+  if (::fstatfs(root_descriptor, &value) != 0) {
+    throw_errno("fstatfs selected B1 output root");
+  }
+#if defined(__APPLE__)
+  std::string result = "darwin-";
+  for (const unsigned char character :
+       std::string_view(value.f_fstypename,
+                        std::char_traits<char>::length(value.f_fstypename))) {
+    if (character >= 'A' && character <= 'Z') {
+      result.push_back(static_cast<char>(character - 'A' + 'a'));
+    } else if ((character >= 'a' && character <= 'z') ||
+               (character >= '0' && character <= '9') || character == '.' ||
+               character == '_' || character == '+' || character == '-') {
+      result.push_back(static_cast<char>(character));
+    } else {
+      result.push_back('-');
+    }
+  }
+  if (result == "darwin-") {
+    throw B1RevalidationError("B1 root filesystem type is empty.");
+  }
+  return result;
+#elif defined(__linux__)
+  std::ostringstream result;
+  result << "linux-fs-" << std::hex << static_cast<std::uint64_t>(value.f_type);
+  return result.str();
+#else
+  (void)value;
+  throw B1RevalidationError(
+      "B1 root filesystem type observation is unsupported.");
+#endif
+}
+
+/**
  * @brief Revalidates one root-relative slot name against its held directory fd.
  * @param root_descriptor Held original root directory.
  * @param slot_descriptor Held slot directory.
@@ -658,19 +706,20 @@ void commit_and_validate_manifest(B1CommitTaskState* state) {
  * @param parent_descriptor Held trusted parent directory.
  * @param name Single private child name.
  * @param options Source-private fault seam policy.
- * @param expose_handoff_seam Whether to invoke the slot replacement seam.
+ * @param handoff_fault_point Optional exact post-mkdir/pre-open seam.
  * @param identity Output for the pre-open and descriptor-matched identity.
  * @return Newly owned directory descriptor.
  * @throws File, hook, or revalidation failures unchanged.
  * @note No child mutation occurs before the named pre-open identity equals the
- * opened descriptor identity. Failure never removes the current name because
- * it may already denote an unowned replacement.
+ * opened descriptor identity. A pre-guard anchor failure preserves the
+ * ambiguous current name and propagates; a slot failure after anchor-guard
+ * activation terminates during fail-stop cleanup if the anchor is nonempty.
  */
-int create_and_open_private_directory(int parent_descriptor,
-                                      const std::string& name,
-                                      const B1OutputStoreOptions& options,
-                                      bool expose_handoff_seam,
-                                      B1FileIdentity* identity) {
+int create_and_open_private_directory(
+    int parent_descriptor, const std::string& name,
+    const B1OutputStoreOptions& options,
+    std::optional<B1OutputStoreFaultPoint> handoff_fault_point,
+    B1FileIdentity* identity) {
   if (identity == nullptr) {
     throw std::invalid_argument(
         "B1 private directory identity output is null.");
@@ -689,9 +738,8 @@ int create_and_open_private_directory(int parent_descriptor,
         "B1 private staging directory cannot be observed safely.");
   }
   const B1FileIdentity before_open = file_identity(named);
-  if (expose_handoff_seam) {
-    invoke_fault_injector(
-        options, B1OutputStoreFaultPoint::AfterStagingSlotMkdirBeforeOpen);
+  if (handoff_fault_point.has_value()) {
+    invoke_fault_injector(options, *handoff_fault_point);
   }
   const int descriptor =
       ::openat(parent_descriptor, name.c_str(),
@@ -773,17 +821,42 @@ void invoke_cleanup_injector(const B1OutputStoreOptions& options,
 }
 
 /**
+ * @brief Runs the deterministic final-recheck/pre-remove failure seam.
+ * @param options Source-private cleanup policy.
+ * @param operation Exact object whose name was just rechecked.
+ * @return Nothing when removal should proceed.
+ * @throws std::system_error for an injected errno before name removal.
+ * @note Namespace mutation at this boundary violates the cooperative exclusive
+ * owner contract. The seam exists to prove fail-stop before `unlinkat`, not to
+ * claim an unavailable atomic identity-selected POSIX removal.
+ */
+void invoke_final_cleanup_injector(const B1OutputStoreOptions& options,
+                                   B1OutputStoreCleanupOperation operation) {
+  if (options.final_cleanup_injector == nullptr) {
+    return;
+  }
+  const int injected = options.final_cleanup_injector(
+      options.final_cleanup_injector_context, operation);
+  if (injected != 0) {
+    throw std::system_error(injected, std::generic_category(),
+                            "injected B1 final cleanup failure");
+  }
+}
+
+/**
  * @brief Strictly removes one optional exact store-owned regular leaf.
  * @param directory_descriptor Held owning directory.
  * @param leaf Exact fixed leaf name.
  * @param expected Recorded creation identity, or empty before creation.
  * @param operation Closed cleanup operation for deterministic injection.
  * @param options Source-private cleanup policy.
- * @return Nothing after proving the name absent.
+ * @return Nothing after checked removal and a following absence observation.
  * @throws Revalidation, system, or injected failures unchanged.
- * @note A second identity check after the test seam prevents deletion of a
- * different replacement. Absence is accepted; an unexpected present leaf is
- * never removed.
+ * @note Under the cooperative exclusive owner protocol, the second identity
+ * check selects the same reserved name that `unlinkat` removes. POSIX does not
+ * make those calls atomic; a non-cooperating same-UID mutation after the final
+ * check is outside the contract. Absence before cleanup is accepted, while a
+ * replacement detected by either check causes fail-stop before removal.
  */
 void strictly_remove_leaf(int directory_descriptor, const char* leaf,
                           const std::optional<B1FileIdentity>& expected,
@@ -809,6 +882,7 @@ void strictly_remove_leaf(int directory_descriptor, const char* leaf,
     throw B1RevalidationError(
         "B1 cleanup leaf identity changed after verification.");
   }
+  invoke_final_cleanup_injector(options, operation);
   if (::unlinkat(directory_descriptor, leaf, 0) != 0) {
     throw_errno("unlinkat B1 strict cleanup leaf");
   }
@@ -828,8 +902,11 @@ void strictly_remove_leaf(int directory_descriptor, const char* leaf,
  * @param expected Creation-time directory identity.
  * @param operation Closed cleanup operation for deterministic injection.
  * @param options Source-private cleanup policy.
- * @return Nothing after proving exact removal and name absence.
+ * @return Nothing after checked removal and a following absence observation.
  * @throws Revalidation, system, injected, or nonempty failures unchanged.
+ * @note The final identity check and name-based `unlinkat` are separate POSIX
+ * operations. Their binding relies on the class's cooperative exclusive owner
+ * precondition; detected drift fails before removal.
  */
 void strictly_remove_directory(int parent_descriptor, int directory_descriptor,
                                const std::string& name,
@@ -856,6 +933,7 @@ void strictly_remove_directory(int parent_descriptor, int directory_descriptor,
     throw B1RevalidationError(
         "B1 cleanup directory identity changed after verification.");
   }
+  invoke_final_cleanup_injector(options, operation);
   if (::unlinkat(parent_descriptor, name.c_str(), AT_REMOVEDIR) != 0) {
     throw_errno("unlinkat B1 strict cleanup directory");
   }
@@ -873,8 +951,10 @@ void strictly_remove_directory(int parent_descriptor, int directory_descriptor,
  * @throws Nothing from destruction; cancellation/wait/cleanup invariant
  * failures terminate because descriptor lifetime cannot otherwise be proved.
  * @note The guard is created immediately after staging-anchor fd acquisition.
- * On every exit it settles accepted work first, then removes only identities
- * proved to be transaction-owned. The anchor is always removed exactly.
+ * Under the cooperative exclusive namespace contract, every exit settles
+ * accepted work first and then removes the recorded names after identity
+ * checks. A takeover before guard construction preserves ambiguous residue;
+ * detected later drift or cleanup failure terminates fail-stop.
  */
 class B1CommitTransactionGuard final {
  public:
@@ -1131,6 +1211,9 @@ B1OutputStore::B1OutputStore(std::filesystem::path root,
   ScopedFileDescriptor owner(descriptor);
   const struct stat identity =
       directory_stat(owner.get(), "fstat selected B1 output root");
+  if (::flock(owner.get(), LOCK_EX | LOCK_NB) != 0) {
+    throw_errno("acquire exclusive B1 output-root ownership");
+  }
   root_device_ = static_cast<std::uint64_t>(identity.st_dev);
   root_inode_ = static_cast<std::uint64_t>(identity.st_ino);
   root_descriptor_ = owner.release();
@@ -1143,6 +1226,22 @@ B1OutputStore::~B1OutputStore() noexcept {
     std::terminate();
   }
   root_descriptor_ = -1;
+#endif
+}
+
+B1OutputStoreRootObservation B1OutputStore::observe_root_authority() const {
+#if defined(_WIN32)
+  throw std::runtime_error(
+      "B1 root authority observation is unsupported on Windows.");
+#else
+  verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
+  const struct stat root_stat =
+      directory_stat(root_descriptor_, "fstat observed B1 output root");
+  std::ostringstream identity;
+  identity << "dev=" << static_cast<std::uint64_t>(root_stat.st_dev)
+           << ";ino=" << static_cast<std::uint64_t>(root_stat.st_ino);
+  return B1OutputStoreRootObservation{
+      root_, identity.str(), filesystem_type_from_descriptor(root_descriptor_)};
 #endif
 }
 
@@ -1221,7 +1320,9 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
   const std::string anchor_name = ".b1-staging-" + commit_id;
   B1FileIdentity anchor_identity;
   const int anchor_raw = create_and_open_private_directory(
-      root_descriptor_, anchor_name, options_, false, &anchor_identity);
+      root_descriptor_, anchor_name, options_,
+      B1OutputStoreFaultPoint::AfterStagingAnchorMkdirBeforeOpen,
+      &anchor_identity);
   ScopedFileDescriptor anchor_owner(anchor_raw);
   B1CommitTransactionGuard transaction(root_descriptor_, anchor_owner.get(),
                                        anchor_name, anchor_identity,
@@ -1230,7 +1331,8 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
   const std::string staging_slot_name = "slot";
   B1FileIdentity slot_identity;
   const int slot_raw = create_and_open_private_directory(
-      anchor_owner.get(), staging_slot_name, options_, true, &slot_identity);
+      anchor_owner.get(), staging_slot_name, options_,
+      B1OutputStoreFaultPoint::AfterStagingSlotMkdirBeforeOpen, &slot_identity);
   ScopedFileDescriptor slot_owner(slot_raw);
   transaction.adopt_slot(slot_owner.release(), staging_slot_name,
                          slot_identity);

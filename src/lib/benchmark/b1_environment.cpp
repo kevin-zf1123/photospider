@@ -1859,6 +1859,126 @@ B1StorageEligibility evaluate_b1_storage_eligibility(
   return result;
 }
 
+bool b1_storage_actual_observation_matches(
+    const B1EnvironmentEvidence& evidence) noexcept {
+  try {
+    if (!evidence.storage_manifest.has_value() ||
+        !evidence.storage_raw_proof.has_value() ||
+        !evidence.storage_actual_observation.has_value()) {
+      return false;
+    }
+    const B1StorageActualObservation& actual =
+        *evidence.storage_actual_observation;
+    if (!actual.complete_probe.has_value() ||
+        !actual.unverified_external_fields.empty() || actual.receipts.empty() ||
+        !canonical_absolute_path(actual.selected_root) ||
+        !canonical_absolute_path(actual.resolved_root) ||
+        actual.selected_root != actual.resolved_root ||
+        actual.root_authority_identity.empty() ||
+        !valid_identifier(actual.filesystem_type)) {
+      return false;
+    }
+
+    const B1StorageRawEvidence retained =
+        parse_b1_storage_raw_proof(evidence.storage_raw_proof->canonical_bytes);
+    const std::string actual_proof_bytes =
+        encode_b1_storage_raw_proof(*actual.complete_probe);
+    if (actual_proof_bytes != evidence.storage_raw_proof->canonical_bytes ||
+        retained.backend.selected_root != actual.selected_root ||
+        retained.backend.resolved_root != actual.resolved_root ||
+        retained.containment.selected_root != actual.selected_root ||
+        retained.containment.resolved_root != actual.resolved_root ||
+        retained.containment.root_authority_identity !=
+            actual.root_authority_identity) {
+      return false;
+    }
+
+    const B1CanonicalManifest storage =
+        parse_b1_environment_manifest(*evidence.storage_manifest);
+    if (storage.schema != kStorageSchema ||
+        adapt_b1_storage_observation(actual.complete_probe->backend).fields !=
+            storage.fields) {
+      return false;
+    }
+    const B1CanonicalField& filesystem_type =
+        find_field(storage, "filesystem_type");
+    if (filesystem_type.state != B1ObservationState::Known ||
+        filesystem_type.payload != actual.filesystem_type) {
+      return false;
+    }
+
+    const B1StorageTransactionRawObservation& transaction =
+        retained.transaction;
+    const auto receipt_matches =
+        [&transaction,
+         &actual](const B1StorageReceiptAuthorityObservation& receipt) {
+          return valid_lower_hex(receipt.commit_id, 32U) &&
+                 receipt.commit_id == transaction.receipt_commit_id &&
+                 receipt.resolved_root == actual.resolved_root &&
+                 receipt.resolved_root == transaction.receipt_root &&
+                 safe_relative_path(receipt.rooted_slot) &&
+                 receipt.rooted_slot == transaction.receipt_slot &&
+                 receipt.published_manifest_identity ==
+                     transaction.published_manifest_identity &&
+                 receipt.requested_durability ==
+                     transaction.requested_durability &&
+                 receipt.achieved_durability == transaction.achieved_durability;
+        };
+    if (std::none_of(actual.receipts.begin(), actual.receipts.end(),
+                     receipt_matches)) {
+      return false;
+    }
+
+    return std::any_of(
+        retained.containment.destinations.begin(),
+        retained.containment.destinations.end(),
+        [&transaction,
+         &actual](const B1ContainmentDestinationObservation& destination) {
+          return destination.owner_kind == "transaction-receipt" &&
+                 destination.owner_identity == transaction.receipt_commit_id &&
+                 destination.root_authority_identity ==
+                     actual.root_authority_identity &&
+                 destination.resolved ==
+                     (actual.resolved_root / transaction.receipt_slot)
+                         .lexically_normal();
+        });
+  } catch (...) {
+    return false;
+  }
+}
+
+/**
+ * @brief Builds the portable runner's deliberately incomplete live observation.
+ * @param selected_root Initial/final verified selected root spelling.
+ * @param resolved_root Initial/final verified canonical root.
+ * @param root_authority_identity Held-root descriptor identity.
+ * @param filesystem_type Descriptor-derived filesystem type.
+ * @param receipts Actual typed successful output receipts from the row.
+ * @return Root/receipt authority plus the exact unverified external-field set.
+ * @throws std::bad_alloc when moving or constructing owned values allocates.
+ * @note No retained proof input is accepted and `complete_probe` is always
+ * absent, so required-storage validation necessarily fails closed.
+ */
+B1StorageActualObservation make_b1_portable_runner_storage_observation(
+    std::filesystem::path selected_root, std::filesystem::path resolved_root,
+    std::string root_authority_identity, std::string filesystem_type,
+    std::vector<B1StorageReceiptAuthorityObservation> receipts) {
+  return B1StorageActualObservation{std::move(selected_root),
+                                    std::move(resolved_root),
+                                    std::move(root_authority_identity),
+                                    std::move(filesystem_type),
+                                    std::move(receipts),
+                                    std::nullopt,
+                                    {
+                                        "b1_performance_configuration",
+                                        "hardware_write_cache_policy",
+                                        "mount_effective_options",
+                                        "mount_identity",
+                                        "power_loss_protection_policy",
+                                        "transaction_observation.events",
+                                    }};
+}
+
 bool prove_b1_root_containment(
     const std::filesystem::path& selected_root,
     const std::vector<std::filesystem::path>& destinations) {
@@ -1897,7 +2017,10 @@ namespace {
  * both embedded digest payloads are compared with independently recomputed
  * manifest digests and their retained claims. Applicable storage additionally
  * requires retained raw proof and exact equality between retained and
- * independently recomputed eligibility.
+ * independently recomputed eligibility. Required storage also needs a
+ * process-private actual observation whose independently produced proof,
+ * held-root identity, filesystem type, and typed receipt match the retained
+ * evidence. Retained files cannot create that authority.
  */
 bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
   const B1CanonicalManifest base =
@@ -1928,7 +2051,8 @@ bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
         !evidence.claimed_storage_digest.has_value() ||
         !evidence.storage_raw_proof.has_value() ||
         !evidence.storage_eligibility.has_value() ||
-        !evidence.storage_eligibility->eligible) {
+        !evidence.storage_eligibility->eligible ||
+        !b1_storage_actual_observation_matches(evidence)) {
       return false;
     }
     const B1CanonicalManifest storage =
@@ -1953,6 +2077,7 @@ bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
            !evidence.claimed_storage_digest.has_value() &&
            !evidence.storage_raw_proof.has_value() &&
            !evidence.storage_eligibility.has_value() &&
+           !evidence.storage_actual_observation.has_value() &&
            environment_class.fields[3U].state ==
                B1ObservationState::NotApplicable &&
            environment_class.fields[3U].payload.empty();

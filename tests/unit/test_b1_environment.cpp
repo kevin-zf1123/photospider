@@ -884,6 +884,25 @@ TEST(B1Environment, ContainmentAndCompatibilityUseExactBytesAndRelations) {
   EXPECT_TRUE(compatible_b1_environments(
       cap_one, cap_one, B1EnvironmentRelation::CandidateReference));
 
+  B1EnvironmentEvidence recast_cap_one =
+      testing::synchronously_recast_b1_test_storage(cap_one, "forgedfs");
+  B1EnvironmentEvidence recast_cap_eight =
+      testing::synchronously_recast_b1_test_storage(cap_eight, "forgedfs");
+  ASSERT_TRUE(recast_cap_one.storage_eligibility->eligible);
+  ASSERT_TRUE(recast_cap_one.storage_eligibility->reasons.empty());
+  EXPECT_FALSE(b1_storage_actual_observation_matches(recast_cap_one));
+  EXPECT_FALSE(
+      compatible_b1_environments(recast_cap_one, recast_cap_one,
+                                 B1EnvironmentRelation::CandidateReference));
+  EXPECT_FALSE(compatible_b1_environments(
+      recast_cap_one, cap_one, B1EnvironmentRelation::CandidateReference));
+  EXPECT_FALSE(compatible_b1_environments(
+      cap_one, recast_cap_one, B1EnvironmentRelation::CandidateReference));
+  EXPECT_FALSE(compatible_b1_environments(
+      recast_cap_one, cap_eight, B1EnvironmentRelation::CapOneCapEight));
+  EXPECT_FALSE(compatible_b1_environments(
+      cap_one, recast_cap_eight, B1EnvironmentRelation::CapOneCapEight));
+
   B1EnvironmentEvidence drift = cap_one;
   drift.replicate_ordinal = 2U;
   EXPECT_FALSE(compatible_b1_environments(
@@ -904,6 +923,11 @@ TEST(B1Environment, ContainmentAndCompatibilityUseExactBytesAndRelations) {
 
   drift = cap_one;
   drift.storage_raw_proof.reset();
+  EXPECT_FALSE(compatible_b1_environments(
+      cap_one, drift, B1EnvironmentRelation::CandidateReference));
+
+  drift = cap_one;
+  drift.storage_actual_observation.reset();
   EXPECT_FALSE(compatible_b1_environments(
       cap_one, drift, B1EnvironmentRelation::CandidateReference));
 
@@ -969,6 +993,14 @@ TEST(B1Environment, ContainmentAndCompatibilityUseExactBytesAndRelations) {
   m1.workload_id = "M1-shared-v1";
   EXPECT_TRUE(compatible_b1_environments(
       m1, paired_b1, B1EnvironmentRelation::M1PairedB1CapEight));
+  B1EnvironmentEvidence recast_m1 =
+      testing::synchronously_recast_b1_test_storage(m1, "forgedfs");
+  B1EnvironmentEvidence recast_paired_b1 =
+      testing::synchronously_recast_b1_test_storage(paired_b1, "forgedfs");
+  EXPECT_FALSE(compatible_b1_environments(
+      recast_m1, paired_b1, B1EnvironmentRelation::M1PairedB1CapEight));
+  EXPECT_FALSE(compatible_b1_environments(
+      m1, recast_paired_b1, B1EnvironmentRelation::M1PairedB1CapEight));
 
   B1EnvironmentEvidence paired_i1 = m1;
   paired_i1.workload_id = "I1-edit-storm-v1";
@@ -976,6 +1008,7 @@ TEST(B1Environment, ContainmentAndCompatibilityUseExactBytesAndRelations) {
   paired_i1.claimed_storage_digest.reset();
   paired_i1.storage_raw_proof.reset();
   paired_i1.storage_eligibility.reset();
+  paired_i1.storage_actual_observation.reset();
   const std::vector<B1CanonicalField> i1_class{
       testing::known_b1_field("base_environment_digest", "sha256",
                               b1_digest_hex(paired_i1.claimed_base_digest)),
@@ -990,6 +1023,8 @@ TEST(B1Environment, ContainmentAndCompatibilityUseExactBytesAndRelations) {
       digest_b1_environment_manifest(paired_i1.environment_class_manifest);
   EXPECT_TRUE(compatible_b1_environments(
       m1, paired_i1, B1EnvironmentRelation::M1PairedI1BaseOnly));
+  EXPECT_FALSE(compatible_b1_environments(
+      recast_m1, paired_i1, B1EnvironmentRelation::M1PairedI1BaseOnly));
   paired_i1.run_cap = 1U;
   EXPECT_FALSE(compatible_b1_environments(
       m1, paired_i1, B1EnvironmentRelation::M1PairedI1BaseOnly));
