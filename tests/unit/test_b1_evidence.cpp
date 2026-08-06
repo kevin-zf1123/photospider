@@ -4,6 +4,7 @@
  */
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -143,37 +144,58 @@ B1JobEvidence make_valid_job(const B1JobInstance& job,
   evidence.execution_before = make_execution_snapshot();
   evidence.execution_after = make_execution_snapshot();
   evidence.golden = b1_frozen_job_golden(job.job_index);
-  evidence.semantic_trace = encode_b1_semantic_trace(
-      make_b1_success_semantic_records(b1_frozen_semantic_plan(job.job_index)));
-  evidence.semantic_trace_digest = b1_sha256(evidence.semantic_trace);
 
   const std::uint64_t run_id = job.job_index + 1U;
   evidence.physical_trace.job = job;
   evidence.physical_trace.current_generations.push_back(
       B1ObservedCurrentGeneration{
           1U, compute::ComputeRunObservationCoordinate{offered_at, 1U}});
+  const std::vector<B1SemanticTask> semantic_plan =
+      b1_frozen_semantic_plan(job.job_index);
   for (std::uint64_t task = 0U; task < kB1TasksPerJob; ++task) {
+    const B1SemanticTask& planned =
+        semantic_plan.at(static_cast<std::size_t>(task));
+    if (planned.dependencies.size() > kB1ObservedDependencyCapacity) {
+      throw std::logic_error(
+          "B1 test semantic plan exceeds observation dependency capacity");
+    }
+    B1ObservedTaskReady ready;
+    ready.run_id = run_id;
+    ready.local_task_id = task;
+    ready.dependency_count = planned.dependencies.size();
+    std::copy(planned.dependencies.begin(), planned.dependencies.end(),
+              ready.dependencies.begin());
+    ready.resources = planned.resources;
+    ready.coordinate =
+        compute::ComputeRunObservationCoordinate{offered_at, 2U + task * 3U};
+    evidence.physical_trace.task_readies.push_back(ready);
     evidence.physical_trace.service_starts.push_back(B1ObservedServiceStart{
         run_id, task, 1U,
         compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
                                std::nullopt, 1U,
                                static_cast<std::uint32_t>(job.run_cap)},
-        compute::ComputeRunObservationCoordinate{offered_at, task + 2U}});
+        compute::ComputeRunObservationCoordinate{offered_at, 3U + task * 3U}});
+    evidence.physical_trace.task_terminals.push_back(B1ObservedTaskTerminal{
+        run_id, task, compute::ComputeRunTaskTerminalKind::Succeeded,
+        compute::ComputeRunObservationCoordinate{offered_at, 4U + task * 3U}});
   }
   evidence.physical_trace.visible = B1ObservedRunTransition{
-      run_id, compute::ComputeRunObservationCoordinate{offered_at, 259U}};
+      run_id, compute::ComputeRunObservationCoordinate{offered_at, 773U}};
   evidence.physical_trace.terminal_kind =
       compute::ComputeRunTerminalKind::Succeeded;
   evidence.physical_trace.terminal = B1ObservedRunTransition{
-      run_id, compute::ComputeRunObservationCoordinate{offered_at, 260U}};
+      run_id, compute::ComputeRunObservationCoordinate{offered_at, 774U}};
   evidence.physical_trace.quiescent = B1ObservedRunTransition{
-      run_id, compute::ComputeRunObservationCoordinate{offered_at, 261U}};
+      run_id, compute::ComputeRunObservationCoordinate{offered_at, 775U}};
   evidence.physical_trace.resource_settled = B1ObservedRunTransition{
-      run_id, compute::ComputeRunObservationCoordinate{offered_at, 262U}};
+      run_id, compute::ComputeRunObservationCoordinate{offered_at, 776U}};
   evidence.physical_trace.visible_content_digest =
       ContentDigestResult{ContentDigestState::Available,
                           evidence.golden.logical_digest,
                           {}};
+  evidence.semantic_trace = encode_b1_semantic_trace(
+      make_b1_observed_semantic_records(evidence.physical_trace));
+  evidence.semantic_trace_digest = b1_sha256(evidence.semantic_trace);
 
   const std::string commit_id = test_commit_id(job);
   const std::string manifest =
@@ -319,6 +341,121 @@ TEST(B1Evidence, MissingTraceAndResourceClosureInvalidateAffectedAxes) {
   EXPECT_EQ(row.waste_verdict, I1Verdict::Fail);
   EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
   EXPECT_FALSE(row.validity_reasons.empty());
+}
+
+/**
+ * @brief Proves actual task observations fail closed on every semantic drift.
+ * @throws Test fixture, evaluation, and framework failures unchanged.
+ */
+TEST(B1Evidence,
+     ActualSemanticObservationsRejectMissingDuplicateGapAndFieldDrift) {
+  const auto expect_determinism_invalid = [](B1InnerRowInput input) {
+    const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
+    EXPECT_EQ(row.determinism_verdict, I1Verdict::Invalid);
+    EXPECT_GT(row.semantic_trace_mismatches, 0U);
+  };
+
+  B1InnerRowInput missing = make_valid_row_input(8U, 1U);
+  missing.jobs[4U].physical_trace.task_readies.pop_back();
+  expect_determinism_invalid(std::move(missing));
+
+  B1InnerRowInput duplicate = make_valid_row_input(8U, 1U);
+  duplicate.jobs[4U].physical_trace.task_readies.back().local_task_id = 0U;
+  expect_determinism_invalid(std::move(duplicate));
+
+  B1InnerRowInput gap = make_valid_row_input(8U, 1U);
+  gap.jobs[4U].physical_trace.task_terminals.back().local_task_id =
+      kB1TasksPerJob;
+  expect_determinism_invalid(std::move(gap));
+
+  B1InnerRowInput dependency = make_valid_row_input(8U, 1U);
+  ASSERT_EQ(
+      dependency.jobs[4U].physical_trace.task_readies[1U].dependency_count, 1U);
+  dependency.jobs[4U].physical_trace.task_readies[1U].dependencies[0U] = 2U;
+  expect_determinism_invalid(std::move(dependency));
+
+  B1InnerRowInput resource = make_valid_row_input(8U, 1U);
+  ++resource.jobs[4U].physical_trace.task_readies[1U].resources.ready_bytes;
+  expect_determinism_invalid(std::move(resource));
+
+  B1InnerRowInput outcome = make_valid_row_input(8U, 1U);
+  outcome.jobs[4U].physical_trace.task_terminals[1U].kind =
+      compute::ComputeRunTaskTerminalKind::Failed;
+  expect_determinism_invalid(std::move(outcome));
+}
+
+/**
+ * @brief Proves the exact Compute I/O FSM rejects structural mutation matrix.
+ * @throws Test fixture, evaluation, and framework failures unchanged.
+ */
+TEST(B1Evidence,
+     ComputeIoFsmRejectsMissingDuplicateReorderIdentityStatusGapAndSnapshot) {
+  const auto expect_row_invalid = [](B1InnerRowInput input) {
+    const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
+    EXPECT_EQ(row.throughput_verdict, I1Verdict::Invalid);
+    EXPECT_EQ(row.determinism_verdict, I1Verdict::Invalid);
+    EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+    EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  };
+
+  B1InnerRowInput missing = make_valid_row_input(8U, 1U);
+  missing.jobs[4U].output.io_observations.erase(
+      missing.jobs[4U].output.io_observations.begin() + 2);
+  expect_row_invalid(std::move(missing));
+
+  B1InnerRowInput duplicate = make_valid_row_input(8U, 1U);
+  duplicate.jobs[4U].output.io_observations.insert(
+      duplicate.jobs[4U].output.io_observations.begin() + 2,
+      duplicate.jobs[4U].output.io_observations[1U]);
+  expect_row_invalid(std::move(duplicate));
+
+  B1InnerRowInput reordered = make_valid_row_input(8U, 1U);
+  std::swap(reordered.jobs[4U].output.io_observations[2U],
+            reordered.jobs[4U].output.io_observations[3U]);
+  expect_row_invalid(std::move(reordered));
+
+  B1InnerRowInput wrong_stage = make_valid_row_input(8U, 1U);
+  wrong_stage.jobs[4U].output.io_observations[1U].task->stage =
+      B1IoStage::ManifestCommit;
+  expect_row_invalid(std::move(wrong_stage));
+
+  B1InnerRowInput wrong_job = make_valid_row_input(8U, 1U);
+  ++wrong_job.jobs[4U].output.io_observations[1U].task->job.job_index;
+  expect_row_invalid(std::move(wrong_job));
+
+  B1InnerRowInput wrong_status = make_valid_row_input(8U, 1U);
+  wrong_status.jobs[4U].output.io_observations[1U].admission =
+      execution::ComputeIoAdmissionStatus::TaskLimit;
+  expect_row_invalid(std::move(wrong_status));
+
+  B1InnerRowInput wrong_completion = make_valid_row_input(8U, 1U);
+  wrong_completion.jobs[4U].output.io_observations[2U].completion =
+      execution::ComputeIoCompletionStatus::Failed;
+  expect_row_invalid(std::move(wrong_completion));
+
+  B1InnerRowInput attempt_gap = make_valid_row_input(8U, 1U);
+  attempt_gap.jobs[4U].output.io_observations[1U].task->attempt = 1U;
+  expect_row_invalid(std::move(attempt_gap));
+
+  B1InnerRowInput misplaced_final = make_valid_row_input(8U, 1U);
+  std::swap(misplaced_final.jobs[4U].output.io_observations[4U],
+            misplaced_final.jobs[4U].output.io_observations[5U]);
+  expect_row_invalid(std::move(misplaced_final));
+
+  B1InnerRowInput invalid_snapshot = make_valid_row_input(8U, 1U);
+  invalid_snapshot.jobs[4U].output.io_observations[1U].snapshot.active_tasks =
+      kB1ComputeIoTaskLimit + 1U;
+  expect_row_invalid(std::move(invalid_snapshot));
+
+  B1InnerRowInput unsettled_final = make_valid_row_input(8U, 1U);
+  unsettled_final.jobs[4U].output.io_observations.back().snapshot.active_tasks =
+      1U;
+  expect_row_invalid(std::move(unsettled_final));
+
+  B1InnerRowInput post_final = make_valid_row_input(8U, 1U);
+  post_final.jobs[4U].output.io_observations.push_back(
+      post_final.jobs[4U].output.io_observations.front());
+  expect_row_invalid(std::move(post_final));
 }
 
 /**

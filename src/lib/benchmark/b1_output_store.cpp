@@ -607,7 +607,8 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
                             std::uint64_t planned_bytes,
                             const execution::ComputeIoExecutor::Task& task)
       -> std::optional<execution::ComputeIoTaskResult> {
-    for (;;) {
+    for (std::size_t attempt_number = 1U;
+         attempt_number <= kB1CapacityAdmissionAttemptLimit; ++attempt_number) {
       const std::shared_ptr<const void> lifetime = state;
       const execution::ComputeIoSubmission submission = executor_.try_submit(
           planned_bytes, lifetime, [task]() { return task; });
@@ -636,8 +637,17 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
       if (planned_bytes > snapshot.planned_bytes_limit) {
         return std::nullopt;
       }
+      if (options_.capacity_rejection_observer != nullptr) {
+        options_.capacity_rejection_observer(
+            options_.capacity_rejection_observer_context, identity,
+            attempt_number);
+      }
+      if (attempt_number == kB1CapacityAdmissionAttemptLimit) {
+        return std::nullopt;
+      }
       std::this_thread::yield();
     }
+    return std::nullopt;
   };
 
   const B1IoTaskIdentity payload_identity{job, B1IoStage::PayloadStage, 0U};
@@ -646,7 +656,9 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
   });
   if (!payload.has_value()) {
     result.status = B1OutputCommitStatus::AdmissionFailed;
-    result.diagnostic = "B1 payload admission became permanently unavailable.";
+    result.diagnostic = "B1 payload admission failed after at most " +
+                        std::to_string(kB1CapacityAdmissionAttemptLimit) +
+                        " deterministic attempts.";
     cleanup_failed_slot(slot);
     append_final_observation();
     return result;
@@ -668,7 +680,9 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
                });
   if (!manifest.has_value()) {
     result.status = B1OutputCommitStatus::AdmissionFailed;
-    result.diagnostic = "B1 manifest admission became permanently unavailable.";
+    result.diagnostic = "B1 manifest admission failed after at most " +
+                        std::to_string(kB1CapacityAdmissionAttemptLimit) +
+                        " deterministic attempts.";
     cleanup_failed_slot(slot);
     append_final_observation();
     return result;

@@ -298,20 +298,65 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
   }
   const std::size_t task_index =
       static_cast<std::size_t>(identity.local_task_id().value());
-  const int trace_node_id =
-      compute_plan_.task_graph.tasks.at(task_index).node_id;
+  const PlannedTask& task = compute_plan_.task_graph.tasks.at(task_index);
+  const int trace_node_id = task.node_id;
   const std::size_t execution_index =
       static_cast<std::size_t>(dependency_state_.id_to_idx().at(trace_node_id));
-  return ReadyTaskSubmission(
+  const Device device = execution_devices_.at(execution_index);
+  ReadyTaskSubmission submission(
       lease, identity, trace_node_id, is_initial_ready,
       [](ComputeRunLease& ready_lease,
          const ComputeRunTaskIdentity& ready_identity,
          ExecutionTaskRuntime& task_runtime) {
         ready_lease.execute_task(ready_identity, task_runtime);
       },
-      ExecutionTaskPriority::Normal, task_resource_demand_,
-      execution_devices_.at(execution_index),
+      ExecutionTaskPriority::Normal, task_resource_demand_, device,
       std::move(operation_constraints_.at(task_index)));
+  observe_task_ready(lease, identity, task, device);
+  return submission;
+}
+
+/** @copydoc TaskSubmissionPlan::observe_task_ready */
+void TaskSubmissionPlan::observe_task_ready(
+    const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
+    const PlannedTask& task, Device device) const noexcept {
+  const ComputeRunDescriptor& descriptor = lease.descriptor();
+  const std::shared_ptr<ComputeRunObservationSink>& sink =
+      descriptor.observation_sink();
+  if (!sink || !sink->observes_task_semantics()) {
+    return;
+  }
+  const ComputeRunObservationCoordinate coordinate =
+      sink->reserve_causal_coordinate();
+  const ComputeRunTaskReadyObservation observation{
+      task.dependency_task_ids.data(),
+      task.dependency_task_ids.size(),
+      task.kind == PlannedTaskKind::Tile,
+      task.output_roi.x,
+      task.output_roi.y,
+      task.output_roi.width,
+      task.output_roi.height,
+      device,
+      task_resource_demand_.work_units,
+      task_resource_demand_.retained_memory_bytes,
+      task_resource_demand_.scratch_bytes,
+      task_resource_demand_.ready_bytes};
+  sink->on_task_ready(descriptor, identity, observation, coordinate);
+}
+
+/** @copydoc TaskSubmissionPlan::observe_task_terminal */
+void TaskSubmissionPlan::observe_task_terminal(
+    const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
+    ComputeRunTaskTerminalKind kind) const noexcept {
+  const ComputeRunDescriptor& descriptor = lease.descriptor();
+  const std::shared_ptr<ComputeRunObservationSink>& sink =
+      descriptor.observation_sink();
+  if (!sink || !sink->observes_task_semantics()) {
+    return;
+  }
+  const ComputeRunObservationCoordinate coordinate =
+      sink->reserve_causal_coordinate();
+  sink->on_task_terminal(descriptor, identity, kind, coordinate);
 }
 
 /**
@@ -442,7 +487,16 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
         "Task identity does not belong to this Run submission plan.");
   }
   (void)lease.observe_cancellation();
-  if (lease.terminal_outcome().has_value()) {
+  const std::optional<ComputeRunTerminalOutcome> initial_terminal =
+      lease.terminal_outcome();
+  if (initial_terminal.has_value()) {
+    const ComputeRunTaskTerminalKind kind =
+        initial_terminal->kind == ComputeRunTerminalKind::Cancelled
+            ? ComputeRunTaskTerminalKind::Cancelled
+            : (initial_terminal->kind == ComputeRunTerminalKind::Succeeded
+                   ? ComputeRunTaskTerminalKind::Succeeded
+                   : ComputeRunTaskTerminalKind::Failed);
+    observe_task_terminal(lease, identity, kind);
     return;
   }
   const int task_id = static_cast<int>(identity.local_task_id().value());
@@ -458,6 +512,7 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
     task_execution_states_.at(task_id).store(
         static_cast<std::uint8_t>(TaskExecutionState::Failed),
         std::memory_order_release);
+    observe_task_terminal(lease, identity, ComputeRunTaskTerminalKind::Failed);
     throw GraphError(GraphErrc::ComputeError,
                      "TaskSubmissionPlan has no owned task runner.");
   }
@@ -479,11 +534,14 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
     task_execution_states_.at(task_id).store(
         static_cast<std::uint8_t>(TaskExecutionState::Completed),
         std::memory_order_release);
+    observe_task_terminal(lease, identity,
+                          ComputeRunTaskTerminalKind::Succeeded);
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
     task_execution_states_.at(task_id).store(
         static_cast<std::uint8_t>(TaskExecutionState::Failed),
         std::memory_order_release);
+    observe_task_terminal(lease, identity, ComputeRunTaskTerminalKind::Failed);
     try {
       task_runtime.log_event(ExecutionTraceAction::RethrowException,
                              task.node_id);
@@ -608,11 +666,14 @@ void TaskSubmissionPlan::complete_deferred_value(
     task_execution_states_.at(static_cast<std::size_t>(task_id))
         .store(static_cast<std::uint8_t>(TaskExecutionState::Completed),
                std::memory_order_release);
+    observe_task_terminal(lease, identity,
+                          ComputeRunTaskTerminalKind::Succeeded);
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
     task_execution_states_.at(static_cast<std::size_t>(task_id))
         .store(static_cast<std::uint8_t>(TaskExecutionState::Failed),
                std::memory_order_release);
+    observe_task_terminal(lease, identity, ComputeRunTaskTerminalKind::Failed);
     try {
       task_runtime.log_event(ExecutionTraceAction::RethrowException,
                              task.node_id);

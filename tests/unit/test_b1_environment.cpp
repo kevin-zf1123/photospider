@@ -785,6 +785,30 @@ TEST(B1Environment, ContainmentAndCompatibilityUseExactBytesAndRelations) {
   EXPECT_FALSE(compatible_b1_environments(
       cap_one, drift, B1EnvironmentRelation::CandidateReference));
 
+  drift = cap_one;
+  B1CanonicalManifest drifted_class =
+      parse_b1_environment_manifest(drift.environment_class_manifest);
+  find_test_field(&drifted_class.fields, "base_environment_digest").payload =
+      b1_digest_hex(b1_sha256("different-base-payload"));
+  drift.environment_class_manifest =
+      encode_b1_environment_class(drifted_class.fields);
+  drift.claimed_environment_class_digest =
+      digest_b1_environment_manifest(drift.environment_class_manifest);
+  EXPECT_FALSE(compatible_b1_environments(
+      cap_one, drift, B1EnvironmentRelation::CandidateReference));
+
+  drift = cap_one;
+  drifted_class =
+      parse_b1_environment_manifest(drift.environment_class_manifest);
+  find_test_field(&drifted_class.fields, "storage_environment_digest").payload =
+      b1_digest_hex(b1_sha256("different-storage-payload"));
+  drift.environment_class_manifest =
+      encode_b1_environment_class(drifted_class.fields);
+  drift.claimed_environment_class_digest =
+      digest_b1_environment_manifest(drift.environment_class_manifest);
+  EXPECT_FALSE(compatible_b1_environments(
+      cap_one, drift, B1EnvironmentRelation::CandidateReference));
+
   B1EnvironmentEvidence m1 = testing::make_b1_test_environment(8U, 2U);
   B1EnvironmentEvidence paired_b1 = m1;
   m1.workload_id = "M1-shared-v1";

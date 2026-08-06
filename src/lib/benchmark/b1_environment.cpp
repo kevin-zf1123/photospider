@@ -955,6 +955,74 @@ bool prove_b1_root_containment(
   return true;
 }
 
+namespace {
+
+/**
+ * @brief Validates one environment-class manifest against its actual evidence.
+ * @param evidence Complete base/storage/class evidence object.
+ * @return True only when all three independent digests, applicability state,
+ * storage presence, and eligibility are mutually bound.
+ * @throws Parsing and allocation exceptions from canonical validation.
+ * @note The four-field class bytes are not trusted as a self-contained claim:
+ * both embedded digest payloads are compared with independently recomputed
+ * manifest digests and their retained claims.
+ */
+bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
+  const B1CanonicalManifest base =
+      parse_b1_environment_manifest(evidence.base_manifest);
+  const B1CanonicalManifest environment_class =
+      parse_b1_environment_manifest(evidence.environment_class_manifest);
+  const B1Sha256Digest recomputed_base =
+      digest_b1_environment_manifest(evidence.base_manifest);
+  if (base.schema != kBaseSchema ||
+      environment_class.schema != kEnvironmentClassSchema ||
+      environment_class.fields.size() != kEnvironmentClassFields.size() ||
+      recomputed_base != evidence.claimed_base_digest ||
+      environment_class.fields[0U].payload != b1_digest_hex(recomputed_base) ||
+      digest_b1_environment_manifest(evidence.environment_class_manifest) !=
+          evidence.claimed_environment_class_digest) {
+    return false;
+  }
+
+  const std::string& applicability = environment_class.fields[1U].payload;
+  const bool workload_requires_storage =
+      evidence.workload_id == kB1WorkloadId ||
+      evidence.workload_id == "M1-shared-v1";
+  const bool workload_has_no_output_commit =
+      evidence.workload_id == "I1-edit-storm-v1" ||
+      evidence.workload_id == "I2-progressive-v1";
+  if (applicability == "required") {
+    if (!workload_requires_storage || !evidence.storage_manifest.has_value() ||
+        !evidence.claimed_storage_digest.has_value() ||
+        !evidence.storage_eligibility.has_value() ||
+        !evidence.storage_eligibility->eligible ||
+        !evidence.storage_eligibility->reasons.empty()) {
+      return false;
+    }
+    const B1CanonicalManifest storage =
+        parse_b1_environment_manifest(*evidence.storage_manifest);
+    const B1Sha256Digest recomputed_storage =
+        digest_b1_environment_manifest(*evidence.storage_manifest);
+    return storage.schema == kStorageSchema &&
+           recomputed_storage == *evidence.claimed_storage_digest &&
+           environment_class.fields[3U].state == B1ObservationState::Known &&
+           environment_class.fields[3U].payload ==
+               b1_digest_hex(recomputed_storage);
+  }
+  if (applicability == "not-applicable") {
+    return workload_has_no_output_commit &&
+           !evidence.storage_manifest.has_value() &&
+           !evidence.claimed_storage_digest.has_value() &&
+           !evidence.storage_eligibility.has_value() &&
+           environment_class.fields[3U].state ==
+               B1ObservationState::NotApplicable &&
+           environment_class.fields[3U].payload.empty();
+  }
+  return false;
+}
+
+}  // namespace
+
 bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
                                 const B1EnvironmentEvidence& rhs,
                                 B1EnvironmentRelation relation) noexcept {
@@ -976,15 +1044,8 @@ bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
       return false;
     }
 
-    const auto valid_class = [](const B1EnvironmentEvidence& evidence) {
-      const B1CanonicalManifest parsed =
-          parse_b1_environment_manifest(evidence.environment_class_manifest);
-      return parsed.schema == kEnvironmentClassSchema &&
-             digest_b1_environment_manifest(
-                 evidence.environment_class_manifest) ==
-                 evidence.claimed_environment_class_digest;
-    };
-    if (!valid_class(lhs) || !valid_class(rhs)) {
+    if (!valid_environment_class_binding(lhs) ||
+        !valid_environment_class_binding(rhs)) {
       return false;
     }
 

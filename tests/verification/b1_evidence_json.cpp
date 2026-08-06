@@ -331,6 +331,23 @@ Json optional_transition_json(
 }
 
 /**
+ * @brief Encodes one actual task-semantic resource vector.
+ * @param value Complete ready-plan resource declaration.
+ * @return Closed eight-dimension resource object.
+ * @throws nlohmann allocation failures unchanged.
+ */
+Json semantic_resource_json(const B1SemanticResourceVector& value) {
+  return Json{{"work_units", value.work_units},
+              {"ready_entries", value.ready_entries},
+              {"ready_bytes", value.ready_bytes},
+              {"cpu_slots", value.cpu_slots},
+              {"host_retained_bytes", value.host_retained_bytes},
+              {"host_scratch_bytes", value.host_scratch_bytes},
+              {"device_memory_bytes", value.device_memory_bytes},
+              {"device_scratch_bytes", value.device_scratch_bytes}};
+}
+
+/**
  * @brief Encodes one complete request-scoped physical trace.
  * @param value Frozen callback observation snapshot.
  * @return Closed occurrence/lifecycle/service trace.
@@ -344,6 +361,19 @@ Json physical_trace_json(const B1RunObservationSnapshot& value) {
         Json{{"generation", generation.generation},
              {"coordinate", coordinate_json(generation.coordinate)}});
   }
+  Json readies = Json::array();
+  for (const B1ObservedTaskReady& ready : value.task_readies) {
+    Json dependencies = Json::array();
+    for (std::size_t index = 0U; index < ready.dependency_count; ++index) {
+      dependencies.push_back(ready.dependencies.at(index));
+    }
+    readies.push_back(
+        Json{{"run_id", ready.run_id},
+             {"local_task_id", ready.local_task_id},
+             {"dependencies", std::move(dependencies)},
+             {"resources", semantic_resource_json(ready.resources)},
+             {"coordinate", coordinate_json(ready.coordinate)}});
+  }
   Json starts = Json::array();
   for (const B1ObservedServiceStart& start : value.service_starts) {
     starts.push_back(Json{{"run_id", start.run_id},
@@ -351,6 +381,14 @@ Json physical_trace_json(const B1RunObservationSnapshot& value) {
                           {"service_charge", start.service_charge},
                           {"qos", qos_json(start.qos)},
                           {"coordinate", coordinate_json(start.coordinate)}});
+  }
+  Json task_terminals = Json::array();
+  for (const B1ObservedTaskTerminal& terminal : value.task_terminals) {
+    task_terminals.push_back(
+        Json{{"run_id", terminal.run_id},
+             {"local_task_id", terminal.local_task_id},
+             {"kind", static_cast<std::uint32_t>(terminal.kind)},
+             {"coordinate", coordinate_json(terminal.coordinate)}});
   }
   Json cancellations = Json::array();
   for (const B1ObservedCancellation& cancellation : value.cancellations) {
@@ -363,7 +401,9 @@ Json physical_trace_json(const B1RunObservationSnapshot& value) {
       {"job", job_json(value.job)},
       {"overflowed", value.overflowed},
       {"current_generations", std::move(generations)},
+      {"task_readies", std::move(readies)},
       {"service_starts", std::move(starts)},
+      {"task_terminals", std::move(task_terminals)},
       {"cancellations", std::move(cancellations)},
       {"terminal_kind",
        value.terminal_kind.has_value()

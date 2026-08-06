@@ -27,6 +27,12 @@ constexpr std::size_t kB1CancellationCapacity = 1U;
 /** @brief Exactly one current-generation publication is permitted per job. */
 constexpr std::size_t kB1CurrentGenerationCapacity = 1U;
 
+/** @brief Exact number of actual task-ready observations per B1 job. */
+constexpr std::size_t kB1TaskReadyCapacity = kB1TasksPerJob;
+
+/** @brief Exact number of actual task-terminal observations per B1 job. */
+constexpr std::size_t kB1TaskTerminalCapacity = kB1TasksPerJob;
+
 /** @brief Exactly one terminal publication is permitted per job. */
 constexpr std::size_t kB1TerminalCapacity = 1U;
 
@@ -400,6 +406,18 @@ B1PhysicalEvaluation evaluate_b1_physical_trace(
     }
     reserve_sequence(cancellation.coordinate.causal_sequence);
   }
+  for (const B1ObservedTaskReady& ready : trace.task_readies) {
+    if (ready.run_id == 0U) {
+      structural_failure("task ready has zero Run identity");
+    }
+    reserve_sequence(ready.coordinate.causal_sequence);
+  }
+  for (const B1ObservedTaskTerminal& terminal : trace.task_terminals) {
+    if (terminal.run_id == 0U) {
+      structural_failure("task terminal has zero Run identity");
+    }
+    reserve_sequence(terminal.coordinate.causal_sequence);
+  }
 
   std::set<std::uint64_t> local_tasks;
   std::uint64_t expected_run_id = 0U;
@@ -520,11 +538,14 @@ B1DeterministicEvaluation evaluate_b1_deterministic_evidence(
   try {
     const std::vector<B1SemanticRecord> parsed =
         parse_b1_semantic_trace(evidence.semantic_trace);
+    const std::string observed_trace = encode_b1_semantic_trace(
+        make_b1_observed_semantic_records(evidence.physical_trace));
     result.trace_valid =
         parsed.size() == kB1TasksPerJob * 3U &&
         parsed.front().task.job_index == evidence.job.job_index &&
         parsed.back().task.job_index == evidence.job.job_index &&
         encode_b1_semantic_trace(parsed) == evidence.semantic_trace &&
+        observed_trace == evidence.semantic_trace &&
         b1_sha256(evidence.semantic_trace) == evidence.semantic_trace_digest;
   } catch (const std::exception&) {
     result.trace_valid = false;
@@ -609,10 +630,47 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
     invalidate_b1(reasons, "job " + std::to_string(evidence.job.job_index) +
                                " Compute I/O: " + detail);
   };
-  std::size_t initial_count = 0U;
-  std::size_t final_count = 0U;
+
+  /** @brief Exact ordered state of the two-stage observation protocol. */
+  enum class StreamState : std::uint8_t {
+    /** @brief The first row boundary has not been consumed. */
+    Initial,
+    /** @brief Payload attempt-zero offer or typed rejection is next. */
+    PayloadOffer,
+    /** @brief The accepted payload task must settle next. */
+    PayloadSettlement,
+    /** @brief Manifest attempt-zero offer or typed rejection is next. */
+    ManifestOffer,
+    /** @brief The accepted manifest task must settle next. */
+    ManifestSettlement,
+    /** @brief The row-level final boundary must appear next. */
+    Final,
+    /** @brief The final boundary was consumed; no rows remain legal. */
+    Complete,
+  };
+
+  /** @brief Exact product path that made the next boundary Final. */
+  enum class TerminalPath : std::uint8_t {
+    /** @brief No structurally valid terminal path has completed yet. */
+    None,
+    /** @brief A terminal rejection or bounded capacity exhaustion occurred. */
+    AdmissionRejected,
+    /** @brief One accepted payload or manifest task failed or cancelled. */
+    SettlementFailed,
+    /** @brief Both payload and manifest tasks settled successfully. */
+    IoCompleted,
+  };
+
+  StreamState state = StreamState::Initial;
+  TerminalPath terminal_path = TerminalPath::None;
   std::map<B1IoStage, std::size_t> accepted;
   std::map<B1IoStage, std::size_t> settled;
+  std::map<B1IoStage, std::size_t> capacity_rejections;
+  const auto boundary_fields_empty = [](const B1ComputeIoObservation& value) {
+    return !value.task.has_value() && value.planned_bytes == 0U &&
+           !value.admission.has_value() && !value.completion.has_value();
+  };
+
   for (const B1ComputeIoObservation& observation :
        evidence.output.io_observations) {
     if (!valid_b1_io_snapshot(observation.snapshot)) {
@@ -624,81 +682,162 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
         std::max(result.planned_byte_high_water,
                  observation.snapshot.active_planned_bytes);
 
-    if (observation.point == B1IoObservationPoint::Initial ||
-        observation.point == B1IoObservationPoint::Final) {
-      if (observation.task.has_value() || observation.planned_bytes != 0U ||
-          observation.admission.has_value() ||
-          observation.completion.has_value()) {
-        structural_failure("row boundary contains task-specific fields");
-      }
-      if (observation.point == B1IoObservationPoint::Initial) {
-        ++initial_count;
+    if (state == StreamState::Complete) {
+      structural_failure("observation appears after the final boundary");
+      continue;
+    }
+    if (state == StreamState::Initial) {
+      if (observation.point != B1IoObservationPoint::Initial ||
+          !boundary_fields_empty(observation)) {
+        structural_failure("Initial is not the first row boundary");
       } else {
-        ++final_count;
+        state = StreamState::PayloadOffer;
       }
       continue;
     }
 
-    if (!observation.task.has_value() ||
-        !(observation.task->job == evidence.job)) {
-      structural_failure("task occurrence identity is absent or mismatched");
+    if (observation.point == B1IoObservationPoint::Final) {
+      if (state != StreamState::Final || !boundary_fields_empty(observation)) {
+        structural_failure("Final is misplaced or contains task fields");
+      }
+      if (terminal_path == TerminalPath::IoCompleted &&
+          (observation.snapshot.active_tasks != 0U ||
+           observation.snapshot.active_planned_bytes != 0U)) {
+        structural_failure(
+            "completed I/O path did not settle to an exact zero Final");
+      }
+      state = StreamState::Complete;
       continue;
     }
+
+    const bool payload_stage = state == StreamState::PayloadOffer ||
+                               state == StreamState::PayloadSettlement;
+    const B1IoStage expected_stage =
+        payload_stage ? B1IoStage::PayloadStage : B1IoStage::ManifestCommit;
+    if (!observation.task.has_value() ||
+        !(observation.task->job == evidence.job) ||
+        observation.task->stage != expected_stage) {
+      structural_failure("task job or stage does not match stream state");
+      continue;
+    }
+    if (observation.task->attempt != 0U) {
+      ++result.retry_records;
+      structural_failure("task attempt is not the frozen attempt zero");
+    }
     try {
-      const std::uint64_t expected = expected_b1_io_charge(*observation.task);
-      if (observation.planned_bytes != expected) {
+      if (observation.planned_bytes !=
+          expected_b1_io_charge(*observation.task)) {
         structural_failure("task planned-byte charge changed");
       }
     } catch (const std::exception&) {
       structural_failure("task identity is invalid");
       continue;
     }
-    if (observation.task->attempt != 0U) {
-      ++result.retry_records;
+
+    if (state == StreamState::PayloadOffer ||
+        state == StreamState::ManifestOffer) {
+      if (observation.point == B1IoObservationPoint::OfferRejected) {
+        if (!observation.admission.has_value() ||
+            *observation.admission ==
+                execution::ComputeIoAdmissionStatus::Accepted ||
+            observation.completion.has_value()) {
+          structural_failure("offer rejection status is invalid");
+          continue;
+        }
+        if (*observation.admission ==
+                execution::ComputeIoAdmissionStatus::TaskLimit ||
+            *observation.admission ==
+                execution::ComputeIoAdmissionStatus::PlannedByteLimit) {
+          const std::size_t rejection_count =
+              ++capacity_rejections[expected_stage];
+          if (rejection_count == kB1CapacityAdmissionAttemptLimit) {
+            state = StreamState::Final;
+            terminal_path = TerminalPath::AdmissionRejected;
+          }
+        } else {
+          state = StreamState::Final;
+          terminal_path = TerminalPath::AdmissionRejected;
+        }
+        continue;
+      }
+      if (observation.point != B1IoObservationPoint::AcceptedAdmission ||
+          observation.admission !=
+              execution::ComputeIoAdmissionStatus::Accepted ||
+          observation.completion.has_value()) {
+        structural_failure("offer state did not contain a valid admission");
+        continue;
+      }
+      if (++accepted[expected_stage] > 1U) {
+        ++result.duplicate_admissions;
+        structural_failure("task stage was admitted more than once");
+      }
+      state = payload_stage ? StreamState::PayloadSettlement
+                            : StreamState::ManifestSettlement;
+      continue;
     }
 
-    switch (observation.point) {
-      case B1IoObservationPoint::OfferRejected:
-        if (!observation.admission.has_value() ||
-            (*observation.admission !=
-                 execution::ComputeIoAdmissionStatus::TaskLimit &&
-             *observation.admission !=
-                 execution::ComputeIoAdmissionStatus::PlannedByteLimit) ||
-            observation.completion.has_value()) {
-          structural_failure("capacity rejection category is invalid");
-        }
-        break;
-      case B1IoObservationPoint::AcceptedAdmission:
-        if (observation.admission !=
-                execution::ComputeIoAdmissionStatus::Accepted ||
-            observation.completion.has_value()) {
-          structural_failure("accepted admission snapshot is inconsistent");
-        }
-        if (++accepted[observation.task->stage] > 1U) {
-          ++result.duplicate_admissions;
-        }
-        break;
-      case B1IoObservationPoint::Settlement:
-        if (observation.admission !=
-                execution::ComputeIoAdmissionStatus::Accepted ||
-            !observation.completion.has_value()) {
-          structural_failure("settlement status is incomplete");
-        }
-        ++settled[observation.task->stage];
-        break;
-      case B1IoObservationPoint::Initial:
-      case B1IoObservationPoint::Final:
-        break;
+    if (state == StreamState::PayloadSettlement ||
+        state == StreamState::ManifestSettlement) {
+      if (observation.point != B1IoObservationPoint::Settlement ||
+          observation.admission !=
+              execution::ComputeIoAdmissionStatus::Accepted ||
+          !observation.completion.has_value()) {
+        structural_failure("settlement state or status is invalid");
+        continue;
+      }
+      if (++settled[expected_stage] > 1U) {
+        structural_failure("task stage settled more than once");
+      }
+      if (*observation.completion !=
+          execution::ComputeIoCompletionStatus::Succeeded) {
+        state = StreamState::Final;
+        terminal_path = TerminalPath::SettlementFailed;
+      } else if (payload_stage) {
+        state = StreamState::ManifestOffer;
+      } else {
+        state = StreamState::Final;
+        terminal_path = TerminalPath::IoCompleted;
+      }
+      continue;
     }
+
+    structural_failure("observation point does not match the current state");
+  }
+
+  if (state != StreamState::Complete) {
+    structural_failure("observation stream ended before the final boundary");
   }
   const bool payload_succeeded = accepted[B1IoStage::PayloadStage] == 1U &&
                                  settled[B1IoStage::PayloadStage] == 1U;
   const bool manifest_succeeded = accepted[B1IoStage::ManifestCommit] == 1U &&
                                   settled[B1IoStage::ManifestCommit] == 1U;
-  result.fault_free_complete = initial_count == 1U && final_count == 1U &&
-                               payload_succeeded && manifest_succeeded &&
-                               result.duplicate_admissions == 0U &&
-                               result.retry_records == 0U;
+  result.fault_free_complete =
+      state == StreamState::Complete &&
+      terminal_path == TerminalPath::IoCompleted && payload_succeeded &&
+      manifest_succeeded && result.duplicate_admissions == 0U &&
+      result.retry_records == 0U &&
+      capacity_rejections[B1IoStage::PayloadStage] == 0U &&
+      capacity_rejections[B1IoStage::ManifestCommit] == 0U;
+  if ((evidence.output.status == B1OutputCommitStatus::Succeeded) !=
+      evidence.output.receipt.has_value()) {
+    structural_failure("output status and receipt presence disagree");
+  }
+  const bool failed_task_status =
+      evidence.output.status == B1OutputCommitStatus::TaskFailed ||
+      evidence.output.status == B1OutputCommitStatus::DurabilityUnsupported ||
+      evidence.output.status == B1OutputCommitStatus::RevalidationFailed;
+  if ((terminal_path == TerminalPath::AdmissionRejected &&
+       (evidence.output.status != B1OutputCommitStatus::AdmissionFailed ||
+        evidence.output.receipt.has_value())) ||
+      (terminal_path == TerminalPath::SettlementFailed &&
+       (!failed_task_status || evidence.output.receipt.has_value())) ||
+      (terminal_path == TerminalPath::IoCompleted &&
+       !((evidence.output.status == B1OutputCommitStatus::Succeeded &&
+          evidence.output.receipt.has_value()) ||
+         (evidence.output.status == B1OutputCommitStatus::RevalidationFailed &&
+          !evidence.output.receipt.has_value())))) {
+    structural_failure("terminal I/O path disagrees with output status");
+  }
   if (evidence.output.succeeded()) {
     for (const B1ComputeIoObservation& observation :
          evidence.output.io_observations) {
@@ -709,7 +848,7 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
       }
     }
     if (!result.fault_free_complete) {
-      structural_failure("successful receipt lacks the exact two-task stream");
+      structural_failure("successful receipt lacks the exact two-task FSM");
     }
   }
   return result;
@@ -989,6 +1128,67 @@ class B1RunObservationCollector::Impl final
         B1ObservedCurrentGeneration{identity.generation.value(), coordinate});
   }
 
+  /** @copydoc compute::ComputeRunObservationSink::observes_task_semantics */
+  bool observes_task_semantics() const noexcept override { return true; }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_task_ready */
+  void on_task_ready(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunTaskIdentity task_identity,
+      const compute::ComputeRunTaskReadyObservation& observation,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    B1ObservedTaskReady ready;
+    ready.run_id = descriptor.id().value();
+    ready.local_task_id = task_identity.local_task_id().value();
+    ready.coordinate = coordinate;
+    if ((observation.dependency_task_count != 0U &&
+         observation.dependency_task_ids == nullptr) ||
+        observation.dependency_task_count > ready.dependencies.size()) {
+      overflowed_.store(true, std::memory_order_release);
+      return;
+    }
+    ready.dependency_count = observation.dependency_task_count;
+    for (std::size_t index = 0U; index < ready.dependency_count; ++index) {
+      const int dependency = observation.dependency_task_ids[index];
+      if (dependency < 0) {
+        overflowed_.store(true, std::memory_order_release);
+        return;
+      }
+      ready.dependencies[index] = static_cast<std::uint64_t>(dependency);
+    }
+
+    std::uint64_t logical_ready_bytes = 0U;
+    if (observation.tiled) {
+      if (observation.output_width <= 0 || observation.output_height <= 0) {
+        overflowed_.store(true, std::memory_order_release);
+        return;
+      }
+      constexpr std::uint64_t kBytesPerB1Pixel =
+          kB1ChannelCount * sizeof(float);
+      const std::uint64_t width =
+          static_cast<std::uint64_t>(observation.output_width);
+      const std::uint64_t height =
+          static_cast<std::uint64_t>(observation.output_height);
+      if (width > std::numeric_limits<std::uint64_t>::max() / height ||
+          width * height >
+              std::numeric_limits<std::uint64_t>::max() / kBytesPerB1Pixel) {
+        overflowed_.store(true, std::memory_order_release);
+        return;
+      }
+      logical_ready_bytes = width * height * kBytesPerB1Pixel;
+    }
+    ready.resources =
+        B1SemanticResourceVector{observation.work_units,
+                                 1U,
+                                 logical_ready_bytes,
+                                 observation.device == Device::CPU ? 1U : 0U,
+                                 observation.retained_memory_bytes,
+                                 observation.scratch_bytes,
+                                 0U,
+                                 0U};
+    publish(task_readies_, next_task_ready_, std::move(ready));
+  }
+
   /** @copydoc compute::ComputeRunObservationSink::on_service_start */
   void on_service_start(
       const compute::ComputeRunDescriptor& descriptor,
@@ -999,6 +1199,18 @@ class B1RunObservationCollector::Impl final
             B1ObservedServiceStart{
                 descriptor.id().value(), task_identity.local_task_id().value(),
                 service_charge, descriptor.qos(), coordinate});
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_task_terminal */
+  void on_task_terminal(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunTaskIdentity task_identity,
+      compute::ComputeRunTaskTerminalKind kind,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    publish(task_terminals_, next_task_terminal_,
+            B1ObservedTaskTerminal{descriptor.id().value(),
+                                   task_identity.local_task_id().value(), kind,
+                                   coordinate});
   }
 
   /** @copydoc compute::ComputeRunObservationSink::on_cancellation */
@@ -1084,8 +1296,12 @@ class B1RunObservationCollector::Impl final
   std::atomic<bool> overflowed_{false};
   /** @brief Unique current-generation slot allocator. */
   std::atomic<std::size_t> next_current_generation_{0U};
+  /** @brief Unique actual task-ready slot allocator. */
+  std::atomic<std::size_t> next_task_ready_{0U};
   /** @brief Unique physical service-start slot allocator. */
   std::atomic<std::size_t> next_service_start_{0U};
+  /** @brief Unique actual task-terminal slot allocator. */
+  std::atomic<std::size_t> next_task_terminal_{0U};
   /** @brief Unique accepted-cancellation slot allocator. */
   std::atomic<std::size_t> next_cancellation_{0U};
   /** @brief Unique terminal slot allocator. */
@@ -1100,9 +1316,15 @@ class B1RunObservationCollector::Impl final
   std::array<PublishedB1Slot<B1ObservedCurrentGeneration>,
              kB1CurrentGenerationCapacity>
       current_generations_;
+  /** @brief Fixed actual task-ready storage for the frozen plan. */
+  std::array<PublishedB1Slot<B1ObservedTaskReady>, kB1TaskReadyCapacity>
+      task_readies_;
   /** @brief Fixed service-start storage for the exact frozen plan. */
   std::array<PublishedB1Slot<B1ObservedServiceStart>, kB1TasksPerJob>
       service_starts_;
+  /** @brief Fixed actual task-terminal storage for the frozen plan. */
+  std::array<PublishedB1Slot<B1ObservedTaskTerminal>, kB1TaskTerminalCapacity>
+      task_terminals_;
   /** @brief Fixed cancellation storage sufficient for fault-free failure. */
   std::array<PublishedB1Slot<B1ObservedCancellation>, kB1CancellationCapacity>
       cancellations_;
@@ -1136,7 +1358,9 @@ B1RunObservationSnapshot B1RunObservationCollector::snapshot() const {
   result.job = impl_->job_;
   result.overflowed = impl_->overflowed_.load(std::memory_order_acquire);
   append_b1_slots(impl_->current_generations_, &result.current_generations);
+  append_b1_slots(impl_->task_readies_, &result.task_readies);
   append_b1_slots(impl_->service_starts_, &result.service_starts);
+  append_b1_slots(impl_->task_terminals_, &result.task_terminals);
   append_b1_slots(impl_->cancellations_, &result.cancellations);
   if (impl_->terminals_.front().published.load(std::memory_order_acquire)) {
     result.terminal_kind = impl_->terminals_.front().value.kind;
@@ -1155,6 +1379,130 @@ B1RunObservationSnapshot B1RunObservationCollector::snapshot() const {
     result.resource_settled = impl_->resource_settled_.front().value;
   }
   return result;
+}
+
+std::vector<B1SemanticRecord> make_b1_observed_semantic_records(
+    const B1RunObservationSnapshot& snapshot) {
+  validate_b1_job_instance(snapshot.job);
+  if (snapshot.overflowed) {
+    throw std::invalid_argument(
+        "B1 semantic observation capacity or coordinate overflowed.");
+  }
+  if (snapshot.task_readies.size() != kB1TasksPerJob ||
+      snapshot.service_starts.size() != kB1TasksPerJob ||
+      snapshot.task_terminals.size() != kB1TasksPerJob) {
+    throw std::invalid_argument(
+        "B1 semantic observation triplets are missing or duplicated.");
+  }
+
+  std::vector<std::optional<B1ObservedTaskReady>> readies(kB1TasksPerJob);
+  std::vector<std::optional<B1ObservedServiceStart>> starts(kB1TasksPerJob);
+  std::vector<std::optional<B1ObservedTaskTerminal>> terminals(kB1TasksPerJob);
+  std::set<std::uint64_t> causal_sequences;
+  std::uint64_t expected_run_id = 0U;
+  const auto validate_identity = [&](std::uint64_t run_id,
+                                     std::uint64_t local_task_id,
+                                     std::uint64_t sequence) {
+    if (run_id == 0U || local_task_id >= kB1TasksPerJob || sequence == 0U ||
+        !causal_sequences.insert(sequence).second) {
+      throw std::invalid_argument(
+          "B1 semantic observation identity or sequence is invalid.");
+    }
+    if (expected_run_id == 0U) {
+      expected_run_id = run_id;
+    } else if (expected_run_id != run_id) {
+      throw std::invalid_argument(
+          "B1 semantic observations span multiple Runs.");
+    }
+  };
+
+  for (const B1ObservedTaskReady& ready : snapshot.task_readies) {
+    validate_identity(ready.run_id, ready.local_task_id,
+                      ready.coordinate.causal_sequence);
+    std::optional<B1ObservedTaskReady>& slot =
+        readies[static_cast<std::size_t>(ready.local_task_id)];
+    if (slot.has_value()) {
+      throw std::invalid_argument(
+          "B1 semantic task-ready identity is duplicated.");
+    }
+    if (ready.dependency_count > ready.dependencies.size()) {
+      throw std::invalid_argument(
+          "B1 semantic dependency count exceeds retained storage.");
+    }
+    for (std::size_t index = 0U; index < ready.dependency_count; ++index) {
+      if (ready.dependencies[index] >= kB1TasksPerJob ||
+          (index != 0U &&
+           ready.dependencies[index - 1U] >= ready.dependencies[index])) {
+        throw std::invalid_argument(
+            "B1 semantic dependencies are invalid or unsorted.");
+      }
+    }
+    slot = ready;
+  }
+  for (const B1ObservedServiceStart& start : snapshot.service_starts) {
+    validate_identity(start.run_id, start.local_task_id,
+                      start.coordinate.causal_sequence);
+    std::optional<B1ObservedServiceStart>& slot =
+        starts[static_cast<std::size_t>(start.local_task_id)];
+    if (slot.has_value() || start.service_charge == 0U) {
+      throw std::invalid_argument(
+          "B1 semantic task-start identity or charge is invalid.");
+    }
+    slot = start;
+  }
+  for (const B1ObservedTaskTerminal& terminal : snapshot.task_terminals) {
+    validate_identity(terminal.run_id, terminal.local_task_id,
+                      terminal.coordinate.causal_sequence);
+    std::optional<B1ObservedTaskTerminal>& slot =
+        terminals[static_cast<std::size_t>(terminal.local_task_id)];
+    if (slot.has_value()) {
+      throw std::invalid_argument(
+          "B1 semantic task-terminal identity is duplicated.");
+    }
+    slot = terminal;
+  }
+
+  std::vector<B1SemanticRecord> records;
+  records.reserve(kB1TasksPerJob * 3U);
+  const B1GraphRole graph = b1_graph_for_job(snapshot.job.job_index);
+  for (std::size_t index = 0U; index < kB1TasksPerJob; ++index) {
+    if (!readies[index].has_value() || !starts[index].has_value() ||
+        !terminals[index].has_value()) {
+      throw std::invalid_argument(
+          "B1 semantic task identities contain a contiguous-plan gap.");
+    }
+    const B1ObservedTaskReady& ready = *readies[index];
+    const B1ObservedServiceStart& start = *starts[index];
+    const B1ObservedTaskTerminal& terminal = *terminals[index];
+    if (!(ready.coordinate.causal_sequence < start.coordinate.causal_sequence &&
+          start.coordinate.causal_sequence <
+              terminal.coordinate.causal_sequence)) {
+      throw std::invalid_argument(
+          "B1 semantic ready/start/terminal order is invalid.");
+    }
+    if (terminal.kind != compute::ComputeRunTaskTerminalKind::Succeeded) {
+      throw std::invalid_argument(
+          "B1 semantic task terminal outcome drifted from success.");
+    }
+
+    std::vector<std::uint64_t> dependencies;
+    dependencies.reserve(ready.dependency_count);
+    for (std::size_t dependency = 0U; dependency < ready.dependency_count;
+         ++dependency) {
+      dependencies.push_back(ready.dependencies[dependency]);
+    }
+    B1SemanticTask task{snapshot.job.job_index, graph,
+                        static_cast<std::uint64_t>(index),
+                        std::move(dependencies), ready.resources};
+    records.push_back(B1SemanticRecord{task, B1SemanticAction::Ready,
+                                       B1SemanticOutcome::NotApplicable});
+    records.push_back(B1SemanticRecord{task, B1SemanticAction::Start,
+                                       B1SemanticOutcome::NotApplicable});
+    records.push_back(B1SemanticRecord{std::move(task),
+                                       B1SemanticAction::Terminal,
+                                       B1SemanticOutcome::Succeeded});
+  }
+  return records;
 }
 
 B1InnerRow evaluate_b1_inner_row(B1InnerRowInput input) {
@@ -1258,7 +1606,8 @@ B1InnerRow evaluate_b1_inner_row(B1InnerRowInput input) {
       throughput_invalid = determinism_invalid = waste_invalid = true;
     }
     if (!io.structurally_valid) {
-      throughput_invalid = waste_invalid = memory_invalid = true;
+      throughput_invalid = determinism_invalid = waste_invalid =
+          memory_invalid = true;
     }
     if (!execution_valid) {
       throughput_invalid = memory_invalid = true;

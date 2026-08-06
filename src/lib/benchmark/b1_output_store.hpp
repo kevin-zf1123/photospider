@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -14,6 +15,10 @@
 #include "execution/compute_io_executor.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::benchmark {
+
+/** @brief Exact deterministic number of capacity admission attempts per task.
+ */
+inline constexpr std::size_t kB1CapacityAdmissionAttemptLimit = 64U;
 
 /**
  * @brief Closed durability vocabulary requested and achieved by B1 output.
@@ -42,7 +47,8 @@ enum class B1OutputCommitStatus : std::uint8_t {
   RootUnavailable,
   /** @brief The immutable occurrence slot already existed. */
   SlotExists,
-  /** @brief Compute I/O admission became permanently unavailable. */
+  /** @brief Compute I/O admission was rejected or exhausted its attempt bound.
+   */
   AdmissionFailed,
   /** @brief An accepted payload or manifest task failed or was cancelled. */
   TaskFailed,
@@ -162,6 +168,27 @@ struct B1OutputStoreOptions final {
   /** @brief Test/platform capability switch that may only weaken/fail closed.
    */
   bool crash_durability_supported = true;
+
+  /**
+   * @brief Optional source-private observation hook after capacity rejection.
+   * @param context Borrowed context valid for the complete commit call.
+   * @param identity Stable attempt-zero task identity being retried.
+   * @param attempt_number One-based attempt number just rejected.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The hook exists for deterministic mechanism tests. It cannot change
+   * identity, charge, retry count, admission status, cleanup, or receipt
+   * policy and is absent from installed/public contracts.
+   */
+  using CapacityRejectionObserver =
+      void (*)(void* context, const B1IoTaskIdentity& identity,
+               std::size_t attempt_number) noexcept;
+
+  /** @brief Optional capacity-rejection observer; production leaves null. */
+  CapacityRejectionObserver capacity_rejection_observer = nullptr;
+
+  /** @brief Borrowed context paired with `capacity_rejection_observer`. */
+  void* capacity_rejection_observer_context = nullptr;
 };
 
 /**
@@ -210,8 +237,10 @@ class B1OutputStore final {
    * @return Typed result, complete evidence, and receipt only after barriers.
    * @throws std::bad_alloc or synchronization exceptions that prevent even a
    * typed result from being assembled.
-   * @note Capacity rejection retries the same attempt-zero identity/charge;
-   * only executor shutdown converts the pending offer to permanent failure.
+   * @note Capacity rejection retries the same attempt-zero identity/charge for
+   * exactly `kB1CapacityAdmissionAttemptLimit` total attempts. Exhaustion or a
+   * non-capacity rejection returns `AdmissionFailed`, cleans the occurrence
+   * slot, and records the final observation without a timing-derived policy.
    */
   B1OutputCommitResult commit(const B1JobInstance& job,
                               const ImageBuffer& image);

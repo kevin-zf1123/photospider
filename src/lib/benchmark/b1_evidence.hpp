@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,31 @@ inline constexpr double kB1MedianThroughputRatioLimit = 0.95;
 /** @brief Candidate/reference every-replicate ratio floor. */
 inline constexpr double kB1MinimumThroughputRatioLimit = 0.90;
 
+/** @brief Fixed callback capacity for one observed task's dependencies. */
+inline constexpr std::size_t kB1ObservedDependencyCapacity = 4U;
+
+/**
+ * @brief One actual dependency-ready task observation retained without
+ * allocation.
+ * @throws Nothing for value construction and copying.
+ * @note The fixed dependency capacity exceeds the frozen B1 maximum of one so
+ * malformed drift remains observable and fail-closed rather than truncated.
+ */
+struct B1ObservedTaskReady final {
+  /** @brief Exact owning Run identity. */
+  std::uint64_t run_id = 0U;
+  /** @brief Exact Run-local deterministic task identity. */
+  std::uint64_t local_task_id = 0U;
+  /** @brief Actual dependency ids copied synchronously from the Run plan. */
+  std::array<std::uint64_t, kB1ObservedDependencyCapacity> dependencies{};
+  /** @brief Number of meaningful dependency entries. */
+  std::size_t dependency_count = 0U;
+  /** @brief Resource vector derived from actual ready-plan facts. */
+  B1SemanticResourceVector resources;
+  /** @brief Observer-local causal coordinate of ready materialization. */
+  compute::ComputeRunObservationCoordinate coordinate;
+};
+
 /**
  * @brief One allocation-free physical service-start observation.
  * @throws Nothing for value construction and copying.
@@ -48,6 +74,22 @@ struct B1ObservedServiceStart final {
   /** @brief Exact physical Run QoS copied at the start boundary. */
   compute::ComputeRunQos qos;
   /** @brief Observer-local causal coordinate. */
+  compute::ComputeRunObservationCoordinate coordinate;
+};
+
+/**
+ * @brief One actual task-local terminal observation.
+ * @throws Nothing for value construction and copying.
+ */
+struct B1ObservedTaskTerminal final {
+  /** @brief Exact owning Run identity. */
+  std::uint64_t run_id = 0U;
+  /** @brief Exact Run-local deterministic task identity. */
+  std::uint64_t local_task_id = 0U;
+  /** @brief Actual task-local terminal category. */
+  compute::ComputeRunTaskTerminalKind kind =
+      compute::ComputeRunTaskTerminalKind::Failed;
+  /** @brief Observer-local causal coordinate of task terminal publication. */
   compute::ComputeRunObservationCoordinate coordinate;
 };
 
@@ -100,8 +142,12 @@ struct B1RunObservationSnapshot final {
   bool overflowed = false;
   /** @brief Complete accepted current-generation publications. */
   std::vector<B1ObservedCurrentGeneration> current_generations;
+  /** @brief Exact actual dependency-ready task materializations. */
+  std::vector<B1ObservedTaskReady> task_readies;
   /** @brief Exact physically committed callback starts. */
   std::vector<B1ObservedServiceStart> service_starts;
+  /** @brief Exact actual task-local terminal outcomes. */
+  std::vector<B1ObservedTaskTerminal> task_terminals;
   /** @brief Complete accepted Run cancellations; fault-free B1 has none. */
   std::vector<B1ObservedCancellation> cancellations;
   /** @brief Exactly-once terminal kind when materialized. */
@@ -117,6 +163,21 @@ struct B1RunObservationSnapshot final {
   /** @brief Typed digest of the exact product-visible Value when available. */
   ContentDigestResult visible_content_digest;
 };
+
+/**
+ * @brief Normalizes actual ready/start/terminal observations into B1 records.
+ * @param snapshot Complete settled product observation snapshot.
+ * @return Three canonical records for every contiguous actual task identity.
+ * @throws std::invalid_argument for overflow, missing/duplicate/gapped
+ * identity, malformed dependencies, terminal-outcome drift, Run mismatch, or
+ * causal-order failure.
+ * @throws std::bad_alloc when normalized record storage allocates.
+ * @note The function derives candidate records only from product
+ * observations. `encode_b1_semantic_trace()` independently compares them with
+ * the frozen workload plan and remains the expectation oracle.
+ */
+std::vector<B1SemanticRecord> make_b1_observed_semantic_records(
+    const B1RunObservationSnapshot& snapshot);
 
 /**
  * @brief Fixed-capacity allocation-free observation owner for one B1 request.

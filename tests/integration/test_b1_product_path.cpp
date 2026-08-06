@@ -227,7 +227,13 @@ TEST(B1ProductPath, ExactJobClosesLifecycleResourcesGoldenAndDurableOutput) {
   ASSERT_EQ(trace.current_generations.size(), 1U);
   EXPECT_GT(trace.current_generations.front().generation, 0U);
   EXPECT_TRUE(trace.cancellations.empty());
+  EXPECT_EQ(trace.task_readies.size(), kB1TasksPerJob);
   EXPECT_EQ(trace.service_starts.size(), kB1TasksPerJob);
+  EXPECT_EQ(trace.task_terminals.size(), kB1TasksPerJob);
+  const std::string semantic_trace =
+      encode_b1_semantic_trace(make_b1_observed_semantic_records(trace));
+  EXPECT_EQ(encode_b1_semantic_trace(parse_b1_semantic_trace(semantic_trace)),
+            semantic_trace);
   ASSERT_TRUE(trace.terminal_kind.has_value());
   EXPECT_EQ(*trace.terminal_kind, compute::ComputeRunTerminalKind::Succeeded);
   ASSERT_TRUE(trace.visible.has_value());
@@ -359,10 +365,12 @@ TEST(B1ProductPath, GraphProducersMatchContentAndTaskIdentityAcrossBothCaps) {
     }
     EXPECT_EQ(serial_ids, parallel_ids);
   }
-  for (const std::uint64_t seed : {0U, 1U}) {
-    const std::string trace = encode_b1_semantic_trace(
-        make_b1_success_semantic_records(b1_frozen_semantic_plan(seed)));
-    EXPECT_EQ(encode_b1_semantic_trace(parse_b1_semantic_trace(trace)), trace);
+  for (const B1RunObservationSnapshot* observed :
+       {&cap_one[0U], &cap_one[1U], &cap_eight[0U], &cap_eight[1U]}) {
+    const std::string semantic_trace =
+        encode_b1_semantic_trace(make_b1_observed_semantic_records(*observed));
+    EXPECT_EQ(encode_b1_semantic_trace(parse_b1_semantic_trace(semantic_trace)),
+              semantic_trace);
   }
 
   const B1ExecutionSnapshot settled = b1_host->b1_execution_snapshot(0U, 4096U);

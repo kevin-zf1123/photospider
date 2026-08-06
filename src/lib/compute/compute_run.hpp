@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -324,6 +325,74 @@ struct ComputeRunObservationCoordinate final {
 };
 
 /**
+ * @brief Borrowed dependency-ready task facts for source-private observation.
+ *
+ * The dispatcher assembles this value from the exact `PlannedTask`, selected
+ * device, and immutable resource declaration that are about to enter one
+ * `ReadyTaskSubmission`. Dependency storage remains owned by the Run plan and
+ * is valid only for the synchronous callback.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note This value grants no readiness, queue, resource, Graph, operation, or
+ * completion authority. ROI fields describe the actual planned output shape;
+ * consumers remain responsible for workload-specific logical byte mapping.
+ */
+struct ComputeRunTaskReadyObservation final {
+  /** @brief Borrowed dense upstream task ids in plan-owned order. */
+  const int* dependency_task_ids = nullptr;
+
+  /** @brief Number of borrowed dependency ids. */
+  std::size_t dependency_task_count = 0U;
+
+  /** @brief Whether the actual planned task uses tiled execution. */
+  bool tiled = false;
+
+  /** @brief Planned output ROI left coordinate. */
+  int output_x = 0;
+
+  /** @brief Planned output ROI top coordinate. */
+  int output_y = 0;
+
+  /** @brief Planned output ROI width. */
+  int output_width = 0;
+
+  /** @brief Planned output ROI height. */
+  int output_height = 0;
+
+  /** @brief Device selected with the retained operation implementation. */
+  Device device = Device::CPU;
+
+  /** @brief Actual ready submission's declared logical work units. */
+  std::uint64_t work_units = 0U;
+
+  /** @brief Actual ready submission's declared retained Host bytes. */
+  std::uint64_t retained_memory_bytes = 0U;
+
+  /** @brief Actual ready submission's declared Host scratch bytes. */
+  std::uint64_t scratch_bytes = 0U;
+
+  /** @brief Actual ready submission's declared ready-store bytes. */
+  std::uint64_t ready_bytes = 0U;
+};
+
+/**
+ * @brief Closed logical terminal category for one actually entered task.
+ * @throws Nothing for value construction and comparison.
+ * @note The category is task-local evidence. It neither publishes nor
+ * replaces the owning Run's terminal outcome.
+ */
+enum class ComputeRunTaskTerminalKind : std::uint8_t {
+  /** @brief Task work and any deferred producer completion succeeded. */
+  Succeeded,
+
+  /** @brief Task execution or deferred producer completion failed. */
+  Failed,
+
+  /** @brief An already-terminal cancelled Run suppressed task work. */
+  Cancelled,
+};
+
+/**
  * @brief Allocation-free irreversible service-start commit callback.
  * @param context Borrowed caller-owned context valid for the complete call.
  * @return True only after the physical route start commits irreversibly.
@@ -390,6 +459,41 @@ class ComputeRunObservationSink {
       ComputeRunObservationCoordinate coordinate) noexcept = 0;
 
   /**
+   * @brief Reports whether this sink requests task-semantic observations.
+   * @return True only for bounded collectors that consume ready/terminal task
+   * facts.
+   * @throws Nothing.
+   * @note The default false preserves existing observation sequence domains:
+   * dispatchers reserve no additional coordinates for sinks that do not opt
+   * in. The result grants no product authority.
+   */
+  virtual bool observes_task_semantics() const noexcept { return false; }
+
+  /**
+   * @brief Observes one actual dependency-ready task materialization.
+   * @param descriptor Immutable identity and policy inputs of the owning Run.
+   * @param task_identity Exact Run-local ready task identity.
+   * @param observation Borrowed actual dependency, shape, device, and resource
+   * declaration valid only for this synchronous call.
+   * @param coordinate Coordinate reserved immediately before callback
+   * delivery after the owned ready submission is fully constructed.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Only sinks returning true from `observes_task_semantics()` receive
+   * this callback. It does not imply later service admission or start.
+   */
+  virtual void on_task_ready(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunTaskIdentity task_identity,
+      const ComputeRunTaskReadyObservation& observation,
+      ComputeRunObservationCoordinate coordinate) noexcept {
+    (void)descriptor;
+    (void)task_identity;
+    (void)observation;
+    (void)coordinate;
+  }
+
+  /**
    * @brief Observes one physically committed callback service start.
    * @param descriptor Immutable identity and policy inputs of the owning Run.
    * @param task_identity Exact Run-local callback identity.
@@ -408,6 +512,28 @@ class ComputeRunObservationSink {
       const ComputeRunDescriptor& descriptor,
       ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
       ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes the logical terminal category of one entered task.
+   * @param descriptor Immutable identity and policy inputs of the owning Run.
+   * @param task_identity Exact Run-local task reaching terminal state.
+   * @param kind Succeeded, Failed, or Cancelled task-local category.
+   * @param coordinate Coordinate reserved at task terminal publication.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Only opted-in task-semantic sinks receive this callback. Deferred
+   * Values publish terminal only after their producer fence settles; the
+   * callback changes no Run terminal or dependency authority.
+   */
+  virtual void on_task_terminal(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunTaskIdentity task_identity, ComputeRunTaskTerminalKind kind,
+      ComputeRunObservationCoordinate coordinate) noexcept {
+    (void)descriptor;
+    (void)task_identity;
+    (void)kind;
+    (void)coordinate;
+  }
 
   /**
    * @brief Observes acceptance of one Run cancellation reason.

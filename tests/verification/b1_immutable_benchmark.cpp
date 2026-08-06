@@ -667,8 +667,6 @@ B1JobEvidence run_b1_job(Host& host, B1Host& b1_host,
   evidence.job = job;
   evidence.producer_offer_ordinal = producer_offer_ordinal;
   evidence.golden = b1_frozen_job_golden(job.job_index);
-  const std::string semantic_trace = encode_b1_semantic_trace(
-      make_b1_success_semantic_records(b1_frozen_semantic_plan(job.job_index)));
 
   const VoidResult mutated = host.set_node_yaml(
       session, NodeId{0}, b1_source_node_yaml(job.job_index));
@@ -693,8 +691,13 @@ B1JobEvidence run_b1_job(Host& host, B1Host& b1_host,
       computed.value.type == DataType::FLOAT32 &&
       computed.value.device == Device::CPU;
   if (evidence.run_succeeded) {
+    try {
+      evidence.semantic_trace = encode_b1_semantic_trace(
+          make_b1_observed_semantic_records(evidence.physical_trace));
+    } catch (const std::exception&) {
+      evidence.semantic_trace.clear();
+    }
     evidence.output = output_store.commit(job, computed.value);
-    evidence.semantic_trace = semantic_trace;
   } else {
     evidence.output.status = B1OutputCommitStatus::TaskFailed;
     evidence.output.diagnostic =

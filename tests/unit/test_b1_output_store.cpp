@@ -16,7 +16,6 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
-#include <thread>
 #include <vector>
 
 #include "benchmark/b1_output_store.hpp"  // NOLINT(build/include_subdir)
@@ -24,7 +23,6 @@
 namespace ps::benchmark {
 namespace {
 
-using std::chrono_literals::operator""ms;
 using std::chrono_literals::operator""s;
 
 /**
@@ -78,6 +76,51 @@ class ScopedB1OutputRoot final {
  */
 B1JobInstance measured_job_zero() {
   return B1JobInstance{kB1WorkloadId, 1U, B1JobPhase::Measured, 0U, 0U, 8U};
+}
+
+/**
+ * @brief Test-only context that releases one blocking executor task on retry.
+ * @throws Nothing for aggregate construction.
+ */
+struct CapacityRetryReleaseContext final {
+  /** @brief Promise whose publication releases the blocking callback. */
+  std::promise<void>* release = nullptr;
+  /** @brief Accepted blocker whose settlement is awaited before retry. */
+  const execution::ComputeIoSubmission* blocker = nullptr;
+  /** @brief Ensures only the first rejection performs release. */
+  std::atomic<bool> released{false};
+  /** @brief Sticky observer failure reported after commit returns. */
+  std::atomic<bool> failed{false};
+};
+
+/**
+ * @brief Releases and settles a blocker after the first capacity rejection.
+ * @param opaque Borrowed `CapacityRetryReleaseContext`.
+ * @param identity Stable rejected task identity, retained only for validation.
+ * @param attempt_number One-based rejected attempt number.
+ * @return Nothing.
+ * @throws Nothing; failures are retained in the context.
+ */
+void release_capacity_blocker(void* opaque, const B1IoTaskIdentity& identity,
+                              std::size_t attempt_number) noexcept {
+  auto* context = static_cast<CapacityRetryReleaseContext*>(opaque);
+  if (context == nullptr || attempt_number != 1U || identity.attempt != 0U ||
+      context->released.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+  try {
+    if (context->release == nullptr || context->blocker == nullptr) {
+      context->failed.store(true, std::memory_order_release);
+      return;
+    }
+    context->release->set_value();
+    if (context->blocker->completion().wait().status() !=
+        execution::ComputeIoCompletionStatus::Succeeded) {
+      context->failed.store(true, std::memory_order_release);
+    }
+  } catch (...) {
+    context->failed.store(true, std::memory_order_release);
+  }
 }
 
 /**
@@ -215,25 +258,15 @@ TEST(B1OutputStore, CapacityRetryKeepsStableAttemptAndPlannedByteCharge) {
   ASSERT_TRUE(blocker.accepted());
   ASSERT_EQ(entered_future.wait_for(2s), std::future_status::ready);
 
-  B1OutputStore store(output_root.root(), executor);
+  CapacityRetryReleaseContext retry_context{&release, &blocker};
+  B1OutputStoreOptions options;
+  options.capacity_rejection_observer = &release_capacity_blocker;
+  options.capacity_rejection_observer_context = &retry_context;
+  B1OutputStore store(output_root.root(), executor, options);
   const B1JobInstance job = measured_job_zero();
-  std::future<B1OutputCommitResult> pending = std::async(
-      std::launch::async,
-      [&store, &job]() { return store.commit(job, seed_zero_image()); });
-
-  const auto slot_deadline = std::chrono::steady_clock::now() + 2s;
-  while (std::filesystem::is_empty(output_root.root()) &&
-         std::chrono::steady_clock::now() < slot_deadline) {
-    std::this_thread::sleep_for(1ms);
-  }
-  ASSERT_FALSE(std::filesystem::is_empty(output_root.root()));
-  std::this_thread::sleep_for(5ms);
-  release.set_value();
-  EXPECT_EQ(blocker.completion().wait().status(),
-            execution::ComputeIoCompletionStatus::Succeeded);
-  ASSERT_EQ(pending.wait_for(10s), std::future_status::ready);
-  const B1OutputCommitResult committed = pending.get();
+  const B1OutputCommitResult committed = store.commit(job, seed_zero_image());
   ASSERT_TRUE(committed.succeeded()) << committed.diagnostic;
+  EXPECT_FALSE(retry_context.failed.load(std::memory_order_acquire));
 
   std::size_t rejection_count = 0U;
   for (const B1ComputeIoObservation& observation : committed.io_observations) {
@@ -252,6 +285,62 @@ TEST(B1OutputStore, CapacityRetryKeepsStableAttemptAndPlannedByteCharge) {
   EXPECT_GT(rejection_count, 0U);
   EXPECT_EQ(committed.io_observations.back().point,
             B1IoObservationPoint::Final);
+}
+
+/**
+ * @brief Proves a permanent capacity blocker returns at the frozen attempt
+ * bound and cleans the failed occurrence.
+ * @throws Test framework, synchronization, and filesystem failures.
+ */
+TEST(B1OutputStore,
+     PermanentCapacityBlockerExhaustsBoundAndPublishesFiniteFinalEvidence) {
+  ScopedB1OutputRoot output_root;
+  execution::ComputeIoExecutor executor({1U, kB1ComputeIoPlannedByteLimit});
+  const auto blocker_lifetime = std::make_shared<int>(1);
+  std::promise<void> entered;
+  std::shared_future<void> entered_future = entered.get_future().share();
+  std::promise<void> release;
+  std::shared_future<void> release_future = release.get_future().share();
+  const execution::ComputeIoSubmission blocker =
+      executor.try_submit(1U, blocker_lifetime, [&entered, release_future]() {
+        return execution::ComputeIoExecutor::Task([&entered, release_future]() {
+          entered.set_value();
+          release_future.wait();
+        });
+      });
+  ASSERT_TRUE(blocker.accepted());
+  ASSERT_EQ(entered_future.wait_for(2s), std::future_status::ready);
+
+  B1OutputStore store(output_root.root(), executor);
+  const B1JobInstance job = measured_job_zero();
+  const B1OutputCommitResult failed = store.commit(job, seed_zero_image());
+  EXPECT_EQ(failed.status, B1OutputCommitStatus::AdmissionFailed);
+  EXPECT_FALSE(failed.receipt.has_value());
+  ASSERT_EQ(failed.io_observations.size(),
+            kB1CapacityAdmissionAttemptLimit + 2U);
+  EXPECT_EQ(failed.io_observations.front().point,
+            B1IoObservationPoint::Initial);
+  EXPECT_EQ(failed.io_observations.back().point, B1IoObservationPoint::Final);
+  std::size_t rejection_count = 0U;
+  for (const B1ComputeIoObservation& observation : failed.io_observations) {
+    if (observation.point != B1IoObservationPoint::OfferRejected) {
+      continue;
+    }
+    ++rejection_count;
+    ASSERT_TRUE(observation.task.has_value());
+    EXPECT_EQ(observation.task->job, job);
+    EXPECT_EQ(observation.task->stage, B1IoStage::PayloadStage);
+    EXPECT_EQ(observation.task->attempt, 0U);
+    EXPECT_EQ(observation.planned_bytes, kB1PayloadBytes);
+    EXPECT_EQ(observation.admission,
+              execution::ComputeIoAdmissionStatus::TaskLimit);
+  }
+  EXPECT_EQ(rejection_count, kB1CapacityAdmissionAttemptLimit);
+  EXPECT_TRUE(std::filesystem::is_empty(output_root.root()));
+
+  release.set_value();
+  EXPECT_EQ(blocker.completion().wait().status(),
+            execution::ComputeIoCompletionStatus::Succeeded);
 }
 
 }  // namespace
