@@ -509,6 +509,11 @@ fail-closed evidence。Source-private 的 `M1Host` 不增加 compute route：它
 组合 Host/device ledger、Compute I/O、按 class 分区的 ready、lifecycle 与不可变 Throughput
 capacity/reserved snapshot。
 
+Collector 的 boundary snapshot 现在同时闭合 callback lifetime 与 slot publication。有界
+callback-entry/completion frontier 围绕每次完整 attempt，而 claimed 与连续 release-published
+frontier 跟踪 slot prefix。只有四个 frontier 在 copy 前后完全对齐且未变化时，cut 才稳定；
+复制出的 vector size 相等不能隐藏停在 claim 与 publication 之间的 callback。
+
 M1 Compute I/O high-water 同样从 event 推导。每个 protocol B1 offer 必须精确解析到一个完整
 Issue #95 job stream；该 stream 包含 Initial、每次 executor 签发的 admission、每次匹配的
 settlement 与 Final，并保留 task identity、不可变 charge、status、phase counter、同锁
@@ -517,6 +522,12 @@ transition 都会结构性 `Invalid`。稀疏 `M1Host` cut 只保留 current-sta
 增加或修复 high-water；最终 process cut 仍必须归零。因此，即使短 I/O task 在两个稀疏 cut
 之间完整开始并结束，也仍会进入 event-derived maximum。
 
+Lifecycle evidence 以同样 fail-closed 的方式 replay。每个 temporal snapshot 保留 capture
+ordinal 与请求的 `after_cursor`。Validation 从 cursor zero 开始，要求精确 page chain、连续
+lossless event sequence、稳定 service/epoch identity、producer cursor/state 语义，以及非空
+M1 work 要求的完整 service/Graph/admission/terminal/quiescence/resource/close effect。缺失、
+重复、重排、cursor 不一致或 stop 后 record 都会使 memory 为 `Invalid`。
+
 手工 `m1_shared_benchmark` target 为 `EXCLUDE_FROM_ALL`，且不属于 CTest/CI。它通过一个
 `EmbeddedHost` 运行全部三个 Graph，生成封闭 M1 inner row，并物化六个 retained section，
 以及现有 canonical 15-field row 与 five-field bundle。Exact-one/DAG validation、pair
@@ -524,12 +535,17 @@ direction 与 actual environment authority 仍是强制项。Inner row 会保留
 progress/Jain window、全部 480 个 raw admission outcome、committed service-start fact、完整
 temporal/lifecycle record、event-aligned B1 I/O，以及通过既有 closed verification encoder
 生成的完整 Issue #93/#95 source row。Issue #93/#95 手工 producer 现在会各自物化一份
-封闭 source-private pair-object pack，其中包含
-canonical row、单 row bundle、全部六个 source section 及 seal，以及 retained environment
-claim；process-private actual storage authority 会被有意排除。
+封闭 source-private、denominator-only pair-object pack。I1 保留 schema/version 与精确 200 个
+latency sample；B1 保留 schema version one、精确一个 cold、三个 warmup、三十个 measured
+唯一 job occurrence 与三十个有序 outcome。其 output/verdict section 明确不声明超出 I1 p99
+或 B1 rate denominator 的 portable output/conformance authority；process-private actual
+storage authority 会被有意排除。
 
-在推导 timed boundary 前，M1 runner 必须同时取得两份 pack path 及其精确 row/bundle address；
-它会读取有界的绝对 regular file 且不跟随最后一级 symlink，重新物化每个 source，检查同 role/
+在推导 timed boundary 前，M1 runner 必须同时取得两份 pack path 及其精确 row/bundle address。
+POSIX 通过一个 `O_NOFOLLOW` descriptor 完成 validation/read；Windows 使用一个带
+`FILE_FLAG_OPEN_REPARSE_POINT` 的 `CreateFileW` handle。Type/reparse status、有界 size、
+精确 byte、growth check 与 close 全都在同一个 opened object 上评估。Runner 重新物化每个
+denominator source，检查同 role/
 ordinal/cap/fixture 与 base-only-I1/full-B1 environment relation，并重算 I1 nearest-rank p99 与
 B1 successful-operation/interval tuple。只有 digest 文本会被拒绝，也不接受调用者提供的 p99
 或 throughput scalar。已加载 pair 的 row、bundle 与 section 会在 M1 sealing 前 exact-once

@@ -2201,9 +2201,10 @@ construction、dump 与 disk flush 位于每个后续 origin guard 之外，并�
 异常会在此前已安全完成的 artifact 之外写出 `failure.json`。特别是 failed/invalid admission
 会先向 `episodes.ndjson` 追加并 flush 对应 Invalid inner row，保留 raw admission 事实和关闭后的
 observer/resource 状态，然后才写 `failure.json`。JSON/NDJSON 文件仍是封闭的 Issue #93
-inner artifact，不声明 outer envelope。Pair-object pack 只从完整且尚未 compact 的 221 条
-source row 生成：它保留 canonical I1 row、单 row bundle、全部六个 source section、精确
-storage-N/A environment claim，以及用于重算 p99 的 200 个 measured latency sample。
+inner artifact，不声明 outer envelope。Denominator-only pair-object pack 只从完整且尚未
+compact 的 221 条 source row 生成：它保留 canonical I1 row、单 row bundle、全部六个 source
+section、精确 storage-N/A environment claim，以及用于重算 p99 的 200 个 measured latency
+sample；其 output/verdict section 明确拒绝超出该 denominator 的 portable authority。
 Candidate 运行还必须提供不可变 comparison-reference bundle digest。Exit zero 表示四项 I1
 inner verdict 全部通过；exit two
 表示完整 evidence 至少有一项 threshold 失败；exit one 表示 parsing、setup、cadence 或 evidence
@@ -2273,10 +2274,12 @@ YAML、session/cache 目录与
 额外写入 `failure.json`。仅 payload 就超过 2.2 GiB。Exit zero 表示四项 inner verdict 全部
 通过；exit two 表示完整 evidence 至少一项 inner threshold 失败；exit one 表示 parsing、setup、
 product、durability 或 evidence invalid。`row.json` 明确不声明 canonical outer row/bundle；
-pair-object pack 则另行保留 canonical isolated row/bundle 与全部 source section。它从真实
-34-job row 生成，包含三十个有序 verified-endpoint outcome 与精确 measurement interval。
+denominator-only pair-object pack 则另行保留 canonical isolated row/bundle 与全部 source
+section。它要求 schema version one，以及真实 34-job row 中精确的一个 cold、三个 warmup、
+三十个 measured job index，并包含三十个有序 verified-endpoint outcome 与精确 measurement
+interval；其 output/verdict section 拒绝超出 B1 rate denominator 的 portable authority。
 Pack 会保留 storage claim/proof/eligibility，但不能序列化或签发 process-private actual-storage
-authority，因此 portable B1 结果仍可能为 `Invalid`。Candidate 运行还必须提供不可变
+authority，因此 portable B1 结果保持为 `Invalid`。Candidate 运行还必须提供不可变
 comparison-reference bundle digest。
 构建 target 或运行 `--help` 只属于 harness smoke；本文不声明已经执行精确 34-job invocation
 或三 replicate B1 机器运行。
@@ -2292,6 +2295,10 @@ live authority。它们还会拒绝 substituted isolated-I1 source、遗漏的 i
 遗漏的 M1 raw window、outer/inner claim 篡改、denominator/source 不匹配、缺失/重复/重排/
 未知/超限 I/O transition，以及非零 final I/O state。一项专门回归会让全部稀疏 temporal I/O
 current value 保持为零，同时证明短 accepted/settled task 仍会提高 event-derived high-water。
+Callback-boundary 回归在 slot claim 后、release publication 前暂停，并证明 copied-record
+count 不变不能满足 entry/completion/claim/published cut。Lifecycle replay 回归保留 request
+cursor 与 capture ordinal，随后拒绝 empty chain、缺失 page/record、重复、重排、损坏的
+cursor/cut 与 stop 后 event。
 Product suite 使用产品签发的 per-start ready/lifecycle/candidate/resource fact，证明 Throughput
 Run 到达 terminal 与 resource settlement 时 Interactive work 仍为 outstanding，并证明精确
 31-CPU Throughput/32-CPU shared-headroom boundary。Class-start 正负 case 会区分真实 dual-
@@ -2300,8 +2307,12 @@ diagnostic，不是 latency threshold。
 
 Pair-object 测试还会执行真实 Issue #93/#95 evaluator-to-producer 路径、canonical pack
 round trip、精确 section 顺序/数量、source rematerialization、digest/object 不匹配、错误
-role/ordinal、重复 corpus 插入与有界绝对 regular-file 读取。Relative、空、超限、directory
-以及最后一级为 symlink 的输入都会被拒绝。
+role/ordinal、重复 corpus 插入与有界绝对 regular-file 读取。I1 pack 必须保留精确 200 个
+latency sample；B1 pack 必须保留 schema version one、唯一的 1-cold/3-warmup/30-measured job
+index 与 30 个有序 outcome。Loaded validation 会拒绝 portable output authority 或任何超出
+denominator-only 的 claim。Relative、空、超限、directory 以及最后一级为 symlink 的输入都会
+被拒绝。条件式 Windows source path 也会进行 cross-compile syntax 验证；这不构成 Windows
+runtime 结果。
 
 精确 M1 replicate 由手工 `m1_shared_benchmark` target 承担。它为 `EXCLUDE_FROM_ALL`，
 没有 `add_test`，也不属于默认构建或 CI：
@@ -2313,14 +2324,18 @@ cmake --build build --target m1_shared_benchmark -j
 
 一次 invocation 要求 checkout 外的 fresh absolute empty output directory、canonical base/
 storage/environment-class claim、retained storage proof、subject role、ordinal，以及两份
-完整 isolated pair-object pack。每个 pack path 必须是绝对、有界的 regular file，并同时提供
+canonical、denominator-only isolated pair-object pack。每个 pack path 必须是绝对、有界的
+regular file，并同时提供
 精确 row/bundle digest。I1 pack 必须来自同 role、同 ordinal、cap-eight I1 producer；B1 pack
 必须来自同 role、同 ordinal、cap-eight B1 producer，并使用逐 byte 相同且 eligible 的 storage/
 environment-class claim。只有 digest 文本而没有相应 object 时，setup 会直接拒绝；不再接受
 numeric p99 或 B1-rate option。Candidate 还必须提供 comparison-reference bundle address。
 
-在推导 timed C/W/B/U boundary 前，runner 会通过 no-follow descriptor 对每个 pack 只读取
-一次，解析封闭 pack schema，重算 row/bundle/section address，重新物化每个 source object，
+在推导 timed C/W/B/U boundary 前，runner 会通过一个 opened object 读取每个 pack：POSIX
+使用 `O_NOFOLLOW` descriptor，Windows 使用带 `FILE_FLAG_OPEN_REPARSE_POINT` 的
+`CreateFileW` handle。Type/reparse check、有界 size、精确 byte、growth check 与 close 都
+使用同一个 object。Runner 随后解析封闭 pack schema，重算 row/bundle/section address，
+重新物化每个 source object，
 强制单 row membership 与 seal order，检查 role/workload/cap/ordinal 以及 base-only I1/full
 B1 environment relation，并重算 I1 p99 与 B1 successful-site-operation/interval tuple。只有
 这些重算值会填入 M1 evaluator 与 sealed denominator claim。

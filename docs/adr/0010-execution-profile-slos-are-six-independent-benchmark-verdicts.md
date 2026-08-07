@@ -1532,6 +1532,15 @@ or settlement causally produced for that old generation retains its later
 event sequence and immutable warmup phase, while its post-boundary physical
 effects remain measured-window evidence.
 
+The observer boundary is stable only when the callback lifecycle and slot
+publication lifecycle are both closed. Every callback advances bounded entry
+and completion frontiers around its whole attempt, while reservation and
+release publication advance separate claimed and contiguous-published
+frontiers. The boundary snapshot copies only the published prefix and compares
+all four frontiers before and after copying. Equal record counts do not prove
+quiescence; a callback paused after claim and before publication makes the cut
+invalid.
+
 If a same-timestamp lifecycle event orders before the boundary, the snapshot
 reflects its new state; if it orders after, it is a cross-boundary event. A
 terminal warmup event at the same timestamp never creates a new warmup
@@ -1568,6 +1577,15 @@ after `B^M1` include physical effects from every phase. Thus carryover cannot be
 hidden from contention or memory evidence. The class-start bound observes every
 actual Throughput start in the measured interval, including a warmup start,
 while Jain completed service remains measured-occurrence service only.
+
+Each retained temporal capture also records its row-local ordinal and the exact
+lifecycle request cursor. The evaluator replays the bounded lifecycle pages
+from cursor zero, requiring exact page/capture order, one service and epoch,
+contiguous lossless event sequence, producer-defined empty-ring/next-cursor
+semantics, monotonic states and timestamps, closed event/category values, and
+all service/Graph/admission/terminal/quiescence/resource/close effects required
+by nonempty M1 execution. Missing, duplicated, reordered, truncated,
+cursor-inconsistent, or post-stop evidence makes memory Invalid.
 
 Warmup evidence remains required: a carryover failure, missing event evidence,
 duplicate event sequence, non-total event coordinate, illegal phase rewrite,
@@ -2066,6 +2084,22 @@ cross-subject, unknown/unobserved/unsupported/unprovable storage state, or
 otherwise incompatible pair evidence makes the affected M1 relative verdict
 `invalid`.
 
+The portable pair packs are denominator-only auxiliaries, not portable
+isolated-row verdicts. The I1 pack binds its schema/version, role, ordinal,
+exactly 200 positive latency records, and nearest-rank p99 claim. The B1 pack
+binds its schema/version, role, ordinal, interval, the exact one-cold/
+three-warmup/thirty-measured unique occurrence index, thirty ordered measured
+outcomes, and successful-operation numerator. Their output and verdict
+sections explicitly claim no portable output authority and only denominator
+scope; a broader determinism, waste, memory, output, or conformance claim is
+invalid even if the outer object is rehashed.
+
+Loading likewise binds pathname validation and bytes to one opened object.
+POSIX uses one `O_NOFOLLOW` descriptor; Windows uses one `CreateFileW` handle
+with `FILE_FLAG_OPEN_REPARSE_POINT`. Type/reparse status, bounded size, exact
+read, growth check, and close are evaluated on that same descriptor or handle,
+so a path pre-check followed by a second ordinary open is insufficient.
+
 All referenced bundles and rows are immutable and selected by content digest.
 An unrecorded rerun of a “known good” build and a Markdown summary are not
 normative references. Raw evidence must reproduce every aggregate and verdict.
@@ -2105,6 +2139,16 @@ reserved B1 namespace; POSIX provides no portable atomic identity-selected
 unlink/rmdir against a non-cooperating same-UID mutator. The target remains
 excluded from the default build and CTest, and neither an exact three-replicate
 B1 corpus nor #96 composition is asserted here.
+
+The current #96 source tree composes the exact mixed protocol and five-axis
+evaluator, retains callback entry/completion and claim/publication frontiers at
+the B boundary, and exactly replays lifecycle cursors, capture ordinals, pages,
+and events for memory closure. Its I1/B1 portable packs are explicitly
+denominator-only and require exact sample/occurrence shapes. The reader uses
+one no-follow POSIX descriptor or reparse-point-aware Windows handle for
+same-object validation and reading. These mechanisms and deterministic tests
+do not assert a timed three-replicate corpus, complete live storage authority,
+Windows runtime execution, or machine conformance.
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

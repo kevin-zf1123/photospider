@@ -652,6 +652,13 @@ route: it joins Host/device ledger, Compute I/O, class-partitioned ready,
 lifecycle, and immutable Throughput capacity/reserved snapshots from the same
 service.
 
+The collector's boundary snapshot now closes both callback lifetime and slot
+publication. Bounded callback-entry/completion frontiers surround each whole
+attempt, while claimed and contiguous release-published frontiers track the
+slot prefix. A cut is stable only when all four frontiers are reconciled and
+unchanged before and after copying; equal copied-vector sizes do not hide a
+callback paused between claim and publication.
+
 M1 Compute I/O high-water is likewise event-derived. Every protocol B1 offer
 must resolve to exactly one complete Issue #95 job stream containing Initial,
 each executor-authored admission, each matching settlement, and Final, with
@@ -663,6 +670,14 @@ and cannot increase or repair high-water; the final process cut must still be
 zero. Consequently a short I/O task that starts and settles between two sparse
 cuts remains visible in the event-derived maximum.
 
+Lifecycle evidence is replayed with the same fail-closed discipline. Each
+temporal snapshot retains its capture ordinal and requested `after_cursor`.
+Validation starts at cursor zero and requires the exact page chain, contiguous
+lossless event sequence, stable service/epoch identity, producer cursor/state
+semantics, and the complete service/Graph/admission/terminal/quiescence/
+resource/close effects required by nonempty M1 work. Missing, duplicated,
+reordered, cursor-inconsistent, or post-stop records make memory `Invalid`.
+
 The manual `m1_shared_benchmark` target is `EXCLUDE_FROM_ALL` and absent from
 CTest/CI. It runs all three Graphs through one `EmbeddedHost`, emits a closed M1
 inner row, and materializes six retained sections plus the existing canonical
@@ -672,13 +687,20 @@ and actual environment authority remain mandatory. The inner row retains all
 service-start facts, complete temporal/lifecycle records, event-aligned B1 I/O,
 and the complete reused Issue #93/#95 source rows through their existing closed
 verification encoders. The Issue #93 and #95 manual producers now each
-materialize one closed source-private pair-object pack containing the canonical row,
-one-row bundle, all six source sections and seals, and retained environment
-claims. Process-private actual storage authority is intentionally excluded.
+materialize one closed source-private denominator-only pair-object pack. I1
+retains its schema/version and exactly 200 latency samples; B1 retains schema
+version one, exactly one cold, three warmup, and thirty measured unique job
+occurrences, and thirty ordered outcomes. Their output/verdict sections
+explicitly claim no portable output or conformance authority beyond the I1 p99
+or B1 rate denominator. Process-private actual storage authority is
+intentionally excluded.
 
 Before deriving its timed boundary, the M1 runner requires both pack paths plus
-their exact row/bundle addresses, reads bounded absolute regular files without
-following the final symlink, rematerializes every source, checks the same-role/
+their exact row/bundle addresses. POSIX validates and reads through one
+`O_NOFOLLOW` descriptor; Windows uses one `CreateFileW` handle opened with
+`FILE_FLAG_OPEN_REPARSE_POINT`. Type/reparse status, bounded size, exact bytes,
+growth check, and close are all evaluated on that same opened object. The
+runner rematerializes every denominator source, checks the same-role/
 ordinal/cap/fixture and base-only-I1/full-B1 environment relations, and
 recomputes I1 nearest-rank p99 plus the B1 successful-operation/interval tuple.
 Digest text alone is rejected and no caller-provided p99 or throughput scalar

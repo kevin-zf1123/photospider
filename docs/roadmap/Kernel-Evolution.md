@@ -1312,7 +1312,11 @@ fail-closed five-axis inner evaluator; unchanged base-only-I1/full-B1
 environment delegation; one fixed-capacity shared causal observer plus
 same-coordinate workload fanout; and an observation-only `M1Host` snapshot of
 Host/device, Compute I/O, ready-class, lifecycle, and Throughput reservation
-state. It also adds the source-private canonical 15-field row/five-field bundle
+state. Observer boundaries retain callback entry/completion and slot claim/
+contiguous-publication frontiers, so equal event counts cannot conceal an
+in-flight publisher. Lifecycle snapshots retain request cursors and capture
+ordinals and are replayed as an exact lossless page/event chain. It also adds
+the source-private canonical 15-field row/five-field bundle
 materializer and exact-one/DAG validator, and an exact manual
 `m1_shared_benchmark` target. Deterministic product tests exercise real mixed
 backlog and the exact 31-CPU Throughput/32-CPU shared-headroom boundary without
@@ -1326,11 +1330,16 @@ be zero.
 
 The executable-pair correction now closes the source-object boundary as well.
 The actual Issue #93 I1 and Issue #95 B1 manual producers emit canonical
-pair-object packs from their uncompacted evaluator sources. Before M1 derives
-its timed boundary, it requires both packs and their row/bundle addresses,
-strictly reloads and rematerializes every row/bundle/section/environment claim,
-checks the same-role/ordinal/cap and component identities, and recomputes both
-denominators. Those loaded objects are retained exactly once in the M1 corpus;
+denominator-only pair-object packs from their uncompacted evaluator results.
+I1 requires exactly 200 latency samples; B1 requires schema version one and an
+exact unique 1-cold/3-warmup/30-measured job/outcome shape. Output and verdict
+sections explicitly claim no portable authority beyond the denominator.
+Before M1 derives its timed boundary, it requires both packs and their
+row/bundle addresses, strictly reloads and rematerializes every denominator
+source, checks the same-role/ordinal/cap and component identities, and
+recomputes both denominators. POSIX uses one no-follow descriptor and Windows
+one reparse-point-aware `CreateFileW` handle for same-object type/size/read
+validation. Those loaded objects are retained exactly once in the M1 corpus;
 digest-only input no longer yields a sealed denominator claim.
 
 The I1, I2, B1, and M1 runners are `EXCLUDE_FROM_ALL` and absent from CTest;

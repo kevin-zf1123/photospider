@@ -2682,11 +2682,13 @@ earlier artifacts were safely completed. In particular, a failed/invalid
 admission first appends and flushes its Invalid inner row to `episodes.ndjson`,
 preserving raw admission facts and closed observer/resource state, and then
 writes `failure.json`. The JSON/NDJSON files remain closed Issue #93 inner
-artifacts and make no outer-envelope claim. The pair-object pack is produced
-only from the complete uncompacted 221-row source: it retains the canonical
-I1 row, one-row bundle, all six source sections, exact storage-N/A environment
-claims, and the 200 measured latency samples used to recompute p99. Candidate
-runs additionally require an immutable comparison-reference bundle digest.
+artifacts and make no outer-envelope claim. The denominator-only pair-object
+pack is produced only from the complete uncompacted 221-row source: it retains
+the canonical I1 row, one-row bundle, all six source sections, exact
+storage-N/A environment claims, and the 200 measured latency samples used to
+recompute p99. Its output/verdict sections explicitly deny portable authority
+beyond that denominator. Candidate runs additionally require an immutable
+comparison-reference bundle digest.
 Exit zero means
 all four I1 inner verdicts passed;
 exit two means complete evidence failed at least one threshold; exit one means
@@ -2769,13 +2771,15 @@ existing artifact. The payloads alone exceed 2.2 GiB. Exit zero means all four
 inner verdicts passed, two means complete evidence failed at least one inner
 threshold, and one means parsing, setup, product, durability, or evidence was
 invalid. `row.json` explicitly makes no canonical outer-row/bundle claim; the
-pair-object pack separately retains the canonical isolated row/bundle and all
-source sections. It is produced from the actual 34-job row, including thirty
-ordered verified-endpoint outcomes and the exact measurement interval. The
-pack retains storage claims/proof/eligibility but cannot serialize or mint the
-process-private actual-storage authority, so a portable B1 result may remain
-`Invalid`. Candidate runs additionally require an immutable comparison-
-reference bundle digest.
+denominator-only pair-object pack separately retains the canonical isolated
+row/bundle and all source sections. It requires schema version one and the exact
+one-cold/three-warmup/thirty-measured job index from the actual 34-job row,
+including thirty ordered verified-endpoint outcomes and the exact measurement
+interval. Its output/verdict sections deny portable authority beyond the B1
+rate denominator. The pack retains storage claims/proof/eligibility but cannot
+serialize or mint the process-private actual-storage authority, so a portable
+B1 result remains `Invalid`. Candidate runs additionally require an immutable
+comparison-reference bundle digest.
 Building the target or running `--help` is only a harness smoke; this document
 does not claim that an exact 34-job invocation or three-replicate B1 machine run
 has been executed.
@@ -2795,6 +2799,11 @@ tampering, denominator/source mismatches, missing/duplicate/reordered/unknown/
 over-limit I/O transitions, and nonzero final I/O state. A dedicated regression
 keeps every sparse temporal I/O current value at zero while proving that a
 short accepted/settled task still raises the event-derived high-water. The
+callback-boundary regression pauses after slot claim but before release
+publication and proves that unchanged copied-record counts cannot satisfy the
+entry/completion/claim/published cut. Lifecycle replay regressions retain
+request cursors and capture ordinals, then reject an empty chain, missing page
+or record, duplicate, reorder, broken cursor/cut, and post-stop event. The
 product suite consumes product-authored per-start ready/lifecycle/candidate/
 resource facts, proves a Throughput Run reaches terminal and resource
 settlement while Interactive work remains outstanding, and proves the exact
@@ -2806,8 +2815,13 @@ thresholds.
 The pair-object tests also exercise the real Issue #93 and #95 evaluator-to-
 producer paths, canonical pack round trips, exact section order/cardinality,
 source rematerialization, digest/object mismatch, wrong role/ordinal,
-duplicate corpus insertion, and bounded absolute regular-file reads. Relative,
-empty, oversized, directory, and final-component symlink inputs are rejected.
+duplicate corpus insertion, and bounded absolute regular-file reads. I1 packs
+must retain exactly 200 latency samples; B1 packs must retain schema version one
+and a unique 1-cold/3-warmup/30-measured job index plus 30 ordered outcomes.
+Loaded validation rejects portable output authority or any claim wider than
+denominator-only. Relative, empty, oversized, directory, and final-component
+symlink inputs are rejected. The conditional Windows source path is also
+cross-compiled for syntax; this is not a Windows runtime result.
 
 The exact M1 replicate is the manual `m1_shared_benchmark` target. It is
 `EXCLUDE_FROM_ALL`, has no `add_test`, and is absent from default builds and CI:
@@ -2819,7 +2833,8 @@ cmake --build build --target m1_shared_benchmark -j
 
 One invocation requires a fresh absolute empty output directory outside the
 checkout, canonical base/storage/environment-class claims, retained storage
-proof, subject role, ordinal, and two complete isolated pair-object packs. Each
+proof, subject role, ordinal, and two canonical denominator-only pair-object
+packs. Each
 pack path must be an absolute bounded regular file and is accompanied by the
 exact row and bundle digests. The I1 pack must come from the same-role,
 same-ordinal cap-eight I1 producer; the B1 pack must come from the same-role,
@@ -2828,8 +2843,11 @@ environment-class claims. Digest text without the corresponding object is
 rejected during setup; no numeric p99 or B1-rate option is accepted. A
 candidate also requires its comparison-reference bundle address.
 
-Before deriving the timed C/W/B/U boundary, the runner reads each pack once
-through a no-follow descriptor, parses the closed pack schema, recomputes the
+Before deriving the timed C/W/B/U boundary, the runner reads each pack through
+one opened object: an `O_NOFOLLOW` descriptor on POSIX or a `CreateFileW`
+handle with `FILE_FLAG_OPEN_REPARSE_POINT` on Windows. Type/reparse checks,
+bounded size, exact bytes, growth check, and close use that same object. The
+runner parses the closed pack schema, recomputes the
 row/bundle/section addresses, rematerializes every source object, enforces
 one-row membership and seal order, checks role/workload/cap/ordinal and the
 base-only I1/full B1 environment relations, and recomputes the I1 p99 plus B1

@@ -1061,7 +1061,10 @@ current-hold、carryover/FIFO、不可变 attribution、独立 producer cycle、
 settlement；fail-closed 的五轴 inner evaluator；原样委托的 base-only-I1/full-B1 environment
 relation；一个固定容量共享 causal observer 与同坐标 workload fanout；以及只用于观测的
 `M1Host` snapshot，该 snapshot 包含 Host/device、Compute I/O、ready-class、lifecycle 与
-Throughput reservation state。它还新增 source-private canonical 15-field row/five-field
+Throughput reservation state。Observer boundary 保留 callback entry/completion 与 slot
+claim/连续 publication frontier，因此相等 event count 不能隐藏 in-flight publisher。
+Lifecycle snapshot 保留 request cursor 与 capture ordinal，并作为精确 lossless page/event
+chain replay。它还新增 source-private canonical 15-field row/five-field
 bundle materializer 与 exact-one/DAG validator，以及精确手工 `m1_shared_benchmark` target。
 确定性产品测试通过真实 mixed backlog 与精确 31-CPU Throughput/32-CPU shared-headroom
 boundary 验证机制，不采用 wall-time SLO。已完成的 evidence 纠错移除调用者提供的 M1
@@ -1071,10 +1074,14 @@ committed grant；并且只从完整 event-aligned job stream 推导 Compute I/O
 current snapshot 继续只作 diagnostic，最终 process I/O 必须归零。
 
 Executable-pair 修正还闭合了 source-object boundary。真实 Issue #93 I1 与 Issue #95 B1
-手工 producer 会从尚未 compact 的 evaluator source 生成 canonical pair-object pack。M1 在
-推导 timed boundary 前必须取得两份 pack 及其 row/bundle address，严格重新加载并物化每个
-row/bundle/section/environment claim，检查同 role/ordinal/cap 与 component identity，并重算
-两个 denominator。这些已加载 object 会在 M1 corpus 中 exact-once 保留；digest-only 输入不再
+手工 producer 会从尚未 compact 的 evaluator result 生成 canonical、denominator-only
+pair-object pack。I1 要求精确 200 个 latency sample；B1 要求 schema version one 与精确唯一
+1-cold/3-warmup/30-measured job/outcome shape。Output/verdict section 明确不声明超出
+denominator 的 portable authority。M1 在推导 timed boundary 前必须取得两份 pack 及其
+row/bundle address，严格重新加载并物化每个 denominator source，检查同
+role/ordinal/cap 与 component identity，并重算两个 denominator。POSIX 使用一个 no-follow
+descriptor，Windows 使用一个 reparse-point-aware `CreateFileW` handle，以同一 object 验证
+type/size/read。这些已加载 object 会在 M1 corpus 中 exact-once 保留；digest-only 输入不再
 生成 sealed denominator claim。
 
 I1、I2、B1 与 M1 runner 均为 `EXCLUDE_FROM_ALL` 且不属于 CTest；它们都不改变 installed

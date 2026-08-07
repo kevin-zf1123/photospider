@@ -1326,6 +1326,12 @@ current 状态、取消它或改写 snapshot。旧 generation 仍必须在未改
 cancellation、terminal 或 settlement event 都保留更晚的 event sequence 与不可变 warmup
 phase，而它在 boundary 后产生的物理 effect 仍属于 measured-window evidence。
 
+只有 callback lifecycle 与 slot publication lifecycle 都闭合时，observer boundary 才
+stable。每个 callback 围绕完整 attempt 推进有界 entry/completion frontier，而 reservation
+与 release publication 分别推进 claimed frontier 与连续 published frontier。Boundary
+snapshot 只复制 published prefix，并在 copy 前后比较全部四个 frontier。Record count
+相等不能证明 quiescence；callback 在 claim 后、publication 前暂停会使 cut invalid。
+
 同 timestamp 的 lifecycle event 排在 boundary 前时，snapshot 反映其新 state；排在
 其后时，它是 cross-boundary event。同 timestamp 的 terminal warmup event 绝不会在
 步骤一之后创建新的 warmup successor。Phase boundary 不包含 wait、cooling interval、
@@ -1356,6 +1362,13 @@ reservation/grant、Compute I/O count 与 Host/device/ready-memory high-water �
 phase 的物理影响。因此 carryover 不能从 contention 或 memory evidence 中隐藏。
 Class-start bound 会观察 measured interval 内每一次 actual Throughput start，包括
 warmup start；Jain completed service 则只使用 measured-occurrence service。
+
+每个 retained temporal capture 还记录其 row-local ordinal 与精确 lifecycle request cursor。
+Evaluator 从 cursor zero 重放有界 lifecycle page，要求精确 page/capture order、单一 service
+与 epoch、连续 lossless event sequence、producer 定义的 empty-ring/next-cursor 语义、
+单调 state/timestamp、封闭 event/category value，以及非空 M1 execution 要求的全部
+service/Graph/admission/terminal/quiescence/resource/close effect。缺失、重复、重排、截断、
+cursor 不一致或 stop 后 evidence 会使 memory 为 Invalid。
 
 Warmup evidence 仍是必需项：carryover failure、event evidence 缺失、event sequence
 重复、event coordinate 无法形成全序、非法 phase rewrite、boundary-only
@@ -1781,6 +1794,19 @@ I1 latency pair，也不会使其无效。Paired B1 fixture/corpus/golden hash �
 错误、跨 subject，存在 unknown/unobserved/unsupported/unprovable storage state，
 或其他不兼容证据，都会使受影响 M1 relative verdict 成为 `invalid`。
 
+Portable pair pack 是 denominator-only auxiliary，而不是 portable isolated-row verdict。
+I1 pack 绑定 schema/version、role、ordinal、精确 200 条正值 latency record 与 nearest-rank
+p99 claim。B1 pack 绑定 schema/version、role、ordinal、interval、精确 one-cold/
+three-warmup/thirty-measured 唯一 occurrence index、三十条有序 measured outcome 与
+successful-operation numerator。其 output/verdict section 明确不声明 portable output
+authority，且只声明 denominator scope；即使重新 hash outer object，更宽的 determinism、
+waste、memory、output 或 conformance claim 仍为 invalid。
+
+Loading 同样把 pathname validation 与 byte 绑定到同一个 opened object。POSIX 使用一个
+`O_NOFOLLOW` descriptor；Windows 使用一个带 `FILE_FLAG_OPEN_REPARSE_POINT` 的
+`CreateFileW` handle。Type/reparse status、有界 size、精确 read、growth check 与 close 都
+在同一个 descriptor/handle 上评估，因此 path pre-check 后再第二次 ordinary open 不充分。
+
 所有被引用 bundle 与 row 都不可变，并按 content digest 选择。未记录的“known
 good” build 重跑与 Markdown summary 都不是规范 reference。Raw evidence 必须能够
 复算每个 aggregate 与 verdict。
@@ -1812,6 +1838,14 @@ protection 与 transaction-event declaration，因此会输出 Invalid，而不�
 reserved B1 namespace；面对不协作 same-UID mutator，POSIX 没有 portable atomic identity-
 selected `unlink`/`rmdir`。该 target 仍排除在 default build 与 CTest 之外，本文也不声明已经
 产生精确三 replicate B1 corpus 或完成 #96 composition。
+
+当前 #96 源码树组合了精确 mixed protocol 与五轴 evaluator，在 B boundary 保留 callback
+entry/completion 与 claim/publication frontier，并为 memory closure 精确重放 lifecycle
+cursor、capture ordinal、page 与 event。其 I1/B1 portable pack 明确为 denominator-only，
+并要求精确 sample/occurrence shape。Reader 使用一个 no-follow POSIX descriptor 或
+reparse-point-aware Windows handle 完成同一 object validation 与 read。这些 mechanism 与
+deterministic test 不宣称 timed three-replicate corpus、完整 live storage authority、Windows
+runtime execution 或 machine conformance。
 
 每个 Issue 可以为其机制新增长期确定性行为测试，但不能重定义 workload，也不能
 用缺失、invalid 或不同版本的行提升目标。与机器相关的 latency、throughput 与
