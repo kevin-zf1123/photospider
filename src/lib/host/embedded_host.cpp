@@ -2951,7 +2951,9 @@ class EmbeddedHost final : public Host,
         state_->execution_service->throughput_reservation_snapshot(),
         state_->execution_service->ready_class_snapshot(),
         state_->execution_service->lifecycle_snapshot(
-            after_cursor, static_cast<std::uint32_t>(limit))};
+            after_cursor, static_cast<std::uint32_t>(limit)),
+        after_cursor,
+        std::numeric_limits<std::size_t>::max()};
   }
 
   /** @copydoc benchmark::I2Host::acquire_i2_value */

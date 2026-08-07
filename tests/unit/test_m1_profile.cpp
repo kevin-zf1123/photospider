@@ -4,6 +4,7 @@
  */
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -26,6 +27,46 @@
 
 namespace ps::benchmark {
 namespace {
+
+/**
+ * @brief Pauses one deterministic observer callback after slot claim.
+ * @throws Nothing for construction, destruction, or callback dispatch.
+ * @note This deliberately blocking hook is test-only and must never be wired
+ * into a production benchmark collector.
+ */
+class PausingPublicationHook final : public M1ObservationPublicationHook {
+ public:
+  /** @copydoc M1ObservationPublicationHook::after_slot_claim */
+  void after_slot_claim() noexcept override {
+    claimed_.store(true, std::memory_order_release);
+    while (!released_.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  }
+
+  /**
+   * @brief Tests whether the callback reached the post-claim hook.
+   * @return True after the callback has claimed its unique slot.
+   * @throws Nothing.
+   */
+  bool claimed() const noexcept {
+    return claimed_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Releases the paused callback to publish and complete.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void release() noexcept { released_.store(true, std::memory_order_release); }
+
+ private:
+  /** @brief True after the callback claims its slot. */
+  std::atomic<bool> claimed_{false};
+
+  /** @brief True when the callback may finish publication. */
+  std::atomic<bool> released_{false};
+};
 
 /**
  * @brief Builds one complete passing inner-fairness input.
@@ -522,6 +563,123 @@ M1ExecutionSnapshot make_m1_snapshot(bool active, ResourceVector high_water) {
 }
 
 /**
+ * @brief Builds one canonical same-service lifecycle event for row tests.
+ * @param sequence Exact positive telemetry order.
+ * @param kind Closed event transition kind.
+ * @param counters Complete post-transition counters.
+ * @return Versioned event with deterministic identities and timestamp.
+ * @throws Nothing.
+ */
+compute::ExecutionLifecycleEvent make_m1_lifecycle_event(
+    std::uint64_t sequence, compute::ExecutionLifecycleEventKind kind,
+    compute::ExecutionLifecycleCounters counters) noexcept {
+  compute::ExecutionLifecycleEvent event;
+  event.sequence = sequence;
+  event.timestamp_us = sequence;
+  event.service_instance_id = 1U;
+  event.telemetry_epoch = 1U;
+  event.kind = kind;
+  event.counters = counters;
+  if (kind != compute::ExecutionLifecycleEventKind::ServiceStarted &&
+      kind != compute::ExecutionLifecycleEventKind::ServiceStopped) {
+    event.graph_instance_id = 1U;
+  }
+  switch (kind) {
+    case compute::ExecutionLifecycleEventKind::CandidateBegan:
+      event.generation = 1U;
+      break;
+    case compute::ExecutionLifecycleEventKind::BundleAdmitted:
+    case compute::ExecutionLifecycleEventKind::RunTerminal:
+    case compute::ExecutionLifecycleEventKind::RunQuiescent:
+    case compute::ExecutionLifecycleEventKind::ResourceSettled:
+    case compute::ExecutionLifecycleEventKind::RunUnregistered:
+      event.run_id = 1U;
+      event.generation = 1U;
+      break;
+    case compute::ExecutionLifecycleEventKind::GraphClosing:
+      event.category = compute::ExecutionLifecycleCategory::GraphClose;
+      event.generation = 1U;
+      break;
+    case compute::ExecutionLifecycleEventKind::GraphRowRemoved:
+      event.generation = 1U;
+      break;
+    default:
+      break;
+  }
+  if (kind == compute::ExecutionLifecycleEventKind::RunTerminal) {
+    event.category = compute::ExecutionLifecycleCategory::Succeeded;
+  }
+  return event;
+}
+
+/**
+ * @brief Assigns one exact lossless cursor page to a temporal test snapshot.
+ * @param snapshot Mutable execution snapshot.
+ * @param ordinal Chronological capture coordinate.
+ * @param after_cursor Exact requested prior cut.
+ * @param snapshot_cut Exact atomic page cut.
+ * @param records Complete contiguous records after the cursor.
+ * @return Nothing.
+ * @throws std::bad_alloc when record ownership moves.
+ */
+void set_m1_lifecycle_page(
+    M1ExecutionSnapshot* snapshot, std::size_t ordinal,
+    std::uint64_t after_cursor, std::uint64_t snapshot_cut,
+    std::vector<compute::ExecutionLifecycleEvent> records) {
+  snapshot->temporal_capture_ordinal = ordinal;
+  snapshot->lifecycle_after_cursor = after_cursor;
+  snapshot->lifecycle.snapshot_cut = snapshot_cut;
+  snapshot->lifecycle.first_retained_sequence = snapshot_cut == 0U ? 0U : 1U;
+  snapshot->lifecycle.next_sequence = snapshot_cut + 1U;
+  snapshot->lifecycle.records = std::move(records);
+  snapshot->lifecycle.next_cursor = snapshot_cut;
+}
+
+/**
+ * @brief Populates the four passing snapshots with one continuous history.
+ * @param snapshots Exact four-snapshot test timeline to mutate.
+ * @return Nothing.
+ * @throws std::invalid_argument when the timeline cardinality drifts.
+ * @throws std::bad_alloc when event vectors allocate.
+ */
+void configure_passing_m1_lifecycle_history(
+    std::vector<M1ExecutionSnapshot>* snapshots) {
+  if (snapshots == nullptr || snapshots->size() != 4U) {
+    throw std::invalid_argument(
+        "M1 lifecycle test history requires exactly four snapshots");
+  }
+  const auto zero = snapshots->front().lifecycle.counters;
+  const auto active = (*snapshots)[1U].lifecycle.counters;
+  set_m1_lifecycle_page(
+      &(*snapshots)[0U], 0U, 0U, 2U,
+      {make_m1_lifecycle_event(
+           1U, compute::ExecutionLifecycleEventKind::ServiceStarted, zero),
+       make_m1_lifecycle_event(
+           2U, compute::ExecutionLifecycleEventKind::GraphRegistered, zero)});
+  set_m1_lifecycle_page(
+      &(*snapshots)[1U], 1U, 2U, 8U,
+      {make_m1_lifecycle_event(
+           3U, compute::ExecutionLifecycleEventKind::CandidateBegan, active),
+       make_m1_lifecycle_event(
+           4U, compute::ExecutionLifecycleEventKind::BundleAdmitted, active),
+       make_m1_lifecycle_event(
+           5U, compute::ExecutionLifecycleEventKind::RunTerminal, active),
+       make_m1_lifecycle_event(
+           6U, compute::ExecutionLifecycleEventKind::RunQuiescent, active),
+       make_m1_lifecycle_event(
+           7U, compute::ExecutionLifecycleEventKind::ResourceSettled, active),
+       make_m1_lifecycle_event(
+           8U, compute::ExecutionLifecycleEventKind::RunUnregistered, active)});
+  set_m1_lifecycle_page(&(*snapshots)[2U], 2U, 8U, 8U, {});
+  set_m1_lifecycle_page(
+      &(*snapshots)[3U], 3U, 8U, 10U,
+      {make_m1_lifecycle_event(
+           9U, compute::ExecutionLifecycleEventKind::GraphClosing, zero),
+       make_m1_lifecycle_event(
+           10U, compute::ExecutionLifecycleEventKind::GraphRowRemoved, zero)});
+}
+
+/**
  * @brief Builds one valid event-aligned executor snapshot for a test task.
  * @param active_tasks Zero or one active task.
  * @param active_bytes Exact active charge paired with `active_tasks`.
@@ -633,6 +791,7 @@ M1InnerRowInput make_passing_inner_row_input() {
                               make_m1_snapshot(true, active_high_water),
                               make_m1_snapshot(true, active_high_water),
                               make_m1_snapshot(false, active_high_water)};
+  configure_passing_m1_lifecycle_history(&input.temporal_snapshots);
   input.occurrence_attribution_proved = true;
   input.temporal_effects_complete = true;
   return input;
@@ -862,6 +1021,97 @@ TEST(M1Profile, RejectsMissingDuplicateMalformedAndOverlimitIoEvidence) {
   nonzero_final.temporal_snapshots.back().compute_io.active_planned_bytes = 1U;
   EXPECT_EQ(evaluate_m1_inner_row(std::move(nonzero_final)).memory_verdict,
             I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves lifecycle pages fail closed for continuity and post-stop drift.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, RejectsLifecyclePageContinuityAndPostStopEvidence) {
+  M1InnerRowInput empty = make_passing_inner_row_input();
+  for (std::size_t index = 0U; index < empty.temporal_snapshots.size();
+       ++index) {
+    set_m1_lifecycle_page(&empty.temporal_snapshots[index], index, 0U, 0U, {});
+  }
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(empty)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput missing_page = make_passing_inner_row_input();
+  missing_page.temporal_snapshots.erase(
+      missing_page.temporal_snapshots.begin() + 1);
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(missing_page)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput missing_record = make_passing_inner_row_input();
+  missing_record.temporal_snapshots[1U].lifecycle.records.erase(
+      missing_record.temporal_snapshots[1U].lifecycle.records.begin() + 2);
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(missing_record)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput duplicate = make_passing_inner_row_input();
+  duplicate.temporal_snapshots[1U].lifecycle.records[1U].sequence = 3U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(duplicate)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput reordered = make_passing_inner_row_input();
+  std::swap(reordered.temporal_snapshots[1U].lifecycle.records[0U],
+            reordered.temporal_snapshots[1U].lifecycle.records[1U]);
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(reordered)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput broken_cursor = make_passing_inner_row_input();
+  broken_cursor.temporal_snapshots[2U].lifecycle_after_cursor = 7U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(broken_cursor)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput broken_cut = make_passing_inner_row_input();
+  broken_cut.temporal_snapshots[2U].lifecycle.snapshot_cut = 9U;
+  broken_cut.temporal_snapshots[2U].lifecycle.next_cursor = 9U;
+  broken_cut.temporal_snapshots[2U].lifecycle.next_sequence = 10U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(broken_cut)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput broken_identity = make_passing_inner_row_input();
+  broken_identity.temporal_snapshots[0U]
+      .lifecycle.records[1U]
+      .graph_instance_id = 0U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(broken_identity)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput post_stop = make_passing_inner_row_input();
+  M1ExecutionSnapshot& stopped = post_stop.temporal_snapshots.back();
+  compute::ExecutionLifecycleEvent stop = make_m1_lifecycle_event(
+      11U, compute::ExecutionLifecycleEventKind::ServiceStopped,
+      stopped.lifecycle.counters);
+  stop.generation = 1U;
+  stopped.lifecycle.records.push_back(stop);
+  stopped.lifecycle.snapshot_cut = 11U;
+  stopped.lifecycle.next_cursor = 11U;
+  stopped.lifecycle.next_sequence = std::numeric_limits<std::uint64_t>::max();
+  stopped.lifecycle.shutdown_generation = 1U;
+  stopped.lifecycle.service_state =
+      compute::ExecutionLifecycleServiceState::Stopped;
+
+  M1ExecutionSnapshot after_stop = stopped;
+  set_m1_lifecycle_page(
+      &after_stop, 4U, 11U, 12U,
+      {make_m1_lifecycle_event(
+          12U, compute::ExecutionLifecycleEventKind::GraphRegistered,
+          stopped.lifecycle.counters)});
+  after_stop.lifecycle.next_sequence =
+      std::numeric_limits<std::uint64_t>::max();
+  after_stop.lifecycle.shutdown_generation = 1U;
+  after_stop.lifecycle.service_state =
+      compute::ExecutionLifecycleServiceState::Stopped;
+  post_stop.temporal_snapshots.push_back(std::move(after_stop));
+  const M1InnerRow post_stop_row = evaluate_m1_inner_row(std::move(post_stop));
+  EXPECT_EQ(post_stop_row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_TRUE(std::any_of(
+      post_stop_row.validity_reasons.begin(),
+      post_stop_row.validity_reasons.end(), [](const std::string& reason) {
+        return reason.find("ordinary event appears after ServiceStopped") !=
+               std::string::npos;
+      }));
 }
 
 /**
@@ -1233,11 +1483,82 @@ TEST(M1Profile, ObservationCallbacksRemainFiniteUnderConcurrency) {
   EXPECT_FALSE(snapshot.overflowed);
   EXPECT_FALSE(snapshot.sequence_exhausted);
   EXPECT_FALSE(snapshot.qos_mismatch);
+  EXPECT_TRUE(snapshot.stable_publication_cut);
+  EXPECT_EQ(snapshot.callback_entry_frontier, kThreadCount * kEventsPerThread);
+  EXPECT_EQ(snapshot.callback_completion_frontier,
+            kThreadCount * kEventsPerThread);
+  EXPECT_EQ(snapshot.claimed_slot_frontier, kThreadCount * kEventsPerThread);
+  EXPECT_EQ(snapshot.published_slot_frontier, kThreadCount * kEventsPerThread);
   ASSERT_EQ(snapshot.events.size(), kThreadCount * kEventsPerThread);
   for (std::size_t index = 1U; index < snapshot.events.size(); ++index) {
     EXPECT_LT(snapshot.events[index - 1U].causal_sequence,
               snapshot.events[index].causal_sequence);
   }
+}
+
+/**
+ * @brief Proves a claimed-but-unpublished callback invalidates the M1 cut.
+ * @throws GoogleTest assertion control, thread, or observer allocation
+ * failures.
+ */
+TEST(M1Profile, ObservationBoundaryRejectsClaimedUnpublishedCallback) {
+  const auto hook = std::make_shared<PausingPublicationHook>();
+  EXPECT_THROW(M1FairnessObservationCollector(1U, 1U, nullptr),
+               std::invalid_argument);
+  M1FairnessObservationCollector collector(1U, 1U, hook);
+  const auto sink = collector.make_sink(M1ObservedRequestTag::Interactive);
+  compute::ComputeRun run(make_observer_submission(
+      "m1-observer-paused", 51U, compute::ComputeRunQosClass::Interactive));
+  const M1FairnessObservationSnapshot before = collector.snapshot();
+  ASSERT_TRUE(before.stable_publication_cut);
+
+  std::thread worker([&] {
+    const compute::ComputeRunObservationCoordinate coordinate =
+        sink->reserve_causal_coordinate();
+    sink->on_service_start(
+        run.descriptor(),
+        compute::ComputeRunTaskIdentity(run.descriptor().id(),
+                                        compute::ComputeRunLocalTaskId(1U)),
+        1U, compute::ComputeRunServiceStartObservation{true, true, true},
+        coordinate);
+  });
+  for (std::size_t attempt = 0U; attempt < 1000000U && !hook->claimed();
+       ++attempt) {
+    std::this_thread::yield();
+  }
+  if (!hook->claimed()) {
+    hook->release();
+    worker.join();
+    FAIL() << "observer callback did not reach the deterministic claim hook";
+    return;
+  }
+
+  const M1FairnessObservationSnapshot in_flight = collector.snapshot();
+  EXPECT_FALSE(in_flight.stable_publication_cut);
+  EXPECT_EQ(in_flight.callback_entry_frontier, 1U);
+  EXPECT_EQ(in_flight.callback_completion_frontier, 0U);
+  EXPECT_EQ(in_flight.claimed_slot_frontier, 1U);
+  EXPECT_EQ(in_flight.published_slot_frontier, 0U);
+  EXPECT_TRUE(in_flight.events.empty());
+  EXPECT_FALSE(m1_observation_cut_unchanged(before, in_flight));
+
+  M1ProtocolEvidenceInput protocol = make_passing_protocol();
+  protocol.boundary_was_zero_duration =
+      m1_observation_cut_unchanged(before, in_flight);
+  protocol.raw_history_preserved = protocol.boundary_was_zero_duration;
+  EXPECT_EQ(evaluate_m1_protocol(std::move(protocol)).verdict,
+            I1Verdict::Invalid);
+
+  hook->release();
+  worker.join();
+  const M1FairnessObservationSnapshot after = collector.snapshot();
+  EXPECT_TRUE(after.stable_publication_cut);
+  EXPECT_EQ(after.callback_entry_frontier, 1U);
+  EXPECT_EQ(after.callback_completion_frontier, 1U);
+  EXPECT_EQ(after.claimed_slot_frontier, 1U);
+  EXPECT_EQ(after.published_slot_frontier, 1U);
+  ASSERT_EQ(after.events.size(), 1U);
+  EXPECT_FALSE(m1_observation_cut_unchanged(before, after));
 }
 
 /**

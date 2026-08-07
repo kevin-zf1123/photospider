@@ -188,8 +188,11 @@ class M1FairnessObservationCollector::Impl final
    * @throws std::invalid_argument when capacity is zero.
    * @throws std::bad_alloc when slot ownership cannot allocate.
    */
-  Impl(std::size_t capacity, std::uint64_t first_sequence)
-      : capacity_(capacity), next_sequence_(first_sequence) {
+  Impl(std::size_t capacity, std::uint64_t first_sequence,
+       std::shared_ptr<M1ObservationPublicationHook> publication_hook = {})
+      : capacity_(capacity),
+        next_sequence_(first_sequence),
+        publication_hook_(std::move(publication_hook)) {
     if (capacity == 0U || first_sequence == 0U) {
       throw std::invalid_argument(
           "M1 observation capacity and first sequence must be positive.");
@@ -343,6 +346,47 @@ class M1FairnessObservationCollector::Impl final
   }
 
   /**
+   * @brief Completes one successfully counted callback on scope exit.
+   * @throws Nothing for construction and destruction.
+   * @note The guard never owns product state and only advances the bounded
+   * diagnostic completion frontier.
+   */
+  class CallbackCompletionGuard final {
+   public:
+    /**
+     * @brief Binds one active entry to its collector implementation.
+     * @param impl Non-null collector implementation.
+     * @param active True only when the entry frontier advanced.
+     * @throws Nothing.
+     */
+    CallbackCompletionGuard(Impl* impl, bool active) noexcept
+        : impl_(impl), active_(active) {}
+
+    /**
+     * @brief Advances the matching completion frontier when active.
+     * @throws Nothing; bounded frontier failure becomes sticky evidence.
+     */
+    ~CallbackCompletionGuard() noexcept {
+      if (active_) {
+        impl_->advance_callback_frontier(&impl_->callback_completion_frontier_);
+      }
+    }
+
+    /** @brief Prevents double completion through copied scope ownership. */
+    CallbackCompletionGuard(const CallbackCompletionGuard&) = delete;
+
+    /** @brief Prevents replacing one active completion responsibility. */
+    CallbackCompletionGuard& operator=(const CallbackCompletionGuard&) = delete;
+
+   private:
+    /** @brief Non-owning implementation alive for the callback duration. */
+    Impl* impl_;
+
+    /** @brief Whether the paired entry frontier advanced successfully. */
+    bool active_;
+  };
+
+  /**
    * @brief Reserves one shared nonzero observer coordinate without blocking.
    * @return Steady sample and unique sequence, or zero after exhaustion.
    * @throws Nothing.
@@ -382,6 +426,9 @@ class M1FairnessObservationCollector::Impl final
    * @throws Nothing; capacity/sequence exhaustion is recorded explicitly.
    */
   void record(M1FairnessObservation event) noexcept {
+    const bool entry_counted =
+        advance_callback_frontier(&callback_entry_frontier_);
+    CallbackCompletionGuard completion(this, entry_counted);
     if (event.causal_sequence == 0U) {
       sequence_exhausted_.store(true, std::memory_order_release);
       return;
@@ -401,6 +448,9 @@ class M1FairnessObservationCollector::Impl final
       if (next_slot_.compare_exchange_strong(index, index + 1U,
                                              std::memory_order_relaxed,
                                              std::memory_order_relaxed)) {
+        if (publication_hook_ != nullptr) {
+          publication_hook_->after_slot_claim();
+        }
         slots_[index].value = event;
         slots_[index].published.store(true, std::memory_order_release);
         return;
@@ -416,12 +466,19 @@ class M1FairnessObservationCollector::Impl final
    */
   M1FairnessObservationSnapshot snapshot() const {
     M1FairnessObservationSnapshot result;
-    result.events.reserve(
-        std::min(next_slot_.load(std::memory_order_acquire), capacity_));
-    for (std::size_t index = 0U; index < capacity_; ++index) {
-      if (slots_[index].published.load(std::memory_order_acquire)) {
-        result.events.push_back(slots_[index].value);
-      }
+    const std::uint64_t entry_before =
+        callback_entry_frontier_.load(std::memory_order_acquire);
+    const std::uint64_t completion_before =
+        callback_completion_frontier_.load(std::memory_order_acquire);
+    const std::size_t claimed_before =
+        next_slot_.load(std::memory_order_acquire);
+    const std::size_t bounded_claimed = std::min(claimed_before, capacity_);
+    result.events.reserve(bounded_claimed);
+    std::size_t published_prefix = 0U;
+    while (published_prefix < bounded_claimed &&
+           slots_[published_prefix].published.load(std::memory_order_acquire)) {
+      result.events.push_back(slots_[published_prefix].value);
+      ++published_prefix;
     }
     std::sort(
         result.events.begin(), result.events.end(),
@@ -432,10 +489,53 @@ class M1FairnessObservationCollector::Impl final
     result.sequence_exhausted =
         sequence_exhausted_.load(std::memory_order_acquire);
     result.qos_mismatch = qos_mismatch_.load(std::memory_order_acquire);
+    const std::size_t claimed_after =
+        next_slot_.load(std::memory_order_acquire);
+    const std::uint64_t completion_after =
+        callback_completion_frontier_.load(std::memory_order_acquire);
+    const std::uint64_t entry_after =
+        callback_entry_frontier_.load(std::memory_order_acquire);
+    result.callback_entry_frontier = entry_after;
+    result.callback_completion_frontier = completion_after;
+    result.claimed_slot_frontier = claimed_after;
+    result.published_slot_frontier = published_prefix;
+    result.callback_frontier_exhausted =
+        callback_frontier_exhausted_.load(std::memory_order_acquire);
+    result.stable_publication_cut =
+        !result.callback_frontier_exhausted &&
+        entry_before == completion_before && entry_before == entry_after &&
+        completion_before == completion_after &&
+        entry_after == completion_after && claimed_before == claimed_after &&
+        claimed_after <= capacity_ && published_prefix == claimed_after;
     return result;
   }
 
  private:
+  /**
+   * @brief Advances one saturating callback frontier with bounded retries.
+   * @param frontier Entry or completion counter to advance once.
+   * @return True only when the counter advanced without wrapping.
+   * @throws Nothing; exhaustion or excessive contention becomes sticky
+   * invalidity evidence.
+   */
+  bool advance_callback_frontier(
+      std::atomic<std::uint64_t>* frontier) noexcept {
+    std::uint64_t current = frontier->load(std::memory_order_relaxed);
+    for (std::size_t attempt = 0U; attempt < kM1AtomicAttemptLimit; ++attempt) {
+      if (current == std::numeric_limits<std::uint64_t>::max()) {
+        callback_frontier_exhausted_.store(true, std::memory_order_release);
+        return false;
+      }
+      if (frontier->compare_exchange_strong(current, current + 1U,
+                                            std::memory_order_acq_rel,
+                                            std::memory_order_relaxed)) {
+        return true;
+      }
+    }
+    callback_frontier_exhausted_.store(true, std::memory_order_release);
+    return false;
+  }
+
   /**
    * @brief One release-published fixed-capacity observation cell.
    * @throws Nothing for construction and destruction.
@@ -457,6 +557,15 @@ class M1FairnessObservationCollector::Impl final
   /** @brief Next unique event-cell index claimed by a callback. */
   std::atomic<std::size_t> next_slot_{0U};
 
+  /** @brief Monotonic count of callbacks that entered `record`. */
+  std::atomic<std::uint64_t> callback_entry_frontier_{0U};
+
+  /** @brief Monotonic count of callbacks that exited `record`. */
+  std::atomic<std::uint64_t> callback_completion_frontier_{0U};
+
+  /** @brief Sticky callback-frontier exhaustion/contention evidence. */
+  std::atomic<bool> callback_frontier_exhausted_{false};
+
   /** @brief Next shared nonzero observer-local causal sequence. */
   std::atomic<std::uint64_t> next_sequence_;
 
@@ -468,6 +577,9 @@ class M1FairnessObservationCollector::Impl final
 
   /** @brief Sticky tag/actual-QoS contradiction evidence. */
   std::atomic<bool> qos_mismatch_{false};
+
+  /** @brief Optional post-claim hook installed only by deterministic tests. */
+  const std::shared_ptr<M1ObservationPublicationHook> publication_hook_;
 };
 
 /** @copydoc M1FairnessObservationCollector::M1FairnessObservationCollector */
@@ -475,9 +587,22 @@ M1FairnessObservationCollector::M1FairnessObservationCollector(
     std::size_t capacity)
     : M1FairnessObservationCollector(capacity, 1U) {}
 
+/** @copydoc M1FairnessObservationCollector::M1FairnessObservationCollector */
 M1FairnessObservationCollector::M1FairnessObservationCollector(
     std::size_t capacity, std::uint64_t first_sequence)
     : impl_(std::make_shared<Impl>(capacity, first_sequence)) {}
+
+/** @copydoc M1FairnessObservationCollector::M1FairnessObservationCollector */
+M1FairnessObservationCollector::M1FairnessObservationCollector(
+    std::size_t capacity, std::uint64_t first_sequence,
+    std::shared_ptr<M1ObservationPublicationHook> publication_hook) {
+  if (publication_hook == nullptr) {
+    throw std::invalid_argument(
+        "M1 observation publication test hook must be non-null.");
+  }
+  impl_ = std::make_shared<Impl>(capacity, first_sequence,
+                                 std::move(publication_hook));
+}
 
 /** @copydoc M1FairnessObservationCollector::make_sink */
 std::shared_ptr<compute::ComputeRunObservationSink>
@@ -491,6 +616,19 @@ M1FairnessObservationCollector::make_sink(M1ObservedRequestTag tag) const {
 /** @copydoc M1FairnessObservationCollector::snapshot */
 M1FairnessObservationSnapshot M1FairnessObservationCollector::snapshot() const {
   return impl_->snapshot();
+}
+
+/** @copydoc m1_observation_cut_unchanged */
+bool m1_observation_cut_unchanged(
+    const M1FairnessObservationSnapshot& before,
+    const M1FairnessObservationSnapshot& after) noexcept {
+  return before.stable_publication_cut && after.stable_publication_cut &&
+         before.callback_entry_frontier == after.callback_entry_frontier &&
+         before.callback_completion_frontier ==
+             after.callback_completion_frontier &&
+         before.claimed_slot_frontier == after.claimed_slot_frontier &&
+         before.published_slot_frontier == after.published_slot_frontier &&
+         before.events.size() == after.events.size();
 }
 
 /** @copydoc derive_m1_timeline */
@@ -934,9 +1072,14 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
     invalidate(&summary.validity_reasons,
                "mixed observation request tag disagreed with actual QoS");
   }
+  if (input.observation_publication_unstable) {
+    invalidate(&summary.validity_reasons,
+               "mixed observation publication cut was not stable");
+  }
   const bool observation_valid = !input.observation_overflowed &&
                                  !input.observation_sequence_exhausted &&
-                                 !input.observation_qos_mismatch;
+                                 !input.observation_qos_mismatch &&
+                                 !input.observation_publication_unstable;
 
   bool progress_valid = observation_valid;
   std::vector<double> progress_ratios;

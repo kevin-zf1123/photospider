@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "compute/execution_lifecycle_telemetry.hpp"  // NOLINT(build/include_subdir)
@@ -49,6 +50,17 @@ struct M1ExecutionSnapshot final {
 
   /** @brief Bounded raw product lifecycle evidence page. */
   compute::ExecutionLifecyclePage lifecycle;
+
+  /** @brief Exact lifecycle cursor supplied to this snapshot request. */
+  std::uint64_t lifecycle_after_cursor = 0U;
+
+  /**
+   * @brief Chronological M1 capture coordinate assigned by the runner.
+   * @note The Host returns the sentinel because it does not own protocol
+   * phase order; the runner must replace it before retaining row evidence.
+   */
+  std::size_t temporal_capture_ordinal =
+      std::numeric_limits<std::size_t>::max();
 };
 
 /**
@@ -74,13 +86,15 @@ class M1Host {
    * @brief Copies authoritative and policy-only state at one M1 boundary.
    * @param after_cursor Lifecycle cursor strictly before desired events.
    * @param limit Positive bounded maximum lifecycle events to return.
-   * @return Host/device ledgers, Compute I/O, ready/Throughput, and lifecycle
-   * diagnostics.
+   * @return Host/device ledgers, Compute I/O, ready/Throughput, lifecycle
+   * diagnostics, the exact requested cursor, and an unassigned capture ordinal.
    * @throws std::invalid_argument when `limit` violates lifecycle bounds.
    * @throws std::bad_alloc or std::system_error from snapshot ownership and
    * synchronization.
    * @note Observation neither waits for quiescence nor changes any counter;
-   * component samples are not one cross-owner atomic transaction.
+   * component samples are not one cross-owner atomic transaction. The protocol
+   * runner owns temporal order and must replace the capture-ordinal sentinel
+   * before retaining this snapshot as row evidence.
    */
   virtual M1ExecutionSnapshot m1_execution_snapshot(
       std::uint64_t after_cursor, std::size_t limit) const = 0;

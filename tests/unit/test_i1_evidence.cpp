@@ -2005,13 +2005,48 @@ TEST(I1Evidence, ProducesCanonicalPairObjectFromCompleteReplicate) {
   EXPECT_EQ(loaded.bundle.digest, produced.bundle.digest);
   const B1CanonicalManifest measurement =
       parse_b1_canonical_manifest(loaded.row.source.measurement_evidence.bytes);
-  ASSERT_EQ(measurement.fields.size(), 4U);
-  EXPECT_EQ(parse_b1_framed_list(measurement.fields[2U].payload).size(),
+  EXPECT_EQ(measurement.schema, "execution-profile-measurement-evidence-v1");
+  ASSERT_EQ(measurement.fields.size(), 6U);
+  EXPECT_EQ(measurement.fields[0U].payload, kEvidenceI1PairDenominatorSchema);
+  EXPECT_EQ(parse_b1_canonical_uint64(measurement.fields[3U].payload),
+            kI1InnerRowSchemaVersion);
+  EXPECT_EQ(parse_b1_framed_list(measurement.fields[4U].payload).size(),
             kI1MeasuredSlotCount);
   EXPECT_EQ(
-      parse_b1_canonical_uint64(measurement.fields[3U].payload),
+      parse_b1_canonical_uint64(measurement.fields[5U].payload),
       static_cast<std::uint64_t>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(10ms).count()));
+  EXPECT_EQ(loaded.row.source.output_evidence.schema_id,
+            "execution-profile-output-evidence-v1");
+  EXPECT_EQ(loaded.row.source.verdict_evidence.schema_id,
+            "execution-profile-verdict-evidence-v1");
+  EXPECT_EQ(parse_b1_canonical_manifest(loaded.row.source.output_evidence.bytes)
+                .fields[2U]
+                .payload,
+            "not-claimed");
+  EXPECT_EQ(
+      parse_b1_canonical_manifest(loaded.row.source.verdict_evidence.bytes)
+          .fields[2U]
+          .payload,
+      "denominator-only");
+}
+
+/**
+ * @brief Proves the denominator producer rejects inner schema drift.
+ * @throws Test fixture, evaluator, canonical pack, and framework failures.
+ */
+TEST(I1Evidence, PairDenominatorRejectsInnerSchemaVersionDrift) {
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  for (std::size_t slot = 0U; slot < kI1GridSlotCount; ++slot) {
+    rows.push_back(evaluate_i1_episode(make_valid_input(slot, 10ms)));
+  }
+  rows.front().schema_version = kI1InnerRowSchemaVersion + 1U;
+  EXPECT_THROW(make_i1_evidence_pair_object(
+                   rows, make_i1_pair_environment(),
+                   EvidencePairProducerOptions{EvidenceSubjectRole::Reference,
+                                               std::nullopt}),
+               std::invalid_argument);
 }
 
 }  // namespace

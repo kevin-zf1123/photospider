@@ -43,6 +43,22 @@ inline constexpr char kEvidencePairObjectSchema[] =
 /** @brief Maximum accepted pair-object pack size in bytes. */
 inline constexpr std::size_t kEvidencePairObjectMaxBytes = 16U * 1024U * 1024U;
 
+/** @brief Portable isolated-I1 p99-denominator source contract identifier. */
+inline constexpr char kEvidenceI1PairDenominatorSchema[] =
+    "execution-profile-i1-pair-denominator-v1";
+
+/** @brief Portable isolated-B1 rate-denominator source contract identifier. */
+inline constexpr char kEvidenceB1PairDenominatorSchema[] =
+    "execution-profile-b1-pair-denominator-v1";
+
+/** @brief Contract identifier denying portable output-verdict authority. */
+inline constexpr char kEvidencePairNoOutputClaimSchema[] =
+    "execution-profile-pair-no-output-claim-v1";
+
+/** @brief Contract identifier denying non-denominator verdict authority. */
+inline constexpr char kEvidencePairNoVerdictClaimSchema[] =
+    "execution-profile-pair-no-verdict-claim-v1";
+
 // NOLINTEND
 
 /**
@@ -308,10 +324,10 @@ struct EvidenceCorpusValidation final {
 /**
  * @brief One native isolated row/bundle object selected for M1 pairing.
  * @throws std::bad_alloc when canonical source ownership is copied.
- * @note The row and bundle retain source objects. A serialized pack
- * deliberately omits process-private storage authority, which cannot be
- * reconstructed from bytes; loading therefore restores claims only and never
- * mints Pass authority.
+ * @note The portable object is authoritative only for the isolated I1 p99 or
+ * isolated B1 rate denominator retained in its workload-specific measurement
+ * section. It deliberately omits process-private storage authority and makes
+ * no output, waste, memory, determinism, or aggregate verdict claim.
  */
 struct EvidencePairObject final {
   /** @brief Exact isolated row addressed by the M1 pair reference. */
@@ -483,8 +499,9 @@ B1Sha256Digest evidence_resource_identity(const M1ExecutionSnapshot& snapshot);
  * rows.
  *
  * The producer re-evaluates the complete 221-slot replicate, retains exactly
- * 200 measured final latencies, and materializes the existing 15-field row and
- * five-field one-row bundle without inventing a second latency grammar.
+ * 200 measured final latencies, and materializes a denominator-only 15-field
+ * row and five-field one-row bundle. Portable output/verdict sections
+ * explicitly declare that they carry no non-denominator authority.
  *
  * @param rows Complete uncompacted Issue #93 episode rows.
  * @param environment Exact storage-N/A environment claims and resource
@@ -502,9 +519,10 @@ EvidencePairObject make_i1_evidence_pair_object(
  * @brief Produces one native isolated-B1 pair object from an actual Issue #95
  * row.
  *
- * The producer retains all thirty measured per-job outcomes and the exact
- * measurement interval, using the same verified-endpoint predicate as the B1
- * evaluator before materializing the existing outer row/bundle schemas.
+ * The producer first requires the exact 34-occurrence schema/version domain,
+ * then retains all thirty measured per-job outcomes and the exact measurement
+ * interval using the same verified-endpoint predicate as the B1 evaluator.
+ * Portable output/verdict sections explicitly carry no other axis claim.
  *
  * @param row Complete uncompacted Issue #95 isolated inner row.
  * @param options Subject role and optional candidate comparison dependency.
@@ -543,7 +561,7 @@ EvidencePairObject load_evidence_pair_object(
 /**
  * @brief Reads one bounded pair-object pack through a read-only no-follow path.
  * @param path Absolute existing regular-file path.
- * @return Exact bytes read once from the opened descriptor.
+ * @return Exact bytes read from the same validated descriptor or handle.
  * @throws std::invalid_argument for relative, symlink, non-regular, empty, or
  * oversized inputs.
  * @throws std::runtime_error for open/stat/read/close failures.

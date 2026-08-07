@@ -15,6 +15,13 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
 #include "benchmark/m1_evidence.hpp"        // NOLINT(build/include_subdir)
 #include "benchmark/m1_profile.hpp"         // NOLINT(build/include_subdir)
@@ -147,7 +154,7 @@ struct M1EnvelopeDenominatorOptions final {
  * @param role Exact enclosing subject role.
  * @param ordinal Exact enclosing replicate ordinal.
  * @param options Raw sample cardinality/value and row-local claim.
- * @return Four-field raw isolated-I1 measurement source.
+ * @return Five-field raw isolated-I1 denominator source.
  * @throws std::bad_alloc when records or canonical fields allocate.
  */
 std::vector<B1CanonicalField> isolated_i1_measurement_fields(
@@ -158,10 +165,14 @@ std::vector<B1CanonicalField> isolated_i1_measurement_fields(
       options.i1_sample_count,
       encode_b1_fixed_record({std::to_string(options.i1_sample_ns)}));
   return {
+      testing::known_b1_field("pair_source_schema", "identifier",
+                              kEvidenceI1PairDenominatorSchema),
       testing::known_b1_field("subject_role", "enum",
                               evidence_subject_role_name(role)),
       testing::known_b1_field("replicate_ordinal", "uint64",
                               std::to_string(ordinal)),
+      testing::known_b1_field("source_inner_schema_version", "uint64",
+                              std::to_string(kI1InnerRowSchemaVersion)),
       testing::known_b1_field("measured_final_latencies_ns", "uint64-list-v1",
                               encode_test_record_list(samples)),
       testing::known_b1_field("claimed_p99_ns", "uint64",
@@ -186,10 +197,14 @@ std::vector<B1CanonicalField> isolated_b1_measurement_fields(
                                 std::to_string(kB1SiteOperationsPerJob)}));
   }
   return {
+      testing::known_b1_field("pair_source_schema", "identifier",
+                              kEvidenceB1PairDenominatorSchema),
       testing::known_b1_field("subject_role", "enum",
                               evidence_subject_role_name(role)),
       testing::known_b1_field("replicate_ordinal", "uint64",
                               std::to_string(ordinal)),
+      testing::known_b1_field("source_inner_schema_version", "uint64",
+                              std::to_string(kB1InnerRowSchemaVersion)),
       testing::known_b1_field("measurement_start_ns", "uint64", "100"),
       testing::known_b1_field("measurement_end_ns", "uint64", "30000000100"),
       testing::known_b1_field("measured_job_outcomes",
@@ -241,7 +256,7 @@ std::string make_test_m1_inner(const M1EnvelopeDenominatorOptions& options) {
            "protocol_flags", "m1-protocol-flags-v1",
            encode_b1_fixed_record({"true", "true", "true", "true", "true",
                                    "true", "true", "true", "false", "false",
-                                   "false"})),
+                                   "false", "false"})),
        testing::known_b1_field("interactive_occurrences",
                                "m1-i1-occurrence-list-v1",
                                encode_test_record_list(interactive)),
@@ -407,7 +422,19 @@ EvidenceCanonicalRow make_row(
   input.workload_manifest = make_section(
       "workload-manifest", "execution-profile-workload-manifest-v1",
       workload_fields(workload, role, ordinal), first_seal);
-  if (workload == kB1WorkloadId || workload == kM1WorkloadId) {
+  if (workload == kB1WorkloadId) {
+    input.job_instances.push_back(B1JobInstance{
+        workload, ordinal, B1JobPhase::Cold, 0U, kB1ColdJobIndex, run_cap});
+    for (const std::uint64_t job_index : kB1WarmupJobIndices) {
+      input.job_instances.push_back(B1JobInstance{
+          workload, ordinal, B1JobPhase::Warmup, 0U, job_index, run_cap});
+    }
+    for (std::uint64_t job_index = 0U; job_index < kB1MeasuredJobCount;
+         ++job_index) {
+      input.job_instances.push_back(B1JobInstance{
+          workload, ordinal, B1JobPhase::Measured, 0U, job_index, run_cap});
+    }
+  } else if (workload == kM1WorkloadId) {
     input.job_instances.push_back(B1JobInstance{
         workload, ordinal, B1JobPhase::Cold, 0U, kB1ColdJobIndex, run_cap});
   }
@@ -417,20 +444,50 @@ EvidenceCanonicalRow make_row(
       "measurement-evidence", "execution-profile-measurement-evidence-v1",
       measurement_fields(workload, role, ordinal, denominators),
       first_seal + 2U);
-  input.output_evidence = make_section(
-      "output-evidence", "execution-profile-output-evidence-v1",
-      {testing::known_b1_field("raw_digest", "sha256",
-                               test_digest(workload + std::string(":output:") +
-                                           evidence_subject_role_name(role) +
-                                           ":" + std::to_string(ordinal)))},
-      first_seal + 3U);
-  input.verdict_evidence = make_section(
-      "verdict-evidence", "execution-profile-verdict-evidence-v1",
-      {testing::known_b1_field("raw_digest", "sha256",
-                               test_digest(workload + std::string(":verdict:") +
-                                           evidence_subject_role_name(role) +
-                                           ":" + std::to_string(ordinal)))},
-      first_seal + 4U);
+  const bool denominator_only =
+      workload == kI1WorkloadId || workload == kB1WorkloadId;
+  const std::string pair_source_schema = workload == kI1WorkloadId
+                                             ? kEvidenceI1PairDenominatorSchema
+                                             : kEvidenceB1PairDenominatorSchema;
+  input.output_evidence =
+      denominator_only
+          ? make_section(
+                "output-evidence", "execution-profile-output-evidence-v1",
+                {testing::known_b1_field("pair_source_schema", "identifier",
+                                         pair_source_schema),
+                 testing::known_b1_field("portable_output_claim_schema",
+                                         "identifier",
+                                         kEvidencePairNoOutputClaimSchema),
+                 testing::known_b1_field("portable_output_authority", "enum",
+                                         "not-claimed")},
+                first_seal + 3U)
+          : make_section("output-evidence",
+                         "execution-profile-output-evidence-v1",
+                         {testing::known_b1_field(
+                             "raw_digest", "sha256",
+                             test_digest(workload + std::string(":output:") +
+                                         evidence_subject_role_name(role) +
+                                         ":" + std::to_string(ordinal)))},
+                         first_seal + 3U);
+  input.verdict_evidence =
+      denominator_only
+          ? make_section(
+                "verdict-evidence", "execution-profile-verdict-evidence-v1",
+                {testing::known_b1_field("pair_source_schema", "identifier",
+                                         pair_source_schema),
+                 testing::known_b1_field("portable_claim_schema", "identifier",
+                                         kEvidencePairNoVerdictClaimSchema),
+                 testing::known_b1_field("portable_claim_scope", "enum",
+                                         "denominator-only")},
+                first_seal + 4U)
+          : make_section("verdict-evidence",
+                         "execution-profile-verdict-evidence-v1",
+                         {testing::known_b1_field(
+                             "raw_digest", "sha256",
+                             test_digest(workload + std::string(":verdict:") +
+                                         evidence_subject_role_name(role) +
+                                         ":" + std::to_string(ordinal)))},
+                         first_seal + 4U);
   input.paired_isolated_i1 = std::move(i1_pair);
   input.paired_isolated_b1_cap8 = std::move(b1_pair);
   input.seal_ordinal = first_seal + 5U;
@@ -598,9 +655,9 @@ TEST(EvidenceEnvelope, MaterializesCanonicalM1RowAndBundle) {
             fixture.m1_row_digest);
   EXPECT_EQ(digest_evidence_bundle(root.manifest_bytes), fixture.root_digest);
   EXPECT_EQ(fixture.m1_row_digest,
-            "6d7dff5804fd8d5774c6b6a5e32d02e3a019830877db7f538ac5e04d6da9b5f6");
+            "7c04ff4fa3bbd4e4702db393cd3be727331a088695e42e42ee8114e3f9d7e4ee");
   EXPECT_EQ(fixture.root_digest,
-            "ccee55716d612497e216326d4e98f30411aa1a64705e269ec400b8ead4d975a2");
+            "a5165d926517341779271ec198a8c8ae21480af9150d732707d56f2369439f94");
   EXPECT_EQ(
       digest_evidence_section(
           fixture.corpus.rows.back().source.workload_manifest.section_name,
@@ -653,6 +710,51 @@ TEST(EvidenceEnvelope, RoundTripsAndBindsNativePairObjects) {
   EXPECT_EQ(retained.rows.size(), 2U);
   EXPECT_EQ(retained.bundles.size(), 2U);
   EXPECT_THROW(append_evidence_pair_object(loaded_i1, &retained),
+               std::invalid_argument);
+}
+
+/**
+ * @brief Proves readers reject renewed verdict claims and incomplete B1 jobs.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope, RejectsPairVerdictClaimsAndIncompleteB1JobIndex) {
+  const M1EnvelopeFixture fixture = make_m1_fixture();
+  EvidencePairObject i1{fixture.corpus.rows[0U], fixture.corpus.bundles[0U]};
+  const EvidencePairObject valid_b1{fixture.corpus.rows[1U],
+                                    fixture.corpus.bundles[1U]};
+  i1.row.source.verdict_evidence =
+      make_section("verdict-evidence", "execution-profile-verdict-evidence-v1",
+                   {testing::known_b1_field("latency", "verdict", "pass")},
+                   i1.row.source.verdict_evidence.seal_ordinal);
+  i1.row = materialize_evidence_row(i1.row.source);
+  i1.bundle.source.rows = {i1.row};
+  i1.bundle = materialize_evidence_bundle(i1.bundle.source);
+  EXPECT_THROW(validate_evidence_m1_pair_objects(
+                   i1, valid_b1, EvidenceSubjectRole::Reference, 1U,
+                   fixture.corpus.rows[2U].source.environment,
+                   parse_b1_digest(test_digest("i1-fixture")),
+                   EvidenceB1ComponentDigests{
+                       parse_b1_digest(test_digest("b1-fixture")),
+                       parse_b1_digest(test_digest("b1-corpus")),
+                       parse_b1_digest(test_digest("b1-golden"))}),
+               std::invalid_argument);
+
+  const EvidencePairObject valid_i1{fixture.corpus.rows[0U],
+                                    fixture.corpus.bundles[0U]};
+  EvidencePairObject incomplete_b1 = valid_b1;
+  incomplete_b1.row.source.job_instances.pop_back();
+  incomplete_b1.row = materialize_evidence_row(incomplete_b1.row.source);
+  incomplete_b1.bundle.source.rows = {incomplete_b1.row};
+  incomplete_b1.bundle =
+      materialize_evidence_bundle(incomplete_b1.bundle.source);
+  EXPECT_THROW(validate_evidence_m1_pair_objects(
+                   valid_i1, incomplete_b1, EvidenceSubjectRole::Reference, 1U,
+                   fixture.corpus.rows[2U].source.environment,
+                   parse_b1_digest(test_digest("i1-fixture")),
+                   EvidenceB1ComponentDigests{
+                       parse_b1_digest(test_digest("b1-fixture")),
+                       parse_b1_digest(test_digest("b1-corpus")),
+                       parse_b1_digest(test_digest("b1-golden"))}),
                std::invalid_argument);
 }
 
@@ -775,6 +877,22 @@ TEST(EvidenceEnvelope, RejectsWrongPairIdentityAndUnsafeInputPaths) {
 #if !defined(_WIN32)
   const std::filesystem::path symlink = root / "pair-object-link.canonical";
   std::filesystem::create_symlink(regular, symlink);
+  EXPECT_THROW(read_evidence_pair_object_file(symlink), std::invalid_argument);
+#else
+  const std::filesystem::path symlink = root / "pair-object-link.canonical";
+  constexpr DWORD kAllowUnprivilegedSymlinkCreation = 0x2U;
+  if (::CreateSymbolicLinkW(symlink.c_str(), regular.c_str(),
+                            kAllowUnprivilegedSymlinkCreation) == 0) {
+    const DWORD error = ::GetLastError();
+    std::filesystem::remove_all(root);
+    if (error == ERROR_PRIVILEGE_NOT_HELD || error == ERROR_INVALID_PARAMETER ||
+        error == ERROR_NOT_SUPPORTED) {
+      GTEST_SKIP() << "Windows host cannot create the reparse-point fixture: "
+                   << error;
+    }
+    FAIL() << "CreateSymbolicLinkW failed unexpectedly: " << error;
+    return;
+  }
   EXPECT_THROW(read_evidence_pair_object_file(symlink), std::invalid_argument);
 #endif
   std::filesystem::remove_all(root);
@@ -936,7 +1054,7 @@ TEST(EvidenceEnvelope, RejectsTamperingAndLaterPairTargets) {
 
 /**
  * @brief Proves candidate comparison uses exact functional rows and
- * environment.
+ * environment while shared denominator-only claims retain one object identity.
  * @throws GoogleTest assertion control and fixture construction failures.
  */
 TEST(EvidenceEnvelope, ResolvesCandidateReferenceByFunctionalKey) {
@@ -947,8 +1065,11 @@ TEST(EvidenceEnvelope, ResolvesCandidateReferenceByFunctionalKey) {
       std::move(reference_environment), EvidenceSubjectRole::Reference, 1U);
   const EvidenceCanonicalBundle reference_bundle =
       make_reference_bundle(reference_row, 8U);
-  const EvidenceCanonicalRow candidate_row = make_row(
+  EvidenceCanonicalRow candidate_row = make_row(
       std::move(candidate_environment), EvidenceSubjectRole::Candidate, 10U);
+  candidate_row.source.output_evidence = reference_row.source.output_evidence;
+  candidate_row.source.verdict_evidence = reference_row.source.verdict_evidence;
+  candidate_row = materialize_evidence_row(std::move(candidate_row.source));
 
   EvidenceBundleInput candidate_input;
   candidate_input.workload_id = kI1WorkloadId;

@@ -450,6 +450,9 @@ struct M1FairnessEvidenceInput final {
 
   /** @brief True when a request tag disagreed with actual descriptor QoS. */
   bool observation_qos_mismatch = false;
+
+  /** @brief True when the final observation cut was not callback-quiescent. */
+  bool observation_publication_unstable = false;
 };
 
 /**
@@ -610,6 +613,57 @@ struct M1FairnessObservationSnapshot final {
 
   /** @brief True when at least one tag disagreed with actual descriptor QoS. */
   bool qos_mismatch = false;
+
+  /** @brief Completed callback-entry count sampled at the snapshot cut. */
+  std::uint64_t callback_entry_frontier = 0U;
+
+  /** @brief Completed callback-exit count sampled at the snapshot cut. */
+  std::uint64_t callback_completion_frontier = 0U;
+
+  /** @brief Number of fixed slots claimed before the snapshot cut. */
+  std::size_t claimed_slot_frontier = 0U;
+
+  /** @brief Contiguous prefix of claimed slots published before the cut. */
+  std::size_t published_slot_frontier = 0U;
+
+  /** @brief True after either callback frontier can no longer advance. */
+  bool callback_frontier_exhausted = false;
+
+  /**
+   * @brief True only for one quiescent, unchanged, contiguous publication cut.
+   * @note A callback entering, completing, claiming, or publishing while the
+   * snapshot is copied makes this false; callers must fail closed rather than
+   * compare only the retained vector length.
+   */
+  bool stable_publication_cut = false;
+};
+
+/**
+ * @brief Source-private deterministic hook after a callback claims its slot.
+ *
+ * Production collectors never install this hook. Tests may pause publication
+ * after claim to prove that a snapshot cannot mistake an in-flight callback
+ * for an unchanged boundary.
+ *
+ * @throws Nothing for destruction or callback dispatch.
+ * @note Implementations must not throw. A blocking implementation is allowed
+ * only in a deterministic test and would violate the production callback
+ * latency contract if installed by a benchmark runner.
+ */
+class M1ObservationPublicationHook {
+ public:
+  /**
+   * @brief Destroys the test hook through its abstract base.
+   * @throws Nothing.
+   */
+  virtual ~M1ObservationPublicationHook() noexcept = default;
+
+  /**
+   * @brief Runs after a unique slot is claimed and before it is published.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  virtual void after_slot_claim() noexcept = 0;
 };
 
 /**
@@ -648,6 +702,20 @@ class M1FairnessObservationCollector final {
                                  std::uint64_t first_sequence);
 
   /**
+   * @brief Allocates a bounded store with a deterministic publication hook.
+   * @param capacity Maximum number of retained scalar events.
+   * @param first_sequence Nonzero first causal sequence to reserve.
+   * @param publication_hook Non-null source-private post-claim test hook.
+   * @throws std::invalid_argument when an argument is zero or the hook is null.
+   * @throws std::bad_alloc when shared state or fixed slots cannot allocate.
+   * @note This overload is solely for controlled concurrency tests. Production
+   * callers must use a hook-free constructor so callbacks remain nonblocking.
+   */
+  M1FairnessObservationCollector(
+      std::size_t capacity, std::uint64_t first_sequence,
+      std::shared_ptr<M1ObservationPublicationHook> publication_hook);
+
+  /**
    * @brief Creates one request-local tagged sink over the shared store.
    * @param tag Immutable Interactive or Throughput Graph role.
    * @return Shared observation-only sink suitable for I1Host or B1Host.
@@ -673,6 +741,18 @@ class M1FairnessObservationCollector final {
   /** @brief Store shared by every request-local sink. */
   std::shared_ptr<Impl> impl_;
 };
+
+/**
+ * @brief Tests whether two snapshots prove one exact unchanged callback cut.
+ * @param before Stable pre-boundary snapshot.
+ * @param after Stable post-boundary snapshot.
+ * @return True only when both cuts are stable and every entry, completion,
+ * claim, publication, and retained-event frontier is exactly equal.
+ * @throws Nothing.
+ */
+bool m1_observation_cut_unchanged(
+    const M1FairnessObservationSnapshot& before,
+    const M1FairnessObservationSnapshot& after) noexcept;
 
 /**
  * @brief Checked-derives exact M1 phase boundaries from `B^M1`.

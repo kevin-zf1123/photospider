@@ -10,7 +10,6 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <limits>
 #include <map>
@@ -22,7 +21,12 @@
 #include <utility>
 #include <vector>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -87,6 +91,71 @@ constexpr std::array<std::string_view, 15U> kRowFieldTypes{
     "evidence-pair-reference-v1",
     "evidence-pair-reference-v1",
 };
+
+#if defined(_WIN32)
+/**
+ * @brief Owns one Windows evidence-file handle until verified close.
+ * @throws Nothing for construction and destruction.
+ * @note Destruction retries cleanup only when explicit close did not succeed;
+ * the class never duplicates or reopens the path.
+ */
+class WindowsEvidenceReadHandle final {
+ public:
+  /**
+   * @brief Takes ownership of one valid native file handle.
+   * @param handle Handle returned by `CreateFileW`.
+   * @throws Nothing.
+   */
+  explicit WindowsEvidenceReadHandle(HANDLE handle) noexcept
+      : handle_(handle) {}
+
+  /**
+   * @brief Closes an unconsumed handle during exception unwinding.
+   * @throws Nothing; cleanup failure cannot replace the primary exception.
+   * @note Explicit `close` remains the only path that reports close failure.
+   */
+  ~WindowsEvidenceReadHandle() noexcept {
+    if (handle_ != INVALID_HANDLE_VALUE) {
+      static_cast<void>(::CloseHandle(handle_));
+    }
+  }
+
+  /** @brief Prevents duplicating one opened-object identity. */
+  WindowsEvidenceReadHandle(const WindowsEvidenceReadHandle&) = delete;
+
+  /** @brief Prevents assigning or leaking one opened-object identity. */
+  WindowsEvidenceReadHandle& operator=(const WindowsEvidenceReadHandle&) =
+      delete;
+
+  /**
+   * @brief Returns the still-owned native handle without transferring it.
+   * @return Valid handle until `close` succeeds.
+   * @throws Nothing.
+   */
+  HANDLE get() const noexcept { return handle_; }
+
+  /**
+   * @brief Closes the handle exactly once and preserves a failure code.
+   * @param error Mutable destination for `GetLastError` on failure.
+   * @return True only when `CloseHandle` succeeded.
+   * @throws Nothing.
+   */
+  bool close(DWORD* error) noexcept {
+    if (::CloseHandle(handle_) == 0) {
+      if (error != nullptr) {
+        *error = ::GetLastError();
+      }
+      return false;
+    }
+    handle_ = INVALID_HANDLE_VALUE;
+    return true;
+  }
+
+ private:
+  /** @brief Sole native handle ownership. */
+  HANDLE handle_;
+};
+#endif
 
 /** @brief Exact ordered names of the canonical five bundle fields. */
 constexpr std::array<std::string_view, 5U> kBundleFieldNames{
@@ -1073,24 +1142,6 @@ std::vector<B1JobInstance> parse_job_index(
 }
 
 /**
- * @brief Returns the canonical lowercase verdict token.
- * @param verdict Pass, Fail, or Invalid.
- * @return Process-lifetime stable token.
- * @throws std::invalid_argument for an unknown representation.
- */
-const char* verdict_name(I1Verdict verdict) {
-  switch (verdict) {
-    case I1Verdict::Pass:
-      return "pass";
-    case I1Verdict::Fail:
-      return "fail";
-    case I1Verdict::Invalid:
-      return "invalid";
-  }
-  throw std::invalid_argument("Evidence verdict is invalid.");
-}
-
-/**
  * @brief Builds one producer-owned retained section without dependencies.
  * @param name Exact row/provenance binding.
  * @param schema Exact retained-section schema.
@@ -1108,21 +1159,6 @@ EvidenceRetainedSection make_producer_section(
                                  bytes,
                                  {},
                                  seal_ordinal};
-}
-
-/**
- * @brief Encodes ordered diagnostics as one canonical fixed-record list.
- * @param reasons Complete source diagnostics in evaluator order.
- * @return Framed one-component record list.
- * @throws std::bad_alloc when records allocate.
- */
-std::string encode_diagnostics(const std::vector<std::string>& reasons) {
-  std::vector<std::string> records;
-  records.reserve(reasons.size());
-  for (const std::string& reason : reasons) {
-    records.push_back(encode_b1_fixed_record({reason}));
-  }
-  return encode_record_list(records);
 }
 
 /**
@@ -1177,6 +1213,54 @@ std::string encode_logical_digest_identity(const ContentDigest& digest) {
 }
 
 /**
+ * @brief Validates explicit absence of portable output and verdict authority.
+ * @param row Isolated denominator row whose non-measurement claims are closed.
+ * @return Nothing for exact denominator-only scope declarations.
+ * @throws std::invalid_argument for schema, field, or authority drift.
+ * @throws std::bad_alloc when canonical manifests allocate.
+ */
+void validate_pair_denominator_claim_scope(const EvidenceCanonicalRow& row) {
+  const std::string_view pair_source_schema =
+      row.source.workload_id == kI1WorkloadId
+          ? std::string_view(kEvidenceI1PairDenominatorSchema)
+          : std::string_view(kEvidenceB1PairDenominatorSchema);
+  const B1CanonicalManifest output =
+      parse_b1_canonical_manifest(row.source.output_evidence.bytes);
+  if (output.schema != "execution-profile-output-evidence-v1") {
+    throw std::invalid_argument(
+        "Paired denominator output claim schema is invalid.");
+  }
+  require_exact_known_fields(
+      output,
+      {"pair_source_schema", "portable_output_claim_schema",
+       "portable_output_authority"},
+      {"identifier", "identifier", "enum"});
+  if (output.fields[0U].payload != pair_source_schema ||
+      output.fields[1U].payload != kEvidencePairNoOutputClaimSchema ||
+      output.fields[2U].payload != "not-claimed") {
+    throw std::invalid_argument(
+        "Paired denominator unexpectedly claims portable output authority.");
+  }
+
+  const B1CanonicalManifest verdict =
+      parse_b1_canonical_manifest(row.source.verdict_evidence.bytes);
+  if (verdict.schema != "execution-profile-verdict-evidence-v1") {
+    throw std::invalid_argument(
+        "Paired denominator verdict claim schema is invalid.");
+  }
+  require_exact_known_fields(
+      verdict,
+      {"pair_source_schema", "portable_claim_schema", "portable_claim_scope"},
+      {"identifier", "identifier", "enum"});
+  if (verdict.fields[0U].payload != pair_source_schema ||
+      verdict.fields[1U].payload != kEvidencePairNoVerdictClaimSchema ||
+      verdict.fields[2U].payload != "denominator-only") {
+    throw std::invalid_argument(
+        "Paired denominator unexpectedly claims non-denominator verdicts.");
+  }
+}
+
+/**
  * @brief Recomputes isolated-I1 p99 from exactly 200 canonical raw samples.
  * @param row Exact resolved isolated-I1 row.
  * @return Positive nearest-rank p99 in nanoseconds.
@@ -1184,25 +1268,31 @@ std::string encode_logical_digest_identity(const ContentDigest& digest) {
  * @throws std::bad_alloc when samples allocate or sort.
  */
 std::uint64_t recompute_isolated_i1_p99(const EvidenceCanonicalRow& row) {
+  validate_pair_denominator_claim_scope(row);
   const B1CanonicalManifest manifest =
       parse_b1_canonical_manifest(row.source.measurement_evidence.bytes);
   if (manifest.schema != "execution-profile-measurement-evidence-v1") {
     throw std::invalid_argument(
         "Paired isolated-I1 measurement schema is invalid.");
   }
-  require_exact_known_fields(manifest,
-                             {"subject_role", "replicate_ordinal",
-                              "measured_final_latencies_ns", "claimed_p99_ns"},
-                             {"enum", "uint64", "uint64-list-v1", "uint64"});
-  if (manifest.fields[0U].payload !=
+  require_exact_known_fields(
+      manifest,
+      {"pair_source_schema", "subject_role", "replicate_ordinal",
+       "source_inner_schema_version", "measured_final_latencies_ns",
+       "claimed_p99_ns"},
+      {"identifier", "enum", "uint64", "uint64", "uint64-list-v1", "uint64"});
+  if (manifest.fields[0U].payload != kEvidenceI1PairDenominatorSchema ||
+      manifest.fields[1U].payload !=
           evidence_subject_role_name(row.source.subject_role) ||
-      parse_b1_canonical_uint64(manifest.fields[1U].payload) !=
-          row.source.replicate_ordinal) {
+      parse_b1_canonical_uint64(manifest.fields[2U].payload) !=
+          row.source.replicate_ordinal ||
+      parse_b1_canonical_uint64(manifest.fields[3U].payload) !=
+          kI1InnerRowSchemaVersion) {
     throw std::invalid_argument(
         "Paired isolated-I1 measurement identity is invalid.");
   }
   const std::vector<std::string> records =
-      parse_b1_framed_list(manifest.fields[2U].payload);
+      parse_b1_framed_list(manifest.fields[4U].payload);
   if (records.size() != 200U) {
     throw std::invalid_argument(
         "Paired isolated-I1 requires exactly 200 latency samples.");
@@ -1221,7 +1311,7 @@ std::uint64_t recompute_isolated_i1_p99(const EvidenceCanonicalRow& row) {
   std::sort(samples.begin(), samples.end());
   const std::uint64_t recomputed = samples[197U];
   const std::uint64_t claimed =
-      parse_b1_canonical_uint64(manifest.fields[3U].payload);
+      parse_b1_canonical_uint64(manifest.fields[5U].payload);
   if (claimed == 0U || claimed != recomputed) {
     throw std::invalid_argument(
         "Paired isolated-I1 p99 claim does not recompute.");
@@ -1238,6 +1328,7 @@ std::uint64_t recompute_isolated_i1_p99(const EvidenceCanonicalRow& row) {
  */
 B1RateSource recompute_isolated_b1_rate_source(
     const EvidenceCanonicalRow& row) {
+  validate_pair_denominator_claim_scope(row);
   const B1CanonicalManifest manifest =
       parse_b1_canonical_manifest(row.source.measurement_evidence.bytes);
   if (manifest.schema != "execution-profile-measurement-evidence-v1") {
@@ -1246,28 +1337,65 @@ B1RateSource recompute_isolated_b1_rate_source(
   }
   require_exact_known_fields(
       manifest,
-      {"subject_role", "replicate_ordinal", "measurement_start_ns",
+      {"pair_source_schema", "subject_role", "replicate_ordinal",
+       "source_inner_schema_version", "measurement_start_ns",
        "measurement_end_ns", "measured_job_outcomes",
        "successful_site_operations"},
-      {"enum", "uint64", "uint64", "uint64", "b1-measured-job-outcome-list-v1",
-       "uint64"});
-  if (manifest.fields[0U].payload !=
+      {"identifier", "enum", "uint64", "uint64", "uint64", "uint64",
+       "b1-measured-job-outcome-list-v1", "uint64"});
+  if (manifest.fields[0U].payload != kEvidenceB1PairDenominatorSchema ||
+      manifest.fields[1U].payload !=
           evidence_subject_role_name(row.source.subject_role) ||
-      parse_b1_canonical_uint64(manifest.fields[1U].payload) !=
-          row.source.replicate_ordinal) {
+      parse_b1_canonical_uint64(manifest.fields[2U].payload) !=
+          row.source.replicate_ordinal ||
+      parse_b1_canonical_uint64(manifest.fields[3U].payload) !=
+          kB1InnerRowSchemaVersion) {
     throw std::invalid_argument(
         "Paired isolated-B1 measurement identity is invalid.");
   }
+  const std::vector<B1JobInstance> jobs =
+      parse_job_index(row.job_instance_index);
+  std::set<B1JobInstance> unique_jobs;
+  std::size_t cold_count = 0U;
+  std::size_t warmup_count = 0U;
+  std::size_t measured_count = 0U;
+  for (const B1JobInstance& job : jobs) {
+    validate_b1_job_instance(job);
+    if (job.row_workload_id != kB1WorkloadId ||
+        job.replicate_ordinal != row.source.replicate_ordinal ||
+        job.run_cap != row.source.run_cap || !unique_jobs.insert(job).second) {
+      throw std::invalid_argument(
+          "Paired isolated-B1 job index is duplicated or mismatched.");
+    }
+    switch (job.phase) {
+      case B1JobPhase::Cold:
+        ++cold_count;
+        break;
+      case B1JobPhase::Warmup:
+        ++warmup_count;
+        break;
+      case B1JobPhase::Measured:
+        ++measured_count;
+        break;
+    }
+  }
+  if (jobs.size() != 1U + kB1WarmupJobCount + kB1MeasuredJobCount ||
+      unique_jobs.size() != jobs.size() || cold_count != 1U ||
+      warmup_count != kB1WarmupJobCount ||
+      measured_count != kB1MeasuredJobCount) {
+    throw std::invalid_argument(
+        "Paired isolated-B1 job index is not exact 1+3+30 evidence.");
+  }
   const std::uint64_t start =
-      parse_b1_canonical_uint64(manifest.fields[2U].payload);
+      parse_b1_canonical_uint64(manifest.fields[4U].payload);
   const std::uint64_t end =
-      parse_b1_canonical_uint64(manifest.fields[3U].payload);
+      parse_b1_canonical_uint64(manifest.fields[5U].payload);
   if (end <= start) {
     throw std::invalid_argument(
         "Paired isolated-B1 measurement interval is not positive.");
   }
   const std::vector<std::string> records =
-      parse_b1_framed_list(manifest.fields[4U].payload);
+      parse_b1_framed_list(manifest.fields[6U].payload);
   if (records.size() != kB1MeasuredJobCount) {
     throw std::invalid_argument(
         "Paired isolated-B1 requires exactly 30 raw job outcomes.");
@@ -1296,7 +1424,7 @@ B1RateSource recompute_isolated_b1_rate_source(
     successful += site_operations;
   }
   const std::uint64_t claimed =
-      parse_b1_canonical_uint64(manifest.fields[5U].payload);
+      parse_b1_canonical_uint64(manifest.fields[7U].payload);
   if (successful == 0U || claimed != successful) {
     throw std::invalid_argument(
         "Paired isolated-B1 numerator claim does not recompute.");
@@ -1385,7 +1513,7 @@ M1DenominatorClaims parse_m1_denominator_claims(
     throw std::invalid_argument("M1 nested schema version or ordinal drifted.");
   }
   const std::vector<std::string> protocol_flags =
-      parse_b1_fixed_record(inner.fields[3U].payload, 11U);
+      parse_b1_fixed_record(inner.fields[3U].payload, 12U);
   for (const std::string& flag : protocol_flags) {
     static_cast<void>(parse_canonical_boolean(flag));
   }
@@ -2361,7 +2489,8 @@ EvidencePairObject make_i1_evidence_pair_object(
   const I1ReplicateSummary summary = evaluate_i1_replicate(rows);
   if (summary.replicate_ordinal != environment.replicate_ordinal ||
       summary.measured_sample_count != 200U || !summary.latency.has_value() ||
-      summary.latency->p99.count() <= 0) {
+      summary.latency->p99.count() <= 0 ||
+      summary.latency_verdict == I1Verdict::Invalid) {
     throw std::invalid_argument(
         "I1 pair producer lacks one complete positive measured replicate.");
   }
@@ -2377,7 +2506,9 @@ EvidencePairObject make_i1_evidence_pair_object(
             });
   std::vector<std::string> samples;
   for (const I1EpisodeInnerRow* row : ordered) {
-    if (row->workload_id != kI1WorkloadId ||
+    if (row->schema != kI1InnerRowSchema ||
+        row->schema_version != kI1InnerRowSchemaVersion ||
+        row->workload_id != kI1WorkloadId ||
         row->evidence.replicate_ordinal != environment.replicate_ordinal) {
       throw std::invalid_argument(
           "I1 pair producer row identity differs from its environment.");
@@ -2417,10 +2548,14 @@ EvidencePairObject make_i1_evidence_pair_object(
   input.job_index_seal_ordinal = 2U;
   input.measurement_evidence = make_producer_section(
       "measurement-evidence", "execution-profile-measurement-evidence-v1",
-      {known_field("subject_role", "enum",
+      {known_field("pair_source_schema", "identifier",
+                   kEvidenceI1PairDenominatorSchema),
+       known_field("subject_role", "enum",
                    evidence_subject_role_name(options.subject_role)),
        known_field("replicate_ordinal", "uint64",
                    std::to_string(input.replicate_ordinal)),
+       known_field("source_inner_schema_version", "uint64",
+                   std::to_string(kI1InnerRowSchemaVersion)),
        known_field("measured_final_latencies_ns", "uint64-list-v1",
                    encode_record_list(samples)),
        known_field("claimed_p99_ns", "uint64",
@@ -2428,17 +2563,19 @@ EvidencePairObject make_i1_evidence_pair_object(
       3U);
   input.output_evidence = make_producer_section(
       "output-evidence", "execution-profile-output-evidence-v1",
-      {known_field("measured_output_verdict", "verdict",
-                   verdict_name(summary.output_verdict))},
+      {known_field("pair_source_schema", "identifier",
+                   kEvidenceI1PairDenominatorSchema),
+       known_field("portable_output_claim_schema", "identifier",
+                   kEvidencePairNoOutputClaimSchema),
+       known_field("portable_output_authority", "enum", "not-claimed")},
       4U);
   input.verdict_evidence = make_producer_section(
       "verdict-evidence", "execution-profile-verdict-evidence-v1",
-      {known_field("latency", "verdict", verdict_name(summary.latency_verdict)),
-       known_field("waste", "verdict", verdict_name(summary.waste_verdict)),
-       known_field("memory", "verdict", verdict_name(summary.memory_verdict)),
-       known_field("output", "verdict", verdict_name(summary.output_verdict)),
-       known_field("validity_reasons", "diagnostic-list-v1",
-                   encode_diagnostics(summary.validity_reasons))},
+      {known_field("pair_source_schema", "identifier",
+                   kEvidenceI1PairDenominatorSchema),
+       known_field("portable_claim_schema", "identifier",
+                   kEvidencePairNoVerdictClaimSchema),
+       known_field("portable_claim_scope", "enum", "denominator-only")},
       5U);
   input.seal_ordinal = 6U;
   EvidenceCanonicalRow outer_row = materialize_evidence_row(std::move(input));
@@ -2469,7 +2606,9 @@ EvidencePairObject make_b1_evidence_pair_object(
     throw std::invalid_argument(
         "B1 pair producer comparison direction contradicts its role.");
   }
-  if (row.schema != kB1InnerRowSchema || row.workload_id != kB1WorkloadId ||
+  if (row.schema != kB1InnerRowSchema ||
+      row.schema_version != kB1InnerRowSchemaVersion ||
+      row.workload_id != kB1WorkloadId ||
       row.evidence.replicate_ordinal == 0U ||
       row.evidence.replicate_ordinal > 3U ||
       (row.evidence.run_cap != 1U && row.evidence.run_cap != 8U) ||
@@ -2506,11 +2645,38 @@ EvidencePairObject make_b1_evidence_pair_object(
   std::vector<const B1JobEvidence*> measured;
   std::vector<B1JobInstance> job_instances;
   job_instances.reserve(row.evidence.jobs.size());
+  std::set<B1JobInstance> unique_jobs;
+  std::size_t cold_count = 0U;
+  std::size_t warmup_count = 0U;
   for (const B1JobEvidence& job : row.evidence.jobs) {
-    job_instances.push_back(job.job);
-    if (job.job.phase == B1JobPhase::Measured) {
-      measured.push_back(&job);
+    validate_b1_job_instance(job.job);
+    if (job.job.row_workload_id != kB1WorkloadId ||
+        job.job.replicate_ordinal != row.evidence.replicate_ordinal ||
+        job.job.run_cap != row.evidence.run_cap ||
+        !unique_jobs.insert(job.job).second) {
+      throw std::invalid_argument(
+          "B1 pair producer job identity is duplicated or mismatched.");
     }
+    job_instances.push_back(job.job);
+    switch (job.job.phase) {
+      case B1JobPhase::Cold:
+        ++cold_count;
+        break;
+      case B1JobPhase::Warmup:
+        ++warmup_count;
+        break;
+      case B1JobPhase::Measured:
+        measured.push_back(&job);
+        break;
+    }
+  }
+  if (row.evidence.jobs.size() !=
+          1U + kB1WarmupJobCount + kB1MeasuredJobCount ||
+      unique_jobs.size() != row.evidence.jobs.size() || cold_count != 1U ||
+      warmup_count != kB1WarmupJobCount) {
+    throw std::invalid_argument(
+        "B1 pair producer requires exactly one cold, three warmup, and "
+        "thirty measured jobs.");
   }
   std::sort(measured.begin(), measured.end(),
             [](const B1JobEvidence* lhs, const B1JobEvidence* rhs) {
@@ -2567,10 +2733,14 @@ EvidencePairObject make_b1_evidence_pair_object(
   input.job_index_seal_ordinal = 2U;
   input.measurement_evidence = make_producer_section(
       "measurement-evidence", "execution-profile-measurement-evidence-v1",
-      {known_field("subject_role", "enum",
+      {known_field("pair_source_schema", "identifier",
+                   kEvidenceB1PairDenominatorSchema),
+       known_field("subject_role", "enum",
                    evidence_subject_role_name(options.subject_role)),
        known_field("replicate_ordinal", "uint64",
                    std::to_string(input.replicate_ordinal)),
+       known_field("source_inner_schema_version", "uint64",
+                   std::to_string(kB1InnerRowSchemaVersion)),
        known_field("measurement_start_ns", "uint64",
                    std::to_string(measurement_start)),
        known_field("measurement_end_ns", "uint64",
@@ -2582,19 +2752,19 @@ EvidencePairObject make_b1_evidence_pair_object(
       3U);
   input.output_evidence = make_producer_section(
       "output-evidence", "execution-profile-output-evidence-v1",
-      {known_field("verified_measured_jobs", "uint64",
-                   std::to_string(row.verified_measured_jobs))},
+      {known_field("pair_source_schema", "identifier",
+                   kEvidenceB1PairDenominatorSchema),
+       known_field("portable_output_claim_schema", "identifier",
+                   kEvidencePairNoOutputClaimSchema),
+       known_field("portable_output_authority", "enum", "not-claimed")},
       4U);
   input.verdict_evidence = make_producer_section(
       "verdict-evidence", "execution-profile-verdict-evidence-v1",
-      {known_field("throughput", "verdict",
-                   verdict_name(row.throughput_verdict)),
-       known_field("determinism", "verdict",
-                   verdict_name(row.determinism_verdict)),
-       known_field("waste", "verdict", verdict_name(row.waste_verdict)),
-       known_field("memory", "verdict", verdict_name(row.memory_verdict)),
-       known_field("validity_reasons", "diagnostic-list-v1",
-                   encode_diagnostics(row.validity_reasons))},
+      {known_field("pair_source_schema", "identifier",
+                   kEvidenceB1PairDenominatorSchema),
+       known_field("portable_claim_schema", "identifier",
+                   kEvidencePairNoVerdictClaimSchema),
+       known_field("portable_claim_scope", "enum", "denominator-only")},
       5U);
   input.seal_ordinal = 6U;
   EvidenceCanonicalRow outer_row = materialize_evidence_row(std::move(input));
@@ -3015,28 +3185,99 @@ std::string read_evidence_pair_object_file(const std::filesystem::path& path) {
   }
   return bytes;
 #else
-  const std::filesystem::file_status status =
-      std::filesystem::symlink_status(path);
-  if (std::filesystem::is_symlink(status) ||
-      !std::filesystem::is_regular_file(status)) {
-    throw std::invalid_argument(
-        "Evidence pair object must be a non-symlink regular file.");
-  }
-  const std::uintmax_t size = std::filesystem::file_size(path);
-  if (size == 0U || size > kEvidencePairObjectMaxBytes) {
-    throw std::invalid_argument(
-        "Evidence pair object must be nonempty and bounded.");
-  }
-  std::ifstream input(path, std::ios::binary);
-  if (!input) {
-    throw std::runtime_error("Failed to open evidence pair object.");
-  }
-  std::string bytes(static_cast<std::size_t>(size), '\0');
-  input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-  if (input.gcount() != static_cast<std::streamsize>(bytes.size()) ||
-      input.peek() != std::char_traits<char>::eof()) {
+  const DWORD open_flags = FILE_FLAG_OPEN_REPARSE_POINT |
+                           FILE_FLAG_BACKUP_SEMANTICS |
+                           FILE_FLAG_SEQUENTIAL_SCAN;
+  const HANDLE opened =
+      ::CreateFileW(path.c_str(), GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, open_flags, nullptr);
+  if (opened == INVALID_HANDLE_VALUE) {
+    const DWORD error = ::GetLastError();
     throw std::runtime_error(
-        "Evidence pair object changed or failed while reading.");
+        "Failed to open evidence pair object with no-follow semantics: " +
+        std::to_string(error));
+  }
+  WindowsEvidenceReadHandle handle(opened);
+
+  ::SetLastError(ERROR_SUCCESS);
+  const DWORD file_type = ::GetFileType(handle.get());
+  const DWORD file_type_error = ::GetLastError();
+  if (file_type == FILE_TYPE_UNKNOWN && file_type_error != ERROR_SUCCESS) {
+    throw std::runtime_error(
+        "Failed to classify evidence pair object handle: " +
+        std::to_string(file_type_error));
+  }
+  if (file_type != FILE_TYPE_DISK) {
+    throw std::invalid_argument(
+        "Evidence pair object handle must name a disk file.");
+  }
+
+  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  if (::GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+                                     &attributes, sizeof(attributes)) == 0) {
+    const DWORD error = ::GetLastError();
+    throw std::runtime_error(
+        "Failed to inspect evidence pair object reparse attributes: " +
+        std::to_string(error));
+  }
+  if ((attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
+    throw std::invalid_argument(
+        "Evidence pair object path must not name a reparse point.");
+  }
+
+  FILE_STANDARD_INFO standard{};
+  if (::GetFileInformationByHandleEx(handle.get(), FileStandardInfo, &standard,
+                                     sizeof(standard)) == 0) {
+    const DWORD error = ::GetLastError();
+    throw std::runtime_error("Failed to inspect evidence pair object size: " +
+                             std::to_string(error));
+  }
+  if (standard.Directory != 0 || standard.EndOfFile.QuadPart <= 0 ||
+      static_cast<std::uint64_t>(standard.EndOfFile.QuadPart) >
+          kEvidencePairObjectMaxBytes) {
+    throw std::invalid_argument(
+        "Evidence pair object must be a nonempty bounded regular file.");
+  }
+
+  const std::size_t size =
+      static_cast<std::size_t>(standard.EndOfFile.QuadPart);
+  std::string bytes(size, '\0');
+  std::size_t consumed = 0U;
+  while (consumed < bytes.size()) {
+    const std::size_t remaining = bytes.size() - consumed;
+    const DWORD requested = static_cast<DWORD>(
+        std::min<std::size_t>(remaining, std::numeric_limits<DWORD>::max()));
+    DWORD read = 0U;
+    if (::ReadFile(handle.get(), bytes.data() + consumed, requested, &read,
+                   nullptr) == 0) {
+      const DWORD error = ::GetLastError();
+      throw std::runtime_error("Failed to read evidence pair object: " +
+                               std::to_string(error));
+    }
+    if (read == 0U) {
+      throw std::runtime_error(
+          "Failed to read evidence pair object: unexpected end of file");
+    }
+    consumed += read;
+  }
+
+  char extra = '\0';
+  DWORD extra_read = 0U;
+  if (::ReadFile(handle.get(), &extra, 1U, &extra_read, nullptr) == 0) {
+    const DWORD error = ::GetLastError();
+    throw std::runtime_error(
+        "Failed to verify evidence pair object end of file: " +
+        std::to_string(error));
+  }
+  if (extra_read != 0U) {
+    throw std::runtime_error(
+        "Evidence pair object grew while reading from its opened handle.");
+  }
+  DWORD close_error = ERROR_SUCCESS;
+  if (!handle.close(&close_error)) {
+    throw std::runtime_error("Failed to close evidence pair object: " +
+                             std::to_string(close_error));
   }
   return bytes;
 #endif

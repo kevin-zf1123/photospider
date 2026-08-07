@@ -1147,11 +1147,13 @@ void run_measured_producer(
  * @brief Captures one lossless M1 snapshot and advances its lifecycle cursor.
  * @param host Source-private M1 diagnostics.
  * @param cursor In/out prior complete lifecycle cut.
+ * @param capture_ordinal Exact chronological row-local snapshot coordinate.
  * @return One bounded same-service snapshot.
  * @throws std::invalid_argument for null cursor.
  * @throws std::runtime_error for loss, overflow, or pagination.
  */
-M1ExecutionSnapshot capture_m1_snapshot(M1Host& host, std::uint64_t* cursor) {
+M1ExecutionSnapshot capture_m1_snapshot(M1Host& host, std::uint64_t* cursor,
+                                        std::size_t capture_ordinal) {
   if (cursor == nullptr) {
     throw std::invalid_argument("M1 lifecycle cursor is null");
   }
@@ -1161,6 +1163,7 @@ M1ExecutionSnapshot capture_m1_snapshot(M1Host& host, std::uint64_t* cursor) {
       snapshot.lifecycle.global_dropped_saturated) {
     throw std::runtime_error("M1 lifecycle snapshot is not lossless");
   }
+  snapshot.temporal_capture_ordinal = capture_ordinal;
   *cursor = snapshot.lifecycle.snapshot_cut;
   return snapshot;
 }
@@ -1455,6 +1458,8 @@ void derive_m1_aggregates(
   input->fairness.observation_sequence_exhausted =
       observations.sequence_exhausted;
   input->fairness.observation_qos_mismatch = observations.qos_mismatch;
+  input->fairness.observation_publication_unstable =
+      !observations.stable_publication_cut;
   for (std::size_t window = 0U; window < kM1MeasuredWindowCount; ++window) {
     const auto start = checked_i1_time_add(
         timeline.measurement_start,
@@ -1705,7 +1710,9 @@ std::string encode_m1_execution_snapshot(const M1ExecutionSnapshot& snapshot) {
             std::to_string(snapshot.ready_classes.throughput_entries),
             std::to_string(snapshot.ready_classes.total_entries),
             boolean_text(snapshot.ready_classes.valid)}),
-       encode_m1_lifecycle_page(snapshot.lifecycle)});
+       encode_m1_lifecycle_page(snapshot.lifecycle),
+       std::to_string(snapshot.lifecycle_after_cursor),
+       std::to_string(snapshot.temporal_capture_ordinal)});
 }
 
 /**
@@ -2004,7 +2011,8 @@ std::string encode_m1_inner_row(
        boolean_text(row.evidence.temporal_effects_complete),
        boolean_text(row.evidence.fairness.observation_overflowed),
        boolean_text(row.evidence.fairness.observation_sequence_exhausted),
-       boolean_text(row.evidence.fairness.observation_qos_mismatch)});
+       boolean_text(row.evidence.fairness.observation_qos_mismatch),
+       boolean_text(row.evidence.fairness.observation_publication_unstable)});
   const M1BatchWasteEvidence& waste = row.evidence.batch_waste;
   const std::string batch_waste_record = encode_b1_fixed_record(
       {std::to_string(waste.all_started_service),
@@ -2408,7 +2416,8 @@ M1RunResult run_exact_m1_replicate(
   input.protocol.shared_execution_domain = true;
 
   std::uint64_t m1_cursor = 0U;
-  input.temporal_snapshots.push_back(capture_m1_snapshot(*m1_host, &m1_cursor));
+  input.temporal_snapshots.push_back(capture_m1_snapshot(
+      *m1_host, &m1_cursor, input.temporal_snapshots.size()));
   const M1ExecutionSnapshot initial_m1 = input.temporal_snapshots.back();
   std::uint64_t b1_initial_cursor = 0U;
   const B1ExecutionSnapshot initial_b1 =
@@ -2538,7 +2547,8 @@ M1RunResult run_exact_m1_replicate(
   std::this_thread::sleep_until(timeline.warmup_start);
   input.protocol.boundaries.warmup_start =
       protocol_sequence.coordinate(timeline.warmup_start);
-  input.temporal_snapshots.push_back(capture_m1_snapshot(*m1_host, &m1_cursor));
+  input.temporal_snapshots.push_back(capture_m1_snapshot(
+      *m1_host, &m1_cursor, input.temporal_snapshots.size()));
   const M1EventCoordinate warmup_zero_i1_origin =
       protocol_sequence.coordinate(timeline.warmup_start);
 
@@ -2593,8 +2603,8 @@ M1RunResult run_exact_m1_replicate(
     const M1EventCoordinate coordinate = protocol_sequence.coordinate(origin);
     completed_i1.push_back(
         run_sync_i1(B1JobPhase::Warmup, ordinal, coordinate, baseline));
-    input.temporal_snapshots.push_back(
-        capture_m1_snapshot(*m1_host, &m1_cursor));
+    input.temporal_snapshots.push_back(capture_m1_snapshot(
+        *m1_host, &m1_cursor, input.temporal_snapshots.size()));
   }
 
   const std::size_t final_warmup_ordinal = kM1WarmupI1OriginCount - 1U;
@@ -2643,11 +2653,12 @@ M1RunResult run_exact_m1_replicate(
   input.protocol.measured_counters_reset = true;
   const M1FairnessObservationSnapshot boundary_after =
       mixed_collector.snapshot();
-  input.protocol.boundary_was_zero_duration =
-      boundary_before.events.size() == boundary_after.events.size();
-  input.protocol.raw_history_preserved =
-      boundary_before.events.size() <= boundary_after.events.size() &&
-      !boundary_after.overflowed && !boundary_after.sequence_exhausted;
+  const bool observation_cut_unchanged =
+      m1_observation_cut_unchanged(boundary_before, boundary_after);
+  input.protocol.boundary_was_zero_duration = observation_cut_unchanged;
+  input.protocol.raw_history_preserved = observation_cut_unchanged &&
+                                         !boundary_after.overflowed &&
+                                         !boundary_after.sequence_exhausted;
 
   const M1EventCoordinate first_measured_origin =
       protocol_sequence.coordinate(timeline.measurement_start);
@@ -2685,7 +2696,8 @@ M1RunResult run_exact_m1_replicate(
       options.replicate_ordinal, first_measured_origin, measured_zero_baseline,
       measured_zero_first_sequence, mixed_collector, measured_zero_live));
   completed_i1.push_back(final_warmup.get());
-  input.temporal_snapshots.push_back(capture_m1_snapshot(*m1_host, &m1_cursor));
+  input.temporal_snapshots.push_back(capture_m1_snapshot(
+      *m1_host, &m1_cursor, input.temporal_snapshots.size()));
 
   for (std::size_t ordinal = 1U; ordinal < kM1MeasuredI1OriginCount;
        ++ordinal) {
@@ -2699,8 +2711,8 @@ M1RunResult run_exact_m1_replicate(
     const M1EventCoordinate coordinate = protocol_sequence.coordinate(origin);
     completed_i1.push_back(
         run_sync_i1(B1JobPhase::Measured, ordinal, coordinate, baseline));
-    input.temporal_snapshots.push_back(
-        capture_m1_snapshot(*m1_host, &m1_cursor));
+    input.temporal_snapshots.push_back(capture_m1_snapshot(
+        *m1_host, &m1_cursor, input.temporal_snapshots.size()));
   }
 
   std::this_thread::sleep_until(timeline.measurement_end);
@@ -2800,7 +2812,8 @@ M1RunResult run_exact_m1_replicate(
                                     !observations.qos_mismatch;
 
   graphs.close_all();
-  input.temporal_snapshots.push_back(capture_m1_snapshot(*m1_host, &m1_cursor));
+  input.temporal_snapshots.push_back(capture_m1_snapshot(
+      *m1_host, &m1_cursor, input.temporal_snapshots.size()));
   input.protocol.final_settlement_proved =
       final_m1_snapshot_is_zero(input.temporal_snapshots.back());
   M1InnerRow inner = evaluate_m1_inner_row(std::move(input));

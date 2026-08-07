@@ -334,13 +334,58 @@ TEST(B1Evidence, ProducesCanonicalPairObjectFromCompleteCapEightRow) {
   EXPECT_EQ(loaded.bundle.digest, produced.bundle.digest);
   const B1CanonicalManifest measurement =
       parse_b1_canonical_manifest(loaded.row.source.measurement_evidence.bytes);
-  ASSERT_EQ(measurement.fields.size(), 6U);
-  EXPECT_EQ(parse_b1_framed_list(measurement.fields[4U].payload).size(),
+  EXPECT_EQ(measurement.schema, "execution-profile-measurement-evidence-v1");
+  ASSERT_EQ(measurement.fields.size(), 8U);
+  EXPECT_EQ(measurement.fields[0U].payload, kEvidenceB1PairDenominatorSchema);
+  EXPECT_EQ(parse_b1_canonical_uint64(measurement.fields[3U].payload),
+            kB1InnerRowSchemaVersion);
+  EXPECT_EQ(parse_b1_framed_list(measurement.fields[6U].payload).size(),
             kB1MeasuredJobCount);
-  EXPECT_EQ(parse_b1_canonical_uint64(measurement.fields[5U].payload),
+  EXPECT_EQ(parse_b1_canonical_uint64(measurement.fields[7U].payload),
             row.successful_site_operations);
+  EXPECT_EQ(loaded.row.source.output_evidence.schema_id,
+            "execution-profile-output-evidence-v1");
+  EXPECT_EQ(loaded.row.source.verdict_evidence.schema_id,
+            "execution-profile-verdict-evidence-v1");
+  EXPECT_EQ(parse_b1_canonical_manifest(loaded.row.source.output_evidence.bytes)
+                .fields[2U]
+                .payload,
+            "not-claimed");
+  EXPECT_EQ(
+      parse_b1_canonical_manifest(loaded.row.source.verdict_evidence.bytes)
+          .fields[2U]
+          .payload,
+      "denominator-only");
   EXPECT_TRUE(valid_b1_environment_claims(loaded.row.source.environment));
   EXPECT_FALSE(valid_b1_environment_evidence(loaded.row.source.environment));
+}
+
+/**
+ * @brief Proves B1 denominator production requires schema v1 and exact jobs.
+ * @throws Test fixture, evaluator, canonical pack, and framework failures.
+ */
+TEST(B1Evidence, PairDenominatorRejectsSchemaAndOccurrenceDrift) {
+  B1InnerRowInput input = make_valid_row_input(8U, 1U);
+  input.environment.fixture_digest = evidence_b1_component_digests().fixture;
+  const B1InnerRow valid = evaluate_b1_inner_row(std::move(input));
+  ASSERT_TRUE(valid.validity_reasons.empty());
+  const EvidencePairProducerOptions options{EvidenceSubjectRole::Reference,
+                                            std::nullopt};
+
+  B1InnerRow schema_drift = valid;
+  schema_drift.schema_version = kB1InnerRowSchemaVersion + 1U;
+  EXPECT_THROW(make_b1_evidence_pair_object(schema_drift, options),
+               std::invalid_argument);
+
+  B1InnerRow missing = valid;
+  missing.evidence.jobs.pop_back();
+  EXPECT_THROW(make_b1_evidence_pair_object(missing, options),
+               std::invalid_argument);
+
+  B1InnerRow duplicate = valid;
+  duplicate.evidence.jobs.back() = duplicate.evidence.jobs.front();
+  EXPECT_THROW(make_b1_evidence_pair_object(duplicate, options),
+               std::invalid_argument);
 }
 
 /**

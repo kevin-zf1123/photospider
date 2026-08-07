@@ -511,6 +511,7 @@ M1FairnessEvidenceInput make_product_class_start_input(
   input.observation_overflowed = snapshot.overflowed;
   input.observation_sequence_exhausted = snapshot.sequence_exhausted;
   input.observation_qos_mismatch = snapshot.qos_mismatch;
+  input.observation_publication_unstable = !snapshot.stable_publication_cut;
   return input;
 }
 
