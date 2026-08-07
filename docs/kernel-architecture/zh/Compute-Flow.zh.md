@@ -393,12 +393,20 @@ descriptor 持有、且经过验证的 mode-`0700` private staging anchor/slot �
 都必须遵守该 lock，并把 B1 name 保留给单一 store owner。mkdir-to-open identity 必须在任何
 artifact mutation 前匹配。两个 task 均结算后，一次 Darwin `RENAME_EXCL` 或 Linux
 `RENAME_NOREPLACE` transition 会发布完整 occurrence。Root-path 或 public-slot replacement
-都不能重定向写入。Transaction guard 会先结算 accepted Compute I/O charge，再进行严格的
-checked cleanup。它会两次检查每个 identity、每个 removal 结果及随后 absence，并对检测到的
-extra leaf、type/identity 漂移、unlink/rmdir 失败或无法证明 absence 执行 fail-stop。由于
-POSIX 会把最终 identity 检查与按 name 删除分开，cleanup 保证仅限协作式 exclusive-owner
-contract；任意不协作 same-UID namespace mutation 不在覆盖范围内。Guard 建立前的 anchor
-handoff failure 会保留含义不确定的 residue，且不声称可重试。该路径只会在 B1 Run result 已
+都不能重定向写入。在 publication 之前，transaction guard 会先结算 accepted Compute I/O
+charge，再进行严格的 checked private cleanup。它会两次检查每个 identity、每个 removal 结果及
+随后 absence，并对检测到的 extra leaf、type/identity 漂移、unlink/rmdir 失败或无法证明 absence
+执行 fail-stop。由于 POSIX 会把最终 identity 检查与按 name 删除分开，cleanup 保证仅限协作式
+exclusive-owner contract；任意不协作 same-UID namespace mutation 不在覆盖范围内。Guard 建立
+前的 anchor handoff failure 会保留含义不确定的 residue，且不声称可重试。Atomic rename 随后
+撤销 public cleanup authority：后续 barrier、最终 validation 或 receipt failure 会保留 occurrence
+与空 anchor。Same-commit retry 会验证精确 public payload/manifest 并完成缺失 barrier，且不产生
+新 output task 或 rewrite。非 directory，或完全没有 transaction-looking leaf 的 real directory
+（空目录或仅含 marker），属于 plainly foreign collision，会保持原状并返回 `SlotExists`；一旦
+出现 payload、manifest 或 private-manifest，不完整/额外/漂移 state 就属于 transaction
+occurrence，会保持原状并返回 `RevalidationFailed`。Reconciliation 返回空
+`io_observations`，不能伪造当前两 task FSM；evaluator 必须取得早先保留的 new-work stream，
+否则 fail closed。该路径只会在 B1 Run result 已
 通过普通 embedded Host compute path 获取之后调用。其 retained environment file 只是 expected
 claim：required-storage compatibility 还要求每一侧自己的进程私有 held-root observation、实际
 typed receipt 与独立产生的完整 probe。JSON 不能恢复该 authority，任一未验证 external storage

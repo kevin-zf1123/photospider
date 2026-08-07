@@ -210,17 +210,33 @@ root barrier，并最终重验 descriptor/name binding。实现不会先创建 p
 打开它进行写入。
 
 Allocation-free transaction guard 会在 anchor、slot、payload、private manifest 与
-published manifest 逐一归属事务时记录其精确 identity。若后续 factory、observation、
-wait、publication 或 receipt 工作失败，guard 会先 cancel 并等待每个 accepted Compute
-I/O task，并证明其精确 charge 已退休。Cleanup 是严格操作而非 best effort：每个存在的
-name 都必须通过两次 descriptor-relative 的已记录 type/identity 检查；每次
-`unlinkat`/`rmdir` 结果、随后 absence 与 parent-directory sync 都必须成功。POSIX 不会把
-最终 identity 检查与后续按 name 删除合并成一个原子的 identity-selected 操作。在协作式
-exclusive-owner 前提下，不会有 actor 在这段间隔修改 reserved name；任一次检查检测到
-replacement 都会在删除前保留它并 fail-stop。最终检查之后由不协作 same-UID actor 发起的
-mutation 不在本 contract 内，设计也不声称永远不会删除这种 replacement。Extra leaf、
-type/identity 漂移、`EIO`/`EROFS`、非空 directory 或无法证明 absence 都会 fail-stop。
-只有在该前提内完成 checked removal 并观察到 absence 后，原 commit identity 才保持可重试。
+published manifest 逐一归属事务时记录其精确 identity。在 public rename 之前，若 factory、
+observation、wait、publication 或 receipt 工作失败，guard 会先 cancel 并等待每个 accepted
+Compute I/O task，证明其精确 charge 已退休，并且只回滚 private occurrence。Cleanup 是严格
+操作而非 best effort：每个存在的 name 都必须通过两次 descriptor-relative 的已记录
+type/identity 检查；每次 `unlinkat`/`rmdir` 结果、随后 absence 与 parent-directory sync 都必须
+成功。POSIX 不会把最终 identity 检查与后续按 name 删除合并成一个原子的 identity-selected
+操作。在协作式 exclusive-owner 前提下，不会有 actor 在这段间隔修改 reserved name；任一次
+检查检测到 replacement 都会在删除前保留它并 fail-stop。最终检查之后由不协作 same-UID actor
+发起的 mutation 不在本 contract 内，设计也不声称永远不会删除这种 replacement。Extra leaf、
+type/identity 漂移、`EIO`/`EROFS`、非空 directory 或无法证明 absence 都会 fail-stop。只有在该
+前提内完成 checked private removal 并观察到 absence 后，原 commit identity 才能从空 namespace
+重试。
+
+成功的 no-replace rename 是从 private rollback 到 public pending reconciliation 的不可逆
+lifecycle transition。从该指令起，source-anchor barrier、destination-root barrier、最终
+revalidation 或 receipt construction 失败都会保留 immutable public occurrence 及其同 root 的
+空 staging anchor；guard 不再拥有 public deletion authority。使用相同 commit id 的重试会相对
+retained root descriptor 打开 occurrence 与可选 pending anchor，要求其中精确只有 payload 和
+manifest 两个 leaf，重新检查其 expected candidate byte、length、digest 与 filesystem identity，
+完成可能缺失的 source/root barrier，再执行最终 root/name/leaf revalidation。只有此后才能重建
+同一 stable receipt，并删除已经不需要的空 anchor。Reconciliation 不会提交新 output task，也
+绝不重写 public byte。因此它的 receipt 包含空 `io_observations`；这些空 observation 不能伪造
+当前 transaction FSM，B1 evaluator 必须取得早先保留的 new-work stream，否则 fail closed。
+非 directory、空 real directory，或仅含未知 marker 的 real directory 都没有 transaction-looking
+leaf，会保持原状并返回类型化 `SlotExists`。一旦出现 payload、manifest 或 private-manifest
+residue，不完整/额外 entry set 或 payload/manifest 漂移就会以 `RevalidationFailed` fail closed，
+既不修复也不删除。
 
 回执标识 commit、descriptor/content、namespace、version 与达到的 durability。它没有 public
 aggregate 或 field-based construction path；只有 store 能在完整 revalidation 后签发其不可变
@@ -281,19 +297,26 @@ Issue #87 不修改协议 v2。后续版本化协议可以在远端调用方需�
 ### ComputeIoExecutor 拥有有界机制，不拥有策略
 
 Issue #88 新增唯一 process-owned `ComputeIoExecutor` mechanism，用于有界 cache、
-asset 与 codec 子工作。准入会在 lazy payload construction 或副作用之前，同时
-原子覆盖 task 数与 estimated retained bytes。每项已接受任务都会保留
-Run/transaction lifetime token，并返回 `Succeeded`、`Failed` 或 `Cancelled`
-typed completion。Cancellation、callback failure、late return 与 graceful shutdown
-都会恰好一次释放该 token 与两项账本。CPU compute worker 不能同步等待 completion。
+asset 与 codec 子工作。通过 limit decision 后，会在 lazy payload construction 或副作用之前
+暂时预留 task 数与 estimated retained bytes。该 reservation 位于 constructing phase，但尚未
+发布 Accepted identity。Factory 抛异常、返回空 callback 或 queue-entry construction 失败时，
+reservation 会被精确回滚，且不会签发 Accepted event。Callback construction 成功后只会进入
+二选一的最终 decision：若准入仍开放，则 queue ownership 与 Accepted 一起发布并绑定 sequence；
+若外部 shutdown 在 construction 后获胜，则 Accepted 与其精确关联的 Cancelled settlement 原子
+发布，且 callback 不会进入。每项已接受任务都会保留 Run/transaction lifetime token，并返回
+`Succeeded`、`Failed` 或 `Cancelled` typed completion。Cancellation、callback failure、late
+return 与 graceful shutdown 都会恰好
+一次释放该 token 与两项账本。CPU compute worker 不能同步等待 completion。
 
-executor 还负责签发归属 proof。它在与每次 admission decision 相同的 mutex 下签发
-不可变 event，其中包含单调非零 sequence、精确 task/byte charge delta、类型化 decision
-与结果 process-global snapshot；又在与 settlement release 相同的 mutex 下签发第二个
-不可变 event，关联该 admission，并携带精确 released delta 与结果 snapshot。Rejected
-offer 的 delta 为零。Snapshot 可以包含无关并发工作，可用于 limit/high-water 验证，
-但不能替代该 task 自己的 charge/release event。当 consumer 只观察部分 process work
-时，event sequence 允许存在 gap。
+executor 还负责签发归属 proof。它在与每次 terminal rejection decision 或成功 Accepted
+publication 相同的 mutex 下签发不可变 event，其中包含单调非零 sequence、精确 task/byte
+charge delta、类型化 decision 与结果 process-global snapshot；又在与 settlement release
+相同的 mutex 下签发第二个不可变 event，关联该 admission，并携带精确 released delta 与结果
+snapshot。Rejected offer 的 delta 为零；provisional factory failure 完全没有 event，因为没有
+admission identity 变成 externally observable。Snapshot 可以包含无关并发工作，可用于 limit/
+high-water 验证，但不能替代该 task 自己的 charge/release event。每个 active task 在每份
+snapshot 中必须精确属于 constructing、queued 或 running 之一。当 consumer 只观察部分 process
+work 时，event sequence 允许存在数值 gap。
 
 唯一 I/O worker 不能向自身 owning executor 准入另一个任务：准入仍开放时，该调用
 会在改变任一 budget 或 lazy factory 前返回 inactive `InvalidRequest`。Owning worker

@@ -779,10 +779,13 @@ fence。CPU worker 不阻塞等待 GPU completion；stale device completion 会�
 更新的 graph revision。
 
 当前 V-11 新增唯一 source-private process `ComputeIoExecutor`，其中有一个独立 worker，并在
-lazy payload construction 或副作用之前，按 task 数与 estimated retained bytes 原子准入。
-已接受 work 会保留显式 transaction lifetime token，并暴露 typed completion；failure、
-cancellation、late return 与 shutdown 都会恰好一次 settlement。CPU compute worker 不能同步
-等待该 executor。
+通过 limit check 后、lazy payload construction 或副作用之前，暂时预留 task 数与 estimated
+retained bytes。Factory 抛异常、返回空 callback 或 task/queue-entry allocation 失败时，
+reservation 会回滚且不签发 Accepted event。Construction 成功后，Accepted 要么与 queue
+ownership 一起发布，要么在外部 shutdown 已获胜时与其精确关联的 Cancelled settlement 原子
+发布，且 callback 不会进入。已接受 work 会保留显式 transaction lifetime token，并暴露 typed
+completion；failure、cancellation、late return 与 shutdown 都会恰好一次 settlement。CPU
+compute worker 不能同步等待该 executor。
 
 首条生产垂直路径通过该 executor 运行 staged HP cache-save codec/filesystem mechanism，同时
 由 graph-state policy 保留 eligibility、path、错误解释与既有 publication 前 commit point。

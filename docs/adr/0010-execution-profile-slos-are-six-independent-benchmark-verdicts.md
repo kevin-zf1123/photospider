@@ -605,6 +605,14 @@ Checked arithmetic must produce those values before every `try_submit`, and
 all attempts for one identity must use the same charge. The 64-task and
 268,435,456-byte summed-planned-byte limits apply at every accepted admission.
 
+A passing limit decision first provisionally reserves one task and its planned
+bytes in the constructing phase. Factory throw, empty callback, or task/queue-
+entry allocation failure rolls that reservation back exactly and mints no
+Accepted event. Successful nonempty construction reaches one binary final
+decision: queue ownership and Accepted publish together while admission remains
+open, or external shutdown publishes Accepted atomically with its exactly
+linked Cancelled settlement before callback entry.
+
 `planned_bytes` is a stable admission estimate of task-retained bytes. Under
 the same executor mutex as the decision, each offer receives an immutable
 admission event with a monotonic nonzero sequence, exact charged task/byte
@@ -627,12 +635,17 @@ repeat only in the current offer state up to the 64-attempt bound. Every event
 binds the expected job, stage, attempt, charge, typed status, and coherent
 event-aligned snapshot. Accepted admission charges exactly one task and the
 offered bytes; its linked settlement releases exactly that charge, while a
-rejected admission charges zero. Global snapshots may include unrelated
-concurrent jobs and may remain nonzero at this job's `Final`; the per-task delta
-proves attribution, and the row boundary still settles to its required process
-baseline. Missing, duplicate, reordered, gapped, wrong-identity, wrong-status,
-undercharged, forged-zero, invalid-event/snapshot, or post-final evidence
-invalidates throughput, determinism, waste, and memory together.
+rejected admission charges zero. Every active snapshot task belongs to exactly
+one of constructing, queued, or running; their checked sum equals active tasks.
+Global snapshots may include unrelated concurrent jobs and may remain nonzero
+at this job's `Final`; the per-task delta proves attribution, and the row
+boundary still settles to its required process baseline. Executor-authored
+sequence numbers need only be strictly increasing in this retained subset:
+numeric gaps such as `10 -> 30 -> 44` are valid because omitted numbers may
+belong to unrelated process work. Missing, duplicate, or reordered required
+task-local state transitions, wrong identity/status, undercharge, forged zero,
+invalid event/snapshot, or post-final evidence invalidates throughput,
+determinism, waste, and memory together.
 
 The payload-stage task completely writes, hashes, synchronizes, and revalidates
 the private payload stage before it settles. Only then may manifest-commit
@@ -653,14 +666,27 @@ publication, barriers, revalidation, and cleanup are descriptor-relative. A
 pathname replacement or symlink can only make the final path-to-descriptor
 binding fail; it cannot redirect writes. An allocation-free guard owns the slot
 immediately after creation, adopts any accepted completion before later work can
-throw, and on exceptional exit first cancels/waits for exact charge retirement
-before checked cleanup. POSIX exposes the final identity recheck and following
-name removal as separate operations, so the cleanup guarantee relies on that
-cooperating exclusive-owner precondition. Detected drift fails before removal;
-arbitrary non-cooperating same-UID mutation is outside the contract. A
+throw, and before public rename first cancels/waits for exact charge retirement
+before checked private cleanup. POSIX exposes the final identity recheck and
+following name removal as separate operations, so that cleanup guarantee relies
+on the cooperating exclusive-owner precondition. Detected drift fails before
+removal; arbitrary non-cooperating same-UID mutation is outside the contract. A
 pre-guard anchor handoff failure retains ambiguous residue and makes no
-retryability claim. Only checked removal and observed absence inside the
-precondition leave the same commit identity retryable.
+retryability claim. Only checked private removal and observed absence inside the
+precondition leave the same commit identity retryable from an empty namespace.
+After atomic public rename the guard permanently revokes deletion authority and
+preserves the occurrence plus empty source anchor on barrier, final-validation,
+or receipt failure. Same-commit retry reopens them descriptor-relatively,
+requires the exact payload/manifest entry set and expected bytes, completes
+missing barriers, repeats final identity validation, and returns the same stable
+receipt without new Compute I/O or public rewriting. A non-directory, empty real
+directory, or real directory containing only unknown markers has no transaction-
+looking leaf and returns `SlotExists` untouched. Once payload, manifest, or
+private-manifest residue is present, an incomplete/extra entry set or byte/
+identity drift returns `RevalidationFailed` untouched. Reconciliation receipts
+carry empty `io_observations` because no new task ran; they cannot fabricate the
+current B1 state machine. The evaluator must receive the retained earlier new-
+work stream or fail closed when it is unavailable.
 
 When evidence must outlive the store object, the store alone may mint an opaque
 retained-root capability by duplicating the held descriptor. Its copies share
@@ -1361,12 +1387,14 @@ device-memory and scratch limits are 512 MiB and 256 MiB. Absent Metal is predef
 B1 evidence samples `ComputeIoExecutor::snapshot()` immediately after every
 accepted task admission and every task settlement, with an initial pre-row
 sample and a final post-quiescent sample. It retains the task charge identity,
-planned bytes, admission status, completion status, active-task count, and
-active-planned-byte count. Every active-planned-byte total is the checked sum
-of the true per-job charges, and its high-water is the maximum of this complete
-event-aligned stream. Any missing sample, arithmetic inconsistency, value over
-the frozen limit, or nonzero final count makes the row invalid. The final
-snapshot must be exactly zero for both active tasks and active planned bytes.
+planned bytes, admission status, completion status, active-task count, active-
+planned-byte count, and constructing/queued/running phase counts. Every active-
+planned-byte total is the checked sum of the true per-job charges; every active
+task is in exactly one phase, so the checked phase sum equals active tasks; and
+the high-water is the maximum of this complete event-aligned stream. Any missing
+sample, arithmetic/phase inconsistency, value over the frozen limit, or nonzero
+final count makes the row invalid. The final snapshot must be exactly zero for
+active tasks, active planned bytes, and all three phases.
 
 Disk-cache/codec I/O and cross-episode/job result reuse are disabled for cold,
 warmup, and measured work. I1/I2 retain only the explicitly recomputed baseline
@@ -1662,12 +1690,17 @@ Those canonical candidate records are produced only after execution from
 actual source-private product observations. Ready materialization observes the
 actual local identity, planned dependencies, shape/device, and submission
 resource declaration; the execution service observes the irreversible start;
-and task execution observes its terminal outcome. The collector maps the
-actual shape/declaration into the B1 resource vector. The frozen semantic plan
-is only the independent expectation oracle and is never emitted as observed
-evidence before execution. Missing, duplicate, or gapped observations,
-dependency/resource drift, causal reordering, or terminal-outcome drift makes
-determinism invalid even when every artifact digest matches.
+and task execution observes its terminal outcome. The collector retains the
+callback's adapter-owned `ready_bytes` declaration independently from the
+workload-mapped logical ROI bytes placed in the semantic resource vector. The
+current B1 adapter declares zero additional ready bytes, while tiled logical
+bytes are still derived from the actual planned ROI; declaration drift is
+invalid and cannot be hidden by recomputing that ROI mapping. The frozen
+semantic plan is only the independent expectation oracle and is never emitted
+as observed evidence before execution. Missing, duplicate, or gapped task
+observations, declaration/dependency/resource drift, causal reordering, or
+terminal-outcome drift makes determinism invalid even when every artifact
+digest matches.
 
 The canonical bytes begin with this exact ASCII header and LF:
 

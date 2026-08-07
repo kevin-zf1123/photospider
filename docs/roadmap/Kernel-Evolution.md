@@ -974,11 +974,15 @@ CPU workers do not block waiting for GPU completion. A stale device completion
 releases resources but cannot commit to a newer graph revision.
 
 Current V-11 adds one source-private process `ComputeIoExecutor` with an
-independent worker and atomic task/estimated-retained-byte admission before
-lazy payload construction or side effects. Accepted work retains an explicit
-transaction lifetime token and exposes typed completion with exactly-once
-settlement across failure, cancellation, late return, and shutdown. CPU
-compute workers cannot synchronously wait for it.
+independent worker. A passing limit check provisionally reserves task and
+estimated-retained-byte capacity before lazy payload construction or side
+effects. Factory throw, empty callback, or task/queue-entry allocation failure
+rolls back without an Accepted event. Successful construction publishes
+Accepted either with queue ownership or, if external shutdown won, atomically
+with its exactly linked Cancelled settlement before callback entry. Accepted
+work retains an explicit transaction lifetime token and exposes typed
+completion with exactly-once settlement across failure, cancellation, late
+return, and shutdown. CPU compute workers cannot synchronously wait for it.
 
 The first production vertical runs staged HP cache-save codec/filesystem
 mechanism through this executor while graph-state policy keeps eligibility,

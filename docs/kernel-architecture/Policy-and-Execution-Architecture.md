@@ -373,12 +373,18 @@ numeric-maximum generation order.
 ## Compute I/O Execution Boundary
 
 `ExecutionService::PoolState` owns one source-private `ComputeIoExecutor` with
-one independent worker. Under one mutex, admission charges both the task count
-and a positive estimated-retained-byte amount before lazy payload construction,
-queue publication, filesystem mutation, or codec entry. Each accepted task
-retains an explicit transaction lifetime token and returns a typed completion.
-Success, failure, queued cancellation, running late cancellation, construction
-rollback, and graceful shutdown converge on exactly-once account release.
+one independent worker. Under one mutex, a passing limit check provisionally
+reserves both the task count and a positive estimated-retained-byte amount
+before lazy payload construction, queue publication, filesystem mutation, or
+codec entry. Factory throw, empty callback, or task/queue-entry allocation
+failure rolls that reservation back without an Accepted event. Successful
+nonempty construction reaches one binary final decision: queue ownership and
+Accepted publish together while admission remains open, or external shutdown
+publishes Accepted atomically with its exactly linked Cancelled settlement
+without callback entry. Each accepted task retains an explicit transaction
+lifetime token and returns a typed completion. Success, failure, queued
+cancellation, running late cancellation, construction rollback, and graceful
+shutdown converge on exactly-once account release.
 
 The executor authors immutable attribution events at those same accounting
 linearization points. Admission records a monotonic nonzero sequence, typed
@@ -686,16 +692,29 @@ both settle, the store atomically renames the complete private slot to the
 immutable public occurrence with platform no-replace semantics and synchronizes
 both namespaces. Every artifact mutation, barrier, and revalidation remains
 descriptor-relative, so pathname or real-directory slot replacement cannot
-redirect writes. The guard settles accepted work before cleanup, checks
-recorded leaf/directory identities twice, checks each name-removal result and
-following absence, synchronizes parents, and fail-stops on detected unowned
-residue or cleanup failure. POSIX does not atomically bind the final identity
-check to `unlinkat`/`rmdir`; this guarantee therefore relies on the cooperating
-exclusive-owner precondition and makes no claim about arbitrary
-non-cooperating same-UID mutation in that interval. A pre-guard anchor handoff
-failure preserves ambiguous residue without a retryability claim. Only checked
-removal and observed absence inside the precondition keep the commit identity
-retryable. The store writes tight little-endian RGBA binary32 bytes,
+redirect writes. Before public rename, the guard settles accepted work before
+private cleanup, checks recorded leaf/directory identities twice, checks each
+name-removal result and following absence, synchronizes parents, and fail-stops
+on detected unowned residue or cleanup failure. POSIX does not atomically bind
+the final identity check to `unlinkat`/`rmdir`; this guarantee therefore relies
+on the cooperating exclusive-owner precondition and makes no claim about
+arbitrary non-cooperating same-UID mutation in that interval. A pre-guard anchor
+handoff failure preserves ambiguous residue without a retryability claim. Only
+checked private removal and observed absence inside the precondition keep the
+commit identity retryable from an empty namespace. Atomic public rename changes
+the guard to public-pending and revokes deletion authority. Later barrier,
+final-validation, or receipt failure preserves the occurrence and empty anchor;
+same-commit retry descriptor-relatively verifies exact payload/manifest bytes
+and identities, finishes missing barriers, and returns the same receipt without
+new output work or rewriting. A non-directory or real directory with no
+transaction-looking leaf (empty or containing only unknown markers) is plainly
+foreign and returns `SlotExists` untouched. Once payload, manifest, or private-
+manifest residue is present, an incomplete/extra entry set or byte/identity
+drift returns `RevalidationFailed` untouched. A reconciled receipt carries an
+empty `io_observations` sequence because no new tasks ran; it cannot fabricate
+the current B1 FSM, so evaluation requires the retained earlier new-work stream
+and fails closed when that stream is unavailable. The store writes tight
+little-endian RGBA binary32 bytes,
 syncs and revalidates the payload and manifest, publishes once, completes
 leaf-to-root directory barriers, and only then returns a typed crash-durable
 receipt. That receipt has no public field-based constructor: only the store can
@@ -706,7 +725,15 @@ by evaluated inner rows therefore keep the descriptor and exclusive ownership
 alive even after the originating store is destroyed. Every offer and
 settlement retains the complete occurrence/task identity and executor-authored
 exact delta plus same-lock I/O snapshot; capacity retry keeps attempt zero and
-the same charge. Planned bytes and per-task events are authoritative only for
+the same charge. A passing limit check is only a provisional constructing
+reservation: factory throw/empty or task/queue-entry allocation failure mints no
+Accepted event. Successful construction publishes Accepted either with queue
+ownership or, if external shutdown won, atomically with its exactly linked
+Cancelled settlement. Every active snapshot task
+occupies exactly one constructing/queued/running phase; retained global event
+sequences may have numeric gaps for omitted unrelated work, but task-local
+transitions may not be missing. Planned bytes and per-task events are
+authoritative only for
 Compute I/O admission, high-water, and exact task settlement, not physical
 memory ownership, durability, RSS, or ledger/device evidence.
 

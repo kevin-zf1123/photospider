@@ -257,21 +257,42 @@ No mkdir-created public occurrence is reopened for later writes.
 
 An allocation-free transaction guard records the exact identity of the anchor,
 slot, payload, private manifest, and published manifest as each becomes owned.
-If later factory, observation, wait, publication, or receipt work fails, the
-guard first cancels and waits for every accepted Compute I/O task and proves its
-exact charge retired. Cleanup is strict rather than best effort: each present
-name must have its recorded type and identity at two descriptor-relative
-checks, every `unlinkat`/`rmdir` result and following absence is checked, and
-parent directories are synchronized. POSIX does not make the final identity
-check and following name-based removal one atomic identity-selected operation.
-Under the cooperating exclusive-owner precondition, no actor mutates a
-reserved name in that interval; a replacement detected by either check is
-preserved and causes fail-stop before removal. A mutation by a non-cooperating
-same-UID actor after the final check is outside this contract, and the design
-does not claim it can never remove such a replacement. An extra leaf,
-type/identity drift, `EIO`/`EROFS`, nonempty directory, or unprovable absence
-terminates fail-stop. Only checked removal and observed absence within that
-precondition leave the original commit identity retryable.
+Before public rename, factory, observation, wait, publication, or receipt work
+failure first cancels and waits for every accepted Compute I/O task, proves its
+exact charge retired, and rolls back only the private occurrence. Cleanup is
+strict rather than best effort: each present name must have its recorded type
+and identity at two descriptor-relative checks, every `unlinkat`/`rmdir` result
+and following absence is checked, and parent directories are synchronized.
+POSIX does not make the final identity check and following name-based removal
+one atomic identity-selected operation. Under the cooperating exclusive-owner
+precondition, no actor mutates a reserved name in that interval; a replacement
+detected by either check is preserved and causes fail-stop before removal. A
+mutation by a non-cooperating same-UID actor after the final check is outside
+this contract, and the design does not claim it can never remove such a
+replacement. An extra leaf, type/identity drift, `EIO`/`EROFS`, nonempty
+directory, or unprovable absence terminates fail-stop. Only checked private
+removal and observed absence within that precondition leave the original commit
+identity retryable from an empty namespace.
+
+The successful no-replace rename is an irreversible lifecycle transition from
+private rollback to public pending reconciliation. From that instruction
+onward, source-anchor barrier, destination-root barrier, final revalidation, or
+receipt-construction failure preserves both the immutable public occurrence and
+its empty same-root staging anchor; the guard has no public deletion authority.
+A retry with the same commit id opens the occurrence and optional pending anchor
+relative to the retained root descriptor, requires exactly the payload and
+manifest leaves, rechecks their expected candidate bytes, lengths, digests, and
+filesystem identities, completes the possibly missing source/root barriers,
+then repeats final root/name/leaf revalidation. Only then does it reconstruct
+the same stable receipt and remove the now-unneeded empty anchor. Reconciliation
+submits no new output task and never rewrites public bytes. Its receipt therefore
+contains empty `io_observations`; those empty observations cannot fabricate a
+current transaction FSM, so a B1 evaluator must receive the retained earlier
+new-work stream or fail closed. A non-directory, empty real directory, or real
+directory containing only unknown markers has no transaction-looking leaf and
+returns typed `SlotExists` untouched. Once payload, manifest, or private-
+manifest residue is present, an incomplete/extra entry set or payload/manifest
+drift fails closed as `RevalidationFailed` and is neither repaired nor deleted.
 
 The receipt identifies commit, descriptor/content, namespace, version, and
 achieved durability. It has no public aggregate or field-based construction
@@ -348,24 +369,34 @@ durable commit.
 ### ComputeIoExecutor owns bounded mechanism, not policy
 
 Issue #88 adds one process-owned `ComputeIoExecutor` mechanism for bounded
-cache, asset, and codec subwork. Admission atomically covers task count and
-estimated retained bytes before lazy payload construction or side effects.
-Each accepted task retains its Run/transaction lifetime token and returns a
-typed `Succeeded`, `Failed`, or `Cancelled` completion. Cancellation,
-callback failure, late return, and graceful shutdown release that token and
-both accounts exactly once. CPU compute workers cannot synchronously wait on
-the completion.
+cache, asset, and codec subwork. A passing limit decision provisionally reserves
+task count and estimated retained bytes before lazy payload construction or
+side effects. The reservation occupies the constructing phase but does not yet
+publish an Accepted identity. Factory throw, empty callback, or queue-entry
+construction failure rolls that reservation back exactly and mints no Accepted
+event. Successful callback construction reaches one binary final decision. If
+admission remains open, queue ownership and Accepted publish together and bind
+the sequence. If external shutdown won after construction, Accepted instead
+publishes atomically with its exactly linked Cancelled settlement, and the
+callback never enters. Each accepted task retains its Run/transaction lifetime
+token and returns a typed `Succeeded`, `Failed`, or `Cancelled` completion.
+Cancellation, callback failure, late return, and graceful shutdown release that
+token and both accounts exactly once. CPU compute workers cannot synchronously
+wait on the completion.
 
 The executor also authors the attribution proof. Under the same mutex as every
-admission decision it mints an immutable event containing a monotonic nonzero
-sequence, exact task/byte charge delta, typed decision, and the resulting
-process-global snapshot. Under the same mutex as settlement release it mints a
-second immutable event linked to that admission and carrying the exact released
-delta plus resulting snapshot. A rejected offer has zero delta. The snapshot
+terminal rejection decision or successful Accepted publication it mints an
+immutable event containing a monotonic nonzero sequence, exact task/byte charge
+delta, typed decision, and the resulting process-global snapshot. Under the
+same mutex as settlement release it mints a second immutable event linked to
+that admission and carrying the exact released delta plus resulting snapshot.
+A rejected offer has zero delta; a provisional factory failure has no event at
+all because no admission identity became externally observable. The snapshot
 may include unrelated concurrent work and is useful for limit/high-water
 validation, but it is not a substitute for the task's own charge or release
-event. Event sequences may contain gaps when consumers observe only a subset of
-process work.
+event. Every active task occupies exactly one of constructing, queued, or
+running in each snapshot. Event sequences may contain numeric gaps when
+consumers observe only a subset of process work.
 
 The sole I/O worker cannot admit another task to its owning executor: while
 admission remains open, that call returns inactive `InvalidRequest` before

@@ -505,15 +505,26 @@ descriptors; every cooperating actor must honor that lock and reserve B1 names
 to the single store owner. The mkdir-to-open identity must match before any
 artifact mutation. After both tasks settle, one Darwin `RENAME_EXCL` or Linux
 `RENAME_NOREPLACE` transition publishes the complete occurrence. Root-path or
-public-slot replacement cannot redirect writes. A transaction guard settles
-accepted Compute I/O charge before strict checked cleanup. It checks each
-identity twice, every removal result, and following absence, then fail-stops on
-detected extra leaves, type/identity drift, unlink/rmdir failure, or unproved
-absence. Because POSIX separates the final identity check from name removal,
-the cleanup guarantee is scoped to the cooperating exclusive-owner contract;
-arbitrary non-cooperating same-UID namespace mutation is not covered. A pre-
-guard anchor handoff failure retains ambiguous residue and makes no retryability
-claim. This path is invoked only after the B1 Run result is acquired through
+public-slot replacement cannot redirect writes. Before publication, a
+transaction guard settles accepted Compute I/O charge before strict checked
+private cleanup. It checks each identity twice, every removal result, and
+following absence, then fail-stops on detected extra leaves, type/identity drift,
+unlink/rmdir failure, or unproved absence. Because POSIX separates the final
+identity check from name removal, the cleanup guarantee is scoped to the
+cooperating exclusive-owner contract; arbitrary non-cooperating same-UID
+namespace mutation is not covered. A pre-guard anchor handoff failure retains
+ambiguous residue and makes no retryability claim. The atomic rename then
+revokes public cleanup authority: later barrier, final-validation, or receipt
+failure preserves the occurrence and empty anchor. Same-commit retry verifies
+the exact public payload/manifest and finishes missing barriers without new
+output tasks or rewriting. A non-directory or real directory with no
+transaction-looking leaf (empty or marker-only) is plainly foreign and remains
+untouched with `SlotExists`; any payload, manifest, or private-manifest presence
+makes incomplete/extra/drifted state a `RevalidationFailed` transaction
+occurrence that also remains untouched. Reconciliation returns an empty
+`io_observations` sequence and cannot fabricate the current two-task FSM; the
+evaluator needs the retained earlier new-work stream or fails closed. This path
+is invoked only after the B1 Run result is acquired through
 the ordinary embedded Host compute path. Its retained environment files are
 expected claims only: required-storage compatibility additionally needs each
 side's own process-private held-root observation, actual typed receipt, and

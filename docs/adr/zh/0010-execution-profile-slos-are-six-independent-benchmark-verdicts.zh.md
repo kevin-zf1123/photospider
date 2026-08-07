@@ -520,6 +520,12 @@ task，稳定 charge identity 分别为
 值，同一 identity 的全部 attempt 必须使用相同 charge。64-task 与
 268,435,456-byte summed-planned-byte limit 适用于每次 accepted admission。
 
+通过 limit decision 后，会先在 constructing phase 暂时预留一个 task 及其 planned byte。
+Factory 抛异常、返回空 callback 或 task/queue-entry allocation 失败时，会精确回滚该 reservation，
+且不签发 Accepted event。成功构造出的非空 callback 只会进入二选一的最终 decision：若准入仍
+开放，则 queue ownership 与 Accepted 一起发布；若外部 shutdown 已获胜，则 Accepted 与其精确
+关联的 Cancelled settlement 原子发布，且 callback 不会进入。
+
 `planned_bytes` 是 task-retained byte 的稳定 admission estimate。每个 offer 都会在与
 decision 相同的 executor mutex 下取得不可变 admission event，其中包含单调非零
 sequence、精确 charged task/byte delta、typed status 与结果 process-global snapshot。
@@ -538,11 +544,14 @@ settlement；`Final` 最后。Capacity rejection 只能在当前 offer state 重
 64-attempt bound。每个 event 都绑定 expected job、stage、attempt、charge、typed
 status 与一致的 event-aligned snapshot。Accepted admission 精确 charge 一个 task 与
 offered byte；其关联 settlement 精确 release 同一 charge，而 rejected admission 的
-charge 为零。Global snapshot 可以包含无关并发 job，也可以在当前 job 的 `Final` 时
-保持非零；单 task delta 证明归属，row boundary 仍结算到要求的 process baseline。
-缺失、重复、重排、gap、identity 错误、status 错误、undercharge、伪造零值、event/
-snapshot 无效或 `Final` 后 evidence 会同时使 throughput、determinism、waste 与 memory
-invalid。
+charge 为零。每个 active snapshot task 必须精确属于 constructing、queued 或 running
+之一，三者的 checked sum 必须等于 active task。Global snapshot 可以包含无关并发 job，
+也可以在当前 job 的 `Final` 时保持非零；单 task delta 证明归属，row boundary 仍结算到
+要求的 process baseline。Executor 签发的 sequence number 在该 retained subset 中只需严格
+递增：`10 -> 30 -> 44` 之类数值 gap 合法，因为省略的序号可能属于无关 process work。
+缺失、重复或重排必需 task-local state transition、identity/status 错误、undercharge、伪造
+零值、event/snapshot 无效或 `Final` 后 evidence，会同时使 throughput、determinism、waste
+与 memory invalid。
 
 Payload-stage task 在结算前必须完整写入、hash、同步并重新验证 private payload
 stage。只有这样，manifest-commit 才可以写入并同步 private canonical manifest，
@@ -559,12 +568,21 @@ nonblocking advisory exclusive root lock；所有协作进程/线程都必须遵
 staging/occurrence namespace 保留给单一 owner。Slot/payload/manifest mutation、publication、
 barrier、revalidation 与 cleanup 都是 descriptor-relative。Pathname replacement 或 symlink
 只能使最终 path-to-descriptor binding 失败，不能重定向写入。Allocation-free guard 在 slot
-创建后立即接管它，在后续工作可能抛异常前接纳任意 accepted completion，并在异常退出时先
-cancel/wait 到精确 charge 退休，再进行 checked cleanup。POSIX 把最终 identity recheck 与
-后续按 name 删除暴露为两个独立操作，因此 cleanup 保证依赖该协作式 exclusive-owner 前提。
-检测到的漂移会在删除前失败；任意不协作 same-UID mutation 不在 contract 内。Guard 建立前的
-anchor handoff failure 会保留含义不确定的 residue，且不声称可重试。只有在该前提内完成 checked
-removal 并观察到 absence 后，相同 commit identity 才保持可重试。
+创建后立即接管它，在后续工作可能抛异常前接纳任意 accepted completion，并在 public rename
+之前的异常退出中先 cancel/wait 到精确 charge 退休，再进行 checked private cleanup。POSIX 把
+最终 identity recheck 与后续按 name 删除暴露为两个独立操作，因此 cleanup 保证依赖该协作式
+exclusive-owner 前提。检测到的漂移会在删除前失败；任意不协作 same-UID mutation 不在 contract
+内。Guard 建立前的 anchor handoff failure 会保留含义不确定的 residue，且不声称可重试。只有在
+该前提内完成 checked private removal 并观察到 absence 后，相同 commit identity 才能从空
+namespace 重试。Atomic public rename 后，guard 永久撤销 deletion authority；barrier、最终
+validation 或 receipt failure 都会保留 occurrence 与空 source anchor。Same-commit retry 会相对
+descriptor 重新打开二者，要求精确 payload/manifest entry set 与 expected byte，完成缺失 barrier，
+再次执行最终 identity validation，并且不产生新 Compute I/O 或 public rewrite，就返回相同 stable
+receipt。非 directory、空 real directory，或仅含未知 marker 的 real directory 都没有
+transaction-looking leaf，会保持原状并返回 `SlotExists`。一旦出现 payload、manifest 或 private-
+manifest residue，不完整/额外 entry set 或 byte/identity 漂移就会保持原状并返回
+`RevalidationFailed`。Reconciliation receipt 的 `io_observations` 为空，因为没有运行新 task；
+它不能伪造当前 B1 状态机。Evaluator 必须取得早先保留的 new-work stream，缺失时 fail closed。
 
 当 evidence 必须比 store object 活得更久时，只有 store 能通过复制 held descriptor 签发不透明
 retained-root capability。其副本共享 open-file description 与 advisory-lock 生命周期，因此复制
@@ -1184,11 +1202,12 @@ ready entry 与 16 MiB ready byte。Compute I/O 准入上限为 64 个 task 与 
 B1 evidence 在每次 accepted task admission 与每次 task settlement 后立即采样
 `ComputeIoExecutor::snapshot()`，并保留一个 pre-row 初始 sample 与一个
 post-quiescent 最终 sample。它记录 task charge identity、planned byte、admission
-status、completion status、active-task count 与 active-planned-byte count。每个
-active-planned-byte total 都是对真实 per-job charge 的 checked sum，其 high-water
-是这条完整 event-aligned stream 的最大值；缺少任一 sample、算术不一致、值超过
-冻结 limit 或最终 count 非零，都会使该行无效。最终 snapshot 的 active task 与
-active planned byte 必须都精确为零。
+status、completion status、active-task count、active-planned-byte count，以及 constructing/
+queued/running phase count。每个 active-planned-byte total 都是对真实 per-job charge 的
+checked sum；每个 active task 精确位于一个 phase，因此 phase checked sum 必须等于 active
+task；high-water 是这条完整 event-aligned stream 的最大值。缺少任一 sample、算术/phase
+不一致、值超过冻结 limit 或最终 count 非零，都会使该行无效。最终 snapshot 的 active task、
+active planned byte 与全部三个 phase 必须都精确为零。
 
 Cold、warmup 与 measured work 都禁用 disk-cache/codec I/O 和跨 episode/job 的
 result reuse。I1/I2 只保留显式重新计算的 baseline、当前 episode target，以及 I2
@@ -1445,11 +1464,13 @@ outcome 为 `succeeded`；非 terminal record 使用 outcome `-`。
 这些 canonical candidate record 只能在执行后，从实际源码私有 product observation
 产生。Ready materialization 观察实际 local identity、planned dependency、shape/
 device 与 submission resource declaration；execution service 观察不可逆 start；task
-execution 观察其 terminal outcome。Collector 把实际 shape/declaration 映射为 B1
-resource vector。冻结 semantic plan 只能作为独立 expectation oracle，绝不能在执行前
-作为 observed evidence 发出。Observation 缺失、重复或存在 gap、dependency/resource
-漂移、causal reorder 或 terminal-outcome 漂移，即使全部 artifact digest 匹配，也会
-使 determinism invalid。
+execution 观察其 terminal outcome。Collector 会把 callback 的 adapter-owned `ready_bytes`
+declaration 与 semantic resource vector 中按 workload 映射的 logical ROI byte 分开保留。
+当前 B1 adapter 声明零 additional ready byte，而 tiled logical byte 仍根据实际 planned ROI
+推导；declaration drift 会使 evidence invalid，不能被重新计算 ROI mapping 所掩盖。冻结
+semantic plan 只能作为独立 expectation oracle，绝不能在执行前作为 observed evidence 发出。
+Task observation 缺失、重复或存在 gap、declaration/dependency/resource 漂移、causal reorder
+或 terminal-outcome 漂移，即使全部 artifact digest 匹配，也会使 determinism invalid。
 
 Canonical byte 以以下精确 ASCII header 与 LF 开始：
 

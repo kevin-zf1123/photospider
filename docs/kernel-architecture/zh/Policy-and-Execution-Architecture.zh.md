@@ -305,11 +305,14 @@ coordinator 发布的 exact identity。未使用该 callback 的 standalone mana
 ## Compute I/O 执行边界
 
 `ExecutionService::PoolState` 拥有唯一 source-private `ComputeIoExecutor`，其中有一个独立
-worker。Admission 会在同一 mutex 下、且早于 lazy payload construction、queue publication、
-filesystem mutation 或 codec entry，同时计入 task 数与正数 estimated-retained-byte。每项已接受
-任务保留显式 transaction lifetime token，并返回 typed completion。Success、failure、queued
-cancellation、running late cancellation、construction rollback 与 graceful shutdown 最终都会
-恰好一次释放账本。
+worker。通过 limit check 后，会在同一 mutex 下、且早于 lazy payload construction、queue
+publication、filesystem mutation 或 codec entry，暂时预留 task 数与正数 estimated-retained-
+byte。Factory 抛异常、返回空 callback 或 task/queue-entry allocation 失败时，reservation 会回滚
+且不签发 Accepted event。成功构造出的非空 callback 只会进入二选一的最终 decision：若准入仍
+开放，则 queue ownership 与 Accepted 一起发布；若外部 shutdown 已获胜，则 Accepted 与其精确
+关联的 Cancelled settlement 原子发布，且 callback 不会进入。每项已接受任务保留显式
+transaction lifetime token，并返回 typed completion。Success、failure、queued cancellation、
+running late cancellation、construction rollback 与 graceful shutdown 最终都会恰好一次释放账本。
 
 Executor 会在这些相同 accounting linearization point 签发不可变 attribution event。
 Admission 记录单调非零 sequence、typed decision、精确 charged task/byte delta 与同锁
@@ -550,13 +553,22 @@ staging anchor/slot。协作进程与线程必须遵守该 lock，并把 B1 stag
 executor。两个 task 均结算后，store 以平台 no-replace 语义把完整 private slot 原子 rename
 到不可变 public occurrence，并同步 source/destination namespace。每个 artifact mutation、
 barrier 与 revalidation 都保持 descriptor-relative，因此 pathname 或 real-directory slot
-replacement 不能重定向写入。Guard 会先结算 accepted work，再进行 cleanup：两次检查已记录
-leaf/directory identity，检查每次按 name 删除的结果与随后 absence，并同步 parent；若检测到
-unowned residue 或 cleanup failure 则 fail-stop。POSIX 不会原子绑定最终 identity 检查与
-`unlinkat`/`rmdir`；因此该保证依赖协作式 exclusive-owner 前提，且不对这段间隔中任意不协作
-same-UID mutation 作出声明。Guard 建立前的 anchor handoff failure 会保留含义不确定的 residue，
-且不声称可重试。只有在该前提内完成 checked removal 并观察到 absence 后，相同 commit
-identity 才保持可重试。Store 写入紧密 little-endian RGBA binary32
+replacement 不能重定向写入。在 public rename 之前，guard 会先结算 accepted work，再进行
+private cleanup：两次检查已记录 leaf/directory identity，检查每次按 name 删除的结果与随后
+absence，并同步 parent；若检测到 unowned residue 或 cleanup failure 则 fail-stop。POSIX 不会
+原子绑定最终 identity 检查与 `unlinkat`/`rmdir`；因此该保证依赖协作式 exclusive-owner 前提，
+且不对这段间隔中任意不协作 same-UID mutation 作出声明。Guard 建立前的 anchor handoff failure
+会保留含义不确定的 residue，且不声称可重试。只有在该前提内完成 checked private removal 并
+观察到 absence 后，相同 commit identity 才能从空 namespace 重试。Atomic public rename 会把
+guard 转为 public-pending，并撤销 deletion authority。后续 barrier、最终 validation 或 receipt
+failure 会保留 occurrence 与空 anchor；same-commit retry 会相对 descriptor 验证精确 payload/
+manifest byte 与 identity，完成缺失 barrier，并且不产生新 output work 或 rewrite，就返回相同
+receipt。非 directory，或完全没有 transaction-looking leaf 的 real directory（空目录或仅含未知
+marker），属于 plainly foreign collision，会保持原状并返回 `SlotExists`。一旦出现 payload、
+manifest 或 private-manifest residue，不完整/额外 entry set 或 byte/identity 漂移就会保持原状并
+返回 `RevalidationFailed`。Reconciled receipt 的 `io_observations` 为空，因为没有运行新 task；
+它不能伪造当前 B1 FSM，因此 evaluation 必须取得早先保留的 new-work stream，缺失时 fail closed。
+Store 写入紧密 little-endian RGBA binary32
 byte、同步并重验 payload 与 manifest、一次性发布、完成 leaf-to-root directory barrier，
 然后才返回类型化 crash-durable receipt。该 receipt 没有公开的 field-based constructor；
 只有 store 能在 revalidation 完成后签发其不可变类型化字段。Store 还可以保留一个由重复
@@ -564,8 +576,14 @@ descriptor 支撑的不透明 root-authority capability；该 descriptor 与原 
 open-file description 和 advisory-lock 生命周期。因此，evaluated inner row 中的 capability
 副本即使在原始 store 销毁后，仍会让 descriptor 与 exclusive ownership 保持存活。每次 offer 与
 settlement 都保留完整 occurrence/task identity、executor 签发的精确 delta 与同锁 I/O
-snapshot；capacity retry 保持 attempt zero 与相同 charge。Planned byte 与单 task event 只
-对 Compute I/O admission、high-water 与精确 task settlement 具有权威性，不能证明 physical
+snapshot；capacity retry 保持 attempt zero 与相同 charge。通过 limit check 只产生 provisional
+constructing reservation：factory 抛异常、返回空 callback 或 task/queue-entry allocation 失败时
+会回滚，且不签发 Accepted event。Construction 成功后，Accepted 要么随 queue ownership 一起
+发布，要么在外部 shutdown 已获胜时与其精确关联的 Cancelled settlement 原子发布。每个 active
+snapshot task 必须精确位于一个
+constructing/queued/running phase；retained global event sequence 可以因省略无关 work 而存在数值
+gap，但 task-local transition 不能缺失。Planned byte 与单 task event 只对 Compute I/O
+admission、high-water 与精确 task settlement 具有权威性，不能证明 physical
 memory ownership、durability、RSS 或 ledger/device evidence。
 
 Source-private B1 profile、environment validator 与 evidence evaluator 还实现不可变

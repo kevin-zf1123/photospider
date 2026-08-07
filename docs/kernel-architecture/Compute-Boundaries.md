@@ -600,7 +600,13 @@ RT-preview/HP-final child descriptors. Logical equality is a typed available
 admission/settlement event with its executor-authored exact delta/linkage/
 sequence and same-lock process snapshot, planned-byte high-water, ADR 0009
 requested and achieved durability, complete output receipt, raw payload/
-manifest hashes, and the separate canonical semantic trace. Applicable B1/M1
+manifest hashes, and the separate canonical semantic trace. Its raw ready
+observation retains the callback's adapter-owned byte declaration independently
+from logical ROI bytes mapped into the canonical resource vector, so declaration
+drift cannot be hidden by recomputation. Every active Compute I/O snapshot task
+occupies exactly one constructing/queued/running phase. Retained global event
+sequences may contain numeric gaps for omitted unrelated work, while every
+required task-local transition remains mandatory. Applicable B1/M1
 environment evidence also retains exactly one
 `execution-profile-b1-storage-raw-proof-v1` document: six fields in the shared
 manifest grammar carry the backend and all 21 raw field observations, native
@@ -625,7 +631,15 @@ charges and executor-authored admission/settlement deltas are mandatory,
 authoritative evidence for Compute I/O admission, planned-byte high-water, and
 that task's settlement. A same-lock process snapshot may include unrelated work
 and may be nonzero at one job's final observation; row teardown still returns to
-its required baseline. These facts do not add fields to the current
+its required baseline. A provisional lazy-factory reservation that throws or
+returns empty, or whose task/queue-entry allocation fails, rolls back before
+Accepted publication and therefore contributes no orphan admission identity.
+Successful construction publishes Accepted either with queue ownership or,
+when external shutdown won, atomically with the exactly linked Cancelled
+settlement before callback entry. A reconciled output receipt contains empty
+`io_observations` because it ran no new task; it cannot synthesize the current
+two-task FSM, so the earlier new-work stream must be retained or the evaluator
+fails closed. These facts do not add fields to the current
 `BenchmarkResult`, change `ComputeRun`, prove physical memory ownership, replace
 diagnostic RSS or ledger/device ownership evidence, or promote the current IPC
 delivery store to durable output authority.

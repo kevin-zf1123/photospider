@@ -470,7 +470,11 @@ equality 是 typed available `ContentDigest`。B1 记录每个 `ComputeIoExecuto
 charge、带 executor 签发的精确 delta/linkage/sequence 与同锁 process snapshot 的
 accepted admission/settlement event、planned-byte high-water、ADR 0009 requested/
 achieved durability、完整 output receipt、raw payload/manifest hash，以及独立 canonical
-semantic trace。适用 B1/M1 environment evidence 还会保留唯一的
+semantic trace。其 raw ready observation 会把 callback 的 adapter-owned byte declaration 与映射进
+canonical resource vector 的 logical ROI byte 分开保留，因此 declaration drift 不能被重新计算所
+掩盖。每个 active Compute I/O snapshot task 必须精确位于一个 constructing/queued/running phase。
+Retained global event sequence 可以因省略无关 work 而存在数值 gap，但每个必需 task-local
+transition 仍是强制项。适用 B1/M1 environment evidence 还会保留唯一的
 `execution-profile-b1-storage-raw-proof-v1` document：共享 manifest grammar 下的六个
 field 承载 backend 与全部 21 个 raw field observation、native mount evidence、两次
 37-component performance cut、transaction/receipt event 以及 root/destination ownership。
@@ -489,7 +493,13 @@ advisory lock 与 adapter 生命周期。JSON 只接收构造时 diagnostic 与 
 这些仍是画像 harness/evidence 语义。精确 per-job planned-byte charge 与 executor 签发的
 admission/settlement delta 是 Compute I/O admission、planned-byte high-water 与该 task
 settlement 的强制性权威证据。同锁 process snapshot 可以包含无关 work，也可以在单个
-job 的 final observation 时保持非零；row teardown 仍必须返回要求的 baseline。这些事实
+job 的 final observation 时保持非零；row teardown 仍必须返回要求的 baseline。若 provisional
+lazy-factory reservation 抛异常、返回空 callback 或 task/queue-entry allocation 失败，它会在
+Accepted publication 前回滚，因此不会产生孤立 admission identity。Construction 成功后，
+Accepted 要么与 queue ownership 一起发布，要么在外部 shutdown 已获胜时与其精确关联的
+Cancelled settlement 原子发布，且 callback 不会进入。Reconciled output receipt 的
+`io_observations` 为空，因为没有运行新 task；它不能合成当前两 task FSM，因此必须保留早先的
+new-work stream，否则 evaluator 会 fail closed。这些事实
 不会向当前 `BenchmarkResult` 增加 field、改变 `ComputeRun`、证明 physical memory
 ownership、替代 diagnostic RSS 或 ledger/device ownership evidence，也不会把当前 IPC
 delivery store 提升为 durable output authority。
