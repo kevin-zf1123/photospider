@@ -25,7 +25,8 @@ struct ComputeIoExecutorState;
  * accounts, CPU/GPU routes, and scheduler ready-store capacity.
  */
 struct ComputeIoExecutorLimits final {
-  /** @brief Maximum admitted, constructing, queued, and running tasks. */
+  /** @brief Maximum provisional constructing plus accepted queued/running
+   * tasks. */
   std::uint64_t task_limit = 0U;
 
   /** @brief Maximum summed estimated bytes for the same active task set. */
@@ -43,17 +44,17 @@ struct ComputeIoExecutorSnapshot final {
   std::uint64_t task_limit = 0U;
   /** @brief Configured immutable planned-byte limit. */
   std::uint64_t planned_bytes_limit = 0U;
-  /** @brief Currently charged tasks across every active phase. */
+  /** @brief Currently reserved or accepted tasks across every active phase. */
   std::uint64_t active_tasks = 0U;
-  /** @brief Currently charged estimated bytes. */
+  /** @brief Currently reserved or accepted estimated bytes. */
   std::uint64_t active_planned_bytes = 0U;
-  /** @brief Admitted tasks whose lazy factory/queue publication is ongoing. */
+  /** @brief Reservations still in the factory/final-decision phase. */
   std::uint64_t constructing_tasks = 0U;
   /** @brief Published FIFO entries not yet selected by the worker. */
   std::uint64_t queued_tasks = 0U;
   /** @brief Callbacks currently entered on the sole I/O worker. */
   std::uint64_t running_tasks = 0U;
-  /** @brief Whether new submissions may still be admitted. */
+  /** @brief Whether new submissions may begin provisional reservation. */
   bool accepting = false;
   /** @brief Whether graceful shutdown joined the worker. */
   bool shutdown_complete = false;
@@ -67,7 +68,7 @@ struct ComputeIoExecutorSnapshot final {
  * accounting.
  */
 enum class ComputeIoAdmissionStatus : std::uint8_t {
-  /** @brief Both budgets committed and a completion fact was created. */
+  /** @brief Reserved budgets became externally owned by one completion. */
   Accepted,
   /**
    * @brief Input was invalid or the owning I/O worker attempted re-entry.
@@ -123,9 +124,9 @@ struct ComputeIoAdmissionEvent final {
   ComputeIoAdmissionStatus status = ComputeIoAdmissionStatus::InvalidRequest;
   /** @brief Exact positive offered estimate, or zero for invalid input. */
   std::uint64_t offered_planned_bytes = 0U;
-  /** @brief Exact task charge applied by this decision: zero or one. */
+  /** @brief Exact provisional task reservation adopted: zero or one. */
   std::uint64_t charged_tasks = 0U;
-  /** @brief Exact planned-byte charge applied by this decision. */
+  /** @brief Exact provisional planned-byte reservation adopted. */
   std::uint64_t charged_planned_bytes = 0U;
   /** @brief Process state captured atomically after this decision. */
   ComputeIoExecutorSnapshot snapshot_after;
@@ -428,11 +429,17 @@ class ComputeIoWaitProhibitionScope final {
 /**
  * @brief Owns one independent bounded process compute-I/O worker.
  *
- * Submission atomically charges task count and planned bytes before invoking a
- * non-owning lazy factory. The resulting callback and explicit lifetime token
- * are then published to a private FIFO. One worker contains callback failures,
- * produces typed completion, and releases both charges exactly once. The sole
- * worker cannot submit back into this executor, and a lazy factory cannot
+ * Submission provisionally reserves task count and planned bytes before
+ * invoking a non-owning lazy factory. Only a successfully constructed nonempty
+ * callback reaches one final admission decision. If admission remains open,
+ * queue ownership and the executor-authored Accepted event publish together. If
+ * external shutdown wins after construction, Accepted instead publishes
+ * atomically with its exactly linked typed Cancelled settlement and the
+ * callback never enters. Factory throw, empty result, or task/queue-entry
+ * allocation failure rolls the provisional reservation back without minting an
+ * admission identity. One worker contains callback failures, produces typed
+ * completion, and releases both accepted charges exactly once. The sole worker
+ * cannot submit back into this executor, and a lazy factory cannot
  * synchronously shut down any executor for which it is still constructing a
  * task.
  *
@@ -467,23 +474,28 @@ class ComputeIoExecutor final {
   ComputeIoExecutor& operator=(const ComputeIoExecutor&) = delete;
 
   /**
-   * @brief Atomically admits one task before invoking its lazy factory.
+   * @brief Provisionally reserves budgets, then atomically accepts built work.
    *
    * @tparam TaskFactory Const-invocable factory returning one nonempty `Task`.
    * @param planned_bytes Positive estimated retained bytes for complete work.
    * @param lifetime_token Non-null Run/transaction owner retained through
    * callback settlement.
-   * @param factory Non-owning factory invoked only after both budgets commit.
+   * @param factory Non-owning factory invoked only after both budgets are
+   * provisionally reserved.
    * @return Typed rejection, or Accepted with an active completion. A call
    * from this executor's I/O worker returns inactive `InvalidRequest` before
    * factory invocation or budget mutation.
-   * @throws std::invalid_argument when an admitted factory returns empty.
+   * @throws std::invalid_argument when the factory returns an empty `Task`
+   * after provisional reservation.
    * @throws Exceptions from the factory or queue/task-state allocation after
-   * exact admission rollback.
+   * exact provisional-reservation rollback and without an Accepted event.
    * @note Shutdown rejection linearizes before I/O-worker re-entry rejection,
    * followed by task and byte capacity checks. Every rejection avoids lazy
-   * payload construction. The factory object itself remains caller-owned for
-   * this synchronous call.
+   * payload construction. After successful nonempty construction, Accepted
+   * linearizes either with queue ownership publication or, when external
+   * shutdown has already stopped new provisional reservations, atomically with
+   * an exactly linked Cancelled settlement before callback entry. The factory
+   * object itself remains caller-owned for this synchronous call.
    */
   template <typename TaskFactory>
   ComputeIoSubmission try_submit(
@@ -509,14 +521,15 @@ class ComputeIoExecutor final {
   ComputeIoExecutorSnapshot snapshot() const;
 
   /**
-   * @brief Stops admission, drains accepted work, and joins exactly once.
+   * @brief Stops new reservations, drains accepted work, and joins once.
    * @return Nothing after every phase and both budget totals reach zero.
    * @throws std::logic_error when called by the I/O worker itself or from a
    * nested lazy-factory stack that is constructing for this executor.
    * @throws std::system_error from control synchronization.
    * @note A rejected factory re-entry changes no shutdown flag and performs no
-   * join. External shutdown still stops admission, waits for every already
-   * charged factory to return or throw, drains accepted callbacks, and joins.
+   * join. External shutdown still stops new provisional reservations, waits
+   * for every factory holding one to return or throw, drains accepted
+   * callbacks, and joins.
    * Repeated calls after complete shutdown are idempotent.
    */
   void shutdown();
@@ -526,16 +539,18 @@ class ComputeIoExecutor final {
   using TaskFactoryInvoker = Task (*)(const void* context);
 
   /**
-   * @brief Implements atomic admission around an erased lazy factory.
+   * @brief Implements provisional reservation and atomic built-work admission.
    * @param planned_bytes Positive caller estimate.
    * @param lifetime_token Explicit Run/transaction owner.
    * @param factory_context Borrowed factory address valid for this call.
    * @param invoke Factory invocation function.
    * @return Typed submission result.
    * @throws Factory, state-allocation, queue-allocation, or invalid-task errors
-   * after exact rollback.
+   * after exact provisional rollback without a signed Accepted event.
    * @note Re-entry from the owning I/O worker returns inactive
-   * `InvalidRequest` before budget mutation or factory invocation.
+   * `InvalidRequest` before budget mutation or factory invocation. Successful
+   * construction publishes Accepted either with FIFO ownership or, if external
+   * shutdown won, atomically with its linked Cancelled settlement.
    */
   ComputeIoSubmission try_submit_erased(
       std::uint64_t planned_bytes,

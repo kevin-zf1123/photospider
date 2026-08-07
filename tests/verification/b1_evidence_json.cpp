@@ -372,6 +372,7 @@ Json physical_trace_json(const B1RunObservationSnapshot& value) {
         Json{{"run_id", ready.run_id},
              {"local_task_id", ready.local_task_id},
              {"dependencies", std::move(dependencies)},
+             {"declared_ready_bytes", ready.declared_ready_bytes},
              {"resources", semantic_resource_json(ready.resources)},
              {"coordinate", coordinate_json(ready.coordinate)}});
   }

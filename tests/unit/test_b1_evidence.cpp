@@ -115,28 +115,28 @@ std::vector<B1ComputeIoObservation> make_io_observations(
   const execution::ComputeIoExecutorSnapshot manifest_released =
       make_io_snapshot();
   const execution::ComputeIoAdmissionEvent payload_admission{
-      1U,
+      10U,
       execution::ComputeIoAdmissionStatus::Accepted,
       kB1PayloadBytes,
       1U,
       kB1PayloadBytes,
       payload_charged};
   const execution::ComputeIoSettlementEvent payload_settlement{
-      2U,
+      30U,
       payload_admission.sequence,
       execution::ComputeIoCompletionStatus::Succeeded,
       1U,
       kB1PayloadBytes,
       payload_released};
   const execution::ComputeIoAdmissionEvent manifest_admission{
-      3U,
+      44U,
       execution::ComputeIoAdmissionStatus::Accepted,
       manifest_bytes,
       1U,
       manifest_bytes,
       manifest_charged};
   const execution::ComputeIoSettlementEvent manifest_settlement{
-      4U,
+      90U,
       manifest_admission.sequence,
       execution::ComputeIoCompletionStatus::Succeeded,
       1U,
@@ -488,6 +488,12 @@ TEST(B1Evidence,
   ++resource.jobs[4U].physical_trace.task_readies[1U].resources.ready_bytes;
   expect_determinism_invalid(std::move(resource));
 
+  B1InnerRowInput ready_declaration = make_valid_row_input(8U, 1U);
+  ++ready_declaration.jobs[4U]
+        .physical_trace.task_readies[1U]
+        .declared_ready_bytes;
+  expect_determinism_invalid(std::move(ready_declaration));
+
   B1InnerRowInput outcome = make_valid_row_input(8U, 1U);
   outcome.jobs[4U].physical_trace.task_terminals[1U].kind =
       compute::ComputeRunTaskTerminalKind::Failed;
@@ -498,8 +504,9 @@ TEST(B1Evidence,
  * @brief Proves the exact Compute I/O FSM rejects structural mutation matrix.
  * @throws Test fixture, evaluation, and framework failures unchanged.
  */
-TEST(B1Evidence,
-     ComputeIoFsmRejectsMissingDuplicateReorderIdentityStatusGapAndSnapshot) {
+TEST(
+    B1Evidence,
+    ComputeIoFsmRejectsMissingDuplicateReorderIdentityStatusAttemptAndSnapshot) {
   const auto expect_row_invalid = [](B1InnerRowInput input) {
     const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
     EXPECT_EQ(row.throughput_verdict, I1Verdict::Invalid);
@@ -586,6 +593,40 @@ TEST(B1Evidence,
   post_final.jobs[4U].output.io_observations.push_back(
       post_final.jobs[4U].output.io_observations.front());
   expect_row_invalid(std::move(post_final));
+
+  B1InnerRowInput reconciled_without_earlier_stream =
+      make_valid_row_input(8U, 1U);
+  reconciled_without_earlier_stream.jobs[4U].output.io_observations.clear();
+  expect_row_invalid(std::move(reconciled_without_earlier_stream));
+}
+
+/**
+ * @brief Proves global event-number gaps are legal but task FSM rows are not.
+ * @throws Test fixture, evaluation, and framework failures unchanged.
+ */
+TEST(B1Evidence,
+     ComputeIoFsmAllowsNumericSequenceGapsButNotMissingTransitions) {
+  B1InnerRowInput valid = make_valid_row_input(8U, 1U);
+  const std::vector<B1ComputeIoObservation>& observations =
+      valid.jobs[4U].output.io_observations;
+  ASSERT_TRUE(observations[1U].admission_event.has_value());
+  ASSERT_TRUE(observations[2U].settlement_event.has_value());
+  ASSERT_TRUE(observations[3U].admission_event.has_value());
+  ASSERT_EQ(observations[1U].admission_event->sequence, 10U);
+  ASSERT_EQ(observations[2U].settlement_event->sequence, 30U);
+  ASSERT_EQ(observations[3U].admission_event->sequence, 44U);
+  const B1InnerRow valid_row = evaluate_b1_inner_row(std::move(valid));
+  EXPECT_TRUE(valid_row.validity_reasons.empty());
+
+  B1InnerRowInput missing_transition = make_valid_row_input(8U, 1U);
+  missing_transition.jobs[4U].output.io_observations.erase(
+      missing_transition.jobs[4U].output.io_observations.begin() + 2);
+  const B1InnerRow invalid_row =
+      evaluate_b1_inner_row(std::move(missing_transition));
+  EXPECT_EQ(invalid_row.throughput_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(invalid_row.determinism_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(invalid_row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(invalid_row.memory_verdict, I1Verdict::Invalid);
 }
 
 /**
@@ -607,6 +648,62 @@ TEST(B1Evidence, JobFinalAllowsUnrelatedActiveExecutorCharge) {
   EXPECT_EQ(row.determinism_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves every active Compute I/O charge occupies exactly one phase.
+ * @throws Test fixture, evaluation, and framework failures unchanged.
+ */
+TEST(B1Evidence, ComputeIoSnapshotRequiresExactSinglePhasePartition) {
+  const auto expect_pass = [](execution::ComputeIoExecutorSnapshot snapshot) {
+    B1InnerRowInput input = make_valid_row_input(8U, 1U);
+    input.jobs[4U].output.io_observations.back().snapshot = snapshot;
+    const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
+    EXPECT_TRUE(row.validity_reasons.empty());
+  };
+  const auto expect_invalid =
+      [](execution::ComputeIoExecutorSnapshot snapshot) {
+        B1InnerRowInput input = make_valid_row_input(8U, 1U);
+        input.jobs[4U].output.io_observations.back().snapshot = snapshot;
+        const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
+        EXPECT_EQ(row.throughput_verdict, I1Verdict::Invalid);
+        EXPECT_EQ(row.determinism_verdict, I1Verdict::Invalid);
+        EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+        EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+      };
+
+  execution::ComputeIoExecutorSnapshot constructing = make_io_snapshot();
+  constructing.active_tasks = 1U;
+  constructing.active_planned_bytes = 1U;
+  constructing.constructing_tasks = 1U;
+  expect_pass(constructing);
+
+  execution::ComputeIoExecutorSnapshot queued = make_io_snapshot(1U, 1U);
+  expect_pass(queued);
+
+  execution::ComputeIoExecutorSnapshot running = make_io_snapshot();
+  running.active_tasks = 1U;
+  running.active_planned_bytes = 1U;
+  running.running_tasks = 1U;
+  expect_pass(running);
+
+  execution::ComputeIoExecutorSnapshot boundary = make_io_snapshot();
+  boundary.active_tasks = kB1ComputeIoTaskLimit;
+  boundary.active_planned_bytes = kB1ComputeIoTaskLimit;
+  boundary.constructing_tasks = kB1ComputeIoTaskLimit;
+  expect_pass(boundary);
+
+  execution::ComputeIoExecutorSnapshot missing_phase = make_io_snapshot();
+  missing_phase.active_tasks = 1U;
+  missing_phase.active_planned_bytes = 1U;
+  expect_invalid(missing_phase);
+
+  execution::ComputeIoExecutorSnapshot duplicate_phase = make_io_snapshot();
+  duplicate_phase.active_tasks = 1U;
+  duplicate_phase.active_planned_bytes = 1U;
+  duplicate_phase.constructing_tasks = 1U;
+  duplicate_phase.running_tasks = 1U;
+  expect_invalid(duplicate_phase);
 }
 
 /**

@@ -128,7 +128,7 @@ enum class B1OutputCommitStatus : std::uint8_t {
   InvalidImage,
   /** @brief Selected root was unavailable, moved, or not a directory. */
   RootUnavailable,
-  /** @brief The immutable occurrence slot already existed. */
+  /** @brief A non-directory or no-transaction-leaf foreign collision exists. */
   SlotExists,
   /** @brief Compute I/O admission was rejected or exhausted its attempt bound.
    */
@@ -347,7 +347,13 @@ struct B1OutputCommitResult final {
   std::string diagnostic;
   /** @brief Present exactly for `Succeeded`. */
   std::optional<B1OutputCommitReceipt> receipt;
-  /** @brief Complete initial/admission/settlement/final snapshots. */
+  /**
+   * @brief Complete snapshots for tasks newly executed by this request.
+   * @note Exact public-occurrence reconciliation performs no new Compute I/O
+   * work and therefore returns an empty sequence rather than fabricating a
+   * current-request FSM. A caller evaluating that occurrence must retain the
+   * earlier new-work stream; without it, evidence evaluation fails closed.
+   */
   std::vector<B1ComputeIoObservation> io_observations;
 
   /**
@@ -377,7 +383,7 @@ enum class B1OutputStoreFaultPoint : std::uint8_t {
   /** @brief Private slot and retained descriptor exist, before task setup.
    */
   AfterSlotCreated,
-  /** @brief Accepted budget is charged and the lazy task factory is entered. */
+  /** @brief Provisional budget is reserved and the lazy factory is entered. */
   InsideTaskFactory,
   /** @brief Submission returned Accepted and its completion was guarded. */
   AfterTaskAccepted,
@@ -388,7 +394,13 @@ enum class B1OutputStoreFaultPoint : std::uint8_t {
   AfterTaskSettled,
   /** @brief Both tasks settled and the private slot is ready to publish. */
   BeforeSlotPublication,
-  /** @brief Both I/O tasks succeeded immediately before receipt construction.
+  /** @brief Rename succeeded, before the private-source directory barrier. */
+  AfterSlotPublicationBeforeSourceBarrier,
+  /** @brief Source barrier succeeded, before the destination-root barrier. */
+  AfterSourceBarrierBeforeRootBarrier,
+  /** @brief Namespace barriers succeeded, before final public revalidation. */
+  BeforeFinalPublicRevalidation,
+  /** @brief Public slot and barriers revalidated before receipt construction.
    */
   BeforeReceiptAssembly,
 };
@@ -447,8 +459,10 @@ struct B1OutputStoreOptions final {
    * @param context Borrowed caller context valid for `commit()`.
    * @param point Exact internal boundary currently reached.
    * @return Nothing when execution should continue.
-   * @throws Any test-selected exception; the commit transaction first cancels
-   * and settles accepted work, removes the owned slot, then propagates it.
+   * @throws Any test-selected exception. Before public rename, the transaction
+   * first cancels/settles accepted work and removes its private slot. After
+   * public rename, the public occurrence and private anchor remain pending for
+   * same-commit descriptor-relative reconciliation and are never rolled back.
    * @note The callback is source-private and cannot receive root/slot fds.
    */
   using FaultInjector = void (*)(void* context, B1OutputStoreFaultPoint point);
@@ -580,7 +594,7 @@ class B1OutputStore final {
    * @brief Commits one exact candidate image using two ordered I/O tasks.
    * @param job Complete immutable occurrence allocated before offer.
    * @param image Exact candidate CPU FP32 RGBA image.
-   * @return Typed result, complete evidence, and receipt only after barriers.
+   * @return Typed result, new-work evidence, and receipt only after barriers.
    * @throws std::bad_alloc or synchronization exceptions that prevent even a
    * typed result from being assembled.
    * @note Capacity rejection retries the same attempt-zero identity/charge for
@@ -588,8 +602,16 @@ class B1OutputStore final {
    * non-capacity rejection returns `AdmissionFailed`, cleans the occurrence
    * slot, and records the final observation without a timing-derived policy.
    * Cleanup retryability assumes the cooperative exclusive namespace contract.
-   * A pre-guard anchor takeover throws and preserves the ambiguous name;
-   * post-anchor slot takeover or detected cleanup drift terminates fail-stop.
+   * A matching existing public occurrence is descriptor-relatively revalidated,
+   * completes any missing source/root barriers, and returns the same stable
+   * receipt without writing into the public directory or fabricating new I/O
+   * observations. A non-directory, empty directory, or marker-only directory
+   * with no transaction-looking payload/manifest/private-manifest leaf is a
+   * plainly foreign `SlotExists` collision. Any payload, manifest, or private-
+   * manifest presence makes incomplete, extra, or drifted state a
+   * `RevalidationFailed` transaction occurrence that remains untouched. A pre-
+   * guard anchor takeover throws and preserves the ambiguous name; post-anchor
+   * slot takeover or detected private cleanup drift terminates fail-stop.
    */
   B1OutputCommitResult commit(const B1JobInstance& job,
                               const ImageBuffer& image);

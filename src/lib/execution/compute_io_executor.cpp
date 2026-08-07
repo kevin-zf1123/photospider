@@ -132,22 +132,21 @@ bool compute_io_wait_prohibited() noexcept {
  */
 struct ComputeIoTaskState final {
   /**
-   * @brief Creates nonterminal completion state for one owning executor.
+   * @brief Creates provisional nonterminal state for one owning executor.
    * @param executor Shared executor identity observed weakly by `wait()`.
-   * @param accepted_admission_sequence Nonzero atomic admission event identity.
    * @param accepted_planned_bytes Exact positive task byte charge.
    * @throws Nothing.
+   * @note Admission sequence remains zero until successful factory construction
+   * reaches either queue publication or the shutdown-won atomic
+   * Accepted/Cancelled decision.
    * @note Weak ownership prevents a retained terminal completion from keeping
    * the process executor alive or causing address-reuse false positives.
    */
   explicit ComputeIoTaskState(
       const std::shared_ptr<ComputeIoExecutorState>& executor,
-      std::uint64_t accepted_admission_sequence,
       std::uint64_t accepted_planned_bytes) noexcept
-      : admission_sequence(accepted_admission_sequence),
-        planned_bytes(accepted_planned_bytes),
-        owning_executor(executor) {
-    if (admission_sequence == 0U || planned_bytes == 0U) {
+      : planned_bytes(accepted_planned_bytes), owning_executor(executor) {
+    if (planned_bytes == 0U) {
       std::terminate();
     }
   }
@@ -178,7 +177,7 @@ struct ComputeIoTaskState final {
   std::optional<ComputeIoTaskResult> result;
 
   /** @brief Executor event sequence that atomically admitted this task. */
-  const std::uint64_t admission_sequence = 0U;
+  std::uint64_t admission_sequence = 0U;
 
   /** @brief Exact immutable planned-byte charge admitted for this task. */
   const std::uint64_t planned_bytes = 0U;
@@ -190,6 +189,21 @@ struct ComputeIoTaskState final {
    * queue, shutdown, or budget authority.
    */
   std::weak_ptr<ComputeIoExecutorState> owning_executor;
+
+  /**
+   * @brief Binds the one signed Accepted event after provisional construction.
+   * @param accepted_admission_sequence Nonzero executor event identity.
+   * @return Nothing.
+   * @throws Nothing; duplicate/zero binding terminates as an invariant breach.
+   * @note The caller holds the executor mutex before queue visibility or typed
+   * shutdown cancellation; no worker can observe an unbound queued state.
+   */
+  void bind_admission(std::uint64_t accepted_admission_sequence) noexcept {
+    if (admission_sequence != 0U || accepted_admission_sequence == 0U) {
+      std::terminate();
+    }
+    admission_sequence = accepted_admission_sequence;
+  }
 
   /**
    * @brief Publishes the one immutable terminal fact while already locked.
@@ -275,13 +289,13 @@ struct ComputeIoExecutorState final {
   /** @brief Sole independent process I/O worker. */
   std::thread worker;
 
-  /** @brief Charged tasks across constructing, queued, and running phases. */
+  /** @brief Provisional/accepted tasks across all three active phases. */
   std::uint64_t active_tasks = 0U;
 
-  /** @brief Summed planned bytes for all charged tasks. */
+  /** @brief Summed planned bytes for all provisional/accepted tasks. */
   std::uint64_t active_planned_bytes = 0U;
 
-  /** @brief Charged submissions currently building payload/queue ownership. */
+  /** @brief Reservations still occupying construction/final-decision phase. */
   std::uint64_t constructing_tasks = 0U;
 
   /** @brief Published FIFO entries not yet entered. */
@@ -340,10 +354,10 @@ std::uint64_t next_accounting_event_sequence_locked(
 
 /**
  * @brief Captures one exact admission decision at its locked linearization.
- * @param state Locked executor state after any accepted charge mutation.
+ * @param state Locked executor state after rejection or reservation adoption.
  * @param status Exact typed admission decision.
  * @param offered_planned_bytes Caller-provided estimate, possibly zero-invalid.
- * @param charged Whether this exact decision committed both budgets.
+ * @param charged Whether Accepted adopted both provisional reservations.
  * @return Executor-authored event and same-lock post-decision snapshot.
  * @throws Nothing.
  */
@@ -398,16 +412,17 @@ void release_admission_locked(ComputeIoExecutorState& state,
 }
 
 /**
- * @brief Rolls back a charged construction unless queue publication consumes
+ * @brief Rolls back a provisional construction unless final admission consumes
  * it.
  *
  * @throws Nothing from destruction; synchronization failure terminates.
- * @note The guard owns exactly one constructing count plus task/byte charge.
+ * @note The guard owns exactly one constructing count plus task/byte
+ * reservation.
  */
 class ComputeIoConstructionRollback final {
  public:
   /**
-   * @brief Adopts one already charged construction.
+   * @brief Adopts one provisionally charged construction.
    * @param state Shared executor authority.
    * @param planned_bytes Exact charged estimate.
    * @throws Nothing.
@@ -447,7 +462,7 @@ class ComputeIoConstructionRollback final {
       const ComputeIoConstructionRollback&) = delete;
 
   /**
-   * @brief Relinquishes rollback after queue publication or typed cancellation.
+   * @brief Relinquishes rollback after queue admission or atomic cancellation.
    * @return Nothing.
    * @throws Nothing.
    */
@@ -733,7 +748,6 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
                                     planned_bytes, false));
   }
 
-  ComputeIoAdmissionEvent admission_event;
   {
     std::lock_guard<std::mutex> lock(state->mutex);
     if (!state->accepting) {
@@ -769,8 +783,6 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
     ++state->active_tasks;
     state->active_planned_bytes += planned_bytes;
     ++state->constructing_tasks;
-    admission_event = make_admission_event_locked(
-        *state, ComputeIoAdmissionStatus::Accepted, planned_bytes, true);
   }
 
   ComputeIoConstructionRollback rollback(state, planned_bytes);
@@ -784,13 +796,14 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
     throw std::invalid_argument(
         "Compute-I/O task factory returned an empty callback.");
   }
-  auto completion_state = std::make_shared<ComputeIoTaskState>(
-      state, admission_event.sequence, planned_bytes);
+  auto completion_state =
+      std::make_shared<ComputeIoTaskState>(state, planned_bytes);
   ComputeIoCompletion completion(completion_state);
   ComputeIoQueueEntry entry{completion_state, std::move(retained_lifetime),
                             std::move(task), planned_bytes};
 
   bool cancelled_by_shutdown = false;
+  ComputeIoAdmissionEvent admission_event;
   {
     std::lock_guard<std::mutex> lock(state->mutex);
     if (!state->accepting) {
@@ -802,6 +815,9 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
       }
       --state->constructing_tasks;
       ++state->queued_tasks;
+      admission_event = make_admission_event_locked(
+          *state, ComputeIoAdmissionStatus::Accepted, planned_bytes, true);
+      completion_state->bind_admission(admission_event.sequence);
     }
   }
   if (cancelled_by_shutdown) {
@@ -813,6 +829,9 @@ ComputeIoSubmission ComputeIoExecutor::try_submit_erased(
       if (state->constructing_tasks == 0U) {
         std::terminate();
       }
+      admission_event = make_admission_event_locked(
+          *state, ComputeIoAdmissionStatus::Accepted, planned_bytes, true);
+      completion_state->bind_admission(admission_event.sequence);
       --state->constructing_tasks;
       release_admission_locked(*state, planned_bytes);
       completion_state->cancellation_requested = true;

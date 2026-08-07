@@ -24,6 +24,7 @@
 #include <vector>
 
 #if !defined(_WIN32)
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -98,13 +99,13 @@ class B1RootBindingError final : public std::runtime_error {
 };
 
 /**
- * @brief Typed internal failure for an occupied immutable public slot.
+ * @brief Typed collision for atomic no-replace or plainly foreign public state.
  * @throws Nothing beyond standard runtime-error string allocation.
  */
 class B1SlotExistsError final : public std::runtime_error {
  public:
   /**
-   * @brief Creates the closed no-replace collision failure.
+   * @brief Creates the closed no-replace/no-transaction-leaf collision failure.
    * @throws std::bad_alloc when diagnostic storage cannot allocate.
    */
   B1SlotExistsError()
@@ -222,6 +223,49 @@ class ScopedFileDescriptor final {
  private:
   /** @brief Owned descriptor or negative released sentinel. */
   int descriptor_ = -1;
+};
+
+/**
+ * @brief Owns one duplicated POSIX directory stream for exact entry inspection.
+ * @throws std::invalid_argument for a null stream; destruction is fail-stop on
+ * close failure because an unclosed stream would retain descriptor authority.
+ */
+class ScopedDirectoryStream final {
+ public:
+  /**
+   * @brief Adopts one non-null stream returned by `fdopendir`.
+   * @param stream Owned stream.
+   * @throws std::invalid_argument when `stream` is null.
+   */
+  explicit ScopedDirectoryStream(DIR* stream) : stream_(stream) {
+    if (stream_ == nullptr) {
+      throw std::invalid_argument("B1 directory stream is null.");
+    }
+  }
+
+  /** @brief Closes the owned stream; close failure terminates fail-stop. */
+  ~ScopedDirectoryStream() noexcept {
+    if (stream_ != nullptr && ::closedir(stream_) != 0) {
+      std::terminate();
+    }
+  }
+
+  /** @brief Directory-stream ownership cannot be copied. */
+  ScopedDirectoryStream(const ScopedDirectoryStream&) = delete;
+
+  /** @brief Directory-stream ownership cannot be assigned. */
+  ScopedDirectoryStream& operator=(const ScopedDirectoryStream&) = delete;
+
+  /**
+   * @brief Returns the borrowed stream.
+   * @return Non-null stream valid for this owner lifetime.
+   * @throws Nothing.
+   */
+  DIR* get() const noexcept { return stream_; }
+
+ private:
+  /** @brief Owned directory stream. */
+  DIR* stream_ = nullptr;
 };
 
 /**
@@ -359,6 +403,56 @@ void synchronize_descriptor(int descriptor, const char* kind) {
 bool native_little_endian() noexcept {
   const std::uint16_t one = 1U;
   return *reinterpret_cast<const std::uint8_t*>(&one) == 1U;
+}
+
+/**
+ * @brief Hashes one exact candidate as tight little-endian B1 payload bytes.
+ * @param image Validated CPU FP32 RGBA B1 candidate.
+ * @return SHA-256 matching bytes written by `write_and_validate_payload`.
+ * @throws std::bad_alloc on big-endian hosts when one conversion row allocates.
+ * @throws Digest or image-row validation failures unchanged.
+ * @note The function performs no filesystem mutation and is used to identify a
+ * same-commit public occurrence before any reconciliation barrier is attempted.
+ */
+B1Sha256Digest digest_b1_payload_image(const ImageBuffer& image) {
+  B1Sha256 hash;
+  std::vector<std::byte> converted;
+  if (!native_little_endian()) {
+    converted.resize(static_cast<std::size_t>(kB1PayloadRowBytes));
+  }
+  for (int row_index = 0; row_index < image.height; ++row_index) {
+    const std::byte* row = image_buffer_row_data(image, row_index);
+    if (native_little_endian()) {
+      hash.update(row, static_cast<std::size_t>(kB1PayloadRowBytes));
+      continue;
+    }
+    for (std::size_t offset = 0U; offset < converted.size(); offset += 4U) {
+      converted[offset] = row[offset + 3U];
+      converted[offset + 1U] = row[offset + 2U];
+      converted[offset + 2U] = row[offset + 1U];
+      converted[offset + 3U] = row[offset];
+    }
+    hash.update(converted.data(), converted.size());
+  }
+  return hash.finish();
+}
+
+/**
+ * @brief Computes the required typed logical digest for one B1 candidate.
+ * @param image Validated exact candidate image.
+ * @return Available typed content identity.
+ * @throws B1RevalidationError when the digest is unavailable.
+ * @throws Adapter, digest, or allocation failures unchanged.
+ */
+ContentDigest compute_b1_logical_digest(const ImageBuffer& image) {
+  const Value candidate = value_image_adapter::snapshot_cpu_image_value(image);
+  const ContentDigestResult logical = compute_content_digest(candidate);
+  if (logical.state != ContentDigestState::Available ||
+      !logical.digest.has_value()) {
+    throw B1RevalidationError("B1 candidate logical digest is unavailable: " +
+                              logical.diagnostic);
+  }
+  return *logical.digest;
 }
 
 /**
@@ -642,6 +736,269 @@ B1Sha256Digest validate_exact_file_at(
 }
 
 /**
+ * @brief Streams and validates one exact public B1 payload through its slot fd.
+ * @param slot_descriptor Held occurrence directory.
+ * @param expected_digest Digest of the caller's exact candidate bytes.
+ * @param expected_identity Optional identity retained by the publishing call.
+ * @param observed_identity Optional output for the reopened payload identity.
+ * @return Recomputed digest after exact length and identity validation.
+ * @throws File, digest, or revalidation failures unchanged.
+ * @note This helper is read-only and never follows a public-slot pathname.
+ */
+B1Sha256Digest validate_b1_payload_at(
+    int slot_descriptor, const B1Sha256Digest& expected_digest,
+    const B1FileIdentity* expected_identity,
+    B1FileIdentity* observed_identity = nullptr) {
+  const int descriptor = ::openat(slot_descriptor, kPayloadName,
+                                  O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (descriptor < 0) {
+    throw_errno("openat B1 payload for public revalidation");
+  }
+  ScopedFileDescriptor owner(descriptor);
+  const struct stat opened_stat =
+      regular_file_stat(owner.get(), "fstat public B1 payload");
+  const B1FileIdentity identity = file_identity(opened_stat);
+  if (opened_stat.st_size < 0 ||
+      static_cast<std::uint64_t>(opened_stat.st_size) != kB1PayloadBytes ||
+      (expected_identity != nullptr && identity != *expected_identity)) {
+    throw B1RevalidationError("B1 public payload length or identity drifted.");
+  }
+
+  B1Sha256 hash;
+  std::array<std::byte, 65536U> buffer{};
+  std::uint64_t length = 0U;
+  for (;;) {
+    const ssize_t count = ::read(owner.get(), buffer.data(), buffer.size());
+    if (count < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      throw_errno("read B1 public payload for revalidation");
+    }
+    if (count == 0) {
+      break;
+    }
+    if (length > std::numeric_limits<std::uint64_t>::max() -
+                     static_cast<std::uint64_t>(count)) {
+      throw B1RevalidationError("B1 public payload length overflowed.");
+    }
+    length += static_cast<std::uint64_t>(count);
+    hash.update(buffer.data(), static_cast<std::size_t>(count));
+  }
+  owner.close();
+  const B1Sha256Digest observed_digest = hash.finish();
+  if (length != kB1PayloadBytes || observed_digest != expected_digest) {
+    throw B1RevalidationError("B1 public payload bytes drifted.");
+  }
+  if (observed_identity != nullptr) {
+    *observed_identity = identity;
+  }
+  return observed_digest;
+}
+
+/**
+ * @brief Formats one stable filesystem identity for an immutable receipt.
+ * @param identity Exact manifest device/inode identity.
+ * @return Canonical `dev=<u>;ino=<u>` text.
+ * @throws std::bad_alloc when stream storage cannot allocate.
+ */
+std::string b1_file_identity_text(const B1FileIdentity& identity) {
+  std::ostringstream output;
+  output << "dev=" << identity.device << ";ino=" << identity.inode;
+  return output.str();
+}
+
+/**
+ * @brief Opens one existing public occurrence without following substitutions.
+ * @param root_descriptor Held selected output root.
+ * @param slot_name Exact deterministic occurrence leaf.
+ * @param named_stat No-follow result that detected the existing leaf.
+ * @param slot_identity Output for the name/descriptor-matched identity.
+ * @return Newly owned read-only directory descriptor.
+ * @throws B1SlotExistsError when the collision is not a directory.
+ * @throws File or revalidation failures for open/type/identity drift.
+ */
+int open_existing_public_slot(int root_descriptor, const std::string& slot_name,
+                              const struct stat& named_stat,
+                              B1FileIdentity* slot_identity) {
+  if (slot_identity == nullptr) {
+    throw std::invalid_argument("B1 public slot identity output is null.");
+  }
+  if (!S_ISDIR(named_stat.st_mode)) {
+    throw B1SlotExistsError();
+  }
+  const int descriptor =
+      ::openat(root_descriptor, slot_name.c_str(),
+               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (descriptor < 0) {
+    throw_errno("openat existing B1 public occurrence");
+  }
+  ScopedFileDescriptor owner(descriptor);
+  const B1FileIdentity named_identity = file_identity(named_stat);
+  const B1FileIdentity opened_identity = file_identity(
+      directory_stat(owner.get(), "fstat existing B1 public occurrence"));
+  if (opened_identity != named_identity) {
+    throw B1RevalidationError(
+        "B1 public occurrence identity changed during open.");
+  }
+  *slot_identity = opened_identity;
+  return owner.release();
+}
+
+/**
+ * @brief Validates that a pending private staging anchor is exactly empty.
+ * @param anchor_descriptor Held staging-anchor directory.
+ * @return Nothing when only dot entries exist.
+ * @throws File, allocation, or B1RevalidationError on retained residue.
+ */
+void validate_empty_staging_anchor(int anchor_descriptor);
+
+/**
+ * @brief Reopens an optional pending staging anchor under the held root.
+ * @param root_descriptor Held selected output root.
+ * @param anchor_name Exact deterministic private anchor leaf.
+ * @param anchor_identity Output when the anchor exists and matches its fd.
+ * @return Owned descriptor, or `-1` when no pending anchor remains.
+ * @throws File or revalidation failures for type, open, identity, or residue.
+ * @note A present anchor must be exactly empty after public directory rename;
+ * ambiguous residue is preserved and fails closed.
+ */
+int open_pending_staging_anchor(int root_descriptor,
+                                const std::string& anchor_name,
+                                B1FileIdentity* anchor_identity) {
+  if (anchor_identity == nullptr) {
+    throw std::invalid_argument("B1 pending anchor identity output is null.");
+  }
+  struct stat named_stat{};
+  if (::fstatat(root_descriptor, anchor_name.c_str(), &named_stat,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+    if (errno == ENOENT) {
+      return -1;
+    }
+    throw_errno("fstatat pending B1 staging anchor");
+  }
+  if (!S_ISDIR(named_stat.st_mode)) {
+    throw B1RevalidationError("B1 pending staging anchor is not a directory.");
+  }
+  const int descriptor =
+      ::openat(root_descriptor, anchor_name.c_str(),
+               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (descriptor < 0) {
+    throw_errno("openat pending B1 staging anchor");
+  }
+  ScopedFileDescriptor owner(descriptor);
+  const B1FileIdentity named_identity = file_identity(named_stat);
+  const B1FileIdentity opened_identity = file_identity(
+      directory_stat(owner.get(), "fstat pending B1 staging anchor"));
+  if (opened_identity != named_identity) {
+    throw B1RevalidationError(
+        "B1 pending staging anchor identity changed during open.");
+  }
+  validate_empty_staging_anchor(owner.get());
+  *anchor_identity = opened_identity;
+  return owner.release();
+}
+
+/**
+ * @brief Validates that a public occurrence contains exactly its two leaves.
+ * @param slot_descriptor Held public occurrence directory.
+ * @return Nothing for exactly payload plus manifest and no other entry.
+ * @throws B1SlotExistsError when no transaction-looking leaf is present.
+ * @throws B1RevalidationError when any payload/manifest/private-manifest leaf
+ * makes the entry set incomplete, extra, or drifted.
+ * @throws File/allocation failures while opening or reading the directory.
+ * @note Dot entries are ignored. No entry is opened or mutated by this scan.
+ */
+void validate_exact_public_slot_entries(int slot_descriptor) {
+  const int scan_descriptor =
+      ::openat(slot_descriptor, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (scan_descriptor < 0) {
+    throw_errno("openat B1 public occurrence for entry scan");
+  }
+  DIR* raw_stream = ::fdopendir(scan_descriptor);
+  if (raw_stream == nullptr) {
+    const int saved_errno = errno;
+    static_cast<void>(::close(scan_descriptor));
+    errno = saved_errno;
+    throw_errno("fdopendir B1 public occurrence");
+  }
+  ScopedDirectoryStream stream(raw_stream);
+  bool payload_present = false;
+  bool manifest_present = false;
+  bool transaction_residue_present = false;
+  bool unknown_present = false;
+  for (;;) {
+    errno = 0;
+    const struct dirent* entry = ::readdir(stream.get());
+    if (entry == nullptr) {
+      if (errno != 0) {
+        throw_errno("readdir B1 public occurrence");
+      }
+      break;
+    }
+    const std::string_view name(entry->d_name);
+    if (name == "." || name == "..") {
+      continue;
+    }
+    if (name == kPayloadName) {
+      payload_present = true;
+    } else if (name == kManifestName) {
+      manifest_present = true;
+    } else if (name == kPrivateManifestName) {
+      transaction_residue_present = true;
+    } else {
+      unknown_present = true;
+    }
+  }
+  if (!payload_present && !manifest_present && !transaction_residue_present) {
+    throw B1SlotExistsError();
+  }
+  if (unknown_present || transaction_residue_present || !payload_present ||
+      !manifest_present) {
+    throw B1RevalidationError(
+        "B1 public occurrence is incomplete or contains drifted entries.");
+  }
+}
+
+/**
+ * @brief Validates that a pending private staging anchor is exactly empty.
+ * @param anchor_descriptor Held staging-anchor directory.
+ * @return Nothing when only dot entries exist.
+ * @throws File, allocation, or B1RevalidationError on retained residue.
+ * @note Reconciliation never removes an anchor whose contents are ambiguous.
+ */
+void validate_empty_staging_anchor(int anchor_descriptor) {
+  const int scan_descriptor =
+      ::openat(anchor_descriptor, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (scan_descriptor < 0) {
+    throw_errno("openat B1 staging anchor for entry scan");
+  }
+  DIR* raw_stream = ::fdopendir(scan_descriptor);
+  if (raw_stream == nullptr) {
+    const int saved_errno = errno;
+    static_cast<void>(::close(scan_descriptor));
+    errno = saved_errno;
+    throw_errno("fdopendir B1 staging anchor");
+  }
+  ScopedDirectoryStream stream(raw_stream);
+  for (;;) {
+    errno = 0;
+    const struct dirent* entry = ::readdir(stream.get());
+    if (entry == nullptr) {
+      if (errno != 0) {
+        throw_errno("readdir B1 staging anchor");
+      }
+      return;
+    }
+    const std::string_view name(entry->d_name);
+    if (name != "." && name != "..") {
+      throw B1RevalidationError(
+          "B1 pending staging anchor contains ambiguous residue.");
+    }
+  }
+}
+
+/**
  * @brief Writes, links, barriers, and revalidates a private-slot manifest.
  * @param state Complete task state with verified payload digest/manifest.
  * @return Nothing after both leaves and the private slot are durable and exact.
@@ -686,10 +1043,7 @@ void commit_and_validate_manifest(B1CommitTaskState* state) {
   state->manifest_digest = validate_exact_file_at(
       state->slot_descriptor, kManifestName, state->manifest, &private_identity,
       &published_identity);
-  std::ostringstream identity_text;
-  identity_text << "dev=" << published_identity.device
-                << ";ino=" << published_identity.inode;
-  state->published_identity = identity_text.str();
+  state->published_identity = b1_file_identity_text(published_identity);
 
   synchronize_descriptor(state->slot_descriptor, "directory");
   const B1Sha256Digest after_barrier =
@@ -946,18 +1300,39 @@ void strictly_remove_directory(int parent_descriptor, int directory_descriptor,
 }
 
 /**
- * @brief Owns strict cleanup and at most one accepted task settlement.
+ * @brief Owns private rollback, public reconciliation, and task settlement.
  *
  * @throws Nothing from destruction; cancellation/wait/cleanup invariant
  * failures terminate because descriptor lifetime cannot otherwise be proved.
  * @note The guard is created immediately after staging-anchor fd acquisition.
  * Under the cooperative exclusive namespace contract, every exit settles
- * accepted work first and then removes the recorded names after identity
- * checks. A takeover before guard construction preserves ambiguous residue;
- * detected later drift or cleanup failure terminates fail-stop.
+ * accepted work first. Private state then removes recorded names after identity
+ * checks. Atomic public rename irreversibly changes the lifecycle to pending
+ * reconciliation, where destruction closes descriptors but cannot delete the
+ * public occurrence or its empty source anchor. A completed receipt changes the
+ * lifecycle to committed and permits exact private-anchor cleanup. A takeover
+ * before guard construction preserves ambiguous residue; detected later private
+ * drift or cleanup failure terminates fail-stop.
  */
 class B1CommitTransactionGuard final {
  public:
+  /**
+   * @brief Closed occurrence lifecycle controlling destructor mutation rights.
+   * @throws Nothing for value construction and comparison.
+   */
+  enum class SlotLifecycle : std::uint8_t {
+    /** @brief No slot descriptor has been adopted yet. */
+    Unadopted,
+    /** @brief Slot remains private and must be rolled back on failure. */
+    PrivateRollback,
+    /** @brief Public rename occurred; all public cleanup authority is revoked.
+     */
+    PublicPendingReconcile,
+    /** @brief Complete receipt was minted; only empty anchor cleanup remains.
+     */
+    Committed,
+  };
+
   /**
    * @brief Adopts one newly created verified private staging anchor.
    * @param root_descriptor Held original root directory.
@@ -991,7 +1366,7 @@ class B1CommitTransactionGuard final {
         static_cast<void>(completion_.wait());
         completion_active_ = false;
       }
-      if (slot_cleanup_required_) {
+      if (slot_lifecycle_ == SlotLifecycle::PrivateRollback) {
         if (slot_descriptor_ < 0 || state_ == nullptr) {
           std::terminate();
         }
@@ -1013,10 +1388,13 @@ class B1CommitTransactionGuard final {
         synchronize_descriptor(slot_parent_descriptor_,
                                "cleanup parent directory");
       }
-      strictly_remove_directory(
-          root_descriptor_, anchor_descriptor_, anchor_name_, anchor_identity_,
-          B1OutputStoreCleanupOperation::StagingAnchorDirectory, options_);
-      synchronize_descriptor(root_descriptor_, "cleanup root directory");
+      if (slot_lifecycle_ != SlotLifecycle::PublicPendingReconcile) {
+        strictly_remove_directory(
+            root_descriptor_, anchor_descriptor_, anchor_name_,
+            anchor_identity_,
+            B1OutputStoreCleanupOperation::StagingAnchorDirectory, options_);
+        synchronize_descriptor(root_descriptor_, "cleanup root directory");
+      }
       if (slot_descriptor_ >= 0 && ::close(slot_descriptor_) != 0) {
         std::terminate();
       }
@@ -1042,14 +1420,15 @@ class B1CommitTransactionGuard final {
    */
   void adopt_slot(int slot_descriptor, const std::string& slot_name,
                   B1FileIdentity slot_identity) noexcept {
-    if (slot_descriptor_ >= 0 || slot_descriptor < 0) {
+    if (slot_descriptor_ >= 0 || slot_descriptor < 0 ||
+        slot_lifecycle_ != SlotLifecycle::Unadopted) {
       std::terminate();
     }
     slot_descriptor_ = slot_descriptor;
     slot_parent_descriptor_ = anchor_descriptor_;
     slot_name_ = slot_name;
     slot_identity_ = slot_identity;
-    slot_cleanup_required_ = true;
+    slot_lifecycle_ = SlotLifecycle::PrivateRollback;
   }
 
   /**
@@ -1065,17 +1444,18 @@ class B1CommitTransactionGuard final {
   }
 
   /**
-   * @brief Moves cleanup authority to the atomically published public name.
-   * @param slot_name Exact public immutable occurrence leaf.
+   * @brief Revokes cleanup authority after atomic public publication.
    * @return Nothing.
-   * @throws Nothing; missing slot adoption terminates.
+   * @throws Nothing; missing/private lifecycle drift terminates.
+   * @note The public occurrence and empty source anchor remain intact on every
+   * later failure so a same-commit retry can finish missing barriers.
    */
-  void mark_slot_published(const std::string& slot_name) noexcept {
-    if (slot_descriptor_ < 0) {
+  void mark_slot_published() noexcept {
+    if (slot_descriptor_ < 0 ||
+        slot_lifecycle_ != SlotLifecycle::PrivateRollback) {
       std::terminate();
     }
-    slot_parent_descriptor_ = root_descriptor_;
-    slot_name_ = slot_name;
+    slot_lifecycle_ = SlotLifecycle::PublicPendingReconcile;
   }
 
   /**
@@ -1106,15 +1486,16 @@ class B1CommitTransactionGuard final {
   }
 
   /**
-   * @brief Preserves the completed immutable slot on successful receipt return.
+   * @brief Marks public reconciliation committed after receipt construction.
    * @return Nothing.
-   * @throws Nothing; active task ownership terminates as an invariant breach.
+   * @throws Nothing; active task or lifecycle drift terminates.
    */
   void preserve_slot() noexcept {
-    if (completion_active_) {
+    if (completion_active_ ||
+        slot_lifecycle_ != SlotLifecycle::PublicPendingReconcile) {
       std::terminate();
     }
-    slot_cleanup_required_ = false;
+    slot_lifecycle_ = SlotLifecycle::Committed;
   }
 
  private:
@@ -1128,9 +1509,9 @@ class B1CommitTransactionGuard final {
   B1FileIdentity anchor_identity_;
   /** @brief Held occurrence-slot directory descriptor after adoption. */
   int slot_descriptor_ = -1;
-  /** @brief Current held parent of `slot_name_`. */
+  /** @brief Private parent of `slot_name_` while rollback remains legal. */
   int slot_parent_descriptor_ = -1;
-  /** @brief Current private or public slot leaf. */
+  /** @brief Exact private slot leaf while rollback remains legal. */
   std::string slot_name_;
   /** @brief Creation-time slot identity. */
   B1FileIdentity slot_identity_;
@@ -1142,8 +1523,8 @@ class B1CommitTransactionGuard final {
   execution::ComputeIoCompletion completion_;
   /** @brief Whether destruction must cancel/wait `completion_`. */
   bool completion_active_ = false;
-  /** @brief Whether destruction must remove the occurrence slot. */
-  bool slot_cleanup_required_ = false;
+  /** @brief Current private/public mutation-right lifecycle. */
+  SlotLifecycle slot_lifecycle_ = SlotLifecycle::Unadopted;
 };
 
 /**
@@ -1416,12 +1797,112 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
   const std::string commit_id = b1_digest_hex(commit_hash.finish());
   const std::filesystem::path rooted_slot = "occurrence-" + commit_id;
   const std::string slot_name = rooted_slot.string();
+  const std::string anchor_name = ".b1-staging-" + commit_id;
   struct stat existing_slot{};
   if (::fstatat(root_descriptor_, slot_name.c_str(), &existing_slot,
                 AT_SYMLINK_NOFOLLOW) == 0) {
-    result.status = B1OutputCommitStatus::SlotExists;
-    result.diagnostic = "The immutable B1 occurrence slot already exists.";
-    return result;
+    try {
+      const B1Sha256Digest expected_payload_digest =
+          digest_b1_payload_image(image);
+      const std::string expected_manifest =
+          b1_artifact_manifest(job.job_index, expected_payload_digest);
+      const B1Sha256Digest expected_manifest_digest =
+          b1_sha256(expected_manifest);
+
+      B1FileIdentity slot_identity;
+      const int slot_raw = open_existing_public_slot(
+          root_descriptor_, slot_name, existing_slot, &slot_identity);
+      ScopedFileDescriptor slot_owner(slot_raw);
+      validate_exact_public_slot_entries(slot_owner.get());
+
+      B1FileIdentity payload_identity;
+      static_cast<void>(validate_b1_payload_at(slot_owner.get(),
+                                               expected_payload_digest, nullptr,
+                                               &payload_identity));
+      B1FileIdentity manifest_identity;
+      const B1Sha256Digest observed_manifest_digest = validate_exact_file_at(
+          slot_owner.get(), kManifestName, expected_manifest, nullptr,
+          &manifest_identity);
+      if (observed_manifest_digest != expected_manifest_digest) {
+        throw B1RevalidationError(
+            "B1 existing manifest digest differs from the same commit.");
+      }
+
+      B1FileIdentity anchor_identity;
+      const int anchor_raw = open_pending_staging_anchor(
+          root_descriptor_, anchor_name, &anchor_identity);
+      std::optional<ScopedFileDescriptor> anchor_owner;
+      if (anchor_raw >= 0) {
+        anchor_owner.emplace(anchor_raw);
+      }
+
+      invoke_fault_injector(
+          options_,
+          B1OutputStoreFaultPoint::AfterSlotPublicationBeforeSourceBarrier);
+      synchronize_descriptor(slot_owner.get(),
+                             "published occurrence directory");
+      if (anchor_owner.has_value()) {
+        synchronize_descriptor(anchor_owner->get(), "pending source directory");
+      }
+      invoke_fault_injector(
+          options_,
+          B1OutputStoreFaultPoint::AfterSourceBarrierBeforeRootBarrier);
+      synchronize_descriptor(root_descriptor_, "directory");
+      invoke_fault_injector(
+          options_, B1OutputStoreFaultPoint::BeforeFinalPublicRevalidation);
+
+      verify_slot_binding(root_descriptor_, slot_owner.get(), slot_name,
+                          slot_identity);
+      verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
+      validate_exact_public_slot_entries(slot_owner.get());
+      static_cast<void>(validate_b1_payload_at(
+          slot_owner.get(), expected_payload_digest, &payload_identity));
+      const B1Sha256Digest final_manifest_digest =
+          validate_exact_file_at(slot_owner.get(), kManifestName,
+                                 expected_manifest, &manifest_identity);
+      if (final_manifest_digest != expected_manifest_digest) {
+        throw B1RevalidationError(
+            "B1 manifest digest changed during public reconciliation.");
+      }
+      const ContentDigest logical_digest = compute_b1_logical_digest(image);
+      invoke_fault_injector(options_,
+                            B1OutputStoreFaultPoint::BeforeReceiptAssembly);
+      B1OutputCommitReceipt receipt(B1OutputCommitReceipt::Fields{
+          commit_id, root_, rooted_slot, job,
+          "dense-tensor-hwc-fp32-rgba-2048x2048", logical_digest, 1U,
+          kPayloadName, kManifestName, kB1PayloadBytes,
+          b1_manifest_length(job.job_index), expected_payload_digest,
+          expected_manifest_digest, B1OutputDurability::CrashDurable,
+          B1OutputDurability::CrashDurable,
+          b1_file_identity_text(manifest_identity)});
+
+      if (anchor_owner.has_value()) {
+        strictly_remove_directory(
+            root_descriptor_, anchor_owner->get(), anchor_name, anchor_identity,
+            B1OutputStoreCleanupOperation::StagingAnchorDirectory, options_);
+        synchronize_descriptor(root_descriptor_,
+                               "reconciled cleanup root directory");
+      }
+      result.receipt = std::move(receipt);
+      result.status = B1OutputCommitStatus::Succeeded;
+      return result;
+    } catch (const B1SlotExistsError& error) {
+      result.status = B1OutputCommitStatus::SlotExists;
+      result.diagnostic = error.what();
+      return result;
+    } catch (const B1RootBindingError& error) {
+      result.status = B1OutputCommitStatus::RootUnavailable;
+      result.diagnostic = error.what();
+      return result;
+    } catch (const B1DurabilityError& error) {
+      result.status = B1OutputCommitStatus::DurabilityUnsupported;
+      result.diagnostic = error.what();
+      return result;
+    } catch (const std::exception& error) {
+      result.status = B1OutputCommitStatus::RevalidationFailed;
+      result.diagnostic = error.what();
+      return result;
+    }
   }
   if (errno != ENOENT) {
     result.status = B1OutputCommitStatus::RootUnavailable;
@@ -1431,7 +1912,6 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
   }
 
   auto state = std::make_shared<B1CommitTaskState>();
-  const std::string anchor_name = ".b1-staging-" + commit_id;
   B1FileIdentity anchor_identity;
   const int anchor_raw = create_and_open_private_directory(
       root_descriptor_, anchor_name, options_,
@@ -1606,32 +2086,35 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
 
   append_final_observation();
   try {
-    invoke_fault_injector(options_,
-                          B1OutputStoreFaultPoint::BeforeReceiptAssembly);
     verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
-    const Value candidate =
-        value_image_adapter::snapshot_cpu_image_value(image);
-    const ContentDigestResult logical = compute_content_digest(candidate);
-    if (logical.state != ContentDigestState::Available ||
-        !logical.digest.has_value()) {
-      throw B1RevalidationError("B1 candidate logical digest is unavailable: " +
-                                logical.diagnostic);
-    }
+    const ContentDigest logical_digest = compute_b1_logical_digest(image);
     invoke_fault_injector(options_,
                           B1OutputStoreFaultPoint::BeforeSlotPublication);
     verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
     publish_private_directory_no_replace(anchor_owner.get(), staging_slot_name,
                                          root_descriptor_, slot_name);
-    transaction.mark_slot_published(slot_name);
+    transaction.mark_slot_published();
+    invoke_fault_injector(
+        options_,
+        B1OutputStoreFaultPoint::AfterSlotPublicationBeforeSourceBarrier);
     synchronize_descriptor(anchor_owner.get(), "directory");
+    invoke_fault_injector(
+        options_, B1OutputStoreFaultPoint::AfterSourceBarrierBeforeRootBarrier);
     synchronize_descriptor(root_descriptor_, "directory");
+    invoke_fault_injector(
+        options_, B1OutputStoreFaultPoint::BeforeFinalPublicRevalidation);
     verify_slot_binding(root_descriptor_, transaction.slot_descriptor(),
                         slot_name, slot_identity);
     verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
-    if (!state->manifest_identity.has_value()) {
+    validate_exact_public_slot_entries(transaction.slot_descriptor());
+    if (!state->payload_identity.has_value() ||
+        !state->manifest_identity.has_value()) {
       throw B1RevalidationError(
-          "B1 published manifest identity was not retained.");
+          "B1 published payload/manifest identity was not retained.");
     }
+    static_cast<void>(validate_b1_payload_at(transaction.slot_descriptor(),
+                                             state->payload_digest,
+                                             &*state->payload_identity));
     const B1Sha256Digest after_publication =
         validate_exact_file_at(transaction.slot_descriptor(), kManifestName,
                                state->manifest, &*state->manifest_identity);
@@ -1639,9 +2122,11 @@ B1OutputCommitResult B1OutputStore::commit(const B1JobInstance& job,
       throw B1RevalidationError(
           "B1 manifest digest changed after directory publication.");
     }
+    invoke_fault_injector(options_,
+                          B1OutputStoreFaultPoint::BeforeReceiptAssembly);
     result.receipt = B1OutputCommitReceipt(B1OutputCommitReceipt::Fields{
         commit_id, root_, rooted_slot, job,
-        "dense-tensor-hwc-fp32-rgba-2048x2048", *logical.digest, 1U,
+        "dense-tensor-hwc-fp32-rgba-2048x2048", logical_digest, 1U,
         kPayloadName, kManifestName, kB1PayloadBytes,
         b1_manifest_length(job.job_index), state->payload_digest,
         state->manifest_digest, B1OutputDurability::CrashDurable,

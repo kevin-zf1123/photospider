@@ -45,6 +45,13 @@ constexpr std::size_t kB1QuiescenceCapacity = 1U;
 /** @brief Exactly one root-settlement transition is permitted per job. */
 constexpr std::size_t kB1ResourceSettlementCapacity = 1U;
 
+/**
+ * @brief Frozen adapter-owned ready-byte declaration for every B1 submission.
+ * @note B1 logical tile bytes are independently mapped from actual planned ROI;
+ * the current product submission declares no additional adapter-owned bytes.
+ */
+constexpr std::uint64_t kB1DeclaredReadyBytes = 0U;
+
 /** @brief Frozen B1 Host resource limits from the execution-profile contract.
  */
 constexpr ResourceVector kB1HostResourceLimits{
@@ -298,13 +305,18 @@ bool valid_b1_io_snapshot(
       snapshot.running_tasks > snapshot.active_tasks) {
     return false;
   }
-  const std::uint64_t phase_sum = snapshot.constructing_tasks +
-                                  snapshot.queued_tasks +
-                                  snapshot.running_tasks;
-  return phase_sum >= snapshot.constructing_tasks &&
-         phase_sum >= snapshot.queued_tasks &&
-         phase_sum >= snapshot.running_tasks &&
-         phase_sum <= snapshot.active_tasks;
+  if (snapshot.constructing_tasks >
+      std::numeric_limits<std::uint64_t>::max() - snapshot.queued_tasks) {
+    return false;
+  }
+  const std::uint64_t staged_sum =
+      snapshot.constructing_tasks + snapshot.queued_tasks;
+  if (staged_sum >
+      std::numeric_limits<std::uint64_t>::max() - snapshot.running_tasks) {
+    return false;
+  }
+  const std::uint64_t phase_sum = staged_sum + snapshot.running_tasks;
+  return phase_sum == snapshot.active_tasks;
 }
 
 /**
@@ -661,6 +673,9 @@ struct B1IoEvaluation final {
  * @param reasons Row-level structural diagnostics.
  * @return I/O structural, fault-free, retry, and high-water facts.
  * @throws std::bad_alloc when maps or diagnostics allocate.
+ * @note A reconciled receipt intentionally carries no new observations. The
+ * caller must retain the earlier new-work stream; an empty stream cannot be
+ * synthesized into this FSM and therefore fails closed below.
  */
 B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
                                        std::vector<std::string>* reasons) {
@@ -1243,6 +1258,7 @@ class B1RunObservationCollector::Impl final
       }
       ready.dependencies[index] = static_cast<std::uint64_t>(dependency);
     }
+    ready.declared_ready_bytes = observation.ready_bytes;
 
     std::uint64_t logical_ready_bytes = 0U;
     if (observation.tiled) {
@@ -1515,6 +1531,10 @@ std::vector<B1SemanticRecord> make_b1_observed_semantic_records(
     if (ready.dependency_count > ready.dependencies.size()) {
       throw std::invalid_argument(
           "B1 semantic dependency count exceeds retained storage.");
+    }
+    if (ready.declared_ready_bytes != kB1DeclaredReadyBytes) {
+      throw std::invalid_argument(
+          "B1 ready submission byte declaration drifted.");
     }
     for (std::size_t index = 0U; index < ready.dependency_count; ++index) {
       if (ready.dependencies[index] >= kB1TasksPerJob ||

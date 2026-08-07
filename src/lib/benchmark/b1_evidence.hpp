@@ -54,7 +54,14 @@ struct B1ObservedTaskReady final {
   std::array<std::uint64_t, kB1ObservedDependencyCapacity> dependencies{};
   /** @brief Number of meaningful dependency entries. */
   std::size_t dependency_count = 0U;
-  /** @brief Resource vector derived from actual ready-plan facts. */
+  /**
+   * @brief Actual adapter-owned ready-byte declaration carried by submission.
+   * @note This authority is retained separately from the workload-mapped
+   * output-shape bytes in `resources.ready_bytes`; conflating the two would
+   * hide a producer declaration drift behind a recomputed ROI value.
+   */
+  std::uint64_t declared_ready_bytes = 0U;
+  /** @brief Resource vector mapped from actual ready-plan facts. */
   B1SemanticResourceVector resources;
   /** @brief Observer-local causal coordinate of ready materialization. */
   compute::ComputeRunObservationCoordinate coordinate;

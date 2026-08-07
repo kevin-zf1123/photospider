@@ -618,6 +618,34 @@ std::string read_text_file(const std::filesystem::path& path) {
 }
 
 /**
+ * @brief Compares every stable field in two store-minted receipts.
+ * @param lhs First successful commit/reconciliation receipt.
+ * @param rhs Second successful commit/reconciliation receipt.
+ * @return Nothing after publishing GoogleTest expectations.
+ * @throws Test framework failures only.
+ */
+void expect_same_receipt(const B1OutputCommitReceipt& lhs,
+                         const B1OutputCommitReceipt& rhs) {
+  EXPECT_EQ(lhs.commit_id(), rhs.commit_id());
+  EXPECT_EQ(lhs.resolved_root(), rhs.resolved_root());
+  EXPECT_EQ(lhs.rooted_slot(), rhs.rooted_slot());
+  EXPECT_EQ(lhs.job(), rhs.job());
+  EXPECT_EQ(lhs.logical_descriptor(), rhs.logical_descriptor());
+  EXPECT_EQ(lhs.logical_content_digest(), rhs.logical_content_digest());
+  EXPECT_EQ(lhs.committed_generation(), rhs.committed_generation());
+  EXPECT_EQ(lhs.payload_name(), rhs.payload_name());
+  EXPECT_EQ(lhs.manifest_name(), rhs.manifest_name());
+  EXPECT_EQ(lhs.payload_length(), rhs.payload_length());
+  EXPECT_EQ(lhs.manifest_length(), rhs.manifest_length());
+  EXPECT_EQ(lhs.payload_digest(), rhs.payload_digest());
+  EXPECT_EQ(lhs.manifest_digest(), rhs.manifest_digest());
+  EXPECT_EQ(lhs.requested_durability(), rhs.requested_durability());
+  EXPECT_EQ(lhs.achieved_durability(), rhs.achieved_durability());
+  EXPECT_EQ(lhs.published_manifest_identity(),
+            rhs.published_manifest_identity());
+}
+
+/**
  * @brief Proves invalid policy/image requests fail before filesystem mutation.
  * @throws Test framework, executor, and filesystem failures unchanged.
  */
@@ -763,8 +791,10 @@ TEST(B1OutputStore, CommitsExactPayloadAndPublishesManifestLastWithoutReplace) {
   EXPECT_EQ(committed.io_observations.back().snapshot.active_planned_bytes, 0U);
 
   const B1OutputCommitResult duplicate = store.commit(job, seed_zero_image());
-  EXPECT_EQ(duplicate.status, B1OutputCommitStatus::SlotExists);
-  EXPECT_FALSE(duplicate.receipt.has_value());
+  ASSERT_TRUE(duplicate.succeeded()) << duplicate.diagnostic;
+  ASSERT_TRUE(duplicate.receipt.has_value());
+  EXPECT_TRUE(duplicate.io_observations.empty());
+  expect_same_receipt(receipt, *duplicate.receipt);
   EXPECT_EQ(std::filesystem::file_size(payload), kB1PayloadBytes);
   EXPECT_EQ(read_text_file(manifest), expected_manifest);
 }
@@ -877,18 +907,18 @@ TEST(B1OutputStore,
 }
 
 /**
- * @brief Proves every post-slot exception path rolls back and remains
+ * @brief Proves every prepublication exception rolls back and remains
  * retryable.
  * @throws Test framework, oracle, filesystem, executor, and injected failures.
  */
 TEST(B1OutputStore,
-     PostSlotExceptionsSettleExecutorRemoveSlotAndPermitExactRetry) {
+     PrepublicationExceptionsSettleExecutorRemoveSlotAndPermitExactRetry) {
   const std::array<B1OutputStoreFaultPoint, 5U> points{
       B1OutputStoreFaultPoint::AfterSlotCreated,
       B1OutputStoreFaultPoint::InsideTaskFactory,
       B1OutputStoreFaultPoint::AfterTaskAccepted,
       B1OutputStoreFaultPoint::AfterTaskSettled,
-      B1OutputStoreFaultPoint::BeforeReceiptAssembly};
+      B1OutputStoreFaultPoint::BeforeSlotPublication};
   for (const B1OutputStoreFaultPoint point : points) {
     SCOPED_TRACE(static_cast<std::uint32_t>(point));
     ScopedB1OutputRoot output_root;
@@ -900,7 +930,7 @@ TEST(B1OutputStore,
     options.fault_injector_context = &context;
     B1OutputStore store(output_root.root(), executor, options);
 
-    if (point == B1OutputStoreFaultPoint::BeforeReceiptAssembly) {
+    if (point == B1OutputStoreFaultPoint::BeforeSlotPublication) {
       const B1OutputCommitResult failed =
           store.commit(measured_job_zero(), seed_zero_image());
       EXPECT_EQ(failed.status, B1OutputCommitStatus::RevalidationFailed);
@@ -919,10 +949,177 @@ TEST(B1OutputStore,
     EXPECT_EQ(rolled_back.running_tasks, 0U);
     EXPECT_TRUE(std::filesystem::is_empty(output_root.root()));
 
+    if (point == B1OutputStoreFaultPoint::InsideTaskFactory) {
+      const auto lifetime = std::make_shared<int>(19);
+      const execution::ComputeIoSubmission first_signed = executor.try_submit(
+          1U, lifetime,
+          []() -> execution::ComputeIoExecutor::Task { return []() {}; });
+      ASSERT_TRUE(first_signed.accepted());
+      EXPECT_EQ(first_signed.admission_event().sequence, 1U);
+      EXPECT_EQ(first_signed.completion().wait().status(),
+                execution::ComputeIoCompletionStatus::Succeeded);
+    }
+
     context.enabled = false;
     const B1OutputCommitResult retried =
         store.commit(measured_job_zero(), seed_zero_image());
     EXPECT_TRUE(retried.succeeded()) << retried.diagnostic;
+  }
+}
+
+/**
+ * @brief Proves every post-rename failure preserves and reconciles one output.
+ * @throws Test framework, oracle, filesystem, executor, and injected failures.
+ */
+TEST(B1OutputStore,
+     PostPublicationFailuresPreserveOccurrenceAndReturnStableReceiptOnRetry) {
+  const std::array<B1OutputStoreFaultPoint, 4U> points{
+      B1OutputStoreFaultPoint::AfterSlotPublicationBeforeSourceBarrier,
+      B1OutputStoreFaultPoint::AfterSourceBarrierBeforeRootBarrier,
+      B1OutputStoreFaultPoint::BeforeFinalPublicRevalidation,
+      B1OutputStoreFaultPoint::BeforeReceiptAssembly};
+  for (const B1OutputStoreFaultPoint point : points) {
+    SCOPED_TRACE(static_cast<std::uint32_t>(point));
+    ScopedB1OutputRoot output_root;
+    execution::ComputeIoExecutor executor(
+        {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+    ThrowingFaultContext context{point, true};
+    B1OutputStoreOptions options;
+    options.fault_injector = &throw_selected_output_fault;
+    options.fault_injector_context = &context;
+    B1OutputStore store(output_root.root(), executor, options);
+    const B1JobInstance job = measured_job_zero();
+    const std::filesystem::path public_slot =
+        public_slot_for_job(output_root.root(), job);
+    const std::filesystem::path private_anchor =
+        private_anchor_for_job(output_root.root(), job);
+
+    const B1OutputCommitResult failed = store.commit(job, seed_zero_image());
+    EXPECT_EQ(failed.status, B1OutputCommitStatus::RevalidationFailed)
+        << failed.diagnostic;
+    EXPECT_FALSE(failed.receipt.has_value());
+    EXPECT_TRUE(std::filesystem::is_directory(public_slot));
+    EXPECT_TRUE(std::filesystem::exists(public_slot / "output.rgba32le"));
+    EXPECT_TRUE(std::filesystem::exists(public_slot / "manifest.txt"));
+    EXPECT_TRUE(std::filesystem::is_directory(private_anchor));
+    const execution::ComputeIoExecutorSnapshot settled = executor.snapshot();
+    EXPECT_EQ(settled.active_tasks, 0U);
+    EXPECT_EQ(settled.active_planned_bytes, 0U);
+    EXPECT_EQ(settled.constructing_tasks, 0U);
+    EXPECT_EQ(settled.queued_tasks, 0U);
+    EXPECT_EQ(settled.running_tasks, 0U);
+
+    context.enabled = false;
+    const B1OutputCommitResult reconciled =
+        store.commit(job, seed_zero_image());
+    ASSERT_TRUE(reconciled.succeeded()) << reconciled.diagnostic;
+    ASSERT_TRUE(reconciled.receipt.has_value());
+    EXPECT_TRUE(reconciled.io_observations.empty());
+    EXPECT_FALSE(std::filesystem::exists(private_anchor));
+
+    const B1OutputCommitResult replayed = store.commit(job, seed_zero_image());
+    ASSERT_TRUE(replayed.succeeded()) << replayed.diagnostic;
+    ASSERT_TRUE(replayed.receipt.has_value());
+    EXPECT_TRUE(replayed.io_observations.empty());
+    expect_same_receipt(*reconciled.receipt, *replayed.receipt);
+  }
+}
+
+/**
+ * @brief Proves no-transaction-leaf public directories are plainly foreign.
+ * @throws Test framework, oracle, filesystem, and executor failures unchanged.
+ * @note Both cases exist before `commit` starts and must remain byte-for-byte
+ * untouched while the initial `fstatat` reconciliation branch returns
+ * `SlotExists` without creating private or transaction-looking leaves.
+ */
+TEST(B1OutputStore,
+     EmptyAndMarkerOnlyExistingPublicSlotsRemainUntouchedSlotExists) {
+  for (const bool marker_present : {false, true}) {
+    SCOPED_TRACE(marker_present);
+    ScopedB1OutputRoot output_root;
+    execution::ComputeIoExecutor executor(
+        {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+    const B1JobInstance job = measured_job_zero();
+    const std::filesystem::path public_slot =
+        public_slot_for_job(output_root.root(), job);
+    ASSERT_TRUE(std::filesystem::create_directory(public_slot));
+    const std::filesystem::path marker = public_slot / "foreign-marker";
+    if (marker_present) {
+      std::ofstream output(marker, std::ios::binary);
+      ASSERT_TRUE(output.good());
+      output << "foreign-marker-content";
+      output.close();
+      ASSERT_TRUE(output.good());
+    }
+    B1OutputStore store(output_root.root(), executor);
+
+    const B1OutputCommitResult rejected = store.commit(job, seed_zero_image());
+    EXPECT_EQ(rejected.status, B1OutputCommitStatus::SlotExists)
+        << rejected.diagnostic;
+    EXPECT_FALSE(rejected.receipt.has_value());
+    EXPECT_TRUE(rejected.io_observations.empty());
+    EXPECT_TRUE(std::filesystem::is_directory(public_slot));
+    EXPECT_FALSE(std::filesystem::exists(public_slot / "output.rgba32le"));
+    EXPECT_FALSE(std::filesystem::exists(public_slot / "manifest.txt"));
+    EXPECT_FALSE(std::filesystem::exists(public_slot / ".manifest.private"));
+    EXPECT_FALSE(std::filesystem::exists(
+        private_anchor_for_job(output_root.root(), job)));
+    if (marker_present) {
+      EXPECT_EQ(read_text_file(marker), "foreign-marker-content");
+    } else {
+      EXPECT_TRUE(std::filesystem::is_empty(public_slot));
+    }
+    const execution::ComputeIoExecutorSnapshot untouched = executor.snapshot();
+    EXPECT_EQ(untouched.active_tasks, 0U);
+    EXPECT_EQ(untouched.active_planned_bytes, 0U);
+    EXPECT_EQ(untouched.constructing_tasks, 0U);
+    EXPECT_EQ(untouched.queued_tasks, 0U);
+    EXPECT_EQ(untouched.running_tasks, 0U);
+  }
+}
+
+/**
+ * @brief Proves incomplete or drifted pending public state fails closed.
+ * @throws Test framework, oracle, filesystem, executor, and injected failures.
+ */
+TEST(B1OutputStore, PendingPublicIncompleteOrDriftedStateIsNeverRewritten) {
+  for (const bool remove_manifest : {false, true}) {
+    SCOPED_TRACE(remove_manifest);
+    ScopedB1OutputRoot output_root;
+    execution::ComputeIoExecutor executor(
+        {kB1ComputeIoTaskLimit, kB1ComputeIoPlannedByteLimit});
+    ThrowingFaultContext context{
+        B1OutputStoreFaultPoint::AfterSlotPublicationBeforeSourceBarrier, true};
+    B1OutputStoreOptions options;
+    options.fault_injector = &throw_selected_output_fault;
+    options.fault_injector_context = &context;
+    B1OutputStore store(output_root.root(), executor, options);
+    const B1JobInstance job = measured_job_zero();
+    const std::filesystem::path public_slot =
+        public_slot_for_job(output_root.root(), job);
+    const std::filesystem::path manifest = public_slot / "manifest.txt";
+
+    const B1OutputCommitResult failed = store.commit(job, seed_zero_image());
+    ASSERT_EQ(failed.status, B1OutputCommitStatus::RevalidationFailed);
+    ASSERT_TRUE(std::filesystem::exists(manifest));
+    context.enabled = false;
+    if (remove_manifest) {
+      ASSERT_TRUE(std::filesystem::remove(manifest));
+    } else {
+      std::ofstream output(manifest, std::ios::binary | std::ios::trunc);
+      ASSERT_TRUE(output.good());
+      output << "drifted-manifest";
+      output.close();
+      ASSERT_TRUE(output.good());
+    }
+
+    const B1OutputCommitResult rejected = store.commit(job, seed_zero_image());
+    EXPECT_EQ(rejected.status, B1OutputCommitStatus::RevalidationFailed)
+        << rejected.diagnostic;
+    EXPECT_FALSE(rejected.receipt.has_value());
+    EXPECT_TRUE(std::filesystem::is_directory(public_slot));
+    EXPECT_EQ(std::filesystem::exists(manifest), !remove_manifest);
+    EXPECT_TRUE(std::filesystem::exists(public_slot / "output.rgba32le"));
   }
 }
 
@@ -1065,6 +1262,8 @@ TEST(B1OutputStore,
       std::filesystem::exists(context.public_slot / "replacement-marker"));
   EXPECT_FALSE(
       std::filesystem::exists(context.public_slot / "output.rgba32le"));
+  EXPECT_FALSE(
+      std::filesystem::exists(private_anchor_for_job(output_root.root(), job)));
   EXPECT_EQ(executor.snapshot().active_tasks, 0U);
   EXPECT_EQ(executor.snapshot().active_planned_bytes, 0U);
   ASSERT_GT(std::filesystem::remove_all(context.public_slot), 0U);
