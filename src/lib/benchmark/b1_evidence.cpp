@@ -649,23 +649,80 @@ B1DeterministicEvaluation evaluate_b1_deterministic_evidence(
 }
 
 /**
- * @brief Internal Compute I/O evidence evaluation for one occurrence.
- * @throws Nothing for scalar construction.
+ * @brief Tests the closed B1 Compute I/O observation-point vocabulary.
+ * @param point Candidate serialized or in-memory enum value.
+ * @return True only for a declared observation point.
+ * @throws Nothing.
  */
-struct B1IoEvaluation final {
-  /** @brief True when every snapshot/status/identity relation is coherent. */
-  bool structurally_valid = true;
-  /** @brief True when exactly two attempt-zero tasks accepted and succeeded. */
-  bool fault_free_complete = false;
-  /** @brief Duplicate accepted admissions for one stage/attempt. */
-  std::size_t duplicate_admissions = 0U;
-  /** @brief Accepted or offered task records using attempts above zero. */
-  std::size_t retry_records = 0U;
-  /** @brief Maximum observed active task count. */
-  std::uint64_t task_high_water = 0U;
-  /** @brief Maximum observed active planned bytes. */
-  std::uint64_t planned_byte_high_water = 0U;
-};
+bool known_b1_io_observation_point(B1IoObservationPoint point) noexcept {
+  switch (point) {
+    case B1IoObservationPoint::Initial:
+    case B1IoObservationPoint::OfferRejected:
+    case B1IoObservationPoint::AcceptedAdmission:
+    case B1IoObservationPoint::Settlement:
+    case B1IoObservationPoint::Final:
+      return true;
+  }
+  return false;
+}
+
+/**
+ * @brief Tests the closed Compute I/O admission-status vocabulary.
+ * @param status Candidate serialized or in-memory enum value.
+ * @return True only for a declared admission status.
+ * @throws Nothing.
+ */
+bool known_b1_io_admission_status(
+    execution::ComputeIoAdmissionStatus status) noexcept {
+  switch (status) {
+    case execution::ComputeIoAdmissionStatus::Accepted:
+    case execution::ComputeIoAdmissionStatus::InvalidRequest:
+    case execution::ComputeIoAdmissionStatus::TaskLimit:
+    case execution::ComputeIoAdmissionStatus::PlannedByteLimit:
+    case execution::ComputeIoAdmissionStatus::ShuttingDown:
+      return true;
+  }
+  return false;
+}
+
+/**
+ * @brief Tests the closed Compute I/O completion-status vocabulary.
+ * @param status Candidate serialized or in-memory enum value.
+ * @return True only for a declared completion status.
+ * @throws Nothing.
+ */
+bool known_b1_io_completion_status(
+    execution::ComputeIoCompletionStatus status) noexcept {
+  switch (status) {
+    case execution::ComputeIoCompletionStatus::Succeeded:
+    case execution::ComputeIoCompletionStatus::Failed:
+    case execution::ComputeIoCompletionStatus::Cancelled:
+      return true;
+  }
+  return false;
+}
+
+/**
+ * @brief Tests the closed B1 output terminal-status vocabulary.
+ * @param status Candidate serialized or in-memory enum value.
+ * @return True only for a declared output status.
+ * @throws Nothing.
+ */
+bool known_b1_output_status(B1OutputCommitStatus status) noexcept {
+  switch (status) {
+    case B1OutputCommitStatus::Succeeded:
+    case B1OutputCommitStatus::InvalidRequest:
+    case B1OutputCommitStatus::InvalidImage:
+    case B1OutputCommitStatus::RootUnavailable:
+    case B1OutputCommitStatus::SlotExists:
+    case B1OutputCommitStatus::AdmissionFailed:
+    case B1OutputCommitStatus::TaskFailed:
+    case B1OutputCommitStatus::DurabilityUnsupported:
+    case B1OutputCommitStatus::RevalidationFailed:
+      return true;
+  }
+  return false;
+}
 
 /**
  * @brief Evaluates event-aligned Compute I/O observations for one job.
@@ -677,9 +734,9 @@ struct B1IoEvaluation final {
  * caller must retain the earlier new-work stream; an empty stream cannot be
  * synthesized into this FSM and therefore fails closed below.
  */
-B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
-                                       std::vector<std::string>* reasons) {
-  B1IoEvaluation result;
+B1ComputeIoEvaluation evaluate_b1_io_evidence_impl(
+    const B1JobEvidence& evidence, std::vector<std::string>* reasons) {
+  B1ComputeIoEvaluation result;
   const auto structural_failure = [&](const std::string& detail) {
     result.structurally_valid = false;
     invalidate_b1(reasons, "job " + std::to_string(evidence.job.job_index) +
@@ -732,6 +789,19 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
 
   for (const B1ComputeIoObservation& observation :
        evidence.output.io_observations) {
+    if (!known_b1_io_observation_point(observation.point) ||
+        (observation.admission.has_value() &&
+         !known_b1_io_admission_status(*observation.admission)) ||
+        (observation.completion.has_value() &&
+         !known_b1_io_completion_status(*observation.completion)) ||
+        (observation.admission_event.has_value() &&
+         !known_b1_io_admission_status(observation.admission_event->status)) ||
+        (observation.settlement_event.has_value() &&
+         !known_b1_io_completion_status(
+             observation.settlement_event->status))) {
+      structural_failure("observation contains an unknown enum value");
+      continue;
+    }
     if (!valid_b1_io_snapshot(observation.snapshot)) {
       structural_failure("snapshot limits or phase totals are invalid");
     }
@@ -919,6 +989,9 @@ B1IoEvaluation evaluate_b1_io_evidence(const B1JobEvidence& evidence,
       result.retry_records == 0U &&
       capacity_rejections[B1IoStage::PayloadStage] == 0U &&
       capacity_rejections[B1IoStage::ManifestCommit] == 0U;
+  if (!known_b1_output_status(evidence.output.status)) {
+    structural_failure("output contains an unknown terminal status");
+  }
   if ((evidence.output.status == B1OutputCommitStatus::Succeeded) !=
       evidence.output.receipt.has_value()) {
     structural_failure("output status and receipt presence disagree");
@@ -1191,7 +1264,58 @@ auto b1_comparison_identity(const B1JobEvidence& job) {
                     job.golden.logical_digest, job.golden.raw_payload_digest);
 }
 
+/**
+ * @brief Applies the single verified-endpoint conjunction to derived facts.
+ * @param evidence Complete raw job evidence.
+ * @param physical Replayed physical Run facts.
+ * @param deterministic Replayed trace/output/golden facts.
+ * @param io Replayed event-aligned Compute-I/O facts.
+ * @return True exactly when Issue #95 credits the job as successful work.
+ * @throws Nothing.
+ */
+bool b1_verified_endpoint_from_evaluations(
+    const B1JobEvidence& evidence, const B1PhysicalEvaluation& physical,
+    const B1DeterministicEvaluation& deterministic,
+    const B1ComputeIoEvaluation& io) noexcept {
+  const bool visible_digest_match =
+      evidence.output.receipt.has_value() &&
+      evidence.physical_trace.visible_content_digest.state ==
+          ContentDigestState::Available &&
+      evidence.physical_trace.visible_content_digest.digest.has_value() &&
+      *evidence.physical_trace.visible_content_digest.digest ==
+          evidence.output.receipt->logical_content_digest();
+  return physical.structurally_valid && physical.complete_plan &&
+         physical.successful_visible_run && deterministic.trace_valid &&
+         deterministic.artifact_valid && deterministic.manifest_match &&
+         deterministic.logical_match && deterministic.raw_match &&
+         visible_digest_match && io.structurally_valid &&
+         io.fault_free_complete && evidence.output.succeeded();
+}
+
 }  // namespace
+
+/** @copydoc evaluate_b1_compute_io_evidence */
+B1ComputeIoEvaluation evaluate_b1_compute_io_evidence(
+    const B1JobEvidence& evidence) {
+  std::vector<std::string> reasons;
+  B1ComputeIoEvaluation result =
+      evaluate_b1_io_evidence_impl(evidence, &reasons);
+  result.validity_reasons = std::move(reasons);
+  return result;
+}
+
+/** @copydoc b1_job_has_verified_endpoint */
+bool b1_job_has_verified_endpoint(const B1JobEvidence& evidence) {
+  std::vector<std::string> reasons;
+  const B1PhysicalEvaluation physical =
+      evaluate_b1_physical_trace(evidence, &reasons);
+  const B1DeterministicEvaluation deterministic =
+      evaluate_b1_deterministic_evidence(evidence, &reasons);
+  const B1ComputeIoEvaluation io =
+      evaluate_b1_io_evidence_impl(evidence, &reasons);
+  return b1_verified_endpoint_from_evaluations(evidence, physical,
+                                               deterministic, io);
+}
 
 /**
  * @brief Shared fixed-capacity sink implementation for one B1 request.
@@ -1297,7 +1421,9 @@ class B1RunObservationCollector::Impl final
       const compute::ComputeRunDescriptor& descriptor,
       compute::ComputeRunTaskIdentity task_identity,
       std::uint64_t service_charge,
+      const compute::ComputeRunServiceStartObservation& observation,
       compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    (void)observation;
     publish(service_starts_, next_service_start_,
             B1ObservedServiceStart{
                 descriptor.id().value(), task_identity.local_task_id().value(),
@@ -1711,8 +1837,10 @@ B1InnerRow evaluate_b1_inner_row(B1InnerRowInput input) {
         evaluate_b1_physical_trace(evidence, &row.validity_reasons);
     const B1DeterministicEvaluation deterministic =
         evaluate_b1_deterministic_evidence(evidence, &row.validity_reasons);
-    const B1IoEvaluation io =
-        evaluate_b1_io_evidence(evidence, &row.validity_reasons);
+    const B1ComputeIoEvaluation io = evaluate_b1_compute_io_evidence(evidence);
+    for (const std::string& reason : io.validity_reasons) {
+      invalidate_b1(&row.validity_reasons, reason);
+    }
     const bool execution_valid =
         validate_b1_job_execution_evidence(evidence, &row.validity_reasons);
     if (!physical.structurally_valid) {
@@ -1760,20 +1888,8 @@ B1InnerRow evaluate_b1_inner_row(B1InnerRowInput input) {
     row.compute_io_planned_byte_high_water = std::max(
         row.compute_io_planned_byte_high_water, io.planned_byte_high_water);
 
-    const bool visible_digest_match =
-        evidence.output.receipt.has_value() &&
-        evidence.physical_trace.visible_content_digest.state ==
-            ContentDigestState::Available &&
-        evidence.physical_trace.visible_content_digest.digest.has_value() &&
-        *evidence.physical_trace.visible_content_digest.digest ==
-            evidence.output.receipt->logical_content_digest();
-    const bool verified =
-        physical.structurally_valid && physical.complete_plan &&
-        physical.successful_visible_run && deterministic.trace_valid &&
-        deterministic.artifact_valid && deterministic.manifest_match &&
-        deterministic.logical_match && deterministic.raw_match &&
-        visible_digest_match && io.structurally_valid &&
-        io.fault_free_complete && evidence.output.succeeded();
+    const bool verified = b1_verified_endpoint_from_evaluations(
+        evidence, physical, deterministic, io);
     if (evidence.job.phase == B1JobPhase::Measured && verified) {
       ++row.verified_measured_jobs;
     }

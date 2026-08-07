@@ -134,6 +134,24 @@ bool valid_m1_request_tag(M1ObservedRequestTag tag) noexcept {
   return false;
 }
 
+/**
+ * @brief Tests the closed public Host status-domain vocabulary.
+ * @param domain Candidate raw status domain.
+ * @return True only for a declared `OperationErrorDomain` value.
+ * @throws Nothing.
+ */
+bool valid_operation_error_domain(OperationErrorDomain domain) noexcept {
+  switch (domain) {
+    case OperationErrorDomain::None:
+    case OperationErrorDomain::Transport:
+    case OperationErrorDomain::Protocol:
+    case OperationErrorDomain::Graph:
+    case OperationErrorDomain::Daemon:
+      return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 /** @copydoc M1EventCoordinate::operator== */
@@ -217,6 +235,7 @@ class M1FairnessObservationCollector::Impl final
         const compute::ComputeRunDescriptor& descriptor,
         compute::ComputeRunTaskIdentity task_identity,
         std::uint64_t service_charge,
+        const compute::ComputeRunServiceStartObservation& observation,
         compute::ComputeRunObservationCoordinate coordinate) noexcept override {
       impl_->record(M1FairnessObservation{
           M1ObservationKind::ServiceStart, tag_, descriptor.qos().service_class,
@@ -224,7 +243,10 @@ class M1FairnessObservationCollector::Impl final
           coordinate.causal_sequence, coordinate.observed_at,
           descriptor.id().value(), task_identity.local_task_id().value(),
           service_charge, compute::ComputeRunTaskTerminalKind::Succeeded,
-          compute::ComputeRunTerminalKind::Succeeded});
+          compute::ComputeRunTerminalKind::Succeeded,
+          observation.interactive_candidate_startable,
+          observation.throughput_candidate_startable,
+          observation.execution_grant_committed});
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_task_terminal */
@@ -918,22 +940,32 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
 
   bool progress_valid = observation_valid;
   std::vector<double> progress_ratios;
-  if (input.progress_windows.size() != kM1MeasuredWindowCount) {
+  if (input.progress_windows.size() != kM1MeasuredWindowCount ||
+      !input.paired_isolated_b1.has_value() ||
+      input.paired_isolated_b1->successful_site_operations == 0U ||
+      input.paired_isolated_b1->duration.count() <= 0) {
     progress_valid = false;
     invalidate(&summary.validity_reasons,
-               "M1 progress requires exactly 30 measured windows");
+               "M1 progress requires 30 windows and an exact paired source");
   } else {
     progress_ratios.reserve(input.progress_windows.size());
-    for (const M1ThroughputProgressSample& window : input.progress_windows) {
-      if (!std::isfinite(window.measured_rate) ||
-          !std::isfinite(window.paired_isolated_rate) ||
-          window.measured_rate < 0.0 || window.paired_isolated_rate <= 0.0) {
+    for (std::size_t index = 0U; index < input.progress_windows.size();
+         ++index) {
+      const M1ThroughputProgressSample& window = input.progress_windows[index];
+      if (window.window_ordinal != index || window.duration.count() <= 0) {
         progress_valid = false;
         invalidate(&summary.validity_reasons,
-                   "M1 progress contains a malformed rate or denominator");
+                   "M1 progress contains an unordered or invalid raw window");
         break;
       }
-      const double ratio = window.measured_rate / window.paired_isolated_rate;
+      const long double numerator =
+          static_cast<long double>(window.successful_site_operations) *
+          static_cast<long double>(input.paired_isolated_b1->duration.count());
+      const long double denominator =
+          static_cast<long double>(window.duration.count()) *
+          static_cast<long double>(
+              input.paired_isolated_b1->successful_site_operations);
+      const double ratio = static_cast<double>(numerator / denominator);
       if (!std::isfinite(ratio) || ratio < 0.0) {
         progress_valid = false;
         invalidate(&summary.validity_reasons,
@@ -954,7 +986,20 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
 
   bool jain_valid = observation_valid;
   std::vector<double> jain_samples;
-  for (const M1GraphServiceWindow& window : input.graph_service_windows) {
+  if (input.graph_service_windows.size() != kM1MeasuredWindowCount) {
+    jain_valid = false;
+    invalidate(&summary.validity_reasons,
+               "M1 Graph service requires exactly 30 raw windows");
+  }
+  for (std::size_t index = 0U; index < input.graph_service_windows.size();
+       ++index) {
+    const M1GraphServiceWindow& window = input.graph_service_windows[index];
+    if (window.window_ordinal != index) {
+      jain_valid = false;
+      invalidate(&summary.validity_reasons,
+                 "M1 Graph service windows are not in exact ordinal order");
+      continue;
+    }
     if (!window.both_graphs_continuously_demanding) {
       continue;
     }
@@ -997,7 +1042,18 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
   bool saw_applicable_throughput = false;
   std::size_t interactive_burst = 0U;
   bool open_interactive_burst = false;
+  std::uint64_t prior_start_sequence = 0U;
   for (const M1ClassStartSample& start : input.class_starts) {
+    if (start.causal_sequence == 0U ||
+        start.causal_sequence <= prior_start_sequence ||
+        !start.execution_grant_committed) {
+      class_start_valid = false;
+      invalidate(
+          &summary.validity_reasons,
+          "M1 class-start evidence lacks a unique committed product cut");
+      continue;
+    }
+    prior_start_sequence = start.causal_sequence;
     if (start.service_class != compute::ComputeRunQosClass::Interactive &&
         start.service_class != compute::ComputeRunQosClass::Throughput) {
       class_start_valid = false;
@@ -1005,7 +1061,8 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
                  "M1 class-start evidence contains an unknown QoS class");
       continue;
     }
-    if (!start.both_classes_continuously_startable) {
+    if (!start.interactive_candidate_startable ||
+        !start.throughput_candidate_startable) {
       interactive_burst = 0U;
       open_interactive_burst = false;
       continue;
@@ -1046,12 +1103,44 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
             : I1Verdict::Fail;
   }
 
+  M1HeadroomAdmissionEvidence recomputed_admissions;
+  bool raw_headroom_valid =
+      input.headroom_outcomes.size() == kM1MeasuredI1AttemptCount;
+  for (std::size_t index = 0U; index < input.headroom_outcomes.size();
+       ++index) {
+    const M1HeadroomAdmissionOutcome& outcome = input.headroom_outcomes[index];
+    const std::size_t expected_origin = index / kI1EditCount;
+    const std::size_t expected_edit = index % kI1EditCount;
+    if (outcome.origin_ordinal != expected_origin ||
+        outcome.edit_index != expected_edit) {
+      raw_headroom_valid = false;
+    }
+    if (outcome.admission_attempted) {
+      ++recomputed_admissions.attempted_edits;
+    }
+    if (outcome.host_status.has_value()) {
+      ++recomputed_admissions.classified_outcomes;
+    }
+    if (outcome.admission_attempted != outcome.host_status.has_value() ||
+        (outcome.host_status.has_value() &&
+         (!valid_operation_error_domain(outcome.host_status->domain) ||
+          outcome.throughput_headroom_failure == outcome.host_status->ok))) {
+      raw_headroom_valid = false;
+    }
+    if (outcome.throughput_headroom_failure) {
+      ++recomputed_admissions.throughput_headroom_failures;
+    }
+  }
   const M1HeadroomAdmissionEvidence& admissions = input.headroom_admissions;
   const bool headroom_valid =
-      observation_valid &&
+      observation_valid && raw_headroom_valid &&
+      admissions.attempted_edits == recomputed_admissions.attempted_edits &&
+      admissions.classified_outcomes ==
+          recomputed_admissions.classified_outcomes &&
+      admissions.throughput_headroom_failures ==
+          recomputed_admissions.throughput_headroom_failures &&
       admissions.attempted_edits == kM1MeasuredI1AttemptCount &&
-      admissions.classified_outcomes == admissions.attempted_edits &&
-      admissions.throughput_headroom_failures <= admissions.classified_outcomes;
+      admissions.classified_outcomes == admissions.attempted_edits;
   if (!headroom_valid) {
     invalidate(&summary.validity_reasons,
                "M1 headroom admission classification is incomplete");

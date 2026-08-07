@@ -6,13 +6,15 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "benchmark/b1_environment.hpp"  // NOLINT(build/include_subdir)
-#include "benchmark/i1_evidence.hpp"     // NOLINT(build/include_subdir)
+#include "benchmark/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/i1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1_host.hpp"      // NOLINT(build/include_subdir)
 
 namespace ps::benchmark {
 
@@ -33,6 +35,13 @@ inline constexpr char kEvidenceJobIndexSchema[] =
 /** @brief Exact bundle-provenance retained-section schema header. */
 inline constexpr char kEvidenceBundleProvenanceSchema[] =
     "execution-profile-bundle-provenance-v1";
+
+/** @brief Exact reusable retained pair-object pack schema header. */
+inline constexpr char kEvidencePairObjectSchema[] =
+    "execution-profile-pair-object-v1";
+
+/** @brief Maximum accepted pair-object pack size in bytes. */
+inline constexpr std::size_t kEvidencePairObjectMaxBytes = 16U * 1024U * 1024U;
 
 // NOLINTEND
 
@@ -297,6 +306,58 @@ struct EvidenceCorpusValidation final {
 };
 
 /**
+ * @brief One native isolated row/bundle object selected for M1 pairing.
+ * @throws std::bad_alloc when canonical source ownership is copied.
+ * @note The row and bundle retain source objects. A serialized pack
+ * deliberately omits process-private storage authority, which cannot be
+ * reconstructed from bytes; loading therefore restores claims only and never
+ * mints Pass authority.
+ */
+struct EvidencePairObject final {
+  /** @brief Exact isolated row addressed by the M1 pair reference. */
+  EvidenceCanonicalRow row;
+  /** @brief Exact one-row isolated bundle that names `row` once. */
+  EvidenceCanonicalBundle bundle;
+};
+
+/**
+ * @brief Role and comparison direction used by isolated pack producers.
+ * @throws std::bad_alloc when an optional comparison digest is copied.
+ */
+struct EvidencePairProducerOptions final {
+  /** @brief Candidate or reference role shared by row and bundle. */
+  EvidenceSubjectRole subject_role = EvidenceSubjectRole::Reference;
+  /** @brief Required candidate baseline and forbidden reference dependency. */
+  std::optional<std::string> comparison_reference_bundle_digest;
+};
+
+/**
+ * @brief Frozen B1 component addresses shared by isolated B1 and embedded M1.
+ * @throws Nothing for value construction and copying.
+ */
+struct EvidenceB1ComponentDigests final {
+  /** @brief Complete graph/source/plan/golden fixture identity. */
+  B1Sha256Digest fixture;
+  /** @brief Exact cold/warmup/measured input corpus identity. */
+  B1Sha256Digest corpus;
+  /** @brief Exact frozen logical/raw golden table identity. */
+  B1Sha256Digest golden;
+};
+
+/**
+ * @brief Raw isolated denominator sources independently recomputed for M1.
+ * @throws Nothing for value construction and copying.
+ */
+struct EvidenceM1PairDenominators final {
+  /** @brief Nearest-rank p99 over exactly 200 isolated-I1 samples. */
+  std::uint64_t isolated_i1_p99_ns = 0U;
+  /** @brief Verified isolated-B1 pixel-site operation numerator. */
+  std::uint64_t isolated_b1_successful_site_operations = 0U;
+  /** @brief Positive isolated-B1 measured interval duration. */
+  std::uint64_t isolated_b1_duration_ns = 0U;
+};
+
+/**
  * @brief Returns the canonical token for one closed subject role.
  * @param role Candidate or Reference.
  * @return Process-lifetime canonical token.
@@ -386,5 +447,151 @@ EvidenceParsedBundle parse_evidence_bundle(std::string_view bytes);
  */
 EvidenceCorpusValidation validate_evidence_corpus(
     const EvidenceCorpus& corpus, std::string_view root_bundle_digest);
+
+/**
+ * @brief Computes the exact I1 component fixture used by isolated I1 and M1.
+ * @return SHA-256 over frozen graph bytes and independent final golden bytes.
+ * @throws Profile validation or allocation failures unchanged.
+ */
+B1Sha256Digest evidence_i1_component_fixture_digest();
+
+/**
+ * @brief Computes the three B1 component identities used by B1 and M1.
+ * @return Independently domain-separated fixture, corpus, and golden digests.
+ * @throws Profile validation or allocation failures unchanged.
+ */
+EvidenceB1ComponentDigests evidence_b1_component_digests();
+
+/**
+ * @brief Computes one shared execution-resource identity from a B1 snapshot.
+ * @param snapshot Authoritative settled process resource and Compute-I/O cut.
+ * @return SHA-256 over worker count and immutable resource limits.
+ * @throws std::bad_alloc when canonical identity bytes allocate.
+ */
+B1Sha256Digest evidence_resource_identity(const B1ExecutionSnapshot& snapshot);
+
+/**
+ * @brief Computes one shared execution-resource identity from an M1 snapshot.
+ * @param snapshot Authoritative settled process resource and Compute-I/O cut.
+ * @return Same domain and byte layout as the B1 overload.
+ * @throws std::bad_alloc when canonical identity bytes allocate.
+ */
+B1Sha256Digest evidence_resource_identity(const M1ExecutionSnapshot& snapshot);
+
+/**
+ * @brief Produces one native isolated-I1 pair object from actual Issue #93
+ * rows.
+ *
+ * The producer re-evaluates the complete 221-slot replicate, retains exactly
+ * 200 measured final latencies, and materializes the existing 15-field row and
+ * five-field one-row bundle without inventing a second latency grammar.
+ *
+ * @param rows Complete uncompacted Issue #93 episode rows.
+ * @param environment Exact storage-N/A environment claims and resource
+ * identity.
+ * @param options Subject role and optional candidate comparison dependency.
+ * @return Native canonical row/bundle suitable for pack materialization.
+ * @throws std::invalid_argument for incomplete raw evidence or identity drift.
+ * @throws std::bad_alloc when canonical source ownership allocates.
+ */
+EvidencePairObject make_i1_evidence_pair_object(
+    const std::vector<I1EpisodeInnerRow>& rows,
+    B1EnvironmentEvidence environment, EvidencePairProducerOptions options);
+
+/**
+ * @brief Produces one native isolated-B1 pair object from an actual Issue #95
+ * row.
+ *
+ * The producer retains all thirty measured per-job outcomes and the exact
+ * measurement interval, using the same verified-endpoint predicate as the B1
+ * evaluator before materializing the existing outer row/bundle schemas.
+ *
+ * @param row Complete uncompacted Issue #95 isolated inner row.
+ * @param options Subject role and optional candidate comparison dependency.
+ * @return Native canonical row/bundle suitable for pack materialization.
+ * @throws std::invalid_argument for incomplete raw evidence or identity drift.
+ * @throws std::bad_alloc when canonical source ownership allocates.
+ */
+EvidencePairObject make_b1_evidence_pair_object(
+    const B1InnerRow& row, EvidencePairProducerOptions options);
+
+/**
+ * @brief Materializes one native pair object into a closed canonical pack.
+ * @param object Exact one-row isolated bundle and all six retained sections.
+ * @return Canonical source pack bytes including one final LF.
+ * @throws std::invalid_argument for source/row/bundle/section/seal drift.
+ * @throws std::bad_alloc when pack bytes allocate.
+ * @note Process-private actual storage authority is intentionally excluded.
+ */
+std::string materialize_evidence_pair_object(const EvidencePairObject& object);
+
+/**
+ * @brief Loads and reconstructs one claims-only native canonical pair object.
+ * @param bytes Complete canonical pack bytes.
+ * @param expected_row_digest Exact caller-addressed row digest.
+ * @param expected_bundle_digest Exact caller-addressed bundle digest.
+ * @return Rebuilt row/bundle with every source claim and retained section.
+ * @throws std::invalid_argument for source tamper, missing/duplicate sections,
+ * digest mismatch, unresolved dependency, unsafe seal order, or schema drift.
+ * @throws std::bad_alloc when reconstructed ownership allocates.
+ * @note The returned required-storage environment has no actual observation.
+ */
+EvidencePairObject load_evidence_pair_object(
+    std::string_view bytes, std::string_view expected_row_digest,
+    std::string_view expected_bundle_digest);
+
+/**
+ * @brief Reads one bounded pair-object pack through a read-only no-follow path.
+ * @param path Absolute existing regular-file path.
+ * @return Exact bytes read once from the opened descriptor.
+ * @throws std::invalid_argument for relative, symlink, non-regular, empty, or
+ * oversized inputs.
+ * @throws std::runtime_error for open/stat/read/close failures.
+ * @throws std::bad_alloc when byte storage allocates.
+ * @note The helper never creates, replaces, truncates, deletes, or follows an
+ * input path after opening it.
+ */
+std::string read_evidence_pair_object_file(const std::filesystem::path& path);
+
+/**
+ * @brief Adds one pair object to a retained corpus without deduplication.
+ * @param object Exact row, bundle, and six retained sections.
+ * @param corpus Mutable destination object multiset.
+ * @return Nothing after all addresses are appended once.
+ * @throws std::invalid_argument when any address already resolves in corpus.
+ * @throws std::bad_alloc when destination vectors grow.
+ * @note Rejecting rather than silently deduplicating preserves exact-one
+ * ambiguity as evidence.
+ */
+void append_evidence_pair_object(const EvidencePairObject& object,
+                                 EvidenceCorpus* corpus);
+
+/**
+ * @brief Binds two loaded pair objects to one pre-timed M1 source context.
+ *
+ * This claims-only boundary checks exact role/workload/cap/ordinal, one-row
+ * bundle membership, base/full-environment relations, component fixture/
+ * corpus/golden identities, and independently recomputes both denominators.
+ * It does not promote retained storage claims to actual authority or Pass.
+ *
+ * @param isolated_i1 Loaded native isolated-I1 object.
+ * @param isolated_b1_cap8 Loaded native isolated-B1 cap-eight object.
+ * @param subject_role Required same-subject role.
+ * @param replicate_ordinal Required same-ordinal key in `[1,3]`.
+ * @param m1_environment Retained M1 claims and shared resource identity.
+ * @param i1_fixture Exact embedded-I1 component fixture address.
+ * @param b1_components Exact embedded-B1 component identities.
+ * @return Positive raw denominator tuple for `M1InnerRowInput`.
+ * @throws std::invalid_argument for every missing, mismatched, malformed, or
+ * non-recomputing pair fact.
+ * @throws std::bad_alloc when canonical raw records allocate.
+ */
+EvidenceM1PairDenominators validate_evidence_m1_pair_objects(
+    const EvidencePairObject& isolated_i1,
+    const EvidencePairObject& isolated_b1_cap8,
+    EvidenceSubjectRole subject_role, std::uint64_t replicate_ordinal,
+    const B1EnvironmentEvidence& m1_environment,
+    const B1Sha256Digest& i1_fixture,
+    const EvidenceB1ComponentDigests& b1_components);
 
 }  // namespace ps::benchmark

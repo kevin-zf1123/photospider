@@ -6,13 +6,17 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1_evidence.hpp"        // NOLINT(build/include_subdir)
 #include "benchmark/m1_profile.hpp"         // NOLINT(build/include_subdir)
 #include "support/b1_test_environment.hpp"
 
@@ -95,6 +99,229 @@ std::string encode_test_dependencies(
 }
 
 /**
+ * @brief Encodes one canonical generic framed list for envelope fixtures.
+ * @param records Complete records in authoritative order.
+ * @return Count prefix plus one frame per record.
+ * @throws std::bad_alloc when output ownership allocates.
+ */
+std::string encode_test_record_list(const std::vector<std::string>& records) {
+  std::string payload = std::to_string(records.size()) + ":";
+  for (const std::string& record : records) {
+    payload.append(b1_environment_frame(record));
+  }
+  return payload;
+}
+
+/**
+ * @brief Raw isolated sources and M1 claims varied by denominator tests.
+ * @throws Nothing for value construction and copying.
+ */
+struct M1EnvelopeDenominatorOptions final {
+  /** @brief Value repeated in every retained isolated-I1 sample. */
+  std::uint64_t i1_sample_ns = 10U;
+  /** @brief Number of retained isolated-I1 raw latency samples. */
+  std::size_t i1_sample_count = 200U;
+  /** @brief Isolated-I1 row-local nearest-rank p99 claim. */
+  std::uint64_t i1_claimed_p99_ns = 10U;
+  /** @brief Number of retained isolated-B1 raw job outcomes. */
+  std::size_t b1_outcome_count = kB1MeasuredJobCount;
+  /** @brief Number of retained M1 measured progress windows. */
+  std::size_t m1_progress_window_count = kM1MeasuredWindowCount;
+  /** @brief Isolated-B1 row-local successful-operation claim. */
+  std::uint64_t b1_claimed_successful_operations =
+      kB1MeasuredJobCount * kB1SiteOperationsPerJob;
+  /** @brief M1 outer isolated-I1 denominator claim. */
+  std::uint64_t m1_outer_i1_p99_ns = 10U;
+  /** @brief M1 nested isolated-I1 denominator claim. */
+  std::uint64_t m1_inner_i1_p99_ns = 10U;
+  /** @brief M1 outer isolated-B1 numerator claim. */
+  std::uint64_t m1_outer_b1_successful_operations =
+      kB1MeasuredJobCount * kB1SiteOperationsPerJob;
+  /** @brief M1 nested isolated-B1 numerator claim. */
+  std::uint64_t m1_inner_b1_successful_operations =
+      kB1MeasuredJobCount * kB1SiteOperationsPerJob;
+};
+
+/**
+ * @brief Builds exact isolated-I1 raw denominator fields for one replicate.
+ * @param role Exact enclosing subject role.
+ * @param ordinal Exact enclosing replicate ordinal.
+ * @param options Raw sample cardinality/value and row-local claim.
+ * @return Four-field raw isolated-I1 measurement source.
+ * @throws std::bad_alloc when records or canonical fields allocate.
+ */
+std::vector<B1CanonicalField> isolated_i1_measurement_fields(
+    EvidenceSubjectRole role, std::uint64_t ordinal,
+    const M1EnvelopeDenominatorOptions& options) {
+  std::vector<std::string> samples;
+  samples.assign(
+      options.i1_sample_count,
+      encode_b1_fixed_record({std::to_string(options.i1_sample_ns)}));
+  return {
+      testing::known_b1_field("subject_role", "enum",
+                              evidence_subject_role_name(role)),
+      testing::known_b1_field("replicate_ordinal", "uint64",
+                              std::to_string(ordinal)),
+      testing::known_b1_field("measured_final_latencies_ns", "uint64-list-v1",
+                              encode_test_record_list(samples)),
+      testing::known_b1_field("claimed_p99_ns", "uint64",
+                              std::to_string(options.i1_claimed_p99_ns))};
+}
+
+/**
+ * @brief Builds exact isolated-B1 raw denominator fields for one replicate.
+ * @param role Exact enclosing subject role.
+ * @param ordinal Exact enclosing replicate ordinal.
+ * @param options Raw outcome cardinality and row-local numerator claim.
+ * @return Raw isolated-B1 outcomes over exactly thirty seconds.
+ * @throws std::bad_alloc when records or canonical fields allocate.
+ */
+std::vector<B1CanonicalField> isolated_b1_measurement_fields(
+    EvidenceSubjectRole role, std::uint64_t ordinal,
+    const M1EnvelopeDenominatorOptions& options) {
+  std::vector<std::string> outcomes;
+  for (std::size_t index = 0U; index < options.b1_outcome_count; ++index) {
+    outcomes.push_back(
+        encode_b1_fixed_record({std::to_string(index), "true",
+                                std::to_string(kB1SiteOperationsPerJob)}));
+  }
+  return {
+      testing::known_b1_field("subject_role", "enum",
+                              evidence_subject_role_name(role)),
+      testing::known_b1_field("replicate_ordinal", "uint64",
+                              std::to_string(ordinal)),
+      testing::known_b1_field("measurement_start_ns", "uint64", "100"),
+      testing::known_b1_field("measurement_end_ns", "uint64", "30000000100"),
+      testing::known_b1_field("measured_job_outcomes",
+                              "b1-measured-job-outcome-list-v1",
+                              encode_test_record_list(outcomes)),
+      testing::known_b1_field(
+          "successful_site_operations", "uint64",
+          std::to_string(options.b1_claimed_successful_operations))};
+}
+
+/**
+ * @brief Builds a shape-complete M1 inner row with exact denominator claims.
+ * @param options Exact nested denominator claims.
+ * @return Canonical nested row retaining 48/30/480/raw-stream cardinalities.
+ * @throws Canonical encoding and allocation failures unchanged.
+ */
+std::string make_test_m1_inner(const M1EnvelopeDenominatorOptions& options) {
+  std::vector<std::string> interactive(kM1TotalI1OriginCount,
+                                       encode_b1_fixed_record({"occurrence"}));
+  std::vector<std::string> offers{encode_b1_fixed_record({"offer"})};
+  std::vector<std::string> carryover(3U, encode_b1_fixed_record({"carryover"}));
+  std::vector<std::string> progress;
+  std::vector<std::string> graph;
+  for (std::size_t index = 0U; index < options.m1_progress_window_count;
+       ++index) {
+    progress.push_back(encode_b1_fixed_record(
+        {std::to_string(index), "200000", "1000000000"}));
+    graph.push_back(
+        encode_b1_fixed_record({std::to_string(index), "true", "1", "1"}));
+  }
+  std::vector<std::string> headroom;
+  for (std::size_t origin = 0U; origin < kM1MeasuredI1OriginCount; ++origin) {
+    for (std::size_t edit = 0U; edit < kI1EditCount; ++edit) {
+      headroom.push_back(encode_b1_fixed_record(
+          {std::to_string(origin), std::to_string(edit), "true", "true", "true",
+           "0", "0", "", "", "false"}));
+    }
+  }
+  const std::vector<std::string> io{encode_b1_fixed_record({"io"})};
+  const std::vector<std::string> snapshots(
+      4U, encode_b1_fixed_record({"snapshot"}));
+  return encode_b1_canonical_manifest(
+      kM1InnerRowSchema,
+      {testing::known_b1_field("schema_version", "uint64", "1"),
+       testing::known_b1_field("replicate_ordinal", "uint64", "1"),
+       testing::known_b1_field("boundaries", "m1-boundary-record-v1",
+                               encode_b1_fixed_record({"boundaries"})),
+       testing::known_b1_field(
+           "protocol_flags", "m1-protocol-flags-v1",
+           encode_b1_fixed_record({"true", "true", "true", "true", "true",
+                                   "true", "true", "true", "false", "false",
+                                   "false"})),
+       testing::known_b1_field("interactive_occurrences",
+                               "m1-i1-occurrence-list-v1",
+                               encode_test_record_list(interactive)),
+       testing::known_b1_field("batch_offers", "m1-b1-offer-list-v1",
+                               encode_test_record_list(offers)),
+       testing::known_b1_field("carryover", "m1-carryover-list-v1",
+                               encode_test_record_list(carryover)),
+       testing::known_b1_field("first_measured_admission",
+                               "m1-first-admission-record-v1",
+                               encode_b1_fixed_record({"first"})),
+       testing::known_b1_field("progress_windows", "m1-progress-window-list-v1",
+                               encode_test_record_list(progress)),
+       testing::known_b1_field("graph_service_windows",
+                               "m1-graph-service-window-list-v1",
+                               encode_test_record_list(graph)),
+       testing::known_b1_field("class_starts", "m1-class-start-list-v1",
+                               encode_test_record_list({encode_b1_fixed_record(
+                                   {"1", "0", "true", "true", "true"})})),
+       testing::known_b1_field("headroom_outcomes",
+                               "m1-headroom-outcome-list-v1",
+                               encode_test_record_list(headroom)),
+       testing::known_b1_field("batch_io_streams", "m1-b1-io-stream-list-v1",
+                               encode_test_record_list(io)),
+       testing::known_b1_field("temporal_snapshots",
+                               "m1-execution-snapshot-list-v1",
+                               encode_test_record_list(snapshots)),
+       testing::known_b1_field(
+           "mixed_observations", "m1-observation-list-v1",
+           encode_test_record_list({encode_b1_fixed_record({"event"})})),
+       testing::known_b1_field("paired_isolated_i1_p99_ns", "uint64",
+                               std::to_string(options.m1_inner_i1_p99_ns)),
+       testing::known_b1_field(
+           "paired_isolated_b1_source", "m1-b1-rate-source-v1",
+           encode_b1_fixed_record(
+               {std::to_string(options.m1_inner_b1_successful_operations),
+                "30000000000"})),
+       testing::known_b1_field("batch_waste", "m1-batch-waste-record-v1",
+                               encode_b1_fixed_record({"waste"})),
+       testing::known_b1_field("verdicts", "m1-five-axis-verdict-record-v1",
+                               encode_b1_fixed_record({"pass"}))});
+}
+
+/**
+ * @brief Builds exact workload-specific measurement source fields.
+ * @param workload Frozen row workload token.
+ * @param role Candidate/reference role for generic I2 fixture identity.
+ * @param ordinal Replicate ordinal for generic I2 fixture identity.
+ * @param options Raw denominator sources and M1 claims.
+ * @return Closed raw/claim fields for I1, B1, M1, or the unaffected I2 stub.
+ * @throws Canonical encoding and allocation failures unchanged.
+ */
+std::vector<B1CanonicalField> measurement_fields(
+    std::string_view workload, EvidenceSubjectRole role, std::uint64_t ordinal,
+    const M1EnvelopeDenominatorOptions& options) {
+  if (workload == kI1WorkloadId) {
+    return isolated_i1_measurement_fields(role, ordinal, options);
+  }
+  if (workload == kB1WorkloadId) {
+    return isolated_b1_measurement_fields(role, ordinal, options);
+  }
+  if (workload == kM1WorkloadId) {
+    return {testing::known_b1_field(
+                "m1_inner_row", "canonical-text-hex-v1",
+                encode_b1_normalized_text(make_test_m1_inner(options))),
+            testing::known_b1_field("paired_isolated_i1_p99_ns", "uint64",
+                                    std::to_string(options.m1_outer_i1_p99_ns)),
+            testing::known_b1_field(
+                "paired_isolated_b1_successful_site_operations", "uint64",
+                std::to_string(options.m1_outer_b1_successful_operations)),
+            testing::known_b1_field("paired_isolated_b1_duration_ns", "uint64",
+                                    "30000000000")};
+  }
+  return {testing::known_b1_field(
+      "raw_digest", "sha256",
+      test_digest(std::string(workload) +
+                  ":measurement:" + evidence_subject_role_name(role) + ":" +
+                  std::to_string(ordinal)))};
+}
+
+/**
  * @brief Builds one closed retained section with optional explicit addresses.
  * @param name Exact row/provenance binding.
  * @param schema Exact inner schema header.
@@ -157,6 +384,7 @@ std::vector<B1CanonicalField> workload_fields(std::string_view workload,
  * @param first_seal First section seal; six consecutive values are consumed.
  * @param i1_pair Required M1 I1 target, otherwise absent.
  * @param b1_pair Required M1 B1 target, otherwise absent.
+ * @param denominators Raw denominator sources and M1 claims.
  * @return Canonical row suitable for bundle/corpus tests.
  * @throws Envelope, environment, canonical, and allocation failures unchanged.
  */
@@ -164,7 +392,9 @@ EvidenceCanonicalRow make_row(
     B1EnvironmentEvidence environment, EvidenceSubjectRole role,
     std::uint64_t first_seal,
     std::optional<EvidencePairReference> i1_pair = std::nullopt,
-    std::optional<EvidencePairReference> b1_pair = std::nullopt) {
+    std::optional<EvidencePairReference> b1_pair = std::nullopt,
+    const M1EnvelopeDenominatorOptions& denominators =
+        M1EnvelopeDenominatorOptions{}) {
   const std::string workload = environment.workload_id;
   const std::uint64_t ordinal = environment.replicate_ordinal;
   const std::uint64_t run_cap = environment.run_cap;
@@ -185,11 +415,7 @@ EvidenceCanonicalRow make_row(
       workload == kI1WorkloadId ? 2U : first_seal + 1U;
   input.measurement_evidence = make_section(
       "measurement-evidence", "execution-profile-measurement-evidence-v1",
-      {testing::known_b1_field(
-          "raw_digest", "sha256",
-          test_digest(workload + std::string(":measurement:") +
-                      evidence_subject_role_name(role) + ":" +
-                      std::to_string(ordinal)))},
+      measurement_fields(workload, role, ordinal, denominators),
       first_seal + 2U);
   input.output_evidence = make_section(
       "output-evidence", "execution-profile-output-evidence-v1",
@@ -304,26 +530,32 @@ struct M1EnvelopeFixture final {
 
 /**
  * @brief Builds isolated I1/B1 prerequisites followed by one M1 root.
+ * @param denominators Raw isolated sources and exact M1 claims.
  * @return Complete acyclic same-role/same-ordinal corpus.
  * @throws Environment, envelope, digest, and allocation failures unchanged.
  */
-M1EnvelopeFixture make_m1_fixture() {
+M1EnvelopeFixture make_m1_fixture(
+    const M1EnvelopeDenominatorOptions& denominators =
+        M1EnvelopeDenominatorOptions{}) {
   B1EnvironmentEvidence m1 = testing::make_b1_test_environment(8U, 1U);
   B1EnvironmentEvidence b1 = m1;
   m1.workload_id = kM1WorkloadId;
   B1EnvironmentEvidence i1 = make_i1_environment(m1);
 
   const EvidenceCanonicalRow i1_row =
-      make_row(std::move(i1), EvidenceSubjectRole::Reference, 1U);
+      make_row(std::move(i1), EvidenceSubjectRole::Reference, 1U, std::nullopt,
+               std::nullopt, denominators);
   const EvidenceCanonicalBundle i1_bundle = make_reference_bundle(i1_row, 8U);
   const EvidenceCanonicalRow b1_row =
-      make_row(std::move(b1), EvidenceSubjectRole::Reference, 10U);
+      make_row(std::move(b1), EvidenceSubjectRole::Reference, 10U, std::nullopt,
+               std::nullopt, denominators);
   const EvidenceCanonicalBundle b1_bundle = make_reference_bundle(b1_row, 17U);
 
   const EvidencePairReference i1_pair{i1_row.digest, i1_bundle.digest, 1U};
   const EvidencePairReference b1_pair{b1_row.digest, b1_bundle.digest, 1U};
-  const EvidenceCanonicalRow m1_row = make_row(
-      std::move(m1), EvidenceSubjectRole::Reference, 20U, i1_pair, b1_pair);
+  const EvidenceCanonicalRow m1_row =
+      make_row(std::move(m1), EvidenceSubjectRole::Reference, 20U, i1_pair,
+               b1_pair, denominators);
   const EvidenceCanonicalBundle m1_bundle = make_reference_bundle(m1_row, 27U);
 
   M1EnvelopeFixture fixture;
@@ -366,15 +598,271 @@ TEST(EvidenceEnvelope, MaterializesCanonicalM1RowAndBundle) {
             fixture.m1_row_digest);
   EXPECT_EQ(digest_evidence_bundle(root.manifest_bytes), fixture.root_digest);
   EXPECT_EQ(fixture.m1_row_digest,
-            "3a08a8db6cf2e721e25e340e41d39e58452f92488c84caef73339ac7bd75ccdd");
+            "6d7dff5804fd8d5774c6b6a5e32d02e3a019830877db7f538ac5e04d6da9b5f6");
   EXPECT_EQ(fixture.root_digest,
-            "a81466b1df82f35d3f2e361e6353bb724159545a6cdbf2239131b7dfa6dba86a");
+            "ccee55716d612497e216326d4e98f30411aa1a64705e269ec400b8ead4d975a2");
   EXPECT_EQ(
       digest_evidence_section(
           fixture.corpus.rows.back().source.workload_manifest.section_name,
           fixture.corpus.rows.back().source.workload_manifest.schema_id,
           fixture.corpus.rows.back().source.workload_manifest.bytes),
       "562395616c5d14f39805ad65d29f9cac0b299044af7f245aad651a41cb5b6d8d");
+}
+
+/**
+ * @brief Proves native isolated objects survive pack round-trip and bind M1
+ * denominators from their retained raw measurement sections.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope, RoundTripsAndBindsNativePairObjects) {
+  const M1EnvelopeFixture fixture = make_m1_fixture();
+  const EvidencePairObject i1{fixture.corpus.rows[0U],
+                              fixture.corpus.bundles[0U]};
+  const EvidencePairObject b1{fixture.corpus.rows[1U],
+                              fixture.corpus.bundles[1U]};
+  const std::string i1_pack = materialize_evidence_pair_object(i1);
+  const std::string b1_pack = materialize_evidence_pair_object(b1);
+  const EvidencePairObject loaded_i1 =
+      load_evidence_pair_object(i1_pack, i1.row.digest, i1.bundle.digest);
+  const EvidencePairObject loaded_b1 =
+      load_evidence_pair_object(b1_pack, b1.row.digest, b1.bundle.digest);
+  EXPECT_EQ(loaded_i1.row.digest, i1.row.digest);
+  EXPECT_EQ(loaded_i1.bundle.digest, i1.bundle.digest);
+  EXPECT_EQ(loaded_b1.row.digest, b1.row.digest);
+  EXPECT_EQ(loaded_b1.bundle.digest, b1.bundle.digest);
+  EXPECT_TRUE(valid_b1_environment_claims(loaded_b1.row.source.environment));
+  EXPECT_FALSE(valid_b1_environment_evidence(loaded_b1.row.source.environment));
+
+  const EvidenceM1PairDenominators denominators =
+      validate_evidence_m1_pair_objects(
+          loaded_i1, loaded_b1, EvidenceSubjectRole::Reference, 1U,
+          fixture.corpus.rows[2U].source.environment,
+          parse_b1_digest(test_digest("i1-fixture")),
+          EvidenceB1ComponentDigests{
+              parse_b1_digest(test_digest("b1-fixture")),
+              parse_b1_digest(test_digest("b1-corpus")),
+              parse_b1_digest(test_digest("b1-golden"))});
+  EXPECT_EQ(denominators.isolated_i1_p99_ns, 10U);
+  EXPECT_EQ(denominators.isolated_b1_successful_site_operations,
+            kB1MeasuredJobCount * kB1SiteOperationsPerJob);
+  EXPECT_EQ(denominators.isolated_b1_duration_ns, 30000000000U);
+
+  EvidenceCorpus retained;
+  EXPECT_NO_THROW(append_evidence_pair_object(loaded_i1, &retained));
+  EXPECT_NO_THROW(append_evidence_pair_object(loaded_b1, &retained));
+  EXPECT_EQ(retained.rows.size(), 2U);
+  EXPECT_EQ(retained.bundles.size(), 2U);
+  EXPECT_THROW(append_evidence_pair_object(loaded_i1, &retained),
+               std::invalid_argument);
+}
+
+/**
+ * @brief Proves digest-only, digest/object mismatch, source tamper, and missing
+ * or duplicate sections all fail before an M1 timed row can begin.
+ * @throws GoogleTest assertion control and canonical fixture failures.
+ */
+TEST(EvidenceEnvelope, RejectsIncompleteOrTamperedPairPacks) {
+  const M1EnvelopeFixture fixture = make_m1_fixture();
+  const EvidencePairObject i1{fixture.corpus.rows[0U],
+                              fixture.corpus.bundles[0U]};
+  const std::string pack = materialize_evidence_pair_object(i1);
+  EXPECT_THROW(load_evidence_pair_object("", i1.row.digest, i1.bundle.digest),
+               std::invalid_argument);
+  EXPECT_THROW(load_evidence_pair_object(pack, test_digest("wrong-row"),
+                                         i1.bundle.digest),
+               std::invalid_argument);
+  EXPECT_THROW(load_evidence_pair_object(pack, i1.row.digest,
+                                         test_digest("wrong-bundle")),
+               std::invalid_argument);
+
+  B1CanonicalManifest tampered = parse_b1_canonical_manifest(pack);
+  tampered.fields[2U].payload.push_back('0');
+  EXPECT_THROW(load_evidence_pair_object(encode_b1_canonical_manifest(
+                                             tampered.schema, tampered.fields),
+                                         i1.row.digest, i1.bundle.digest),
+               std::invalid_argument);
+
+  B1CanonicalManifest missing = parse_b1_canonical_manifest(pack);
+  std::vector<std::string> records =
+      parse_b1_framed_list(missing.fields[12U].payload);
+  records.pop_back();
+  missing.fields[12U].payload = encode_test_record_list(records);
+  EXPECT_THROW(load_evidence_pair_object(
+                   encode_b1_canonical_manifest(missing.schema, missing.fields),
+                   i1.row.digest, i1.bundle.digest),
+               std::invalid_argument);
+
+  B1CanonicalManifest duplicate = parse_b1_canonical_manifest(pack);
+  records = parse_b1_framed_list(duplicate.fields[12U].payload);
+  records[1U] = records[0U];
+  duplicate.fields[12U].payload = encode_test_record_list(records);
+  EXPECT_THROW(
+      load_evidence_pair_object(
+          encode_b1_canonical_manifest(duplicate.schema, duplicate.fields),
+          i1.row.digest, i1.bundle.digest),
+      std::invalid_argument);
+
+  B1CanonicalManifest reordered = parse_b1_canonical_manifest(pack);
+  records = parse_b1_framed_list(reordered.fields[12U].payload);
+  std::swap(records[0U], records[1U]);
+  reordered.fields[12U].payload = encode_test_record_list(records);
+  EXPECT_THROW(
+      load_evidence_pair_object(
+          encode_b1_canonical_manifest(reordered.schema, reordered.fields),
+          i1.row.digest, i1.bundle.digest),
+      std::invalid_argument);
+}
+
+/**
+ * @brief Proves role/ordinal mismatch and unsafe file paths fail independently
+ * of canonical object bytes.
+ * @throws GoogleTest assertion control, fixture, and temporary-file failures.
+ */
+TEST(EvidenceEnvelope, RejectsWrongPairIdentityAndUnsafeInputPaths) {
+  const M1EnvelopeFixture fixture = make_m1_fixture();
+  const EvidencePairObject i1{fixture.corpus.rows[0U],
+                              fixture.corpus.bundles[0U]};
+  const EvidencePairObject b1{fixture.corpus.rows[1U],
+                              fixture.corpus.bundles[1U]};
+  EXPECT_THROW(validate_evidence_m1_pair_objects(
+                   i1, b1, EvidenceSubjectRole::Candidate, 1U,
+                   fixture.corpus.rows[2U].source.environment,
+                   parse_b1_digest(test_digest("i1-fixture")),
+                   EvidenceB1ComponentDigests{
+                       parse_b1_digest(test_digest("b1-fixture")),
+                       parse_b1_digest(test_digest("b1-corpus")),
+                       parse_b1_digest(test_digest("b1-golden"))}),
+               std::invalid_argument);
+  EXPECT_THROW(validate_evidence_m1_pair_objects(
+                   i1, b1, EvidenceSubjectRole::Reference, 2U,
+                   fixture.corpus.rows[2U].source.environment,
+                   parse_b1_digest(test_digest("i1-fixture")),
+                   EvidenceB1ComponentDigests{
+                       parse_b1_digest(test_digest("b1-fixture")),
+                       parse_b1_digest(test_digest("b1-corpus")),
+                       parse_b1_digest(test_digest("b1-golden"))}),
+               std::invalid_argument);
+  EXPECT_THROW(read_evidence_pair_object_file("relative-pair-object"),
+               std::invalid_argument);
+
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() /
+      ("photospider-pair-object-test-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  ASSERT_TRUE(std::filesystem::create_directory(root));
+  EXPECT_THROW(read_evidence_pair_object_file(root), std::invalid_argument);
+  const std::filesystem::path empty = root / "empty.canonical";
+  {
+    std::ofstream output(empty, std::ios::binary);
+  }
+  EXPECT_THROW(read_evidence_pair_object_file(empty), std::invalid_argument);
+  const std::filesystem::path oversized = root / "oversized.canonical";
+  {
+    std::ofstream output(oversized, std::ios::binary);
+    output.put('x');
+  }
+  std::filesystem::resize_file(oversized, kEvidencePairObjectMaxBytes + 1U);
+  EXPECT_THROW(read_evidence_pair_object_file(oversized),
+               std::invalid_argument);
+  const std::filesystem::path regular = root / "pair-object.canonical";
+  {
+    std::ofstream output(regular, std::ios::binary);
+    output << materialize_evidence_pair_object(i1);
+  }
+  EXPECT_EQ(read_evidence_pair_object_file(regular),
+            materialize_evidence_pair_object(i1));
+#if !defined(_WIN32)
+  const std::filesystem::path symlink = root / "pair-object-link.canonical";
+  std::filesystem::create_symlink(regular, symlink);
+  EXPECT_THROW(read_evidence_pair_object_file(symlink), std::invalid_argument);
+#endif
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves a valid but different isolated-I1 source cannot substitute for
+ * the M1 denominator named by the canonical pair.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope, RejectsSubstitutedIsolatedI1Denominator) {
+  M1EnvelopeDenominatorOptions denominators;
+  denominators.i1_sample_ns = 11U;
+  denominators.i1_claimed_p99_ns = 11U;
+  const M1EnvelopeFixture fixture = make_m1_fixture(denominators);
+
+  const EvidenceCorpusValidation validation =
+      validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+  EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+  ASSERT_EQ(validation.reasons.size(), 1U);
+  EXPECT_EQ(validation.reasons.front(),
+            "M1 isolated-I1 denominator differs from resolved raw evidence.");
+}
+
+/**
+ * @brief Proves omission of one isolated-B1 raw outcome invalidates the M1
+ * pair even when all row and bundle addresses are consistently rebuilt.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope, RejectsOmittedIsolatedB1Outcome) {
+  M1EnvelopeDenominatorOptions denominators;
+  denominators.b1_outcome_count = kB1MeasuredJobCount - 1U;
+  denominators.b1_claimed_successful_operations =
+      denominators.b1_outcome_count * kB1SiteOperationsPerJob;
+  const M1EnvelopeFixture fixture = make_m1_fixture(denominators);
+
+  const EvidenceCorpusValidation validation =
+      validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+  EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+  ASSERT_EQ(validation.reasons.size(), 1U);
+  EXPECT_EQ(validation.reasons.front(),
+            "Paired isolated-B1 requires exactly 30 raw job outcomes.");
+}
+
+/**
+ * @brief Proves omission of one M1 raw progress window fails even when the
+ * nested row and all enclosing content addresses are consistently rebuilt.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope, RejectsOmittedM1RawProgressWindow) {
+  M1EnvelopeDenominatorOptions denominators;
+  denominators.m1_progress_window_count = kM1MeasuredWindowCount - 1U;
+  const M1EnvelopeFixture fixture = make_m1_fixture(denominators);
+
+  const EvidenceCorpusValidation validation =
+      validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+  EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+  ASSERT_EQ(validation.reasons.size(), 1U);
+  EXPECT_EQ(validation.reasons.front(),
+            "M1 nested raw evidence cardinality drifted.");
+}
+
+/**
+ * @brief Proves M1 claim tampering and a self-consistent false B1 denominator
+ * both fail after all enclosing content addresses are rebuilt.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope, RejectsM1DenominatorClaimTamperingAndMismatch) {
+  M1EnvelopeDenominatorOptions denominators;
+  denominators.m1_outer_i1_p99_ns = 11U;
+  M1EnvelopeFixture fixture = make_m1_fixture(denominators);
+  EvidenceCorpusValidation validation =
+      validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+  EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+  ASSERT_EQ(validation.reasons.size(), 1U);
+  EXPECT_EQ(validation.reasons.front(),
+            "M1 inner and measurement denominator claims disagree.");
+
+  denominators = M1EnvelopeDenominatorOptions{};
+  denominators.m1_outer_b1_successful_operations -= kB1SiteOperationsPerJob;
+  denominators.m1_inner_b1_successful_operations =
+      denominators.m1_outer_b1_successful_operations;
+  fixture = make_m1_fixture(denominators);
+  validation = validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+  EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+  ASSERT_EQ(validation.reasons.size(), 1U);
+  EXPECT_EQ(validation.reasons.front(),
+            "M1 isolated-B1 denominator differs from resolved raw evidence.");
 }
 
 /**

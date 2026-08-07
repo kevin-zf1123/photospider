@@ -33,7 +33,8 @@
 #include <unistd.h>
 #endif
 
-#include "benchmark/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1_evidence.hpp"        // NOLINT(build/include_subdir)
+#include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 #include "verification/b1_evidence_json.hpp"
 
@@ -61,10 +62,14 @@ struct B1RunnerOptions final {
   std::filesystem::path environment_class_manifest_path;
   /** @brief Retained independent storage proof facts. */
   std::filesystem::path storage_proof_path;
+  /** @brief Candidate or reference identity of this isolated row. */
+  EvidenceSubjectRole subject_role = EvidenceSubjectRole::Reference;
   /** @brief Normative fresh-process replicate ordinal in `[1,3]`. */
   std::uint64_t replicate_ordinal = 1U;
   /** @brief Exact isolated Run cap, one or eight. */
   std::uint64_t run_cap = 1U;
+  /** @brief Candidate-only immutable comparison bundle address. */
+  std::optional<std::string> comparison_reference_bundle_digest;
   /** @brief Whether usage was requested without running product work. */
   bool help = false;
 };
@@ -99,14 +104,32 @@ void print_usage(std::ostream& output) {
   output << "Usage: b1_immutable_benchmark --output-dir ABSOLUTE_PATH "
             "--base-manifest FILE --storage-manifest FILE "
             "--environment-class-manifest FILE --storage-proof FILE "
-            "--run-cap 1|8 [--replicate-ordinal 1|2|3]\n"
+            "--run-cap 1|8 --subject-role candidate|reference "
+            "[--replicate-ordinal 1|2|3] "
+            "[--comparison-reference-bundle-digest SHA256]\n"
          << "Runs one exact 34-job B1-immutable-v1 isolated row. The selected "
             "output root must already exist, be empty, and be outside the "
             "Photospider checkout. Canonical environment/proof files are "
             "expected claims only; actual live root, receipt, and complete "
             "trusted probe authority is required independently, otherwise "
             "the row is Invalid. This manual target writes only below that "
-            "root and makes no canonical outer row or bundle claim.\n";
+            "root. A complete row writes one canonical pair-object pack; "
+            "portable live authority can still keep its machine verdict "
+            "Invalid.\n";
+}
+
+/**
+ * @brief Tests one exact lowercase SHA-256 spelling.
+ * @param value Candidate digest bytes.
+ * @return True only for 64 lowercase hexadecimal characters.
+ * @throws Nothing.
+ */
+bool valid_sha256(std::string_view value) noexcept {
+  return value.size() == 64U &&
+         std::all_of(value.begin(), value.end(), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
 }
 
 /**
@@ -164,8 +187,10 @@ B1RunnerOptions parse_options(int argc, char** argv) {
   bool saw_storage = false;
   bool saw_class = false;
   bool saw_proof = false;
+  bool saw_role = false;
   bool saw_cap = false;
   bool saw_replicate = false;
+  bool saw_comparison = false;
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
     if (argument == "--help" || argument == "-h") {
@@ -190,6 +215,21 @@ B1RunnerOptions parse_options(int argc, char** argv) {
       require_path(&saw_class, &options.environment_class_manifest_path);
     } else if (argument == "--storage-proof") {
       require_path(&saw_proof, &options.storage_proof_path);
+    } else if (argument == "--subject-role") {
+      if (saw_role || index + 1 >= argc) {
+        throw std::invalid_argument(
+            "--subject-role must appear exactly once with a value");
+      }
+      saw_role = true;
+      const std::string_view value(argv[++index]);
+      if (value == "candidate") {
+        options.subject_role = EvidenceSubjectRole::Candidate;
+      } else if (value == "reference") {
+        options.subject_role = EvidenceSubjectRole::Reference;
+      } else {
+        throw std::invalid_argument(
+            "--subject-role must be candidate or reference");
+      }
     } else if (argument == "--run-cap") {
       if (saw_cap || index + 1 >= argc) {
         throw std::invalid_argument(
@@ -205,14 +245,34 @@ B1RunnerOptions parse_options(int argc, char** argv) {
       }
       saw_replicate = true;
       options.replicate_ordinal = parse_replicate_ordinal(argv[++index]);
+    } else if (argument == "--comparison-reference-bundle-digest") {
+      if (saw_comparison || index + 1 >= argc) {
+        throw std::invalid_argument(
+            "--comparison-reference-bundle-digest must appear at most once "
+            "with a value");
+      }
+      saw_comparison = true;
+      options.comparison_reference_bundle_digest = argv[++index];
     } else {
       throw std::invalid_argument("unknown argument: " + std::string(argument));
     }
   }
   if (!options.help && !(saw_output && saw_base && saw_storage && saw_class &&
-                         saw_proof && saw_cap)) {
+                         saw_proof && saw_role && saw_cap)) {
     throw std::invalid_argument(
-        "output, three manifests, storage proof, and run cap are required");
+        "output, three manifests, storage proof, role, and run cap are "
+        "required");
+  }
+  if (options.comparison_reference_bundle_digest.has_value() &&
+      !valid_sha256(*options.comparison_reference_bundle_digest)) {
+    throw std::invalid_argument(
+        "--comparison-reference-bundle-digest is not lowercase SHA-256");
+  }
+  if (!options.help &&
+      ((options.subject_role == EvidenceSubjectRole::Candidate) !=
+       options.comparison_reference_bundle_digest.has_value())) {
+    throw std::invalid_argument(
+        "candidate requires, and reference forbids, a comparison digest");
   }
   return options;
 }
@@ -442,86 +502,6 @@ B1StorageRawProof read_storage_proof(const std::filesystem::path& path) {
 }
 
 /**
- * @brief Returns lowercase hexadecimal for one logical digest in fixture hash.
- * @param digest Exact typed logical digest.
- * @return Algorithm-number-prefixed lowercase bytes.
- * @throws std::bad_alloc when output ownership cannot allocate.
- */
-std::string logical_digest_identity(const ContentDigest& digest) {
-  constexpr char kHex[] = "0123456789abcdef";
-  std::string result =
-      std::to_string(static_cast<std::uint32_t>(digest.algorithm));
-  result.push_back(':');
-  result.reserve(result.size() + digest.bytes.size() * 2U);
-  for (const std::byte byte_value : digest.bytes) {
-    const auto value = std::to_integer<std::uint8_t>(byte_value);
-    result.push_back(kHex[value >> 4U]);
-    result.push_back(kHex[value & 0x0fU]);
-  }
-  return result;
-}
-
-/**
- * @brief Computes the exact immutable fixture content address.
- * @return SHA-256 over frozen graph/source/plan/golden identities.
- * @throws Profile validation or allocation failures unchanged.
- * @note Candidate output never contributes to this independently initialized
- * value.
- */
-B1Sha256Digest frozen_fixture_digest() {
-  B1Sha256 hash;
-  hash.update("execution-profile-b1-fixture-identity-v1\n");
-  const auto add_seed = [&](std::uint64_t seed) {
-    hash.update(std::to_string(seed));
-    hash.update("\n");
-    hash.update(b1_frozen_graph_yaml(seed));
-    hash.update(b1_source_node_yaml(seed));
-    hash.update(encode_b1_semantic_trace(
-        make_b1_success_semantic_records(b1_frozen_semantic_plan(seed))));
-    const B1JobGolden golden = b1_frozen_job_golden(seed);
-    hash.update(logical_digest_identity(golden.logical_digest));
-    hash.update("\n");
-    hash.update(b1_digest_hex(golden.raw_payload_digest));
-    hash.update("\n");
-  };
-  add_seed(kB1ColdJobIndex);
-  for (const std::uint64_t seed : kB1WarmupJobIndices) {
-    add_seed(seed);
-  }
-  for (std::uint64_t seed = 0U; seed < kB1MeasuredJobCount; ++seed) {
-    add_seed(seed);
-  }
-  return hash.finish();
-}
-
-/**
- * @brief Computes the actual fixed process resource-configuration identity.
- * @param snapshot Authoritative pre-cold Host/device/I/O state.
- * @return SHA-256 over exact immutable limits and configured worker count.
- * @throws Allocation failures from canonical string construction unchanged.
- */
-B1Sha256Digest resource_identity(const B1ExecutionSnapshot& snapshot) {
-  std::ostringstream canonical;
-  const ResourceVector& host = snapshot.host_resources.limits;
-  canonical << "execution-profile-b1-resource-identity-v1\n"
-            << "worker-count=8\n"
-            << "host=" << host.cpu_slots << ',' << host.retained_memory_bytes
-            << ',' << host.scratch_bytes << ',' << host.ready_entries << ','
-            << host.ready_bytes << '\n';
-  for (const ResourceLedger::DeviceSnapshot& device :
-       snapshot.device_resources) {
-    canonical << "device="
-              << static_cast<std::uint32_t>(device.device.backend()) << ','
-              << device.device.ordinal() << ','
-              << device.limits.device_memory_bytes << ','
-              << device.limits.device_scratch_bytes << '\n';
-  }
-  canonical << "compute-io=" << snapshot.compute_io.task_limit << ','
-            << snapshot.compute_io.planned_bytes_limit << '\n';
-  return b1_sha256(canonical.str());
-}
-
-/**
  * @brief Owns best-effort close for every successfully loaded B1 Graph.
  * @throws Nothing from destruction; explicit close exposes product failures.
  */
@@ -738,7 +718,7 @@ B1RunnerExpectedEnvironment load_runner_expected_environment(
     throw std::invalid_argument(
         "retained B1 raw proof is not bound to the selected output root");
   }
-  const std::array<std::filesystem::path, 10U> required_destinations{
+  const std::array<std::filesystem::path, 11U> required_destinations{
       output_directory,
       output_directory / "graph-A.yaml",
       output_directory / "graph-B.yaml",
@@ -748,6 +728,7 @@ B1RunnerExpectedEnvironment load_runner_expected_environment(
       output_directory / "cache-B",
       output_directory / "invocation.json",
       output_directory / "row.json",
+      output_directory / "pair-object.canonical",
       output_directory / "failure.json"};
   for (const std::filesystem::path& required : required_destinations) {
     const std::filesystem::path resolved =
@@ -821,8 +802,8 @@ B1EnvironmentEvidence make_runner_environment(
       expected.storage_raw_proof,
       expected.storage_eligibility,
       kB1WorkloadId,
-      frozen_fixture_digest(),
-      resource_identity(initial_snapshot),
+      evidence_b1_component_digests().fixture,
+      evidence_resource_identity(initial_snapshot),
       options.run_cap,
       options.replicate_ordinal,
       std::move(actual)};
@@ -880,6 +861,7 @@ B1InnerRow run_exact_row(const B1RunnerOptions& options,
       {"workload_id", kB1WorkloadId},
       {"replicate_ordinal", options.replicate_ordinal},
       {"run_cap", options.run_cap},
+      {"subject_role", evidence_subject_role_name(options.subject_role)},
       {"output_directory", output_directory.string()},
       {"worker_count", 8U},
       {"base_manifest_source", options.base_manifest_path.string()},
@@ -890,7 +872,7 @@ B1InnerRow run_exact_row(const B1RunnerOptions& options,
       {"environment_input_role", "expected-only"},
       {"actual_authority_policy", "live-root-and-receipts-required"},
       {"workload_contract", b1_workload_contract_json()},
-      {"outer_canonical_envelope_claim", false},
+      {"outer_canonical_envelope_claim", true},
   };
   write_fresh_text_file(output_directory / "invocation.json",
                         invocation.dump(2) + "\n");
@@ -987,6 +969,13 @@ B1InnerRow run_exact_row(const B1RunnerOptions& options,
   B1InnerRow row = evaluate_b1_inner_row(std::move(input));
   write_fresh_text_file(output_directory / "row.json",
                         b1_inner_row_json(row).dump(2) + "\n");
+  const EvidencePairObject pair_object = make_b1_evidence_pair_object(
+      row, EvidencePairProducerOptions{
+               options.subject_role,
+               options.comparison_reference_bundle_digest,
+           });
+  write_fresh_text_file(output_directory / "pair-object.canonical",
+                        materialize_evidence_pair_object(pair_object));
   graph_set.close_all();
   return row;
 }

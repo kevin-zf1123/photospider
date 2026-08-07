@@ -11,8 +11,9 @@
 #include <string>
 #include <vector>
 
-#include "benchmark/m1_host.hpp"     // NOLINT(build/include_subdir)
-#include "benchmark/m1_profile.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1_host.hpp"      // NOLINT(build/include_subdir)
+#include "benchmark/m1_profile.hpp"   // NOLINT(build/include_subdir)
 
 namespace ps::benchmark {
 
@@ -57,6 +58,8 @@ struct M1InnerRowInput final {
   std::optional<std::chrono::nanoseconds> paired_isolated_i1_p99;
   /** @brief Complete fault-free measured B1 service/waste aggregate. */
   M1BatchWasteEvidence batch_waste;
+  /** @brief Exact-one complete B1 job records for every protocol offer. */
+  std::vector<B1JobEvidence> batch_jobs;
   /** @brief Chronological same-domain resource/lifecycle/ready/I/O samples. */
   std::vector<M1ExecutionSnapshot> temporal_snapshots;
   /** @brief True when occurrence-owned aggregates exclude cold/warmup work. */

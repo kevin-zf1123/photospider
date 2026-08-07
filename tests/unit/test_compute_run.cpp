@@ -107,10 +107,12 @@ class VisibleCommitObservationSink final : public ComputeRunObservationSink {
   void on_service_start(
       const ComputeRunDescriptor& descriptor,
       ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
+      const ComputeRunServiceStartObservation& observation,
       ComputeRunObservationCoordinate coordinate) noexcept override {
     (void)descriptor;
     (void)task_identity;
     (void)service_charge;
+    (void)observation;
     (void)coordinate;
   }
 
@@ -269,10 +271,12 @@ class StartCancellationOrderObservationSink final
   void on_service_start(
       const ComputeRunDescriptor& descriptor,
       ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
+      const ComputeRunServiceStartObservation& observation,
       ComputeRunObservationCoordinate coordinate) noexcept override {
     (void)descriptor;
     (void)task_identity;
     (void)service_charge;
+    (void)observation;
     start_sequence_.store(coordinate.causal_sequence,
                           std::memory_order_relaxed);
     start_callback_entered_.store(1, std::memory_order_release);

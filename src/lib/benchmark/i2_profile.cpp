@@ -192,7 +192,9 @@ class I2EpisodeObservationCollector::Impl final {
         const compute::ComputeRunDescriptor& descriptor,
         compute::ComputeRunTaskIdentity task_identity,
         std::uint64_t service_charge,
+        const compute::ComputeRunServiceStartObservation& observation,
         compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+      (void)observation;
       impl_->publish(impl_->service_starts_, impl_->next_service_start_,
                      I2ObservedServiceStart{
                          observe_i2_child(edit_index_, descriptor),

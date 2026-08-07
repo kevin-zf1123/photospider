@@ -726,8 +726,10 @@ TEST(I1EpisodeObservationCollector,
        ++index) {
     const compute::ComputeRunObservationCoordinate coordinate =
         sink->reserve_causal_coordinate();
-    sink->on_service_start(lease.descriptor(), lease.task_identity(index), 1U,
-                           coordinate);
+    sink->on_service_start(
+        lease.descriptor(), lease.task_identity(index), 1U,
+        compute::ComputeRunServiceStartObservation{true, true, true},
+        coordinate);
   }
   const I1EpisodeObservationSnapshot at_capacity = collector.snapshot();
   EXPECT_FALSE(at_capacity.overflowed);
@@ -735,9 +737,10 @@ TEST(I1EpisodeObservationCollector,
 
   const compute::ComputeRunObservationCoordinate overflow_coordinate =
       sink->reserve_causal_coordinate();
-  sink->on_service_start(lease.descriptor(),
-                         lease.task_identity(kI1EpisodeServiceStartCapacity),
-                         1U, overflow_coordinate);
+  sink->on_service_start(
+      lease.descriptor(), lease.task_identity(kI1EpisodeServiceStartCapacity),
+      1U, compute::ComputeRunServiceStartObservation{true, true, true},
+      overflow_coordinate);
   const I1EpisodeObservationSnapshot overflowed = collector.snapshot();
   EXPECT_TRUE(overflowed.overflowed);
   EXPECT_EQ(overflowed.service_starts.size(), kI1EpisodeServiceStartCapacity);

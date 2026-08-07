@@ -80,10 +80,12 @@ class ProgressiveTriggerOrderObservationSink final
       const compute::ComputeRunDescriptor& descriptor,
       compute::ComputeRunTaskIdentity task_identity,
       std::uint64_t service_charge,
+      const compute::ComputeRunServiceStartObservation& observation,
       compute::ComputeRunObservationCoordinate coordinate) noexcept override {
     (void)descriptor;
     (void)task_identity;
     (void)service_charge;
+    (void)observation;
     (void)coordinate;
     service_count_.fetch_add(1U, std::memory_order_release);
   }

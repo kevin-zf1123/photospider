@@ -18,6 +18,17 @@ namespace ps::benchmark {
 nlohmann::json b1_workload_contract_json();
 
 /**
+ * @brief Encodes one complete raw cold/warmup/measured B1 occurrence.
+ * @param evidence Exact job, physical, execution, output, golden, and semantic
+ * evidence.
+ * @return Closed source-faithful job object without derived row aggregates.
+ * @throws nlohmann/std allocation failures unchanged.
+ * @note This helper lets a composing verification profile retain the Issue
+ * #95 source record without defining a second B1 evidence grammar.
+ */
+nlohmann::json b1_job_evidence_json(const B1JobEvidence& evidence);
+
+/**
  * @brief Encodes one fully evaluated closed Issue #95 inner row.
  * @param row Raw and derived B1 evidence.
  * @return Closed version-one JSON object; never an outer canonical row.

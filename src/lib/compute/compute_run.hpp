@@ -405,6 +405,33 @@ enum class ComputeRunTaskTerminalKind : std::uint8_t {
 using ComputeRunServiceStartCommitCallback = bool (*)(void* context) noexcept;
 
 /**
+ * @brief Immutable scheduler facts bound to one committed service start.
+ *
+ * The two class facts are sampled by `ExecutionService` from its real
+ * ready-store candidate, Run lifecycle, operation-gate, and physical-route
+ * predicates immediately before the selected start stages its execution grant
+ * and enters irreversible Run arbitration. They therefore describe the exact
+ * scheduler applicability cut that owns the three-to-one class rule; nominal
+ * request or offer intervals cannot mint either value.
+ *
+ * @throws Nothing for value construction and comparison.
+ * @note `execution_grant_committed` is true only after the selected child
+ * grant, operation gate, physical route, ready removal, and start counters
+ * commit. The value is observation-only and grants no queue, route, resource,
+ * Run, or cancellation authority.
+ */
+struct ComputeRunServiceStartObservation final {
+  /** @brief Whether a real Interactive candidate was startable at the cut. */
+  bool interactive_candidate_startable = false;
+
+  /** @brief Whether a real Throughput candidate was startable at the cut. */
+  bool throughput_candidate_startable = false;
+
+  /** @brief Whether the selected start committed its execution child grant. */
+  bool execution_grant_committed = false;
+};
+
+/**
  * @brief Source-private, observation-only sink for one product compute request.
  *
  * The sink receives immutable identities, scalar service facts, terminal
@@ -498,6 +525,7 @@ class ComputeRunObservationSink {
    * @param descriptor Immutable identity and policy inputs of the owning Run.
    * @param task_identity Exact Run-local callback identity.
    * @param service_charge Exact `work_units + ceil(ready_bytes/4096)` charge.
+   * @param observation Real scheduler applicability and committed-grant facts.
    * @param coordinate Coordinate reserved at reserved-start commitment.
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.
@@ -511,6 +539,7 @@ class ComputeRunObservationSink {
   virtual void on_service_start(
       const ComputeRunDescriptor& descriptor,
       ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
+      const ComputeRunServiceStartObservation& observation,
       ComputeRunObservationCoordinate coordinate) noexcept = 0;
 
   /**

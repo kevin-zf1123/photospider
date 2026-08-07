@@ -6,16 +6,32 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-#include "benchmark/m1_profile.hpp"  // NOLINT(build/include_subdir)
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
+#include "benchmark/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1_profile.hpp"   // NOLINT(build/include_subdir)
 
 namespace ps::benchmark {
 namespace {
@@ -80,6 +96,55 @@ constexpr std::array<std::string_view, 5U> kBundleFieldNames{
 /** @brief Exact ordered types of the canonical five bundle fields. */
 constexpr std::array<std::string_view, 5U> kBundleFieldTypes{
     "workload-id-v1", "enum", "sha256", "sha256", "row-reference-list-v1"};
+
+/** @brief Exact ordered fields of the reusable pair-object pack. */
+constexpr std::array<std::string_view, 15U> kPairObjectFieldNames{
+    "row_manifest",
+    "bundle_manifest",
+    "base_manifest",
+    "claimed_base_digest",
+    "storage_manifest",
+    "claimed_storage_digest",
+    "environment_class_manifest",
+    "claimed_environment_class_digest",
+    "storage_raw_proof",
+    "storage_eligibility",
+    "fixture_digest",
+    "resource_identity",
+    "retained_sections",
+    "row_seal_ordinal",
+    "bundle_seal_ordinal",
+};
+
+/** @brief Exact ordered types of the reusable pair-object pack. */
+constexpr std::array<std::string_view, 15U> kPairObjectFieldTypes{
+    "canonical-text-hex-v1",
+    "canonical-text-hex-v1",
+    "canonical-text-hex-v1",
+    "sha256",
+    "canonical-text-hex-v1",
+    "sha256",
+    "canonical-text-hex-v1",
+    "sha256",
+    "canonical-text-hex-v1",
+    "b1-storage-eligibility-v1",
+    "sha256",
+    "sha256",
+    "evidence-retained-section-list-v1",
+    "uint64",
+    "uint64",
+};
+
+/** @brief Exact retained sections embedded by every one-row pair pack. */
+constexpr std::array<std::pair<std::string_view, std::string_view>, 6U>
+    kPairSectionContracts{{
+        {"workload-manifest", "execution-profile-workload-manifest-v1"},
+        {"job-instance-index", kEvidenceJobIndexSchema},
+        {"measurement-evidence", "execution-profile-measurement-evidence-v1"},
+        {"output-evidence", "execution-profile-output-evidence-v1"},
+        {"verdict-evidence", "execution-profile-verdict-evidence-v1"},
+        {"bundle-provenance", kEvidenceBundleProvenanceSchema},
+    }};
 
 // NOLINTEND
 
@@ -762,6 +827,658 @@ bool bundle_names_row(const EvidenceCanonicalBundle& bundle,
 }
 
 /**
+ * @brief Exact recomputed isolated-B1 denominator source.
+ * @throws Nothing for value construction and copying.
+ */
+struct B1RateSource final {
+  /** @brief Successful pixel-site operations across thirty raw outcomes. */
+  std::uint64_t successful_site_operations = 0U;
+  /** @brief Exact positive end-minus-start interval in nanoseconds. */
+  std::uint64_t duration_ns = 0U;
+};
+
+/**
+ * @brief Exact M1 claims that must equal resolved isolated raw sources.
+ * @throws Nothing for value construction and copying.
+ */
+struct M1DenominatorClaims final {
+  /** @brief Claimed same-ordinal isolated-I1 nearest-rank p99. */
+  std::uint64_t isolated_i1_p99_ns = 0U;
+  /** @brief Claimed isolated-B1 numerator and interval. */
+  B1RateSource isolated_b1;
+};
+
+/**
+ * @brief Requires one exact ordered all-known field contract.
+ * @param manifest Parsed candidate manifest.
+ * @param names Exact ordered field names.
+ * @param types Exact ordered field types.
+ * @return Nothing when the complete contract matches.
+ * @throws std::invalid_argument for cardinality/name/type/state drift.
+ */
+void require_exact_known_fields(const B1CanonicalManifest& manifest,
+                                const std::vector<std::string_view>& names,
+                                const std::vector<std::string_view>& types) {
+  if (names.size() != types.size() || manifest.fields.size() != names.size()) {
+    throw std::invalid_argument(
+        "Evidence measurement field cardinality is invalid.");
+  }
+  for (std::size_t index = 0U; index < names.size(); ++index) {
+    require_known_field(manifest.fields[index], names[index], types[index]);
+  }
+}
+
+/**
+ * @brief Parses one exact lowercase canonical Boolean token.
+ * @param payload Candidate scalar bytes.
+ * @return True for `true` and false for `false`.
+ * @throws std::invalid_argument for every other spelling.
+ */
+bool parse_canonical_boolean(std::string_view payload) {
+  if (payload == "true") {
+    return true;
+  }
+  if (payload == "false") {
+    return false;
+  }
+  throw std::invalid_argument("Canonical Boolean token is invalid.");
+}
+
+/**
+ * @brief Decodes canonical lowercase hexadecimal text without normalization.
+ * @param payload Even-length lowercase hexadecimal bytes.
+ * @return Exact original byte string.
+ * @throws std::invalid_argument for empty, odd, or noncanonical input.
+ * @throws std::bad_alloc when decoded ownership allocates.
+ */
+std::string decode_canonical_text_hex(std::string_view payload) {
+  if (payload.empty() || payload.size() % 2U != 0U) {
+    throw std::invalid_argument("Canonical text-hex payload is invalid.");
+  }
+  const auto nibble = [](char value) -> std::uint8_t {
+    if (value >= '0' && value <= '9') {
+      return static_cast<std::uint8_t>(value - '0');
+    }
+    if (value >= 'a' && value <= 'f') {
+      return static_cast<std::uint8_t>(value - 'a' + 10);
+    }
+    throw std::invalid_argument("Canonical text-hex digit is invalid.");
+  };
+  std::string decoded(payload.size() / 2U, '\0');
+  for (std::size_t index = 0U; index < decoded.size(); ++index) {
+    decoded[index] = static_cast<char>((nibble(payload[index * 2U]) << 4U) |
+                                       nibble(payload[index * 2U + 1U]));
+  }
+  return decoded;
+}
+
+/**
+ * @brief Encodes one generic list from already canonical record payloads.
+ * @param records Complete records in authoritative order.
+ * @return Count prefix followed by one frame per record.
+ * @throws std::bad_alloc when result ownership allocates.
+ */
+std::string encode_record_list(const std::vector<std::string>& records) {
+  std::string result = std::to_string(records.size()) + ":";
+  for (const std::string& record : records) {
+    result.append(b1_environment_frame(record));
+  }
+  return result;
+}
+
+/**
+ * @brief Encodes one retained section as an exact source record.
+ * @param section Complete retained bytes, dependencies, and seal ordinal.
+ * @return Five-component fixed record.
+ * @throws Section validation and allocation failures unchanged.
+ */
+std::string encode_pair_section_record(const EvidenceRetainedSection& section) {
+  static_cast<void>(
+      validate_section(section, section.section_name, section.schema_id));
+  return encode_b1_fixed_record(
+      {section.section_name, section.schema_id,
+       encode_b1_normalized_text(section.bytes),
+       encode_address_dependencies(section.address_dependencies),
+       std::to_string(section.seal_ordinal)});
+}
+
+/**
+ * @brief Parses one exact retained-section source record.
+ * @param record Complete five-component fixed record.
+ * @return Reconstructed retained section.
+ * @throws std::invalid_argument for framing, bytes, dependency, or seal drift.
+ * @throws std::bad_alloc when source ownership allocates.
+ */
+EvidenceRetainedSection parse_pair_section_record(std::string_view record) {
+  const std::vector<std::string> components = parse_b1_fixed_record(record, 5U);
+  EvidenceRetainedSection section{
+      components[0U],
+      components[1U],
+      decode_canonical_text_hex(components[2U]),
+      parse_address_dependencies(components[3U]),
+      parse_b1_canonical_uint64(components[4U]),
+  };
+  static_cast<void>(
+      validate_section(section, section.section_name, section.schema_id));
+  if (encode_pair_section_record(section) != record) {
+    throw std::invalid_argument(
+        "Evidence pair retained-section record is not canonical.");
+  }
+  return section;
+}
+
+/**
+ * @brief Encodes retained storage eligibility without changing its truth set.
+ * @param eligibility Complete derived verdict and ordered reasons.
+ * @return Two-component fixed record containing a framed reason list.
+ * @throws std::bad_alloc when record ownership allocates.
+ */
+std::string encode_storage_eligibility(
+    const B1StorageEligibility& eligibility) {
+  std::vector<std::string> reasons;
+  reasons.reserve(eligibility.reasons.size());
+  for (const std::string& reason : eligibility.reasons) {
+    reasons.push_back(encode_b1_fixed_record({reason}));
+  }
+  return encode_b1_fixed_record(
+      {eligibility.eligible ? "true" : "false", encode_record_list(reasons)});
+}
+
+/**
+ * @brief Parses one retained storage-eligibility fixed record.
+ * @param payload Exact Boolean and framed-reason components.
+ * @return Reconstructed eligibility truth set.
+ * @throws std::invalid_argument for Boolean/list/record drift.
+ * @throws std::bad_alloc when reasons allocate.
+ */
+B1StorageEligibility parse_storage_eligibility(std::string_view payload) {
+  const std::vector<std::string> components =
+      parse_b1_fixed_record(payload, 2U);
+  B1StorageEligibility result;
+  result.eligible = parse_canonical_boolean(components[0U]);
+  for (const std::string& record : parse_b1_framed_list(components[1U])) {
+    result.reasons.push_back(parse_b1_fixed_record(record, 1U)[0U]);
+  }
+  if (encode_storage_eligibility(result) != payload) {
+    throw std::invalid_argument(
+        "Evidence pair storage eligibility is not canonical.");
+  }
+  return result;
+}
+
+/**
+ * @brief Parses one closed B1 phase token from a job-instance record.
+ * @param token Candidate lowercase phase token.
+ * @return Cold, warmup, or measured.
+ * @throws std::invalid_argument for an unknown token.
+ */
+B1JobPhase parse_job_phase(std::string_view token) {
+  if (token == "cold") {
+    return B1JobPhase::Cold;
+  }
+  if (token == "warmup") {
+    return B1JobPhase::Warmup;
+  }
+  if (token == "measured") {
+    return B1JobPhase::Measured;
+  }
+  throw std::invalid_argument("Evidence pair job phase is invalid.");
+}
+
+/**
+ * @brief Parses one exact Issue #95 job-instance fixed record.
+ * @param record Six-component canonical occurrence identity.
+ * @return Validated job occurrence.
+ * @throws std::invalid_argument for framing or identity drift.
+ */
+B1JobInstance parse_job_instance(std::string_view record) {
+  const std::vector<std::string> components = parse_b1_fixed_record(record, 6U);
+  B1JobInstance job{components[0U],
+                    parse_b1_canonical_uint64(components[1U]),
+                    parse_job_phase(components[2U]),
+                    parse_b1_canonical_uint64(components[3U]),
+                    parse_b1_canonical_uint64(components[4U]),
+                    parse_b1_canonical_uint64(components[5U])};
+  validate_b1_job_instance(job);
+  if (encode_b1_job_instance(job) != record) {
+    throw std::invalid_argument(
+        "Evidence pair job-instance record is not canonical.");
+  }
+  return job;
+}
+
+/**
+ * @brief Recovers every job source from an exact job-index section.
+ * @param section Validated job-instance-index retained section.
+ * @return Canonically ordered occurrence list, possibly empty for I1.
+ * @throws std::invalid_argument for schema/field/list/job drift.
+ * @throws std::bad_alloc when jobs allocate.
+ */
+std::vector<B1JobInstance> parse_job_index(
+    const EvidenceRetainedSection& section) {
+  const B1CanonicalManifest manifest =
+      validate_section(section, "job-instance-index", kEvidenceJobIndexSchema);
+  if (manifest.fields.size() != 1U) {
+    throw std::invalid_argument(
+        "Evidence pair job index field cardinality is invalid.");
+  }
+  require_known_field(manifest.fields[0U], "job_instances",
+                      "job-instance-list-v1");
+  std::vector<B1JobInstance> result;
+  for (const std::string& record :
+       parse_b1_framed_list(manifest.fields[0U].payload)) {
+    result.push_back(parse_job_instance(record));
+  }
+  return result;
+}
+
+/**
+ * @brief Returns the canonical lowercase verdict token.
+ * @param verdict Pass, Fail, or Invalid.
+ * @return Process-lifetime stable token.
+ * @throws std::invalid_argument for an unknown representation.
+ */
+const char* verdict_name(I1Verdict verdict) {
+  switch (verdict) {
+    case I1Verdict::Pass:
+      return "pass";
+    case I1Verdict::Fail:
+      return "fail";
+    case I1Verdict::Invalid:
+      return "invalid";
+  }
+  throw std::invalid_argument("Evidence verdict is invalid.");
+}
+
+/**
+ * @brief Builds one producer-owned retained section without dependencies.
+ * @param name Exact row/provenance binding.
+ * @param schema Exact retained-section schema.
+ * @param fields Complete canonical fields.
+ * @param seal_ordinal Nonzero topological seal ordinal.
+ * @return Complete retained section.
+ * @throws Canonical encoding and allocation failures unchanged.
+ */
+EvidenceRetainedSection make_producer_section(
+    std::string name, std::string schema, std::vector<B1CanonicalField> fields,
+    std::uint64_t seal_ordinal) {
+  const std::string bytes = encode_b1_canonical_manifest(schema, fields);
+  return EvidenceRetainedSection{std::move(name),
+                                 std::move(schema),
+                                 bytes,
+                                 {},
+                                 seal_ordinal};
+}
+
+/**
+ * @brief Encodes ordered diagnostics as one canonical fixed-record list.
+ * @param reasons Complete source diagnostics in evaluator order.
+ * @return Framed one-component record list.
+ * @throws std::bad_alloc when records allocate.
+ */
+std::string encode_diagnostics(const std::vector<std::string>& reasons) {
+  std::vector<std::string> records;
+  records.reserve(reasons.size());
+  for (const std::string& reason : reasons) {
+    records.push_back(encode_b1_fixed_record({reason}));
+  }
+  return encode_record_list(records);
+}
+
+/**
+ * @brief Computes the shared resource identity from a compatible snapshot.
+ * @tparam Snapshot B1ExecutionSnapshot or M1ExecutionSnapshot.
+ * @param snapshot Settled Host/device/Compute-I/O state.
+ * @return Domain-separated immutable-limit digest.
+ * @throws std::bad_alloc when canonical bytes allocate.
+ */
+template <typename Snapshot>
+B1Sha256Digest compute_resource_identity(const Snapshot& snapshot) {
+  std::ostringstream canonical;
+  const ResourceVector& host = snapshot.host_resources.limits;
+  canonical << "execution-profile-b1-resource-identity-v1\n"
+            << "worker-count=8\n"
+            << "host=" << host.cpu_slots << ',' << host.retained_memory_bytes
+            << ',' << host.scratch_bytes << ',' << host.ready_entries << ','
+            << host.ready_bytes << '\n';
+  for (const ResourceLedger::DeviceSnapshot& device :
+       snapshot.device_resources) {
+    canonical << "device="
+              << static_cast<std::uint32_t>(device.device.backend()) << ','
+              << device.device.ordinal() << ','
+              << device.limits.device_memory_bytes << ','
+              << device.limits.device_scratch_bytes << '\n';
+  }
+  canonical << "compute-io=" << snapshot.compute_io.task_limit << ','
+            << snapshot.compute_io.planned_bytes_limit << '\n';
+  return b1_sha256(canonical.str());
+}
+
+/**
+ * @brief Encodes one typed logical digest for the frozen B1 fixture identity.
+ * @param digest Exact independently initialized logical golden digest.
+ * @return Algorithm-number-prefixed lowercase hexadecimal bytes.
+ * @throws std::bad_alloc when the canonical identity cannot allocate.
+ * @note This preserves the Issue #95 fixture identity byte-for-byte; pair-pack
+ * production must not silently rename an already frozen B1 fixture.
+ */
+std::string encode_logical_digest_identity(const ContentDigest& digest) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string result =
+      std::to_string(static_cast<std::uint32_t>(digest.algorithm));
+  result.push_back(':');
+  result.reserve(result.size() + digest.bytes.size() * 2U);
+  for (const std::byte byte_value : digest.bytes) {
+    const auto value = std::to_integer<std::uint8_t>(byte_value);
+    result.push_back(kHex[value >> 4U]);
+    result.push_back(kHex[value & 0x0fU]);
+  }
+  return result;
+}
+
+/**
+ * @brief Recomputes isolated-I1 p99 from exactly 200 canonical raw samples.
+ * @param row Exact resolved isolated-I1 row.
+ * @return Positive nearest-rank p99 in nanoseconds.
+ * @throws std::invalid_argument for schema/cardinality/scalar/claim drift.
+ * @throws std::bad_alloc when samples allocate or sort.
+ */
+std::uint64_t recompute_isolated_i1_p99(const EvidenceCanonicalRow& row) {
+  const B1CanonicalManifest manifest =
+      parse_b1_canonical_manifest(row.source.measurement_evidence.bytes);
+  if (manifest.schema != "execution-profile-measurement-evidence-v1") {
+    throw std::invalid_argument(
+        "Paired isolated-I1 measurement schema is invalid.");
+  }
+  require_exact_known_fields(manifest,
+                             {"subject_role", "replicate_ordinal",
+                              "measured_final_latencies_ns", "claimed_p99_ns"},
+                             {"enum", "uint64", "uint64-list-v1", "uint64"});
+  if (manifest.fields[0U].payload !=
+          evidence_subject_role_name(row.source.subject_role) ||
+      parse_b1_canonical_uint64(manifest.fields[1U].payload) !=
+          row.source.replicate_ordinal) {
+    throw std::invalid_argument(
+        "Paired isolated-I1 measurement identity is invalid.");
+  }
+  const std::vector<std::string> records =
+      parse_b1_framed_list(manifest.fields[2U].payload);
+  if (records.size() != 200U) {
+    throw std::invalid_argument(
+        "Paired isolated-I1 requires exactly 200 latency samples.");
+  }
+  std::vector<std::uint64_t> samples;
+  samples.reserve(records.size());
+  for (const std::string& record : records) {
+    const std::vector<std::string> fields = parse_b1_fixed_record(record, 1U);
+    const std::uint64_t sample = parse_b1_canonical_uint64(fields[0U]);
+    if (sample == 0U) {
+      throw std::invalid_argument(
+          "Paired isolated-I1 contains a zero latency sample.");
+    }
+    samples.push_back(sample);
+  }
+  std::sort(samples.begin(), samples.end());
+  const std::uint64_t recomputed = samples[197U];
+  const std::uint64_t claimed =
+      parse_b1_canonical_uint64(manifest.fields[3U].payload);
+  if (claimed == 0U || claimed != recomputed) {
+    throw std::invalid_argument(
+        "Paired isolated-I1 p99 claim does not recompute.");
+  }
+  return recomputed;
+}
+
+/**
+ * @brief Recomputes isolated-B1 numerator and interval from thirty outcomes.
+ * @param row Exact resolved isolated-B1 cap-eight row.
+ * @return Positive exact throughput source tuple.
+ * @throws std::invalid_argument for schema/cardinality/outcome/claim drift.
+ * @throws std::bad_alloc when framed records allocate.
+ */
+B1RateSource recompute_isolated_b1_rate_source(
+    const EvidenceCanonicalRow& row) {
+  const B1CanonicalManifest manifest =
+      parse_b1_canonical_manifest(row.source.measurement_evidence.bytes);
+  if (manifest.schema != "execution-profile-measurement-evidence-v1") {
+    throw std::invalid_argument(
+        "Paired isolated-B1 measurement schema is invalid.");
+  }
+  require_exact_known_fields(
+      manifest,
+      {"subject_role", "replicate_ordinal", "measurement_start_ns",
+       "measurement_end_ns", "measured_job_outcomes",
+       "successful_site_operations"},
+      {"enum", "uint64", "uint64", "uint64", "b1-measured-job-outcome-list-v1",
+       "uint64"});
+  if (manifest.fields[0U].payload !=
+          evidence_subject_role_name(row.source.subject_role) ||
+      parse_b1_canonical_uint64(manifest.fields[1U].payload) !=
+          row.source.replicate_ordinal) {
+    throw std::invalid_argument(
+        "Paired isolated-B1 measurement identity is invalid.");
+  }
+  const std::uint64_t start =
+      parse_b1_canonical_uint64(manifest.fields[2U].payload);
+  const std::uint64_t end =
+      parse_b1_canonical_uint64(manifest.fields[3U].payload);
+  if (end <= start) {
+    throw std::invalid_argument(
+        "Paired isolated-B1 measurement interval is not positive.");
+  }
+  const std::vector<std::string> records =
+      parse_b1_framed_list(manifest.fields[4U].payload);
+  if (records.size() != kB1MeasuredJobCount) {
+    throw std::invalid_argument(
+        "Paired isolated-B1 requires exactly 30 raw job outcomes.");
+  }
+  std::uint64_t successful = 0U;
+  for (std::size_t index = 0U; index < records.size(); ++index) {
+    const std::vector<std::string> fields =
+        parse_b1_fixed_record(records[index], 3U);
+    if (parse_b1_canonical_uint64(fields[0U]) != index ||
+        (fields[1U] != "true" && fields[1U] != "false")) {
+      throw std::invalid_argument(
+          "Paired isolated-B1 job outcome identity is invalid.");
+    }
+    const bool verified = fields[1U] == "true";
+    const std::uint64_t site_operations = parse_b1_canonical_uint64(fields[2U]);
+    const std::uint64_t expected = verified ? kB1SiteOperationsPerJob : 0U;
+    if (site_operations != expected) {
+      throw std::invalid_argument(
+          "Paired isolated-B1 job outcome charge is invalid.");
+    }
+    if (successful >
+        std::numeric_limits<std::uint64_t>::max() - site_operations) {
+      throw std::invalid_argument(
+          "Paired isolated-B1 successful operations overflow.");
+    }
+    successful += site_operations;
+  }
+  const std::uint64_t claimed =
+      parse_b1_canonical_uint64(manifest.fields[5U].payload);
+  if (successful == 0U || claimed != successful) {
+    throw std::invalid_argument(
+        "Paired isolated-B1 numerator claim does not recompute.");
+  }
+  return B1RateSource{successful, end - start};
+}
+
+/**
+ * @brief Parses exact M1 denominator claims and checks retained raw shape.
+ * @param row Exact resolved M1 row.
+ * @return Positive claims duplicated exactly by its nested inner row.
+ * @throws std::invalid_argument for section/inner/cardinality/claim drift.
+ * @throws std::bad_alloc when canonical lists allocate.
+ */
+M1DenominatorClaims parse_m1_denominator_claims(
+    const EvidenceCanonicalRow& row) {
+  const B1CanonicalManifest measurement =
+      parse_b1_canonical_manifest(row.source.measurement_evidence.bytes);
+  if (measurement.schema != "execution-profile-measurement-evidence-v1") {
+    throw std::invalid_argument("M1 measurement schema is invalid.");
+  }
+  require_exact_known_fields(
+      measurement,
+      {"m1_inner_row", "paired_isolated_i1_p99_ns",
+       "paired_isolated_b1_successful_site_operations",
+       "paired_isolated_b1_duration_ns"},
+      {"canonical-text-hex-v1", "uint64", "uint64", "uint64"});
+  M1DenominatorClaims claims{
+      parse_b1_canonical_uint64(measurement.fields[1U].payload),
+      B1RateSource{parse_b1_canonical_uint64(measurement.fields[2U].payload),
+                   parse_b1_canonical_uint64(measurement.fields[3U].payload)}};
+  if (claims.isolated_i1_p99_ns == 0U ||
+      claims.isolated_b1.successful_site_operations == 0U ||
+      claims.isolated_b1.duration_ns == 0U) {
+    throw std::invalid_argument("M1 denominator claim is zero.");
+  }
+
+  const B1CanonicalManifest inner = parse_b1_canonical_manifest(
+      decode_canonical_text_hex(measurement.fields[0U].payload));
+  const std::vector<std::string_view> names{"schema_version",
+                                            "replicate_ordinal",
+                                            "boundaries",
+                                            "protocol_flags",
+                                            "interactive_occurrences",
+                                            "batch_offers",
+                                            "carryover",
+                                            "first_measured_admission",
+                                            "progress_windows",
+                                            "graph_service_windows",
+                                            "class_starts",
+                                            "headroom_outcomes",
+                                            "batch_io_streams",
+                                            "temporal_snapshots",
+                                            "mixed_observations",
+                                            "paired_isolated_i1_p99_ns",
+                                            "paired_isolated_b1_source",
+                                            "batch_waste",
+                                            "verdicts"};
+  const std::vector<std::string_view> types{"uint64",
+                                            "uint64",
+                                            "m1-boundary-record-v1",
+                                            "m1-protocol-flags-v1",
+                                            "m1-i1-occurrence-list-v1",
+                                            "m1-b1-offer-list-v1",
+                                            "m1-carryover-list-v1",
+                                            "m1-first-admission-record-v1",
+                                            "m1-progress-window-list-v1",
+                                            "m1-graph-service-window-list-v1",
+                                            "m1-class-start-list-v1",
+                                            "m1-headroom-outcome-list-v1",
+                                            "m1-b1-io-stream-list-v1",
+                                            "m1-execution-snapshot-list-v1",
+                                            "m1-observation-list-v1",
+                                            "uint64",
+                                            "m1-b1-rate-source-v1",
+                                            "m1-batch-waste-record-v1",
+                                            "m1-five-axis-verdict-record-v1"};
+  if (inner.schema != kM1InnerRowSchema) {
+    throw std::invalid_argument("M1 nested inner schema is invalid.");
+  }
+  require_exact_known_fields(inner, names, types);
+  if (parse_b1_canonical_uint64(inner.fields[0U].payload) !=
+          kM1InnerRowSchemaVersion ||
+      parse_b1_canonical_uint64(inner.fields[1U].payload) !=
+          row.source.replicate_ordinal) {
+    throw std::invalid_argument("M1 nested schema version or ordinal drifted.");
+  }
+  const std::vector<std::string> protocol_flags =
+      parse_b1_fixed_record(inner.fields[3U].payload, 11U);
+  for (const std::string& flag : protocol_flags) {
+    static_cast<void>(parse_canonical_boolean(flag));
+  }
+  const std::size_t interactive_count =
+      parse_b1_framed_list(inner.fields[4U].payload).size();
+  const std::vector<std::string> offers =
+      parse_b1_framed_list(inner.fields[5U].payload);
+  const std::vector<std::string> progress =
+      parse_b1_framed_list(inner.fields[8U].payload);
+  const std::vector<std::string> graph =
+      parse_b1_framed_list(inner.fields[9U].payload);
+  const std::vector<std::string> headroom =
+      parse_b1_framed_list(inner.fields[11U].payload);
+  const std::vector<std::string> io =
+      parse_b1_framed_list(inner.fields[12U].payload);
+  const std::vector<std::string> snapshots =
+      parse_b1_framed_list(inner.fields[13U].payload);
+  if (interactive_count != kM1TotalI1OriginCount || offers.empty() ||
+      progress.size() != kM1MeasuredWindowCount ||
+      graph.size() != kM1MeasuredWindowCount ||
+      headroom.size() != kM1MeasuredI1AttemptCount ||
+      io.size() != offers.size() || snapshots.size() < 4U) {
+    throw std::invalid_argument("M1 nested raw evidence cardinality drifted.");
+  }
+  for (std::size_t index = 0U; index < progress.size(); ++index) {
+    const std::vector<std::string> fields =
+        parse_b1_fixed_record(progress[index], 3U);
+    if (parse_b1_canonical_uint64(fields[0U]) != index ||
+        parse_b1_canonical_uint64(fields[2U]) == 0U) {
+      throw std::invalid_argument("M1 raw progress window is invalid.");
+    }
+    static_cast<void>(parse_b1_canonical_uint64(fields[1U]));
+  }
+  for (std::size_t index = 0U; index < graph.size(); ++index) {
+    const std::vector<std::string> fields =
+        parse_b1_fixed_record(graph[index], 4U);
+    if (parse_b1_canonical_uint64(fields[0U]) != index) {
+      throw std::invalid_argument("M1 raw Graph window is unordered.");
+    }
+    static_cast<void>(parse_canonical_boolean(fields[1U]));
+    static_cast<void>(parse_b1_canonical_uint64(fields[2U]));
+    static_cast<void>(parse_b1_canonical_uint64(fields[3U]));
+  }
+  for (std::size_t index = 0U; index < headroom.size(); ++index) {
+    const std::vector<std::string> fields =
+        parse_b1_fixed_record(headroom[index], 10U);
+    if (parse_b1_canonical_uint64(fields[0U]) != index / kI1EditCount ||
+        parse_b1_canonical_uint64(fields[1U]) != index % kI1EditCount) {
+      throw std::invalid_argument("M1 raw headroom outcome is unordered.");
+    }
+    const bool attempted = parse_canonical_boolean(fields[2U]);
+    const bool has_status = parse_canonical_boolean(fields[3U]);
+    const bool status_ok = parse_canonical_boolean(fields[4U]);
+    static_cast<void>(parse_b1_canonical_uint64(fields[5U]));
+    const bool headroom_failure = parse_canonical_boolean(fields[9U]);
+    if (!attempted || !has_status || headroom_failure == status_ok) {
+      throw std::invalid_argument(
+          "M1 raw headroom status or classification is invalid.");
+    }
+  }
+  const std::vector<std::string> starts =
+      parse_b1_framed_list(inner.fields[10U].payload);
+  std::uint64_t prior_start_sequence = 0U;
+  for (const std::string& start : starts) {
+    const std::vector<std::string> fields = parse_b1_fixed_record(start, 5U);
+    const std::uint64_t sequence = parse_b1_canonical_uint64(fields[0U]);
+    const std::uint64_t service_class = parse_b1_canonical_uint64(fields[1U]);
+    if (sequence == 0U || sequence <= prior_start_sequence ||
+        service_class > static_cast<std::uint64_t>(
+                            compute::ComputeRunQosClass::Throughput) ||
+        !parse_canonical_boolean(fields[4U])) {
+      throw std::invalid_argument("M1 raw class start is invalid.");
+    }
+    static_cast<void>(parse_canonical_boolean(fields[2U]));
+    static_cast<void>(parse_canonical_boolean(fields[3U]));
+    prior_start_sequence = sequence;
+  }
+  const std::uint64_t inner_i1 =
+      parse_b1_canonical_uint64(inner.fields[15U].payload);
+  const std::vector<std::string> inner_b1 =
+      parse_b1_fixed_record(inner.fields[16U].payload, 2U);
+  if (inner_i1 != claims.isolated_i1_p99_ns ||
+      parse_b1_canonical_uint64(inner_b1[0U]) !=
+          claims.isolated_b1.successful_site_operations ||
+      parse_b1_canonical_uint64(inner_b1[1U]) !=
+          claims.isolated_b1.duration_ns) {
+    throw std::invalid_argument(
+        "M1 inner and measurement denominator claims disagree.");
+  }
+  return claims;
+}
+
+/**
  * @brief Validates one M1 isolated pair after exact object resolution.
  * @param m1 Enclosing M1 row.
  * @param pair Exact pair record.
@@ -800,6 +1517,11 @@ void validate_m1_pair(const EvidenceCanonicalRow& m1,
       throw std::invalid_argument(
           "M1 isolated-I1 base-only fixture relation is invalid.");
     }
+    const M1DenominatorClaims claims = parse_m1_denominator_claims(m1);
+    if (recompute_isolated_i1_p99(row) != claims.isolated_i1_p99_ns) {
+      throw std::invalid_argument(
+          "M1 isolated-I1 denominator differs from resolved raw evidence.");
+    }
   } else {
     if (!m1.source.environment.storage_manifest.has_value() ||
         !row.source.environment.storage_manifest.has_value() ||
@@ -814,6 +1536,14 @@ void validate_m1_pair(const EvidenceCanonicalRow& m1,
             workload_named_digest(row, "b1_golden_digest")) {
       throw std::invalid_argument(
           "M1 isolated-B1 full environment/fixture relation is invalid.");
+    }
+    const M1DenominatorClaims claims = parse_m1_denominator_claims(m1);
+    const B1RateSource source = recompute_isolated_b1_rate_source(row);
+    if (source.successful_site_operations !=
+            claims.isolated_b1.successful_site_operations ||
+        source.duration_ns != claims.isolated_b1.duration_ns) {
+      throw std::invalid_argument(
+          "M1 isolated-B1 denominator differs from resolved raw evidence.");
     }
   }
 }
@@ -1531,6 +2261,907 @@ EvidenceCorpusValidation validate_evidence_corpus(
     result.verdict = I1Verdict::Invalid;
   }
   return result;
+}
+
+/** @copydoc evidence_i1_component_fixture_digest */
+B1Sha256Digest evidence_i1_component_fixture_digest() {
+  B1Sha256 hash;
+  hash.update("execution-profile-m1-i1-fixture-v1\n");
+  hash.update(i1_frozen_graph_yaml());
+  const ContentDigest golden = i1_frozen_final_content_digest();
+  for (const std::byte value : golden.bytes) {
+    const char byte = static_cast<char>(std::to_integer<std::uint8_t>(value));
+    hash.update(std::string_view(&byte, 1U));
+  }
+  return hash.finish();
+}
+
+/** @copydoc evidence_b1_component_digests */
+EvidenceB1ComponentDigests evidence_b1_component_digests() {
+  B1Sha256 fixture;
+  B1Sha256 corpus;
+  B1Sha256 golden;
+  fixture.update("execution-profile-b1-fixture-identity-v1\n");
+  corpus.update("execution-profile-b1-corpus-identity-v1\n");
+  golden.update("execution-profile-b1-golden-identity-v1\n");
+  const auto add = [&](std::uint64_t seed) {
+    const std::string seed_text = std::to_string(seed) + "\n";
+    const std::string graph = b1_frozen_graph_yaml(seed);
+    const std::string source = b1_source_node_yaml(seed);
+    const std::string trace = encode_b1_semantic_trace(
+        make_b1_success_semantic_records(b1_frozen_semantic_plan(seed)));
+    const B1JobGolden job_golden = b1_frozen_job_golden(seed);
+    fixture.update(seed_text);
+    fixture.update(graph);
+    fixture.update(source);
+    fixture.update(trace);
+    corpus.update(seed_text);
+    corpus.update(graph);
+    corpus.update(source);
+    corpus.update(trace);
+    const std::string logical_identity =
+        encode_logical_digest_identity(job_golden.logical_digest);
+    fixture.update(logical_identity);
+    fixture.update("\n");
+    const std::string algorithm = std::to_string(
+        static_cast<std::uint32_t>(job_golden.logical_digest.algorithm));
+    golden.update(seed_text);
+    golden.update(algorithm);
+    golden.update("\n");
+    for (const std::byte value : job_golden.logical_digest.bytes) {
+      const char byte = static_cast<char>(std::to_integer<std::uint8_t>(value));
+      golden.update(std::string_view(&byte, 1U));
+    }
+    fixture.update(b1_digest_hex(job_golden.raw_payload_digest));
+    fixture.update("\n");
+    golden.update("\n");
+    golden.update(b1_digest_hex(job_golden.raw_payload_digest));
+    golden.update("\n");
+  };
+  add(kB1ColdJobIndex);
+  for (const std::uint64_t seed : kB1WarmupJobIndices) {
+    add(seed);
+  }
+  for (std::uint64_t seed = 0U; seed < kB1MeasuredJobCount; ++seed) {
+    add(seed);
+  }
+  return EvidenceB1ComponentDigests{fixture.finish(), corpus.finish(),
+                                    golden.finish()};
+}
+
+/** @copydoc evidence_resource_identity */
+B1Sha256Digest evidence_resource_identity(const B1ExecutionSnapshot& snapshot) {
+  return compute_resource_identity(snapshot);
+}
+
+/** @copydoc evidence_resource_identity */
+B1Sha256Digest evidence_resource_identity(const M1ExecutionSnapshot& snapshot) {
+  return compute_resource_identity(snapshot);
+}
+
+/** @copydoc make_i1_evidence_pair_object */
+EvidencePairObject make_i1_evidence_pair_object(
+    const std::vector<I1EpisodeInnerRow>& rows,
+    B1EnvironmentEvidence environment, EvidencePairProducerOptions options) {
+  const B1Sha256Digest fixture = evidence_i1_component_fixture_digest();
+  if (environment.workload_id != kI1WorkloadId || environment.run_cap != 8U ||
+      environment.replicate_ordinal == 0U ||
+      environment.replicate_ordinal > 3U ||
+      environment.fixture_digest != fixture ||
+      environment.storage_manifest.has_value() ||
+      !valid_b1_environment_claims(environment)) {
+    throw std::invalid_argument(
+        "I1 pair producer environment identity or claims are invalid.");
+  }
+  if ((options.subject_role == EvidenceSubjectRole::Candidate) !=
+      options.comparison_reference_bundle_digest.has_value()) {
+    throw std::invalid_argument(
+        "I1 pair producer comparison direction contradicts its role.");
+  }
+  const I1ReplicateSummary summary = evaluate_i1_replicate(rows);
+  if (summary.replicate_ordinal != environment.replicate_ordinal ||
+      summary.measured_sample_count != 200U || !summary.latency.has_value() ||
+      summary.latency->p99.count() <= 0) {
+    throw std::invalid_argument(
+        "I1 pair producer lacks one complete positive measured replicate.");
+  }
+
+  std::vector<const I1EpisodeInnerRow*> ordered;
+  ordered.reserve(rows.size());
+  for (const I1EpisodeInnerRow& row : rows) {
+    ordered.push_back(&row);
+  }
+  std::sort(ordered.begin(), ordered.end(),
+            [](const I1EpisodeInnerRow* lhs, const I1EpisodeInnerRow* rhs) {
+              return lhs->evidence.slot < rhs->evidence.slot;
+            });
+  std::vector<std::string> samples;
+  for (const I1EpisodeInnerRow* row : ordered) {
+    if (row->workload_id != kI1WorkloadId ||
+        row->evidence.replicate_ordinal != environment.replicate_ordinal) {
+      throw std::invalid_argument(
+          "I1 pair producer row identity differs from its environment.");
+    }
+    if (classify_i1_slot(row->evidence.slot).first !=
+        I1EpisodePhase::Measured) {
+      continue;
+    }
+    if (!row->final_latency.has_value() || row->final_latency->count() <= 0) {
+      throw std::invalid_argument(
+          "I1 pair producer measured row lacks positive final latency.");
+    }
+    samples.push_back(
+        encode_b1_fixed_record({std::to_string(row->final_latency->count())}));
+  }
+  if (samples.size() != 200U) {
+    throw std::invalid_argument(
+        "I1 pair producer did not retain exactly 200 measured samples.");
+  }
+
+  EvidenceRowInput input;
+  input.workload_id = kI1WorkloadId;
+  input.subject_role = options.subject_role;
+  input.replicate_ordinal = environment.replicate_ordinal;
+  input.run_cap = 8U;
+  input.environment = std::move(environment);
+  input.workload_manifest = make_producer_section(
+      "workload-manifest", "execution-profile-workload-manifest-v1",
+      {known_field("fixture_digest", "sha256", b1_digest_hex(fixture)),
+       known_field("i1_fixture_digest", "sha256", b1_digest_hex(fixture)),
+       known_field("row_identity_digest", "sha256",
+                   b1_digest_hex(b1_sha256(
+                       std::string(kI1WorkloadId) + ":" +
+                       evidence_subject_role_name(options.subject_role) + ":" +
+                       std::to_string(input.replicate_ordinal))))},
+      1U);
+  input.job_index_seal_ordinal = 2U;
+  input.measurement_evidence = make_producer_section(
+      "measurement-evidence", "execution-profile-measurement-evidence-v1",
+      {known_field("subject_role", "enum",
+                   evidence_subject_role_name(options.subject_role)),
+       known_field("replicate_ordinal", "uint64",
+                   std::to_string(input.replicate_ordinal)),
+       known_field("measured_final_latencies_ns", "uint64-list-v1",
+                   encode_record_list(samples)),
+       known_field("claimed_p99_ns", "uint64",
+                   std::to_string(summary.latency->p99.count()))},
+      3U);
+  input.output_evidence = make_producer_section(
+      "output-evidence", "execution-profile-output-evidence-v1",
+      {known_field("measured_output_verdict", "verdict",
+                   verdict_name(summary.output_verdict))},
+      4U);
+  input.verdict_evidence = make_producer_section(
+      "verdict-evidence", "execution-profile-verdict-evidence-v1",
+      {known_field("latency", "verdict", verdict_name(summary.latency_verdict)),
+       known_field("waste", "verdict", verdict_name(summary.waste_verdict)),
+       known_field("memory", "verdict", verdict_name(summary.memory_verdict)),
+       known_field("output", "verdict", verdict_name(summary.output_verdict)),
+       known_field("validity_reasons", "diagnostic-list-v1",
+                   encode_diagnostics(summary.validity_reasons))},
+      5U);
+  input.seal_ordinal = 6U;
+  EvidenceCanonicalRow outer_row = materialize_evidence_row(std::move(input));
+
+  EvidenceBundleInput bundle_input;
+  bundle_input.workload_id = kI1WorkloadId;
+  bundle_input.subject_role = options.subject_role;
+  bundle_input.provenance = make_producer_section(
+      "bundle-provenance", kEvidenceBundleProvenanceSchema,
+      {known_field("producer_schema", "identifier",
+                   "execution-profile-i1-manual-runner-v1"),
+       known_field("environment_authority", "enum", "storage-not-applicable")},
+      7U);
+  bundle_input.comparison_reference_bundle_digest =
+      std::move(options.comparison_reference_bundle_digest);
+  bundle_input.rows.push_back(outer_row);
+  bundle_input.seal_ordinal = 8U;
+  EvidenceCanonicalBundle outer_bundle =
+      materialize_evidence_bundle(std::move(bundle_input));
+  return EvidencePairObject{std::move(outer_row), std::move(outer_bundle)};
+}
+
+/** @copydoc make_b1_evidence_pair_object */
+EvidencePairObject make_b1_evidence_pair_object(
+    const B1InnerRow& row, EvidencePairProducerOptions options) {
+  if ((options.subject_role == EvidenceSubjectRole::Candidate) !=
+      options.comparison_reference_bundle_digest.has_value()) {
+    throw std::invalid_argument(
+        "B1 pair producer comparison direction contradicts its role.");
+  }
+  if (row.schema != kB1InnerRowSchema || row.workload_id != kB1WorkloadId ||
+      row.evidence.replicate_ordinal == 0U ||
+      row.evidence.replicate_ordinal > 3U ||
+      (row.evidence.run_cap != 1U && row.evidence.run_cap != 8U) ||
+      row.evidence.environment.workload_id != kB1WorkloadId ||
+      row.evidence.environment.replicate_ordinal !=
+          row.evidence.replicate_ordinal ||
+      row.evidence.environment.run_cap != row.evidence.run_cap ||
+      !valid_b1_environment_claims(row.evidence.environment)) {
+    throw std::invalid_argument(
+        "B1 pair producer row identity or environment claims are invalid.");
+  }
+  const EvidenceB1ComponentDigests components = evidence_b1_component_digests();
+  if (row.evidence.environment.fixture_digest != components.fixture) {
+    throw std::invalid_argument(
+        "B1 pair producer environment fixture identity drifted.");
+  }
+  const auto to_ns = [](std::chrono::steady_clock::time_point point) {
+    const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           point.time_since_epoch())
+                           .count();
+    if (value < 0) {
+      throw std::invalid_argument(
+          "B1 pair producer monotonic timestamp is negative.");
+    }
+    return static_cast<std::uint64_t>(value);
+  };
+  const std::uint64_t measurement_start = to_ns(row.evidence.measurement_start);
+  const std::uint64_t measurement_end = to_ns(row.evidence.measurement_end);
+  if (measurement_end <= measurement_start) {
+    throw std::invalid_argument(
+        "B1 pair producer measurement interval is not positive.");
+  }
+
+  std::vector<const B1JobEvidence*> measured;
+  std::vector<B1JobInstance> job_instances;
+  job_instances.reserve(row.evidence.jobs.size());
+  for (const B1JobEvidence& job : row.evidence.jobs) {
+    job_instances.push_back(job.job);
+    if (job.job.phase == B1JobPhase::Measured) {
+      measured.push_back(&job);
+    }
+  }
+  std::sort(measured.begin(), measured.end(),
+            [](const B1JobEvidence* lhs, const B1JobEvidence* rhs) {
+              return lhs->job.job_index < rhs->job.job_index;
+            });
+  if (measured.size() != kB1MeasuredJobCount) {
+    throw std::invalid_argument(
+        "B1 pair producer requires exactly 30 measured jobs.");
+  }
+  std::vector<std::string> outcomes;
+  std::uint64_t successful = 0U;
+  for (std::size_t index = 0U; index < measured.size(); ++index) {
+    if (measured[index]->job.job_index != index) {
+      throw std::invalid_argument(
+          "B1 pair producer measured job order or identity drifted.");
+    }
+    const bool verified = b1_job_has_verified_endpoint(*measured[index]);
+    const std::uint64_t site_operations =
+        verified ? kB1SiteOperationsPerJob : 0U;
+    successful += site_operations;
+    outcomes.push_back(encode_b1_fixed_record(
+        {std::to_string(index), verified ? "true" : "false",
+         std::to_string(site_operations)}));
+  }
+  if (successful != row.successful_site_operations) {
+    throw std::invalid_argument(
+        "B1 pair producer outcomes disagree with the evaluated numerator.");
+  }
+
+  EvidenceRowInput input;
+  input.workload_id = kB1WorkloadId;
+  input.subject_role = options.subject_role;
+  input.replicate_ordinal = row.evidence.replicate_ordinal;
+  input.run_cap = row.evidence.run_cap;
+  input.environment = row.evidence.environment;
+  input.workload_manifest = make_producer_section(
+      "workload-manifest", "execution-profile-workload-manifest-v1",
+      {known_field("fixture_digest", "sha256",
+                   b1_digest_hex(components.fixture)),
+       known_field("b1_fixture_digest", "sha256",
+                   b1_digest_hex(components.fixture)),
+       known_field("b1_corpus_digest", "sha256",
+                   b1_digest_hex(components.corpus)),
+       known_field("b1_golden_digest", "sha256",
+                   b1_digest_hex(components.golden)),
+       known_field("row_identity_digest", "sha256",
+                   b1_digest_hex(b1_sha256(
+                       std::string(kB1WorkloadId) + ":" +
+                       evidence_subject_role_name(options.subject_role) + ":" +
+                       std::to_string(input.replicate_ordinal) + ":" +
+                       std::to_string(input.run_cap))))},
+      1U);
+  input.job_instances = std::move(job_instances);
+  input.job_index_seal_ordinal = 2U;
+  input.measurement_evidence = make_producer_section(
+      "measurement-evidence", "execution-profile-measurement-evidence-v1",
+      {known_field("subject_role", "enum",
+                   evidence_subject_role_name(options.subject_role)),
+       known_field("replicate_ordinal", "uint64",
+                   std::to_string(input.replicate_ordinal)),
+       known_field("measurement_start_ns", "uint64",
+                   std::to_string(measurement_start)),
+       known_field("measurement_end_ns", "uint64",
+                   std::to_string(measurement_end)),
+       known_field("measured_job_outcomes", "b1-measured-job-outcome-list-v1",
+                   encode_record_list(outcomes)),
+       known_field("successful_site_operations", "uint64",
+                   std::to_string(successful))},
+      3U);
+  input.output_evidence = make_producer_section(
+      "output-evidence", "execution-profile-output-evidence-v1",
+      {known_field("verified_measured_jobs", "uint64",
+                   std::to_string(row.verified_measured_jobs))},
+      4U);
+  input.verdict_evidence = make_producer_section(
+      "verdict-evidence", "execution-profile-verdict-evidence-v1",
+      {known_field("throughput", "verdict",
+                   verdict_name(row.throughput_verdict)),
+       known_field("determinism", "verdict",
+                   verdict_name(row.determinism_verdict)),
+       known_field("waste", "verdict", verdict_name(row.waste_verdict)),
+       known_field("memory", "verdict", verdict_name(row.memory_verdict)),
+       known_field("validity_reasons", "diagnostic-list-v1",
+                   encode_diagnostics(row.validity_reasons))},
+      5U);
+  input.seal_ordinal = 6U;
+  EvidenceCanonicalRow outer_row = materialize_evidence_row(std::move(input));
+
+  EvidenceBundleInput bundle_input;
+  bundle_input.workload_id = kB1WorkloadId;
+  bundle_input.subject_role = options.subject_role;
+  bundle_input.provenance = make_producer_section(
+      "bundle-provenance", kEvidenceBundleProvenanceSchema,
+      {known_field("producer_schema", "identifier",
+                   "execution-profile-b1-manual-runner-v1"),
+       known_field("environment_authority", "enum",
+                   valid_b1_environment_evidence(outer_row.source.environment)
+                       ? "complete-live-authority"
+                       : "portable-incomplete-live-authority")},
+      7U);
+  bundle_input.comparison_reference_bundle_digest =
+      std::move(options.comparison_reference_bundle_digest);
+  bundle_input.rows.push_back(outer_row);
+  bundle_input.seal_ordinal = 8U;
+  EvidenceCanonicalBundle outer_bundle =
+      materialize_evidence_bundle(std::move(bundle_input));
+  return EvidencePairObject{std::move(outer_row), std::move(outer_bundle)};
+}
+
+/** @copydoc materialize_evidence_pair_object */
+std::string materialize_evidence_pair_object(const EvidencePairObject& object) {
+  const EvidenceCanonicalRow rebuilt_row =
+      materialize_evidence_row(object.row.source);
+  const EvidenceCanonicalBundle rebuilt_bundle =
+      materialize_evidence_bundle(object.bundle.source);
+  if (rebuilt_row.manifest_bytes != object.row.manifest_bytes ||
+      rebuilt_row.digest != object.row.digest ||
+      rebuilt_bundle.manifest_bytes != object.bundle.manifest_bytes ||
+      rebuilt_bundle.digest != object.bundle.digest ||
+      rebuilt_bundle.row_references != object.bundle.row_references ||
+      object.bundle.source.rows.size() != 1U ||
+      object.bundle.source.rows.front().digest != object.row.digest ||
+      !bundle_names_row(object.bundle, object.row)) {
+    throw std::invalid_argument(
+        "Evidence pair object is not one reproducible row/bundle source.");
+  }
+  if (!valid_b1_environment_claims(object.row.source.environment)) {
+    throw std::invalid_argument(
+        "Evidence pair object environment claims are invalid.");
+  }
+  const std::array<const EvidenceRetainedSection*, 6U> sections{
+      &object.row.source.workload_manifest,
+      &object.row.job_instance_index,
+      &object.row.source.measurement_evidence,
+      &object.row.source.output_evidence,
+      &object.row.source.verdict_evidence,
+      &object.bundle.source.provenance,
+  };
+  std::vector<std::string> section_records;
+  section_records.reserve(sections.size());
+  std::set<std::string> section_digests;
+  for (std::size_t index = 0U; index < sections.size(); ++index) {
+    if (sections[index]->section_name != kPairSectionContracts[index].first ||
+        sections[index]->schema_id != kPairSectionContracts[index].second) {
+      throw std::invalid_argument(
+          "Evidence pair object retained-section contract drifted.");
+    }
+    const std::string digest = digest_evidence_section(
+        sections[index]->section_name, sections[index]->schema_id,
+        sections[index]->bytes);
+    if (!section_digests.insert(digest).second) {
+      throw std::invalid_argument(
+          "Evidence pair object contains a duplicate section address.");
+    }
+    section_records.push_back(encode_pair_section_record(*sections[index]));
+  }
+
+  const B1EnvironmentEvidence& environment = object.row.source.environment;
+  std::vector<B1CanonicalField> fields{
+      known_field("row_manifest", "canonical-text-hex-v1",
+                  encode_b1_normalized_text(object.row.manifest_bytes)),
+      known_field("bundle_manifest", "canonical-text-hex-v1",
+                  encode_b1_normalized_text(object.bundle.manifest_bytes)),
+      known_field("base_manifest", "canonical-text-hex-v1",
+                  encode_b1_normalized_text(environment.base_manifest)),
+      known_field("claimed_base_digest", "sha256",
+                  b1_digest_hex(environment.claimed_base_digest)),
+  };
+  if (environment.storage_manifest.has_value()) {
+    if (!environment.claimed_storage_digest.has_value() ||
+        !environment.storage_raw_proof.has_value() ||
+        !environment.storage_eligibility.has_value()) {
+      throw std::invalid_argument(
+          "Evidence pair required-storage source is incomplete.");
+    }
+    fields.push_back(
+        known_field("storage_manifest", "canonical-text-hex-v1",
+                    encode_b1_normalized_text(*environment.storage_manifest)));
+    fields.push_back(
+        known_field("claimed_storage_digest", "sha256",
+                    b1_digest_hex(*environment.claimed_storage_digest)));
+  } else {
+    fields.push_back(not_applicable_field("storage_manifest",
+                                          "canonical-text-hex-v1",
+                                          "row-has-no-output-commit"));
+    fields.push_back(not_applicable_field("claimed_storage_digest", "sha256",
+                                          "row-has-no-output-commit"));
+  }
+  fields.push_back(known_field(
+      "environment_class_manifest", "canonical-text-hex-v1",
+      encode_b1_normalized_text(environment.environment_class_manifest)));
+  fields.push_back(
+      known_field("claimed_environment_class_digest", "sha256",
+                  b1_digest_hex(environment.claimed_environment_class_digest)));
+  if (environment.storage_manifest.has_value()) {
+    fields.push_back(
+        known_field("storage_raw_proof", "canonical-text-hex-v1",
+                    encode_b1_normalized_text(
+                        environment.storage_raw_proof->canonical_bytes)));
+    fields.push_back(known_field(
+        "storage_eligibility", "b1-storage-eligibility-v1",
+        encode_storage_eligibility(*environment.storage_eligibility)));
+  } else {
+    fields.push_back(not_applicable_field("storage_raw_proof",
+                                          "canonical-text-hex-v1",
+                                          "row-has-no-output-commit"));
+    fields.push_back(not_applicable_field("storage_eligibility",
+                                          "b1-storage-eligibility-v1",
+                                          "row-has-no-output-commit"));
+  }
+  fields.push_back(known_field("fixture_digest", "sha256",
+                               b1_digest_hex(environment.fixture_digest)));
+  fields.push_back(known_field("resource_identity", "sha256",
+                               b1_digest_hex(environment.resource_identity)));
+  fields.push_back(known_field("retained_sections",
+                               "evidence-retained-section-list-v1",
+                               encode_record_list(section_records)));
+  fields.push_back(known_field("row_seal_ordinal", "uint64",
+                               std::to_string(object.row.source.seal_ordinal)));
+  fields.push_back(
+      known_field("bundle_seal_ordinal", "uint64",
+                  std::to_string(object.bundle.source.seal_ordinal)));
+  const std::string bytes =
+      encode_b1_canonical_manifest(kEvidencePairObjectSchema, fields);
+  if (bytes.size() > kEvidencePairObjectMaxBytes) {
+    throw std::invalid_argument(
+        "Evidence pair object exceeds the bounded pack size.");
+  }
+  return bytes;
+}
+
+/** @copydoc load_evidence_pair_object */
+EvidencePairObject load_evidence_pair_object(
+    std::string_view bytes, std::string_view expected_row_digest,
+    std::string_view expected_bundle_digest) {
+  if (bytes.empty() || bytes.size() > kEvidencePairObjectMaxBytes ||
+      !valid_digest(expected_row_digest) ||
+      !valid_digest(expected_bundle_digest)) {
+    throw std::invalid_argument(
+        "Evidence pair pack size or expected address is invalid.");
+  }
+  const B1CanonicalManifest manifest = parse_b1_canonical_manifest(bytes);
+  if (manifest.schema != kEvidencePairObjectSchema ||
+      manifest.fields.size() != kPairObjectFieldNames.size()) {
+    throw std::invalid_argument(
+        "Evidence pair pack schema or field cardinality drifted.");
+  }
+  for (std::size_t index = 0U; index < manifest.fields.size(); ++index) {
+    if (manifest.fields[index].name != kPairObjectFieldNames[index] ||
+        manifest.fields[index].type != kPairObjectFieldTypes[index]) {
+      throw std::invalid_argument(
+          "Evidence pair pack field name/type order drifted.");
+    }
+  }
+  for (const std::size_t index :
+       {0U, 1U, 2U, 3U, 6U, 7U, 10U, 11U, 12U, 13U, 14U}) {
+    require_known_field(manifest.fields[index], kPairObjectFieldNames[index],
+                        kPairObjectFieldTypes[index]);
+  }
+  const bool has_storage =
+      manifest.fields[4U].state == B1ObservationState::Known;
+  for (const std::size_t index : {4U, 5U, 8U, 9U}) {
+    const B1CanonicalField& field = manifest.fields[index];
+    if (has_storage) {
+      require_known_field(field, kPairObjectFieldNames[index],
+                          kPairObjectFieldTypes[index]);
+    } else if (field.state != B1ObservationState::NotApplicable ||
+               field.reason != "row-has-no-output-commit" ||
+               !field.payload.empty()) {
+      throw std::invalid_argument(
+          "Evidence pair storage applicability fields disagree.");
+    }
+  }
+  const std::string row_bytes =
+      decode_canonical_text_hex(manifest.fields[0U].payload);
+  const std::string bundle_bytes =
+      decode_canonical_text_hex(manifest.fields[1U].payload);
+  const EvidenceParsedRow parsed_row = parse_evidence_row(row_bytes);
+  const EvidenceParsedBundle parsed_bundle =
+      parse_evidence_bundle(bundle_bytes);
+  if (digest_evidence_row(row_bytes) != expected_row_digest ||
+      digest_evidence_bundle(bundle_bytes) != expected_bundle_digest ||
+      parsed_bundle.workload_id != parsed_row.workload_id ||
+      parsed_bundle.subject_role != parsed_row.subject_role ||
+      parsed_bundle.row_references.size() != 1U ||
+      parsed_bundle.row_references.front().row_digest != expected_row_digest ||
+      parsed_bundle.row_references.front().workload_id !=
+          parsed_row.workload_id ||
+      parsed_bundle.row_references.front().run_cap != parsed_row.run_cap ||
+      parsed_bundle.row_references.front().replicate_ordinal !=
+          parsed_row.replicate_ordinal) {
+    throw std::invalid_argument(
+        "Evidence pair row/bundle address or functional key mismatched.");
+  }
+
+  const std::vector<std::string> section_records =
+      parse_b1_framed_list(manifest.fields[12U].payload);
+  if (section_records.size() != kPairSectionContracts.size()) {
+    throw std::invalid_argument(
+        "Evidence pair pack does not contain exactly six sections.");
+  }
+  std::array<EvidenceRetainedSection, 6U> sections;
+  std::set<std::string> section_digests;
+  for (std::size_t index = 0U; index < section_records.size(); ++index) {
+    sections[index] = parse_pair_section_record(section_records[index]);
+    if (sections[index].section_name != kPairSectionContracts[index].first ||
+        sections[index].schema_id != kPairSectionContracts[index].second) {
+      throw std::invalid_argument(
+          "Evidence pair retained section is missing, reordered, or unknown.");
+    }
+    const std::string digest = digest_evidence_section(
+        sections[index].section_name, sections[index].schema_id,
+        sections[index].bytes);
+    if (!section_digests.insert(digest).second) {
+      throw std::invalid_argument(
+          "Evidence pair retained section address is ambiguous.");
+    }
+  }
+
+  B1EnvironmentEvidence environment;
+  environment.base_manifest =
+      decode_canonical_text_hex(manifest.fields[2U].payload);
+  environment.claimed_base_digest =
+      parse_b1_digest(manifest.fields[3U].payload);
+  if (has_storage) {
+    environment.storage_manifest =
+        decode_canonical_text_hex(manifest.fields[4U].payload);
+    environment.claimed_storage_digest =
+        parse_b1_digest(manifest.fields[5U].payload);
+  }
+  environment.environment_class_manifest =
+      decode_canonical_text_hex(manifest.fields[6U].payload);
+  environment.claimed_environment_class_digest =
+      parse_b1_digest(manifest.fields[7U].payload);
+  if (has_storage) {
+    environment.storage_raw_proof = B1StorageRawProof{
+        decode_canonical_text_hex(manifest.fields[8U].payload)};
+    environment.storage_eligibility =
+        parse_storage_eligibility(manifest.fields[9U].payload);
+  }
+  environment.workload_id = parsed_row.workload_id;
+  environment.fixture_digest = parse_b1_digest(manifest.fields[10U].payload);
+  environment.resource_identity = parse_b1_digest(manifest.fields[11U].payload);
+  environment.run_cap = parsed_row.run_cap;
+  environment.replicate_ordinal = parsed_row.replicate_ordinal;
+  environment.storage_actual_observation.reset();
+  if (!valid_b1_environment_claims(environment)) {
+    throw std::invalid_argument(
+        "Evidence pair retained environment claims do not self-validate.");
+  }
+
+  EvidenceRowInput row_input;
+  row_input.workload_id = parsed_row.workload_id;
+  row_input.subject_role = parsed_row.subject_role;
+  row_input.replicate_ordinal = parsed_row.replicate_ordinal;
+  row_input.run_cap = parsed_row.run_cap;
+  row_input.environment = std::move(environment);
+  row_input.workload_manifest = sections[0U];
+  row_input.job_instances = parse_job_index(sections[1U]);
+  row_input.job_index_seal_ordinal = sections[1U].seal_ordinal;
+  row_input.measurement_evidence = sections[2U];
+  row_input.output_evidence = sections[3U];
+  row_input.verdict_evidence = sections[4U];
+  row_input.paired_isolated_i1 = parsed_row.paired_isolated_i1;
+  row_input.paired_isolated_b1_cap8 = parsed_row.paired_isolated_b1_cap8;
+  row_input.seal_ordinal =
+      parse_b1_canonical_uint64(manifest.fields[13U].payload);
+  EvidenceCanonicalRow row = materialize_evidence_row(std::move(row_input));
+  if (row.manifest_bytes != row_bytes || row.digest != expected_row_digest) {
+    throw std::invalid_argument(
+        "Evidence pair row source does not reproduce its addressed bytes.");
+  }
+
+  EvidenceBundleInput bundle_input;
+  bundle_input.workload_id = parsed_bundle.workload_id;
+  bundle_input.subject_role = parsed_bundle.subject_role;
+  bundle_input.provenance = sections[5U];
+  bundle_input.comparison_reference_bundle_digest =
+      parsed_bundle.comparison_reference_bundle_digest;
+  bundle_input.rows.push_back(row);
+  bundle_input.seal_ordinal =
+      parse_b1_canonical_uint64(manifest.fields[14U].payload);
+  EvidenceCanonicalBundle bundle =
+      materialize_evidence_bundle(std::move(bundle_input));
+  if (bundle.manifest_bytes != bundle_bytes ||
+      bundle.digest != expected_bundle_digest) {
+    throw std::invalid_argument(
+        "Evidence pair bundle source does not reproduce its addressed bytes.");
+  }
+
+  EvidenceCorpus closure;
+  closure.sections.assign(sections.begin(), sections.end());
+  closure.rows.push_back(row);
+  closure.bundles.push_back(bundle);
+  for (const EvidenceRetainedSection& section : closure.sections) {
+    for (const EvidenceAddressReference& dependency :
+         section.address_dependencies) {
+      std::size_t matches = 0U;
+      std::uint64_t target_seal = 0U;
+      if (dependency.kind == EvidenceAddressKind::Section) {
+        for (const EvidenceRetainedSection& target : closure.sections) {
+          if (digest_evidence_section(target.section_name, target.schema_id,
+                                      target.bytes) == dependency.digest) {
+            ++matches;
+            target_seal = target.seal_ordinal;
+          }
+        }
+      } else if (dependency.kind == EvidenceAddressKind::Row) {
+        if (row.digest == dependency.digest) {
+          matches = 1U;
+          target_seal = row.source.seal_ordinal;
+        }
+      } else if (dependency.kind == EvidenceAddressKind::Bundle) {
+        if (bundle.digest == dependency.digest) {
+          matches = 1U;
+          target_seal = bundle.source.seal_ordinal;
+        }
+      }
+      if (matches != 1U || target_seal >= section.seal_ordinal) {
+        throw std::invalid_argument(
+            "Evidence pair dependency is unresolved, ambiguous, or later.");
+      }
+    }
+  }
+  EvidencePairObject object{std::move(row), std::move(bundle)};
+  if (materialize_evidence_pair_object(object) != bytes) {
+    throw std::invalid_argument(
+        "Evidence pair pack bytes do not round-trip canonically.");
+  }
+  return object;
+}
+
+/** @copydoc read_evidence_pair_object_file */
+std::string read_evidence_pair_object_file(const std::filesystem::path& path) {
+  if (path.empty() || !path.is_absolute()) {
+    throw std::invalid_argument("Evidence pair object path must be absolute.");
+  }
+#if !defined(_WIN32)
+  const int descriptor =
+      ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (descriptor < 0) {
+    if (errno == ELOOP) {
+      throw std::invalid_argument(
+          "Evidence pair object path must not be a symbolic link.");
+    }
+    throw std::runtime_error("Failed to open evidence pair object: " +
+                             std::string(std::strerror(errno)));
+  }
+  const auto close_descriptor = [descriptor]() noexcept {
+    int result = 0;
+    do {
+      result = ::close(descriptor);
+    } while (result < 0 && errno == EINTR);
+    return result;
+  };
+  struct stat status{};
+  if (::fstat(descriptor, &status) != 0) {
+    const std::string diagnostic = std::strerror(errno);
+    static_cast<void>(close_descriptor());
+    throw std::runtime_error("Failed to stat evidence pair object: " +
+                             diagnostic);
+  }
+  if (!S_ISREG(status.st_mode) || status.st_size <= 0 ||
+      static_cast<std::uintmax_t>(status.st_size) >
+          kEvidencePairObjectMaxBytes) {
+    static_cast<void>(close_descriptor());
+    throw std::invalid_argument(
+        "Evidence pair object must be a nonempty bounded regular file.");
+  }
+  std::string bytes(static_cast<std::size_t>(status.st_size), '\0');
+  std::size_t consumed = 0U;
+  while (consumed < bytes.size()) {
+    const ssize_t count =
+        ::read(descriptor, bytes.data() + consumed, bytes.size() - consumed);
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    if (count <= 0) {
+      const std::string diagnostic =
+          count == 0 ? "unexpected end of file" : std::strerror(errno);
+      static_cast<void>(close_descriptor());
+      throw std::runtime_error("Failed to read evidence pair object: " +
+                               diagnostic);
+    }
+    consumed += static_cast<std::size_t>(count);
+  }
+  char extra = '\0';
+  ssize_t extra_count = 0;
+  do {
+    extra_count = ::read(descriptor, &extra, 1U);
+  } while (extra_count < 0 && errno == EINTR);
+  if (extra_count != 0) {
+    const std::string diagnostic =
+        extra_count < 0 ? std::strerror(errno) : "file grew while reading";
+    static_cast<void>(close_descriptor());
+    throw std::runtime_error("Evidence pair object changed during read: " +
+                             diagnostic);
+  }
+  if (close_descriptor() != 0) {
+    throw std::runtime_error("Failed to close evidence pair object: " +
+                             std::string(std::strerror(errno)));
+  }
+  return bytes;
+#else
+  const std::filesystem::file_status status =
+      std::filesystem::symlink_status(path);
+  if (std::filesystem::is_symlink(status) ||
+      !std::filesystem::is_regular_file(status)) {
+    throw std::invalid_argument(
+        "Evidence pair object must be a non-symlink regular file.");
+  }
+  const std::uintmax_t size = std::filesystem::file_size(path);
+  if (size == 0U || size > kEvidencePairObjectMaxBytes) {
+    throw std::invalid_argument(
+        "Evidence pair object must be nonempty and bounded.");
+  }
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    throw std::runtime_error("Failed to open evidence pair object.");
+  }
+  std::string bytes(static_cast<std::size_t>(size), '\0');
+  input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  if (input.gcount() != static_cast<std::streamsize>(bytes.size()) ||
+      input.peek() != std::char_traits<char>::eof()) {
+    throw std::runtime_error(
+        "Evidence pair object changed or failed while reading.");
+  }
+  return bytes;
+#endif
+}
+
+/** @copydoc append_evidence_pair_object */
+void append_evidence_pair_object(const EvidencePairObject& object,
+                                 EvidenceCorpus* corpus) {
+  if (corpus == nullptr) {
+    throw std::invalid_argument("Evidence pair corpus destination is null.");
+  }
+  static_cast<void>(materialize_evidence_pair_object(object));
+  const std::array<const EvidenceRetainedSection*, 6U> sections{
+      &object.row.source.workload_manifest,
+      &object.row.job_instance_index,
+      &object.row.source.measurement_evidence,
+      &object.row.source.output_evidence,
+      &object.row.source.verdict_evidence,
+      &object.bundle.source.provenance,
+  };
+  for (const EvidenceRetainedSection* section : sections) {
+    const std::string digest = digest_evidence_section(
+        section->section_name, section->schema_id, section->bytes);
+    const std::size_t matches =
+        std::count_if(corpus->sections.begin(), corpus->sections.end(),
+                      [&digest](const EvidenceRetainedSection& retained) {
+                        return digest_evidence_section(
+                                   retained.section_name, retained.schema_id,
+                                   retained.bytes) == digest;
+                      });
+    if (matches != 0U) {
+      throw std::invalid_argument(
+          "Evidence pair section address already exists in corpus.");
+    }
+  }
+  if (std::any_of(corpus->rows.begin(), corpus->rows.end(),
+                  [&object](const EvidenceCanonicalRow& row) {
+                    return row.digest == object.row.digest;
+                  }) ||
+      std::any_of(corpus->bundles.begin(), corpus->bundles.end(),
+                  [&object](const EvidenceCanonicalBundle& bundle) {
+                    return bundle.digest == object.bundle.digest;
+                  })) {
+    throw std::invalid_argument(
+        "Evidence pair row or bundle address already exists in corpus.");
+  }
+  for (const EvidenceRetainedSection* section : sections) {
+    corpus->sections.push_back(*section);
+  }
+  corpus->rows.push_back(object.row);
+  corpus->bundles.push_back(object.bundle);
+}
+
+/** @copydoc validate_evidence_m1_pair_objects */
+EvidenceM1PairDenominators validate_evidence_m1_pair_objects(
+    const EvidencePairObject& isolated_i1,
+    const EvidencePairObject& isolated_b1_cap8,
+    EvidenceSubjectRole subject_role, std::uint64_t replicate_ordinal,
+    const B1EnvironmentEvidence& m1_environment,
+    const B1Sha256Digest& i1_fixture,
+    const EvidenceB1ComponentDigests& b1_components) {
+  static_cast<void>(materialize_evidence_pair_object(isolated_i1));
+  static_cast<void>(materialize_evidence_pair_object(isolated_b1_cap8));
+  if (replicate_ordinal == 0U || replicate_ordinal > 3U ||
+      m1_environment.workload_id != kM1WorkloadId ||
+      m1_environment.run_cap != 8U ||
+      m1_environment.replicate_ordinal != replicate_ordinal ||
+      !valid_b1_environment_claims(m1_environment)) {
+    throw std::invalid_argument(
+        "M1 pair binding context is malformed or incomplete.");
+  }
+  const auto validate_identity = [&](const EvidencePairObject& object,
+                                     std::string_view workload) {
+    if (object.row.source.workload_id != workload ||
+        object.bundle.source.workload_id != workload ||
+        object.row.source.subject_role != subject_role ||
+        object.bundle.source.subject_role != subject_role ||
+        object.row.source.replicate_ordinal != replicate_ordinal ||
+        object.row.source.run_cap != 8U ||
+        object.bundle.source.rows.size() != 1U ||
+        !bundle_names_row(object.bundle, object.row)) {
+      throw std::invalid_argument(
+          "M1 loaded pair role, workload, cap, ordinal, or membership "
+          "drifted.");
+    }
+  };
+  validate_identity(isolated_i1, kI1WorkloadId);
+  validate_identity(isolated_b1_cap8, kB1WorkloadId);
+  if (!compatible_b1_environment_claims(
+          m1_environment, isolated_i1.row.source.environment,
+          B1EnvironmentRelation::M1PairedI1BaseOnly)) {
+    throw std::invalid_argument(
+        "M1 loaded isolated-I1 base/resource claims are incompatible.");
+  }
+  if (!compatible_b1_environment_claims(
+          m1_environment, isolated_b1_cap8.row.source.environment,
+          B1EnvironmentRelation::M1PairedB1CapEight)) {
+    throw std::invalid_argument(
+        "M1 loaded isolated-B1 full environment claims are incompatible.");
+  }
+  if (workload_fixture_digest(isolated_i1.row, "i1_fixture_digest") !=
+          b1_digest_hex(i1_fixture) ||
+      workload_fixture_digest(isolated_b1_cap8.row, "b1_fixture_digest") !=
+          b1_digest_hex(b1_components.fixture) ||
+      workload_named_digest(isolated_b1_cap8.row, "b1_corpus_digest") !=
+          b1_digest_hex(b1_components.corpus) ||
+      workload_named_digest(isolated_b1_cap8.row, "b1_golden_digest") !=
+          b1_digest_hex(b1_components.golden)) {
+    throw std::invalid_argument(
+        "M1 loaded pair component fixture/corpus/golden identity drifted.");
+  }
+  const std::uint64_t i1_p99 = recompute_isolated_i1_p99(isolated_i1.row);
+  const B1RateSource b1_source =
+      recompute_isolated_b1_rate_source(isolated_b1_cap8.row);
+  constexpr std::uint64_t kMaximumNanoseconds = static_cast<std::uint64_t>(
+      std::numeric_limits<std::chrono::nanoseconds::rep>::max());
+  if (b1_source.successful_site_operations == 0U ||
+      i1_p99 > kMaximumNanoseconds ||
+      b1_source.duration_ns > kMaximumNanoseconds) {
+    throw std::invalid_argument(
+        "M1 loaded pair denominator is zero or exceeds the evaluator "
+        "representation.");
+  }
+  return EvidenceM1PairDenominators{
+      i1_p99, b1_source.successful_site_operations, b1_source.duration_ns};
 }
 
 }  // namespace ps::benchmark

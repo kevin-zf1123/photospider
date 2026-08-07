@@ -313,11 +313,30 @@ struct M1ProtocolSummary final {
  * @throws Nothing for value construction and copying.
  */
 struct M1ThroughputProgressSample final {
-  /** @brief Verified successful M1 B1 rate for this one-second window. */
-  double measured_rate = 0.0;
+  /** @brief Exact zero-based measured-window ordinal in `[0,29]`. */
+  std::size_t window_ordinal = 0U;
 
-  /** @brief Same-ordinal storage-compatible isolated B1 cap-eight rate. */
-  double paired_isolated_rate = 0.0;
+  /** @brief Verified successful B1 pixel-site operations in this window. */
+  std::uint64_t successful_site_operations = 0U;
+
+  /** @brief Exact positive measured window duration. */
+  std::chrono::nanoseconds duration{0};
+};
+
+/**
+ * @brief Exact isolated-B1 denominator claim retained by the M1 inner row.
+ * @throws Nothing for value construction and copying.
+ * @note Canonical corpus validation independently resolves the named paired
+ * row and recomputes this tuple from its thirty raw job outcomes. This value
+ * alone is not pairing authority.
+ */
+struct M1PairedB1RateEvidence final {
+  /** @brief Successful isolated pixel-site operations over the full interval.
+   */
+  std::uint64_t successful_site_operations = 0U;
+
+  /** @brief Exact positive isolated measurement interval duration. */
+  std::chrono::nanoseconds duration{0};
 };
 
 /**
@@ -325,6 +344,9 @@ struct M1ThroughputProgressSample final {
  * @throws Nothing for value construction and copying.
  */
 struct M1GraphServiceWindow final {
+  /** @brief Exact zero-based measured-window ordinal in `[0,29]`. */
+  std::size_t window_ordinal = 0U;
+
   /** @brief True only when both producers retain demand for the full window. */
   bool both_graphs_continuously_demanding = false;
 
@@ -336,16 +358,25 @@ struct M1GraphServiceWindow final {
 };
 
 /**
- * @brief One actual class start and its applicability evidence.
+ * @brief One actual class start and its authoritative applicability evidence.
  * @throws Nothing for value construction and copying.
  */
 struct M1ClassStartSample final {
+  /** @brief Shared nonzero causal sequence of the committed product start. */
+  std::uint64_t causal_sequence = 0U;
+
   /** @brief Actual class copied from the immutable Run descriptor. */
   compute::ComputeRunQosClass service_class =
       compute::ComputeRunQosClass::Throughput;
 
-  /** @brief True only while both classes are continuously startable. */
-  bool both_classes_continuously_startable = false;
+  /** @brief Real Interactive candidate startability at the scheduler cut. */
+  bool interactive_candidate_startable = false;
+
+  /** @brief Real Throughput candidate startability at the scheduler cut. */
+  bool throughput_candidate_startable = false;
+
+  /** @brief True only after the selected execution child grant committed. */
+  bool execution_grant_committed = false;
 };
 
 /**
@@ -364,6 +395,27 @@ struct M1HeadroomAdmissionEvidence final {
 };
 
 /**
+ * @brief One raw measured I1 admission outcome used for headroom evidence.
+ * @throws std::bad_alloc when an optional Host status is copied.
+ */
+struct M1HeadroomAdmissionOutcome final {
+  /** @brief Exact measured I1 origin ordinal in `[0,39]`. */
+  std::size_t origin_ordinal = 0U;
+
+  /** @brief Exact zero-based edit index in `[0,11]`. */
+  std::size_t edit_index = 0U;
+
+  /** @brief Whether the edit reached its Host admission boundary. */
+  bool admission_attempted = false;
+
+  /** @brief Complete Host return status, absent if no return was observed. */
+  std::optional<OperationStatus> host_status;
+
+  /** @brief Whether the failure was classified as a headroom violation. */
+  bool throughput_headroom_failure = false;
+};
+
+/**
  * @brief Complete raw inputs for deterministic M1 fairness aggregation.
  * @throws std::bad_alloc when vector storage is copied.
  * @note The latency verdict is supplied by the accepted I1 evidence authority.
@@ -371,6 +423,9 @@ struct M1HeadroomAdmissionEvidence final {
 struct M1FairnessEvidenceInput final {
   /** @brief Exact measured one-second progress samples in window order. */
   std::vector<M1ThroughputProgressSample> progress_windows;
+
+  /** @brief Exact paired isolated-B1 numerator and measurement interval. */
+  std::optional<M1PairedB1RateEvidence> paired_isolated_b1;
 
   /** @brief All retained Graph-peer service windows in time order. */
   std::vector<M1GraphServiceWindow> graph_service_windows;
@@ -380,6 +435,9 @@ struct M1FairnessEvidenceInput final {
 
   /** @brief Complete measured Interactive admission classification. */
   M1HeadroomAdmissionEvidence headroom_admissions;
+
+  /** @brief All 40-by-12 measured Interactive raw admission outcomes. */
+  std::vector<M1HeadroomAdmissionOutcome> headroom_outcomes;
 
   /** @brief Frozen I1 mixed-latency verdict computed by its own authority. */
   I1Verdict interactive_latency_verdict = I1Verdict::Invalid;
@@ -525,6 +583,15 @@ struct M1FairnessObservation final {
   /** @brief Run terminal category for Run-terminal records. */
   compute::ComputeRunTerminalKind run_terminal_kind =
       compute::ComputeRunTerminalKind::Succeeded;
+
+  /** @brief Real Interactive candidate startability for ServiceStart only. */
+  bool interactive_candidate_startable = false;
+
+  /** @brief Real Throughput candidate startability for ServiceStart only. */
+  bool throughput_candidate_startable = false;
+
+  /** @brief Selected execution-grant commitment for ServiceStart only. */
+  bool execution_grant_committed = false;
 };
 
 /**

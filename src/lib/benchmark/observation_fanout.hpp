@@ -72,6 +72,7 @@ class ComputeRunObservationFanout final
       const compute::ComputeRunDescriptor& descriptor,
       compute::ComputeRunTaskIdentity task_identity,
       std::uint64_t service_charge,
+      const compute::ComputeRunServiceStartObservation& observation,
       compute::ComputeRunObservationCoordinate coordinate) noexcept override;
 
   /** @copydoc compute::ComputeRunObservationSink::on_task_terminal */

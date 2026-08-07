@@ -2076,6 +2076,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_link_libraries(i1_edit_storm_benchmark PRIVATE
             photospider
             nlohmann_json::nlohmann_json
+            PkgConfig::UTF8PROC
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
         add_executable(i2_progressive_benchmark EXCLUDE_FROM_ALL
@@ -2118,7 +2119,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
         add_executable(m1_shared_benchmark EXCLUDE_FROM_ALL
-            tests/verification/m1_shared_benchmark.cpp)
+            tests/verification/m1_shared_benchmark.cpp
+            tests/verification/i1_evidence_json.cpp
+            tests/verification/b1_evidence_json.cpp)
         set_target_properties(m1_shared_benchmark PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
             BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
@@ -2143,7 +2146,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/verification/i1_evidence_json.cpp
         tests/verification/i1_evidence_workflow.cpp)
     target_link_libraries(test_i1_evidence PRIVATE
-        nlohmann_json::nlohmann_json)
+        nlohmann_json::nlohmann_json
+        PkgConfig::UTF8PROC)
     add_ps_test(test_i1_profile tests/unit/test_i1_profile.cpp)
     add_ps_test(test_i2_evidence tests/unit/test_i2_evidence.cpp)
     target_sources(test_i2_evidence PRIVATE

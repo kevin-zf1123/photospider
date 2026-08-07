@@ -474,46 +474,39 @@ void close_sessions(Host& host, const std::vector<GraphSessionId>& sessions) {
 /**
  * @brief Builds complete non-timing fairness input around observed starts.
  * @param snapshot Settled real mixed observation snapshot.
- * @param ready_at_release Real class-partitioned backlog before gate release.
  * @return Passing synthetic threshold inputs plus actual class-start order.
  * @throws std::bad_alloc when vector storage allocates.
  * @note Only class-start evidence comes from this reduced product fixture;
  * machine progress/Jain/latency thresholds remain deliberately synthetic.
  */
 M1FairnessEvidenceInput make_product_class_start_input(
-    const M1FairnessObservationSnapshot& snapshot,
-    const compute::ExecutionReadyClassSnapshot& ready_at_release) {
+    const M1FairnessObservationSnapshot& snapshot) {
   M1FairnessEvidenceInput input;
-  input.progress_windows.assign(kM1MeasuredWindowCount,
-                                M1ThroughputProgressSample{0.20, 1.0});
-  input.graph_service_windows.assign(kM1MeasuredWindowCount,
-                                     M1GraphServiceWindow{true, 1U, 1U});
-  std::uint64_t remaining_interactive = ready_at_release.interactive_entries;
-  std::uint64_t remaining_throughput = ready_at_release.throughput_entries;
+  input.paired_isolated_b1 =
+      M1PairedB1RateEvidence{1000000U, std::chrono::seconds(1)};
+  for (std::size_t window = 0U; window < kM1MeasuredWindowCount; ++window) {
+    input.progress_windows.push_back(
+        M1ThroughputProgressSample{window, 200000U, std::chrono::seconds(1)});
+    input.graph_service_windows.push_back(
+        M1GraphServiceWindow{window, true, 1U, 1U});
+  }
   for (const M1FairnessObservation& event : snapshot.events) {
     if (event.kind == M1ObservationKind::ServiceStart) {
-      const bool both_startable =
-          remaining_interactive != 0U && remaining_throughput != 0U;
       input.class_starts.push_back(
-          M1ClassStartSample{event.service_class, both_startable});
-      switch (event.service_class) {
-        case compute::ComputeRunQosClass::Interactive:
-          if (remaining_interactive != 0U) {
-            --remaining_interactive;
-          }
-          break;
-        case compute::ComputeRunQosClass::Throughput:
-          if (remaining_throughput != 0U) {
-            --remaining_throughput;
-          }
-          break;
-        default:
-          break;
-      }
+          M1ClassStartSample{event.causal_sequence, event.service_class,
+                             event.interactive_candidate_startable,
+                             event.throughput_candidate_startable,
+                             event.execution_grant_committed});
     }
   }
   input.headroom_admissions = M1HeadroomAdmissionEvidence{
       kM1MeasuredI1AttemptCount, kM1MeasuredI1AttemptCount, 0U};
+  for (std::size_t origin = 0U; origin < kM1MeasuredI1OriginCount; ++origin) {
+    for (std::size_t edit = 0U; edit < kI1EditCount; ++edit) {
+      input.headroom_outcomes.push_back(M1HeadroomAdmissionOutcome{
+          origin, edit, true, OperationStatus{}, false});
+    }
+  }
   input.interactive_latency_verdict = I1Verdict::Pass;
   input.observation_overflowed = snapshot.overflowed;
   input.observation_sequence_exhausted = snapshot.sequence_exhausted;
@@ -631,8 +624,8 @@ TEST(M1ProductPath,
   ASSERT_FALSE(snapshot.overflowed);
   ASSERT_FALSE(snapshot.sequence_exhausted);
   ASSERT_FALSE(snapshot.qos_mismatch);
-  const M1FairnessSummary fairness = evaluate_m1_fairness(
-      make_product_class_start_input(snapshot, ready.ready_classes));
+  const M1FairnessSummary fairness =
+      evaluate_m1_fairness(make_product_class_start_input(snapshot));
   EXPECT_EQ(fairness.class_start_verdict, I1Verdict::Pass);
   EXPECT_LE(fairness.maximum_interactive_burst, kM1InteractiveBurstLimit);
 
@@ -640,9 +633,15 @@ TEST(M1ProductPath,
   std::uint64_t final_interactive_settlement = 0U;
   std::size_t interactive_starts = 0U;
   std::size_t throughput_starts = 0U;
+  std::size_t dual_startable_starts = 0U;
   std::vector<std::uint64_t> successful_throughput_runs;
   for (const M1FairnessObservation& event : snapshot.events) {
     if (event.kind == M1ObservationKind::ServiceStart) {
+      EXPECT_TRUE(event.execution_grant_committed);
+      if (event.interactive_candidate_startable &&
+          event.throughput_candidate_startable) {
+        ++dual_startable_starts;
+      }
       if (event.service_class == compute::ComputeRunQosClass::Interactive) {
         ++interactive_starts;
       } else {
@@ -668,6 +667,7 @@ TEST(M1ProductPath,
   }
   EXPECT_EQ(interactive_starts, interactive_sessions.size());
   EXPECT_EQ(throughput_starts, throughput_sessions.size());
+  EXPECT_GT(dual_startable_starts, 0U);
   EXPECT_FALSE(successful_throughput_runs.empty());
   EXPECT_NE(first_throughput_settlement, 0U);
   EXPECT_NE(final_interactive_settlement, 0U);

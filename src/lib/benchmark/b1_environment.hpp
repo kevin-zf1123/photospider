@@ -888,4 +888,19 @@ bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
                                 const B1EnvironmentEvidence& rhs,
                                 B1EnvironmentRelation relation) noexcept;
 
+/**
+ * @brief Checks an exact environment relation using retained claims only.
+ * @param lhs First canonical claims object.
+ * @param rhs Second canonical claims object.
+ * @param relation Required candidate/reference, cap, or M1 pair relation.
+ * @return True only when all serializable claims and relation keys agree.
+ * @throws Nothing; malformed, incomplete, or drifting claims fail closed.
+ * @note This source-private import boundary cannot establish conformance or
+ * Pass. Required-storage callers must independently validate each side's live
+ * actual authority with `compatible_b1_environments` before promotion.
+ */
+bool compatible_b1_environment_claims(const B1EnvironmentEvidence& lhs,
+                                      const B1EnvironmentEvidence& rhs,
+                                      B1EnvironmentRelation relation) noexcept;
+
 }  // namespace ps::benchmark

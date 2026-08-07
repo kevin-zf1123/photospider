@@ -54,11 +54,12 @@ void ComputeRunObservationFanout::on_task_ready(
 void ComputeRunObservationFanout::on_service_start(
     const compute::ComputeRunDescriptor& descriptor,
     compute::ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
+    const compute::ComputeRunServiceStartObservation& observation,
     compute::ComputeRunObservationCoordinate coordinate) noexcept {
-  sequence_authority_->on_service_start(descriptor, task_identity,
-                                        service_charge, coordinate);
+  sequence_authority_->on_service_start(
+      descriptor, task_identity, service_charge, observation, coordinate);
   mirror_->on_service_start(descriptor, task_identity, service_charge,
-                            coordinate);
+                            observation, coordinate);
 }
 
 void ComputeRunObservationFanout::on_task_terminal(

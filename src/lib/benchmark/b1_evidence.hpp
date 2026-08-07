@@ -271,6 +271,46 @@ struct B1JobEvidence final {
 };
 
 /**
+ * @brief Reusable result of the Issue #95 event-aligned Compute I/O FSM.
+ *
+ * The result is derived only from executor-authored admission/settlement
+ * events and their same-lock snapshots. Sparse later process snapshots cannot
+ * increase, repair, or replace either high-water value.
+ *
+ * @throws std::bad_alloc when structural diagnostics are copied.
+ */
+struct B1ComputeIoEvaluation final {
+  /** @brief True when every snapshot/status/identity relation is coherent. */
+  bool structurally_valid = true;
+  /** @brief True when exactly two attempt-zero tasks accepted and succeeded. */
+  bool fault_free_complete = false;
+  /** @brief Duplicate accepted admissions for one stage/attempt. */
+  std::size_t duplicate_admissions = 0U;
+  /** @brief Accepted or offered task records using attempts above zero. */
+  std::size_t retry_records = 0U;
+  /** @brief Event-aligned maximum observed active task count. */
+  std::uint64_t task_high_water = 0U;
+  /** @brief Event-aligned maximum observed active planned bytes. */
+  std::uint64_t planned_byte_high_water = 0U;
+  /** @brief Complete stable structural invalidation reasons. */
+  std::vector<std::string> validity_reasons;
+};
+
+/**
+ * @brief Replays one B1 job's complete event-aligned Compute I/O stream.
+ * @param evidence Complete immutable job/output evidence.
+ * @return Structural, fault-free, retry, and high-water facts.
+ * @throws std::bad_alloc when maps or diagnostics allocate.
+ * @note The accepted stream is exactly Initial, payload admission/settlement,
+ * manifest admission/settlement, and Final for fault-free work. Missing,
+ * duplicated, reordered, arithmetically contradictory, unknown-enum, or
+ * noncanonical task/status evidence fails closed. Global executor sequence
+ * gaps are permitted because unrelated process work may be omitted.
+ */
+B1ComputeIoEvaluation evaluate_b1_compute_io_evidence(
+    const B1JobEvidence& evidence);
+
+/**
  * @brief Complete raw input to one isolated cap-one or cap-eight B1 row.
  * @throws std::bad_alloc when job/environment/snapshot storage allocates.
  * @note Copying an input that carries actual storage authority shares its live
@@ -379,6 +419,17 @@ struct B1ReferenceThroughputSummary final {
   /** @brief Independent reference-relative throughput verdict. */
   I1Verdict verdict = I1Verdict::Invalid;
 };
+
+/**
+ * @brief Replays the exact Issue #95 verified-endpoint predicate for one job.
+ * @param evidence Complete raw physical, semantic, output, and I/O evidence.
+ * @return True only for the same successful endpoint credited by the row
+ * evaluator.
+ * @throws std::bad_alloc when temporary canonical or diagnostic storage grows.
+ * @note This helper exposes derived truth only; it creates no output, storage,
+ * scheduling, or observation authority.
+ */
+bool b1_job_has_verified_endpoint(const B1JobEvidence& evidence);
 
 /**
  * @brief Evaluates and closes one exact isolated B1 inner row fail-closed.

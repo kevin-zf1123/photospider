@@ -38,7 +38,7 @@ struct M1ExecutionSnapshot final {
   /** @brief Every configured authoritative device resource account. */
   std::vector<ResourceLedger::DeviceSnapshot> device_resources;
 
-  /** @brief Process Compute I/O active/phase/high-water/settlement evidence. */
+  /** @brief Sparse process Compute I/O current/phase diagnostic cut only. */
   execution::ComputeIoExecutorSnapshot compute_io;
 
   /** @brief Fixed general capacity and active Throughput root total. */

@@ -20,9 +20,11 @@
 #include <utility>
 #include <vector>
 
+#include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
 #include "benchmark/i1_evidence.hpp"
 #include "compute/compute_run.hpp"
 #include "photospider/data/value.hpp"
+#include "support/b1_test_environment.hpp"
 #include "verification/i1_evidence_json.hpp"
 #include "verification/i1_evidence_workflow.hpp"
 
@@ -54,6 +56,34 @@ Value make_test_output() {
  */
 OperationStatus success_status() {
   return OperationStatus{};
+}
+
+/**
+ * @brief Builds the exact storage-N/A environment accepted by the I1 producer.
+ * @return Self-validating same-base I1 claims with the shared frozen fixture.
+ * @throws Canonical environment and allocation failures unchanged.
+ */
+B1EnvironmentEvidence make_i1_pair_environment() {
+  B1EnvironmentEvidence environment = testing::make_b1_test_environment(8U, 1U);
+  environment.workload_id = kI1WorkloadId;
+  environment.fixture_digest = evidence_i1_component_fixture_digest();
+  environment.storage_manifest.reset();
+  environment.claimed_storage_digest.reset();
+  environment.storage_raw_proof.reset();
+  environment.storage_eligibility.reset();
+  environment.storage_actual_observation.reset();
+  environment.environment_class_manifest = encode_b1_environment_class(
+      {testing::known_b1_field("base_environment_digest", "sha256",
+                               b1_digest_hex(environment.claimed_base_digest)),
+       testing::known_b1_field("storage_environment_applicability", "enum",
+                               "not-applicable"),
+       testing::known_b1_field("storage_environment_not_applicable_reason",
+                               "enum", "row-has-no-output-commit"),
+       testing::not_applicable_b1_field("storage_environment_digest", "sha256",
+                                        "row-has-no-output-commit")});
+  environment.claimed_environment_class_digest =
+      digest_b1_environment_manifest(environment.environment_class_manifest);
+  return environment;
 }
 
 /**
@@ -1951,6 +1981,37 @@ TEST(I1Evidence, AggregatesExactlyTwoHundredMeasuredRows) {
   EXPECT_EQ(summary.waste_verdict, I1Verdict::Pass);
   EXPECT_EQ(summary.memory_verdict, I1Verdict::Pass);
   EXPECT_EQ(summary.output_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves the real I1 evaluator output produces a loadable native pair.
+ * @throws Test fixture, evaluator, canonical pack, and framework failures.
+ */
+TEST(I1Evidence, ProducesCanonicalPairObjectFromCompleteReplicate) {
+  std::vector<I1EpisodeInnerRow> rows;
+  rows.reserve(kI1GridSlotCount);
+  for (std::size_t slot = 0U; slot < kI1GridSlotCount; ++slot) {
+    rows.push_back(evaluate_i1_episode(make_valid_input(slot, 10ms)));
+  }
+
+  const EvidencePairObject produced = make_i1_evidence_pair_object(
+      rows, make_i1_pair_environment(),
+      EvidencePairProducerOptions{EvidenceSubjectRole::Reference,
+                                  std::nullopt});
+  const std::string pack = materialize_evidence_pair_object(produced);
+  const EvidencePairObject loaded = load_evidence_pair_object(
+      pack, produced.row.digest, produced.bundle.digest);
+  EXPECT_EQ(loaded.row.digest, produced.row.digest);
+  EXPECT_EQ(loaded.bundle.digest, produced.bundle.digest);
+  const B1CanonicalManifest measurement =
+      parse_b1_canonical_manifest(loaded.row.source.measurement_evidence.bytes);
+  ASSERT_EQ(measurement.fields.size(), 4U);
+  EXPECT_EQ(parse_b1_framed_list(measurement.fields[2U].payload).size(),
+            kI1MeasuredSlotCount);
+  EXPECT_EQ(
+      parse_b1_canonical_uint64(measurement.fields[3U].payload),
+      static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(10ms).count()));
 }
 
 }  // namespace

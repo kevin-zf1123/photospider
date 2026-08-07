@@ -666,6 +666,13 @@ struct ExecutionService::QueueEntry final {
   bool operation_gate_started = false;
 
   /**
+   * @brief Real scheduler/grant facts committed with the physical start.
+   * @note The worker publishes this immutable observation only after releasing
+   * the pool, Run-state, and terminal-arbiter mutexes.
+   */
+  std::optional<ComputeRunServiceStartObservation> service_start_observation;
+
+  /**
    * @brief Coordinate committed with the physical route start, when observed.
    * @note The worker publishes this immutable fact only after releasing the
    * service pool, service Run-state, and Run terminal-arbiter mutexes.
@@ -1824,9 +1831,15 @@ class ExecutionService::BoundedReadyStore final {
    * coordinate and performs the irreversible route commit under one critical
    * section shared with cancellation acceptance. A rejected route leaves an
    * unpublished sequence gap, and every staged owner rolls back.
-   * @note Caller holds `pool -> RunState`. `try_grant` acquires and releases
-   * the reservation mutex before this method enters the Run terminal arbiter;
-   * no path holds reservation and terminal-arbiter mutexes together.
+   * Immediately before staging, both class-applicability facts are recomputed
+   * from real ready entries, Run lifecycle, operation/route eligibility, and
+   * available child-grant capacity. They are published only if this exact
+   * selected start subsequently commits every owner and counter.
+   * @note Caller holds `PoolState::mutex`; this method locks each probed
+   * `RunState` separately and later holds the selected Run while staging its
+   * child grant. `try_grant` acquires and releases the reservation mutex before
+   * this method enters the Run terminal arbiter; no path holds reservation and
+   * terminal-arbiter mutexes together.
    */
   StartResult commit_start(SelectionPin& pin, int worker_id,
                            execution::PhysicalExecutionLane lane,
@@ -1834,7 +1847,9 @@ class ExecutionService::BoundedReadyStore final {
     if (!pin.entry || !pin.entry->run) {
       return StartResult::Obsolete;
     }
-    const bool throughput_ready =
+    const bool interactive_startable =
+        has_startable(ComputeRunQosClass::Interactive, worker_id, lane, routes);
+    const bool throughput_startable =
         has_startable(ComputeRunQosClass::Throughput, worker_id, lane, routes);
     const auto run_found = run_states_.find(pin.entry->run->id.value());
     if (run_found == run_states_.end()) {
@@ -1854,7 +1869,7 @@ class ExecutionService::BoundedReadyStore final {
             std::numeric_limits<std::uint64_t>::max() ||
         run.committed_starts == std::numeric_limits<std::uint64_t>::max() ||
         (pin.service_class == ComputeRunQosClass::Interactive &&
-         throughput_ready &&
+         throughput_startable &&
          consecutive_interactive_ ==
              std::numeric_limits<std::uint64_t>::max())) {
       return class_dispatch_count(pin.service_class) ==
@@ -1865,13 +1880,7 @@ class ExecutionService::BoundedReadyStore final {
                  : StartResult::Obsolete;
     }
 
-    const ResourceVector execution_resources{
-        1U,
-        run.execution_retained_bytes_per_task,
-        run.resource_demand.scratch_bytes,
-        0U,
-        0U,
-    };
+    const ResourceVector execution_resources = task_execution_resources(run);
     if (!run.reservation.has_value()) {
       std::terminate();
     }
@@ -1946,8 +1955,10 @@ class ExecutionService::BoundedReadyStore final {
     ++class_dispatch_count(pin.service_class);
     ++run.committed_starts;
     ++run.in_flight;
+    pin.entry->service_start_observation = ComputeRunServiceStartObservation{
+        interactive_startable, throughput_startable, true};
     if (pin.service_class == ComputeRunQosClass::Interactive &&
-        throughput_ready) {
+        throughput_startable) {
       ++consecutive_interactive_;
     } else {
       consecutive_interactive_ = 0U;
@@ -2569,6 +2580,32 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
+   * @brief Builds the exact child-grant vector for one physical task start.
+   * @param run Run whose immutable demand and retained bytes are authoritative.
+   * @return Complete per-task Host resource demand.
+   * @throws Nothing.
+   */
+  static ResourceVector task_execution_resources(const RunState& run) noexcept {
+    return ResourceVector{1U, run.execution_retained_bytes_per_task,
+                          run.resource_demand.scratch_bytes, 0U, 0U};
+  }
+
+  /**
+   * @brief Tests whether a Run can mint its next exact execution child grant.
+   * @param run Run whose mutex is held by the caller.
+   * @return True only when live reservation capacity covers every dimension.
+   * @throws Nothing; a reservation-state locking failure terminates because
+   * this helper is a no-throw scheduler probe.
+   * @note This copies authority-free capacity and never mints or consumes a
+   * grant. A later `try_grant()` remains the sole commit linearization point.
+   */
+  static bool has_execution_capacity(const RunState& run) noexcept {
+    return run.reservation.has_value() &&
+           resources_fit(task_execution_resources(run),
+                         run.reservation->available());
+  }
+
+  /**
    * @brief Tests whether one class currently contains startable ready work.
    * @param service_class Class already independent from intent and route.
    * @param worker_id Worker attempting a start.
@@ -2587,7 +2624,8 @@ class ExecutionService::BoundedReadyStore final {
         continue;
       }
       std::lock_guard<std::mutex> run_lock(state.run->mutex);
-      if (candidate_entry_for_lane(state, worker_id, lane, routes) != nullptr) {
+      if (candidate_entry_for_lane(state, worker_id, lane, routes) != nullptr &&
+          has_execution_capacity(*state.run)) {
         return true;
       }
     }
@@ -5971,12 +6009,14 @@ void ExecutionService::worker_loop(
     const std::shared_ptr<ComputeRunObservationSink>& observation_sink =
         entry->submission.lease_.descriptor().observation_sink();
     if (entry->service_start_coordinate.has_value()) {
-      if (observation_sink == nullptr) {
+      if (observation_sink == nullptr ||
+          !entry->service_start_observation.has_value()) {
         std::terminate();
       }
       observation_sink->on_service_start(
           entry->submission.lease_.descriptor(), entry->submission.identity(),
-          entry->policy_service_cost, *entry->service_start_coordinate);
+          entry->policy_service_cost, *entry->service_start_observation,
+          *entry->service_start_coordinate);
     }
     try {
       const std::optional<ComputeRunCancellationReason> cancellation =

@@ -12,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -33,18 +34,29 @@ namespace {
  */
 M1FairnessEvidenceInput make_passing_fairness_input() {
   M1FairnessEvidenceInput input;
-  input.progress_windows.assign(kM1MeasuredWindowCount,
-                                M1ThroughputProgressSample{0.20, 1.0});
-  input.graph_service_windows.assign(kM1MeasuredWindowCount,
-                                     M1GraphServiceWindow{true, 100U, 100U});
+  input.paired_isolated_b1 =
+      M1PairedB1RateEvidence{1000000U, std::chrono::seconds(1)};
+  for (std::size_t window = 0U; window < kM1MeasuredWindowCount; ++window) {
+    input.progress_windows.push_back(
+        M1ThroughputProgressSample{window, 200000U, std::chrono::seconds(1)});
+    input.graph_service_windows.push_back(
+        M1GraphServiceWindow{window, true, 100U, 100U});
+  }
   for (std::size_t group = 0U; group < 3U; ++group) {
     input.class_starts.push_back(
-        M1ClassStartSample{compute::ComputeRunQosClass::Interactive, true});
+        M1ClassStartSample{group + 1U, compute::ComputeRunQosClass::Interactive,
+                           true, true, true});
   }
-  input.class_starts.push_back(
-      M1ClassStartSample{compute::ComputeRunQosClass::Throughput, true});
+  input.class_starts.push_back(M1ClassStartSample{
+      4U, compute::ComputeRunQosClass::Throughput, true, true, true});
   input.headroom_admissions = M1HeadroomAdmissionEvidence{
       kM1MeasuredI1AttemptCount, kM1MeasuredI1AttemptCount, 0U};
+  for (std::size_t origin = 0U; origin < kM1MeasuredI1OriginCount; ++origin) {
+    for (std::size_t edit = 0U; edit < kI1EditCount; ++edit) {
+      input.headroom_outcomes.push_back(M1HeadroomAdmissionOutcome{
+          origin, edit, true, OperationStatus{}, false});
+    }
+  }
   input.interactive_latency_verdict = I1Verdict::Pass;
   return input;
 }
@@ -132,10 +144,12 @@ class RecordingObservationSink final
       const compute::ComputeRunDescriptor& descriptor,
       compute::ComputeRunTaskIdentity task_identity,
       std::uint64_t service_charge,
+      const compute::ComputeRunServiceStartObservation& observation,
       compute::ComputeRunObservationCoordinate coordinate) noexcept override {
     static_cast<void>(descriptor);
     static_cast<void>(task_identity);
     static_cast<void>(service_charge);
+    static_cast<void>(observation);
     record(coordinate);
   }
 
@@ -477,11 +491,11 @@ M1ExecutionSnapshot make_m1_snapshot(bool active, ResourceVector high_water) {
   snapshot.host_resources.high_water = high_water;
   snapshot.compute_io.task_limit = kB1ComputeIoTaskLimit;
   snapshot.compute_io.planned_bytes_limit = kB1ComputeIoPlannedByteLimit;
-  snapshot.compute_io.active_tasks = active ? 2U : 0U;
-  snapshot.compute_io.active_planned_bytes = active ? 4096U : 0U;
+  snapshot.compute_io.active_tasks = 0U;
+  snapshot.compute_io.active_planned_bytes = 0U;
   snapshot.compute_io.constructing_tasks = 0U;
-  snapshot.compute_io.queued_tasks = active ? 1U : 0U;
-  snapshot.compute_io.running_tasks = active ? 1U : 0U;
+  snapshot.compute_io.queued_tasks = 0U;
+  snapshot.compute_io.running_tasks = 0U;
   snapshot.compute_io.accepting = true;
   snapshot.throughput.capacity =
       ResourceVector{31U, 1006632960U, 503316480U, 64512U, 251658240U};
@@ -508,6 +522,95 @@ M1ExecutionSnapshot make_m1_snapshot(bool active, ResourceVector high_water) {
 }
 
 /**
+ * @brief Builds one valid event-aligned executor snapshot for a test task.
+ * @param active_tasks Zero or one active task.
+ * @param active_bytes Exact active charge paired with `active_tasks`.
+ * @return Frozen-limit snapshot with the task represented as queued.
+ * @throws Nothing.
+ */
+execution::ComputeIoExecutorSnapshot make_m1_io_event_snapshot(
+    std::uint64_t active_tasks, std::uint64_t active_bytes) noexcept {
+  execution::ComputeIoExecutorSnapshot snapshot;
+  snapshot.task_limit = kB1ComputeIoTaskLimit;
+  snapshot.planned_bytes_limit = kB1ComputeIoPlannedByteLimit;
+  snapshot.active_tasks = active_tasks;
+  snapshot.active_planned_bytes = active_bytes;
+  snapshot.queued_tasks = active_tasks;
+  snapshot.accepting = true;
+  return snapshot;
+}
+
+/**
+ * @brief Builds one fault-free two-stage B1 I/O stream for an M1 offer.
+ * @param offer Exact protocol offer and endpoint identity.
+ * @param first_sequence First of four globally unique accounting sequences.
+ * @return Minimal complete B1 job record accepted by the reusable I/O FSM.
+ * @throws std::invalid_argument when the offer lacks its terminal endpoint.
+ * @throws std::bad_alloc when observation storage allocates.
+ */
+B1JobEvidence make_m1_batch_io_job(const M1BatchOfferEvidence& offer,
+                                   std::uint64_t first_sequence) {
+  if (!offer.endpoint.has_value()) {
+    throw std::invalid_argument("M1 test offer lacks an endpoint");
+  }
+  B1JobEvidence evidence;
+  evidence.job = offer.job;
+  evidence.producer_offer_ordinal = offer.producer_offer_ordinal;
+  evidence.offered_at = offer.offered.timestamp;
+  evidence.endpoint_at = offer.endpoint->timestamp;
+  evidence.output.status = B1OutputCommitStatus::RevalidationFailed;
+
+  const B1IoTaskIdentity payload{offer.job, B1IoStage::PayloadStage, 0U};
+  const B1IoTaskIdentity manifest{offer.job, B1IoStage::ManifestCommit, 0U};
+  const std::uint64_t manifest_bytes = b1_manifest_length(offer.job.job_index);
+  const auto zero = make_m1_io_event_snapshot(0U, 0U);
+  const auto payload_active = make_m1_io_event_snapshot(1U, kB1PayloadBytes);
+  const auto manifest_active = make_m1_io_event_snapshot(1U, manifest_bytes);
+  const execution::ComputeIoAdmissionEvent payload_admission{
+      first_sequence,  execution::ComputeIoAdmissionStatus::Accepted,
+      kB1PayloadBytes, 1U,
+      kB1PayloadBytes, payload_active};
+  const execution::ComputeIoSettlementEvent payload_settlement{
+      first_sequence + 1U,
+      first_sequence,
+      execution::ComputeIoCompletionStatus::Succeeded,
+      1U,
+      kB1PayloadBytes,
+      zero};
+  const execution::ComputeIoAdmissionEvent manifest_admission{
+      first_sequence + 2U, execution::ComputeIoAdmissionStatus::Accepted,
+      manifest_bytes,      1U,
+      manifest_bytes,      manifest_active};
+  const execution::ComputeIoSettlementEvent manifest_settlement{
+      first_sequence + 3U,
+      first_sequence + 2U,
+      execution::ComputeIoCompletionStatus::Succeeded,
+      1U,
+      manifest_bytes,
+      zero};
+  evidence.output.io_observations = {
+      {B1IoObservationPoint::Initial, std::nullopt, 0U, std::nullopt,
+       std::nullopt, std::nullopt, std::nullopt, zero},
+      {B1IoObservationPoint::AcceptedAdmission, payload, kB1PayloadBytes,
+       execution::ComputeIoAdmissionStatus::Accepted, std::nullopt,
+       payload_admission, std::nullopt, payload_active},
+      {B1IoObservationPoint::Settlement, payload, kB1PayloadBytes,
+       execution::ComputeIoAdmissionStatus::Accepted,
+       execution::ComputeIoCompletionStatus::Succeeded, payload_admission,
+       payload_settlement, zero},
+      {B1IoObservationPoint::AcceptedAdmission, manifest, manifest_bytes,
+       execution::ComputeIoAdmissionStatus::Accepted, std::nullopt,
+       manifest_admission, std::nullopt, manifest_active},
+      {B1IoObservationPoint::Settlement, manifest, manifest_bytes,
+       execution::ComputeIoAdmissionStatus::Accepted,
+       execution::ComputeIoCompletionStatus::Succeeded, manifest_admission,
+       manifest_settlement, zero},
+      {B1IoObservationPoint::Final, std::nullopt, 0U, std::nullopt,
+       std::nullopt, std::nullopt, std::nullopt, zero}};
+  return evidence;
+}
+
+/**
  * @brief Builds one complete passing five-axis M1 row input.
  * @return Exact protocol, SLO samples, fault-free waste, and zero settlement.
  * @throws Allocation and checked-time failures unchanged.
@@ -519,6 +622,11 @@ M1InnerRowInput make_passing_inner_row_input() {
   input.fairness = make_passing_fairness_input();
   input.paired_isolated_i1_p99 = std::chrono::milliseconds(10);
   input.batch_waste = M1BatchWasteEvidence{1000U, 0U, 0U, 0U, 0U};
+  std::uint64_t io_sequence = 1U;
+  for (const M1BatchOfferEvidence& offer : input.protocol.batch_offers) {
+    input.batch_jobs.push_back(make_m1_batch_io_job(offer, io_sequence));
+    io_sequence += 4U;
+  }
   const ResourceVector zero_high_water{};
   const ResourceVector active_high_water{4U, 1048576U, 524288U, 3U, 4096U};
   input.temporal_snapshots = {make_m1_snapshot(false, zero_high_water),
@@ -642,8 +750,28 @@ TEST(M1Profile, PassesClosedFiveAxisInnerRow) {
       << (row.validity_reasons.empty() ? "no diagnostic"
                                        : row.validity_reasons.front());
   EXPECT_DOUBLE_EQ(*row.interactive_discarded_ratio, 0.2);
-  EXPECT_EQ(row.compute_io_task_high_water, 2U);
-  EXPECT_EQ(row.compute_io_planned_byte_high_water, 4096U);
+  EXPECT_EQ(row.compute_io_task_high_water, 1U);
+  EXPECT_EQ(row.compute_io_planned_byte_high_water, kB1PayloadBytes);
+}
+
+/**
+ * @brief Proves a short accepted/settled I/O task entirely between sparse M1
+ * cuts still contributes to event-aligned high-water.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, DerivesIoHighWaterBetweenSparseTemporalCuts) {
+  M1InnerRowInput input = make_passing_inner_row_input();
+  ASSERT_TRUE(std::all_of(
+      input.temporal_snapshots.begin(), input.temporal_snapshots.end(),
+      [](const M1ExecutionSnapshot& snapshot) {
+        return snapshot.compute_io.active_tasks == 0U &&
+               snapshot.compute_io.active_planned_bytes == 0U;
+      }));
+
+  const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.compute_io_task_high_water, 1U);
+  EXPECT_EQ(row.compute_io_planned_byte_high_water, kB1PayloadBytes);
 }
 
 /**
@@ -671,8 +799,69 @@ TEST(M1Profile, KeepsFiveAxisFailuresIndependent) {
   const M1InnerRow memory = evaluate_m1_inner_row(std::move(memory_input));
   EXPECT_EQ(memory.latency_verdict, I1Verdict::Pass);
   EXPECT_EQ(memory.waste_verdict, I1Verdict::Pass);
-  EXPECT_EQ(memory.memory_verdict, I1Verdict::Fail);
-  EXPECT_EQ(memory.overall_verdict, I1Verdict::Fail);
+  EXPECT_EQ(memory.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(memory.overall_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves M1 rejects every incomplete or contradictory raw I/O stream.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, RejectsMissingDuplicateMalformedAndOverlimitIoEvidence) {
+  M1InnerRowInput missing = make_passing_inner_row_input();
+  missing.batch_jobs.pop_back();
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(missing)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput duplicate = make_passing_inner_row_input();
+  ASSERT_GE(duplicate.batch_jobs.size(), 2U);
+  const std::uint64_t duplicate_sequence = duplicate.batch_jobs[0U]
+                                               .output.io_observations[1U]
+                                               .admission_event->sequence;
+  auto& duplicate_stream = duplicate.batch_jobs[1U].output.io_observations;
+  duplicate_stream[1U].admission_event->sequence = duplicate_sequence;
+  duplicate_stream[2U].admission_event->sequence = duplicate_sequence;
+  duplicate_stream[2U].settlement_event->admission_sequence =
+      duplicate_sequence;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(duplicate)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput reordered = make_passing_inner_row_input();
+  std::swap(reordered.batch_jobs[0U].output.io_observations[1U],
+            reordered.batch_jobs[0U].output.io_observations[2U]);
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(reordered)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput arithmetic = make_passing_inner_row_input();
+  auto& arithmetic_stream = arithmetic.batch_jobs[0U].output.io_observations;
+  --arithmetic_stream[1U].admission_event->charged_planned_bytes;
+  --arithmetic_stream[2U].admission_event->charged_planned_bytes;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(arithmetic)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput unknown = make_passing_inner_row_input();
+  unknown.batch_jobs[0U].output.io_observations[1U].point =
+      static_cast<B1IoObservationPoint>(255U);
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(unknown)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput overlimit = make_passing_inner_row_input();
+  auto& overlimit_stream = overlimit.batch_jobs[0U].output.io_observations;
+  auto invalid_snapshot = overlimit_stream[1U].snapshot;
+  invalid_snapshot.active_tasks = kB1ComputeIoTaskLimit + 1U;
+  invalid_snapshot.queued_tasks = kB1ComputeIoTaskLimit + 1U;
+  overlimit_stream[1U].snapshot = invalid_snapshot;
+  overlimit_stream[1U].admission_event->snapshot_after = invalid_snapshot;
+  overlimit_stream[2U].admission_event->snapshot_after = invalid_snapshot;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(overlimit)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput nonzero_final = make_passing_inner_row_input();
+  nonzero_final.temporal_snapshots.back().compute_io.active_tasks = 1U;
+  nonzero_final.temporal_snapshots.back().compute_io.queued_tasks = 1U;
+  nonzero_final.temporal_snapshots.back().compute_io.active_planned_bytes = 1U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(nonzero_final)).memory_verdict,
+            I1Verdict::Invalid);
 }
 
 /**
@@ -734,10 +923,10 @@ TEST(M1Profile, PassesCompleteIndependentFairnessGuards) {
  */
 TEST(M1Profile, ProgressP05FailsDespitePassingOverallAverage) {
   M1FairnessEvidenceInput input = make_passing_fairness_input();
-  input.progress_windows[0U].measured_rate = 0.0;
-  input.progress_windows[1U].measured_rate = 0.19;
+  input.progress_windows[0U].successful_site_operations = 0U;
+  input.progress_windows[1U].successful_site_operations = 190000U;
   for (std::size_t index = 2U; index < input.progress_windows.size(); ++index) {
-    input.progress_windows[index].measured_rate = 1.0;
+    input.progress_windows[index].successful_site_operations = 1000000U;
   }
   const M1FairnessSummary summary = evaluate_m1_fairness(std::move(input));
   ASSERT_TRUE(summary.throughput_progress_p05.has_value());
@@ -753,15 +942,18 @@ TEST(M1Profile, ProgressP05FailsDespitePassingOverallAverage) {
  */
 TEST(M1Profile, FailsPeerJainAndFourInteractiveBurstIndependently) {
   M1FairnessEvidenceInput input = make_passing_fairness_input();
-  input.graph_service_windows.assign(kM1MeasuredWindowCount,
-                                     M1GraphServiceWindow{true, 100U, 1U});
+  for (M1GraphServiceWindow& window : input.graph_service_windows) {
+    window.graph_a_completed_service = 100U;
+    window.graph_b_completed_service = 1U;
+  }
   input.class_starts.clear();
   for (std::size_t index = 0U; index < 4U; ++index) {
     input.class_starts.push_back(
-        M1ClassStartSample{compute::ComputeRunQosClass::Interactive, true});
+        M1ClassStartSample{index + 1U, compute::ComputeRunQosClass::Interactive,
+                           true, true, true});
   }
-  input.class_starts.push_back(
-      M1ClassStartSample{compute::ComputeRunQosClass::Throughput, true});
+  input.class_starts.push_back(M1ClassStartSample{
+      5U, compute::ComputeRunQosClass::Throughput, true, true, true});
 
   const M1FairnessSummary summary = evaluate_m1_fairness(std::move(input));
   ASSERT_TRUE(summary.graph_jain_p05.has_value());
@@ -774,12 +966,37 @@ TEST(M1Profile, FailsPeerJainAndFourInteractiveBurstIndependently) {
 }
 
 /**
+ * @brief Proves a fourth Interactive start counts only at a real dual-start
+ * cut.
+ * @throws GoogleTest assertion control and evaluator allocation failures.
+ * @note Nominal offer overlap is deliberately absent from the evidence model;
+ * the negative case differs only in product-authored Throughput startability.
+ */
+TEST(M1Profile, ExcludesFourthStartWhenThroughputWasNotReallyStartable) {
+  M1FairnessEvidenceInput input = make_passing_fairness_input();
+  input.class_starts = {
+      {1U, compute::ComputeRunQosClass::Interactive, true, true, true},
+      {2U, compute::ComputeRunQosClass::Interactive, true, true, true},
+      {3U, compute::ComputeRunQosClass::Interactive, true, true, true},
+      {4U, compute::ComputeRunQosClass::Interactive, true, false, true},
+      {5U, compute::ComputeRunQosClass::Throughput, true, true, true}};
+
+  const M1FairnessSummary summary = evaluate_m1_fairness(std::move(input));
+  EXPECT_EQ(summary.maximum_interactive_burst, 3U);
+  EXPECT_EQ(summary.class_start_verdict, I1Verdict::Pass);
+  EXPECT_EQ(summary.composite_fairness_verdict, I1Verdict::Pass);
+}
+
+/**
  * @brief Proves headroom and latency failures cannot substitute for each other.
  * @throws GoogleTest assertion control and evaluator allocation failures.
  */
 TEST(M1Profile, KeepsHeadroomAndLatencyVerdictsNonSubstitutable) {
   M1FairnessEvidenceInput input = make_passing_fairness_input();
   input.headroom_admissions.throughput_headroom_failures = 1U;
+  input.headroom_outcomes.front().host_status = OperationStatus{
+      false, OperationErrorDomain::Graph, 1, "headroom", "headroom"};
+  input.headroom_outcomes.front().throughput_headroom_failure = true;
   input.interactive_latency_verdict = I1Verdict::Fail;
   const M1FairnessSummary summary = evaluate_m1_fairness(std::move(input));
   EXPECT_EQ(summary.throughput_progress_verdict, I1Verdict::Pass);
@@ -797,7 +1014,7 @@ TEST(M1Profile, KeepsHeadroomAndLatencyVerdictsNonSubstitutable) {
 TEST(M1Profile, InvalidatesIncompleteAndOverflowedEvidence) {
   M1FairnessEvidenceInput input = make_passing_fairness_input();
   input.progress_windows.pop_back();
-  input.graph_service_windows.front() = M1GraphServiceWindow{true, 0U, 0U};
+  input.graph_service_windows.front() = M1GraphServiceWindow{0U, true, 0U, 0U};
   input.class_starts.pop_back();
   input.headroom_admissions.classified_outcomes -= 1U;
   input.observation_overflowed = true;
@@ -829,7 +1046,8 @@ TEST(M1Profile, UnknownClosedEnumsInvalidateCompositeEvidence) {
   M1FairnessEvidenceInput unknown_class = make_passing_fairness_input();
   unknown_class.class_starts.insert(
       unknown_class.class_starts.begin(),
-      M1ClassStartSample{static_cast<compute::ComputeRunQosClass>(255U), true});
+      M1ClassStartSample{1U, static_cast<compute::ComputeRunQosClass>(255U),
+                         true, true, true});
   const M1FairnessSummary class_summary =
       evaluate_m1_fairness(std::move(unknown_class));
   EXPECT_EQ(class_summary.class_start_verdict, I1Verdict::Invalid);
@@ -876,7 +1094,8 @@ TEST(M1Profile, ObservationFanoutUsesOnlySharedSequenceAuthority) {
       run.descriptor(),
       compute::ComputeRunTaskIdentity(run.descriptor().id(),
                                       compute::ComputeRunLocalTaskId(1U)),
-      8U, reserved);
+      8U, compute::ComputeRunServiceStartObservation{true, true, true},
+      reserved);
   EXPECT_EQ(authority->callback_count, 1U);
   EXPECT_EQ(mirror->callback_count, 1U);
   EXPECT_EQ(authority->last_coordinate.observed_at,
@@ -920,12 +1139,13 @@ TEST(M1Profile, ObservationSinksShareOneNonzeroCausalSequence) {
       throughput_run.descriptor(),
       compute::ComputeRunTaskIdentity(throughput_run.descriptor().id(),
                                       compute::ComputeRunLocalTaskId(2U)),
-      22U, second);
+      22U, compute::ComputeRunServiceStartObservation{true, true, true},
+      second);
   interactive->on_service_start(
       interactive_run.descriptor(),
       compute::ComputeRunTaskIdentity(interactive_run.descriptor().id(),
                                       compute::ComputeRunLocalTaskId(1U)),
-      11U, first);
+      11U, compute::ComputeRunServiceStartObservation{true, true, true}, first);
 
   const compute::ComputeRunObservationCoordinate third =
       throughput->reserve_causal_coordinate();
@@ -933,7 +1153,7 @@ TEST(M1Profile, ObservationSinksShareOneNonzeroCausalSequence) {
       interactive_run.descriptor(),
       compute::ComputeRunTaskIdentity(interactive_run.descriptor().id(),
                                       compute::ComputeRunLocalTaskId(3U)),
-      33U, third);
+      33U, compute::ComputeRunServiceStartObservation{true, true, true}, third);
   EXPECT_THROW(collector.make_sink(static_cast<M1ObservedRequestTag>(255U)),
                std::invalid_argument);
   const M1FairnessObservationSnapshot snapshot = collector.snapshot();
@@ -994,12 +1214,14 @@ TEST(M1Profile, ObservationCallbacksRemainFiniteUnderConcurrency) {
       for (std::size_t event = 0U; event < kEventsPerThread; ++event) {
         const compute::ComputeRunObservationCoordinate coordinate =
             sink->reserve_causal_coordinate();
-        sink->on_service_start(run.descriptor(),
-                               compute::ComputeRunTaskIdentity(
-                                   run.descriptor().id(),
-                                   compute::ComputeRunLocalTaskId(
-                                       thread * kEventsPerThread + event + 1U)),
-                               1U, coordinate);
+        sink->on_service_start(
+            run.descriptor(),
+            compute::ComputeRunTaskIdentity(
+                run.descriptor().id(),
+                compute::ComputeRunLocalTaskId(thread * kEventsPerThread +
+                                               event + 1U)),
+            1U, compute::ComputeRunServiceStartObservation{true, true, true},
+            coordinate);
       }
     });
   }

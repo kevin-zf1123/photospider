@@ -2210,9 +2210,21 @@ bool valid_b1_environment_claims(
   }
 }
 
-bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
-                                const B1EnvironmentEvidence& rhs,
-                                B1EnvironmentRelation relation) noexcept {
+namespace {
+
+/**
+ * @brief Implements one environment relation with explicit authority policy.
+ * @param lhs First complete retained environment object.
+ * @param rhs Second complete retained environment object.
+ * @param relation Required cross-row relation.
+ * @param require_actual True to require applicable opaque observations.
+ * @return True only for the exact claims and requested authority strength.
+ * @throws Nothing; malformed or drifting evidence fails closed.
+ */
+bool compatible_b1_environments_impl(const B1EnvironmentEvidence& lhs,
+                                     const B1EnvironmentEvidence& rhs,
+                                     B1EnvironmentRelation relation,
+                                     bool require_actual) noexcept {
   try {
     const B1CanonicalManifest lhs_base =
         parse_b1_environment_manifest(lhs.base_manifest);
@@ -2231,8 +2243,8 @@ bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
       return false;
     }
 
-    if (!valid_environment_class_binding(lhs, true) ||
-        !valid_environment_class_binding(rhs, true)) {
+    if (!valid_environment_class_binding(lhs, require_actual) ||
+        !valid_environment_class_binding(rhs, require_actual)) {
       return false;
     }
 
@@ -2273,7 +2285,8 @@ bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
         lhs.environment_class_manifest != rhs.environment_class_manifest ||
         lhs.claimed_environment_class_digest !=
             rhs.claimed_environment_class_digest ||
-        lhs.fixture_digest != rhs.fixture_digest) {
+        (relation != B1EnvironmentRelation::M1PairedB1CapEight &&
+         lhs.fixture_digest != rhs.fixture_digest)) {
       return false;
     }
     const B1CanonicalManifest lhs_storage =
@@ -2306,6 +2319,22 @@ bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
     return false;
   }
   return false;
+}
+
+}  // namespace
+
+/** @copydoc compatible_b1_environments */
+bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
+                                const B1EnvironmentEvidence& rhs,
+                                B1EnvironmentRelation relation) noexcept {
+  return compatible_b1_environments_impl(lhs, rhs, relation, true);
+}
+
+/** @copydoc compatible_b1_environment_claims */
+bool compatible_b1_environment_claims(const B1EnvironmentEvidence& lhs,
+                                      const B1EnvironmentEvidence& rhs,
+                                      B1EnvironmentRelation relation) noexcept {
+  return compatible_b1_environments_impl(lhs, rhs, relation, false);
 }
 
 namespace {

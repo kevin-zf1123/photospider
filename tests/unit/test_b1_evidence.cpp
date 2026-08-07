@@ -13,7 +13,8 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/b1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/b1_evidence.hpp"        // NOLINT(build/include_subdir)
+#include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
 #include "support/b1_test_environment.hpp"
 #include "verification/b1_evidence_json.hpp"
 
@@ -311,6 +312,56 @@ TEST(B1Evidence, CompleteExactRowPassesEveryIndependentAxis) {
   EXPECT_EQ(row.determinism_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.waste_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves the real B1 evaluator output produces a loadable native pair.
+ * @throws Test fixture, evaluator, canonical pack, and framework failures.
+ */
+TEST(B1Evidence, ProducesCanonicalPairObjectFromCompleteCapEightRow) {
+  B1InnerRowInput input = make_valid_row_input(8U, 1U);
+  input.environment.fixture_digest = evidence_b1_component_digests().fixture;
+  const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
+  ASSERT_TRUE(row.validity_reasons.empty());
+
+  const EvidencePairObject produced = make_b1_evidence_pair_object(
+      row, EvidencePairProducerOptions{EvidenceSubjectRole::Reference,
+                                       std::nullopt});
+  const std::string pack = materialize_evidence_pair_object(produced);
+  const EvidencePairObject loaded = load_evidence_pair_object(
+      pack, produced.row.digest, produced.bundle.digest);
+  EXPECT_EQ(loaded.row.digest, produced.row.digest);
+  EXPECT_EQ(loaded.bundle.digest, produced.bundle.digest);
+  const B1CanonicalManifest measurement =
+      parse_b1_canonical_manifest(loaded.row.source.measurement_evidence.bytes);
+  ASSERT_EQ(measurement.fields.size(), 6U);
+  EXPECT_EQ(parse_b1_framed_list(measurement.fields[4U].payload).size(),
+            kB1MeasuredJobCount);
+  EXPECT_EQ(parse_b1_canonical_uint64(measurement.fields[5U].payload),
+            row.successful_site_operations);
+  EXPECT_TRUE(valid_b1_environment_claims(loaded.row.source.environment));
+  EXPECT_FALSE(valid_b1_environment_evidence(loaded.row.source.environment));
+}
+
+/**
+ * @brief Preserves the existing cap-one B1 runner while M1 binds only cap
+ * eight.
+ * @throws Test fixture, evaluator, canonical pack, and framework failures.
+ */
+TEST(B1Evidence, PairProducerPreservesCompleteCapOneRow) {
+  B1InnerRowInput input = make_valid_row_input(1U, 1U);
+  input.environment.fixture_digest = evidence_b1_component_digests().fixture;
+  const B1InnerRow row = evaluate_b1_inner_row(std::move(input));
+  ASSERT_TRUE(row.validity_reasons.empty());
+
+  const EvidencePairObject produced = make_b1_evidence_pair_object(
+      row, EvidencePairProducerOptions{EvidenceSubjectRole::Reference,
+                                       std::nullopt});
+  const EvidencePairObject loaded =
+      load_evidence_pair_object(materialize_evidence_pair_object(produced),
+                                produced.row.digest, produced.bundle.digest);
+  EXPECT_EQ(loaded.row.source.run_cap, 1U);
+  EXPECT_EQ(loaded.bundle.row_references.front().run_cap, 1U);
 }
 
 /**

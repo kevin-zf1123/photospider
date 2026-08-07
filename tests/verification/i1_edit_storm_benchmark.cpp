@@ -16,6 +16,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -24,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
 #include "benchmark/i1_evidence.hpp"
 #include "photospider/host/host.hpp"
 #include "verification/i1_evidence_json.hpp"
@@ -45,8 +47,16 @@ using Json = nlohmann::json;
 struct I1RunnerOptions final {
   /** @brief Caller-selected fresh disposable directory outside the checkout. */
   std::filesystem::path output_directory;
+  /** @brief Exact caller-supplied 24-field base manifest. */
+  std::filesystem::path base_manifest_path;
+  /** @brief Exact caller-supplied storage-N/A environment-class manifest. */
+  std::filesystem::path environment_class_manifest_path;
+  /** @brief Candidate or reference identity of this isolated row. */
+  EvidenceSubjectRole subject_role = EvidenceSubjectRole::Reference;
   /** @brief Normative replicate ordinal in `[1,3]`. */
   std::uint64_t replicate_ordinal = 1U;
+  /** @brief Candidate-only immutable comparison bundle address. */
+  std::optional<std::string> comparison_reference_bundle_digest;
   /** @brief Whether usage was requested without running product work. */
   bool help = false;
 };
@@ -58,12 +68,29 @@ struct I1RunnerOptions final {
  * @throws std::ios_base::failure only when enabled on the stream by caller.
  */
 void print_usage(std::ostream& output) {
-  output
-      << "Usage: i1_edit_storm_benchmark --output-dir ABSOLUTE_PATH "
-         "[--replicate-ordinal 1|2|3]\n"
-      << "Runs one exact 221-slot I1-edit-storm-v1 replicate. The output "
-         "directory must be absent or empty, disposable, and outside the "
-         "Photospider checkout. This target is manual and machine-dependent.\n";
+  output << "Usage: i1_edit_storm_benchmark --output-dir ABSOLUTE_PATH "
+            "--base-manifest FILE --environment-class-manifest FILE "
+            "--subject-role candidate|reference [--replicate-ordinal 1|2|3] "
+            "[--comparison-reference-bundle-digest SHA256]\n"
+         << "Runs one exact 221-slot I1-edit-storm-v1 replicate. The output "
+            "directory must be absent or empty, disposable, and outside the "
+            "Photospider checkout. A successful complete replicate writes one "
+            "canonical pair-object pack for M1. This target is manual and "
+            "machine-dependent.\n";
+}
+
+/**
+ * @brief Tests one exact lowercase SHA-256 spelling.
+ * @param value Candidate digest bytes.
+ * @return True only for 64 lowercase hexadecimal characters.
+ * @throws Nothing.
+ */
+bool valid_sha256(std::string_view value) noexcept {
+  return value.size() == 64U &&
+         std::all_of(value.begin(), value.end(), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
 }
 
 /**
@@ -94,7 +121,11 @@ std::uint64_t parse_replicate_ordinal(std::string_view text) {
 I1RunnerOptions parse_options(int argc, char** argv) {
   I1RunnerOptions options;
   bool saw_output = false;
+  bool saw_base = false;
+  bool saw_class = false;
+  bool saw_role = false;
   bool saw_replicate = false;
+  bool saw_comparison = false;
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
     if (argument == "--help" || argument == "-h") {
@@ -110,6 +141,42 @@ I1RunnerOptions parse_options(int argc, char** argv) {
       options.output_directory = argv[++index];
       continue;
     }
+    if (argument == "--base-manifest") {
+      if (saw_base || index + 1 >= argc) {
+        throw std::invalid_argument(
+            "--base-manifest must appear exactly once with a value");
+      }
+      saw_base = true;
+      options.base_manifest_path = argv[++index];
+      continue;
+    }
+    if (argument == "--environment-class-manifest") {
+      if (saw_class || index + 1 >= argc) {
+        throw std::invalid_argument(
+            "--environment-class-manifest must appear exactly once with a "
+            "value");
+      }
+      saw_class = true;
+      options.environment_class_manifest_path = argv[++index];
+      continue;
+    }
+    if (argument == "--subject-role") {
+      if (saw_role || index + 1 >= argc) {
+        throw std::invalid_argument(
+            "--subject-role must appear exactly once with a value");
+      }
+      saw_role = true;
+      const std::string_view value(argv[++index]);
+      if (value == "candidate") {
+        options.subject_role = EvidenceSubjectRole::Candidate;
+      } else if (value == "reference") {
+        options.subject_role = EvidenceSubjectRole::Reference;
+      } else {
+        throw std::invalid_argument(
+            "--subject-role must be candidate or reference");
+      }
+      continue;
+    }
     if (argument == "--replicate-ordinal") {
       if (saw_replicate || index + 1 >= argc) {
         throw std::invalid_argument(
@@ -119,10 +186,32 @@ I1RunnerOptions parse_options(int argc, char** argv) {
       options.replicate_ordinal = parse_replicate_ordinal(argv[++index]);
       continue;
     }
+    if (argument == "--comparison-reference-bundle-digest") {
+      if (saw_comparison || index + 1 >= argc) {
+        throw std::invalid_argument(
+            "--comparison-reference-bundle-digest must appear at most once "
+            "with a value");
+      }
+      saw_comparison = true;
+      options.comparison_reference_bundle_digest = argv[++index];
+      continue;
+    }
     throw std::invalid_argument("unknown argument: " + std::string(argument));
   }
-  if (!options.help && !saw_output) {
-    throw std::invalid_argument("--output-dir is required");
+  if (!options.help && !(saw_output && saw_base && saw_class && saw_role)) {
+    throw std::invalid_argument(
+        "output, base/class manifests, and subject role are required");
+  }
+  if (options.comparison_reference_bundle_digest.has_value() &&
+      !valid_sha256(*options.comparison_reference_bundle_digest)) {
+    throw std::invalid_argument(
+        "--comparison-reference-bundle-digest is not lowercase SHA-256");
+  }
+  if (!options.help &&
+      ((options.subject_role == EvidenceSubjectRole::Candidate) !=
+       options.comparison_reference_bundle_digest.has_value())) {
+    throw std::invalid_argument(
+        "candidate requires, and reference forbids, a comparison digest");
   }
   return options;
 }
@@ -205,6 +294,67 @@ void write_text_file(const std::filesystem::path& path,
   if (!output) {
     throw std::runtime_error("failed to write output file: " + path.string());
   }
+}
+
+/**
+ * @brief Reads one exact binary manifest without newline normalization.
+ * @param path Existing caller-supplied input path.
+ * @return Complete file bytes.
+ * @throws std::runtime_error when open or read fails.
+ * @throws std::bad_alloc when byte ownership allocates.
+ */
+std::string read_binary_file(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    throw std::runtime_error("failed to open I1 environment input: " +
+                             path.string());
+  }
+  std::ostringstream bytes;
+  bytes << input.rdbuf();
+  if (!input.eof() && input.fail()) {
+    throw std::runtime_error("failed to read I1 environment input: " +
+                             path.string());
+  }
+  return bytes.str();
+}
+
+/**
+ * @brief Builds exact storage-N/A I1 environment claims for outer sealing.
+ * @param options Validated manifest paths, ordinal, and role.
+ * @param resource_snapshot Settled shared Host/device/Compute-I/O limits.
+ * @return Self-validating retained I1 environment source.
+ * @throws Canonical parse, identity, I/O, and allocation failures unchanged.
+ * @note No storage actual observation is applicable to I1.
+ */
+B1EnvironmentEvidence make_i1_runner_environment(
+    const I1RunnerOptions& options,
+    const B1ExecutionSnapshot& resource_snapshot) {
+  const std::string base = read_binary_file(options.base_manifest_path);
+  const std::string environment_class =
+      read_binary_file(options.environment_class_manifest_path);
+  static_cast<void>(parse_b1_environment_manifest(base));
+  static_cast<void>(parse_b1_environment_manifest(environment_class));
+  B1EnvironmentEvidence environment{
+      base,
+      digest_b1_environment_manifest(base),
+      std::nullopt,
+      std::nullopt,
+      environment_class,
+      digest_b1_environment_manifest(environment_class),
+      std::nullopt,
+      std::nullopt,
+      kI1WorkloadId,
+      evidence_i1_component_fixture_digest(),
+      evidence_resource_identity(resource_snapshot),
+      8U,
+      options.replicate_ordinal,
+      std::nullopt,
+  };
+  if (!valid_b1_environment_claims(environment)) {
+    throw std::invalid_argument(
+        "I1 base/environment-class claims are not exact storage-N/A inputs");
+  }
+  return environment;
 }
 
 /**
@@ -521,9 +671,13 @@ I1ReplicateSummary run_exact_replicate(
   ScopedGraphClose graph_close(*host, loaded.value);
 
   I1Host* const i1_host = as_i1_host(*host);
-  if (i1_host == nullptr) {
-    throw std::runtime_error("embedded Host does not expose private I1 seam");
+  B1Host* const b1_host = as_b1_host(*host);
+  if (i1_host == nullptr || b1_host == nullptr) {
+    throw std::runtime_error(
+        "embedded Host does not expose private I1/resource seams");
   }
+  const B1ExecutionSnapshot resource_snapshot =
+      b1_host->b1_execution_snapshot(0U, 4096U);
 
   prepare_episode_baseline(*host, loaded.value);
   const auto grid_origin = checked_i1_time_add(std::chrono::steady_clock::now(),
@@ -533,12 +687,16 @@ I1ReplicateSummary run_exact_replicate(
       {"schema", "execution-profile-i1-manual-invocation-v1"},
       {"workload_id", kI1WorkloadId},
       {"replicate_ordinal", options.replicate_ordinal},
+      {"subject_role", evidence_subject_role_name(options.subject_role)},
       {"grid_origin_ns", monotonic_nanoseconds(grid_origin)},
       {"terminal_boundary_ns", monotonic_nanoseconds(terminal_boundary)},
       {"output_directory", output_directory.string()},
       {"worker_count", 8},
       {"workload_contract", i1_workload_contract_json()},
-      {"outer_canonical_envelope_claim", false},
+      {"base_manifest_source", options.base_manifest_path.string()},
+      {"environment_class_manifest_source",
+       options.environment_class_manifest_path.string()},
+      {"outer_canonical_envelope_claim", true},
   };
   write_text_file(output_directory / "invocation.json",
                   invocation.dump(2) + "\n");
@@ -750,12 +908,20 @@ I1ReplicateSummary run_exact_replicate(
     throw std::runtime_error("failed to close episodes.ndjson");
   }
 
+  const I1ReplicateSummary summary = evaluate_i1_replicate(rows);
+  const EvidencePairObject pair_object = make_i1_evidence_pair_object(
+      rows, make_i1_runner_environment(options, resource_snapshot),
+      EvidencePairProducerOptions{
+          options.subject_role,
+          options.comparison_reference_bundle_digest,
+      });
+  write_text_file(output_directory / "pair-object.canonical",
+                  materialize_evidence_pair_object(pair_object));
+  write_text_file(output_directory / "summary.json",
+                  i1_replicate_summary_json(summary).dump(2) + "\n");
   for (I1EpisodeInnerRow& row : rows) {
     compact_row_for_summary(&row);
   }
-  const I1ReplicateSummary summary = evaluate_i1_replicate(rows);
-  write_text_file(output_directory / "summary.json",
-                  i1_replicate_summary_json(summary).dump(2) + "\n");
   require_success("close_graph", graph_close.close_now().status);
   return summary;
 }

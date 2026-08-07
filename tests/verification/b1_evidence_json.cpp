@@ -902,6 +902,10 @@ nlohmann::json b1_workload_contract_json() {
       {"outer_canonical_envelope_claim", false}};
 }
 
+nlohmann::json b1_job_evidence_json(const B1JobEvidence& evidence) {
+  return job_evidence_json(evidence);
+}
+
 nlohmann::json b1_inner_row_json(const B1InnerRow& row) {
   Json jobs = Json::array();
   for (const B1JobEvidence& job : row.evidence.jobs) {

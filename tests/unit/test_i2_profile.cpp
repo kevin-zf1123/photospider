@@ -425,8 +425,9 @@ TEST(I2EpisodeObservationCollector, RetainsChildAwareProgressiveOrder) {
   sink->on_progressive_final_triggered(final_lease.descriptor(), coordinate);
   const std::uint64_t trigger_sequence = coordinate.causal_sequence;
   coordinate = sink->reserve_causal_coordinate();
-  sink->on_service_start(final_lease.descriptor(),
-                         final_lease.task_identity(0U), 1U, coordinate);
+  sink->on_service_start(
+      final_lease.descriptor(), final_lease.task_identity(0U), 1U,
+      compute::ComputeRunServiceStartObservation{true, true, true}, coordinate);
 
   const I2EpisodeObservationSnapshot snapshot = collector.snapshot();
   ASSERT_EQ(snapshot.visible_outputs.size(), 1U);

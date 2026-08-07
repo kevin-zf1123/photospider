@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -168,15 +170,19 @@ struct M1MemoryValidation final {
 };
 
 /**
- * @brief Validates all temporal snapshots and derives Compute I/O high-water.
+ * @brief Validates temporal snapshots and event-derived Compute I/O evidence.
  * @param snapshots Chronological same-service samples including final cut.
+ * @param offers Complete immutable B1 protocol offer set.
+ * @param jobs Exact-one complete B1 evidence for every offer.
  * @param row Mutable result receiving high-water values and diagnostics.
  * @return Structural validity plus independently complete limit/settlement
  * outcomes.
  * @throws std::bad_alloc when diagnostics allocate.
  */
 M1MemoryValidation validate_m1_memory(
-    const std::vector<M1ExecutionSnapshot>& snapshots, M1InnerRow* row) {
+    const std::vector<M1ExecutionSnapshot>& snapshots,
+    const std::vector<M1BatchOfferEvidence>& offers,
+    const std::vector<B1JobEvidence>& jobs, M1InnerRow* row) {
   M1MemoryValidation result;
   const auto invalid = [&result, row](std::string reason) {
     result.valid = false;
@@ -185,6 +191,59 @@ M1MemoryValidation validate_m1_memory(
   if (snapshots.size() < 4U) {
     invalid("fewer than four boundary/final snapshots");
     return result;
+  }
+
+  std::map<B1JobInstance, const B1JobEvidence*> indexed_jobs;
+  for (const B1JobEvidence& job : jobs) {
+    if (!indexed_jobs.emplace(job.job, &job).second) {
+      invalid("multiple B1 I/O streams claim the same occurrence");
+    }
+  }
+  if (jobs.size() != offers.size() || indexed_jobs.size() != offers.size()) {
+    invalid("B1 I/O stream cardinality does not match protocol offers");
+  }
+  std::set<std::uint64_t> accounting_sequences;
+  for (const M1BatchOfferEvidence& offer : offers) {
+    const auto found = indexed_jobs.find(offer.job);
+    if (found == indexed_jobs.end()) {
+      invalid("a protocol B1 offer lacks its complete I/O stream");
+      continue;
+    }
+    const B1JobEvidence& job = *found->second;
+    if (job.producer_offer_ordinal != offer.producer_offer_ordinal ||
+        job.offered_at != offer.offered.timestamp ||
+        !offer.endpoint.has_value() ||
+        job.endpoint_at != offer.endpoint->timestamp) {
+      invalid("B1 I/O stream identity or endpoint differs from its offer");
+    }
+    const B1ComputeIoEvaluation io = evaluate_b1_compute_io_evidence(job);
+    if (!io.structurally_valid || !io.fault_free_complete) {
+      invalid("B1 I/O stream is malformed or not fault-free complete");
+      for (const std::string& reason : io.validity_reasons) {
+        invalidate_m1(&row->validity_reasons, "M1 memory evidence: " + reason);
+      }
+    }
+    row->compute_io_task_high_water =
+        std::max(row->compute_io_task_high_water, io.task_high_water);
+    row->compute_io_planned_byte_high_water = std::max(
+        row->compute_io_planned_byte_high_water, io.planned_byte_high_water);
+    for (const B1ComputeIoObservation& observation :
+         job.output.io_observations) {
+      std::optional<std::uint64_t> sequence;
+      if (observation.point == B1IoObservationPoint::AcceptedAdmission ||
+          observation.point == B1IoObservationPoint::OfferRejected) {
+        if (observation.admission_event.has_value()) {
+          sequence = observation.admission_event->sequence;
+        }
+      } else if (observation.point == B1IoObservationPoint::Settlement &&
+                 observation.settlement_event.has_value()) {
+        sequence = observation.settlement_event->sequence;
+      }
+      if (sequence.has_value() &&
+          !accounting_sequences.insert(*sequence).second) {
+        invalid("Compute I/O accounting sequence is duplicated across jobs");
+      }
+    }
   }
 
   const std::uint64_t service_id =
@@ -237,11 +296,6 @@ M1MemoryValidation validate_m1_memory(
         io.active_planned_bytes > io.planned_bytes_limit) {
       invalid("Compute I/O limits, phase partition, or active state drifted");
     }
-    row->compute_io_task_high_water =
-        std::max(row->compute_io_task_high_water, io.active_tasks);
-    row->compute_io_planned_byte_high_water = std::max(
-        row->compute_io_planned_byte_high_water, io.active_planned_bytes);
-
     if (snapshot.device_resources.size() != initial_devices.size()) {
       invalid("configured device inventory cardinality changed");
     } else {
@@ -289,6 +343,14 @@ M1MemoryValidation validate_m1_memory(
     }
   }
 
+  const M1ExecutionSnapshot& initial = snapshots.front();
+  if (initial.compute_io.active_tasks != 0U ||
+      initial.compute_io.active_planned_bytes != 0U ||
+      initial.compute_io.constructing_tasks != 0U ||
+      initial.compute_io.queued_tasks != 0U ||
+      initial.compute_io.running_tasks != 0U) {
+    invalid("initial Compute I/O boundary is not zero");
+  }
   const M1ExecutionSnapshot& final = snapshots.back();
   if (!zero_resources(final.host_resources.reserved) ||
       !zero_resources(final.throughput.reserved) ||
@@ -300,10 +362,12 @@ M1MemoryValidation validate_m1_memory(
       final.compute_io.running_tasks != 0U ||
       !lifecycle_settled(final.lifecycle.counters)) {
     result.settled = false;
+    invalid("final Host, ready, I/O, or lifecycle ownership is not zero");
   }
   for (const ResourceLedger::DeviceSnapshot& device : final.device_resources) {
     if (device.reserved != DeviceResourceVector{}) {
       result.settled = false;
+      invalid("final device ownership is not zero");
     }
   }
   return result;
@@ -456,8 +520,9 @@ M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
                   "M1 measured Interactive/B1 waste evidence is incomplete");
   }
 
-  const M1MemoryValidation memory =
-      validate_m1_memory(row.evidence.temporal_snapshots, &row);
+  const M1MemoryValidation memory = validate_m1_memory(
+      row.evidence.temporal_snapshots, row.evidence.protocol.batch_offers,
+      row.evidence.batch_jobs, &row);
   if (memory.valid && row.evidence.temporal_effects_complete) {
     row.memory_verdict = memory.within_limits && memory.settled
                              ? I1Verdict::Pass

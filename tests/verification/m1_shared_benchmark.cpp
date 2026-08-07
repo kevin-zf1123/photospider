@@ -7,7 +7,6 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
-#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -36,6 +35,8 @@
 #include "benchmark/m1_evidence.hpp"         // NOLINT(build/include_subdir)
 #include "benchmark/observation_fanout.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
+#include "verification/b1_evidence_json.hpp"
+#include "verification/i1_evidence_json.hpp"
 
 #ifndef PHOTOSPIDER_M1_PROJECT_SOURCE_DIR
 #error "PHOTOSPIDER_M1_PROJECT_SOURCE_DIR must name the project checkout"
@@ -68,18 +69,18 @@ struct M1RunnerOptions final {
   EvidenceSubjectRole subject_role = EvidenceSubjectRole::Reference;
   /** @brief Fresh-process replicate ordinal in `[1,3]`. */
   std::uint64_t replicate_ordinal = 1U;
-  /** @brief Optional exact isolated-I1 row address. */
-  std::optional<std::string> paired_i1_row_digest;
-  /** @brief Optional exact isolated-I1 bundle address. */
-  std::optional<std::string> paired_i1_bundle_digest;
-  /** @brief Optional same-ordinal isolated-I1 p99 denominator. */
-  std::optional<std::chrono::nanoseconds> paired_i1_p99;
-  /** @brief Optional exact isolated-B1 cap-eight row address. */
-  std::optional<std::string> paired_b1_row_digest;
-  /** @brief Optional exact isolated-B1 cap-eight bundle address. */
-  std::optional<std::string> paired_b1_bundle_digest;
-  /** @brief Optional same-ordinal isolated-B1 MPix-op/s denominator. */
-  std::optional<double> paired_b1_rate;
+  /** @brief Absolute actual isolated-I1 native pair-object pack path. */
+  std::filesystem::path paired_i1_object_path;
+  /** @brief Exact caller-addressed isolated-I1 row digest. */
+  std::string paired_i1_row_digest;
+  /** @brief Exact caller-addressed isolated-I1 bundle digest. */
+  std::string paired_i1_bundle_digest;
+  /** @brief Absolute actual isolated-B1 cap-eight pair-object pack path. */
+  std::filesystem::path paired_b1_object_path;
+  /** @brief Exact caller-addressed isolated-B1 cap-eight row digest. */
+  std::string paired_b1_row_digest;
+  /** @brief Exact caller-addressed isolated-B1 cap-eight bundle digest. */
+  std::string paired_b1_bundle_digest;
   /** @brief Candidate-only immutable comparison bundle address. */
   std::optional<std::string> comparison_reference_bundle_digest;
   /** @brief Whether usage was requested without product execution. */
@@ -115,15 +116,17 @@ void print_usage(std::ostream& output) {
          "--base-manifest FILE --storage-manifest FILE "
          "--environment-class-manifest FILE --storage-proof FILE "
          "--subject-role candidate|reference [--replicate-ordinal 1|2|3] "
-         "[--paired-i1-row-digest SHA256 --paired-i1-bundle-digest SHA256 "
-         "--paired-i1-p99-ns POSITIVE] "
-         "[--paired-b1-row-digest SHA256 --paired-b1-bundle-digest SHA256 "
-         "--paired-b1-rate POSITIVE] "
+         "--paired-i1-object ABSOLUTE_FILE --paired-i1-row-digest SHA256 "
+         "--paired-i1-bundle-digest SHA256 "
+         "--paired-b1-object ABSOLUTE_FILE --paired-b1-row-digest SHA256 "
+         "--paired-b1-bundle-digest SHA256 "
          "[--comparison-reference-bundle-digest SHA256]\n"
       << "Runs one exact M1-shared-v1 C/W/B/U replicate through one "
-         "EmbeddedHost and ExecutionService. Missing isolated objects, "
-         "comparison objects, or complete live storage authority are retained "
-         "as a canonical Invalid corpus and can never produce Pass. This "
+         "EmbeddedHost and ExecutionService. Both isolated source-private "
+         "objects are loaded, rematerialized, and bound before the timed "
+         "protocol; digest-only pairing is rejected. Missing comparison "
+         "objects or complete live storage authority remain canonical Invalid "
+         "and can never produce Pass. This "
          "target is manual, EXCLUDE_FROM_ALL, and absent from CTest/CI.\n";
 }
 
@@ -145,29 +148,6 @@ std::uint64_t parse_uint64(std::string_view text, std::uint64_t minimum,
       value < minimum || value > maximum) {
     throw std::invalid_argument(std::string(option) +
                                 " has an invalid unsigned value");
-  }
-  return value;
-}
-
-/**
- * @brief Parses one strict finite positive double.
- * @param text Complete decimal bytes.
- * @param option Stable option name for diagnostics.
- * @return Positive finite value.
- * @throws std::invalid_argument for malformed, non-finite, or nonpositive data.
- */
-double parse_positive_double(std::string_view text, std::string_view option) {
-  std::size_t consumed = 0U;
-  double value = 0.0;
-  try {
-    value = std::stod(std::string(text), &consumed);
-  } catch (...) {
-    throw std::invalid_argument(std::string(option) +
-                                " has an invalid decimal value");
-  }
-  if (consumed != text.size() || !std::isfinite(value) || value <= 0.0) {
-    throw std::invalid_argument(std::string(option) +
-                                " must be finite and positive");
   }
   return value;
 }
@@ -231,22 +211,18 @@ M1RunnerOptions parse_options(int argc, char** argv) {
     } else if (argument == "--replicate-ordinal") {
       options.replicate_ordinal =
           parse_uint64(next_value(&index, argument), 1U, 3U, argument);
+    } else if (argument == "--paired-i1-object") {
+      options.paired_i1_object_path = next_value(&index, argument);
     } else if (argument == "--paired-i1-row-digest") {
       options.paired_i1_row_digest = next_value(&index, argument);
     } else if (argument == "--paired-i1-bundle-digest") {
       options.paired_i1_bundle_digest = next_value(&index, argument);
-    } else if (argument == "--paired-i1-p99-ns") {
-      options.paired_i1_p99 = std::chrono::nanoseconds(parse_uint64(
-          next_value(&index, argument), 1U,
-          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()),
-          argument));
+    } else if (argument == "--paired-b1-object") {
+      options.paired_b1_object_path = next_value(&index, argument);
     } else if (argument == "--paired-b1-row-digest") {
       options.paired_b1_row_digest = next_value(&index, argument);
     } else if (argument == "--paired-b1-bundle-digest") {
       options.paired_b1_bundle_digest = next_value(&index, argument);
-    } else if (argument == "--paired-b1-rate") {
-      options.paired_b1_rate =
-          parse_positive_double(next_value(&index, argument), argument);
     } else if (argument == "--comparison-reference-bundle-digest") {
       options.comparison_reference_bundle_digest = next_value(&index, argument);
     } else {
@@ -260,40 +236,32 @@ M1RunnerOptions parse_options(int argc, char** argv) {
       options.storage_manifest_path.empty() ||
       options.environment_class_manifest_path.empty() ||
       options.storage_proof_path.empty() ||
+      options.paired_i1_object_path.empty() ||
+      options.paired_i1_row_digest.empty() ||
+      options.paired_i1_bundle_digest.empty() ||
+      options.paired_b1_object_path.empty() ||
+      options.paired_b1_row_digest.empty() ||
+      options.paired_b1_bundle_digest.empty() ||
       seen.count("--subject-role") == 0U) {
     throw std::invalid_argument(
-        "output, environment inputs, storage proof, and subject role are "
-        "required");
+        "output, environment inputs, storage proof, subject role, and both "
+        "complete isolated pair objects are required");
   }
-  const auto pair_complete = [](const auto& row, const auto& bundle,
-                                const auto& denominator) {
-    return row.has_value() == bundle.has_value() &&
-           row.has_value() == denominator.has_value();
-  };
-  if (!pair_complete(options.paired_i1_row_digest,
-                     options.paired_i1_bundle_digest, options.paired_i1_p99) ||
-      !pair_complete(options.paired_b1_row_digest,
-                     options.paired_b1_bundle_digest, options.paired_b1_rate)) {
-    throw std::invalid_argument(
-        "each isolated pair requires row, bundle, and denominator together");
-  }
-  const auto validate_optional_digest = [](const std::optional<std::string>& d,
-                                           std::string_view option) {
-    if (d.has_value() && !valid_sha256(*d)) {
+  const auto validate_digest = [](std::string_view digest,
+                                  std::string_view option) {
+    if (!valid_sha256(digest)) {
       throw std::invalid_argument(std::string(option) +
                                   " is not lowercase SHA-256");
     }
   };
-  validate_optional_digest(options.paired_i1_row_digest,
-                           "--paired-i1-row-digest");
-  validate_optional_digest(options.paired_i1_bundle_digest,
-                           "--paired-i1-bundle-digest");
-  validate_optional_digest(options.paired_b1_row_digest,
-                           "--paired-b1-row-digest");
-  validate_optional_digest(options.paired_b1_bundle_digest,
-                           "--paired-b1-bundle-digest");
-  validate_optional_digest(options.comparison_reference_bundle_digest,
-                           "--comparison-reference-bundle-digest");
+  validate_digest(options.paired_i1_row_digest, "--paired-i1-row-digest");
+  validate_digest(options.paired_i1_bundle_digest, "--paired-i1-bundle-digest");
+  validate_digest(options.paired_b1_row_digest, "--paired-b1-row-digest");
+  validate_digest(options.paired_b1_bundle_digest, "--paired-b1-bundle-digest");
+  if (options.comparison_reference_bundle_digest.has_value()) {
+    validate_digest(*options.comparison_reference_bundle_digest,
+                    "--comparison-reference-bundle-digest");
+  }
   if ((options.subject_role == EvidenceSubjectRole::Candidate) !=
       options.comparison_reference_bundle_digest.has_value()) {
     throw std::invalid_argument(
@@ -1377,6 +1345,20 @@ B1CanonicalField known_field(std::string name, std::string type,
 }
 
 /**
+ * @brief Creates one explicit canonical not-applicable field.
+ * @param name Stable ASCII field name.
+ * @param type Stable ASCII type token.
+ * @param reason Closed reason token.
+ * @return N/A field with an empty payload.
+ * @throws std::bad_alloc when owned strings allocate.
+ */
+B1CanonicalField not_applicable_field(std::string name, std::string type,
+                                      std::string reason) {
+  return B1CanonicalField{std::move(name), B1ObservationState::NotApplicable,
+                          std::move(reason), std::move(type), ""};
+}
+
+/**
  * @brief Returns the stable lowercase token for one inner verdict.
  * @param verdict Closed verdict value.
  * @return `pass`, `fail`, or `invalid`.
@@ -1454,46 +1436,11 @@ bool graph_demand_covers(
 }
 
 /**
- * @brief Returns whether both B1 Graphs and one I1 occurrence demand service.
- * @param occurrences Complete B1 offer set.
- * @param interactive Complete I1 protocol occurrences.
- * @param timestamp Actual service-start timestamp.
- * @return True only inside all three offered occurrence intervals.
- * @throws Nothing.
- */
-bool both_classes_demanding_at(
-    const std::vector<std::shared_ptr<BatchOccurrence>>& occurrences,
-    const std::vector<M1InteractiveOccurrenceEvidence>& interactive,
-    std::chrono::steady_clock::time_point timestamp) noexcept {
-  const bool i1_active = std::any_of(
-      interactive.begin(), interactive.end(),
-      [timestamp](const M1InteractiveOccurrenceEvidence& occurrence) {
-        return occurrence.origin.timestamp <= timestamp &&
-               timestamp < occurrence.settlement_endpoint;
-      });
-  const auto graph_active = [&](std::uint64_t parity) {
-    return std::any_of(
-        occurrences.begin(), occurrences.end(),
-        [timestamp,
-         parity](const std::shared_ptr<BatchOccurrence>& occurrence) {
-          return occurrence->offer.job.phase == B1JobPhase::Measured &&
-                 (occurrence->offer.job.job_index & 1U) == parity &&
-                 occurrence->offer.endpoint.has_value() &&
-                 occurrence->offer.offered.timestamp <= timestamp &&
-                 timestamp < occurrence->offer.endpoint->timestamp;
-        });
-  };
-  return i1_active && graph_active(0U) && graph_active(1U);
-}
-
-/**
  * @brief Derives all measured M1 fairness and waste inputs from raw evidence.
  * @param timeline Exact frozen row boundaries.
  * @param occurrences Complete settled B1 occurrences.
- * @param interactive Complete I1 protocol occurrences.
  * @param completed_i1 Complete Issue #93 rows for admission classification.
  * @param observations Shared mixed causal snapshot.
- * @param paired_b1_rate Optional isolated denominator.
  * @param input Mutable M1 row input receiving fairness/waste aggregates.
  * @return Nothing.
  * @throws std::overflow_error for service aggregation overflow.
@@ -1502,10 +1449,8 @@ bool both_classes_demanding_at(
 void derive_m1_aggregates(
     const M1Timeline& timeline,
     const std::vector<std::shared_ptr<BatchOccurrence>>& occurrences,
-    const std::vector<M1InteractiveOccurrenceEvidence>& interactive,
     const std::vector<CompletedI1Occurrence>& completed_i1,
-    const M1FairnessObservationSnapshot& observations,
-    const std::optional<double>& paired_b1_rate, M1InnerRowInput* input) {
+    const M1FairnessObservationSnapshot& observations, M1InnerRowInput* input) {
   input->fairness.observation_overflowed = observations.overflowed;
   input->fairness.observation_sequence_exhausted =
       observations.sequence_exhausted;
@@ -1537,9 +1482,10 @@ void derive_m1_aggregates(
       }
     }
     input->fairness.progress_windows.push_back(M1ThroughputProgressSample{
-        static_cast<double>(verified_jobs * kB1SiteOperationsPerJob) / 1.0e6,
-        paired_b1_rate.value_or(0.0)});
+        window, verified_jobs * kB1SiteOperationsPerJob,
+        std::chrono::seconds(1)});
     input->fairness.graph_service_windows.push_back(M1GraphServiceWindow{
+        window,
         graph_demand_covers(occurrences, 0U, start, end) &&
             graph_demand_covers(occurrences, 1U, start, end),
         graph_service[0U], graph_service[1U]});
@@ -1551,10 +1497,11 @@ void derive_m1_aggregates(
         !(observation.observed_at < timeline.measurement_end)) {
       continue;
     }
-    input->fairness.class_starts.push_back(
-        M1ClassStartSample{observation.service_class,
-                           both_classes_demanding_at(occurrences, interactive,
-                                                     observation.observed_at)});
+    input->fairness.class_starts.push_back(M1ClassStartSample{
+        observation.causal_sequence, observation.service_class,
+        observation.interactive_candidate_startable,
+        observation.throughput_candidate_startable,
+        observation.execution_grant_committed});
   }
 
   for (const CompletedI1Occurrence& occurrence : completed_i1) {
@@ -1562,12 +1509,20 @@ void derive_m1_aggregates(
       continue;
     }
     for (const I1EditEvidence& edit : occurrence.row.evidence.edits) {
+      const bool headroom_failure =
+          edit.host_return.has_value() && !edit.host_return->status.ok;
+      input->fairness.headroom_outcomes.push_back(M1HeadroomAdmissionOutcome{
+          occurrence.phase_ordinal, edit.edit_index, edit.admission_attempted,
+          edit.host_return.has_value()
+              ? std::optional<OperationStatus>(edit.host_return->status)
+              : std::nullopt,
+          headroom_failure});
       if (edit.admission_attempted) {
         ++input->fairness.headroom_admissions.attempted_edits;
       }
       if (edit.host_return.has_value()) {
         ++input->fairness.headroom_admissions.classified_outcomes;
-        if (!edit.host_return->status.ok) {
+        if (headroom_failure) {
           ++input->fairness.headroom_admissions.throughput_headroom_failures;
         }
       }
@@ -1609,120 +1564,379 @@ void derive_m1_aggregates(
 }
 
 /**
- * @brief Computes the actual fixed resource-configuration identity.
- * @param snapshot Authoritative pre-cold M1 state.
- * @return SHA-256 over worker count and immutable limits.
- * @throws std::bad_alloc when canonical bytes allocate.
+ * @brief Returns the canonical lowercase token for one boolean.
+ * @param value Boolean evidence value.
+ * @return `true` or `false`.
+ * @throws Nothing.
  */
-B1Sha256Digest m1_resource_identity(const M1ExecutionSnapshot& snapshot) {
-  std::ostringstream canonical;
-  const ResourceVector& host = snapshot.host_resources.limits;
-  canonical << "execution-profile-m1-resource-identity-v1\n"
-            << "worker-count=8\n"
-            << host.cpu_slots << ',' << host.retained_memory_bytes << ','
-            << host.scratch_bytes << ',' << host.ready_entries << ','
-            << host.ready_bytes << '\n'
-            << snapshot.compute_io.task_limit << ','
-            << snapshot.compute_io.planned_bytes_limit << '\n';
+const char* boolean_text(bool value) noexcept {
+  return value ? "true" : "false";
+}
+
+/**
+ * @brief Encodes every dimension of one Host resource vector.
+ * @param value Complete resource vector.
+ * @return Canonical five-component fixed record.
+ * @throws Canonical encoding and allocation failures unchanged.
+ */
+std::string encode_m1_resource_vector(const ResourceVector& value) {
+  return encode_b1_fixed_record({std::to_string(value.cpu_slots),
+                                 std::to_string(value.retained_memory_bytes),
+                                 std::to_string(value.scratch_bytes),
+                                 std::to_string(value.ready_entries),
+                                 std::to_string(value.ready_bytes)});
+}
+
+/**
+ * @brief Encodes every current/limit/phase bit of a Compute I/O snapshot.
+ * @param value Exact event-aligned or sparse diagnostic snapshot.
+ * @return Canonical nine-component fixed record.
+ * @throws Canonical encoding and allocation failures unchanged.
+ */
+std::string encode_m1_io_snapshot(
+    const execution::ComputeIoExecutorSnapshot& value) {
+  return encode_b1_fixed_record(
+      {std::to_string(value.task_limit),
+       std::to_string(value.planned_bytes_limit),
+       std::to_string(value.active_tasks),
+       std::to_string(value.active_planned_bytes),
+       std::to_string(value.constructing_tasks),
+       std::to_string(value.queued_tasks), std::to_string(value.running_tasks),
+       boolean_text(value.accepting), boolean_text(value.shutdown_complete)});
+}
+
+/**
+ * @brief Encodes the complete lifecycle counter vector without aggregation.
+ * @param value Exact post-transition or snapshot counters.
+ * @return Canonical fifteen-component fixed record.
+ * @throws Canonical encoding and allocation failures unchanged.
+ */
+std::string encode_m1_lifecycle_counters(
+    const compute::ExecutionLifecycleCounters& value) {
+  return encode_b1_fixed_record(
+      {std::to_string(value.registered_graph_count),
+       std::to_string(value.open_graph_count),
+       std::to_string(value.closing_graph_count),
+       std::to_string(value.pending_candidate_count),
+       std::to_string(value.admitted_standalone_run_count),
+       std::to_string(value.admitted_run_group_count),
+       std::to_string(value.admitted_child_run_count),
+       std::to_string(value.terminal_not_quiescent_run_count),
+       std::to_string(value.finalizing_run_count),
+       std::to_string(value.ready_entry_count),
+       std::to_string(value.entered_callback_count),
+       std::to_string(value.live_root_reservation_count),
+       std::to_string(value.live_child_grant_count),
+       std::to_string(value.live_policy_invocation_count),
+       std::to_string(value.live_policy_binding_count)});
+}
+
+/**
+ * @brief Encodes one complete lifecycle page including every retained event.
+ * @param page Exact source-private page copied at one temporal cut.
+ * @return Canonical page record with a nested raw-event list.
+ * @throws Canonical encoding and allocation failures unchanged.
+ */
+std::string encode_m1_lifecycle_page(
+    const compute::ExecutionLifecyclePage& page) {
+  std::vector<std::string> records;
+  records.reserve(page.records.size());
+  for (const compute::ExecutionLifecycleEvent& event : page.records) {
+    records.push_back(encode_b1_fixed_record(
+        {std::to_string(event.schema_version), std::to_string(event.sequence),
+         std::to_string(event.timestamp_us),
+         boolean_text(event.timestamp_saturated),
+         std::to_string(event.service_instance_id),
+         std::to_string(event.telemetry_epoch),
+         std::to_string(event.graph_instance_id), std::to_string(event.run_id),
+         std::to_string(event.run_group_id), std::to_string(event.generation),
+         std::to_string(static_cast<std::uint32_t>(event.kind)),
+         std::to_string(static_cast<std::uint32_t>(event.category)),
+         encode_m1_lifecycle_counters(event.counters)}));
+  }
+  return encode_b1_fixed_record(
+      {std::to_string(page.schema_version), std::to_string(page.capacity),
+       std::to_string(page.service_instance_id),
+       std::to_string(page.telemetry_epoch),
+       std::to_string(static_cast<std::uint32_t>(page.service_state)),
+       std::to_string(page.shutdown_generation),
+       std::to_string(page.snapshot_cut),
+       std::to_string(page.first_retained_sequence),
+       std::to_string(page.next_sequence),
+       std::to_string(page.global_dropped_total),
+       boolean_text(page.global_dropped_saturated),
+       encode_m1_lifecycle_counters(page.counters), encode_record_list(records),
+       std::to_string(page.cursor_gap), std::to_string(page.next_cursor),
+       boolean_text(page.has_more)});
+}
+
+/**
+ * @brief Encodes one complete sparse M1 execution diagnostic cut.
+ * @param snapshot Host/device/I/O/Throughput/ready/lifecycle evidence.
+ * @return Canonical fixed record retaining every scalar and lifecycle event.
+ * @throws Canonical encoding and allocation failures unchanged.
+ */
+std::string encode_m1_execution_snapshot(const M1ExecutionSnapshot& snapshot) {
+  std::vector<std::string> devices;
+  devices.reserve(snapshot.device_resources.size());
   for (const ResourceLedger::DeviceSnapshot& device :
        snapshot.device_resources) {
-    canonical << static_cast<std::uint32_t>(device.device.backend()) << ','
-              << device.device.ordinal() << ','
-              << device.limits.device_memory_bytes << ','
-              << device.limits.device_scratch_bytes << '\n';
+    devices.push_back(encode_b1_fixed_record(
+        {std::to_string(static_cast<std::uint32_t>(device.device.backend())),
+         std::to_string(device.device.ordinal()),
+         std::to_string(device.limits.device_memory_bytes),
+         std::to_string(device.limits.device_scratch_bytes),
+         std::to_string(device.reserved.device_memory_bytes),
+         std::to_string(device.reserved.device_scratch_bytes),
+         std::to_string(device.available.device_memory_bytes),
+         std::to_string(device.available.device_scratch_bytes),
+         std::to_string(device.high_water.device_memory_bytes),
+         std::to_string(device.high_water.device_scratch_bytes)}));
   }
-  return b1_sha256(canonical.str());
+  return encode_b1_fixed_record(
+      {encode_m1_resource_vector(snapshot.host_resources.limits),
+       encode_m1_resource_vector(snapshot.host_resources.reserved),
+       encode_m1_resource_vector(snapshot.host_resources.high_water),
+       encode_record_list(devices), encode_m1_io_snapshot(snapshot.compute_io),
+       encode_m1_resource_vector(snapshot.throughput.capacity),
+       encode_m1_resource_vector(snapshot.throughput.reserved),
+       encode_b1_fixed_record(
+           {std::to_string(snapshot.ready_classes.interactive_entries),
+            std::to_string(snapshot.ready_classes.throughput_entries),
+            std::to_string(snapshot.ready_classes.total_entries),
+            boolean_text(snapshot.ready_classes.valid)}),
+       encode_m1_lifecycle_page(snapshot.lifecycle)});
 }
 
 /**
- * @brief Computes the frozen embedded I1 fixture address.
- * @return SHA-256 over graph bytes and independent golden identity.
- * @throws std::bad_alloc when canonical bytes allocate.
+ * @brief Encodes one executor-authored admission event or explicit absence.
+ * @param event Optional immutable admission decision.
+ * @return Nested exact record or `not-applicable`.
+ * @throws Canonical encoding and allocation failures unchanged.
  */
-B1Sha256Digest m1_i1_fixture_digest() {
-  B1Sha256 hash;
-  hash.update("execution-profile-m1-i1-fixture-v1\n");
-  hash.update(i1_frozen_graph_yaml());
-  const ContentDigest golden = i1_frozen_final_content_digest();
-  for (const std::byte value : golden.bytes) {
-    const char byte = static_cast<char>(std::to_integer<std::uint8_t>(value));
-    hash.update(std::string_view(&byte, 1U));
+std::string encode_m1_io_admission_event(
+    const std::optional<execution::ComputeIoAdmissionEvent>& event) {
+  if (!event.has_value()) {
+    return "not-applicable";
   }
-  return hash.finish();
+  return encode_b1_fixed_record(
+      {std::to_string(event->sequence),
+       std::to_string(static_cast<std::uint32_t>(event->status)),
+       std::to_string(event->offered_planned_bytes),
+       std::to_string(event->charged_tasks),
+       std::to_string(event->charged_planned_bytes),
+       encode_m1_io_snapshot(event->snapshot_after)});
 }
 
 /**
- * @brief Computes one frozen embedded B1 fixture/corpus/golden address.
- * @param domain Distinct stable identity domain.
- * @return SHA-256 over all cold/warmup/measured seed authorities.
- * @throws Profile and allocation failures unchanged.
+ * @brief Encodes one executor-authored settlement event or explicit absence.
+ * @param event Optional immutable settlement decision.
+ * @return Nested exact record or `not-applicable`.
+ * @throws Canonical encoding and allocation failures unchanged.
  */
-B1Sha256Digest m1_b1_identity(std::string_view domain) {
-  B1Sha256 hash;
-  hash.update(domain);
-  hash.update("\n");
-  const auto add = [&hash](std::uint64_t seed) {
-    hash.update(std::to_string(seed));
-    hash.update("\n");
-    hash.update(b1_frozen_graph_yaml(seed));
-    hash.update(b1_source_node_yaml(seed));
-    hash.update(encode_b1_semantic_trace(
-        make_b1_success_semantic_records(b1_frozen_semantic_plan(seed))));
-    const B1JobGolden golden = b1_frozen_job_golden(seed);
-    hash.update(b1_digest_hex(golden.raw_payload_digest));
-  };
-  add(kB1ColdJobIndex);
-  for (const std::uint64_t seed : kB1WarmupJobIndices) {
-    add(seed);
+std::string encode_m1_io_settlement_event(
+    const std::optional<execution::ComputeIoSettlementEvent>& event) {
+  if (!event.has_value()) {
+    return "not-applicable";
   }
-  for (std::uint64_t seed = 0U; seed < kB1MeasuredJobCount; ++seed) {
-    add(seed);
-  }
-  return hash.finish();
+  return encode_b1_fixed_record(
+      {std::to_string(event->sequence),
+       std::to_string(event->admission_sequence),
+       std::to_string(static_cast<std::uint32_t>(event->status)),
+       std::to_string(event->released_tasks),
+       std::to_string(event->released_planned_bytes),
+       encode_m1_io_snapshot(event->snapshot_after)});
+}
+
+/**
+ * @brief Encodes one complete B1 Compute I/O observation without loss.
+ * @param observation Exact row boundary or task transition.
+ * @return Canonical fixed record including task, events, and same-lock cut.
+ * @throws Canonical encoding and allocation failures unchanged.
+ */
+std::string encode_m1_io_observation(
+    const B1ComputeIoObservation& observation) {
+  const std::string task =
+      observation.task.has_value()
+          ? encode_b1_fixed_record(
+                {encode_b1_job_instance(observation.task->job),
+                 std::to_string(
+                     static_cast<std::uint32_t>(observation.task->stage)),
+                 std::to_string(observation.task->attempt)})
+          : "not-applicable";
+  return encode_b1_fixed_record(
+      {std::to_string(static_cast<std::uint32_t>(observation.point)), task,
+       std::to_string(observation.planned_bytes),
+       observation.admission.has_value()
+           ? std::to_string(static_cast<std::uint32_t>(*observation.admission))
+           : "not-applicable",
+       observation.completion.has_value()
+           ? std::to_string(static_cast<std::uint32_t>(*observation.completion))
+           : "not-applicable",
+       encode_m1_io_admission_event(observation.admission_event),
+       encode_m1_io_settlement_event(observation.settlement_event),
+       encode_m1_io_snapshot(observation.snapshot)});
 }
 
 /**
  * @brief Encodes the closed M1 inner row and raw aggregate inputs canonically.
  * @param row Evaluated M1 inner row.
  * @param observations Complete shared causal event snapshot.
+ * @param completed_i1 Complete reused Issue #93 rows in protocol order.
  * @return Nested canonical `execution-profile-m1-inner-row-v1` bytes.
+ * @throws std::invalid_argument when the I1 source-row join is incomplete.
  * @throws Encoding and allocation failures unchanged.
  */
 std::string encode_m1_inner_row(
-    const M1InnerRow& row, const M1FairnessObservationSnapshot& observations) {
+    const M1InnerRow& row, const M1FairnessObservationSnapshot& observations,
+    const std::vector<CompletedI1Occurrence>& completed_i1) {
+  if (completed_i1.size() !=
+      row.evidence.protocol.interactive_occurrences.size()) {
+    throw std::invalid_argument(
+        "M1 canonical row lacks one exact reused I1 source row");
+  }
   std::vector<std::string> i1_records;
-  for (const M1InteractiveOccurrenceEvidence& occurrence :
-       row.evidence.protocol.interactive_occurrences) {
+  for (std::size_t index = 0U;
+       index < row.evidence.protocol.interactive_occurrences.size(); ++index) {
+    const M1InteractiveOccurrenceEvidence& occurrence =
+        row.evidence.protocol.interactive_occurrences[index];
     i1_records.push_back(encode_b1_fixed_record(
         {phase_text(occurrence.phase), std::to_string(occurrence.phase_ordinal),
          std::to_string(monotonic_nanoseconds(occurrence.origin.timestamp)),
          std::to_string(occurrence.origin.event_sequence),
          std::to_string(monotonic_nanoseconds(occurrence.settlement_endpoint)),
+         occurrence.settlement_observed.has_value()
+             ? std::to_string(monotonic_nanoseconds(
+                   occurrence.settlement_observed->timestamp))
+             : "not-applicable",
+         occurrence.settlement_observed.has_value()
+             ? std::to_string(occurrence.settlement_observed->event_sequence)
+             : "not-applicable",
          occurrence.final_latency.has_value()
              ? std::to_string(occurrence.final_latency->count())
              : "not-applicable",
          std::to_string(occurrence.service.all_started_service),
          std::to_string(occurrence.service.discarded_started_service),
+         std::to_string(occurrence.service.post_cancel_started_service),
          verdict_text(occurrence.latency_verdict),
          verdict_text(occurrence.waste_verdict),
          verdict_text(occurrence.memory_verdict),
-         verdict_text(occurrence.output_verdict)}));
+         verdict_text(occurrence.output_verdict),
+         boolean_text(occurrence.phase_identity_immutable),
+         boolean_text(occurrence.publication_current_at_measurement),
+         boolean_text(occurrence.settlement_pending_at_measurement),
+         encode_b1_normalized_text(
+             i1_inner_row_json(completed_i1[index].row).dump())}));
   }
   std::vector<std::string> offer_records;
   for (const M1BatchOfferEvidence& offer : row.evidence.protocol.batch_offers) {
     offer_records.push_back(encode_b1_fixed_record(
         {encode_b1_job_instance(offer.job),
          std::to_string(offer.producer_offer_ordinal),
+         std::to_string(offer.attempt),
          std::to_string(monotonic_nanoseconds(offer.offered.timestamp)),
          std::to_string(offer.offered.event_sequence),
+         offer.predecessor.has_value()
+             ? encode_b1_job_instance(*offer.predecessor)
+             : "not-applicable",
+         offer.predecessor_terminal.has_value()
+             ? std::to_string(
+                   monotonic_nanoseconds(offer.predecessor_terminal->timestamp))
+             : "not-applicable",
+         offer.predecessor_terminal.has_value()
+             ? std::to_string(offer.predecessor_terminal->event_sequence)
+             : "not-applicable",
          offer.endpoint.has_value()
              ? std::to_string(monotonic_nanoseconds(offer.endpoint->timestamp))
              : "not-applicable",
          offer.endpoint.has_value()
              ? std::to_string(offer.endpoint->event_sequence)
              : "not-applicable",
-         offer.owner_settled ? "true" : "false",
-         offer.output_removed ? "true" : "false"}));
+         boolean_text(offer.owner_settled), boolean_text(offer.output_removed),
+         boolean_text(offer.phase_identity_immutable),
+         boolean_text(offer.fifo_position_preserved),
+         boolean_text(offer.resource_authority_preserved)}));
+  }
+  std::vector<std::string> carryover_records;
+  for (const M1CarryoverEntry& carryover : row.evidence.protocol.carryover) {
+    carryover_records.push_back(encode_b1_fixed_record(
+        {carryover.occurrence_key, phase_text(carryover.phase),
+         std::to_string(static_cast<std::uint32_t>(carryover.state)),
+         carryover.queue_predecessor_key,
+         boolean_text(carryover.resource_authority_preserved),
+         boolean_text(carryover.publication_current),
+         boolean_text(carryover.owner_settled)}));
+  }
+  std::vector<std::string> progress_records;
+  for (const M1ThroughputProgressSample& window :
+       row.evidence.fairness.progress_windows) {
+    progress_records.push_back(encode_b1_fixed_record(
+        {std::to_string(window.window_ordinal),
+         std::to_string(window.successful_site_operations),
+         std::to_string(window.duration.count())}));
+  }
+  std::vector<std::string> graph_records;
+  for (const M1GraphServiceWindow& window :
+       row.evidence.fairness.graph_service_windows) {
+    graph_records.push_back(encode_b1_fixed_record(
+        {std::to_string(window.window_ordinal),
+         boolean_text(window.both_graphs_continuously_demanding),
+         std::to_string(window.graph_a_completed_service),
+         std::to_string(window.graph_b_completed_service)}));
+  }
+  std::vector<std::string> class_records;
+  for (const M1ClassStartSample& start : row.evidence.fairness.class_starts) {
+    class_records.push_back(encode_b1_fixed_record(
+        {std::to_string(start.causal_sequence),
+         std::to_string(static_cast<std::uint32_t>(start.service_class)),
+         boolean_text(start.interactive_candidate_startable),
+         boolean_text(start.throughput_candidate_startable),
+         boolean_text(start.execution_grant_committed)}));
+  }
+  std::vector<std::string> headroom_records;
+  for (const M1HeadroomAdmissionOutcome& outcome :
+       row.evidence.fairness.headroom_outcomes) {
+    headroom_records.push_back(encode_b1_fixed_record(
+        {std::to_string(outcome.origin_ordinal),
+         std::to_string(outcome.edit_index),
+         boolean_text(outcome.admission_attempted),
+         boolean_text(outcome.host_status.has_value()),
+         outcome.host_status.has_value() ? boolean_text(outcome.host_status->ok)
+                                         : "not-applicable",
+         outcome.host_status.has_value()
+             ? std::to_string(
+                   static_cast<std::uint32_t>(outcome.host_status->domain))
+             : "not-applicable",
+         outcome.host_status.has_value()
+             ? std::to_string(outcome.host_status->code)
+             : "not-applicable",
+         outcome.host_status.has_value() ? outcome.host_status->name
+                                         : "not-applicable",
+         outcome.host_status.has_value() ? outcome.host_status->message
+                                         : "not-applicable",
+         boolean_text(outcome.throughput_headroom_failure)}));
+  }
+  std::vector<std::string> io_records;
+  for (const B1JobEvidence& job : row.evidence.batch_jobs) {
+    std::vector<std::string> observations_for_job;
+    observations_for_job.reserve(job.output.io_observations.size());
+    for (const B1ComputeIoObservation& observation :
+         job.output.io_observations) {
+      observations_for_job.push_back(encode_m1_io_observation(observation));
+    }
+    io_records.push_back(encode_b1_fixed_record(
+        {encode_b1_job_instance(job.job),
+         std::to_string(job.producer_offer_ordinal),
+         std::to_string(monotonic_nanoseconds(job.offered_at)),
+         std::to_string(monotonic_nanoseconds(job.endpoint_at)),
+         std::to_string(static_cast<std::uint32_t>(job.output.status)),
+         encode_record_list(observations_for_job),
+         encode_b1_normalized_text(b1_job_evidence_json(job).dump())}));
+  }
+  std::vector<std::string> snapshot_records;
+  snapshot_records.reserve(row.evidence.temporal_snapshots.size());
+  for (const M1ExecutionSnapshot& snapshot : row.evidence.temporal_snapshots) {
+    snapshot_records.push_back(encode_m1_execution_snapshot(snapshot));
   }
   std::vector<std::string> mixed_records;
   for (const M1FairnessObservation& observation : observations.events) {
@@ -1734,7 +1948,15 @@ std::string encode_m1_inner_row(
          std::to_string(monotonic_nanoseconds(observation.observed_at)),
          std::to_string(observation.run_id),
          std::to_string(observation.local_task_id),
-         std::to_string(observation.service_charge)}));
+         std::to_string(observation.service_charge),
+         std::to_string(
+             static_cast<std::uint32_t>(observation.task_terminal_kind)),
+         std::to_string(
+             static_cast<std::uint32_t>(observation.run_terminal_kind)),
+         boolean_text(observation.qos_matches_tag),
+         boolean_text(observation.interactive_candidate_startable),
+         boolean_text(observation.throughput_candidate_startable),
+         boolean_text(observation.execution_grant_committed)}));
   }
   const auto& boundaries = row.evidence.protocol.boundaries;
   const std::string boundary_record = encode_b1_fixed_record(
@@ -1748,26 +1970,108 @@ std::string encode_m1_inner_row(
        std::to_string(
            monotonic_nanoseconds(boundaries.measurement_end.timestamp)),
        std::to_string(boundaries.measurement_end.event_sequence)});
+  const M1FirstMeasuredAdmissionEvidence& first =
+      row.evidence.protocol.first_measured_admission;
+  const std::string first_admission_record = encode_b1_fixed_record(
+      {std::to_string(first.edit_index),
+       std::to_string(monotonic_nanoseconds(first.nominal_time)),
+       boolean_text(first.attempted),
+       std::to_string(monotonic_nanoseconds(first.admission_sample)),
+       first.reserved_event_sequence.has_value()
+           ? std::to_string(*first.reserved_event_sequence)
+           : "not-applicable",
+       boolean_text(first.host_succeeded),
+       first.accepted_coordinate.has_value()
+           ? std::to_string(monotonic_nanoseconds(
+                 first.accepted_coordinate->admission_time()))
+           : "not-applicable",
+       first.accepted_coordinate.has_value()
+           ? std::to_string(first.accepted_coordinate->event_sequence())
+           : "not-applicable",
+       boolean_text(first.warmup_publication_current_before_acceptance),
+       boolean_text(first.superseded_exactly_at_acceptance),
+       boolean_text(first.boundary_only_cancellation),
+       std::to_string(
+           monotonic_nanoseconds(first.old_generation_settlement_endpoint))});
+  const std::string protocol_flags = encode_b1_fixed_record(
+      {boolean_text(row.evidence.protocol.shared_execution_domain),
+       boolean_text(row.evidence.protocol.boundary_was_zero_duration),
+       boolean_text(row.evidence.protocol.raw_history_preserved),
+       boolean_text(row.evidence.protocol.warmup_sources_closed),
+       boolean_text(row.evidence.protocol.measured_counters_reset),
+       boolean_text(row.evidence.protocol.final_settlement_proved),
+       boolean_text(row.evidence.occurrence_attribution_proved),
+       boolean_text(row.evidence.temporal_effects_complete),
+       boolean_text(row.evidence.fairness.observation_overflowed),
+       boolean_text(row.evidence.fairness.observation_sequence_exhausted),
+       boolean_text(row.evidence.fairness.observation_qos_mismatch)});
+  const M1BatchWasteEvidence& waste = row.evidence.batch_waste;
+  const std::string batch_waste_record = encode_b1_fixed_record(
+      {std::to_string(waste.all_started_service),
+       std::to_string(waste.discarded_started_service),
+       std::to_string(waste.post_cancellation_started_service),
+       std::to_string(waste.duplicate_service_starts),
+       std::to_string(waste.retry_service_starts)});
   const std::string verdict_record = encode_b1_fixed_record(
       {verdict_text(row.latency_verdict),
        verdict_text(row.throughput_progress_verdict),
        verdict_text(row.fairness_verdict), verdict_text(row.waste_verdict),
        verdict_text(row.memory_verdict), verdict_text(row.overall_verdict)});
-  return encode_b1_canonical_manifest(
-      kM1InnerRowSchema,
-      {known_field("schema_version", "uint64",
-                   std::to_string(kM1InnerRowSchemaVersion)),
-       known_field("replicate_ordinal", "uint64",
-                   std::to_string(row.evidence.replicate_ordinal)),
-       known_field("boundaries", "m1-boundary-record-v1", boundary_record),
-       known_field("interactive_occurrences", "m1-i1-occurrence-list-v1",
-                   encode_record_list(i1_records)),
-       known_field("batch_offers", "m1-b1-offer-list-v1",
-                   encode_record_list(offer_records)),
-       known_field("mixed_observations", "m1-observation-list-v1",
-                   encode_record_list(mixed_records)),
-       known_field("verdicts", "m1-five-axis-verdict-record-v1",
-                   verdict_record)});
+  std::vector<B1CanonicalField> fields{
+      known_field("schema_version", "uint64",
+                  std::to_string(kM1InnerRowSchemaVersion)),
+      known_field("replicate_ordinal", "uint64",
+                  std::to_string(row.evidence.replicate_ordinal)),
+      known_field("boundaries", "m1-boundary-record-v1", boundary_record),
+      known_field("protocol_flags", "m1-protocol-flags-v1", protocol_flags),
+      known_field("interactive_occurrences", "m1-i1-occurrence-list-v1",
+                  encode_record_list(i1_records)),
+      known_field("batch_offers", "m1-b1-offer-list-v1",
+                  encode_record_list(offer_records)),
+      known_field("carryover", "m1-carryover-list-v1",
+                  encode_record_list(carryover_records)),
+      known_field("first_measured_admission", "m1-first-admission-record-v1",
+                  first_admission_record),
+      known_field("progress_windows", "m1-progress-window-list-v1",
+                  encode_record_list(progress_records)),
+      known_field("graph_service_windows", "m1-graph-service-window-list-v1",
+                  encode_record_list(graph_records)),
+      known_field("class_starts", "m1-class-start-list-v1",
+                  encode_record_list(class_records)),
+      known_field("headroom_outcomes", "m1-headroom-outcome-list-v1",
+                  encode_record_list(headroom_records)),
+      known_field("batch_io_streams", "m1-b1-io-stream-list-v1",
+                  encode_record_list(io_records)),
+      known_field("temporal_snapshots", "m1-execution-snapshot-list-v1",
+                  encode_record_list(snapshot_records)),
+      known_field("mixed_observations", "m1-observation-list-v1",
+                  encode_record_list(mixed_records))};
+  if (row.evidence.paired_isolated_i1_p99.has_value()) {
+    fields.push_back(known_field(
+        "paired_isolated_i1_p99_ns", "uint64",
+        std::to_string(row.evidence.paired_isolated_i1_p99->count())));
+  } else {
+    fields.push_back(not_applicable_field("paired_isolated_i1_p99_ns", "uint64",
+                                          "paired-isolated-row-not-resolved"));
+  }
+  if (row.evidence.fairness.paired_isolated_b1.has_value()) {
+    fields.push_back(known_field(
+        "paired_isolated_b1_source", "m1-b1-rate-source-v1",
+        encode_b1_fixed_record(
+            {std::to_string(row.evidence.fairness.paired_isolated_b1
+                                ->successful_site_operations),
+             std::to_string(row.evidence.fairness.paired_isolated_b1->duration
+                                .count())})));
+  } else {
+    fields.push_back(not_applicable_field("paired_isolated_b1_source",
+                                          "m1-b1-rate-source-v1",
+                                          "paired-isolated-row-not-resolved"));
+  }
+  fields.push_back(known_field("batch_waste", "m1-batch-waste-record-v1",
+                               batch_waste_record));
+  fields.push_back(known_field("verdicts", "m1-five-axis-verdict-record-v1",
+                               verdict_record));
+  return encode_b1_canonical_manifest(kM1InnerRowSchema, fields);
 }
 
 /**
@@ -1777,6 +2081,10 @@ std::string encode_m1_inner_row(
 struct M1RunResult final {
   /** @brief Evaluated five-axis inner row. */
   M1InnerRow inner_row;
+  /** @brief Exact pre-timed loaded isolated-I1 source-private object. */
+  EvidencePairObject paired_i1;
+  /** @brief Exact pre-timed loaded isolated-B1 cap-eight object. */
+  EvidencePairObject paired_b1_cap8;
   /** @brief Canonical 15-field M1 row. */
   EvidenceCanonicalRow outer_row;
   /** @brief Canonical five-field M1 bundle. */
@@ -1808,17 +2116,26 @@ EvidenceRetainedSection make_section(std::string name, std::string schema,
 }
 
 /**
- * @brief Returns a stable unresolved digest when an external pair is absent.
- * @param role Exact missing prerequisite identity.
- * @return Canonical lowercase SHA-256 address that resolves to no local object.
- * @throws std::bad_alloc when digest input/output ownership allocates.
- * @note This value is never treated as evidence or Pass. Exact-one corpus
- * resolution fails and the diagnostic names the missing prerequisite.
+ * @brief Finds the latest topological seal retained by one pair object.
+ * @param object Complete loaded row, bundle, and their six source sections.
+ * @return Maximum nonzero seal ordinal in the object.
+ * @throws std::invalid_argument when any required seal is zero.
+ * @throws Nothing otherwise.
  */
-std::string unresolved_pair_digest(std::string_view role) {
-  return b1_digest_hex(
-      b1_sha256(std::string("execution-profile-m1-unresolved-external-v1\n") +
-                std::string(role)));
+std::uint64_t latest_pair_seal(const EvidencePairObject& object) {
+  const std::array<std::uint64_t, 8U> seals{
+      object.row.source.workload_manifest.seal_ordinal,
+      object.row.job_instance_index.seal_ordinal,
+      object.row.source.measurement_evidence.seal_ordinal,
+      object.row.source.output_evidence.seal_ordinal,
+      object.row.source.verdict_evidence.seal_ordinal,
+      object.row.source.seal_ordinal,
+      object.bundle.source.provenance.seal_ordinal,
+      object.bundle.source.seal_ordinal};
+  if (std::find(seals.begin(), seals.end(), 0U) != seals.end()) {
+    throw std::invalid_argument("loaded M1 pair object has a zero seal");
+  }
+  return *std::max_element(seals.begin(), seals.end());
 }
 
 /**
@@ -1827,29 +2144,33 @@ std::string unresolved_pair_digest(std::string_view role) {
  * @param environment Complete retained claims plus portable live observation.
  * @param inner Evaluated five-axis row.
  * @param observations Complete shared causal event snapshot.
+ * @param completed_i1 Complete reused Issue #93 rows in protocol order.
+ * @param paired_i1 Exact pre-timed loaded isolated-I1 object.
+ * @param paired_b1_cap8 Exact pre-timed loaded isolated-B1 cap-eight object.
  * @param i1_fixture Frozen embedded I1 fixture digest.
  * @param b1_fixture Frozen embedded B1 fixture digest.
  * @param b1_corpus Frozen embedded B1 corpus digest.
  * @param b1_golden Frozen embedded B1 golden digest.
  * @return Canonical row, bundle, local fail-closed corpus result, and detail.
  * @throws Canonical envelope and allocation failures unchanged.
+ * @throws std::overflow_error when the loaded pair seals leave no range for
+ * the eight local M1 objects.
  */
-M1RunResult seal_m1_result(const M1RunnerOptions& options,
-                           B1EnvironmentEvidence environment, M1InnerRow inner,
-                           const M1FairnessObservationSnapshot& observations,
-                           const B1Sha256Digest& i1_fixture,
-                           const B1Sha256Digest& b1_fixture,
-                           const B1Sha256Digest& b1_corpus,
-                           const B1Sha256Digest& b1_golden) {
-  const std::string nested_inner = encode_m1_inner_row(inner, observations);
-  const std::string i1_row = options.paired_i1_row_digest.value_or(
-      unresolved_pair_digest("isolated-i1-row"));
-  const std::string i1_bundle = options.paired_i1_bundle_digest.value_or(
-      unresolved_pair_digest("isolated-i1-bundle"));
-  const std::string b1_row = options.paired_b1_row_digest.value_or(
-      unresolved_pair_digest("isolated-b1-cap8-row"));
-  const std::string b1_bundle = options.paired_b1_bundle_digest.value_or(
-      unresolved_pair_digest("isolated-b1-cap8-bundle"));
+M1RunResult seal_m1_result(
+    const M1RunnerOptions& options, B1EnvironmentEvidence environment,
+    M1InnerRow inner, const M1FairnessObservationSnapshot& observations,
+    const std::vector<CompletedI1Occurrence>& completed_i1,
+    EvidencePairObject paired_i1, EvidencePairObject paired_b1_cap8,
+    const B1Sha256Digest& i1_fixture, const B1Sha256Digest& b1_fixture,
+    const B1Sha256Digest& b1_corpus, const B1Sha256Digest& b1_golden) {
+  const std::string nested_inner =
+      encode_m1_inner_row(inner, observations, completed_i1);
+  const std::uint64_t latest_external_seal =
+      std::max(latest_pair_seal(paired_i1), latest_pair_seal(paired_b1_cap8));
+  if (latest_external_seal > std::numeric_limits<std::uint64_t>::max() - 8U) {
+    throw std::overflow_error("loaded M1 pair seal range is exhausted");
+  }
+  const std::uint64_t first_local_seal = latest_external_seal + 1U;
 
   EvidenceRowInput row_input;
   row_input.workload_id = kM1WorkloadId;
@@ -1879,15 +2200,44 @@ M1RunResult seal_m1_result(const M1RunnerOptions& options,
                    std::to_string(kM1MeasuredI1OriginCount)),
        known_field("measured_windows", "uint64",
                    std::to_string(kM1MeasuredWindowCount))},
-      1U);
+      first_local_seal);
   for (const M1BatchOfferEvidence& offer :
        inner.evidence.protocol.batch_offers) {
     row_input.job_instances.push_back(offer.job);
   }
-  row_input.job_index_seal_ordinal = 2U;
+  row_input.job_index_seal_ordinal = first_local_seal + 1U;
+  std::vector<B1CanonicalField> measurement_fields{
+      known_field("m1_inner_row", "canonical-text-hex-v1",
+                  encode_b1_normalized_text(nested_inner))};
+  if (inner.evidence.paired_isolated_i1_p99.has_value()) {
+    measurement_fields.push_back(known_field(
+        "paired_isolated_i1_p99_ns", "uint64",
+        std::to_string(inner.evidence.paired_isolated_i1_p99->count())));
+  } else {
+    measurement_fields.push_back(
+        not_applicable_field("paired_isolated_i1_p99_ns", "uint64",
+                             "paired-isolated-row-not-resolved"));
+  }
+  if (inner.evidence.fairness.paired_isolated_b1.has_value()) {
+    measurement_fields.push_back(
+        known_field("paired_isolated_b1_successful_site_operations", "uint64",
+                    std::to_string(inner.evidence.fairness.paired_isolated_b1
+                                       ->successful_site_operations)));
+    measurement_fields.push_back(known_field(
+        "paired_isolated_b1_duration_ns", "uint64",
+        std::to_string(
+            inner.evidence.fairness.paired_isolated_b1->duration.count())));
+  } else {
+    measurement_fields.push_back(
+        not_applicable_field("paired_isolated_b1_successful_site_operations",
+                             "uint64", "paired-isolated-row-not-resolved"));
+    measurement_fields.push_back(
+        not_applicable_field("paired_isolated_b1_duration_ns", "uint64",
+                             "paired-isolated-row-not-resolved"));
+  }
   row_input.measurement_evidence = make_section(
       "measurement-evidence", "execution-profile-measurement-evidence-v1",
-      {known_field("m1_inner_row", kM1InnerRowSchema, nested_inner)}, 3U);
+      std::move(measurement_fields), first_local_seal + 2U);
   std::vector<std::string> receipts;
   for (const M1BatchOfferEvidence& offer :
        inner.evidence.protocol.batch_offers) {
@@ -1902,7 +2252,7 @@ M1RunResult seal_m1_result(const M1RunnerOptions& options,
       make_section("output-evidence", "execution-profile-output-evidence-v1",
                    {known_field("job_endpoints", "m1-job-endpoint-list-v1",
                                 encode_record_list(receipts))},
-                   4U);
+                   first_local_seal + 3U);
   std::vector<std::string> reason_records;
   for (const std::string& reason : inner.validity_reasons) {
     reason_records.push_back(encode_b1_fixed_record({reason}));
@@ -1918,12 +2268,13 @@ M1RunResult seal_m1_result(const M1RunnerOptions& options,
        known_field("overall", "verdict", verdict_text(inner.overall_verdict)),
        known_field("validity_reasons", "diagnostic-list-v1",
                    encode_record_list(reason_records))},
-      5U);
-  row_input.paired_isolated_i1 =
-      EvidencePairReference{i1_row, i1_bundle, options.replicate_ordinal};
-  row_input.paired_isolated_b1_cap8 =
-      EvidencePairReference{b1_row, b1_bundle, options.replicate_ordinal};
-  row_input.seal_ordinal = 6U;
+      first_local_seal + 4U);
+  row_input.paired_isolated_i1 = EvidencePairReference{
+      paired_i1.row.digest, paired_i1.bundle.digest, options.replicate_ordinal};
+  row_input.paired_isolated_b1_cap8 = EvidencePairReference{
+      paired_b1_cap8.row.digest, paired_b1_cap8.bundle.digest,
+      options.replicate_ordinal};
+  row_input.seal_ordinal = first_local_seal + 5U;
   EvidenceCanonicalRow row = materialize_evidence_row(std::move(row_input));
 
   EvidenceBundleInput bundle_input;
@@ -1937,18 +2288,21 @@ M1RunResult seal_m1_result(const M1RunnerOptions& options,
                    valid_b1_environment_evidence(row.source.environment)
                        ? "complete-live-authority"
                        : "portable-incomplete-live-authority")},
-      7U);
+      first_local_seal + 6U);
   bundle_input.comparison_reference_bundle_digest =
       options.comparison_reference_bundle_digest;
   bundle_input.rows.push_back(row);
-  bundle_input.seal_ordinal = 8U;
+  bundle_input.seal_ordinal = first_local_seal + 7U;
   EvidenceCanonicalBundle bundle =
       materialize_evidence_bundle(std::move(bundle_input));
   EvidenceCorpus corpus;
-  corpus.sections = {
-      row.source.workload_manifest,    row.job_instance_index,
-      row.source.measurement_evidence, row.source.output_evidence,
-      row.source.verdict_evidence,     bundle.source.provenance};
+  append_evidence_pair_object(paired_i1, &corpus);
+  append_evidence_pair_object(paired_b1_cap8, &corpus);
+  corpus.sections.insert(
+      corpus.sections.end(),
+      {row.source.workload_manifest, row.job_instance_index,
+       row.source.measurement_evidence, row.source.output_evidence,
+       row.source.verdict_evidence, bundle.source.provenance});
   corpus.rows.push_back(row);
   corpus.bundles.push_back(bundle);
   const EvidenceCorpusValidation validation =
@@ -1964,16 +2318,27 @@ M1RunResult seal_m1_result(const M1RunnerOptions& options,
       {"outer_bundle_digest", bundle.digest},
       {"corpus_validation", verdict_text(validation.verdict)},
       {"corpus_reasons", validation.reasons},
-      {"isolated_i1_supplied", options.paired_i1_row_digest.has_value()},
-      {"isolated_b1_supplied", options.paired_b1_row_digest.has_value()},
+      {"isolated_i1_object_loaded", true},
+      {"isolated_b1_object_loaded", true},
+      {"isolated_i1_row_digest", paired_i1.row.digest},
+      {"isolated_i1_bundle_digest", paired_i1.bundle.digest},
+      {"isolated_b1_row_digest", paired_b1_cap8.row.digest},
+      {"isolated_b1_bundle_digest", paired_b1_cap8.bundle.digest},
+      {"isolated_i1_p99_ns", inner.evidence.paired_isolated_i1_p99->count()},
+      {"isolated_b1_successful_site_operations",
+       inner.evidence.fairness.paired_isolated_b1->successful_site_operations},
+      {"isolated_b1_duration_ns",
+       inner.evidence.fairness.paired_isolated_b1->duration.count()},
       {"actual_environment_authority",
        valid_b1_environment_evidence(row.source.environment)},
       {"canonical_outer_envelope_claim", true},
       {"machine_conformance_pass",
        validation.verdict == I1Verdict::Pass &&
            inner.overall_verdict == I1Verdict::Pass}};
-  return M1RunResult{std::move(inner), std::move(row), std::move(bundle),
-                     validation, std::move(diagnostic)};
+  return M1RunResult{std::move(inner),          std::move(paired_i1),
+                     std::move(paired_b1_cap8), std::move(row),
+                     std::move(bundle),         validation,
+                     std::move(diagnostic)};
 }
 
 /**
@@ -1986,13 +2351,21 @@ M1RunResult seal_m1_result(const M1RunnerOptions& options,
  * unchanged.
  * @note All three Graphs use one EmbeddedHost, one ExecutionService, one
  * ResourceLedger, and one ComputeIoExecutor. No transition drains or restarts
- * the service; B1 producers remain independent and stop offers only at U.
+ * the service; B1 producers remain independent and stop offers only at U. Both
+ * isolated pair packs are loaded, rebound, and reduced before the timed
+ * boundary or portable output authority is created.
  */
 M1RunResult run_exact_m1_replicate(
     const M1RunnerOptions& options,
     const std::filesystem::path& output_directory) {
   const M1ExpectedEnvironment expected =
       load_expected_environment(options, output_directory);
+  EvidencePairObject paired_i1 = load_evidence_pair_object(
+      read_evidence_pair_object_file(options.paired_i1_object_path),
+      options.paired_i1_row_digest, options.paired_i1_bundle_digest);
+  EvidencePairObject paired_b1_cap8 = load_evidence_pair_object(
+      read_evidence_pair_object_file(options.paired_b1_object_path),
+      options.paired_b1_row_digest, options.paired_b1_bundle_digest);
   std::unique_ptr<Host> host = create_embedded_host();
   if (!host) {
     throw std::runtime_error("failed to create embedded M1 Host");
@@ -2025,11 +2398,6 @@ M1RunResult run_exact_m1_replicate(
     throw std::runtime_error(
         "embedded Host lacks one required I1/B1/M1 private seam");
   }
-  B1OutputStore output_store(output_directory,
-                             b1_host->b1_compute_io_executor());
-  const B1OutputStoreRootObservation initial_root =
-      output_store.observe_root_authority();
-
   M1FairnessObservationCollector mixed_collector(kM1RunnerObservationCapacity);
   M1ProtocolSequence protocol_sequence;
   BatchState batch_state;
@@ -2038,7 +2406,6 @@ M1RunResult run_exact_m1_replicate(
   input.replicate_ordinal = options.replicate_ordinal;
   input.protocol.replicate_ordinal = options.replicate_ordinal;
   input.protocol.shared_execution_domain = true;
-  input.paired_isolated_i1_p99 = options.paired_i1_p99;
 
   std::uint64_t m1_cursor = 0U;
   input.temporal_snapshots.push_back(capture_m1_snapshot(*m1_host, &m1_cursor));
@@ -2048,6 +2415,43 @@ M1RunResult run_exact_m1_replicate(
       capture_b1_snapshot(*b1_host, &b1_initial_cursor);
   std::uint64_t graph_a_cursor = b1_initial_cursor;
   std::uint64_t graph_b_cursor = b1_initial_cursor;
+
+  const B1Sha256Digest i1_fixture = evidence_i1_component_fixture_digest();
+  const EvidenceB1ComponentDigests b1_components =
+      evidence_b1_component_digests();
+  B1Sha256 combined_fixture;
+  combined_fixture.update("execution-profile-m1-shared-fixture-v1\n");
+  combined_fixture.update(b1_digest_hex(i1_fixture));
+  combined_fixture.update(b1_digest_hex(b1_components.fixture));
+  B1EnvironmentEvidence environment{
+      expected.base_manifest,
+      digest_b1_environment_manifest(expected.base_manifest),
+      expected.storage_manifest,
+      digest_b1_environment_manifest(expected.storage_manifest),
+      expected.environment_class_manifest,
+      digest_b1_environment_manifest(expected.environment_class_manifest),
+      expected.storage_raw_proof,
+      expected.storage_eligibility,
+      kM1WorkloadId,
+      combined_fixture.finish(),
+      evidence_resource_identity(initial_m1),
+      8U,
+      options.replicate_ordinal,
+      std::nullopt};
+  const EvidenceM1PairDenominators denominators =
+      validate_evidence_m1_pair_objects(
+          paired_i1, paired_b1_cap8, options.subject_role,
+          options.replicate_ordinal, environment, i1_fixture, b1_components);
+  input.paired_isolated_i1_p99 =
+      std::chrono::nanoseconds(denominators.isolated_i1_p99_ns);
+  input.fairness.paired_isolated_b1 = M1PairedB1RateEvidence{
+      denominators.isolated_b1_successful_site_operations,
+      std::chrono::nanoseconds(denominators.isolated_b1_duration_ns)};
+
+  B1OutputStore output_store(output_directory,
+                             b1_host->b1_compute_io_executor());
+  const B1OutputStoreRootObservation initial_root =
+      output_store.observe_root_authority();
 
   const auto measurement_start = checked_i1_time_add(
       std::chrono::steady_clock::now(), std::chrono::seconds(7));
@@ -2064,6 +2468,16 @@ M1RunResult run_exact_m1_replicate(
        monotonic_nanoseconds(timeline.measurement_start)},
       {"measurement_end_ns", monotonic_nanoseconds(timeline.measurement_end)},
       {"outer_schema", kEvidenceRowSchema},
+      {"paired_i1_object_loaded_before_timing", true},
+      {"paired_i1_row_digest", paired_i1.row.digest},
+      {"paired_i1_bundle_digest", paired_i1.bundle.digest},
+      {"paired_b1_object_loaded_before_timing", true},
+      {"paired_b1_row_digest", paired_b1_cap8.row.digest},
+      {"paired_b1_bundle_digest", paired_b1_cap8.bundle.digest},
+      {"isolated_i1_p99_ns", denominators.isolated_i1_p99_ns},
+      {"isolated_b1_successful_site_operations",
+       denominators.isolated_b1_successful_site_operations},
+      {"isolated_b1_duration_ns", denominators.isolated_b1_duration_ns},
       {"machine_result_requires_complete_external_objects", true}};
   write_fresh_file(output_directory / "invocation.json",
                    invocation.dump(2) + "\n");
@@ -2363,9 +2777,13 @@ M1RunResult run_exact_m1_replicate(
     std::lock_guard<std::mutex> lock(batch_state.mutex);
     occurrences = batch_state.occurrences;
   }
-  derive_m1_aggregates(timeline, occurrences,
-                       input.protocol.interactive_occurrences, completed_i1,
-                       observations, options.paired_b1_rate, &input);
+  for (const std::shared_ptr<BatchOccurrence>& occurrence : occurrences) {
+    if (occurrence->evidence.has_value()) {
+      input.batch_jobs.push_back(*occurrence->evidence);
+    }
+  }
+  derive_m1_aggregates(timeline, occurrences, completed_i1, observations,
+                       &input);
   input.occurrence_attribution_proved =
       std::all_of(input.protocol.interactive_occurrences.begin(),
                   input.protocol.interactive_occurrences.end(),
@@ -2387,36 +2805,13 @@ M1RunResult run_exact_m1_replicate(
       final_m1_snapshot_is_zero(input.temporal_snapshots.back());
   M1InnerRow inner = evaluate_m1_inner_row(std::move(input));
 
-  const B1Sha256Digest i1_fixture = m1_i1_fixture_digest();
-  const B1Sha256Digest b1_fixture =
-      m1_b1_identity("execution-profile-m1-b1-fixture-v1");
-  const B1Sha256Digest b1_corpus =
-      m1_b1_identity("execution-profile-m1-b1-corpus-v1");
-  const B1Sha256Digest b1_golden =
-      m1_b1_identity("execution-profile-m1-b1-golden-v1");
-  B1Sha256 combined_fixture;
-  combined_fixture.update("execution-profile-m1-shared-fixture-v1\n");
-  combined_fixture.update(b1_digest_hex(i1_fixture));
-  combined_fixture.update(b1_digest_hex(b1_fixture));
-  B1EnvironmentEvidence environment{
-      expected.base_manifest,
-      digest_b1_environment_manifest(expected.base_manifest),
-      expected.storage_manifest,
-      digest_b1_environment_manifest(expected.storage_manifest),
-      expected.environment_class_manifest,
-      digest_b1_environment_manifest(expected.environment_class_manifest),
-      expected.storage_raw_proof,
-      expected.storage_eligibility,
-      kM1WorkloadId,
-      combined_fixture.finish(),
-      m1_resource_identity(initial_m1),
-      8U,
-      options.replicate_ordinal,
+  environment.storage_actual_observation =
       make_b1_portable_runner_storage_observation(
-          output_store.retain_root_authority(), batch_state.measured_receipts)};
-  return seal_m1_result(options, std::move(environment), std::move(inner),
-                        observations, i1_fixture, b1_fixture, b1_corpus,
-                        b1_golden);
+          output_store.retain_root_authority(), batch_state.measured_receipts);
+  return seal_m1_result(
+      options, std::move(environment), std::move(inner), observations,
+      completed_i1, std::move(paired_i1), std::move(paired_b1_cap8), i1_fixture,
+      b1_components.fixture, b1_components.corpus, b1_components.golden);
 }
 
 /**
@@ -2448,6 +2843,10 @@ void persist_m1_result(const std::filesystem::path& output_directory,
                    result.outer_row.manifest_bytes);
   write_fresh_file(output_directory / "bundle.canonical",
                    result.outer_bundle.manifest_bytes);
+  write_fresh_file(output_directory / "paired-i1-object.canonical",
+                   materialize_evidence_pair_object(result.paired_i1));
+  write_fresh_file(output_directory / "paired-b1-object.canonical",
+                   materialize_evidence_pair_object(result.paired_b1_cap8));
   write_fresh_file(output_directory / "result.json",
                    result.diagnostic.dump(2) + "\n");
 }
