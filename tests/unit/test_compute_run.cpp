@@ -7833,7 +7833,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
             std::future_status::ready);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             ResourceVector{});
 
   throughput = launch_blocking_policy_run(
@@ -7845,7 +7846,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
             std::future_status::ready);
   EXPECT_EQ(service.resource_snapshot().reserved, *doubled);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             required);
 
   EXPECT_TRUE(interactive_release_guard.release());
@@ -7855,7 +7857,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_TRUE(wait_for_resource_reservation(service, required));
   EXPECT_EQ(service.resource_snapshot().reserved, required);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             required);
 
   std::atomic_int rejected_entered{0};
@@ -7876,7 +7879,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_EQ(rejected_entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             required);
 
   EXPECT_TRUE(throughput_release_guard.release());
@@ -7886,7 +7890,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             ResourceVector{});
 
   targets.push_back(launch_ordered_policy_run(
@@ -7899,7 +7904,8 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             ResourceVector{});
 }
 
@@ -7980,7 +7986,8 @@ TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
   EXPECT_EQ(settled_while_blocked, 1U);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             required);
 
   EXPECT_TRUE(callback_release_guard.release());
@@ -8002,7 +8009,8 @@ TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
   EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
-                throughput_reservation_snapshot(service),
+                throughput_reservation_snapshot(service)
+                    .reserved,
             ResourceVector{});
 }
 

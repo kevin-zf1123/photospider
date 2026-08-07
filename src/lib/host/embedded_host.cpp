@@ -21,6 +21,7 @@
 #include "benchmark/b1_host.hpp"
 #include "benchmark/i1_host.hpp"
 #include "benchmark/i2_host.hpp"
+#include "benchmark/m1_host.hpp"
 #include "compute/dirty_region_snapshot.hpp"
 #include "compute/execution_service.hpp"
 #include "core/parameter_value_text.hpp"
@@ -2494,7 +2495,8 @@ HostPluginLoadReport to_public_plugin_report(const PluginLoadResult& report) {
 class EmbeddedHost final : public Host,
                            public benchmark::B1Host,
                            public benchmark::I1Host,
-                           public benchmark::I2Host {
+                           public benchmark::I2Host,
+                           public benchmark::M1Host {
  public:
   /**
    * @brief Creates a Host with a fresh explicitly composed backend state.
@@ -2933,6 +2935,20 @@ class EmbeddedHost final : public Host,
         state_->execution_service->lifecycle_snapshot(
             after_cursor, static_cast<std::uint32_t>(limit)),
         state_->execution_service->compute_io_executor().snapshot()};
+  }
+
+  /** @copydoc benchmark::M1Host::m1_execution_snapshot */
+  benchmark::M1ExecutionSnapshot m1_execution_snapshot(
+      std::uint64_t after_cursor, std::size_t limit) const override {
+    if (limit > compute::kExecutionLifecycleTelemetryMaxPageSize) {
+      throw std::invalid_argument(
+          "M1 lifecycle snapshot limit exceeds the maintained maximum.");
+    }
+    return benchmark::M1ExecutionSnapshot{
+        state_->execution_service->resource_snapshot(),
+        state_->execution_service->throughput_reservation_snapshot(),
+        state_->execution_service->lifecycle_snapshot(
+            after_cursor, static_cast<std::uint32_t>(limit))};
   }
 
   /** @copydoc benchmark::I2Host::acquire_i2_value */

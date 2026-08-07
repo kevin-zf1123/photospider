@@ -310,16 +310,16 @@ class ExecutionServiceTestAccess final {
 #endif
 
   /**
-   * @brief Copies active built-in Throughput reservation charges.
+   * @brief Copies built-in Throughput capacity and reservation charges.
    * @param service Isolated service under test.
-   * @return Exact class-owned vector excluding Interactive owners.
+   * @return Fixed general capacity and class-owned total excluding Interactive.
    * @throws std::system_error when private accounting locking fails.
    * @note This is a non-authoritative test diagnostic; the ledger snapshot
    * remains the physical-capacity source of truth.
    */
-  static ResourceVector throughput_reservation_snapshot(
-      const compute::ExecutionService& service) {
-    return service.throughput_reservation_snapshot_for_testing();
+  static compute::ExecutionThroughputReservationSnapshot
+  throughput_reservation_snapshot(const compute::ExecutionService& service) {
+    return service.throughput_reservation_snapshot();
   }
 };
 

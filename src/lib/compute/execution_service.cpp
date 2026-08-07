@@ -3492,13 +3492,13 @@ class ThroughputReservationAccount final
   }
 
   /**
-   * @brief Copies current Throughput-owned root commitments for tests.
-   * @return Exact class-owned vector; no authority is minted.
+   * @brief Copies fixed capacity and current Throughput-owned commitments.
+   * @return Immutable policy-only diagnostic; no authority is minted.
    * @throws std::system_error when transaction locking fails.
    */
-  ResourceVector snapshot() const {
+  ExecutionThroughputReservationSnapshot snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return reserved_;
+    return ExecutionThroughputReservationSnapshot{capacity_, reserved_};
   }
 
  private:
@@ -4442,6 +4442,12 @@ ResourceLedger::Snapshot ExecutionService::resource_snapshot() const {
   return pool_->ledger.snapshot();
 }
 
+/** @copydoc ExecutionService::throughput_reservation_snapshot */
+ExecutionThroughputReservationSnapshot
+ExecutionService::throughput_reservation_snapshot() const {
+  return pool_->throughput_reservations->snapshot();
+}
+
 /** @copydoc ExecutionService::compute_io_executor */
 execution::ComputeIoExecutor& ExecutionService::compute_io_executor() noexcept {
   return pool_->compute_io_executor;
@@ -4672,12 +4678,6 @@ void ExecutionService::shutdown() {
 ExecutionLifecyclePage ExecutionService::lifecycle_snapshot(
     std::uint64_t after_cursor, std::uint32_t limit) const {
   return lifecycle_telemetry_->snapshot(after_cursor, limit);
-}
-
-/** @copydoc ExecutionService::throughput_reservation_snapshot_for_testing */
-ResourceVector ExecutionService::throughput_reservation_snapshot_for_testing()
-    const {
-  return pool_->throughput_reservations->snapshot();
 }
 
 /** @copydoc ExecutionService::estimate_cpu_run_resources */

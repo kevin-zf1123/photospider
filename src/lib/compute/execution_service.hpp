@@ -866,6 +866,27 @@ struct DeviceResidentValueAcquisition final {
 };
 
 /**
+ * @brief Immutable policy-only Throughput reservation diagnostics.
+ *
+ * The snapshot copies the fixed general-capacity ceiling and the exact active
+ * Throughput root-reservation total under one account lock. Interactive root
+ * reservations remain visible only in the authoritative ResourceLedger
+ * snapshot and never enter `reserved`.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note This value grants no ledger token, reservation, child grant, queue
+ * entry, Run lease, cancellation, release, or policy-mutation authority.
+ */
+struct ExecutionThroughputReservationSnapshot final {
+  /** @brief Immutable resource ceiling after Interactive headroom subtraction.
+   */
+  ResourceVector capacity;
+
+  /** @brief Exact active built-in Throughput root-reservation total. */
+  ResourceVector reserved;
+};
+
+/**
  * @brief Owns one fixed Host execution domain for concurrent Runs.
  *
  * The service owns a fixed CPU worker pool, one private Metal worker lane, one
@@ -1126,6 +1147,17 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::system_error from ledger snapshot locking.
    */
   ResourceLedger::Snapshot resource_snapshot() const;
+
+  /**
+   * @brief Copies the built-in Throughput policy reservation account.
+   * @return Fixed general capacity and exact active Throughput root total.
+   * @throws std::system_error when private accounting locking fails.
+   * @note This source-private diagnostic contains no physical resource or
+   * policy authority. Compare it with `resource_snapshot()` to distinguish
+   * Throughput accounting from the authoritative all-class ledger total.
+   */
+  ExecutionThroughputReservationSnapshot throughput_reservation_snapshot()
+      const;
 
   /**
    * @brief Returns the process-domain bounded compute-I/O executor.
@@ -2081,17 +2113,6 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   static void observe_policy_binding_retired(void* context,
                                              std::uint64_t generation,
                                              bool destroy_failed) noexcept;
-
-  /**
-   * @brief Copies the built-in Throughput admission charge for repository
-   * tests.
-   * @return Exact active Throughput root vectors, excluding Interactive
-   * reservations.
-   * @throws std::system_error when private accounting locking fails.
-   * @note This private diagnostic mints no authority and is exposed only
-   * through `ExecutionServiceTestAccess`, never an installed API.
-   */
-  ResourceVector throughput_reservation_snapshot_for_testing() const;
 
   /**
    * @brief Returns the Run currently executing on this service worker.

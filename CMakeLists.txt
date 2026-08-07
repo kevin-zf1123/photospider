@@ -701,6 +701,7 @@ set(KERNEL_FACADE_SOURCES
     src/lib/benchmark/i1_profile.cpp
     src/lib/benchmark/i2_evidence.cpp
     src/lib/benchmark/i2_profile.cpp
+    src/lib/benchmark/m1_profile.cpp
     src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp
@@ -2019,6 +2020,13 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             photospider_internal_test_product)
         target_link_libraries(test_b1_product_path PRIVATE
             PkgConfig::UTF8PROC)
+        add_ps_test(test_m1_product_path
+            tests/integration/test_m1_product_path.cpp
+            photospider_internal_test_product)
+        target_compile_definitions(test_m1_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+        target_link_libraries(test_m1_product_path PRIVATE
+            PkgConfig::UTF8PROC)
         add_ps_test(test_opencv_operation_concurrency
             tests/integration/test_opencv_operation_concurrency.cpp)
         target_compile_definitions(test_opencv_operation_concurrency PRIVATE
@@ -2131,6 +2139,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         nlohmann_json::nlohmann_json
         PkgConfig::UTF8PROC)
     add_ps_test(test_b1_output_store tests/unit/test_b1_output_store.cpp)
+    add_ps_test(test_m1_profile tests/unit/test_m1_profile.cpp)
+    target_link_libraries(test_m1_profile PRIVATE PkgConfig::UTF8PROC)
     add_ps_test(test_progressive_compute
         tests/unit/test_progressive_compute.cpp)
     add_ps_test(test_dense_tensor_content_digest
@@ -2527,6 +2537,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_b1_output_store
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_m1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_progressive_compute
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -2545,6 +2558,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 LABELS kernel-concurrency
                 TIMEOUT 30)
         gtest_discover_tests(test_b1_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+        gtest_discover_tests(test_m1_product_path
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS kernel-concurrency
@@ -2672,6 +2690,7 @@ if(TARGET photospider_internal_test_product)
         test_i1_product_path
         test_i2_product_path
         test_b1_product_path
+        test_m1_product_path
         test_kernel_contracts
         test_policy_execution)
     set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS "")
