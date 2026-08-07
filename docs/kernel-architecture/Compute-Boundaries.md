@@ -586,11 +586,13 @@ SLO.
 [ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
 freezes the target workloads, six metric formulas, invalidation rules, and
 downstream evidence ownership. Issues #93 through #96 now add their assigned
-source-private inner collectors at the actual admission, visibility,
+source-private collectors at the actual admission, visibility,
 cancellation/quiescence, artifact, trace, completed-service, and
-resource-lifetime boundaries. #96 supplies the deterministic M1 inner-fairness
-slice without claiming the exact machine protocol or canonical outer evidence.
-No placeholder zero value is a substitute for a missing observation source.
+resource-lifetime boundaries. #96 additionally supplies the exact manual M1
+protocol implementation and the existing canonical outer-envelope
+materializer/resolver. This is implementation availability, not a claim that a
+timed machine corpus or its external authority graph passed. No placeholder
+zero value is a substitute for a missing observation source.
 
 Those profile collectors have precise boundary obligations. Edit ordinals
 `1..12` map to `edit_index=0..11`; nominal monotonic admission starts and their
@@ -618,25 +620,35 @@ adapter, normalizer, mapper, binding, and containment predicate before exact-
 matching eligibility. M1 records two same-ordinal isolated pair references in
 addition to candidate/reference comparison provenance.
 
-The source-private #96 M1 slice checked-derives `C^M1`, `W^M1`, `B^M1`, and
-`U^M1`, and evaluates five non-substitutable guards: the nearest-rank p05 over
-exactly 30 paired Throughput-progress windows, the nearest-rank p05 Jain index
-over eligible completed charged service for Graph A and Graph B, at most three
-consecutive Interactive starts while both classes remain continuously
-startable, complete classification of all 480 measured I1 admission attempts
-with zero Throughput-headroom failures, and the independently supplied mixed-I1
-latency verdict. Environment pairing delegates unchanged to the base-only I1
-and full eligible B1-cap-eight compatibility relations. One preallocated,
-fixed-capacity `M1FairnessObservationCollector` gives all tagged I1/B1 sinks a
-shared causal sequence and records scalar service-start, task-terminal,
-Run-terminal, and root-resource-settlement observations; overflow, sequence
-exhaustion, or tag/QoS disagreement is explicit fail-closed evidence. The
-source-private `M1Host` adds no compute route: it joins the authoritative Host
-ledger and lifecycle page with an immutable Throughput capacity/reserved
-diagnostic copied under the policy account lock. These are deterministic inner
-mechanisms only. They do not implement the exact cold/warmup producer cadence,
-cross-boundary carryover collection, canonical outer row/bundle resolver, or a
-timed machine-conformance run.
+The source-private #96 M1 implementation checked-derives `C^M1`, `W^M1`,
+`B^M1`, and `U^M1`; retains the exact 1/7/40 I1 origin grid, fixed A252 and
+B253/A254/B255 offers, final-warmup current hold, carryover/FIFO snapshot,
+independent Graph producer cycles, U cutoff, and final-zero settlement; and
+evaluates non-substitutable latency, progress, fairness, waste, and memory
+axes. Fairness includes the nearest-rank p05 over exactly 30 paired Throughput
+windows, Graph A/B completed-service Jain p05, at most three applicable
+Interactive starts, and complete classification of all 480 measured I1
+admissions. Environment pairing delegates unchanged to the base-only I1 and
+full eligible B1-cap-eight relations.
+
+One preallocated `M1FairnessObservationCollector` gives tagged I1/B1 Runs one
+bounded observer-causal domain. `ComputeRunObservationFanout` forwards the
+same authority-owned product coordinate to that collector and the reused I1 or
+B1 collector; it does not merge that observer clock with I1's independent
+accepted-row sequence. Overflow, sequence exhaustion, or tag/QoS disagreement
+is sticky fail-closed evidence. The source-private `M1Host` adds no compute
+route: it joins Host/device ledger, Compute I/O, class-partitioned ready,
+lifecycle, and immutable Throughput capacity/reserved snapshots from the same
+service.
+
+The manual `m1_shared_benchmark` target is `EXCLUDE_FROM_ALL` and absent from
+CTest/CI. It runs all three Graphs through one `EmbeddedHost`, emits a closed M1
+inner row, and materializes six retained sections plus the existing canonical
+15-field row and five-field bundle. Exact-one/DAG validation, pair direction,
+and actual environment authority remain mandatory. Missing isolated objects or
+incomplete portable storage authority therefore produce canonical `Invalid`;
+the existence or successful build of this runner is not a timed
+machine-conformance result.
 
 Required-storage actual authority is an opaque copyable capability, not the
 serialized root, receipt, or probe fields. `B1OutputStore` alone duplicates the

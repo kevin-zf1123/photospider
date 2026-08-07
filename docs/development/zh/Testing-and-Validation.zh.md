@@ -1278,11 +1278,12 @@ operation-concurrency 变更时，应重新运行准确命令，并解释新输�
 [ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
 定义规范的 `execution-profile-slo-v1` 契约。Issue #92 会冻结本 protocol，但不
 实现 runner 或 collector。Issues #93 至 #96 现在已经提供各自负责的 source-private I1、I2、
-B1 与确定性 M1 inner mechanism、已实现范围内的封闭 inner evidence，以及 correctness test；
-#93 至 #95 还提供显式 exact-workload runner。当前仍没有命令执行精确 M1
-cold/warmup/measured producer protocol，或组合 canonical 15-field outer row 与 five-field
-bundle，因此仓库仍不能生成 conformant mixed bundle。构建 runner 或通过 correctness test
-都不构成机器画像声明。
+B1 与 M1 mechanism、封闭 inner evidence、correctness test，以及显式 exact-workload 手工
+runner。#96 还实现现有 canonical 15-field row/five-field bundle materializer 与
+exact-one/DAG validator。本地物化的 M1 row 本身并不是 conformant mixed corpus：每个已命名
+isolated/comparison object 与完整 live environment authority 都必须能够解析，任何缺失
+prerequisite 都保持 canonical `Invalid`。构建 runner 或通过 correctness test 都不构成机器
+画像声明。
 
 最终长期维护的 runner 是手工 developer/release 工具。由于本节定义其长期产品
 测量职责，它可以留在 primary repository；但与机器相关的 latency、throughput
@@ -2260,22 +2261,38 @@ product、durability 或 evidence invalid。Artifact 明确不声明 canonical o
 构建 target 或运行 `--help` 只属于 harness smoke；本文不声明已经执行精确 34-job invocation
 或三 replicate B1 机器运行。
 
-Issue #96 现在通过 `test_m1_profile`，以及在启用仓库 OpenCV operation provider 时的
-`test_m1_product_path`，注册确定性 M1 inner-fairness mechanism；`test_compute_run` 中既有
-`ExecutionServicePolicy` case 继续作为聚焦的 scheduler-policy guard。Unit suite 覆盖精确
-boundary arithmetic 与 overflow、30-window nearest-rank p05 Throughput progress、eligible
-Graph-peer completed-service Jain p05、彼此独立的 three-start、480-admission headroom 与
-mixed-I1 latency verdict、malformed/overflowed observation 的 fail-closed 行为、唯一共享 causal
-sequence，以及原样委托的 base-only-I1/full-B1 environment relation。Product suite 使用真实
-embedded Host 与仓库 OpenCV provider。在一个 worker 与 gated ready backlog 下，八个不同
-Interactive Run 与三个 Throughput Run 证明：至多连续三次 Interactive start 后就会启动一个
-Throughput Run，而且一个 Throughput Run 会在最后一次 Interactive settlement 前归还 root
-resource。在八个 worker 下，三个 cap-eight 加七个 cap-one Throughput Run 会精确占用 31 CPU
-general quota；再提交一个 cap-one Throughput Run 会被拒绝且 account 不变；一个 Interactive Run
-仍能让共享 ledger 到达 CPU 32，随后全部结算为零。Timeout 只作为 deadlock diagnostic，不是
-latency threshold。这些经过刻意缩减的 fixture 只证明产品机制；它们不执行精确 M1 cadence、
-不采集 30 个 timed window 或 480 次真实 edit、不生成闭合 M1 row/outer bundle，也不声明 machine
-conformance。本 Issue 切片不新增 M1 手工 runner。
+Issue #96 通过 `test_m1_profile`、`test_evidence_envelope`，以及在启用仓库 OpenCV
+operation provider 时的 `test_m1_product_path` 注册确定性 M1 合同；`test_compute_run` 中
+既有 `ExecutionServicePolicy` case 继续作为聚焦 scheduler-policy guard。Unit suite 覆盖
+精确 C/W/B/U arithmetic、1/7/40 origin grid、固定 warmup offer、carryover/current-hold
+evidence、独立 producer-local cycle、全部五个轴、未知 enum 的 fail-closed 行为、有限
+lock-free callback publication、同坐标 fanout、不变的 base-only-I1/full-B1 environment
+delegation、canonical golden digest、functional key、exact-one/DAG resolution 与不完整
+live authority。Product suite 从真实 ready/lifecycle evidence 推导 applicability，证明
+Throughput Run 到达 terminal 与 resource settlement 时 Interactive work 仍为 outstanding，
+并证明精确 31-CPU Throughput/32-CPU shared-headroom boundary。Timeout 只是 deadlock
+diagnostic，不是 latency threshold。
+
+精确 M1 replicate 由手工 `m1_shared_benchmark` target 承担。它为 `EXCLUDE_FROM_ALL`，
+没有 `add_test`，也不属于默认构建或 CI：
+
+```shell
+cmake --build build --target m1_shared_benchmark -j
+./build/tests/m1_shared_benchmark --help
+```
+
+一次 invocation 要求 checkout 外的 fresh absolute empty output directory、canonical base/
+storage/environment-class claim、retained storage proof、subject role 与 ordinal。可选的同
+ordinal isolated I1/B1 address 与 denominator 绑定 relative input；candidate 还必须提供
+comparison-reference bundle address。Runner 通过一个 `EmbeddedHost` 运行 I1 Graph 与两个
+B1 Graph，执行精确 cold/warmup/measured cadence，分类全部 480 个 measured edit，在 U 停止
+新增 offer，关闭全部 Graph，要求 final-zero state，并写入六个 canonical section，以及
+`row.canonical`、`bundle.canonical` 与 `result.json`。缺失 external object 时使用稳定的
+unresolved address；portable storage observation 也不会制造完整 live machine authority；
+任一情况都会使 corpus validation 保持 `Invalid`，并返回 exit status two。后续完整 validator
+可以组合已经 sealed 的 object，但本 target 不是第二套 result orchestrator。构建该 target 或
+运行 `--help` 只属于 harness smoke；本文不声明已经执行精确 timed replicate 或 three-
+replicate machine corpus。
 
 ## CTest 注册
 

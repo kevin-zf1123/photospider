@@ -1616,13 +1616,14 @@ operation-concurrency change, and interpret the newly printed raw samples.
 [ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
 defines the normative `execution-profile-slo-v1` contract. Issue #92 freezes
 this protocol but does not implement a runner or collector. Issues #93 through
-#96 now provide their assigned source-private I1, I2, B1, and deterministic M1
-inner mechanisms, closed inner evidence where implemented, and correctness
-tests; #93 through #95 also provide explicit exact-workload runners. No current
-command executes the exact M1 cold/warmup/measured producer protocol or
-composes the canonical 15-field outer rows and five-field bundle, so the
-repository still cannot produce a conformant mixed bundle. Building a runner
-or passing correctness tests implies no machine profile claim.
+#96 now provide their assigned source-private I1, I2, B1, and M1 mechanisms,
+closed inner evidence, correctness tests, and explicit exact-workload manual
+runners. #96 also implements the existing canonical 15-field row/five-field
+bundle materializer and exact-one/DAG validator. A locally materialized M1 row
+is not by itself a conformant mixed corpus: every named isolated/comparison
+object and complete live environment authority must resolve, and any missing
+prerequisite remains canonical `Invalid`. Building a runner or passing
+correctness tests implies no machine profile claim.
 
 The eventual maintained runner is a manual developer/release tool. It may live
 in the primary repository because this section defines a lasting product-
@@ -2755,27 +2756,45 @@ Building the target or running `--help` is only a harness smoke; this document
 does not claim that an exact 34-job invocation or three-replicate B1 machine run
 has been executed.
 
-Issue #96 now registers the deterministic M1 inner-fairness mechanism in
-`test_m1_profile` and, when the repository OpenCV operation provider is
+Issue #96 registers the deterministic M1 contract in `test_m1_profile`,
+`test_evidence_envelope`, and, when the repository OpenCV operation provider is
 enabled, `test_m1_product_path`; the existing `ExecutionServicePolicy` cases in
-`test_compute_run` remain the focused scheduler-policy guards. The unit suite
-checks exact boundary arithmetic and overflow, 30-window nearest-rank p05
-Throughput progress, eligible Graph-peer completed-service Jain p05,
-independent three-start, 480-admission headroom, and mixed-I1 latency verdicts,
-fail-closed malformed/overflowed observation, one shared causal sequence, and
-unchanged base-only-I1/full-B1 environment delegation. The product suite uses
-the real embedded Host and repository OpenCV provider. With one worker and a
-gated ready backlog, eight distinct Interactive Runs and three Throughput Runs
-prove that a Throughput Run starts after at most three consecutive Interactive
-starts and returns its root resources before the last Interactive settlement.
-With eight workers, three cap-eight plus seven cap-one Throughput Runs hold the
-exact 31-CPU general quota, a further cap-one Throughput Run is rejected without
-changing that account, and one Interactive Run still enters the shared ledger
-at CPU 32 before complete zero settlement. Timeouts are deadlock diagnostics,
-not latency thresholds. These deliberately reduced fixtures prove product
-mechanisms only; they do not execute the exact M1 cadence, collect 30 timed
-windows or 480 real edits, produce closed M1 rows/outer bundles, or claim
-machine conformance. No M1 manual runner is added by this issue slice.
+`test_compute_run` remain focused scheduler-policy guards. The unit suites
+check exact C/W/B/U arithmetic, the 1/7/40 origin grid, fixed warmup offers,
+carryover/current-hold evidence, independent producer-local cycles, all five
+axes, unknown-enum fail-closed behavior, finite lock-free callback publication,
+same-coordinate fanout, unchanged base-only-I1/full-B1 environment delegation,
+canonical golden digests, functional keys, exact-one/DAG resolution, and
+incomplete live authority. The product suite derives applicability from real
+ready/lifecycle evidence, proves a Throughput Run reaches terminal and resource
+settlement while Interactive work remains outstanding, and proves the exact
+31-CPU Throughput/32-CPU shared-headroom boundary. Timeouts are deadlock
+diagnostics, not latency thresholds.
+
+The exact M1 replicate is the manual `m1_shared_benchmark` target. It is
+`EXCLUDE_FROM_ALL`, has no `add_test`, and is absent from default builds and CI:
+
+```shell
+cmake --build build --target m1_shared_benchmark -j
+./build/tests/m1_shared_benchmark --help
+```
+
+One invocation requires a fresh absolute empty output directory outside the
+checkout, canonical base/storage/environment-class claims, retained storage
+proof, subject role, and ordinal. Optional same-ordinal isolated I1/B1
+addresses and denominators bind relative inputs; a candidate also requires its
+comparison-reference bundle address. The runner uses one `EmbeddedHost` for
+the I1 Graph and both B1 Graphs, executes the exact cold/warmup/measured cadence,
+classifies all 480 measured edits, stops new offers at U, closes all Graphs,
+requires final-zero state, and writes six canonical sections plus
+`row.canonical`, `bundle.canonical`, and `result.json`. Missing external objects
+are represented by stable unresolved addresses, and the portable storage
+observation does not manufacture complete live machine authority; either case
+leaves corpus validation `Invalid` and exit status two. A later complete
+validator may combine already sealed objects, but this target is not a second
+result orchestrator. Building it or running `--help` is only a harness smoke;
+this document does not claim that an exact timed replicate or three-replicate
+machine corpus has been executed.
 
 ## CTest Registration
 

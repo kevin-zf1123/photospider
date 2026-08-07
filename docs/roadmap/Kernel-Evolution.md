@@ -1287,9 +1287,9 @@ The delivery rows are fixed:
 
 ADR 0010 is the current accepted decision record, not by itself a statement of
 machine conformance. Issues #93 through #96 now provide the assigned
-source-private I1, I2, B1, and deterministic M1 inner product mechanisms,
-bounded collectors/evaluators, and correctness tests; #93 through #95 also
-provide exact-workload manual runners. In particular, #94 adds preview-then-
+source-private I1, I2, B1, and M1 product mechanisms, bounded collectors/
+evaluators, correctness tests, and exact-workload manual runners. In
+particular, #94 adds preview-then-
 final coordination, exact preview arithmetic, Host/conditional-Metal
 acquisition evidence, exact
 row-scoped resident release with complete device-reservation closure,
@@ -1305,22 +1305,30 @@ power-loss-protection, and transaction-event declaration; it therefore emits
 Invalid instead of claiming machine conformance. Its guarded cleanup promise is
 scoped to cooperating actors that honor the lock and reserved B1 namespace
 because POSIX does not atomically bind the final identity check to name removal.
-#96 adds checked M1 phase arithmetic, a fail-closed five-guard inner fairness
-evaluator, unchanged base-only-I1/full-B1 environment-pair delegation, one
-fixed-capacity shared causal observer for tagged I1/B1 product Runs, and an
-observation-only `M1Host` snapshot that joins the authoritative all-class Host
-ledger with the built-in Throughput reservation account. Deterministic product
-tests exercise real mixed backlog and the exact 31-CPU Throughput/32-CPU shared
-headroom boundary without a wall-time SLO. None of these additions changes the
-canonical 15-field outer row or installed ABI. The I1, I2, and B1 runners are
-`EXCLUDE_FROM_ALL` and absent from CTest; this current-state document claims
-neither an exact 111-slot I2 machine run nor an exact three-replicate B1 machine
-corpus. The exact M1 cold/warmup/measured producer cadence, cross-boundary
-carryover collection, timed machine runner, and canonical outer-row/bundle/
-reference composition remain absent. Existing policy-order tests,
-`BenchmarkService`, lifecycle telemetry, ledger snapshots, and manual tools do
-not by themselves establish profile conformance. The maintained manual/release
-protocol and test-ownership boundary are documented in
+#96 adds checked M1 phase arithmetic; the exact cold/warmup/measured origin and
+offer cadence; cross-boundary current-hold, carryover/FIFO, immutable
+attribution, independent producer cycles, U cutoff, and final settlement; a
+fail-closed five-axis inner evaluator; unchanged base-only-I1/full-B1
+environment delegation; one fixed-capacity shared causal observer plus
+same-coordinate workload fanout; and an observation-only `M1Host` snapshot of
+Host/device, Compute I/O, ready-class, lifecycle, and Throughput reservation
+state. It also adds the source-private canonical 15-field row/five-field bundle
+materializer and exact-one/DAG validator, and an exact manual
+`m1_shared_benchmark` target. Deterministic product tests exercise real mixed
+backlog and the exact 31-CPU Throughput/32-CPU shared-headroom boundary without
+a wall-time SLO.
+
+The I1, I2, B1, and M1 runners are `EXCLUDE_FROM_ALL` and absent from CTest;
+none changes the installed ABI or the frozen outer field counts. This
+current-state document claims neither an exact 111-slot I2 machine run, an
+exact three-replicate B1 machine corpus, nor an exact three-replicate M1
+machine corpus. The M1 runner can materialize a source-faithful local row and
+bundle, but missing external isolated/comparison objects or incomplete live
+storage authority makes exact-one corpus validation canonical `Invalid`.
+Existing policy-order tests, `BenchmarkService`, lifecycle telemetry, ledger
+snapshots, runner availability, and help smoke do not by themselves establish
+profile conformance. The maintained manual/release protocol and test-ownership
+boundary are documented in
 [Testing and Validation](../development/Testing-and-Validation.md#execution-profile-slo-manualrelease-protocol).
 
 ## Server and Plugin Isolation
