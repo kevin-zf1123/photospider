@@ -1277,10 +1277,11 @@ operation-concurrency 变更时，应重新运行准确命令，并解释新输�
 
 [ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
 定义规范的 `execution-profile-slo-v1` 契约。Issue #92 会冻结本 protocol，但不
-实现 runner 或 collector。Issues #93 至 #95 现在已经提供各自的 source-private I1、I2 与
-B1 mechanism、封闭 inner evidence、deterministic test 和显式 exact-workload runner。
-当前仍没有命令组合 #96 负责的 canonical 15-field outer row、five-field bundle 与 M1
-evidence，因此仓库仍不能生成 conformant bundle。构建 runner 或通过 correctness test
+实现 runner 或 collector。Issues #93 至 #96 现在已经提供各自负责的 source-private I1、I2、
+B1 与确定性 M1 inner mechanism、已实现范围内的封闭 inner evidence，以及 correctness test；
+#93 至 #95 还提供显式 exact-workload runner。当前仍没有命令执行精确 M1
+cold/warmup/measured producer protocol，或组合 canonical 15-field outer row 与 five-field
+bundle，因此仓库仍不能生成 conformant mixed bundle。构建 runner 或通过 correctness test
 都不构成机器画像声明。
 
 最终长期维护的 runner 是手工 developer/release 工具。由于本节定义其长期产品
@@ -2258,6 +2259,23 @@ fresh process 与 root 中运行。一次 invocation 会执行 cold seed 252、w
 product、durability 或 evidence invalid。Artifact 明确不声明 canonical outer row/bundle。
 构建 target 或运行 `--help` 只属于 harness smoke；本文不声明已经执行精确 34-job invocation
 或三 replicate B1 机器运行。
+
+Issue #96 现在通过 `test_m1_profile`，以及在启用仓库 OpenCV operation provider 时的
+`test_m1_product_path`，注册确定性 M1 inner-fairness mechanism；`test_compute_run` 中既有
+`ExecutionServicePolicy` case 继续作为聚焦的 scheduler-policy guard。Unit suite 覆盖精确
+boundary arithmetic 与 overflow、30-window nearest-rank p05 Throughput progress、eligible
+Graph-peer completed-service Jain p05、彼此独立的 three-start、480-admission headroom 与
+mixed-I1 latency verdict、malformed/overflowed observation 的 fail-closed 行为、唯一共享 causal
+sequence，以及原样委托的 base-only-I1/full-B1 environment relation。Product suite 使用真实
+embedded Host 与仓库 OpenCV provider。在一个 worker 与 gated ready backlog 下，八个不同
+Interactive Run 与三个 Throughput Run 证明：至多连续三次 Interactive start 后就会启动一个
+Throughput Run，而且一个 Throughput Run 会在最后一次 Interactive settlement 前归还 root
+resource。在八个 worker 下，三个 cap-eight 加七个 cap-one Throughput Run 会精确占用 31 CPU
+general quota；再提交一个 cap-one Throughput Run 会被拒绝且 account 不变；一个 Interactive Run
+仍能让共享 ledger 到达 CPU 32，随后全部结算为零。Timeout 只作为 deadlock diagnostic，不是
+latency threshold。这些经过刻意缩减的 fixture 只证明产品机制；它们不执行精确 M1 cadence、
+不采集 30 个 timed window 或 480 次真实 edit、不生成闭合 M1 row/outer bundle，也不声明 machine
+conformance。本 Issue 切片不新增 M1 手工 runner。
 
 ## CTest 注册
 

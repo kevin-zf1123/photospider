@@ -456,11 +456,12 @@ dimension verdict。
 机器的 scaling，不构成 Interactive、batch 或 mixed-load SLO。
 
 [ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
-冻结目标 workload、六项 metric 公式、失效规则与下游证据归属。Issues #93 至 #95
+冻结目标 workload、六项 metric 公式、失效规则与下游证据归属。Issues #93 至 #96
 现在已经在真实 admission、visibility、cancellation/quiescence、artifact、trace、
 completed-service 与 resource-lifetime 边界增加各自负责的 source-private inner
-collector；#96 必须增加剩余 M1 composition。任何 placeholder zero value 都不能替代
-缺失的 observation source。
+collector。#96 提供确定性的 M1 inner-fairness 切片，但不声称已实现精确机器 protocol 或
+canonical outer evidence。任何 placeholder zero value 都不能替代缺失的 observation
+source。
 
 这些画像 collector 具有精确 boundary 义务。Edit ordinal `1..12` 映射为
 `edit_index=0..11`；nominal monotonic admission start 与其 bounded lateness 是不同
@@ -482,6 +483,21 @@ field 承载 backend 与全部 21 个 raw field observation、native mount evide
 每个 adapter、normalizer、mapper、binding 与 containment predicate，之后才精确匹配
 eligibility。M1 除 candidate/reference comparison provenance 外，还记录两个 same-ordinal
 isolated pair reference。
+
+Source-private 的 #96 M1 切片以 checked arithmetic 推导 `C^M1`、`W^M1`、`B^M1` 与
+`U^M1`，并评估五项不可互相替代的 guard：精确 30 个 paired Throughput-progress window 的
+nearest-rank p05；Graph A 与 Graph B eligible completed charged service 的 nearest-rank p05
+Jain index；两个 class 持续可启动时至多连续三次 Interactive start；对全部 480 次 measured
+I1 admission attempt 进行完整分类且 Throughput-headroom failure 为零；以及由独立来源提供的
+mixed-I1 latency verdict。Environment pairing 原样委托给 base-only I1 与完整 eligible
+B1-cap-eight compatibility relation。一个预分配、固定容量的
+`M1FairnessObservationCollector` 为全部带 tag 的 I1/B1 sink 提供共享 causal sequence，并记录
+scalar service-start、task-terminal、Run-terminal 与 root-resource-settlement observation；
+overflow、sequence exhaustion 或 tag/QoS 不一致都会成为显式 fail-closed evidence。
+Source-private 的 `M1Host` 不增加 compute route：它把权威 Host ledger 与 lifecycle page，同在
+policy account lock 下复制的不可变 Throughput capacity/reserved diagnostic 组合起来。这些只
+是确定性 inner mechanism；它们没有实现精确 cold/warmup producer cadence、跨 boundary
+carryover collection、canonical outer row/bundle resolver 或 timed machine-conformance run。
 
 Required-storage actual authority 是不透明、可复制的 capability，而不是序列化的 root、receipt
 或 probe field。只有 `B1OutputStore` 能复制 held root descriptor 并签发不可变 typed receipt；

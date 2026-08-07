@@ -585,11 +585,12 @@ SLO.
 
 [ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
 freezes the target workloads, six metric formulas, invalidation rules, and
-downstream evidence ownership. Issues #93 through #95 now add their assigned
+downstream evidence ownership. Issues #93 through #96 now add their assigned
 source-private inner collectors at the actual admission, visibility,
 cancellation/quiescence, artifact, trace, completed-service, and
-resource-lifetime boundaries; #96 must add the remaining M1 composition. No
-placeholder zero value is a substitute for a missing observation source.
+resource-lifetime boundaries. #96 supplies the deterministic M1 inner-fairness
+slice without claiming the exact machine protocol or canonical outer evidence.
+No placeholder zero value is a substitute for a missing observation source.
 
 Those profile collectors have precise boundary obligations. Edit ordinals
 `1..12` map to `edit_index=0..11`; nominal monotonic admission starts and their
@@ -616,6 +617,26 @@ compatibility side strictly parses those bytes and independently replays every
 adapter, normalizer, mapper, binding, and containment predicate before exact-
 matching eligibility. M1 records two same-ordinal isolated pair references in
 addition to candidate/reference comparison provenance.
+
+The source-private #96 M1 slice checked-derives `C^M1`, `W^M1`, `B^M1`, and
+`U^M1`, and evaluates five non-substitutable guards: the nearest-rank p05 over
+exactly 30 paired Throughput-progress windows, the nearest-rank p05 Jain index
+over eligible completed charged service for Graph A and Graph B, at most three
+consecutive Interactive starts while both classes remain continuously
+startable, complete classification of all 480 measured I1 admission attempts
+with zero Throughput-headroom failures, and the independently supplied mixed-I1
+latency verdict. Environment pairing delegates unchanged to the base-only I1
+and full eligible B1-cap-eight compatibility relations. One preallocated,
+fixed-capacity `M1FairnessObservationCollector` gives all tagged I1/B1 sinks a
+shared causal sequence and records scalar service-start, task-terminal,
+Run-terminal, and root-resource-settlement observations; overflow, sequence
+exhaustion, or tag/QoS disagreement is explicit fail-closed evidence. The
+source-private `M1Host` adds no compute route: it joins the authoritative Host
+ledger and lifecycle page with an immutable Throughput capacity/reserved
+diagnostic copied under the policy account lock. These are deterministic inner
+mechanisms only. They do not implement the exact cold/warmup producer cadence,
+cross-boundary carryover collection, canonical outer row/bundle resolver, or a
+timed machine-conformance run.
 
 Required-storage actual authority is an opaque copyable capability, not the
 serialized root, receipt, or probe fields. `B1OutputStore` alone duplicates the
