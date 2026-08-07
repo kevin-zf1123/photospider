@@ -887,6 +887,33 @@ struct ExecutionThroughputReservationSnapshot final {
 };
 
 /**
+ * @brief Immutable class-partitioned physical ready-store diagnostics.
+ *
+ * The snapshot is copied while the process ready store is protected by its
+ * owning service mutex. Counts include every published store-owned entry and
+ * therefore describe real queued product work, not reserved capacity or a
+ * harness prediction.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note This value grants no queue handle, candidate identity, Run lease,
+ * scheduling decision, resource grant, cancellation, or mutation authority.
+ */
+struct ExecutionReadyClassSnapshot final {
+  /** @brief Published Interactive ready entries. */
+  std::uint64_t interactive_entries = 0U;
+
+  /** @brief Published Throughput ready entries. */
+  std::uint64_t throughput_entries = 0U;
+
+  /** @brief Total published entries observed in the same locked cut. */
+  std::uint64_t total_entries = 0U;
+
+  /** @brief False only when a stored Run carries an unknown closed QoS value.
+   */
+  bool valid = true;
+};
+
+/**
  * @brief Owns one fixed Host execution domain for concurrent Runs.
  *
  * The service owns a fixed CPU worker pool, one private Metal worker lane, one
@@ -1158,6 +1185,16 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   ExecutionThroughputReservationSnapshot throughput_reservation_snapshot()
       const;
+
+  /**
+   * @brief Copies class-partitioned real ready-store entry counts.
+   * @return One service-mutex cut of Interactive, Throughput, and total ready
+   * entries.
+   * @throws std::system_error when service-mutex acquisition fails.
+   * @note This source-private diagnostic is observation-only and exposes no
+   * ready value, policy candidate, queue position, or scheduling authority.
+   */
+  ExecutionReadyClassSnapshot ready_class_snapshot() const;
 
   /**
    * @brief Returns the process-domain bounded compute-I/O executor.

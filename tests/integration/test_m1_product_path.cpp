@@ -424,6 +424,38 @@ M1ExecutionSnapshot wait_for_cpu_reservations(
 }
 
 /**
+ * @brief Waits for exact real ready-store counts in both product classes.
+ * @param host Private observation-only M1 diagnostic seam.
+ * @param interactive_entries Required physical Interactive ready count.
+ * @param throughput_entries Required physical Throughput ready count.
+ * @param timeout Bounded deadlock diagnostic, not an M1 timing threshold.
+ * @return Latest complete snapshot at the matching real ready cut.
+ * @throws std::runtime_error when the bounded wait expires or the ready class
+ * snapshot contains an unknown closed QoS value.
+ * @throws Snapshot allocation or synchronization failures unchanged.
+ */
+M1ExecutionSnapshot wait_for_ready_entries(const M1Host& host,
+                                           std::uint64_t interactive_entries,
+                                           std::uint64_t throughput_entries,
+                                           std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  do {
+    M1ExecutionSnapshot snapshot = host.m1_execution_snapshot(0U, 1U);
+    if (!snapshot.ready_classes.valid) {
+      throw std::runtime_error("M1 ready snapshot contains unknown QoS");
+    }
+    if (snapshot.ready_classes.interactive_entries == interactive_entries &&
+        snapshot.ready_classes.throughput_entries == throughput_entries &&
+        snapshot.ready_classes.total_entries ==
+            interactive_entries + throughput_entries) {
+      return snapshot;
+    }
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < deadline);
+  throw std::runtime_error("timed out waiting for exact M1 ready entries");
+}
+
+/**
  * @brief Closes every test-owned session after all product work has settled.
  * @param host Host owning every session.
  * @param sessions Complete loaded session list.
@@ -442,22 +474,42 @@ void close_sessions(Host& host, const std::vector<GraphSessionId>& sessions) {
 /**
  * @brief Builds complete non-timing fairness input around observed starts.
  * @param snapshot Settled real mixed observation snapshot.
+ * @param ready_at_release Real class-partitioned backlog before gate release.
  * @return Passing synthetic threshold inputs plus actual class-start order.
  * @throws std::bad_alloc when vector storage allocates.
  * @note Only class-start evidence comes from this reduced product fixture;
  * machine progress/Jain/latency thresholds remain deliberately synthetic.
  */
 M1FairnessEvidenceInput make_product_class_start_input(
-    const M1FairnessObservationSnapshot& snapshot) {
+    const M1FairnessObservationSnapshot& snapshot,
+    const compute::ExecutionReadyClassSnapshot& ready_at_release) {
   M1FairnessEvidenceInput input;
   input.progress_windows.assign(kM1MeasuredWindowCount,
                                 M1ThroughputProgressSample{0.20, 1.0});
   input.graph_service_windows.assign(kM1MeasuredWindowCount,
                                      M1GraphServiceWindow{true, 1U, 1U});
+  std::uint64_t remaining_interactive = ready_at_release.interactive_entries;
+  std::uint64_t remaining_throughput = ready_at_release.throughput_entries;
   for (const M1FairnessObservation& event : snapshot.events) {
     if (event.kind == M1ObservationKind::ServiceStart) {
+      const bool both_startable =
+          remaining_interactive != 0U && remaining_throughput != 0U;
       input.class_starts.push_back(
-          M1ClassStartSample{event.service_class, true});
+          M1ClassStartSample{event.service_class, both_startable});
+      switch (event.service_class) {
+        case compute::ComputeRunQosClass::Interactive:
+          if (remaining_interactive != 0U) {
+            --remaining_interactive;
+          }
+          break;
+        case compute::ComputeRunQosClass::Throughput:
+          if (remaining_throughput != 0U) {
+            --remaining_throughput;
+          }
+          break;
+        default:
+          break;
+      }
     }
   }
   input.headroom_admissions = M1HeadroomAdmissionEvidence{
@@ -556,6 +608,9 @@ TEST(M1ProductPath,
   const M1ExecutionSnapshot queued =
       wait_for_cpu_reservations(*m1_host, 12U, 4U, 5s);
   EXPECT_EQ(queued.throughput.capacity.cpu_slots, 31U);
+  const M1ExecutionSnapshot ready = wait_for_ready_entries(
+      *m1_host, interactive_sessions.size(), throughput_sessions.size(), 5s);
+  ASSERT_TRUE(ready.ready_classes.valid);
 
   gate.release();
   ASSERT_EQ(blocker_future.wait_for(5s), std::future_status::ready);
@@ -576,8 +631,8 @@ TEST(M1ProductPath,
   ASSERT_FALSE(snapshot.overflowed);
   ASSERT_FALSE(snapshot.sequence_exhausted);
   ASSERT_FALSE(snapshot.qos_mismatch);
-  const M1FairnessSummary fairness =
-      evaluate_m1_fairness(make_product_class_start_input(snapshot));
+  const M1FairnessSummary fairness = evaluate_m1_fairness(
+      make_product_class_start_input(snapshot, ready.ready_classes));
   EXPECT_EQ(fairness.class_start_verdict, I1Verdict::Pass);
   EXPECT_LE(fairness.maximum_interactive_burst, kM1InteractiveBurstLimit);
 
@@ -585,6 +640,7 @@ TEST(M1ProductPath,
   std::uint64_t final_interactive_settlement = 0U;
   std::size_t interactive_starts = 0U;
   std::size_t throughput_starts = 0U;
+  std::vector<std::uint64_t> successful_throughput_runs;
   for (const M1FairnessObservation& event : snapshot.events) {
     if (event.kind == M1ObservationKind::ServiceStart) {
       if (event.service_class == compute::ComputeRunQosClass::Interactive) {
@@ -592,6 +648,11 @@ TEST(M1ProductPath,
       } else {
         ++throughput_starts;
       }
+    }
+    if (event.kind == M1ObservationKind::RunTerminal &&
+        event.service_class == compute::ComputeRunQosClass::Throughput &&
+        event.run_terminal_kind == compute::ComputeRunTerminalKind::Succeeded) {
+      successful_throughput_runs.push_back(event.run_id);
     }
     if (event.kind != M1ObservationKind::RunResourceSettled) {
       continue;
@@ -607,9 +668,47 @@ TEST(M1ProductPath,
   }
   EXPECT_EQ(interactive_starts, interactive_sessions.size());
   EXPECT_EQ(throughput_starts, throughput_sessions.size());
+  EXPECT_FALSE(successful_throughput_runs.empty());
   EXPECT_NE(first_throughput_settlement, 0U);
   EXPECT_NE(final_interactive_settlement, 0U);
   EXPECT_LT(first_throughput_settlement, final_interactive_settlement);
+
+  bool successful_throughput_settled_while_interactive_outstanding = false;
+  for (const std::uint64_t throughput_run : successful_throughput_runs) {
+    const auto settlement = std::find_if(
+        snapshot.events.begin(), snapshot.events.end(),
+        [throughput_run](const M1FairnessObservation& event) {
+          return event.kind == M1ObservationKind::RunResourceSettled &&
+                 event.run_id == throughput_run;
+        });
+    if (settlement == snapshot.events.end()) {
+      continue;
+    }
+    std::uint64_t interactive_started = 0U;
+    std::uint64_t interactive_settled = 0U;
+    for (const M1FairnessObservation& event : snapshot.events) {
+      if (event.causal_sequence > settlement->causal_sequence) {
+        break;
+      }
+      if (event.service_class != compute::ComputeRunQosClass::Interactive) {
+        continue;
+      }
+      if (event.kind == M1ObservationKind::ServiceStart) {
+        ++interactive_started;
+      } else if (event.kind == M1ObservationKind::RunResourceSettled) {
+        ++interactive_settled;
+      }
+    }
+    const bool queued_interactive_remains =
+        interactive_started < ready.ready_classes.interactive_entries;
+    const bool started_interactive_remains =
+        interactive_settled < interactive_started;
+    if (queued_interactive_remains || started_interactive_remains) {
+      successful_throughput_settled_while_interactive_outstanding = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(successful_throughput_settled_while_interactive_outstanding);
 
   const M1ExecutionSnapshot settled =
       wait_for_cpu_reservations(*m1_host, 0U, 0U, 5s);

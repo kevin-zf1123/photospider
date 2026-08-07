@@ -697,11 +697,14 @@ set(KERNEL_FACADE_SOURCES
     src/lib/benchmark/b1_evidence.cpp
     src/lib/benchmark/b1_output_store.cpp
     src/lib/benchmark/b1_profile.cpp
+    src/lib/benchmark/evidence_envelope.cpp
     src/lib/benchmark/i1_evidence.cpp
     src/lib/benchmark/i1_profile.cpp
     src/lib/benchmark/i2_evidence.cpp
     src/lib/benchmark/i2_profile.cpp
+    src/lib/benchmark/m1_evidence.cpp
     src/lib/benchmark/m1_profile.cpp
+    src/lib/benchmark/observation_fanout.cpp
     src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp
@@ -2114,6 +2117,25 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             PkgConfig::UTF8PROC
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
+        add_executable(m1_shared_benchmark EXCLUDE_FROM_ALL
+            tests/verification/m1_shared_benchmark.cpp)
+        set_target_properties(m1_shared_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(m1_shared_benchmark PRIVATE cxx_std_17)
+        target_include_directories(m1_shared_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(m1_shared_benchmark PRIVATE
+            PHOTOSPIDER_M1_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(m1_shared_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            PkgConfig::UTF8PROC
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
     endif()
     add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
     add_ps_test(test_i1_evidence tests/unit/test_i1_evidence.cpp)
@@ -2141,6 +2163,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_b1_output_store tests/unit/test_b1_output_store.cpp)
     add_ps_test(test_m1_profile tests/unit/test_m1_profile.cpp)
     target_link_libraries(test_m1_profile PRIVATE PkgConfig::UTF8PROC)
+    add_ps_test(test_evidence_envelope
+        tests/unit/test_evidence_envelope.cpp)
+    target_link_libraries(test_evidence_envelope PRIVATE PkgConfig::UTF8PROC)
     add_ps_test(test_progressive_compute
         tests/unit/test_progressive_compute.cpp)
     add_ps_test(test_dense_tensor_content_digest
@@ -2538,6 +2563,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_m1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_evidence_envelope
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_progressive_compute

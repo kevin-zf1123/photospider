@@ -2946,7 +2946,10 @@ class EmbeddedHost final : public Host,
     }
     return benchmark::M1ExecutionSnapshot{
         state_->execution_service->resource_snapshot(),
+        state_->execution_service->device_resource_snapshots(),
+        state_->execution_service->compute_io_executor().snapshot(),
         state_->execution_service->throughput_reservation_snapshot(),
+        state_->execution_service->ready_class_snapshot(),
         state_->execution_service->lifecycle_snapshot(
             after_cursor, static_cast<std::uint32_t>(limit))};
   }

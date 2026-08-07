@@ -9,7 +9,9 @@
 #include <cmath>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -17,6 +19,16 @@
 
 namespace ps::benchmark {
 namespace {
+
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "M1 callbacks require lock-free Boolean atomics.");
+static_assert(std::atomic<std::size_t>::is_always_lock_free,
+              "M1 callbacks require lock-free slot atomics.");
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+              "M1 callbacks require lock-free sequence atomics.");
+
+/** @brief Fixed maximum CAS attempts at one observer callback boundary. */
+constexpr std::size_t kM1AtomicAttemptLimit = 64U;
 
 /**
  * @brief Appends one fail-closed structural diagnostic.
@@ -61,19 +73,26 @@ double m1_nearest_rank(std::vector<double> samples, std::uint32_t numerator,
 /**
  * @brief Conjoins non-substitutable fairness verdicts with invalid priority.
  * @param verdicts Complete component verdict list.
+ * @param reasons Mutable diagnostics receiving unknown closed-enum evidence.
  * @return Invalid if any input is invalid, otherwise Fail if any fails, else
  * Pass.
- * @throws Nothing.
+ * @throws std::bad_alloc when an unknown verdict diagnostic allocates.
  */
-I1Verdict compose_fairness(
-    const std::initializer_list<I1Verdict>& verdicts) noexcept {
+I1Verdict compose_fairness(const std::initializer_list<I1Verdict>& verdicts,
+                           std::vector<std::string>* reasons) {
   bool failed = false;
   for (const I1Verdict verdict : verdicts) {
-    if (verdict == I1Verdict::Invalid) {
-      return I1Verdict::Invalid;
-    }
-    if (verdict == I1Verdict::Fail) {
-      failed = true;
+    switch (verdict) {
+      case I1Verdict::Pass:
+        break;
+      case I1Verdict::Fail:
+        failed = true;
+        break;
+      case I1Verdict::Invalid:
+        return I1Verdict::Invalid;
+      default:
+        invalidate(reasons, "M1 fairness verdict contains an unknown value");
+        return I1Verdict::Invalid;
     }
   }
   return failed ? I1Verdict::Fail : I1Verdict::Pass;
@@ -117,6 +136,19 @@ bool valid_m1_request_tag(M1ObservedRequestTag tag) noexcept {
 
 }  // namespace
 
+/** @copydoc M1EventCoordinate::operator== */
+bool M1EventCoordinate::operator==(
+    const M1EventCoordinate& other) const noexcept {
+  return timestamp == other.timestamp && event_sequence == other.event_sequence;
+}
+
+/** @copydoc M1EventCoordinate::operator< */
+bool M1EventCoordinate::operator<(
+    const M1EventCoordinate& other) const noexcept {
+  return timestamp < other.timestamp || (timestamp == other.timestamp &&
+                                         event_sequence < other.event_sequence);
+}
+
 /**
  * @brief Owns the shared fixed-capacity storage and tagged observer adapters.
  *
@@ -138,9 +170,11 @@ class M1FairnessObservationCollector::Impl final
    * @throws std::invalid_argument when capacity is zero.
    * @throws std::bad_alloc when slot ownership cannot allocate.
    */
-  explicit Impl(std::size_t capacity) : capacity_(capacity) {
-    if (capacity == 0U) {
-      throw std::invalid_argument("M1 observation capacity must be positive.");
+  Impl(std::size_t capacity, std::uint64_t first_sequence)
+      : capacity_(capacity), next_sequence_(first_sequence) {
+    if (capacity == 0U || first_sequence == 0U) {
+      throw std::invalid_argument(
+          "M1 observation capacity and first sequence must be positive.");
     }
     slots_ = std::make_unique<Slot[]>(capacity);
   }
@@ -294,14 +328,21 @@ class M1FairnessObservationCollector::Impl final
   compute::ComputeRunObservationCoordinate
   reserve_causal_coordinate() noexcept {
     const auto observed_at = std::chrono::steady_clock::now();
+    if (sequence_exhausted_.load(std::memory_order_acquire)) {
+      return compute::ComputeRunObservationCoordinate{observed_at, 0U};
+    }
     std::uint64_t current = next_sequence_.load(std::memory_order_relaxed);
-    while (current != 0U) {
+    for (std::size_t attempt = 0U; attempt < kM1AtomicAttemptLimit; ++attempt) {
+      if (current == 0U) {
+        sequence_exhausted_.store(true, std::memory_order_release);
+        return compute::ComputeRunObservationCoordinate{observed_at, 0U};
+      }
       const std::uint64_t next =
           current == std::numeric_limits<std::uint64_t>::max() ? 0U
                                                                : current + 1U;
-      if (next_sequence_.compare_exchange_weak(current, next,
-                                               std::memory_order_relaxed,
-                                               std::memory_order_relaxed)) {
+      if (next_sequence_.compare_exchange_strong(current, next,
+                                                 std::memory_order_relaxed,
+                                                 std::memory_order_relaxed)) {
         if (next == 0U) {
           sequence_exhausted_.store(true, std::memory_order_release);
         }
@@ -326,20 +367,24 @@ class M1FairnessObservationCollector::Impl final
     if (!event.qos_matches_tag) {
       qos_mismatch_.store(true, std::memory_order_release);
     }
+    if (overflowed_.load(std::memory_order_acquire)) {
+      return;
+    }
     std::size_t index = next_slot_.load(std::memory_order_relaxed);
-    while (true) {
+    for (std::size_t attempt = 0U; attempt < kM1AtomicAttemptLimit; ++attempt) {
       if (index >= capacity_) {
         overflowed_.store(true, std::memory_order_release);
         return;
       }
-      if (next_slot_.compare_exchange_weak(index, index + 1U,
-                                           std::memory_order_relaxed,
-                                           std::memory_order_relaxed)) {
-        break;
+      if (next_slot_.compare_exchange_strong(index, index + 1U,
+                                             std::memory_order_relaxed,
+                                             std::memory_order_relaxed)) {
+        slots_[index].value = event;
+        slots_[index].published.store(true, std::memory_order_release);
+        return;
       }
     }
-    slots_[index].value = event;
-    slots_[index].published.store(true, std::memory_order_release);
+    overflowed_.store(true, std::memory_order_release);
   }
 
   /**
@@ -391,7 +436,7 @@ class M1FairnessObservationCollector::Impl final
   std::atomic<std::size_t> next_slot_{0U};
 
   /** @brief Next shared nonzero observer-local causal sequence. */
-  std::atomic<std::uint64_t> next_sequence_{1U};
+  std::atomic<std::uint64_t> next_sequence_;
 
   /** @brief Sticky capacity-exhaustion evidence. */
   std::atomic<bool> overflowed_{false};
@@ -406,7 +451,11 @@ class M1FairnessObservationCollector::Impl final
 /** @copydoc M1FairnessObservationCollector::M1FairnessObservationCollector */
 M1FairnessObservationCollector::M1FairnessObservationCollector(
     std::size_t capacity)
-    : impl_(std::make_shared<Impl>(capacity)) {}
+    : M1FairnessObservationCollector(capacity, 1U) {}
+
+M1FairnessObservationCollector::M1FairnessObservationCollector(
+    std::size_t capacity, std::uint64_t first_sequence)
+    : impl_(std::make_shared<Impl>(capacity, first_sequence)) {}
 
 /** @copydoc M1FairnessObservationCollector::make_sink */
 std::shared_ptr<compute::ComputeRunObservationSink>
@@ -430,6 +479,420 @@ M1Timeline derive_m1_timeline(
       checked_i1_time_subtract(measurement_start, kM1WarmupToMeasurement),
       measurement_start,
       checked_i1_time_add(measurement_start, kM1MeasurementDuration)};
+}
+
+/** @copydoc evaluate_m1_protocol */
+M1ProtocolSummary evaluate_m1_protocol(M1ProtocolEvidenceInput input) {
+  M1ProtocolSummary summary;
+  const auto fail = [&summary](std::string reason) {
+    if (std::find(summary.validity_reasons.begin(),
+                  summary.validity_reasons.end(),
+                  reason) == summary.validity_reasons.end()) {
+      summary.validity_reasons.push_back(std::move(reason));
+    }
+  };
+
+  try {
+    const M1Timeline timeline =
+        derive_m1_timeline(input.boundaries.measurement_start.timestamp);
+    const M1EventCoordinate& cold = input.boundaries.cold_start;
+    const M1EventCoordinate& warmup = input.boundaries.warmup_start;
+    const M1EventCoordinate& measured = input.boundaries.measurement_start;
+    const M1EventCoordinate& terminal = input.boundaries.measurement_end;
+    if (cold.timestamp != timeline.cold_start ||
+        warmup.timestamp != timeline.warmup_start ||
+        measured.timestamp != timeline.measurement_start ||
+        terminal.timestamp != timeline.measurement_end || !(cold < warmup) ||
+        !(warmup < measured) || !(measured < terminal)) {
+      fail("M1 boundary timestamps or total order drifted");
+    }
+
+    std::set<std::uint64_t> event_sequences;
+    const auto register_event = [&event_sequences, &fail](
+                                    const M1EventCoordinate& coordinate,
+                                    std::string_view identity) {
+      if (coordinate.event_sequence == 0U) {
+        fail("M1 event has a zero row-local sequence: " +
+             std::string(identity));
+      } else if (!event_sequences.insert(coordinate.event_sequence).second) {
+        fail("M1 event sequence is duplicated");
+      }
+    };
+    register_event(cold, "cold-boundary");
+    register_event(warmup, "warmup-boundary");
+    register_event(measured, "measurement-boundary");
+    register_event(terminal, "terminal-boundary");
+
+    if (input.replicate_ordinal == 0U || input.replicate_ordinal > 3U) {
+      fail("M1 replicate ordinal is outside [1,3]");
+    }
+    if (!input.shared_execution_domain || !input.boundary_was_zero_duration ||
+        !input.raw_history_preserved || !input.warmup_sources_closed ||
+        !input.measured_counters_reset || !input.final_settlement_proved) {
+      fail("M1 shared-domain boundary or final settlement proof is incomplete");
+    }
+
+    const auto phase_known = [](B1JobPhase phase) noexcept {
+      switch (phase) {
+        case B1JobPhase::Cold:
+        case B1JobPhase::Warmup:
+        case B1JobPhase::Measured:
+          return true;
+      }
+      return false;
+    };
+    const auto verdict_known = [](I1Verdict verdict) noexcept {
+      switch (verdict) {
+        case I1Verdict::Pass:
+        case I1Verdict::Fail:
+          return true;
+        case I1Verdict::Invalid:
+          return false;
+      }
+      return false;
+    };
+    const auto expected_i1_origin = [&timeline](B1JobPhase phase,
+                                                std::size_t ordinal) {
+      switch (phase) {
+        case B1JobPhase::Cold:
+          return timeline.cold_start;
+        case B1JobPhase::Warmup:
+          return checked_i1_time_add(
+              timeline.warmup_start,
+              std::chrono::nanoseconds(static_cast<std::int64_t>(ordinal) *
+                                       kI1EpisodeStride.count()));
+        case B1JobPhase::Measured:
+          return checked_i1_time_add(
+              timeline.measurement_start,
+              std::chrono::nanoseconds(static_cast<std::int64_t>(ordinal) *
+                                       kI1EpisodeStride.count()));
+      }
+      throw std::invalid_argument("M1 I1 occurrence phase is unknown");
+    };
+
+    if (input.interactive_occurrences.size() != kM1TotalI1OriginCount) {
+      fail("M1 requires exactly 48 I1 origins");
+    }
+    const M1InteractiveOccurrenceEvidence* final_warmup = nullptr;
+    for (std::size_t index = 0U; index < input.interactive_occurrences.size();
+         ++index) {
+      const M1InteractiveOccurrenceEvidence& occurrence =
+          input.interactive_occurrences[index];
+      B1JobPhase expected_phase = B1JobPhase::Measured;
+      std::size_t expected_ordinal = 0U;
+      if (index < kM1ColdI1OriginCount) {
+        expected_phase = B1JobPhase::Cold;
+        expected_ordinal = index;
+      } else if (index < kM1ColdI1OriginCount + kM1WarmupI1OriginCount) {
+        expected_phase = B1JobPhase::Warmup;
+        expected_ordinal = index - kM1ColdI1OriginCount;
+      } else {
+        expected_ordinal =
+            index - kM1ColdI1OriginCount - kM1WarmupI1OriginCount;
+      }
+      if (!phase_known(occurrence.phase) ||
+          occurrence.phase != expected_phase ||
+          occurrence.phase_ordinal != expected_ordinal ||
+          occurrence.origin.timestamp !=
+              expected_i1_origin(expected_phase, expected_ordinal)) {
+        fail("M1 I1 phase, ordinal, order, or nominal origin drifted");
+      }
+      register_event(occurrence.origin, "I1-origin");
+      const auto expected_settlement = checked_i1_time_add(
+          occurrence.origin.timestamp, kI1MeasurementEndOffset);
+      if (occurrence.settlement_endpoint != expected_settlement ||
+          !occurrence.settlement_observed.has_value() ||
+          expected_settlement < occurrence.settlement_observed->timestamp) {
+        fail("M1 I1 occurrence lacks its fixed settlement cut proof");
+      } else {
+        register_event(*occurrence.settlement_observed, "I1-settlement");
+      }
+      if (!occurrence.phase_identity_immutable ||
+          !verdict_known(occurrence.latency_verdict) ||
+          !verdict_known(occurrence.waste_verdict) ||
+          !verdict_known(occurrence.memory_verdict) ||
+          !verdict_known(occurrence.output_verdict)) {
+        fail("M1 I1 inner evidence is invalid or phase-rewritten");
+      }
+      const bool is_final_warmup =
+          expected_phase == B1JobPhase::Warmup &&
+          expected_ordinal + 1U == kM1WarmupI1OriginCount;
+      if (is_final_warmup) {
+        final_warmup = &occurrence;
+        if (!occurrence.publication_current_at_measurement ||
+            !occurrence.settlement_pending_at_measurement ||
+            !occurrence.settlement_observed.has_value() ||
+            !(measured < *occurrence.settlement_observed)) {
+          fail("M1 final warmup I1 carryover/current state is invalid");
+        }
+      } else if (occurrence.publication_current_at_measurement ||
+                 occurrence.settlement_pending_at_measurement) {
+        fail("M1 non-final-warmup I1 contains carryover-only state");
+      }
+      if ((expected_phase == B1JobPhase::Cold &&
+           (!occurrence.settlement_observed.has_value() ||
+            !(*occurrence.settlement_observed < warmup))) ||
+          (expected_phase == B1JobPhase::Warmup && !is_final_warmup &&
+           (!occurrence.settlement_observed.has_value() ||
+            !(*occurrence.settlement_observed < measured)))) {
+        fail("M1 cold or early-warmup I1 settlement crossed its cutoff");
+      }
+      if (expected_phase == B1JobPhase::Measured &&
+          (!occurrence.final_latency.has_value() ||
+           occurrence.final_latency->count() < 0)) {
+        fail("M1 measured I1 latency sample is missing or negative");
+      }
+    }
+
+    const auto job_key = [](const B1JobInstance& job) {
+      return std::string("b1:") + encode_b1_job_instance(job);
+    };
+    const auto i1_key = [](std::size_t ordinal) {
+      return std::string("i1:warmup:") + std::to_string(ordinal);
+    };
+    const auto require_job = [&fail, &input](const M1BatchOfferEvidence& offer,
+                                             B1JobPhase phase,
+                                             std::uint64_t cycle,
+                                             std::uint64_t job_index,
+                                             std::uint64_t local_ordinal) {
+      try {
+        validate_b1_job_instance(offer.job);
+      } catch (...) {
+        fail("M1 B1 offer contains an invalid job instance");
+        return;
+      }
+      if (offer.job.row_workload_id != kM1WorkloadId ||
+          offer.job.replicate_ordinal != input.replicate_ordinal ||
+          offer.job.phase != phase || offer.job.cycle_ordinal != cycle ||
+          offer.job.job_index != job_index || offer.job.run_cap != 8U ||
+          offer.producer_offer_ordinal != local_ordinal ||
+          offer.attempt != 0U || !offer.phase_identity_immutable) {
+        fail("M1 B1 offer identity, cycle, attempt, or local ordinal drifted");
+      }
+    };
+
+    if (input.batch_offers.size() < 6U) {
+      fail("M1 B1 offer stream lacks the frozen prefix and measured starts");
+    }
+    for (std::size_t index = 0U; index < input.batch_offers.size(); ++index) {
+      const M1BatchOfferEvidence& offer = input.batch_offers[index];
+      register_event(offer.offered, "B1-offer");
+      if (index > 0U &&
+          !(input.batch_offers[index - 1U].offered < offer.offered)) {
+        fail("M1 B1 offer stream is not in strict row-local order");
+      }
+      if (!(offer.offered < terminal)) {
+        fail("M1 B1 offer occurred at or after the terminal cutoff");
+      }
+      if (offer.endpoint.has_value()) {
+        register_event(*offer.endpoint, "B1-endpoint");
+        if (!(offer.offered < *offer.endpoint) || !offer.owner_settled) {
+          fail("M1 B1 endpoint does not follow offer and owner settlement");
+        }
+      } else if (offer.owner_settled) {
+        fail("M1 B1 owner settlement lacks a unique endpoint");
+      }
+    }
+
+    if (input.batch_offers.size() >= 6U) {
+      const M1BatchOfferEvidence& a252 = input.batch_offers[0U];
+      const M1BatchOfferEvidence& b253 = input.batch_offers[1U];
+      const M1BatchOfferEvidence& a254 = input.batch_offers[2U];
+      const M1BatchOfferEvidence& b255 = input.batch_offers[3U];
+      const M1BatchOfferEvidence& a0 = input.batch_offers[4U];
+      const M1BatchOfferEvidence& b1 = input.batch_offers[5U];
+      require_job(a252, B1JobPhase::Cold, 0U, 252U, 0U);
+      require_job(b253, B1JobPhase::Warmup, 0U, 253U, 0U);
+      require_job(a254, B1JobPhase::Warmup, 0U, 254U, 1U);
+      require_job(b255, B1JobPhase::Warmup, 0U, 255U, 1U);
+      require_job(a0, B1JobPhase::Measured, 0U, 0U, 2U);
+      require_job(b1, B1JobPhase::Measured, 0U, 1U, 2U);
+      if (a252.offered.timestamp != timeline.cold_start ||
+          !(cold < a252.offered) || !a252.endpoint.has_value() ||
+          !(*a252.endpoint < warmup) || !a252.output_removed ||
+          a252.predecessor.has_value()) {
+        fail("M1 cold A252 offer/settlement protocol drifted");
+      }
+      if (b253.offered.timestamp != timeline.warmup_start ||
+          a254.offered.timestamp != timeline.warmup_start ||
+          !(warmup < b253.offered) || !(b253.offered < a254.offered) ||
+          b253.predecessor.has_value() || !a252.endpoint.has_value() ||
+          !a254.predecessor.has_value() || !(*a254.predecessor == a252.job) ||
+          !a254.predecessor_terminal.has_value() ||
+          !(*a254.predecessor_terminal == *a252.endpoint)) {
+        fail("M1 W boundary B253/A254 offer order or predecessors drifted");
+      }
+      if (!b253.endpoint.has_value() || !b255.predecessor.has_value() ||
+          !(*b255.predecessor == b253.job) ||
+          !b255.predecessor_terminal.has_value() ||
+          !(*b255.predecessor_terminal == *b253.endpoint) ||
+          !(*b253.endpoint < b255.offered) ||
+          b253.endpoint->timestamp != b255.offered.timestamp ||
+          !(b255.offered < measured)) {
+        fail("M1 B255 was not synchronously derived from B253 before B");
+      }
+      if (a0.offered.timestamp != timeline.measurement_start ||
+          b1.offered.timestamp != timeline.measurement_start ||
+          !(measured < a0.offered) || !(a0.offered < b1.offered) ||
+          !a0.predecessor.has_value() || !(*a0.predecessor == a254.job) ||
+          !b1.predecessor.has_value() || !(*b1.predecessor == b255.job)) {
+        fail("M1 measured A0/B1 boundary offers or FIFO predecessors drifted");
+      }
+    }
+
+    std::vector<const M1BatchOfferEvidence*> graph_a_measured;
+    std::vector<const M1BatchOfferEvidence*> graph_b_measured;
+    for (const M1BatchOfferEvidence& offer : input.batch_offers) {
+      if (offer.job.phase != B1JobPhase::Measured) {
+        continue;
+      }
+      if ((offer.job.job_index & 1U) == 0U) {
+        graph_a_measured.push_back(&offer);
+      } else {
+        graph_b_measured.push_back(&offer);
+      }
+    }
+    const auto validate_producer = [&](const auto& offers,
+                                       std::uint64_t parity) {
+      if (offers.empty()) {
+        fail("M1 measured Graph producer has no offered backlog");
+        return;
+      }
+      for (std::size_t index = 0U; index < offers.size(); ++index) {
+        const std::uint64_t cycle = index / 15U;
+        const std::uint64_t job = 2U * (index % 15U) + parity;
+        require_job(*offers[index], B1JobPhase::Measured, cycle, job,
+                    static_cast<std::uint64_t>(index) + 2U);
+        if (index == 0U) {
+          continue;
+        }
+        const M1BatchOfferEvidence& prior = *offers[index - 1U];
+        const M1BatchOfferEvidence& current = *offers[index];
+        if (!prior.endpoint.has_value() || !current.predecessor.has_value() ||
+            !(*current.predecessor == prior.job) ||
+            !current.predecessor_terminal.has_value() ||
+            !(*current.predecessor_terminal == *prior.endpoint) ||
+            prior.endpoint->timestamp != current.offered.timestamp ||
+            !(*prior.endpoint < current.offered)) {
+          fail("M1 measured producer inserted a gap or crossed predecessors");
+        }
+      }
+      const M1BatchOfferEvidence& last = *offers.back();
+      if (last.endpoint.has_value() && *last.endpoint < terminal) {
+        fail("M1 producer stopped despite a pre-cutoff terminal endpoint");
+      }
+    };
+    validate_producer(graph_a_measured, 0U);
+    validate_producer(graph_b_measured, 1U);
+
+    std::map<std::string, std::pair<bool, std::string>> expected_carryover;
+    if (final_warmup != nullptr) {
+      expected_carryover.emplace(i1_key(final_warmup->phase_ordinal),
+                                 std::make_pair(true, std::string{}));
+    }
+    for (const M1BatchOfferEvidence& offer : input.batch_offers) {
+      if (offer.job.phase != B1JobPhase::Warmup ||
+          (offer.endpoint.has_value() && *offer.endpoint < measured)) {
+        continue;
+      }
+      if (!offer.fifo_position_preserved ||
+          !offer.resource_authority_preserved) {
+        fail("M1 warmup B1 carryover lost FIFO or resource authority");
+      }
+      std::string predecessor_key;
+      if (offer.predecessor.has_value()) {
+        const auto predecessor =
+            std::find_if(input.batch_offers.begin(), input.batch_offers.end(),
+                         [&offer](const M1BatchOfferEvidence& candidate) {
+                           return candidate.job == *offer.predecessor;
+                         });
+        if (predecessor != input.batch_offers.end() &&
+            (!predecessor->endpoint.has_value() ||
+             !(*predecessor->endpoint < measured))) {
+          predecessor_key = job_key(predecessor->job);
+        }
+      }
+      expected_carryover.emplace(job_key(offer.job),
+                                 std::make_pair(false, predecessor_key));
+    }
+
+    std::set<std::string> actual_carryover;
+    for (const M1CarryoverEntry& entry : input.carryover) {
+      const auto expected = expected_carryover.find(entry.occurrence_key);
+      bool state_known = false;
+      switch (entry.state) {
+        case M1CarryoverState::OfferedWaiting:
+        case M1CarryoverState::Accepted:
+        case M1CarryoverState::Queued:
+        case M1CarryoverState::Running:
+          state_known = true;
+          break;
+        default:
+          break;
+      }
+      if (!actual_carryover.insert(entry.occurrence_key).second ||
+          expected == expected_carryover.end() || !state_known ||
+          entry.phase != B1JobPhase::Warmup ||
+          entry.queue_predecessor_key != expected->second.second ||
+          !entry.resource_authority_preserved ||
+          entry.publication_current != expected->second.first ||
+          entry.owner_settled) {
+        fail("M1 carryover snapshot is extra, duplicated, or contradictory");
+      }
+    }
+    if (actual_carryover.size() != expected_carryover.size()) {
+      fail("M1 carryover snapshot omits an incomplete warmup occurrence");
+    }
+
+    const M1FirstMeasuredAdmissionEvidence& admission =
+        input.first_measured_admission;
+    const auto latest_admission =
+        checked_i1_time_add(timeline.measurement_start, kI1AdmissionLateness);
+    if (admission.edit_index != 0U ||
+        admission.nominal_time != timeline.measurement_start ||
+        !admission.attempted ||
+        admission.admission_sample < timeline.measurement_start ||
+        latest_admission < admission.admission_sample ||
+        !admission.reserved_event_sequence.has_value() ||
+        *admission.reserved_event_sequence == 0U || !admission.host_succeeded ||
+        !admission.accepted_coordinate.has_value() ||
+        admission.accepted_coordinate->admission_time() !=
+            admission.admission_sample ||
+        admission.accepted_coordinate->event_sequence() !=
+            *admission.reserved_event_sequence ||
+        !admission.warmup_publication_current_before_acceptance ||
+        !admission.superseded_exactly_at_acceptance ||
+        admission.boundary_only_cancellation || final_warmup == nullptr ||
+        admission.old_generation_settlement_endpoint !=
+            checked_i1_time_add(timeline.measurement_start,
+                                kI1MeasurementStartOffset)) {
+      fail("M1 first measured edit/current-hold exception evidence is invalid");
+    } else {
+      const M1EventCoordinate accepted{
+          admission.accepted_coordinate->admission_time(),
+          admission.accepted_coordinate->event_sequence()};
+      register_event(accepted, "first-measured-accepted");
+      if (input.batch_offers.size() >= 6U &&
+          admission.admission_sample == timeline.measurement_start &&
+          !(input.batch_offers[5U].offered < accepted)) {
+        fail("M1 equal-time first acceptance did not follow both B1 offers");
+      }
+      if (final_warmup != nullptr &&
+          admission.old_generation_settlement_endpoint !=
+              final_warmup->settlement_endpoint) {
+        fail("M1 old generation Q_end was shifted at supersession");
+      }
+    }
+  } catch (const std::exception& error) {
+    fail(std::string("M1 protocol validation raised: ") + error.what());
+  } catch (...) {
+    fail("M1 protocol validation raised a non-standard exception");
+  }
+
+  if (summary.validity_reasons.empty()) {
+    summary.verdict = I1Verdict::Pass;
+  }
+  return summary;
 }
 
 /** @copydoc evaluate_m1_fairness */
@@ -535,6 +998,13 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
   std::size_t interactive_burst = 0U;
   bool open_interactive_burst = false;
   for (const M1ClassStartSample& start : input.class_starts) {
+    if (start.service_class != compute::ComputeRunQosClass::Interactive &&
+        start.service_class != compute::ComputeRunQosClass::Throughput) {
+      class_start_valid = false;
+      invalidate(&summary.validity_reasons,
+                 "M1 class-start evidence contains an unknown QoS class");
+      continue;
+    }
     if (!start.both_classes_continuously_startable) {
       interactive_burst = 0U;
       open_interactive_burst = false;
@@ -552,6 +1022,11 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
         saw_applicable_throughput = true;
         interactive_burst = 0U;
         open_interactive_burst = false;
+        break;
+      default:
+        class_start_valid = false;
+        invalidate(&summary.validity_reasons,
+                   "M1 class-start evidence contains an unknown QoS class");
         break;
     }
   }
@@ -589,7 +1064,8 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
   summary.composite_fairness_verdict = compose_fairness(
       {summary.throughput_progress_verdict, summary.graph_jain_verdict,
        summary.class_start_verdict, summary.interactive_headroom_verdict,
-       summary.interactive_latency_verdict});
+       summary.interactive_latency_verdict},
+      &summary.validity_reasons);
   return summary;
 }
 
@@ -597,6 +1073,14 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
 M1EnvironmentPairCompatibility evaluate_m1_environment_pairs(
     const B1EnvironmentEvidence& m1, const B1EnvironmentEvidence& isolated_i1,
     const B1EnvironmentEvidence& isolated_b1_cap_eight) noexcept {
+  if (m1.workload_id != kM1WorkloadId || m1.run_cap != 8U ||
+      isolated_i1.workload_id != kI1WorkloadId || isolated_i1.run_cap != 8U ||
+      isolated_b1_cap_eight.workload_id != kB1WorkloadId ||
+      isolated_b1_cap_eight.run_cap != 8U || m1.replicate_ordinal == 0U ||
+      m1.replicate_ordinal != isolated_i1.replicate_ordinal ||
+      m1.replicate_ordinal != isolated_b1_cap_eight.replicate_ordinal) {
+    return {};
+  }
   return M1EnvironmentPairCompatibility{
       compatible_b1_environments(m1, isolated_i1,
                                  B1EnvironmentRelation::M1PairedI1BaseOnly),

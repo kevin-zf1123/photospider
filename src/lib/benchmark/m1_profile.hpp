@@ -38,6 +38,18 @@ inline constexpr std::size_t kM1MeasuredWindowCount = 30U;
 /** @brief Exact number of measured I1 episode origins. */
 inline constexpr std::size_t kM1MeasuredI1OriginCount = 40U;
 
+/** @brief Exact number of cold I1 origins before M1 warmup. */
+inline constexpr std::size_t kM1ColdI1OriginCount = 1U;
+
+/** @brief Exact number of M1 warmup I1 origins. */
+inline constexpr std::size_t kM1WarmupI1OriginCount = 7U;
+
+/** @brief Exact total I1 occurrences in one M1 replicate. */
+// NOLINTBEGIN(whitespace/indent_namespace)
+inline constexpr std::size_t kM1TotalI1OriginCount =
+    kM1ColdI1OriginCount + kM1WarmupI1OriginCount + kM1MeasuredI1OriginCount;
+// NOLINTEND
+
 /** @brief Exact measured I1 admission-attempt count, `40 * 12`. */
 // NOLINTBEGIN(whitespace/indent_namespace)
 inline constexpr std::size_t kM1MeasuredI1AttemptCount =
@@ -70,6 +82,230 @@ struct M1Timeline final {
 
   /** @brief Exact terminal cutoff `U^M1=B^M1+30s`. */
   std::chrono::steady_clock::time_point measurement_end;
+};
+
+/**
+ * @brief One row-local total-order coordinate for a boundary or lifecycle
+ * event.
+ * @throws Nothing for value construction and comparison.
+ */
+struct M1EventCoordinate final {
+  /** @brief Monotonic timestamp in the single M1 process clock domain. */
+  std::chrono::steady_clock::time_point timestamp;
+  /** @brief Unique nonzero row-local tie-breaking sequence. */
+  std::uint64_t event_sequence = 0U;
+
+  /**
+   * @brief Compares both coordinate components exactly.
+   * @param other Candidate coordinate.
+   * @return True only for equal timestamp and sequence.
+   * @throws Nothing.
+   */
+  bool operator==(const M1EventCoordinate& other) const noexcept;
+
+  /**
+   * @brief Orders first by timestamp and then by row-local sequence.
+   * @param other Candidate coordinate in the same row domain.
+   * @return True when this coordinate precedes `other`.
+   * @throws Nothing.
+   */
+  bool operator<(const M1EventCoordinate& other) const noexcept;
+};
+
+/**
+ * @brief Exact four boundary coordinates retained by one M1 replicate.
+ * @throws Nothing for value construction and copying.
+ */
+struct M1BoundaryEvidence final {
+  /** @brief Cold-start boundary `(C^M1,c^M1)`. */
+  M1EventCoordinate cold_start;
+  /** @brief Warmup-start boundary `(W^M1,w^M1)`. */
+  M1EventCoordinate warmup_start;
+  /** @brief Atomic measurement boundary `(B^M1,b^M1)`. */
+  M1EventCoordinate measurement_start;
+  /** @brief Terminal offer cutoff `(U^M1,u^M1)`. */
+  M1EventCoordinate measurement_end;
+};
+
+/**
+ * @brief Closed queue state recorded for one incomplete carryover occurrence.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class M1CarryoverState : std::uint8_t {
+  /** @brief Offered but not yet admitted to product ownership. */
+  OfferedWaiting,
+  /** @brief Host accepted the occurrence but no ready entry exists yet. */
+  Accepted,
+  /** @brief At least one occurrence-owned entry remains queued. */
+  Queued,
+  /** @brief Occurrence-owned service is physically running. */
+  Running,
+};
+
+/**
+ * @brief One cold, warmup, or measured I1 occurrence retained by M1.
+ * @throws std::bad_alloc when inner diagnostic ownership is copied.
+ * @note `service`, output, and independent verdicts are produced from the
+ * Issue #93 collector/evaluator boundary; M1 does not synthesize task starts.
+ */
+struct M1InteractiveOccurrenceEvidence final {
+  /** @brief Immutable cold/warmup/measured attribution. */
+  B1JobPhase phase = B1JobPhase::Cold;
+  /** @brief Zero-based ordinal within the immutable phase. */
+  std::size_t phase_ordinal = 0U;
+  /** @brief Exact nominal origin event coordinate. */
+  M1EventCoordinate origin;
+  /** @brief Fixed occurrence-local `origin+683,333,337 ns` cut. */
+  std::chrono::steady_clock::time_point settlement_endpoint;
+  /** @brief Actual old-occurrence settlement/quiescence event, when proved. */
+  std::optional<M1EventCoordinate> settlement_observed;
+  /** @brief Final accepted-to-visible latency, when structurally valid. */
+  std::optional<std::chrono::nanoseconds> final_latency;
+  /** @brief Exact Issue #93 started-service aggregate for this occurrence. */
+  I1ServiceEvidence service;
+  /** @brief Independent Issue #93 latency evidence verdict. */
+  I1Verdict latency_verdict = I1Verdict::Invalid;
+  /** @brief Independent Issue #93 waste evidence verdict. */
+  I1Verdict waste_verdict = I1Verdict::Invalid;
+  /** @brief Independent Issue #93 memory evidence verdict. */
+  I1Verdict memory_verdict = I1Verdict::Invalid;
+  /** @brief Independent Issue #93 output evidence verdict. */
+  I1Verdict output_verdict = I1Verdict::Invalid;
+  /** @brief True only when later events never rewrote phase identity. */
+  bool phase_identity_immutable = false;
+  /** @brief Final-warmup-only current state in the B boundary snapshot. */
+  bool publication_current_at_measurement = false;
+  /** @brief Whether settlement remained pending at the B boundary. */
+  bool settlement_pending_at_measurement = false;
+};
+
+/**
+ * @brief One immutable B1 offer and its predecessor/terminal evidence.
+ * @throws std::bad_alloc when optional identity/string ownership is copied.
+ */
+struct M1BatchOfferEvidence final {
+  /** @brief Exact six-component cold/warmup/measured occurrence. */
+  B1JobInstance job;
+  /** @brief Zero-based contiguous local offer ordinal for its Graph. */
+  std::uint64_t producer_offer_ordinal = 0U;
+  /** @brief Retry attempt; frozen fault-free protocol requires zero. */
+  std::uint64_t attempt = 0U;
+  /** @brief Exact row-local offer coordinate. */
+  M1EventCoordinate offered;
+  /** @brief Prior same-Graph occurrence, absent only for first producer offer.
+   */
+  std::optional<B1JobInstance> predecessor;
+  /** @brief Matching predecessor terminal coordinate when timing requires it.
+   */
+  std::optional<M1EventCoordinate> predecessor_terminal;
+  /** @brief Unique Run/receipt/golden endpoint when complete. */
+  std::optional<M1EventCoordinate> endpoint;
+  /** @brief True after occurrence-owner resource settlement is proved. */
+  bool owner_settled = false;
+  /** @brief Cold/warmup output removal proof; measured output may remain. */
+  bool output_removed = false;
+  /** @brief True only when later events never rewrote phase identity. */
+  bool phase_identity_immutable = false;
+  /** @brief True only when queue position survived the B transition. */
+  bool fifo_position_preserved = false;
+  /** @brief True only when existing reservation/grant authority survived. */
+  bool resource_authority_preserved = false;
+};
+
+/**
+ * @brief One exact incomplete occurrence copied by the atomic B snapshot.
+ * @throws std::bad_alloc when keys are copied.
+ */
+struct M1CarryoverEntry final {
+  /** @brief Canonical occurrence key derived from immutable identity. */
+  std::string occurrence_key;
+  /** @brief Immutable warmup phase retained after the boundary. */
+  B1JobPhase phase = B1JobPhase::Warmup;
+  /** @brief Physical offered/accepted/queued/running state at the cut. */
+  M1CarryoverState state = M1CarryoverState::OfferedWaiting;
+  /** @brief Canonical same-Graph predecessor key, or empty for I1/no
+   * predecessor. */
+  std::string queue_predecessor_key;
+  /** @brief True only when reservation/grant authority is unchanged. */
+  bool resource_authority_preserved = false;
+  /** @brief Final-warmup-I1-only publication-current marker. */
+  bool publication_current = false;
+  /** @brief False for every occurrence included by the incomplete snapshot. */
+  bool owner_settled = false;
+};
+
+/**
+ * @brief Frozen success-only first measured edit supersession evidence.
+ * @throws Nothing for ordinary movement of optional scalar coordinates.
+ */
+struct M1FirstMeasuredAdmissionEvidence final {
+  /** @brief Exact first edit identity; must be zero. */
+  std::size_t edit_index = 0U;
+  /** @brief Exact nominal origin `B^M1`. */
+  std::chrono::steady_clock::time_point nominal_time;
+  /** @brief Whether the pre-call admission boundary was reached. */
+  bool attempted = false;
+  /** @brief Sole pre-call monotonic sample `A_0`. */
+  std::chrono::steady_clock::time_point admission_sample;
+  /** @brief Nonzero sequence reserved before the Host invocation. */
+  std::optional<std::uint64_t> reserved_event_sequence;
+  /** @brief Whether Host admission succeeded with a valid future. */
+  bool host_succeeded = false;
+  /** @brief Success-only product-bound accepted coordinate. */
+  std::optional<I1AcceptedCoordinate> accepted_coordinate;
+  /** @brief True when final warmup publication was current before acceptance.
+   */
+  bool warmup_publication_current_before_acceptance = false;
+  /** @brief True only when ordinary latest-wins superseded at acceptance. */
+  bool superseded_exactly_at_acceptance = false;
+  /** @brief Must remain false; phase transition cannot cancel the old Run. */
+  bool boundary_only_cancellation = false;
+  /** @brief Unchanged old-generation `B^M1+183,333,337 ns` cut. */
+  std::chrono::steady_clock::time_point old_generation_settlement_endpoint;
+};
+
+/**
+ * @brief Complete raw deterministic M1 phase/offer/carryover protocol.
+ * @throws std::bad_alloc when occurrence, offer, or snapshot storage copies.
+ */
+struct M1ProtocolEvidenceInput final {
+  /** @brief Fresh-process ordinal in `[1,3]`. */
+  std::uint64_t replicate_ordinal = 0U;
+  /** @brief Exact four boundary coordinates. */
+  M1BoundaryEvidence boundaries;
+  /** @brief Exact one cold, seven warmup, and forty measured I1 occurrences. */
+  std::vector<M1InteractiveOccurrenceEvidence> interactive_occurrences;
+  /** @brief Every cold/warmup/measured B1 offer in row-local event order. */
+  std::vector<M1BatchOfferEvidence> batch_offers;
+  /** @brief Complete atomic snapshot of all incomplete warmup occurrences. */
+  std::vector<M1CarryoverEntry> carryover;
+  /** @brief Sole measured edit-zero acceptance/current-hold transition. */
+  M1FirstMeasuredAdmissionEvidence first_measured_admission;
+  /** @brief True only when all work used one ExecutionService/process domain.
+   */
+  bool shared_execution_domain = false;
+  /** @brief True only when boundary transition performed no
+   * drain/pause/restart. */
+  bool boundary_was_zero_duration = false;
+  /** @brief True only when raw history survived accumulator reset unchanged. */
+  bool raw_history_preserved = false;
+  /** @brief True only when warmup producers were closed before the snapshot. */
+  bool warmup_sources_closed = false;
+  /** @brief True only when measured logical counters reset atomically at B. */
+  bool measured_counters_reset = false;
+  /** @brief True only when final shutdown settled every phase to zero. */
+  bool final_settlement_proved = false;
+};
+
+/**
+ * @brief Fail-closed deterministic M1 protocol result.
+ * @throws std::bad_alloc when diagnostics allocate.
+ */
+struct M1ProtocolSummary final {
+  /** @brief Complete stable structural invalidation reasons. */
+  std::vector<std::string> validity_reasons;
+  /** @brief Pass only for the exact frozen protocol, otherwise Invalid. */
+  I1Verdict verdict = I1Verdict::Invalid;
 };
 
 /**
@@ -332,6 +568,19 @@ class M1FairnessObservationCollector final {
   explicit M1FairnessObservationCollector(std::size_t capacity = 4096U);
 
   /**
+   * @brief Allocates a bounded store with an injected first sequence.
+   * @param capacity Maximum number of retained scalar events.
+   * @param first_sequence Nonzero first causal sequence to reserve.
+   * @throws std::invalid_argument when capacity or first_sequence is zero.
+   * @throws std::bad_alloc when shared state or fixed slots cannot allocate.
+   * @note This source-private overload exists so deterministic tests can prove
+   * terminal sequence handling without attempting `UINT64_MAX` callbacks.
+   * Production callers use the one-argument constructor and start at one.
+   */
+  M1FairnessObservationCollector(std::size_t capacity,
+                                 std::uint64_t first_sequence);
+
+  /**
    * @brief Creates one request-local tagged sink over the shared store.
    * @param tag Immutable Interactive or Throughput Graph role.
    * @return Shared observation-only sink suitable for I1Host or B1Host.
@@ -366,6 +615,18 @@ class M1FairnessObservationCollector final {
  */
 M1Timeline derive_m1_timeline(
     std::chrono::steady_clock::time_point measurement_start);
+
+/**
+ * @brief Validates exact M1 cold/warmup/measured protocol and attribution.
+ * @param input Complete boundary, I1, B1, carryover, supersession, and final
+ * settlement evidence from one fresh process replicate.
+ * @return Pass only for the frozen v1 protocol; any missing, extra, malformed,
+ * reordered, rewritten, later-stage, or unproved fact returns Invalid.
+ * @throws std::bad_alloc when indexing/diagnostic ownership allocates.
+ * @note Machine timing SLOs are evaluated separately; a structurally exact
+ * protocol can still fail latency/progress/fairness/waste/memory.
+ */
+M1ProtocolSummary evaluate_m1_protocol(M1ProtocolEvidenceInput input);
 
 /**
  * @brief Evaluates five independent M1 fairness guards fail-closed.

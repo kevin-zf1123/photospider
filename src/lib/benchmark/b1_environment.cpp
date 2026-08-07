@@ -1209,7 +1209,22 @@ std::string encode_b1_environment_class(
   return encode_manifest(kEnvironmentClassSchema, fields);
 }
 
-B1CanonicalManifest parse_b1_environment_manifest(std::string_view bytes) {
+/** @copydoc encode_b1_canonical_manifest */
+std::string encode_b1_canonical_manifest(
+    std::string_view schema, const std::vector<B1CanonicalField>& fields) {
+  if (schema.empty() || schema.find('\n') != std::string_view::npos ||
+      schema.find('\r') != std::string_view::npos ||
+      schema.find('\0') != std::string_view::npos) {
+    throw std::invalid_argument("Canonical manifest schema is invalid.");
+  }
+  for (const B1CanonicalField& field : fields) {
+    static_cast<void>(state_name(field.state));
+  }
+  return encode_manifest(schema, fields);
+}
+
+/** @copydoc parse_b1_canonical_manifest */
+B1CanonicalManifest parse_b1_canonical_manifest(std::string_view bytes) {
   if (bytes.empty() || bytes.back() != '\n' ||
       bytes.find('\r') != std::string_view::npos ||
       bytes.find('\0') != std::string_view::npos ||
@@ -1249,6 +1264,12 @@ B1CanonicalManifest parse_b1_environment_manifest(std::string_view bytes) {
         std::string(type), std::string(payload)});
     line_start = line_end + 1U;
   }
+  manifest.bytes = std::string(bytes);
+  return manifest;
+}
+
+B1CanonicalManifest parse_b1_environment_manifest(std::string_view bytes) {
+  B1CanonicalManifest manifest = parse_b1_canonical_manifest(bytes);
   if (manifest.schema == kStorageSchema) {
     validate_fields(manifest.fields, kStorageFields);
     validate_storage_cross_fields(manifest.fields);
@@ -1275,7 +1296,6 @@ B1CanonicalManifest parse_b1_environment_manifest(std::string_view bytes) {
   } else {
     throw std::invalid_argument("Environment manifest schema is unknown.");
   }
-  manifest.bytes = std::string(bytes);
   return manifest;
 }
 
@@ -2083,10 +2103,14 @@ bool prove_b1_root_containment(
 namespace {
 
 /**
- * @brief Validates one environment-class manifest against its actual evidence.
+ * @brief Validates one environment-class manifest against retained evidence and
+ * optional process-private authority.
  * @param evidence Complete base/storage/class evidence object.
+ * @param require_actual_authority True to require a matching live storage
+ * observation; false to validate only canonical retained claims for an Invalid
+ * diagnostic package.
  * @return True only when all three independent digests, applicability state,
- * storage presence, and eligibility are mutually bound.
+ * storage presence, eligibility, and any required authority are mutually bound.
  * @throws Parsing and allocation exceptions from canonical validation.
  * @note The four-field class bytes are not trusted as a self-contained claim:
  * both embedded digest payloads are compared with independently recomputed
@@ -2095,9 +2119,12 @@ namespace {
  * independently recomputed eligibility. Required storage also needs a
  * process-private actual observation whose independently produced proof,
  * held-root identity, filesystem type, and typed receipt match the retained
- * evidence. Retained files cannot create that authority.
+ * evidence when `require_actual_authority` is true. Retained files cannot
+ * create that authority; the false mode is only a serialization boundary and
+ * cannot establish conformance or Pass.
  */
-bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
+bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence,
+                                     bool require_actual_authority) {
   const B1CanonicalManifest base =
       parse_b1_environment_manifest(evidence.base_manifest);
   const B1CanonicalManifest environment_class =
@@ -2127,7 +2154,8 @@ bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
         !evidence.storage_raw_proof.has_value() ||
         !evidence.storage_eligibility.has_value() ||
         !evidence.storage_eligibility->eligible ||
-        !b1_storage_actual_observation_matches(evidence)) {
+        (require_actual_authority &&
+         !b1_storage_actual_observation_matches(evidence))) {
       return false;
     }
     const B1CanonicalManifest storage =
@@ -2162,6 +2190,26 @@ bool valid_environment_class_binding(const B1EnvironmentEvidence& evidence) {
 
 }  // namespace
 
+/** @copydoc valid_b1_environment_evidence */
+bool valid_b1_environment_evidence(
+    const B1EnvironmentEvidence& evidence) noexcept {
+  try {
+    return valid_environment_class_binding(evidence, true);
+  } catch (...) {
+    return false;
+  }
+}
+
+/** @copydoc valid_b1_environment_claims */
+bool valid_b1_environment_claims(
+    const B1EnvironmentEvidence& evidence) noexcept {
+  try {
+    return valid_environment_class_binding(evidence, false);
+  } catch (...) {
+    return false;
+  }
+}
+
 bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
                                 const B1EnvironmentEvidence& rhs,
                                 B1EnvironmentRelation relation) noexcept {
@@ -2183,8 +2231,8 @@ bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
       return false;
     }
 
-    if (!valid_environment_class_binding(lhs) ||
-        !valid_environment_class_binding(rhs)) {
+    if (!valid_environment_class_binding(lhs, true) ||
+        !valid_environment_class_binding(rhs, true)) {
       return false;
     }
 
@@ -2194,6 +2242,16 @@ bool compatible_b1_environments(const B1EnvironmentEvidence& lhs,
                               (rhs.workload_id == "M1-shared-v1" &&
                                lhs.workload_id == "I1-edit-storm-v1");
       return identities && lhs.run_cap == 8U && rhs.run_cap == 8U;
+    }
+
+    if (relation == B1EnvironmentRelation::CandidateReference &&
+        !lhs.storage_manifest.has_value() &&
+        !rhs.storage_manifest.has_value()) {
+      return lhs.workload_id == rhs.workload_id && lhs.run_cap == rhs.run_cap &&
+             lhs.environment_class_manifest == rhs.environment_class_manifest &&
+             lhs.claimed_environment_class_digest ==
+                 rhs.claimed_environment_class_digest &&
+             lhs.fixture_digest == rhs.fixture_digest;
     }
 
     if (!lhs.storage_manifest.has_value() ||
@@ -2602,6 +2660,11 @@ std::string b1_environment_frame(std::string_view payload) {
   return std::to_string(payload.size()) + ":" + std::string(payload);
 }
 
+/** @copydoc parse_b1_canonical_uint64 */
+std::uint64_t parse_b1_canonical_uint64(std::string_view payload) {
+  return parse_uint64(payload);
+}
+
 std::string encode_b1_token_set(std::vector<std::string> tokens,
                                 const std::vector<std::string>& domain) {
   for (const std::string& token : tokens) {
@@ -2639,6 +2702,31 @@ std::string encode_b1_fixed_record(const std::vector<std::string>& components) {
     output.append(b1_environment_frame(component));
   }
   return output;
+}
+
+/** @copydoc parse_b1_fixed_record */
+std::vector<std::string> parse_b1_fixed_record(std::string_view payload,
+                                               std::size_t component_count) {
+  const std::vector<std::string_view> borrowed =
+      parse_fixed_frames(payload, component_count);
+  std::vector<std::string> result;
+  result.reserve(borrowed.size());
+  for (const std::string_view component : borrowed) {
+    result.emplace_back(component);
+  }
+  return result;
+}
+
+/** @copydoc parse_b1_framed_list */
+std::vector<std::string> parse_b1_framed_list(std::string_view payload) {
+  const std::vector<std::string_view> borrowed =
+      parse_counted_frames(payload, 1U);
+  std::vector<std::string> result;
+  result.reserve(borrowed.size());
+  for (const std::string_view item : borrowed) {
+    result.emplace_back(item);
+  }
+  return result;
 }
 
 std::string encode_b1_map(

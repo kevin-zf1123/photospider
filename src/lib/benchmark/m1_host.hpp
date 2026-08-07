@@ -6,9 +6,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "compute/execution_lifecycle_telemetry.hpp"  // NOLINT(build/include_subdir)
-#include "compute/execution_service.hpp"  // NOLINT(build/include_subdir)
+#include "compute/execution_service.hpp"      // NOLINT(build/include_subdir)
+#include "execution/compute_io_executor.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 #include "runtime/resource_ledger.hpp"  // NOLINT(build/include_subdir)
 
@@ -25,16 +27,25 @@ namespace ps::benchmark {
  * @throws std::bad_alloc when lifecycle snapshot storage allocates.
  * @note This aggregate contains no ledger token, reservation, grant, Run
  * lease, queue entry, cancellation source, native handle, or policy authority.
- * Its three components are independently synchronized copies rather than one
+ * Its components are independently synchronized copies rather than one
  * cross-owner transaction; a live harness retries or uses a settled boundary
- * before asserting a relation across components.
+ * before asserting a relation across owners.
  */
 struct M1ExecutionSnapshot final {
   /** @brief Authoritative limits/current/lifetime Host resource values. */
   ResourceLedger::Snapshot host_resources;
 
+  /** @brief Every configured authoritative device resource account. */
+  std::vector<ResourceLedger::DeviceSnapshot> device_resources;
+
+  /** @brief Process Compute I/O active/phase/high-water/settlement evidence. */
+  execution::ComputeIoExecutorSnapshot compute_io;
+
   /** @brief Fixed general capacity and active Throughput root total. */
   compute::ExecutionThroughputReservationSnapshot throughput;
+
+  /** @brief Real queued entries partitioned by immutable product QoS class. */
+  compute::ExecutionReadyClassSnapshot ready_classes;
 
   /** @brief Bounded raw product lifecycle evidence page. */
   compute::ExecutionLifecyclePage lifecycle;
@@ -63,7 +74,8 @@ class M1Host {
    * @brief Copies authoritative and policy-only state at one M1 boundary.
    * @param after_cursor Lifecycle cursor strictly before desired events.
    * @param limit Positive bounded maximum lifecycle events to return.
-   * @return Host ledger, Throughput account, and lifecycle diagnostics.
+   * @return Host/device ledgers, Compute I/O, ready/Throughput, and lifecycle
+   * diagnostics.
    * @throws std::invalid_argument when `limit` violates lifecycle bounds.
    * @throws std::bad_alloc or std::system_error from snapshot ownership and
    * synchronization.

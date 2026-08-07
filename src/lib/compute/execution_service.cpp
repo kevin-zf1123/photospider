@@ -2147,6 +2147,35 @@ class ExecutionService::BoundedReadyStore final {
    */
   std::uint64_t byte_count() const noexcept { return byte_count_; }
 
+  /**
+   * @brief Counts every physical ready entry by immutable Run QoS class.
+   * @return One complete store-local diagnostic cut.
+   * @throws Nothing; caller holds `PoolState::mutex`.
+   * @note Unknown class values make the snapshot invalid while preserving its
+   * total count; they are never silently assigned to either known class.
+   */
+  ExecutionReadyClassSnapshot class_snapshot() const noexcept {
+    ExecutionReadyClassSnapshot snapshot;
+    for (const std::shared_ptr<QueueEntry>& entry : entries_) {
+      ++snapshot.total_entries;
+      switch (entry->run->policy_qos.service_class) {
+        case ComputeRunQosClass::Interactive:
+          ++snapshot.interactive_entries;
+          break;
+        case ComputeRunQosClass::Throughput:
+          ++snapshot.throughput_entries;
+          break;
+        default:
+          snapshot.valid = false;
+          break;
+      }
+    }
+    if (snapshot.total_entries != entry_count_) {
+      std::terminate();
+    }
+    return snapshot;
+  }
+
  private:
   /**
    * @brief Returns the fixed bit assigned to one configured physical worker.
@@ -4446,6 +4475,12 @@ ResourceLedger::Snapshot ExecutionService::resource_snapshot() const {
 ExecutionThroughputReservationSnapshot
 ExecutionService::throughput_reservation_snapshot() const {
   return pool_->throughput_reservations->snapshot();
+}
+
+/** @copydoc ExecutionService::ready_class_snapshot */
+ExecutionReadyClassSnapshot ExecutionService::ready_class_snapshot() const {
+  std::lock_guard<std::mutex> lock(pool_->mutex);
+  return pool_->ready_store.class_snapshot();
 }
 
 /** @copydoc ExecutionService::compute_io_executor */

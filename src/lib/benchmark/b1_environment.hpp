@@ -592,6 +592,14 @@ enum class B1EnvironmentRelation : std::uint8_t {
 std::string b1_environment_frame(std::string_view payload);
 
 /**
+ * @brief Parses one canonical unsigned decimal scalar from the shared grammar.
+ * @param payload Nonempty decimal without sign or noncanonical leading zero.
+ * @return Exact uint64 value.
+ * @throws std::invalid_argument for lexical, range, or canonicality drift.
+ */
+std::uint64_t parse_b1_canonical_uint64(std::string_view payload);
+
+/**
  * @brief Encodes one sorted unique closed token set.
  * @param tokens Candidate raw ASCII tokens.
  * @param domain Closed allowed token universe.
@@ -619,6 +627,27 @@ std::string encode_b1_ordered_text_list(
  * @throws std::bad_alloc when output allocation fails.
  */
 std::string encode_b1_fixed_record(const std::vector<std::string>& components);
+
+/**
+ * @brief Parses one exact fixed record through the shared frame grammar.
+ * @param payload Complete concatenated frame payload.
+ * @param component_count Exact required component count.
+ * @return Owned component bytes in encoded order.
+ * @throws std::invalid_argument for malformed, truncated, or extra frames.
+ * @throws std::bad_alloc when result ownership allocates.
+ */
+std::vector<std::string> parse_b1_fixed_record(std::string_view payload,
+                                               std::size_t component_count);
+
+/**
+ * @brief Parses one counted generic list through the shared frame grammar.
+ * @param payload Count followed by one frame per item.
+ * @return Owned item payloads in encoded order.
+ * @throws std::invalid_argument for count, frame, overflow, or consumption
+ * drift.
+ * @throws std::bad_alloc when result ownership allocates.
+ */
+std::vector<std::string> parse_b1_framed_list(std::string_view payload);
 
 /**
  * @brief Encodes one sorted unique canonical map.
@@ -725,6 +754,31 @@ std::string encode_b1_environment_class(
     const std::vector<B1CanonicalField>& fields);
 
 /**
+ * @brief Encodes one prevalidated manifest through the shared field grammar.
+ * @param schema Literal header without its terminating LF.
+ * @param fields Exact ordered fields already validated by their closed schema.
+ * @return Complete header, field records, and final LF.
+ * @throws std::invalid_argument for an empty or line-breaking schema header or
+ * an invalid closed observation-state representation.
+ * @throws std::bad_alloc when output ownership allocates.
+ * @note This primitive owns only the byte grammar. Callers remain responsible
+ * for their exact field names, types, state/reason rules, and payload domains.
+ */
+std::string encode_b1_canonical_manifest(
+    std::string_view schema, const std::vector<B1CanonicalField>& fields);
+
+/**
+ * @brief Parses only the shared canonical manifest envelope and field frames.
+ * @param bytes Complete candidate bytes including one final LF.
+ * @return Header, ordered fields, and retained exact bytes.
+ * @throws std::invalid_argument for BOM/CR/NUL/header/line/frame/state drift.
+ * @throws std::bad_alloc when parsed ownership allocates.
+ * @note Closed schema validation remains with the caller; environment callers
+ * use `parse_b1_environment_manifest` for the stronger exact schema checks.
+ */
+B1CanonicalManifest parse_b1_canonical_manifest(std::string_view bytes);
+
+/**
  * @brief Independently parses exact canonical environment bytes.
  * @param bytes Complete candidate bytes.
  * @return Parsed schema/fields and retained bytes.
@@ -764,6 +818,35 @@ B1StorageEligibility evaluate_b1_storage_eligibility(
  * process or supply a concretely verified attestation adapter.
  */
 bool b1_storage_actual_observation_matches(
+    const B1EnvironmentEvidence& evidence) noexcept;
+
+/**
+ * @brief Validates one environment object against its retained claims and
+ * process-private authority.
+ * @param evidence Complete base/storage/class evidence object.
+ * @return True only when every manifest, claimed digest, applicability rule,
+ * retained proof, derived eligibility result, and applicable live authority
+ * is mutually consistent.
+ * @throws Nothing; malformed, incomplete, unsupported, or drifting evidence
+ * fails closed as false.
+ * @note This is a self-validation boundary. Cross-row compatibility still
+ * requires `compatible_b1_environments` with the appropriate relation.
+ */
+bool valid_b1_environment_evidence(
+    const B1EnvironmentEvidence& evidence) noexcept;
+
+/**
+ * @brief Validates retained environment manifests, claims, raw proof, and
+ * derived eligibility without treating serialized facts as live authority.
+ * @param evidence Complete retained environment object.
+ * @return True only when canonical bytes, independent digests,
+ * applicability, proof, and derived eligibility are mutually consistent.
+ * @throws Nothing; malformed or incomplete claims fail closed as false.
+ * @note This boundary exists only so an ineligible manual run can retain a
+ * canonical Invalid row. It is insufficient for conformance, compatibility,
+ * or Pass; those require `valid_b1_environment_evidence` and actual authority.
+ */
+bool valid_b1_environment_claims(
     const B1EnvironmentEvidence& evidence) noexcept;
 
 /**
