@@ -2649,11 +2649,20 @@ directory whose existing parent is outside the checkout:
 ```shell
 cmake --build build --target i1_edit_storm_benchmark -j
 ./build/tests/i1_edit_storm_benchmark \
-  --output-dir /tmp/photospider-i1-r1 --replicate-ordinal 1
+  --output-dir /tmp/photospider-i1-r1 \
+  --base-manifest /absolute/evidence/base.manifest \
+  --environment-class-manifest /absolute/evidence/i1-class.manifest \
+  --subject-role reference --replicate-ordinal 1
 ./build/tests/i1_edit_storm_benchmark \
-  --output-dir /tmp/photospider-i1-r2 --replicate-ordinal 2
+  --output-dir /tmp/photospider-i1-r2 \
+  --base-manifest /absolute/evidence/base.manifest \
+  --environment-class-manifest /absolute/evidence/i1-class.manifest \
+  --subject-role reference --replicate-ordinal 2
 ./build/tests/i1_edit_storm_benchmark \
-  --output-dir /tmp/photospider-i1-r3 --replicate-ordinal 3
+  --output-dir /tmp/photospider-i1-r3 \
+  --base-manifest /absolute/evidence/base.manifest \
+  --environment-class-manifest /absolute/evidence/i1-class.manifest \
+  --subject-role reference --replicate-ordinal 3
 ```
 
 The runner fixes the product worker count at eight, keeps one continuous
@@ -2666,13 +2675,19 @@ but must finish before the next admission. JSON construction, dump, and disk
 flush remain outside every later-origin guard and drain in exact slot order at
 `T^I1`; the bounded live set is one evaluator plus 221 Value-free rows. A
 complete run writes the
-frozen `i1-graph.yaml`, `invocation.json`, raw `episodes.ndjson`, and
-`summary.json`; an exception writes `failure.json` in addition to whatever
+frozen `i1-graph.yaml`, `invocation.json`, raw `episodes.ndjson`,
+`summary.json`, and `pair-object.canonical`; an exception writes `failure.json`
+in addition to whatever
 earlier artifacts were safely completed. In particular, a failed/invalid
 admission first appends and flushes its Invalid inner row to `episodes.ndjson`,
 preserving raw admission facts and closed observer/resource state, and then
-writes `failure.json`. These are closed Issue #93 inner artifacts and
-explicitly carry no canonical outer row/section/bundle claim. Exit zero means
+writes `failure.json`. The JSON/NDJSON files remain closed Issue #93 inner
+artifacts and make no outer-envelope claim. The pair-object pack is produced
+only from the complete uncompacted 221-row source: it retains the canonical
+I1 row, one-row bundle, all six source sections, exact storage-N/A environment
+claims, and the 200 measured latency samples used to recompute p99. Candidate
+runs additionally require an immutable comparison-reference bundle digest.
+Exit zero means
 all four I1 inner verdicts passed;
 exit two means complete evidence failed at least one threshold; exit one means
 parsing, setup, cadence, or evidence invalidation. Building the target or
@@ -2724,7 +2739,8 @@ closed backend, 21-field raw observation, mount, two-cut performance,
 transaction/receipt, and root/destination-containment sections. It carries no
 derived proof boolean. The proof's selected/resolved root must equal
 `--output-dir`, and its retained destination list must include the runner's
-root, Graph, session, cache, invocation, row, and failure paths. The runner
+root, Graph, session, cache, invocation, row, pair-object, and failure paths.
+The runner
 strictly reparses/re-encodes the bytes, independently replays all mappings and
 eligibility predicates, and rejects missing, unknown, duplicate, stale, or
 drifting evidence rather than filling any proof fact at runtime.
@@ -2738,20 +2754,28 @@ mkdir -m 700 /absolute/durable-root/b1-cap1-r1
   --storage-manifest /absolute/evidence/storage.manifest \
   --environment-class-manifest /absolute/evidence/b1-class.manifest \
   --storage-proof /absolute/evidence/storage-proof.manifest \
-  --run-cap 1 --replicate-ordinal 1
+  --run-cap 1 --subject-role reference --replicate-ordinal 1
 ```
 
 Run cap one and eight for ordinals one through three in six distinct fresh
 processes and roots before composing a complete B1 candidate or reference.
 One invocation executes cold seed 252, warmup seeds 253/254/255, then two
 concurrent ordered measured producers over even and odd jobs `0..29`. It writes
-`invocation.json`, `row.json`, the two frozen Graph YAMLs, session/cache
+`invocation.json`, `row.json`, `pair-object.canonical`, the two frozen Graph
+YAMLs, session/cache
 directories, and 34 immutable occurrence slots below the selected root; an
 exception after safe root selection adds `failure.json` without replacing an
 existing artifact. The payloads alone exceed 2.2 GiB. Exit zero means all four
 inner verdicts passed, two means complete evidence failed at least one inner
 threshold, and one means parsing, setup, product, durability, or evidence was
-invalid. The artifacts explicitly make no canonical outer-row/bundle claim.
+invalid. `row.json` explicitly makes no canonical outer-row/bundle claim; the
+pair-object pack separately retains the canonical isolated row/bundle and all
+source sections. It is produced from the actual 34-job row, including thirty
+ordered verified-endpoint outcomes and the exact measurement interval. The
+pack retains storage claims/proof/eligibility but cannot serialize or mint the
+process-private actual-storage authority, so a portable B1 result may remain
+`Invalid`. Candidate runs additionally require an immutable comparison-
+reference bundle digest.
 Building the target or running `--help` is only a harness smoke; this document
 does not claim that an exact 34-job invocation or three-replicate B1 machine run
 has been executed.
@@ -2765,11 +2789,25 @@ carryover/current-hold evidence, independent producer-local cycles, all five
 axes, unknown-enum fail-closed behavior, finite lock-free callback publication,
 same-coordinate fanout, unchanged base-only-I1/full-B1 environment delegation,
 canonical golden digests, functional keys, exact-one/DAG resolution, and
-incomplete live authority. The product suite derives applicability from real
-ready/lifecycle evidence, proves a Throughput Run reaches terminal and resource
+incomplete live authority. They also reject substituted isolated-I1 sources,
+omitted isolated-B1 outcomes, omitted M1 raw windows, outer/inner claim
+tampering, denominator/source mismatches, missing/duplicate/reordered/unknown/
+over-limit I/O transitions, and nonzero final I/O state. A dedicated regression
+keeps every sparse temporal I/O current value at zero while proving that a
+short accepted/settled task still raises the event-derived high-water. The
+product suite consumes product-authored per-start ready/lifecycle/candidate/
+resource facts, proves a Throughput Run reaches terminal and resource
 settlement while Interactive work remains outstanding, and proves the exact
-31-CPU Throughput/32-CPU shared-headroom boundary. Timeouts are deadlock
-diagnostics, not latency thresholds.
+31-CPU Throughput/32-CPU shared-headroom boundary. The positive and negative
+class-start cases distinguish a real dual-startable fourth Interactive start
+from nominal interval overlap. Timeouts are deadlock diagnostics, not latency
+thresholds.
+
+The pair-object tests also exercise the real Issue #93 and #95 evaluator-to-
+producer paths, canonical pack round trips, exact section order/cardinality,
+source rematerialization, digest/object mismatch, wrong role/ordinal,
+duplicate corpus insertion, and bounded absolute regular-file reads. Relative,
+empty, oversized, directory, and final-component symlink inputs are rejected.
 
 The exact M1 replicate is the manual `m1_shared_benchmark` target. It is
 `EXCLUDE_FROM_ALL`, has no `add_test`, and is absent from default builds and CI:
@@ -2781,20 +2819,44 @@ cmake --build build --target m1_shared_benchmark -j
 
 One invocation requires a fresh absolute empty output directory outside the
 checkout, canonical base/storage/environment-class claims, retained storage
-proof, subject role, and ordinal. Optional same-ordinal isolated I1/B1
-addresses and denominators bind relative inputs; a candidate also requires its
-comparison-reference bundle address. The runner uses one `EmbeddedHost` for
-the I1 Graph and both B1 Graphs, executes the exact cold/warmup/measured cadence,
-classifies all 480 measured edits, stops new offers at U, closes all Graphs,
-requires final-zero state, and writes six canonical sections plus
-`row.canonical`, `bundle.canonical`, and `result.json`. Missing external objects
-are represented by stable unresolved addresses, and the portable storage
-observation does not manufacture complete live machine authority; either case
-leaves corpus validation `Invalid` and exit status two. A later complete
-validator may combine already sealed objects, but this target is not a second
-result orchestrator. Building it or running `--help` is only a harness smoke;
-this document does not claim that an exact timed replicate or three-replicate
-machine corpus has been executed.
+proof, subject role, ordinal, and two complete isolated pair-object packs. Each
+pack path must be an absolute bounded regular file and is accompanied by the
+exact row and bundle digests. The I1 pack must come from the same-role,
+same-ordinal cap-eight I1 producer; the B1 pack must come from the same-role,
+same-ordinal cap-eight B1 producer under byte-identical eligible storage and
+environment-class claims. Digest text without the corresponding object is
+rejected during setup; no numeric p99 or B1-rate option is accepted. A
+candidate also requires its comparison-reference bundle address.
+
+Before deriving the timed C/W/B/U boundary, the runner reads each pack once
+through a no-follow descriptor, parses the closed pack schema, recomputes the
+row/bundle/section addresses, rematerializes every source object, enforces
+one-row membership and seal order, checks role/workload/cap/ordinal and the
+base-only I1/full B1 environment relations, and recomputes the I1 p99 plus B1
+successful-site-operation/interval tuple. Only those recomputed values populate
+the M1 evaluator and sealed denominator claims.
+
+The runner uses one `EmbeddedHost` for the I1 Graph and both B1 Graphs, executes
+the exact cold/warmup/measured cadence, classifies all 480 measured edits, stops
+new offers at U, closes all Graphs, requires final-zero state, and writes six
+canonical sections plus `row.canonical`, `bundle.canonical`, copied canonical
+`paired-i1-object.canonical`/`paired-b1-object.canonical` packs, and
+`result.json`.
+Its nested M1 row preserves the 30 raw progress and Graph-service windows, 480
+raw Host outcomes, product-authored class-start cuts, complete reused I1/B1
+source rows, event-aligned Compute I/O, and sparse temporal/lifecycle streams.
+A complete corpus validator exact-one resolves each named isolated row,
+recomputes the isolated I1 p99 and B1 successful-site-operation/measurement-
+interval tuple, and exact-checks both duplicated M1 claims. Missing, ambiguous,
+omitted, substituted, tampered, or mismatched evidence is rejected before
+timing or is `Invalid` under corpus replay. Both loaded pair rows, bundles, and
+sections are inserted exactly once into the local validation corpus before the
+M1 row and bundle. The portable storage observation still does not manufacture
+complete live machine authority, so that independent condition may leave
+corpus validation `Invalid` and exit status two even when both denominator
+objects validate. Building it or running `--help` is only a
+harness smoke; this document does not claim that an exact timed replicate or
+three-replicate machine corpus has been executed.
 
 ## CTest Registration
 

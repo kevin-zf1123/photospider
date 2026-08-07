@@ -631,6 +631,17 @@ Interactive starts, and complete classification of all 480 measured I1
 admissions. Environment pairing delegates unchanged to the base-only I1 and
 full eligible B1-cap-eight relations.
 
+Applicability at each service start is now a product-authored scheduler cut,
+not a reconstruction from nominal I1/B1 intervals. Immediately before a
+physical start commits, `ExecutionService` probes real ready entries, Run
+lifecycle, operation/route eligibility, and remaining child-grant capacity for
+both classes. The observation is published only after the selected operation
+gate, route, ready removal, counters, and execution grant commit. The M1
+collector retains both class facts and the committed-grant bit in its existing
+preallocated, allocation-free, nonblocking, lock-free callback store. Nominal
+intervals remain useful only for Graph-demand diagnostics and cannot reset or
+excuse the three-to-one start rule.
+
 One preallocated `M1FairnessObservationCollector` gives tagged I1/B1 Runs one
 bounded observer-causal domain. `ComputeRunObservationFanout` forwards the
 same authority-owned product coordinate to that collector and the reused I1 or
@@ -641,13 +652,42 @@ route: it joins Host/device ledger, Compute I/O, class-partitioned ready,
 lifecycle, and immutable Throughput capacity/reserved snapshots from the same
 service.
 
+M1 Compute I/O high-water is likewise event-derived. Every protocol B1 offer
+must resolve to exactly one complete Issue #95 job stream containing Initial,
+each executor-authored admission, each matching settlement, and Final, with
+task identity, immutable charge, status, phase counters, same-lock snapshots,
+and globally unique accounting sequences. Missing, duplicate, reordered,
+unknown, over-limit, or arithmetically contradictory transitions are
+structural `Invalid`. Sparse `M1Host` cuts retain only current-state diagnostics
+and cannot increase or repair high-water; the final process cut must still be
+zero. Consequently a short I/O task that starts and settles between two sparse
+cuts remains visible in the event-derived maximum.
+
 The manual `m1_shared_benchmark` target is `EXCLUDE_FROM_ALL` and absent from
 CTest/CI. It runs all three Graphs through one `EmbeddedHost`, emits a closed M1
 inner row, and materializes six retained sections plus the existing canonical
 15-field row and five-field bundle. Exact-one/DAG validation, pair direction,
-and actual environment authority remain mandatory. Missing isolated objects or
-incomplete portable storage authority therefore produce canonical `Invalid`;
-the existence or successful build of this runner is not a timed
+and actual environment authority remain mandatory. The inner row retains all
+30 raw progress/Jain windows, all 480 raw admission outcomes, committed
+service-start facts, complete temporal/lifecycle records, event-aligned B1 I/O,
+and the complete reused Issue #93/#95 source rows through their existing closed
+verification encoders. The Issue #93 and #95 manual producers now each
+materialize one closed source-private pair-object pack containing the canonical row,
+one-row bundle, all six source sections and seals, and retained environment
+claims. Process-private actual storage authority is intentionally excluded.
+
+Before deriving its timed boundary, the M1 runner requires both pack paths plus
+their exact row/bundle addresses, reads bounded absolute regular files without
+following the final symlink, rematerializes every source, checks the same-role/
+ordinal/cap/fixture and base-only-I1/full-B1 environment relations, and
+recomputes I1 nearest-rank p99 plus the B1 successful-operation/interval tuple.
+Digest text alone is rejected and no caller-provided p99 or throughput scalar
+is accepted. The loaded pair rows, bundles, and sections are inserted exactly
+once into the local corpus before M1 sealing, and the recomputed values must
+equal both M1 claims. Missing, ambiguous, omitted, substituted, tampered, or
+mismatched pair evidence fails before timing or is `Invalid` on replay.
+Incomplete portable storage authority remains an independent canonical
+`Invalid`; the existence or successful build of this runner is not a timed
 machine-conformance result.
 
 Required-storage actual authority is an opaque copyable capability, not the

@@ -2173,11 +2173,20 @@ waste threshold。
 ```shell
 cmake --build build --target i1_edit_storm_benchmark -j
 ./build/tests/i1_edit_storm_benchmark \
-  --output-dir /tmp/photospider-i1-r1 --replicate-ordinal 1
+  --output-dir /tmp/photospider-i1-r1 \
+  --base-manifest /absolute/evidence/base.manifest \
+  --environment-class-manifest /absolute/evidence/i1-class.manifest \
+  --subject-role reference --replicate-ordinal 1
 ./build/tests/i1_edit_storm_benchmark \
-  --output-dir /tmp/photospider-i1-r2 --replicate-ordinal 2
+  --output-dir /tmp/photospider-i1-r2 \
+  --base-manifest /absolute/evidence/base.manifest \
+  --environment-class-manifest /absolute/evidence/i1-class.manifest \
+  --subject-role reference --replicate-ordinal 2
 ./build/tests/i1_edit_storm_benchmark \
-  --output-dir /tmp/photospider-i1-r3 --replicate-ordinal 3
+  --output-dir /tmp/photospider-i1-r3 \
+  --base-manifest /absolute/evidence/base.manifest \
+  --environment-class-manifest /absolute/evidence/i1-class.manifest \
+  --subject-role reference --replicate-ordinal 3
 ```
 
 Runner 会把产品 worker count 固定为 eight，保留唯一连续的 221-slot cold/warmup/measured
@@ -2187,11 +2196,16 @@ digest，冻结类型化 result，并释放每个 `Value`。正常 `Q_end` 时�
 evaluator 可以与下一 baseline preparation 重叠，但必须在下一 admission 前完成。JSON
 construction、dump 与 disk flush 位于每个后续 origin guard 之外，并在 `T^I1` 按精确 slot
 顺序 drain；bounded live set 是一个 evaluator 加 221 条不含 Value 的 row。完整运行会写出
-冻结的 `i1-graph.yaml`、`invocation.json`、raw `episodes.ndjson` 与 `summary.json`；
+冻结的 `i1-graph.yaml`、`invocation.json`、raw `episodes.ndjson`、`summary.json` 与
+`pair-object.canonical`；
 异常会在此前已安全完成的 artifact 之外写出 `failure.json`。特别是 failed/invalid admission
 会先向 `episodes.ndjson` 追加并 flush 对应 Invalid inner row，保留 raw admission 事实和关闭后的
-observer/resource 状态，然后才写 `failure.json`。这些是封闭的 Issue #93 inner artifact，并明确
-不声明 canonical outer row/section/bundle。Exit zero 表示四项 I1 inner verdict 全部通过；exit two
+observer/resource 状态，然后才写 `failure.json`。JSON/NDJSON 文件仍是封闭的 Issue #93
+inner artifact，不声明 outer envelope。Pair-object pack 只从完整且尚未 compact 的 221 条
+source row 生成：它保留 canonical I1 row、单 row bundle、全部六个 source section、精确
+storage-N/A environment claim，以及用于重算 p99 的 200 个 measured latency sample。
+Candidate 运行还必须提供不可变 comparison-reference bundle digest。Exit zero 表示四项 I1
+inner verdict 全部通过；exit two
 表示完整 evidence 至少有一项 threshold 失败；exit one 表示 parsing、setup、cadence 或 evidence
 invalid。仅构建 target 或运行 `--help` 只是 harness smoke，不是 performance evidence。
 
@@ -2235,7 +2249,7 @@ field/frame grammar，并精确包含六个封闭 section：backend、21-field r
 两次 performance cut、transaction/receipt 与 root/destination containment；其中没有任何
 derived proof boolean。Proof 的 selected/resolved root 必须等于 `--output-dir`，retained
 destination list 必须包含 runner 的 root、Graph、session、cache、invocation、row 与 failure
-path。Runner 会严格 parse/re-encode byte，独立重放全部 mapping 与 eligibility predicate，并
+path，以及 pair-object path。Runner 会严格 parse/re-encode byte，独立重放全部 mapping 与 eligibility predicate，并
 拒绝 missing、unknown、duplicate、stale 或 drifting evidence，不会在运行时补写 proof fact。
 一条精确 invocation 如下：
 
@@ -2247,17 +2261,23 @@ mkdir -m 700 /absolute/durable-root/b1-cap1-r1
   --storage-manifest /absolute/evidence/storage.manifest \
   --environment-class-manifest /absolute/evidence/b1-class.manifest \
   --storage-proof /absolute/evidence/storage-proof.manifest \
-  --run-cap 1 --replicate-ordinal 1
+  --run-cap 1 --subject-role reference --replicate-ordinal 1
 ```
 
 在组合完整 B1 candidate 或 reference 前，必须针对 cap 1 与 8、ordinal 1 至 3，在六个不同
 fresh process 与 root 中运行。一次 invocation 会执行 cold seed 252、warmup seed
 253/254/255，再由两个并发且有序的 measured producer 处理偶数与奇数 job `0..29`。它会在
-所选 root 下写入 `invocation.json`、`row.json`、两份冻结 Graph YAML、session/cache 目录与
+所选 root 下写入 `invocation.json`、`row.json`、`pair-object.canonical`、两份冻结 Graph
+YAML、session/cache 目录与
 34 个 immutable occurrence slot；在安全 root 选择后发生 exception 时，会以 no-replace 方式
 额外写入 `failure.json`。仅 payload 就超过 2.2 GiB。Exit zero 表示四项 inner verdict 全部
 通过；exit two 表示完整 evidence 至少一项 inner threshold 失败；exit one 表示 parsing、setup、
-product、durability 或 evidence invalid。Artifact 明确不声明 canonical outer row/bundle。
+product、durability 或 evidence invalid。`row.json` 明确不声明 canonical outer row/bundle；
+pair-object pack 则另行保留 canonical isolated row/bundle 与全部 source section。它从真实
+34-job row 生成，包含三十个有序 verified-endpoint outcome 与精确 measurement interval。
+Pack 会保留 storage claim/proof/eligibility，但不能序列化或签发 process-private actual-storage
+authority，因此 portable B1 结果仍可能为 `Invalid`。Candidate 运行还必须提供不可变
+comparison-reference bundle digest。
 构建 target 或运行 `--help` 只属于 harness smoke；本文不声明已经执行精确 34-job invocation
 或三 replicate B1 机器运行。
 
@@ -2268,10 +2288,20 @@ operation provider 时的 `test_m1_product_path` 注册确定性 M1 合同；`te
 evidence、独立 producer-local cycle、全部五个轴、未知 enum 的 fail-closed 行为、有限
 lock-free callback publication、同坐标 fanout、不变的 base-only-I1/full-B1 environment
 delegation、canonical golden digest、functional key、exact-one/DAG resolution 与不完整
-live authority。Product suite 从真实 ready/lifecycle evidence 推导 applicability，证明
-Throughput Run 到达 terminal 与 resource settlement 时 Interactive work 仍为 outstanding，
-并证明精确 31-CPU Throughput/32-CPU shared-headroom boundary。Timeout 只是 deadlock
+live authority。它们还会拒绝 substituted isolated-I1 source、遗漏的 isolated-B1 outcome、
+遗漏的 M1 raw window、outer/inner claim 篡改、denominator/source 不匹配、缺失/重复/重排/
+未知/超限 I/O transition，以及非零 final I/O state。一项专门回归会让全部稀疏 temporal I/O
+current value 保持为零，同时证明短 accepted/settled task 仍会提高 event-derived high-water。
+Product suite 使用产品签发的 per-start ready/lifecycle/candidate/resource fact，证明 Throughput
+Run 到达 terminal 与 resource settlement 时 Interactive work 仍为 outstanding，并证明精确
+31-CPU Throughput/32-CPU shared-headroom boundary。Class-start 正负 case 会区分真实 dual-
+startable 的第四次 Interactive start 与 nominal interval overlap。Timeout 只是 deadlock
 diagnostic，不是 latency threshold。
+
+Pair-object 测试还会执行真实 Issue #93/#95 evaluator-to-producer 路径、canonical pack
+round trip、精确 section 顺序/数量、source rematerialization、digest/object 不匹配、错误
+role/ordinal、重复 corpus 插入与有界绝对 regular-file 读取。Relative、空、超限、directory
+以及最后一级为 symlink 的输入都会被拒绝。
 
 精确 M1 replicate 由手工 `m1_shared_benchmark` target 承担。它为 `EXCLUDE_FROM_ALL`，
 没有 `add_test`，也不属于默认构建或 CI：
@@ -2282,17 +2312,35 @@ cmake --build build --target m1_shared_benchmark -j
 ```
 
 一次 invocation 要求 checkout 外的 fresh absolute empty output directory、canonical base/
-storage/environment-class claim、retained storage proof、subject role 与 ordinal。可选的同
-ordinal isolated I1/B1 address 与 denominator 绑定 relative input；candidate 还必须提供
-comparison-reference bundle address。Runner 通过一个 `EmbeddedHost` 运行 I1 Graph 与两个
-B1 Graph，执行精确 cold/warmup/measured cadence，分类全部 480 个 measured edit，在 U 停止
-新增 offer，关闭全部 Graph，要求 final-zero state，并写入六个 canonical section，以及
-`row.canonical`、`bundle.canonical` 与 `result.json`。缺失 external object 时使用稳定的
-unresolved address；portable storage observation 也不会制造完整 live machine authority；
-任一情况都会使 corpus validation 保持 `Invalid`，并返回 exit status two。后续完整 validator
-可以组合已经 sealed 的 object，但本 target 不是第二套 result orchestrator。构建该 target 或
-运行 `--help` 只属于 harness smoke；本文不声明已经执行精确 timed replicate 或 three-
-replicate machine corpus。
+storage/environment-class claim、retained storage proof、subject role、ordinal，以及两份
+完整 isolated pair-object pack。每个 pack path 必须是绝对、有界的 regular file，并同时提供
+精确 row/bundle digest。I1 pack 必须来自同 role、同 ordinal、cap-eight I1 producer；B1 pack
+必须来自同 role、同 ordinal、cap-eight B1 producer，并使用逐 byte 相同且 eligible 的 storage/
+environment-class claim。只有 digest 文本而没有相应 object 时，setup 会直接拒绝；不再接受
+numeric p99 或 B1-rate option。Candidate 还必须提供 comparison-reference bundle address。
+
+在推导 timed C/W/B/U boundary 前，runner 会通过 no-follow descriptor 对每个 pack 只读取
+一次，解析封闭 pack schema，重算 row/bundle/section address，重新物化每个 source object，
+强制单 row membership 与 seal order，检查 role/workload/cap/ordinal 以及 base-only I1/full
+B1 environment relation，并重算 I1 p99 与 B1 successful-site-operation/interval tuple。只有
+这些重算值会填入 M1 evaluator 与 sealed denominator claim。
+
+Runner 通过一个
+`EmbeddedHost` 运行 I1 Graph 与两个 B1 Graph，执行精确 cold/warmup/measured cadence，分类
+全部 480 个 measured edit，在 U 停止新增 offer，关闭全部 Graph，要求 final-zero state，并
+写入六个 canonical section，以及 `row.canonical`、`bundle.canonical`、复制的 canonical
+`paired-i1-object.canonical`/`paired-b1-object.canonical` pack 与 `result.json`。其
+nested M1 row 会保留 30 个 raw progress 与 Graph-service window、480 个 raw Host outcome、
+产品签发的 class-start cut、完整复用的 I1/B1 source row、event-aligned Compute I/O，以及
+稀疏 temporal/lifecycle stream。完整 corpus validator 会 exact-one 解析每个具名 isolated row，
+重新计算 isolated I1 p99 与 B1 successful-site-operation/measurement-interval tuple，并精确
+核对两份重复的 M1 claim。证据缺失、歧义、遗漏、替换、篡改或不匹配会在 timing 前被拒绝，
+或在 corpus replay 中成为 `Invalid`。两份已加载 pair 的 row、bundle 与 section 会先于 M1
+row/bundle，被 exact-once 插入本地 validation corpus。Portable storage observation 仍不会制造
+完整 live machine authority，因此即使两个 denominator object 均通过验证，这个独立条件仍可能
+使 corpus validation 保持 `Invalid` 并返回 exit status two。构建该 target 或运行 `--help`
+只属于 harness smoke；本文不声明已经执行精确
+timed replicate 或 three-replicate machine corpus。
 
 ## CTest 注册
 

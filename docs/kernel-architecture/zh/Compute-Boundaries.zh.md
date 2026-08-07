@@ -493,6 +493,14 @@ service Jain p05、至多三次适用的 Interactive start，以及全部 480 �
 的完整分类。Environment pairing 原样委托给 base-only I1 与完整 eligible B1-cap-eight
 relation。
 
+每次 service start 的 applicability 现在来自产品签发的 scheduler cut，而不是根据 I1/B1
+nominal interval 事后重建。物理 start commit 前，`ExecutionService` 会分别根据两类真实
+ready entry、Run lifecycle、operation/route eligibility 与剩余 child-grant capacity 进行
+probe。只有所选 operation gate、route、ready removal、counter 与 execution grant 全部
+commit 后，才会发布这条 observation。M1 collector 在既有预分配、allocation-free、
+nonblocking、lock-free callback store 中保留两类事实与 committed-grant bit。Nominal
+interval 只保留为 Graph-demand diagnostic，不能重置或豁免 three-to-one start rule。
+
 一个预分配的 `M1FairnessObservationCollector` 为带 tag 的 I1/B1 Run 提供一个有界 observer-
 causal domain。`ComputeRunObservationFanout` 把同一个 authority-owned product coordinate
 转发给该 collector 与复用的 I1 或 B1 collector；它不会把 observer clock 与 I1 独立的
@@ -501,11 +509,33 @@ fail-closed evidence。Source-private 的 `M1Host` 不增加 compute route：它
 组合 Host/device ledger、Compute I/O、按 class 分区的 ready、lifecycle 与不可变 Throughput
 capacity/reserved snapshot。
 
+M1 Compute I/O high-water 同样从 event 推导。每个 protocol B1 offer 必须精确解析到一个完整
+Issue #95 job stream；该 stream 包含 Initial、每次 executor 签发的 admission、每次匹配的
+settlement 与 Final，并保留 task identity、不可变 charge、status、phase counter、同锁
+snapshot 与全局唯一 accounting sequence。缺失、重复、重排、未知、超限或算术矛盾的
+transition 都会结构性 `Invalid`。稀疏 `M1Host` cut 只保留 current-state diagnostic，不能
+增加或修复 high-water；最终 process cut 仍必须归零。因此，即使短 I/O task 在两个稀疏 cut
+之间完整开始并结束，也仍会进入 event-derived maximum。
+
 手工 `m1_shared_benchmark` target 为 `EXCLUDE_FROM_ALL`，且不属于 CTest/CI。它通过一个
 `EmbeddedHost` 运行全部三个 Graph，生成封闭 M1 inner row，并物化六个 retained section，
 以及现有 canonical 15-field row 与 five-field bundle。Exact-one/DAG validation、pair
-direction 与 actual environment authority 仍是强制项。因此，缺失 isolated object 或不完整
-portable storage authority 会产生 canonical `Invalid`；该 runner 存在或构建成功并不是 timed
+direction 与 actual environment authority 仍是强制项。Inner row 会保留全部 30 个 raw
+progress/Jain window、全部 480 个 raw admission outcome、committed service-start fact、完整
+temporal/lifecycle record、event-aligned B1 I/O，以及通过既有 closed verification encoder
+生成的完整 Issue #93/#95 source row。Issue #93/#95 手工 producer 现在会各自物化一份
+封闭 source-private pair-object pack，其中包含
+canonical row、单 row bundle、全部六个 source section 及 seal，以及 retained environment
+claim；process-private actual storage authority 会被有意排除。
+
+在推导 timed boundary 前，M1 runner 必须同时取得两份 pack path 及其精确 row/bundle address；
+它会读取有界的绝对 regular file 且不跟随最后一级 symlink，重新物化每个 source，检查同 role/
+ordinal/cap/fixture 与 base-only-I1/full-B1 environment relation，并重算 I1 nearest-rank p99 与
+B1 successful-operation/interval tuple。只有 digest 文本会被拒绝，也不接受调用者提供的 p99
+或 throughput scalar。已加载 pair 的 row、bundle 与 section 会在 M1 sealing 前 exact-once
+插入本地 corpus，而且重算值必须与两份 M1 claim 都精确相等。Pair evidence 缺失、歧义、
+遗漏、替换、篡改或不匹配会在 timing 前失败，或在 replay 时成为 `Invalid`。不完整 portable
+storage authority 继续是独立的 canonical `Invalid`；该 runner 存在或构建成功并不是 timed
 machine-conformance 结果。
 
 Required-storage actual authority 是不透明、可复制的 capability，而不是序列化的 root、receipt

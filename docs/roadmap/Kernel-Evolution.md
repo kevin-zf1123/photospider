@@ -1316,15 +1316,34 @@ state. It also adds the source-private canonical 15-field row/five-field bundle
 materializer and exact-one/DAG validator, and an exact manual
 `m1_shared_benchmark` target. Deterministic product tests exercise real mixed
 backlog and the exact 31-CPU Throughput/32-CPU shared-headroom boundary without
-a wall-time SLO.
+a wall-time SLO. The completed evidence correction removes caller-supplied M1
+denominator scalars, recomputes them from exact-one canonical isolated rows,
+retains complete reusable I1/B1 source rows plus all 30/480/temporal raw M1
+inputs, records product-authored per-start dual-class startability and committed
+grants, and derives Compute I/O high-water only from complete event-aligned job
+streams. Sparse current snapshots remain diagnostic and final process I/O must
+be zero.
+
+The executable-pair correction now closes the source-object boundary as well.
+The actual Issue #93 I1 and Issue #95 B1 manual producers emit canonical
+pair-object packs from their uncompacted evaluator sources. Before M1 derives
+its timed boundary, it requires both packs and their row/bundle addresses,
+strictly reloads and rematerializes every row/bundle/section/environment claim,
+checks the same-role/ordinal/cap and component identities, and recomputes both
+denominators. Those loaded objects are retained exactly once in the M1 corpus;
+digest-only input no longer yields a sealed denominator claim.
 
 The I1, I2, B1, and M1 runners are `EXCLUDE_FROM_ALL` and absent from CTest;
 none changes the installed ABI or the frozen outer field counts. This
 current-state document claims neither an exact 111-slot I2 machine run, an
 exact three-replicate B1 machine corpus, nor an exact three-replicate M1
-machine corpus. The M1 runner can materialize a source-faithful local row and
-bundle, but missing external isolated/comparison objects or incomplete live
-storage authority makes exact-one corpus validation canonical `Invalid`.
+machine corpus. The M1 runner requires external isolated source-object packs
+before timed execution and can then materialize a source-faithful local row and
+bundle. An unresolved comparison object or incomplete live storage authority
+still makes exact-one corpus validation canonical `Invalid` independently.
+Pair-row substitution, raw omission, address ambiguity, claim tampering, and
+source/claim mismatch also fail closed; nominal offer overlap and sparse I/O
+sampling cannot manufacture fairness or memory authority.
 Existing policy-order tests, `BenchmarkService`, lifecycle telemetry, ledger
 snapshots, runner availability, and help smoke do not by themselves establish
 profile conformance. The maintained manual/release protocol and test-ownership

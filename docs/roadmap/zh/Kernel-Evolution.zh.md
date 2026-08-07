@@ -1064,13 +1064,27 @@ relation；一个固定容量共享 causal observer 与同坐标 workload fanout
 Throughput reservation state。它还新增 source-private canonical 15-field row/five-field
 bundle materializer 与 exact-one/DAG validator，以及精确手工 `m1_shared_benchmark` target。
 确定性产品测试通过真实 mixed backlog 与精确 31-CPU Throughput/32-CPU shared-headroom
-boundary 验证机制，不采用 wall-time SLO。
+boundary 验证机制，不采用 wall-time SLO。已完成的 evidence 纠错移除调用者提供的 M1
+denominator scalar，改为从 exact-one canonical isolated row 重新计算；保留完整可复用 I1/B1
+source row 与全部 30/480/temporal M1 raw input；记录产品签发的 per-start 双类 startability 与
+committed grant；并且只从完整 event-aligned job stream 推导 Compute I/O high-water。稀疏
+current snapshot 继续只作 diagnostic，最终 process I/O 必须归零。
+
+Executable-pair 修正还闭合了 source-object boundary。真实 Issue #93 I1 与 Issue #95 B1
+手工 producer 会从尚未 compact 的 evaluator source 生成 canonical pair-object pack。M1 在
+推导 timed boundary 前必须取得两份 pack 及其 row/bundle address，严格重新加载并物化每个
+row/bundle/section/environment claim，检查同 role/ordinal/cap 与 component identity，并重算
+两个 denominator。这些已加载 object 会在 M1 corpus 中 exact-once 保留；digest-only 输入不再
+生成 sealed denominator claim。
 
 I1、I2、B1 与 M1 runner 均为 `EXCLUDE_FROM_ALL` 且不属于 CTest；它们都不改变 installed
 ABI 或冻结的 outer field 数量。本文既不声明已经完成精确 111-slot I2 机器运行，也不声明
-已经完成精确三 replicate B1 或 M1 machine corpus。M1 runner 可以物化 source-faithful local
-row 与 bundle，但 external isolated/comparison object 缺失或 live storage authority 不完整时，
-exact-one corpus validation 会保持 canonical `Invalid`。既有 policy-order test、
+已经完成精确三 replicate B1 或 M1 machine corpus。M1 runner 在 timed execution 前必须取得
+external isolated source-object pack，随后才能物化 source-faithful local row 与 bundle。
+Comparison object 未解析或 live storage authority 不完整时，exact-one corpus validation 仍会
+因这一独立原因保持 canonical `Invalid`。Pair-row substitution、raw omission、
+address ambiguity、claim tampering 与 source/claim mismatch 同样 fail closed；nominal offer
+overlap 与稀疏 I/O sampling 不能制造 fairness 或 memory authority。既有 policy-order test、
 `BenchmarkService`、lifecycle telemetry、ledger snapshot、runner 存在与 help smoke 本身都
 不能建立画像 conformance。长期手工/release protocol 与测试归属边界记录在
 [测试与验证](../../development/zh/Testing-and-Validation.zh.md#执行画像-slo-手工release-protocol)。
