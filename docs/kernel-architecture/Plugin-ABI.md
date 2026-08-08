@@ -886,6 +886,15 @@ sandboxing or hostile-code containment. [ADR 0010](../adr/0010-execution-profile
 defines that evidence boundary; process supervision and isolated invocation
 remain the separate server/plugin-isolation target.
 
+[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
+fixes that target boundary. The server control plane and WorkerManager load no
+DSO. Every DSO loaded into a Host remains operator-trusted native code,
+including pure-C policy and data-definition records. Tenant-supplied CPU
+operation code instead crosses a separately versioned, attempt-scoped process
+protocol carrying only bounded descriptors and shared-memory/file-descriptor
+capabilities; trusted Host code revalidates every returned descriptor and
+ownership claim. Pure C is a record-compatibility choice, not a sandbox.
+
 Shadow publication prevents partial operation-registry or policy-type-map
 visibility. DSO leases keep callback state and plugin-owned values or contexts
 inside the lifetime of their defining library. Matching operation restoration

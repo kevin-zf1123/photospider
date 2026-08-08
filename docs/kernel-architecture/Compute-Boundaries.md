@@ -1145,6 +1145,16 @@ unchanged.
   transition failure is fail-stop. Repeated external shutdown joins the one
   monotonic generation.
 
+[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
+adds a higher-level target without changing these current boundaries. In the
+future server profile, one fresh constrained `photospider-worker` owns exactly
+one Job attempt and one attempt-local instance of the process execution domain
+described here. Server tenant/Job quota bounds that process; its existing
+`ResourceLedger` subdivides only the current Host/device execution envelope.
+The control plane owns durable Job truth, WorkerManager owns process lifecycle,
+the artifact service owns durable bytes and receipts, and isolated tenant CPU
+plugins receive no Run, Graph, ledger-token, or artifact authority.
+
 ## Boundary Rationale
 
 Separating planning, ready detection, physical execution, and commit provides

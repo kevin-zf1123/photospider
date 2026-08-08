@@ -1411,26 +1411,124 @@ boundary are documented in
 
 ## Server and Plugin Isolation
 
-`photospiderd` remains a same-user local workstation sidecar. A network or
-multi-tenant product uses a separate control plane, worker manager, constrained
-`photospider-worker` processes, and durable artifact store.
+[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
+freezes this target. It is a target contract, not a claim that Issue #97 or any
+server/isolation runtime is complete. `photospiderd` remains the same-user local
+workstation sidecar described by IPC protocol v2. Its `0700`/`0600` paths,
+sessions, opaque ids, process-global plugin controls, and private `OutputStore`
+are not network authentication, tenant authority, durable Job state, or durable
+artifact authority.
 
-The current operation plugin interface remains a provisional C++ ABI. Its
-C-linkage registrar symbol and numeric handshake gate only the expected
-interface generation; matching SDK/toolchain/runtime compatibility is still
-required for the C++ values, callbacks, objects, and vtables that cross the
-DSO. Policy plugins instead use the exact-layout pure-C ABI v1 and receive only
-immutable scalar candidate snapshots, but they remain trusted in-process code.
-A future operation ABI replacement, policy ABI generation, or isolated
-invocation protocol is a separate versioned migration, not a compatibility or
-security promise inferred from the current gates.
+The target separates five security domains:
 
-The `ExecutionService` sees isolated plugin execution through a
-`PluginInvocationExecutor`. A separate `PluginRuntimeSupervisor` owns worker
-processes, protocol, heartbeat, deadlines, restart backoff, sandbox/capability
-policy, shared-memory or file-descriptor transport, quotas, and output
-descriptor validation. The first isolated path targets CPU operation plugins;
-cross-process GPU handles require a later device/fence protocol.
+| Domain | Target authority | Explicit non-authority |
+| --- | --- | --- |
+| Network control plane | Authenticate `PrincipalId`, map and authorize `TenantId`, accept immutable `JobSpec`, own `JobId`, Job state, cancellation/retry policy, tenant/Job quota reservation, artifact-reference metadata | Graph/Run execution, worker process lifecycle, plugin DSO loading, bulk artifact bytes |
+| WorkerManager process | Spawn/reap, `WorkerInstanceId`, assignment lease, authenticated local channel, OS resource envelope, heartbeat, bounded cancellation/termination | End-user authentication, JobSpec mutation, final Job/retry state, artifact commit, Graph/Run commit |
+| One fresh constrained `photospider-worker` per active `JobAttemptId` | One immutable attempt, one embedded Host/Kernel and attempt-local `ExecutionService`/`ResourceLedger`, Graph/Run settlement, typed attempt facts | Network listener, user credentials, second attempt/tenant, server quota mint, artifact root, final Job state |
+| Artifact-store/data-plane service | Immutable bytes/manifests, stable tenant-scoped `ArtifactId`, descriptor/content binding, idempotent commit receipt, durability/recovery/retention, artifact/output quota | Job/Run state, Graph/plugin execution, caller policy outside supplied authorization context |
+| Isolated CPU operation-plugin process | One bounded invocation's tenant code and private invocation state | Network, arbitrary filesystem, credentials, Job/Graph/Run state, Host/server tokens, artifact publication, native GPU authority |
+
+The control plane, WorkerManager, and artifact authority are separate
+process/service boundaries. Each general worker is a fresh OS process for one
+JobAttempt, accepts no second assignment, and exits after settlement or
+manager termination. A plugin runtime is confined to one attempt and approved
+plugin generation; attempt end, lease revocation, protocol fault, or supervisor
+retirement destroys it. Worker reuse and cross-process GPU handles require new
+decisions and cannot be inferred from this first CPU profile.
+
+The authority chain remains typed and lifetime-specific:
+
+```text
+PrincipalId -> TenantId -> JobId + JobSpecDigest
+                         -> JobAttemptId + WorkerInstanceId
+                                         + WorkerLeaseGeneration
+                         -> process-local GraphInstanceId / RunId
+                                                   / RunLocalTaskId
+                         -> PluginInvocationId
+                         -> ArtifactId + OutputCommitReceipt
+```
+
+Retry preserves `JobId` and exact `JobSpecDigest` but mints a new
+`JobAttemptId`, worker identity, and lease generation. Graph/Run/task ids remain
+worker-local correlations. `ArtifactId` and its receipt identify immutable
+durable state; they are not a path, content digest, `OutputArtifactId`,
+`ValueRevisionId`, `AllocationIdentity`, `BufferHandle`, or any runtime handle.
+Every boundary validates the full identity and retained current lease needed
+for its action. Stale, replayed, reordered, revoked, over-limit, or mismatched
+messages fail closed.
+
+The control plane freezes canonical `JobSpec` bytes before acceptance. A spec
+uses authorized immutable artifact identities and declares outputs, execution
+profile, resource policy, durability, and retention. It carries no unrestricted
+Host path, FD, pointer, native/runtime handle, mutable store location, local
+session id, or bearer credential. The worker validates the complete spec and
+resolved descriptors again. It reports attempt facts; only the control plane
+selects the current attempt and owns retry and terminal Job truth. Job success
+requires a successful current attempt plus every promised artifact receipt;
+Run success, artifact commit, Job terminal, cancellation, and response
+observation remain separate facts.
+
+One server quota authority atomically reserves the tenant/Job envelope.
+WorkerManager derives a bounded attempt/OS envelope. The worker's existing
+process-owned `ResourceLedger` remains the sole mint only for its current
+Host/device execution dimensions and cannot exceed that envelope. The artifact
+authority separately enforces delegated stage/commit/retention quota. Workers,
+JobSpec fields, policies, and plugins may declare demand but cannot construct,
+duplicate, enlarge, or directly release server quota or Host ledger tokens.
+
+WorkerManager alone owns spawn, process identity, heartbeat, cancellation
+delivery, capability revocation, termination escalation, exit classification,
+and reaping. Cancellation records control-plane intent, targets the exact
+`{WorkerInstanceId, WorkerLeaseGeneration}` cooperatively, then revokes and
+kills/reaps that exact process after a configured bound. Crash, hang, OOM,
+signal death, malformed protocol, or channel loss fails only that JobAttempt;
+trusted owners reconcile resources without trusting a final worker report, and
+the control plane alone applies retry policy.
+
+Bulk inputs, outputs, and checkpoints use the artifact data plane under exact
+tenant/resource/action/direction/range/expiry-scoped capabilities. Control
+messages carry only bounded authentication, Job, quota, artifact identity,
+receipt, and capability metadata. A worker receives exact immutable-read and
+private output-stage/commit capabilities, never an artifact root. A plugin
+runtime receives invocation buffers only. Committed receipts remain
+authoritative after worker/plugin failure or Job cancellation; uncommitted
+private stages remain artifact-authority cleanup.
+
+Every DSO loaded into a Host remains operator-trusted native code. The current
+operation C++ ABI, data-definition pure-C ABI, and policy pure-C ABI provide no
+sandbox, timeout, syscall, thread, or memory-corruption boundary. The control
+plane and WorkerManager load no DSO. Tenant-supplied CPU operation code reaches
+`ExecutionService` only through a private `PluginInvocationExecutor` and
+trusted `PluginRuntimeSupervisor`. The supervisor owns process lifecycle,
+authenticated IPC, heartbeat/deadline, sandbox/resource policy, restart
+backoff, and shared-memory/FD transport. An invocation carries bounded,
+versioned descriptors and checked ranges, not C++ objects, Host callbacks, raw
+pointers, native GPU handles, credentials, artifact capabilities, or resource
+tokens. Trusted Host code revalidates all returned descriptors, offsets,
+ownership, sizes, readiness, identities, and declared bounds before Run use.
+Pure C improves record compatibility; it does not make hostile native code
+safe in-process.
+
+Delivery remains allocated rather than absorbed by Issue #97:
+
+| Issue | Required target slice |
+| --- | --- |
+| [#98](https://github.com/kevin-zf1123/photospider/issues/98) | Immutable single-tenant JobSpec and control-plane-to-worker submit/query/cancel/completion with artifact identity |
+| [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota, durable artifacts, retry/checkpoint, and recovery semantics |
+| [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision, crash isolation, and bounded cancellation/shutdown |
+| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | Separately versioned pure-C operation-plugin ABI decision |
+| [#102](https://github.com/kevin-zf1123/photospider/issues/102) | Isolated CPU shared-memory/FD invocation and exact descriptor/stride/size/ownership validation |
+| [#103](https://github.com/kevin-zf1123/photospider/issues/103) | `PluginRuntimeSupervisor` heartbeat/deadline and crash/hang/OOM/bad-output containment |
+| [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature and enforceable resource policy |
+| [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata and bulk artifact data-plane separation |
+| [#106](https://github.com/kevin-zf1123/photospider/issues/106) | Long-lived codec/descriptor fuzzing, security audit, and cross-layer identity trace |
+
+Each slice advertises only the profile it actually implements. A single-tenant
+Job vertical is not a multi-tenant server; a pure-C ABI without process
+isolation is not an untrusted-plugin profile. Full network/multi-tenant and
+untrusted-plugin claims require their complete authority boundaries plus
+crash/hang/OOM/replay/bad-output/fuzz and bounded-shutdown evidence.
 
 ## Cross-Cutting Invariants
 

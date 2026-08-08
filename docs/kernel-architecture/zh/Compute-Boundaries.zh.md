@@ -878,6 +878,14 @@ daemon job terminal state、result delivery、cache save、Graph 文档保存与
   `Accepting` 且 generation 为零。关闭 gate 即进入不可逆区域；之后的意外 transition failure
   会 fail-stop。外部重复 shutdown 会加入同一个单调 generation。
 
+[ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
+在不改变上述当前边界的前提下增加了更高层目标。未来 server profile 中，每个全新受限的
+`photospider-worker` 恰好拥有一个 Job attempt，以及本文所述 process execution domain 的一个
+attempt-local instance。Server tenant/Job quota 约束该进程；现有 `ResourceLedger` 只细分当前
+Host/device execution envelope。Control plane 拥有 durable Job truth，WorkerManager 拥有 process
+lifecycle，artifact service 拥有 durable byte 与 receipt，而隔离的 tenant CPU plugin 不获得
+Run、Graph、ledger-token 或 artifact authority。
+
 ## 边界原理
 
 把 planning、ready detection、physical execution 和 commit 分离，会得到四个独立正确性点：

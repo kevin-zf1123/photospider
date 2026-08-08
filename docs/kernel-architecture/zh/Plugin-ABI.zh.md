@@ -681,6 +681,14 @@ determinism、waste 与 memory 判定不声明 sandbox 或 hostile-code containm
 定义这项证据边界；process supervision 与 isolated invocation 仍属于独立的
 server/plugin-isolation 目标。
 
+[ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
+冻结了该目标边界。Server control plane 与 WorkerManager 不加载任何 DSO。凡是加载到 Host
+进程内的 DSO 都仍是 operator-trusted native code，其中也包括纯 C policy 与
+data-definition record。Tenant-supplied CPU operation code 改为跨越单独版本化、绑定 attempt
+的进程协议，该协议只传递有界 descriptor 与 shared-memory/FD capability；可信 Host 代码会
+重新校验每个返回 descriptor 与 ownership 声明。纯 C 是 record compatibility 选择，不是
+sandbox。
+
 影子发布阻止操作注册表或策略类型 map 局部可见。DSO 租约让回调状态和插件拥有
 的值或上下文保持在其定义库的生命周期内。匹配的操作恢复 token 和策略绑定代次
 可防止已移除或替换的插件静默夺回当前所有权。

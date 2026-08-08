@@ -1137,20 +1137,104 @@ overlap 与稀疏 I/O sampling 不能制造 fairness 或 memory authority。既�
 
 ## 服务器与插件隔离
 
-`photospiderd` 继续作为同 UID 的本地 workstation sidecar。网络或多租户产品使用独立 control
-plane、worker manager、受限 `photospider-worker` process 和 durable artifact store。
+[ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
+冻结了该目标。它是目标契约，不表示 Issue #97 或任何 server/isolation runtime 已完成。
+`photospiderd` 继续作为 IPC protocol v2 所述的同用户本地 workstation sidecar。其 `0700`/`0600`
+路径、session、opaque id、process-global plugin control 与私有 `OutputStore` 都不是 network
+authentication、tenant authority、durable Job state 或 durable artifact authority。
 
-当前 operation plugin interface 继续作为临时 C++ ABI。其 C linkage registrar symbol 与数字
-handshake 只拦截预期 interface generation；跨越 DSO 的 C++ value、callback、object 与 vtable 仍
-要求匹配 SDK/toolchain/runtime compatibility。Policy plugin 改用 exact-layout 的纯 C ABI v1，并且
-只接收 immutable scalar candidate snapshot，但仍属于受信任的 in-process code。未来 operation ABI
-replacement、policy ABI generation 或隔离 invocation protocol 都属于独立的带版本迁移，不能从
-当前 gate 推导出兼容或安全承诺。
+目标拆分为五个安全域：
 
-`ExecutionService` 通过 `PluginInvocationExecutor` 看到隔离插件执行。独立
-`PluginRuntimeSupervisor` 拥有 worker process、protocol、heartbeat、deadline、restart backoff、
-sandbox/capability policy、shared-memory 或 FD transport、quota 和 output descriptor validation。
-首条隔离路径面向 CPU operation plugin；跨进程 GPU handle 依赖后续 device/fence protocol。
+| 安全域 | 目标权威 | 明确不拥有 |
+| --- | --- | --- |
+| Network control plane | 认证 `PrincipalId`，映射并授权 `TenantId`，接收 immutable `JobSpec`，拥有 `JobId`、Job state、cancellation/retry policy、tenant/Job quota reservation 与 artifact-reference metadata | Graph/Run execution、worker process lifecycle、plugin DSO loading、bulk artifact byte |
+| WorkerManager process | Spawn/reap、`WorkerInstanceId`、assignment lease、authenticated local channel、OS resource envelope、heartbeat、bounded cancellation/termination | End-user authentication、JobSpec mutation、final Job/retry state、artifact commit、Graph/Run commit |
+| 每个 active `JobAttemptId` 独占一个全新受限 `photospider-worker` | 一个 immutable attempt、一个 embedded Host/Kernel 与 attempt-local `ExecutionService`/`ResourceLedger`、Graph/Run settlement、typed attempt fact | Network listener、user credential、第二个 attempt/tenant、server quota mint、artifact root、final Job state |
+| Artifact-store/data-plane service | Immutable byte/manifest、稳定且 tenant-scoped 的 `ArtifactId`、descriptor/content binding、idempotent commit receipt、durability/recovery/retention、artifact/output quota | Job/Run state、Graph/plugin execution、所提供 authorization context 以外的 caller policy |
+| 隔离的 CPU operation-plugin process | 一次有界 invocation 的 tenant code 与私有 invocation state | Network、任意 filesystem、credential、Job/Graph/Run state、Host/server token、artifact publication、native GPU authority |
+
+Control plane、WorkerManager 与 artifact authority 是不同 process/service boundary。每个 general
+worker 都是只服务一个 JobAttempt 的全新 OS process，不接受第二次 assignment，并在 settlement
+或 manager termination 后退出。Plugin runtime 只限于一个 attempt 和一个已批准 plugin
+generation；attempt 结束、lease revocation、protocol fault 或 supervisor retirement 都会销毁它。
+Worker reuse 与 cross-process GPU handle 需要新的决策，不能从首个 CPU profile 推导出来。
+
+Authority chain 保持强类型并匹配各自生命周期：
+
+```text
+PrincipalId -> TenantId -> JobId + JobSpecDigest
+                         -> JobAttemptId + WorkerInstanceId
+                                         + WorkerLeaseGeneration
+                         -> process-local GraphInstanceId / RunId
+                                                   / RunLocalTaskId
+                         -> PluginInvocationId
+                         -> ArtifactId + OutputCommitReceipt
+```
+
+Retry 保留 `JobId` 和精确 `JobSpecDigest`，但会生成新的 `JobAttemptId`、worker identity 与 lease
+generation。Graph/Run/task id 仍是 worker-local correlation。`ArtifactId` 及其 receipt 标识 immutable
+durable state；它们不是 path、content digest、`OutputArtifactId`、`ValueRevisionId`、
+`AllocationIdentity`、`BufferHandle` 或任何 runtime handle。每个 boundary 都会校验该动作所需的
+完整 identity 和保留的 current lease。Stale、replayed、reordered、revoked、over-limit 或
+mismatched message 都会 fail closed。
+
+Control plane 会在接收前冻结 canonical `JobSpec` byte。Spec 使用经过授权的 immutable artifact
+identity，并声明 output、execution profile、resource policy、durability 与 retention。它不携带
+unrestricted Host path、FD、pointer、native/runtime handle、mutable store location、local session id
+或 bearer credential。Worker 会再次验证完整 spec 与 resolved descriptor。它只报告 attempt fact；
+只有 control plane 选择 current attempt 并拥有 retry 和 terminal Job truth。Job success 需要 current
+attempt 成功以及全部已承诺 artifact receipt；Run success、artifact commit、Job terminal、
+cancellation 与 response observation 仍是相互独立的事实。
+
+唯一 server quota authority 原子保留 tenant/Job envelope。WorkerManager 派生受限 attempt/OS
+envelope。Worker 现有 process-owned `ResourceLedger` 仍只为当前 Host/device execution dimension
+提供唯一 mint，且不能超过该 envelope。Artifact authority 单独执行委托给它的
+stage/commit/retention quota。Worker、JobSpec field、policy 与 plugin 可以声明 demand，但不能构造、
+复制、放大或直接释放 server quota 或 Host ledger token。
+
+WorkerManager 独占 spawn、process identity、heartbeat、cancellation delivery、capability revocation、
+termination escalation、exit classification 与 reaping。Cancellation 先记录 control-plane intent，
+再对精确 `{WorkerInstanceId, WorkerLeaseGeneration}` 发出 cooperative cancellation；超过配置时限后，
+撤销 capability 并 kill/reap 该精确进程。Crash、hang、OOM、signal death、malformed protocol 或 channel
+loss 只使该 JobAttempt 失败；可信 owner 不依赖最终 worker report 便可对账资源，且只有 control plane
+应用 retry policy。
+
+Bulk input、output 与 checkpoint 通过 artifact data plane 传输，并使用精确限制
+tenant/resource/action/direction/range/expiry 的 capability。Control message 只携带有界
+authentication、Job、quota、artifact identity、receipt 与 capability metadata。Worker 只获得精确
+immutable-read capability 和私有 output-stage/commit capability，绝不获得 artifact root。Plugin
+runtime 只获得 invocation buffer。Committed receipt 在 worker/plugin failure 或 Job cancellation 后
+仍具权威；未提交私有 stage 仍由 artifact authority 清理。
+
+凡是加载到 Host 的 DSO 都仍是 operator-trusted native code。当前 operation C++ ABI、
+data-definition pure-C ABI 与 policy pure-C ABI 都不提供 sandbox、timeout、syscall、thread 或
+memory-corruption boundary。Control plane 与 WorkerManager 不加载 DSO。Tenant-supplied CPU
+operation code 只能通过私有 `PluginInvocationExecutor` 和可信 `PluginRuntimeSupervisor` 到达
+`ExecutionService`。Supervisor 拥有 process lifecycle、authenticated IPC、heartbeat/deadline、
+sandbox/resource policy、restart backoff 与 shared-memory/FD transport。Invocation 携带有界且带版本
+descriptor 与 checked range，而不携带 C++ object、Host callback、raw pointer、native GPU handle、
+credential、artifact capability 或 resource token。可信 Host 代码会在 Run 使用前重新校验全部返回
+descriptor、offset、ownership、size、readiness、identity 与 declared bound。纯 C 能改善 record
+compatibility；它不能让恶意 native code 在进程内安全执行。
+
+Issue #97 只做分配，不吸收后续交付：
+
+| Issue | 必需目标切片 |
+| --- | --- |
+| [#98](https://github.com/kevin-zf1123/photospider/issues/98) | Immutable single-tenant JobSpec，以及带 artifact identity 的 control-plane-to-worker submit/query/cancel/completion |
+| [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota、durable artifact、retry/checkpoint 与 recovery semantics |
+| [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision、crash isolation 与 bounded cancellation/shutdown |
+| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 单独版本化的 pure-C operation-plugin ABI 决策 |
+| [#102](https://github.com/kevin-zf1123/photospider/issues/102) | 隔离 CPU shared-memory/FD invocation，以及精确 descriptor/stride/size/ownership validation |
+| [#103](https://github.com/kevin-zf1123/photospider/issues/103) | `PluginRuntimeSupervisor` heartbeat/deadline 与 crash/hang/OOM/bad-output containment |
+| [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature 与可执行 resource policy |
+| [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata 与 bulk artifact data-plane separation |
+| [#106](https://github.com/kevin-zf1123/photospider/issues/106) | 长期 codec/descriptor fuzzing、security audit 与跨层 identity trace |
+
+每个切片只能声明自身实际实现的 profile。Single-tenant Job vertical 不是 multi-tenant server；没有
+process isolation 的 pure-C ABI 也不是 untrusted-plugin profile。完整 network/multi-tenant 与
+untrusted-plugin 声明必须具备全部 authority boundary，并有 crash/hang/OOM/replay/bad-output/fuzz 和
+bounded-shutdown 证据。
 
 ## 跨域不变量
 
