@@ -640,6 +640,14 @@ evaluation can return early. Direct, canonical, and fully rehashed outer replay
 therefore reject the same raw-source contradiction and recompute the same six
 verdicts.
 
+Equal-time displacement uses that same source authority. If measured current
+is observed at `(B,n)`, cancellation of the displaced warmup Run at `(B,n+1)`
+follows current in the replicate-wide observer domain, preserves current hold,
+and is not boundary-only. Cancellation strictly before B, or at `(B,m)` with
+`m<=n`, fails closed. This observer sequence is never compared with the
+independent accepted-row sequence. M1 source closure also does not make a Run
+with both visible success and accepted cancellation valid under Issue #93.
+
 Applicability at each service start is a product-authored evidence cut, not a
 reconstruction from nominal I1/B1 intervals and not the scheduler-selection
 cut. `ExecutionService` first treats a ready lane head as scheduler-selectable

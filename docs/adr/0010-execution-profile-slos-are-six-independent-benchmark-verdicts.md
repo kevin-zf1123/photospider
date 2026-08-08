@@ -1543,6 +1543,15 @@ may return early. A separately invalid protocol fact cannot conceal a source
 contradiction, including after all six verdicts and enclosing addresses are
 synchronized.
 
+When measured current and displaced-warmup cancellation share timestamp
+`B^M1`, this source projection orders them in the replicate-wide M1 observer
+domain: current `(B^M1,n)` followed by cancellation `(B^M1,n+1)` preserves
+current hold and is ordinary supersession. A cancellation strictly before B,
+or at B with sequence no later than `n`, fails closed as pre-current/boundary-
+only evidence. The observer sequence is not the accepted-row sequence, and this
+M1 classification does not override Issue #93: successful visible publication
+plus accepted cancellation remains an independently Invalid Run source.
+
 The observer boundary is stable only when the coordinate reservation lifecycle
 and slot publication lifecycle are both closed. Reservation entry advances
 before route commit and remains open until callback delivery completes or a

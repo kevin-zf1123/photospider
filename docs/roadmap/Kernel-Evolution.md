@@ -1378,6 +1378,14 @@ outer rehashing. Redundant complete I1/B1 diagnostic JSON is not part of v2;
 authority-free receipt observations and pair packs remain non-capabilities, so
 no portable output, storage, or machine authority is created.
 
+The current implementation also closes equal-time current-hold ordering without
+changing either schema: measured current `(B,n)` followed in the shared M1
+observer domain by displaced cancellation `(B,n+1)` remains source-closed and
+is not boundary-only; cancellation at B with sequence no later than current
+fails closed. This observer order remains distinct from the accepted-row
+sequence and does not weaken Issue #93's independent visible-success/
+cancellation validity rule.
+
 M1 memory replay also requires each Host component and stable device identity
 to satisfy `reserved <= lifetime_high_water <= limit`, with nondecreasing
 lifetime high-water across temporal cuts. The nested observation snapshot

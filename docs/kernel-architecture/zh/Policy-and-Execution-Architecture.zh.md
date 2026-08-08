@@ -660,6 +660,13 @@ receipt、live storage authority 或 machine conformance。`m1_shared_benchmark`
 CTest/CI 之外的手工 `EXCLUDE_FROM_ALL` target，本文不声明已完成精确 timed
 three-replicate M1 corpus。
 
+对于 current-hold replay，同一个 M1 observer coordinate 横跨 measured-current publication
+与被替换 warmup cancellation。Current `(B,n)` 后接 cancellation `(B,n+1)` 属于普通产品
+supersession，不是 boundary-only cancellation；严格早于 B 的 cancellation，或在 B 但
+sequence 不晚于 `n` 的 cancellation，会 fail closed。Accepted-row sequence 继续属于独立
+domain。这项 projection 结果也独立于 Issue #93 Run validity；后者仍拒绝成功 visible
+publication 与 accepted cancellation 同时存在的 Run。
+
 Mixed observer 会在一个有界 lock-free atomic gate 内采样 steady time 并分配下一个 causal
 sequence，因此 sequence 顺序蕴含 time 非递减。它接受 task-semantic start/terminal record
 中从零开始的 task zero。M1 memory replay 还独立要求每个 Host component 与稳定 device

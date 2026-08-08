@@ -1334,6 +1334,14 @@ evaluation 可能提前返回之前，校验 accepted coordinate、Host success�
 另一个独立 invalid protocol fact 不能隐藏 source 矛盾，包括全部六个 verdict 与外围 address
 均已同步重建的情况。
 
+当 measured current 与被替换 warmup 的 cancellation 具有相同 timestamp `B^M1` 时，这条
+source projection 会在 replicate-wide M1 observer domain 中排列二者：current
+`(B^M1,n)` 后接 cancellation `(B^M1,n+1)` 时保持 current hold，并属于普通
+supersession。严格早于 B 的 cancellation，或在 B 但 sequence 不晚于 `n` 的 cancellation，
+会作为 pre-current/boundary-only evidence fail closed。Observer sequence 不是 accepted-row
+sequence，而且这项 M1 分类不会覆盖 Issue #93：成功 visible publication 与 accepted
+cancellation 同时存在时，该 Run source 仍因独立合同而为 Invalid。
+
 只有 coordinate reservation lifecycle 与 slot publication lifecycle 都闭合时，observer
 boundary 才 stable。Reservation entry 在 route commit 前推进，并保持 open，直到 callback
 delivery 完成，或被拒绝的 commit 显式 abort。会产生 event 的 callback 会分别推进

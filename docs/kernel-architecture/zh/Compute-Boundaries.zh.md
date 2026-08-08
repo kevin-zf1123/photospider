@@ -500,6 +500,13 @@ replacement、boundary-only cancellation 与旧 settlement fact，并在 protoco
 提前返回之前关闭这些 fact。因此 direct、canonical 与完整重新 hash 的 outer replay 会拒绝
 同一个 raw-source 矛盾，并重新计算同样六个 verdict。
 
+同时间 displacement 使用同一个 source authority。若 measured current 被观察为 `(B,n)`，
+则被替换 warmup Run 的 cancellation `(B,n+1)` 在 replicate-wide observer domain 中晚于
+current，会保持 current hold，且不是 boundary-only。严格早于 B 的 cancellation，或在
+`(B,m)` 且 `m<=n` 的 cancellation，都会 fail closed。该 observer sequence 绝不与独立的
+accepted-row sequence 比较。M1 source closure 也不会使同时具有 visible success 与 accepted
+cancellation 的 Run 绕过 Issue #93 validity。
+
 每次 service start 的 applicability 来自产品签发的 evidence cut，而不是根据 I1/B1 nominal
 interval 事后重建，也不是 scheduler-selection cut。`ExecutionService` 首先在 Run lifecycle、
 operation gate 与 physical route 允许选择时，把 ready lane 头视为 scheduler-selectable；暂时性的

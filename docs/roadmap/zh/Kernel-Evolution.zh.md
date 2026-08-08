@@ -1112,6 +1112,12 @@ retained verdict，并复现相同 canonical byte。即使
 diagnostic JSON；authority-free receipt observation 与 pair pack 都保持非 capability，因此不会
 创建 portable output、storage 或 machine authority。
 
+当前实现还在不改变任一 schema 的前提下，封闭了同时间 current-hold ordering：在共享 M1
+observer domain 中，measured current `(B,n)` 后接被替换 cancellation `(B,n+1)` 时仍保持
+source-closed，且不是 boundary-only；在 B 且 sequence 不晚于 current 的 cancellation 会
+fail closed。该 observer order 与 accepted-row sequence 保持独立，也不会放宽 Issue #93
+独立的 visible-success/cancellation validity rule。
+
 M1 memory replay 还要求每个 Host component 与稳定 device identity 满足
 `reserved <= lifetime_high_water <= limit`，且 lifetime high-water 在 temporal cut 之间
 非递减。Nested observation snapshot 仍为十个 field，v2 manifest 仍为二十个 field；schema

@@ -835,6 +835,14 @@ authority, or machine conformance. `m1_shared_benchmark` remains a manual
 `EXCLUDE_FROM_ALL` target outside CTest/CI, and this document does not claim an
 exact timed three-replicate M1 corpus.
 
+For current-hold replay, the same M1 observer coordinate spans measured-current
+publication and displaced-warmup cancellation. Current `(B,n)` followed by
+cancellation `(B,n+1)` is ordinary product supersession and is not a boundary-
+only cancellation; cancellation before B, or at B with sequence no later than
+`n`, fails closed. The accepted-row sequence remains a separate domain. This
+projection result is also independent from Issue #93 Run validity, which still
+rejects a successful visible publication paired with accepted cancellation.
+
 The mixed observer samples steady time and allocates its next causal sequence
 inside one bounded lock-free atomic gate, so sequence order implies
 nondecreasing time. It accepts zero-based task zero for task-semantic start and
