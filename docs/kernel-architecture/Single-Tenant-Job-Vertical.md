@@ -66,10 +66,14 @@ receipts.
 
 `SingleTenantJobService` is the only owner of accepted Job truth. `submit()`
 validates and freezes JobSpec, mints `JobId`, `JobAttemptId`,
-`WorkerInstanceId`, and lease generation one, records the complete assignment,
-then starts one joinable worker thread. `query()` returns a copied snapshot;
-`wait_for()` bounds only observer waiting and does not impose an execution
-deadline.
+`WorkerInstanceId`, and lease generation one, and constructs the complete
+`JobSubmission` before acceptance. It then records the complete assignment and
+starts one joinable worker thread. If thread start fails, state insertion is
+rolled back. Once the thread starts, returning the already-built submission is
+either copy elision or a compile-time-asserted non-throwing move; receipt-string
+allocation cannot make the caller observe failure after the Job was accepted.
+`query()` returns a copied snapshot; `wait_for()` bounds only observer waiting
+and does not impose an execution deadline.
 
 The current state machine is:
 
@@ -87,13 +91,32 @@ the complete assignment tuple, worker-local outcome, settlement fact, typed
 failure, diagnostic, and optional candidate `ImageBuffer`. It cannot mutate a
 Job snapshot or commit an artifact.
 
+The worker report vocabulary is closed:
+
+- `Succeeded` requires `settled=true`, `failure=None`, and exactly one
+  candidate image;
+- `Cancelled` requires `settled=true`,
+  `failure=CancellationObserved`, and no image; and
+- `Failed` requires no image and one of `InvalidAssignment`,
+  `GraphResolution`, `HostSetup`, `GraphLoad`, `Compute`, `Settlement`, or
+  `Unexpected`. Its `settled` value remains the worker's exact cleanup fact.
+
+`ReportRejected` and `ArtifactCommit` are control-plane failures and are never
+accepted from a worker. `None` belongs only to success, and
+`CancellationObserved` belongs only to cancellation. Invalid underlying enum
+representations are not extensions to this vocabulary.
+
 The control plane finds the Job through the assignment retained by the exact
 worker thread, then validates the report's full tenant/Job/spec-digest/attempt/
-worker/lease tuple. A mismatched, empty, stale, or malformed report fails the
-current Job closed and attaches no artifact. Equality in one identity domain or
-equal content cannot repair another mismatch. Because the rejected report is
-not trusted, its `settled` field also cannot establish settlement for the
-retained current attempt.
+worker/lease tuple. It then validates the complete enum and outcome/settlement/
+failure/image shape before copying any report outcome, settlement, failure, or
+diagnostic and before cancellation adjudication. A mismatched, empty, stale,
+malformed, context-invalid cancellation, or invalid-enum report uniformly
+publishes `Failed` + `ReportRejected`, `attempt_settled=false`, and no receipt.
+Cancellation intent cannot convert such a report into `Cancelled`. Equality in
+one identity domain or equal content cannot repair another mismatch. Because
+the rejected report is not trusted, none of its fields can establish retained
+current-attempt truth.
 
 Job success requires all of the following under the current control mutex:
 
@@ -223,7 +246,12 @@ and the [server roadmap](../roadmap/Kernel-Evolution.md#server-and-plugin-isolat
 The focused tests cover exact six-field canonical bytes and SHA-256, rejection
 of path-shaped identity, tight-row deep copy, equal-content identity
 separation, receipt-gated success, missing output, mismatched lease fencing,
-null/exceptional factory and worker settlement, and cancel-before-commit
-ordering. The product-path test resolves an immutable graph identity to a tiny
-YAML graph, executes it through a fresh Embedded Host, closes it, commits the
-result, and queries the identity-complete artifact.
+closed malformed report shapes and invalid enums, all worker-owned typed
+failure/settlement combinations, null/exceptional factory and worker
+settlement, cancellation after malformed reporting, and cancel-before-commit
+ordering. The compiled contract independently static-asserts the no-throw
+submission move. Gate cleanup guards release blocked workers before service
+destruction even when a fatal test assertion exits early. The product-path test
+resolves an immutable graph identity to a tiny YAML graph, executes it through
+a fresh Embedded Host, closes it, commits the result, and queries the
+identity-complete artifact.

@@ -55,9 +55,12 @@ checkpoint、retry、quota 或 retention policy 字段。JobSpec 外的可信
 ## 可观察 Job 行为
 
 `SingleTenantJobService` 是已接受 Job 真相的唯一 owner。`submit()` 校验并冻结 JobSpec，
-生成 `JobId`、`JobAttemptId`、`WorkerInstanceId` 和 generation 为一的 lease，记录完整
-assignment，然后启动一个可 join 的 worker thread。`query()` 返回复制的 snapshot；
-`wait_for()` 只限制 observer 等待，不设置执行 deadline。
+生成 `JobId`、`JobAttemptId`、`WorkerInstanceId` 和 generation 为一的 lease，并在接受前
+构造完整 `JobSubmission`。随后记录完整 assignment，并启动一个可 join 的 worker thread。
+若线程启动失败，则回滚 state insertion。线程一旦启动，返回已构造 submission 时只会发生
+copy elision 或经编译期断言保证的不抛异常 move；回执字符串分配不能让 caller 在 Job 已接受后
+观察到失败。`query()` 返回复制的 snapshot；`wait_for()` 只限制 observer 等待，不设置执行
+deadline。
 
 当前状态机是：
 
@@ -74,10 +77,24 @@ Queued -> Running ---------------------> Succeeded
 settlement fact、typed failure、diagnostic 和可选 candidate `ImageBuffer`。它不能修改 Job
 snapshot 或提交 artifact。
 
+worker report 词汇是闭合的：
+
+- `Succeeded` 要求 `settled=true`、`failure=None`，且恰有一个 candidate image；
+- `Cancelled` 要求 `settled=true`、`failure=CancellationObserved`，且没有 image；
+- `Failed` 要求没有 image，且 failure 为 `InvalidAssignment`、`GraphResolution`、
+  `HostSetup`、`GraphLoad`、`Compute`、`Settlement` 或 `Unexpected` 之一；其
+  `settled` 值继续表示 worker 的精确清理事实。
+
+`ReportRejected` 和 `ArtifactCommit` 是 control-plane failure，绝不接受为 worker 上报值。
+`None` 只属于成功，`CancellationObserved` 只属于取消。非法底层 enum 表示不会扩展该词汇。
+
 控制面通过精确 worker thread 保留的 assignment 查找 Job，随后校验报告完整的 tenant/Job/
-spec-digest/attempt/worker/lease tuple。不匹配、空、过期或 malformed 报告使当前 Job fail
-closed，不附加工件。某个身份域相等或内容相等不能修复另一处不匹配。由于被拒绝的报告
-不受信任，其 `settled` 字段也不能为保留的 current attempt 建立 settlement 事实。
+spec-digest/attempt/worker/lease tuple。随后在复制任何 report outcome、settlement、failure、
+diagnostic 以及执行取消裁定之前，校验完整 enum 与 outcome/settlement/failure/image shape。
+不匹配、空、过期、malformed、取消上下文非法或 enum 非法的报告，统一发布 `Failed` +
+`ReportRejected`、`attempt_settled=false` 且没有回执。取消意图不能把这类报告变成
+`Cancelled`。某个身份域相等或内容相等不能修复另一处不匹配。由于被拒绝的报告不受信任，
+其任何字段都不能建立 retained current-attempt 真相。
 
 Job 成功要求在当前 control mutex 下同时满足：
 
@@ -190,7 +207,10 @@ tenant-scoped identity allocation 属于 Issue #99。
   `tests/integration/test_single_tenant_job_product_path.cpp`。
 
 聚焦测试覆盖精确六字段规范字节与 SHA-256、path-shaped identity 拒绝、tight-row deep copy、
-相同内容的身份分离、receipt-gated success、缺失 output、不匹配 lease fencing、返回 null/
-异常的 factory 与 worker settlement，以及 cancel-before-commit 顺序。产品路径测试把
-immutable graph identity 解析为微型 YAML 图，经新的 Embedded Host 执行、关闭、提交结果，并
-查询身份完整的工件。
+相同内容的身份分离、receipt-gated success、缺失 output、不匹配 lease fencing、闭合
+malformed report shape 与非法 enum、全部 worker-owned typed failure/settlement 组合、返回 null/
+异常的 factory 与 worker settlement、malformed report 后取消，以及 cancel-before-commit 顺序。
+编译后的契约另行通过 static assertion 固定 submission move 不抛异常。Gate cleanup guard 保证
+即使 fatal 测试断言提前退出，也会在 service 析构前释放阻塞 worker。产品路径测试把 immutable
+graph identity 解析为微型 YAML 图，经新的 Embedded Host 执行、关闭、提交结果，并查询身份
+完整的工件。
