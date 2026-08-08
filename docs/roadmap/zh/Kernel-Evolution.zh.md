@@ -1223,7 +1223,10 @@ compatibility；它不能让恶意 native code 在进程内安全执行。
 `jobspec-v1`，使用不同的 Job/attempt/worker-lease/artifact 身份，每个 attempt 运行一个新的
 进程内 Embedded Host，在 process-lifetime artifact commit 与取消之间建立顺序，并要求
 settlement 加一份完整回执后 Job 才能成功。即使并发接受取消，合法 typed worker failure 仍保持
-`Failed`，并保留精确 settlement 与 failure 事实。它没有把上表任何目标行实现为独立进程、
+`Failed`，并保留精确 settlement 与 failure 事实。Graph load 后，worker 先处理 graph
+settlement failure，再在取消裁定前保留已经记录的 compute/output failure；若因取消而跳过
+compute，则 cancellation 仍先于合成的 missing-output failure。真实 Embedded Host 的确定性测试
+覆盖该边界两侧，并保留精确 compute diagnostic。该切片没有把上表任何目标行实现为独立进程、
 持久服务、quota authority、network endpoint 或 untrusted-plugin boundary。Issues #99 至
 #106 不得从这条首个可执行切片推导各自性质。
 

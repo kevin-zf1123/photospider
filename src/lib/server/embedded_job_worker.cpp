@@ -258,16 +258,20 @@ JobAttemptReport EmbeddedHostJobWorker::execute(
                        JobAttemptFailure::Settlement,
                        std::move(settlement_message));
   }
+  if (compute_failure != JobAttemptFailure::None) {
+    if (compute_message.empty()) {
+      compute_message = "graph compute failed without a diagnostic";
+    }
+    return make_report(assignment.identity, JobAttemptOutcome::Failed, true,
+                       compute_failure, std::move(compute_message));
+  }
   if (cancellation_observed) {
     return cancelled_report(assignment.identity, "before artifact commit");
   }
-  if (compute_failure != JobAttemptFailure::None ||
-      !candidate_image.has_value()) {
-    if (compute_message.empty()) {
-      compute_message = "graph compute produced no required image";
-    }
+  if (!candidate_image.has_value()) {
     return make_report(assignment.identity, JobAttemptOutcome::Failed, true,
-                       JobAttemptFailure::Compute, std::move(compute_message));
+                       JobAttemptFailure::Compute,
+                       "graph compute produced no required image");
   }
 
   JobAttemptReport report =

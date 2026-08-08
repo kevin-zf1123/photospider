@@ -89,9 +89,13 @@ class EmbeddedHostJobWorker final : public JobAttemptWorker {
    * @throws std::bad_alloc or std::system_error only when safe report
    * construction or synchronization cannot continue.
    * @note Cancellation is observed before resolution, before compute, and after
-   * compute. Active provider work is not promised bounded preemption. An
-   * escaping exception carries no settlement proof at the control-plane
-   * boundary.
+   * compute. After a graph is loaded, settlement failure takes precedence over
+   * every other terminal fact; an already recorded compute/output-validation
+   * failure then takes precedence over later cancellation, while cancellation
+   * still takes precedence over synthesizing a missing-output failure when
+   * compute was skipped. Active provider work is not promised bounded
+   * preemption. An escaping exception carries no settlement proof at the
+   * control-plane boundary.
    */
   JobAttemptReport execute(
       const JobAssignment& assignment,

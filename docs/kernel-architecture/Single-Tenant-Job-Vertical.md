@@ -150,6 +150,12 @@ The Embedded Host worker observes cancellation before graph resolution, before
 Host construction/load/compute, and after compute. Once Host compute has
 entered a provider, cancellation may wait indefinitely for that call to return.
 The worker then closes the loaded graph and destroys its Host before reporting.
+After a graph has loaded, report selection preserves facts in this order:
+graph-close/settlement failure, an already recorded compute or output-
+validation failure, observed cancellation, and only then a synthesized missing-
+output failure. Thus cancellation cannot erase a real compute failure, while a
+pre-compute cancellation that intentionally produced no candidate image cannot
+be relabelled as `Compute`.
 
 Cancellation and artifact commit linearize under the Job mutex:
 
@@ -185,6 +191,9 @@ Issue #100 and later work.
 Resolution, Host setup, load, compute, output validation, and settlement have
 separate `JobAttemptFailure` values. Graph resolution failure constructs no
 Host. A graph close failure reports `settled=false` and cannot succeed. The
+worker first preserves that settlement failure, then any compute/output failure
+already recorded before the post-compute cancellation observation. Cancellation
+otherwise wins over the absence of a candidate when compute was skipped. The
 worker never receives artifact-store mutation authority. A null factory result
 or a standard/non-standard exception that escapes worker creation or execution
 gives the control plane no settlement proof; it publishes a failed current
@@ -266,4 +275,9 @@ blocked workers before service destruction even when a fatal test assertion
 exits early. Product-path tests resolve an immutable graph identity to a tiny
 YAML graph, execute it through a fresh Embedded Host, close and commit the
 result, and deterministically prove that a resolver exception after accepted
-cancellation remains `Failed` without an artifact.
+cancellation remains `Failed` without an artifact. They also gate the worker's
+real pre- and post-compute cancellation observations: a missing-node Host
+failure remains settled `Failed` + `Compute` with its exact diagnostic when
+cancellation is accepted after compute, while cancellation accepted immediately
+before compute remains settled `Cancelled` rather than becoming a synthesized
+missing-output failure.

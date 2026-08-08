@@ -1517,7 +1517,12 @@ identities, runs one fresh in-process Embedded Host per attempt, orders
 cancellation against a process-lifetime artifact commit, and gates Job success
 on settlement plus one complete receipt. A valid typed worker failure remains
 `Failed` with its exact settlement and failure facts even when cancellation was
-accepted concurrently. It does not implement any target row above as a
+accepted concurrently. After graph load, the worker gives graph settlement
+failure first priority, then preserves an already recorded compute/output
+failure before adjudicating cancellation; cancellation still outranks a
+synthesized missing-output failure when compute was skipped. Deterministic real
+Embedded Host tests cover both sides of that boundary and preserve the exact
+compute diagnostic. This slice does not implement any target row above as a
 separate process, persistent service, quota authority, network endpoint, or
 untrusted-plugin boundary. Issues #99 through #106 must not infer their
 properties from that first executable slice.

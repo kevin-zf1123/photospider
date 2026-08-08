@@ -12,6 +12,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -23,6 +24,20 @@
 
 namespace ps::server {
 namespace {
+
+/**
+ * @brief Cancellation observation reached immediately before Host compute.
+ * @note The worker's documented sequence is before resolution, before Host
+ * construction, before graph load, before compute, and after compute.
+ */
+constexpr std::size_t kBeforeComputeCancellationObservation = 4U;
+
+/**
+ * @brief Cancellation observation reached after Host compute returns.
+ * @note Blocking this observation proves the compute fact already exists
+ * before the test concurrently accepts cancellation.
+ */
+constexpr std::size_t kAfterComputeCancellationObservation = 5U;
 
 /**
  * @brief Owns one isolated filesystem tree for the real Job product-path test.
@@ -92,6 +107,166 @@ void write_job_graph(const std::filesystem::path& path) {
     throw std::runtime_error("failed to write Job graph YAML");
   }
 }
+
+/**
+ * @brief Builds one complete worker assignment for direct product-path tests.
+ * @param graph_id Immutable graph material identity accepted by the resolver.
+ * @param target_node Node selected for real Embedded Host compute.
+ * @param identity_suffix Unique suffix for attempt-local product identities.
+ * @return Valid immutable assignment with lease generation one.
+ * @throws std::invalid_argument for invalid identities or JobSpec values.
+ * @throws std::bad_alloc when retained identity/spec storage exhausts memory.
+ */
+JobAssignment make_worker_assignment(const GraphArtifactId& graph_id,
+                                     int target_node,
+                                     std::string identity_suffix) {
+  auto spec = std::make_shared<const JobSpec>(graph_id, target_node,
+                                              OutputSlotId("image.final"), 1U);
+  JobAssignment assignment;
+  assignment.identity.tenant_id = TenantId("tenant.issue98");
+  assignment.identity.job_id = JobId("job.product." + identity_suffix);
+  assignment.identity.job_spec_digest = spec->digest();
+  assignment.identity.attempt_id =
+      JobAttemptId("attempt.product." + identity_suffix);
+  assignment.identity.worker_instance_id =
+      WorkerInstanceId("worker.product." + identity_suffix);
+  assignment.identity.worker_lease_generation = WorkerLeaseGeneration{1U};
+  assignment.spec = std::move(spec);
+  return assignment;
+}
+
+/**
+ * @brief Blocks one selected cancellation observation until cancellation is
+ * accepted by the coordinating test thread.
+ *
+ * Earlier observations return false. The selected and all later observations
+ * return true only after `accept()` publishes monotonic cancellation intent.
+ * This turns the worker's documented cooperative checkpoints into a
+ * deterministic concurrency boundary without a product-only test hook.
+ *
+ * @throws std::invalid_argument when the selected observation is zero.
+ * @throws std::system_error from mutex or condition-variable operations.
+ * @note One worker thread calls `observe()` while one test thread waits and
+ * accepts cancellation. The gate must outlive both threads.
+ */
+class CancellationObservationGate final {
+ public:
+  /**
+   * @brief Selects the one-based worker observation that must block.
+   * @param blocking_observation Positive one-based observation ordinal.
+   * @throws std::invalid_argument when the ordinal is zero.
+   */
+  explicit CancellationObservationGate(std::size_t blocking_observation)
+      : blocking_observation_(blocking_observation) {
+    if (blocking_observation_ == 0U) {
+      throw std::invalid_argument("cancellation observation must be positive");
+    }
+  }
+
+  /**
+   * @brief Implements the worker's monotonic cancellation observer.
+   * @return False before the selected checkpoint; true after test acceptance.
+   * @throws std::system_error from mutex or condition-variable operations.
+   */
+  bool observe() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++observation_count_;
+    if (observation_count_ < blocking_observation_) {
+      return false;
+    }
+    blocked_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [&] { return cancellation_accepted_; });
+    return true;
+  }
+
+  /**
+   * @brief Waits a fixed bound for the selected worker checkpoint.
+   * @return True when the worker reached and blocked at the checkpoint.
+   * @throws std::system_error from mutex or condition-variable operations.
+   */
+  bool wait_until_blocked() const {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, std::chrono::seconds(2),
+                               [&] { return blocked_; });
+  }
+
+  /**
+   * @brief Publishes monotonic cancellation intent and releases the worker.
+   * @return Nothing.
+   * @throws std::system_error from mutex or condition-variable operations.
+   */
+  void accept() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cancellation_accepted_ = true;
+    }
+    condition_.notify_all();
+  }
+
+ private:
+  /** @brief One-based worker observation that forms the deterministic gate. */
+  const std::size_t blocking_observation_;
+  /** @brief Serializes observation, acceptance, and release state. */
+  mutable std::mutex mutex_;
+  /** @brief Coordinates the worker checkpoint with the accepting test. */
+  mutable std::condition_variable condition_;
+  /** @brief Number of cancellation observations made by the worker. */
+  std::size_t observation_count_ = 0U;
+  /** @brief Whether the worker reached the selected checkpoint. */
+  bool blocked_ = false;
+  /** @brief Monotonic cancellation intent published by the test thread. */
+  bool cancellation_accepted_ = false;
+};
+
+/**
+ * @brief Guarantees that a blocked cancellation observer is released.
+ * @throws Nothing; an unexpected synchronization failure terminates because
+ * an outstanding worker future would otherwise remain blocked.
+ * @note Declare after the future so early fatal assertions release the gate
+ * before the future joins during stack unwinding.
+ */
+class CancellationAcceptanceGuard final {
+ public:
+  /**
+   * @brief Arms cleanup for one live cancellation gate.
+   * @param gate Gate that outlives this guard.
+   * @throws Nothing.
+   */
+  explicit CancellationAcceptanceGuard(
+      CancellationObservationGate& gate) noexcept
+      : gate_(&gate) {}
+
+  /** @brief Accepts cancellation if cleanup remains armed. */
+  ~CancellationAcceptanceGuard() noexcept { accept(); }
+
+  /** @brief Prevents duplicate gate-release ownership. */
+  CancellationAcceptanceGuard(const CancellationAcceptanceGuard&) = delete;
+  /** @brief Prevents duplicate gate-release assignment. */
+  CancellationAcceptanceGuard& operator=(const CancellationAcceptanceGuard&) =
+      delete;
+
+  /**
+   * @brief Accepts cancellation immediately and disarms cleanup.
+   * @return Nothing.
+   * @throws Nothing; terminates on an unexpected synchronization failure.
+   */
+  void accept() noexcept {
+    if (gate_ == nullptr) {
+      return;
+    }
+    try {
+      gate_->accept();
+      gate_ = nullptr;
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  /** @brief Borrowed armed gate, or null after acceptance. */
+  CancellationObservationGate* gate_;
+};
 
 /**
  * @brief Trusted one-entry graph artifact resolver for product-path tests.
@@ -360,6 +535,79 @@ TEST(SingleTenantJobProductPath,
   EXPECT_EQ(terminal->failure, JobAttemptFailure::GraphResolution);
   EXPECT_EQ(terminal->message, "resolver failed after cancellation");
   EXPECT_FALSE(terminal->output_receipt.has_value());
+}
+
+TEST(SingleTenantJobProductPath,
+     ComputeFailureAfterConcurrentCancellationRemainsFailed) {
+  ScopedJobProductRoot product_root;
+  const std::filesystem::path yaml = product_root.root() / "graph.yaml";
+  write_job_graph(yaml);
+
+  const GraphArtifactId graph_id("graph.compute.failure.race");
+  auto resolver = std::make_shared<TestGraphArtifactResolver>(
+      graph_id, product_root.root() / "sessions", yaml,
+      product_root.root() / "cache");
+  const JobAssignment assignment =
+      make_worker_assignment(graph_id, 99, "compute.failure.race");
+
+  EmbeddedHostJobWorker baseline_worker(resolver);
+  const JobAttemptReport baseline =
+      baseline_worker.execute(assignment, [] { return false; });
+  ASSERT_EQ(baseline.outcome, JobAttemptOutcome::Failed);
+  ASSERT_TRUE(baseline.settled);
+  ASSERT_EQ(baseline.failure, JobAttemptFailure::Compute);
+  ASSERT_EQ(baseline.message,
+            "graph compute failed [not_found]: Node 99 not found in graph.");
+  ASSERT_FALSE(baseline.image.has_value());
+
+  EmbeddedHostJobWorker racing_worker(resolver);
+  CancellationObservationGate gate(kAfterComputeCancellationObservation);
+  std::future<JobAttemptReport> report_future;
+  CancellationAcceptanceGuard cancellation_acceptance(gate);
+  report_future = std::async(std::launch::async, [&] {
+    return racing_worker.execute(assignment, [&] { return gate.observe(); });
+  });
+
+  ASSERT_TRUE(gate.wait_until_blocked());
+  cancellation_acceptance.accept();
+  const JobAttemptReport report = report_future.get();
+  EXPECT_EQ(report.identity, assignment.identity);
+  EXPECT_EQ(report.outcome, JobAttemptOutcome::Failed);
+  EXPECT_TRUE(report.settled);
+  EXPECT_EQ(report.failure, JobAttemptFailure::Compute);
+  EXPECT_EQ(report.message, baseline.message);
+  EXPECT_FALSE(report.image.has_value());
+}
+
+TEST(SingleTenantJobProductPath,
+     PreComputeCancellationDoesNotBecomeMissingOutputFailure) {
+  ScopedJobProductRoot product_root;
+  const std::filesystem::path yaml = product_root.root() / "graph.yaml";
+  write_job_graph(yaml);
+
+  const GraphArtifactId graph_id("graph.precompute.cancel");
+  auto resolver = std::make_shared<TestGraphArtifactResolver>(
+      graph_id, product_root.root() / "sessions", yaml,
+      product_root.root() / "cache");
+  const JobAssignment assignment =
+      make_worker_assignment(graph_id, 0, "precompute.cancel");
+  EmbeddedHostJobWorker worker(resolver);
+  CancellationObservationGate gate(kBeforeComputeCancellationObservation);
+  std::future<JobAttemptReport> report_future;
+  CancellationAcceptanceGuard cancellation_acceptance(gate);
+  report_future = std::async(std::launch::async, [&] {
+    return worker.execute(assignment, [&] { return gate.observe(); });
+  });
+
+  ASSERT_TRUE(gate.wait_until_blocked());
+  cancellation_acceptance.accept();
+  const JobAttemptReport report = report_future.get();
+  EXPECT_EQ(report.identity, assignment.identity);
+  EXPECT_EQ(report.outcome, JobAttemptOutcome::Cancelled);
+  EXPECT_TRUE(report.settled);
+  EXPECT_EQ(report.failure, JobAttemptFailure::CancellationObserved);
+  EXPECT_EQ(report.message, "cancellation observed before artifact commit");
+  EXPECT_FALSE(report.image.has_value());
 }
 
 TEST(SingleTenantJobProductPath, MutatedAssignmentDigestFailsBeforeResolution) {

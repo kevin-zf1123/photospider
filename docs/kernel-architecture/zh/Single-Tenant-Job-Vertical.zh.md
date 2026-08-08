@@ -122,6 +122,10 @@ public Host 当前没有主动 compute-cancellation 操作。Embedded Host worke
 resolution 前、Host construction/load/compute 前以及 compute 后观察取消。Host compute
 一旦进入 provider，取消可能无限期等待该调用返回。随后 worker 关闭已加载图并销毁 Host，
 之后才报告。
+图加载完成后，worker 按以下顺序保留事实并选择报告：graph close/settlement failure、已经记录的
+compute 或 output-validation failure、已观察到的 cancellation，最后才是合成的 missing-output
+failure。因此 cancellation 不能抹掉真实 compute failure；而在 compute 前取消、因而有意不生成
+candidate image 时，也不能被重新标记为 `Compute`。
 
 取消与 artifact commit 在 Job mutex 下线性化：
 
@@ -152,10 +156,12 @@ service 析构会把活跃 Job 标为 cancelling 并 join 每个 worker。这是
 
 resolution、Host setup、load、compute、output validation 和 settlement 各有不同的
 `JobAttemptFailure` 值。Graph resolution 失败不构造 Host。Graph close 失败报告
-`settled=false`，不能成功。worker 从不获得 artifact-store mutation authority。若 factory
-返回 null，或标准/非标准异常逃逸出 worker 创建或执行，control plane 没有 settlement
-证据；它发布 `settled=false` 且没有回执的 current failed attempt。即便已经接受取消，也
-不能把该未 settle 失败改写为 `Cancelled`。
+`settled=false`，不能成功。worker 首先保留该 settlement failure，随后保留在 compute 后取消
+观察之前已经记录的任何 compute/output failure。若因取消而跳过 compute，则 cancellation 仍先于
+candidate 缺失。worker 从不获得 artifact-store mutation authority。若 factory 返回 null，或
+标准/非标准异常逃逸出 worker 创建或执行，control plane 没有 settlement 证据；它发布
+`settled=false` 且没有回执的 current failed attempt。即便已经接受取消，也不能把该未 settle
+失败改写为 `Cancelled`。
 
 ## 进程生命周期工件权威
 
@@ -221,4 +227,7 @@ graph-resolution/Host-setup/graph-load failure 竞态，以及 cancel-before-com
 契约另行通过 static assertion 固定 submission move 不抛异常。Gate cleanup guard 保证即使 fatal
 测试断言提前退出，也会在 service 析构前释放阻塞 worker。产品路径测试把 immutable graph
 identity 解析为微型 YAML 图，经新的 Embedded Host 执行、关闭、提交结果，并确定性证明接受
-取消后的 resolver 异常仍保持 `Failed` 且没有工件。
+取消后的 resolver 异常仍保持 `Failed` 且没有工件。测试还在 worker 真实的 compute 前后取消
+观察点设置 gate：若在 compute 后接受取消，missing-node Host failure 仍保持已 settle 的
+`Failed` + `Compute` 并保留精确 diagnostic；若恰在 compute 前接受取消，则仍为已 settle 的
+`Cancelled`，而不会成为合成的 missing-output failure。
