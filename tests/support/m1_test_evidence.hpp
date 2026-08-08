@@ -16,7 +16,8 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/m1_evidence.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1_canonical.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1_evidence.hpp"   // NOLINT(build/include_subdir)
 #include "photospider/data/value.hpp"
 #include "support/b1_test_environment.hpp"
 
@@ -229,6 +230,243 @@ inline void attach_m1_test_i1_sources(M1InnerRowInput* input) {
     input->interactive_sources.push_back(make_m1_interactive_source_evidence(
         occurrence.phase, occurrence.phase_ordinal, occurrence.origin, row));
   }
+}
+
+/**
+ * @brief Replays one retained I1 source into its matching M1 occurrence.
+ * @param input Mutable M1 input owning exact ordered source/occurrence lists.
+ * @param index Zero-based shared index in both exact 48-element lists.
+ * @return Nothing after all Issue #93-derived occurrence fields are replaced.
+ * @throws std::invalid_argument for null, out-of-range, or identity drift.
+ * @throws Replay and allocation failures unchanged.
+ * @note M1-only current-hold and settlement-at-B fields remain untouched; the
+ * shared source-fairness projection owns those fields separately.
+ */
+inline void synchronize_m1_test_i1_occurrence(M1InnerRowInput* input,
+                                              std::size_t index) {
+  if (input == nullptr || index >= input->interactive_sources.size() ||
+      index >= input->protocol.interactive_occurrences.size()) {
+    throw std::invalid_argument(
+        "M1 test I1 occurrence synchronization index is invalid.");
+  }
+  const M1InteractiveSourceEvidence& source = input->interactive_sources[index];
+  M1InteractiveOccurrenceEvidence& occurrence =
+      input->protocol.interactive_occurrences[index];
+  if (source.phase != occurrence.phase ||
+      source.phase_ordinal != occurrence.phase_ordinal ||
+      !(source.origin == occurrence.origin)) {
+    throw std::invalid_argument(
+        "M1 test I1 source and occurrence identities differ.");
+  }
+  const I1EpisodeInnerRow replay = evaluate_i1_episode(source.episode);
+  occurrence.final_latency = replay.final_latency;
+  occurrence.service = replay.service;
+  occurrence.latency_verdict = replay.latency_verdict;
+  occurrence.waste_verdict = replay.waste_verdict;
+  occurrence.memory_verdict = replay.memory_verdict;
+  occurrence.output_verdict = replay.output_verdict;
+}
+
+/**
+ * @brief Creates the Issue #96 equal-time measured-current supersession case.
+ * @param input Mutable complete M1 test input with all 48 retained I1 sources.
+ * @param cancellation_follows_current Whether cancellation is `(B,n+1)`;
+ * false produces the fail-closed reverse order `(B,n-1)`.
+ * @return Nothing after raw sources and their Issue #93 projections agree.
+ * @throws std::invalid_argument for null, malformed, or unexpected fixtures.
+ * @throws std::overflow_error when observer-sequence remapping would wrap.
+ * @throws Replay, checked-time, and allocation failures unchanged.
+ * @note The measured observer coordinate is deliberately independent from the
+ * retained accepted-row coordinate. The final-warmup Run already published a
+ * successful visible output, so adding an accepted cancellation makes that
+ * source independently Invalid under Issue #93; callers must not interpret
+ * that separate verdict as an M1 current-hold/source-closure failure.
+ */
+inline void configure_m1_test_equal_time_supersession(
+    M1InnerRowInput* input, bool cancellation_follows_current) {
+  constexpr std::size_t final_warmup_index =
+      kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+  constexpr std::size_t measured_zero_index =
+      kM1ColdI1OriginCount + kM1WarmupI1OriginCount;
+  constexpr std::uint64_t measured_current_sequence = 100000U;
+  if (input == nullptr ||
+      input->interactive_sources.size() != kM1TotalI1OriginCount ||
+      input->protocol.interactive_occurrences.size() != kM1TotalI1OriginCount) {
+    throw std::invalid_argument(
+        "M1 equal-time test requires exactly 48 I1 sources and occurrences.");
+  }
+
+  I1EpisodeEvidenceInput& measured =
+      input->interactive_sources[measured_zero_index].episode;
+  I1EditEvidence& measured_edit = measured.edits[0U];
+  const auto measured_current =
+      std::find_if(measured.observations.current_generations.begin(),
+                   measured.observations.current_generations.end(),
+                   [](const I1ObservedCurrentGeneration& current) {
+                     return current.edit_index == 0U;
+                   });
+  if (measured_edit.edit_index != 0U ||
+      !measured_edit.reserved_event_sequence.has_value() ||
+      !measured_edit.host_return.has_value() ||
+      measured_current == measured.observations.current_generations.end() ||
+      measured_current->causal_sequence != 1U) {
+    throw std::invalid_argument(
+        "M1 equal-time test measured edit-zero source is malformed.");
+  }
+
+  const auto boundary = input->protocol.boundaries.measurement_start.timestamp;
+  measured_edit.admission_sample = boundary;
+  measured_edit.deadline = checked_i1_time_add(boundary, kI1DeadlineBudget);
+  measured_edit.host_return->return_time =
+      checked_i1_time_add(boundary, std::chrono::microseconds(100));
+  measured_edit.accepted_coordinate.emplace(
+      boundary, *measured_edit.reserved_event_sequence);
+  measured_current->observed_at = boundary;
+  measured_current->accepted_coordinate = measured_edit.accepted_coordinate;
+  for (I1ObservedServiceStart& start : measured.observations.service_starts) {
+    if (start.edit_index == 0U) {
+      start.qos.deadline = *measured_edit.deadline;
+    }
+  }
+
+  // Preserve global observer order while reserving n+1 for supersession.
+  const auto remap_sequence = [](std::uint64_t* sequence) {
+    if (sequence == nullptr || *sequence == 0U ||
+        (*sequence != 1U &&
+         *sequence > std::numeric_limits<std::uint64_t>::max() -
+                         measured_current_sequence)) {
+      throw std::overflow_error(
+          "M1 equal-time test observer sequence cannot be remapped.");
+    }
+    *sequence = *sequence == 1U ? measured_current_sequence
+                                : measured_current_sequence + *sequence;
+  };
+  for (I1ObservedCurrentGeneration& event :
+       measured.observations.current_generations) {
+    remap_sequence(&event.causal_sequence);
+  }
+  for (I1ObservedServiceStart& event : measured.observations.service_starts) {
+    remap_sequence(&event.causal_sequence);
+  }
+  for (I1ObservedCancellation& event : measured.observations.cancellations) {
+    remap_sequence(&event.causal_sequence);
+  }
+  for (I1ObservedTerminal& event : measured.observations.terminals) {
+    remap_sequence(&event.causal_sequence);
+  }
+  for (I1ObservedVisibleOutput& event : measured.observations.visible_outputs) {
+    remap_sequence(&event.causal_sequence);
+  }
+  for (I1ObservedRunLifecycleTransition& event :
+       measured.observations.run_quiescences) {
+    remap_sequence(&event.causal_sequence);
+  }
+  for (I1ObservedRunLifecycleTransition& event :
+       measured.observations.resource_settlements) {
+    remap_sequence(&event.causal_sequence);
+  }
+  for (I1ObservedHostSettlement& event :
+       measured.observations.host_settlements) {
+    remap_sequence(&event.causal_sequence);
+  }
+  remap_sequence(&measured.observation_cut.causal_sequence);
+
+  I1EpisodeEvidenceInput& final_warmup =
+      input->interactive_sources[final_warmup_index].episode;
+  const auto warmup_current =
+      std::find_if(final_warmup.observations.current_generations.begin(),
+                   final_warmup.observations.current_generations.end(),
+                   [](const I1ObservedCurrentGeneration& current) {
+                     return current.edit_index + 1U == kI1EditCount;
+                   });
+  const auto warmup_visible =
+      std::find_if(final_warmup.observations.visible_outputs.begin(),
+                   final_warmup.observations.visible_outputs.end(),
+                   [](const I1ObservedVisibleOutput& visible) {
+                     return visible.edit_index + 1U == kI1EditCount;
+                   });
+  if (warmup_current == final_warmup.observations.current_generations.end() ||
+      warmup_visible == final_warmup.observations.visible_outputs.end() ||
+      warmup_current->generation != warmup_visible->generation ||
+      !final_warmup.observations.cancellations.empty()) {
+    throw std::invalid_argument(
+        "M1 equal-time test final-warmup source is malformed.");
+  }
+  const std::uint64_t cancellation_sequence =
+      cancellation_follows_current ? measured_current_sequence + 1U
+                                   : measured_current_sequence - 1U;
+  final_warmup.observations.cancellations.push_back(I1ObservedCancellation{
+      kI1EditCount - 1U, warmup_visible->run_id, warmup_current->generation,
+      compute::ComputeRunCancellationReason::Superseded, boundary,
+      cancellation_sequence});
+  final_warmup.observation_cut.causal_sequence = std::max(
+      final_warmup.observation_cut.causal_sequence, cancellation_sequence + 1U);
+
+  synchronize_m1_test_i1_occurrence(input, final_warmup_index);
+  synchronize_m1_test_i1_occurrence(input, measured_zero_index);
+}
+
+/**
+ * @brief Reverses only the equal-time cancellation/current canonical order.
+ * @param canonical Complete source-closed canonical M1 test row containing the
+ * `(B,n)` measured current and exactly one `(B,n+1)` warmup cancellation.
+ * @return Re-encoded row whose cancellation sequence is `n-1` while every
+ * retained projection, verdict claim, and enclosing field remains unchanged.
+ * @throws std::invalid_argument for malformed or unexpected canonical input.
+ * @throws Canonical framing and allocation failures unchanged.
+ * @note This mutation deliberately creates a source/current-hold closure
+ * contradiction for strict reader and fully rehashed outer-envelope tests.
+ */
+inline std::string reverse_m1_test_equal_time_cancellation_order(
+    std::string canonical) {
+  const auto encode_records = [](const std::vector<std::string>& records) {
+    std::string encoded = std::to_string(records.size()) + ":";
+    for (const std::string& record : records) {
+      encoded.append(b1_environment_frame(record));
+    }
+    return encoded;
+  };
+
+  B1CanonicalManifest manifest = parse_b1_canonical_manifest(canonical);
+  if (manifest.fields.size() != 20U) {
+    throw std::invalid_argument(
+        "M1 equal-time canonical test row has unexpected field count.");
+  }
+  std::vector<std::string> sources =
+      parse_b1_framed_list(manifest.fields[5U].payload);
+  constexpr std::size_t final_warmup_index =
+      kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+  if (sources.size() != kM1TotalI1OriginCount) {
+    throw std::invalid_argument(
+        "M1 equal-time canonical test row has unexpected source count.");
+  }
+  std::vector<std::string> source =
+      parse_b1_fixed_record(sources[final_warmup_index], 5U);
+  std::vector<std::string> episode = parse_b1_fixed_record(source[4U], 14U);
+  std::vector<std::string> observations =
+      parse_b1_fixed_record(episode[9U], 9U);
+  std::vector<std::string> cancellations =
+      parse_b1_framed_list(observations[2U]);
+  if (cancellations.size() != 1U) {
+    throw std::invalid_argument(
+        "M1 equal-time canonical test row lacks one cancellation.");
+  }
+  std::vector<std::string> cancellation =
+      parse_b1_fixed_record(cancellations[0U], 6U);
+  const std::uint64_t following_sequence =
+      parse_b1_canonical_uint64(cancellation[5U]);
+  if (following_sequence <= 2U) {
+    throw std::invalid_argument(
+        "M1 equal-time canonical cancellation cannot move before current.");
+  }
+  cancellation[5U] = std::to_string(following_sequence - 2U);
+  cancellations[0U] = encode_b1_fixed_record(cancellation);
+  observations[2U] = encode_records(cancellations);
+  episode[9U] = encode_b1_fixed_record(observations);
+  source[4U] = encode_b1_fixed_record(episode);
+  sources[final_warmup_index] = encode_b1_fixed_record(source);
+  manifest.fields[5U].payload = encode_records(sources);
+  return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
 }
 
 /**

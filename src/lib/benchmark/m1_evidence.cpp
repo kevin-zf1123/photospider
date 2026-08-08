@@ -179,6 +179,27 @@ bool m1_observation_precedes(std::chrono::steady_clock::time_point lhs_time,
 }
 
 /**
+ * @brief Tests whether one cancellation strictly follows measured current.
+ * @param cancellation Final-warmup cancellation observation to classify.
+ * @param measured_current Unique measured edit-zero current publication, or
+ * null when the retained source cannot bind one.
+ * @return True only when both events share the M1 observer domain and the
+ * measured-current coordinate lexicographically precedes cancellation.
+ * @throws Nothing.
+ * @note The sequence belongs to the replicate-wide M1 observation fanout. It
+ * must never be compared with the independent row-local accepted coordinate.
+ * Missing current evidence and duplicate coordinates fail closed.
+ */
+bool m1_cancellation_follows_measured_current(
+    const I1ObservedCancellation& cancellation,
+    const I1ObservedCurrentGeneration* measured_current) noexcept {
+  return measured_current != nullptr &&
+         m1_observation_precedes(
+             measured_current->observed_at, measured_current->causal_sequence,
+             cancellation.observed_at, cancellation.causal_sequence);
+}
+
+/**
  * @brief Finds exactly one current-generation record for an edit.
  * @param source Complete retained Issue #93 source.
  * @param edit_index Exact zero-based edit identity.
@@ -244,7 +265,10 @@ struct M1AdmissionSourceProjection final {
  * @return Source-only admission/current-hold projection.
  * @throws std::invalid_argument for cardinality or boundary identities.
  * @note The rule reads no retained `first_measured_admission` field and is
- * therefore shared unchanged by the producer and canonical reader.
+ * therefore shared unchanged by the producer and canonical reader. Strictly
+ * pre-B cancellation remains invalid. At B or later, only a cancellation that
+ * strictly follows the measured-current publication in the replicate-wide M1
+ * observer coordinate is ordinary accepted-coordinate supersession.
  */
 M1AdmissionSourceProjection derive_m1_admission_source_projection(
     const std::vector<M1InteractiveSourceEvidence>& interactive_sources) {
@@ -286,26 +310,33 @@ M1AdmissionSourceProjection derive_m1_admission_source_projection(
       same_m1_accepted_coordinate(measured_current->accepted_coordinate,
                                   measured_first_edit.accepted_coordinate) &&
       measured_current->observed_at >= measured_first_edit.admission_sample;
+  const I1ObservedCurrentGeneration* bound_measured_current =
+      measured_coordinate_bound ? measured_current : nullptr;
   const bool warmup_coordinate_bound =
       warmup_current != nullptr && warmup_current->generation != 0U &&
       same_m1_accepted_coordinate(warmup_current->accepted_coordinate,
                                   warmup_final_edit.accepted_coordinate);
-  const bool warmup_cancelled_by_measurement =
+  const bool warmup_cancelled_before_measured_current =
       warmup_coordinate_bound &&
       std::any_of(
           final_warmup.episode.observations.cancellations.begin(),
           final_warmup.episode.observations.cancellations.end(),
-          [&warmup_current,
+          [&warmup_current, &bound_measured_current,
            &measured_first_edit](const I1ObservedCancellation& cancellation) {
             return cancellation.edit_index == kI1EditCount - 1U &&
                    cancellation.generation == warmup_current->generation &&
-                   cancellation.observed_at <= measured_first_edit.nominal_time;
+                   (cancellation.observed_at <
+                        measured_first_edit.nominal_time ||
+                    (cancellation.observed_at ==
+                         measured_first_edit.nominal_time &&
+                     !m1_cancellation_follows_measured_current(
+                         cancellation, bound_measured_current)));
           });
   const bool warmup_publication_current =
       warmup_coordinate_bound && warmup_visible != nullptr &&
       warmup_current->observed_at <= warmup_visible->observed_at &&
       warmup_visible->observed_at < measured_first_edit.nominal_time &&
-      !warmup_cancelled_by_measurement;
+      !warmup_cancelled_before_measured_current;
   const bool replacement_ordered =
       warmup_publication_current && measured_coordinate_bound &&
       m1_observation_precedes(
@@ -314,17 +345,14 @@ M1AdmissionSourceProjection derive_m1_admission_source_projection(
   const bool boundary_only_cancellation = std::any_of(
       final_warmup.episode.observations.cancellations.begin(),
       final_warmup.episode.observations.cancellations.end(),
-      [&measured_current, &measured_first_edit,
+      [&bound_measured_current, &measured_first_edit,
        &warmup_current](const I1ObservedCancellation& cancellation) {
         return cancellation.edit_index == kI1EditCount - 1U &&
                warmup_current != nullptr &&
                cancellation.generation == warmup_current->generation &&
                cancellation.observed_at >= measured_first_edit.nominal_time &&
-               (measured_current == nullptr ||
-                m1_observation_precedes(cancellation.observed_at,
-                                        cancellation.causal_sequence,
-                                        measured_current->observed_at,
-                                        measured_current->causal_sequence));
+               !m1_cancellation_follows_measured_current(
+                   cancellation, bound_measured_current);
       });
 
   M1AdmissionSourceProjection projection;

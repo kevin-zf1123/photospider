@@ -1264,6 +1264,124 @@ TEST(M1Profile, RejectsFinalWarmupRawCurrentHoldDriftBeforeProtocolReturn) {
 }
 
 /**
+ * @brief Orders equal-time supersession by the M1 observer coordinate.
+ *
+ * The source-positive case retains measured current `(B,n)` followed by the
+ * displaced final-warmup cancellation `(B,n+1)`. It must keep current hold,
+ * avoid boundary-only classification, close source replay, and round-trip
+ * canonically. Moving only cancellation to `(B,n-1)` must instead fail the
+ * source/current-hold gate in both direct and canonical-reader paths.
+ *
+ * @throws GoogleTest assertion control, replay, canonical, and allocation
+ * failures.
+ * @note The final-warmup fixture has already published a successful visible
+ * output, so its added accepted cancellation is independently Invalid under
+ * Issue #93. This test requires M1 source projection/closure correctness and
+ * intentionally does not weaken that separate Run contract.
+ */
+TEST(M1Profile, OrdersEqualTimeSupersessionByObserverSequence) {
+  const auto has_reason = [](const M1InnerRow& row, std::string_view needle) {
+    return std::any_of(row.validity_reasons.begin(), row.validity_reasons.end(),
+                       [needle](const std::string& reason) {
+                         return reason.find(needle) != std::string::npos;
+                       });
+  };
+
+  M1InnerRowInput following = make_passing_inner_row_input();
+  testing::configure_m1_test_equal_time_supersession(&following, true);
+  const M1SourceFairnessProjection following_projection =
+      derive_m1_source_fairness_projection(following.protocol,
+                                           following.interactive_sources,
+                                           following.batch_sources);
+  EXPECT_TRUE(following_projection.first_measured_admission
+                  .warmup_publication_current_before_acceptance);
+  EXPECT_TRUE(following_projection.first_measured_admission
+                  .superseded_exactly_at_acceptance);
+  EXPECT_FALSE(
+      following_projection.first_measured_admission.boundary_only_cancellation);
+  ASSERT_TRUE(following.interactive_sources[8U]
+                  .episode.edits[0U]
+                  .accepted_coordinate.has_value());
+  ASSERT_FALSE(following.interactive_sources[8U]
+                   .episode.observations.current_generations.empty());
+  EXPECT_NE(following.interactive_sources[8U]
+                .episode.edits[0U]
+                .accepted_coordinate->event_sequence(),
+            following.interactive_sources[8U]
+                .episode.observations.current_generations.front()
+                .causal_sequence);
+
+  testing::attach_m1_test_source_fairness_projection(&following);
+  const M1ProtocolSummary following_protocol =
+      evaluate_m1_protocol(following.protocol);
+  EXPECT_EQ(following_protocol.verdict, I1Verdict::Invalid);
+  EXPECT_TRUE(std::any_of(
+      following_protocol.validity_reasons.begin(),
+      following_protocol.validity_reasons.end(), [](const std::string& reason) {
+        return reason.find("I1 inner evidence is invalid") != std::string::npos;
+      }));
+  const M1InnerRow following_row = evaluate_m1_inner_row(std::move(following));
+  EXPECT_TRUE(following_row.source_evidence_closed);
+  EXPECT_EQ(following_row.overall_verdict, I1Verdict::Invalid);
+  EXPECT_FALSE(has_reason(following_row, "current hold differs"));
+  EXPECT_FALSE(has_reason(following_row,
+                          "source-derived admission/fairness replay failed"));
+
+  const M1FairnessObservationSnapshot observations =
+      make_passing_observation_snapshot(following_row);
+  const std::string canonical =
+      materialize_m1_inner_row(following_row, observations);
+  const M1CanonicalReplay replay =
+      parse_and_recompute_m1_inner_row(canonical, 1U);
+  EXPECT_TRUE(replay.row.source_evidence_closed);
+  EXPECT_TRUE(replay.row.evidence.protocol.first_measured_admission
+                  .warmup_publication_current_before_acceptance);
+  EXPECT_FALSE(replay.row.evidence.protocol.first_measured_admission
+                   .boundary_only_cancellation);
+  EXPECT_FALSE(has_reason(replay.row, "current hold differs"));
+  EXPECT_FALSE(has_reason(replay.row,
+                          "source-derived admission/fairness replay failed"));
+  EXPECT_EQ(materialize_m1_inner_row(replay.row, replay.observations),
+            canonical);
+
+  const std::string reversed_canonical =
+      testing::reverse_m1_test_equal_time_cancellation_order(canonical);
+  EXPECT_THROW(parse_and_recompute_m1_inner_row(reversed_canonical, 1U),
+               std::invalid_argument);
+
+  M1InnerRowInput preceding = make_passing_inner_row_input();
+  testing::configure_m1_test_equal_time_supersession(&preceding, true);
+  testing::attach_m1_test_source_fairness_projection(&preceding);
+  constexpr std::size_t final_warmup_index =
+      kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+  std::vector<I1ObservedCancellation>& cancellations =
+      preceding.interactive_sources[final_warmup_index]
+          .episode.observations.cancellations;
+  ASSERT_EQ(cancellations.size(), 1U);
+  ASSERT_GT(cancellations.front().causal_sequence, 2U);
+  cancellations.front().causal_sequence -= 2U;
+  const M1SourceFairnessProjection preceding_projection =
+      derive_m1_source_fairness_projection(preceding.protocol,
+                                           preceding.interactive_sources,
+                                           preceding.batch_sources);
+  EXPECT_FALSE(preceding_projection.first_measured_admission
+                   .warmup_publication_current_before_acceptance);
+  EXPECT_TRUE(
+      preceding_projection.first_measured_admission.boundary_only_cancellation);
+  const M1InnerRow preceding_row = evaluate_m1_inner_row(std::move(preceding));
+  EXPECT_FALSE(preceding_row.source_evidence_closed);
+  EXPECT_EQ(preceding_row.overall_verdict, I1Verdict::Invalid);
+  EXPECT_TRUE(has_reason(
+      preceding_row,
+      "M1 first admission/current hold differs from retained raw sources"));
+  EXPECT_TRUE(has_reason(
+      preceding_row,
+      "M1 final-warmup current hold differs from retained raw sources"));
+  EXPECT_FALSE(has_reason(preceding_row,
+                          "source-derived admission/fairness replay failed"));
+}
+
+/**
  * @brief Proves one passing producer row round-trips through strict replay.
  * @throws GoogleTest assertion control and canonical/evaluator failures.
  */

@@ -151,6 +151,8 @@ struct M1EnvelopeDenominatorOptions final {
   /** @brief M1 nested isolated-B1 numerator claim. */
   std::uint64_t m1_inner_b1_successful_operations =
       kB1MeasuredJobCount * kB1SiteOperationsPerJob;
+  /** @brief Whether nested M1 sources model equal-time supersession at B. */
+  bool m1_equal_time_supersession = false;
   /** @brief Optional test-only rewrite applied before outer addressing. */
   std::function<std::string(std::string)> rewrite_m1_inner;
 };
@@ -278,6 +280,9 @@ std::string make_test_m1_inner(const M1EnvelopeDenominatorOptions& options) {
                                         false});
   }
   testing::attach_m1_test_i1_sources(&input);
+  if (options.m1_equal_time_supersession) {
+    testing::configure_m1_test_equal_time_supersession(&input, true);
+  }
   const B1JobInstance job{kM1WorkloadId,   1U, B1JobPhase::Cold, 0U,
                           kB1ColdJobIndex, 8U};
   input.protocol.batch_offers.push_back(
@@ -1033,6 +1038,78 @@ TEST(EvidenceEnvelope, RejectsClosedNestedM1SchemaDriftAfterRehash) {
     EXPECT_EQ(
         validate_evidence_corpus(fixture.corpus, fixture.root_digest).verdict,
         I1Verdict::Invalid);
+  }
+}
+
+/**
+ * @brief Keeps `(B,n)` current then `(B,n+1)` cancellation source-closed.
+ * @throws GoogleTest assertion control and fixture/canonical failures.
+ * @note The nested row remains independently Invalid under Issue #93 because
+ * the synthetic final-warmup Run has both visible success and cancellation;
+ * the outer corpus must still accept its exact, source-closed evidence.
+ */
+TEST(EvidenceEnvelope,
+     KeepsEqualTimeFollowingSupersessionClosedAfterOuterRehash) {
+  const auto nested = std::make_shared<std::string>();
+  M1EnvelopeDenominatorOptions options;
+  options.m1_equal_time_supersession = true;
+  options.rewrite_m1_inner = [nested](std::string source) {
+    *nested = source;
+    return source;
+  };
+  const M1EnvelopeFixture fixture = make_m1_fixture(options);
+  const EvidenceCorpusValidation validation =
+      validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+  EXPECT_EQ(validation.verdict, I1Verdict::Pass)
+      << (validation.reasons.empty() ? "no diagnostic"
+                                     : validation.reasons.front());
+  EXPECT_TRUE(validation.reasons.empty());
+
+  const M1CanonicalReplay replay =
+      parse_and_recompute_m1_inner_row(*nested, 1U);
+  EXPECT_TRUE(replay.row.source_evidence_closed);
+  EXPECT_EQ(replay.row.overall_verdict, I1Verdict::Invalid);
+  EXPECT_TRUE(replay.row.evidence.protocol.first_measured_admission
+                  .warmup_publication_current_before_acceptance);
+  EXPECT_FALSE(replay.row.evidence.protocol.first_measured_admission
+                   .boundary_only_cancellation);
+  EXPECT_FALSE(std::any_of(
+      replay.row.validity_reasons.begin(), replay.row.validity_reasons.end(),
+      [](const std::string& reason) {
+        return reason.find("current hold differs") != std::string::npos ||
+               reason.find("source-derived admission/fairness replay failed") !=
+                   std::string::npos;
+      }));
+  EXPECT_EQ(materialize_m1_inner_row(replay.row, replay.observations), *nested);
+}
+
+/**
+ * @brief Rejects `(B,n-1)` cancellation after every outer address is rehashed.
+ * @throws GoogleTest assertion control and fixture/canonical failures.
+ * @note Only the nested raw cancellation sequence changes; retained positive
+ * current-hold projection and already-Invalid Issue #93 verdicts stay fixed.
+ */
+TEST(EvidenceEnvelope,
+     RejectsRehashedEqualTimeCancellationBeforeMeasuredCurrent) {
+  const auto nested = std::make_shared<std::string>();
+  M1EnvelopeDenominatorOptions options;
+  options.m1_equal_time_supersession = true;
+  options.rewrite_m1_inner = [nested](std::string source) {
+    *nested = testing::reverse_m1_test_equal_time_cancellation_order(
+        std::move(source));
+    return *nested;
+  };
+  const M1EnvelopeFixture fixture = make_m1_fixture(options);
+  const EvidenceCorpusValidation validation =
+      validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+  EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+  try {
+    static_cast<void>(parse_and_recompute_m1_inner_row(*nested, 1U));
+    FAIL() << "reversed equal-time cancellation unexpectedly replayed";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(std::string(error.what())
+                  .find("source evidence is not exactly replayable"),
+              std::string::npos);
   }
 }
 
