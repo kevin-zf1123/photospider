@@ -165,6 +165,13 @@ mutation；任何拒绝都会通过不抛异常的 RAII 释放暂存 grant。
 operation gate，直到 provider exit 或 callback skip；即使 cancellation 或 failure 已清除
 其 queued sibling 也不例外。
 
+Observation sink 可以在 route commit 前立刻、在 Run terminal arbiter 下预留 service-start
+causal coordinate。该 coordinate 是 staged observation，而不是 committed start 的证明：
+commit 返回 false 时会调用 sink 的显式 abort，且不发布 callback；commit 成功后则让
+它保持 open，直到 callback delivery 完成。M1 reservation entry/completion frontier 因而为
+reserve → commit → callback/abort 建立 fence，也覆盖 copied record count 仍未变化的两个
+间隙。
+
 重验后 execution grant 暂时耗尽不属于 plugin fault 或 obsolete-decision retry。ready
 store 只在该 worker 的当前 cycle 中标记精确 candidate/version，并在不移除 entry、不释放
 ready grant、也不 charge fairness 的情况下重算 class/frontier selection。这样，独立的较低
@@ -642,7 +649,8 @@ semantic/I/O observation source。Receipt field 只作为 observation 被复制�
 latency/service/四 verdict projection 与 B1 verified-endpoint/waste projection；并使用与 runner
 相同的 checked 规则，从 source 推导并精确匹配全部三十个 progress window、全部三十个 Graph
 A/B service/demand window、全部 480 个 measured headroom outcome 及其 attempted/classified/
-failure aggregate。随后它精确校验其余 mixed observation，复用 production protocol/fairness/
+failure aggregate。该 source gate 还会推导并精确匹配 first measured admission/current hold，
+并在 protocol 提前返回前运行。随后它精确校验其余 mixed observation，复用 production protocol/fairness/
 waste/memory/B1-I/O evaluator，重新计算全部五个轴与 overall，精确匹配六个 retained verdict，并要求逐 byte 相同
 的重新物化。即使 row 已经为 `Invalid`，source closure 仍是独立的 materialization gate。
 因此，未知、重复、缺失、重排、截断、非规范、被篡改、source/projection 不匹配或 verdict
@@ -651,6 +659,13 @@ I1/B1 diagnostic JSON；它与仅具有 denominator 权威的 pair pack 都不�
 receipt、live storage authority 或 machine conformance。`m1_shared_benchmark` 继续是
 CTest/CI 之外的手工 `EXCLUDE_FROM_ALL` target，本文不声明已完成精确 timed
 three-replicate M1 corpus。
+
+Mixed observer 会在一个有界 lock-free atomic gate 内采样 steady time 并分配下一个 causal
+sequence，因此 sequence 顺序蕴含 time 非递减。它接受 task-semantic start/terminal record
+中从零开始的 task zero。M1 memory replay 还独立要求每个 Host component 与稳定 device
+identity 满足 `reserved <= lifetime_high_water <= limit`，且 lifetime high-water 在 temporal
+cut 之间非递减。Nested observation snapshot 仍为十个 field，v2 manifest 仍精确为二十个
+field；这些属于语义修正，不是 schema-version 扩展。
 
 ## 实现与验证入口
 

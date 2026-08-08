@@ -1534,14 +1534,30 @@ or settlement causally produced for that old generation retains its later
 event sequence and immutable warmup phase, while its post-boundary physical
 effects remain measured-window evidence.
 
-The observer boundary is stable only when the callback lifecycle and slot
-publication lifecycle are both closed. Every callback advances bounded entry
-and completion frontiers around its whole attempt, while reservation and
-release publication advance separate claimed and contiguous-published
-frontiers. The boundary snapshot copies only the published prefix and compares
-all four frontiers before and after copying. Equal record counts do not prove
-quiescence; a callback paused after claim and before publication makes the cut
+The first measured admission and final-warmup current-hold exception are
+recomputed solely from the complete final-warmup and measured-zero Issue #93
+sources. One shared producer/reader rule checks the accepted coordinate, Host
+success, product-bound current and visible records, replacement order,
+boundary-only cancellation, and old settlement facts before protocol evaluation
+may return early. A separately invalid protocol fact cannot conceal a source
+contradiction, including after all six verdicts and enclosing addresses are
+synchronized.
+
+The observer boundary is stable only when the coordinate reservation lifecycle
+and slot publication lifecycle are both closed. Reservation entry advances
+before route commit and remains open until callback delivery completes or a
+rejected commit explicitly aborts it. Event-producing callbacks
+separately advance claimed and contiguous-published slot frontiers. The
+boundary snapshot copies only the published prefix and compares all four
+frontiers before and after copying. Equal record counts do not prove
+quiescence; a pause after reserve, after commit, or after claim makes the cut
 invalid.
+
+The observer samples steady time and assigns the next nonzero causal sequence
+inside one bounded lock-free atomic gate. Increasing sequence therefore implies
+nondecreasing time under concurrent reservations. Local task identity is zero-
+based: task zero is valid for start and terminal events under their charge
+rules, while non-task kinds alone use zero as a sentinel scalar.
 
 If a same-timestamp lifecycle event orders before the boundary, the snapshot
 reflects its new state; if it orders after, it is a cross-boundary event. A
@@ -1812,6 +1828,12 @@ final settlement; it does not establish physical memory ownership and does not
 replace RSS or ledger/device ownership evidence. No authoritative dimension
 may exceed its frozen limit. An isolated row must settle exactly to its pre-row
 baseline; M1 shutdown must settle to zero.
+
+Every ordered Host cut and every stable configured-device identity must also
+satisfy `reserved <= lifetime_high_water <= limit` componentwise. Lifetime
+high-water is nondecreasing for the same authority. Reserved above high-water
+or a declining high-water is structural invalidity; high-water above limit
+remains an independent memory failure.
 
 For I2 with Metal configured, the exact row-scoped resident release occurs
 after second-reuse evidence is copied and before the final row snapshot. The
@@ -2158,7 +2180,7 @@ excluded from the default build and CTest, and neither an exact three-replicate
 B1 corpus nor #96 composition is asserted here.
 
 The current #96 source tree composes the exact mixed protocol and five-axis
-evaluator, retains callback entry/completion and claim/publication frontiers at
+evaluator, retains reservation entry/completion and claim/publication frontiers at
 the B boundary, and exactly replays lifecycle cursors, capture ordinals, pages,
 Graph/candidate/bundle/Run/generation causality, and all nine registry-derived
 counters for memory closure. Six independently sampled physical counters are
@@ -2176,10 +2198,11 @@ episode inputs and exactly one complete Issue #95 physical/output/golden/
 semantic/I/O observation source per B1 offer, with receipt values copied
 without their store-private capability. Corpus replay exact-joins source
 identities, recomputes the I1 occurrence projections and B1 verified-endpoint/
-waste projection, then source-derives and exact-matches all thirty progress
-windows, all thirty Graph A/B service/demand windows, all 480 measured headroom
-outcomes, and their attempted/classified/failure aggregate before the five axis
-verdicts plus overall. The runner and reader use the same checked projection
+waste projection, then source-derives and exact-matches first measured
+admission/current hold, all thirty progress windows, all thirty Graph A/B
+service/demand windows, all 480 measured headroom outcomes, and their attempted/
+classified/failure aggregate before the five axis verdicts plus overall. This
+source gate runs before protocol early return. The runner and reader use the same checked projection
 implementation and require byte-identical canonical rematerialization. Source closure is
 mandatory even when another defect already makes the row `Invalid`. Redundant
 full I1/B1 diagnostic JSON is omitted. Outer row and bundle schemas remain
@@ -2187,6 +2210,10 @@ version one, pair packs remain denominator-only, and retained bytes do not mint
 output, storage, or machine authority. These mechanisms and deterministic tests
 do not assert a timed three-replicate corpus, complete live storage
 authority, Windows runtime execution, or machine conformance.
+
+The nested observation snapshot remains exactly ten fields and the v2 manifest
+remains exactly twenty fields; these corrections change the frontier meaning,
+not the schema version or field counts.
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

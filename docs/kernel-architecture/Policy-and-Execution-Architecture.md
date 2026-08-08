@@ -195,6 +195,14 @@ dependency release, and Run settlement also release their owned state exactly
 once. A started callback retains its operation gate until provider exit or
 callback skip, even if cancellation or failure purges its queued siblings.
 
+An observation sink may reserve the service-start causal coordinate under the
+Run terminal arbiter immediately before the route commit. That coordinate is a
+staged observation, not proof of a committed start: a false commit
+invokes the sink's explicit abort and publishes no callback, while successful
+commit keeps it open until callback delivery completes. M1 reservation
+entry/completion frontiers therefore fence reserve → commit → callback/abort,
+including the two gaps in which a copied record count is still unchanged.
+
 Temporary execution-grant exhaustion after revalidation is not a plugin fault
 or obsolete-decision retry. The ready store marks the exact candidate/version
 only for that worker's current cycle and recomputes class/frontier selection
@@ -809,9 +817,11 @@ parsing never mints a `B1OutputCommitReceipt` or live storage capability. Every
 one of the thirty retained progress durations must equal exactly one second.
 An independent corpus reader exact-joins source identity and order, replays the
 I1 latency/service/four-verdict and B1 verified-endpoint/waste projections, and
-uses the runner's same checked rule to source-derive and exact-match all thirty
-progress windows, all thirty Graph A/B service/demand windows, all 480 measured
-headroom outcomes, and their attempted/classified/failure aggregate. It then
+uses the runner's same checked rule to source-derive and exact-match first
+measured admission/current-hold, all thirty progress windows, all thirty Graph
+A/B service/demand windows, all 480 measured headroom outcomes, and their
+attempted/classified/failure aggregate. The source gate runs before protocol
+early return. It then
 exact-checks the remaining mixed observations, reuses the production protocol/
 fairness/waste/memory/B1-I/O evaluators, recomputes all five axes plus overall,
 exact-matches the six retained verdicts, and requires byte-identical
@@ -824,6 +834,16 @@ denominator-only pair packs mint portable output receipts, live storage
 authority, or machine conformance. `m1_shared_benchmark` remains a manual
 `EXCLUDE_FROM_ALL` target outside CTest/CI, and this document does not claim an
 exact timed three-replicate M1 corpus.
+
+The mixed observer samples steady time and allocates its next causal sequence
+inside one bounded lock-free atomic gate, so sequence order implies
+nondecreasing time. It accepts zero-based task zero for task-semantic start and
+terminal records. M1 memory replay independently requires every Host component
+and stable device identity to satisfy
+`reserved <= lifetime_high_water <= limit`, with nondecreasing lifetime
+high-water across temporal cuts. The nested observation snapshot remains ten
+fields and the v2 manifest remains exactly twenty fields; these are semantic
+corrections, not a schema-version expansion.
 
 ## Implementation and Validation Entry Points
 

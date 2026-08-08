@@ -493,6 +493,13 @@ service Jain p05、至多三次适用的 Interactive start，以及全部 480 �
 的完整分类。Environment pairing 原样委托给 base-only I1 与完整 eligible B1-cap-eight
 relation。
 
+第一次 measured admission 与 final-warmup current hold 来自 source 推导，而不是 runner
+铸造。一条共享 producer/reader projection 会精确 join 保留的 final-warmup 与 measured-zero
+Issue #93 input，推导 accepted coordinate、Host success、product-bound current/visible
+replacement、boundary-only cancellation 与旧 settlement fact，并在 protocol evaluation 可能
+提前返回之前关闭这些 fact。因此 direct、canonical 与完整重新 hash 的 outer replay 会拒绝
+同一个 raw-source 矛盾，并重新计算同样六个 verdict。
+
 每次 service start 的 applicability 来自产品签发的 evidence cut，而不是根据 I1/B1 nominal
 interval 事后重建，也不是 scheduler-selection cut。`ExecutionService` 首先在 Run lifecycle、
 operation gate 与 physical route 允许选择时，把 ready lane 头视为 scheduler-selectable；暂时性的
@@ -512,16 +519,20 @@ diagnostic，不能重置或豁免任一规则。
 causal domain。`ComputeRunObservationFanout` 把同一个 authority-owned product coordinate
 转发给该 collector 与复用的 I1 或 B1 collector；它不会把 observer clock 与 I1 独立的
 accepted-row sequence 合并。Overflow、sequence exhaustion 或 tag/QoS 不一致都是 sticky
-fail-closed evidence。Source-private 的 `M1Host` 不增加 compute route：它从同一个 service
+fail-closed evidence。Coordinate allocation 会在同一个有界 lock-free atomic section 中
+采样 steady time 并分配下一个 sequence，因此并发下递增 causal sequence 保证
+`observed_at` 非递减。Local task identity 从零开始：start 与 terminal event 允许 task zero，
+只有 non-task event kind 才把零用作 scalar sentinel。Source-private 的 `M1Host` 不增加 compute route：它从同一个 service
 组合 Host/device ledger、Compute I/O、按 class 分区的 ready、lifecycle 与不可变 Throughput
 capacity/reserved snapshot。它唯一的 mutation 是幂等 evidence-finalization seam，且只有在
 全部 Graph 与 Host operation 已关闭后才合法。该 seam 会关闭同一个 execution service，使
 runner 能保留终态 `ServiceStopped` cut；它不是通用 compute、phase 或 lifecycle 控制面。
 
-Collector 的 boundary snapshot 现在同时闭合 callback lifetime 与 slot publication。有界
-callback-entry/completion frontier 围绕每次完整 attempt，而 claimed 与连续 release-published
-frontier 跟踪 slot prefix。只有四个 frontier 在 copy 前后完全对齐且未变化时，cut 才稳定；
-复制出的 vector size 相等不能隐藏停在 claim 与 publication 之间的 callback。
+Collector 的 boundary snapshot 同时闭合 coordinate reservation lifetime 与 slot
+publication。有界 reservation-entry frontier 在 route commit 前推进；匹配的 completion 只在
+callback delivery 后，或 commit 拒绝时显式 abort 后推进。Claimed 与连续
+release-published frontier 跟踪 event slot。只有四个 frontier 在 copy 前后完全对齐且未变化
+时，cut 才稳定；复制出的 vector size 相等不能隐藏 reserve 后、commit 后或 claim 后的暂停。
 
 M1 Compute I/O high-water 同样从 event 推导。每个 protocol B1 offer 必须精确解析到一个完整
 Issue #95 job stream；该 stream 包含 Initial、每次 executor 签发的 admission、每次匹配的
@@ -530,6 +541,12 @@ snapshot 与全局唯一 accounting sequence。缺失、重复、重排、未知
 transition 都会结构性 `Invalid`。稀疏 `M1Host` cut 只保留 current-state diagnostic，不能
 增加或修复 high-water；最终 process cut 仍必须归零。因此，即使短 I/O task 在两个稀疏 cut
 之间完整开始并结束，也仍会进入 event-derived maximum。
+
+Host ledger 与每个 identity 稳定的 configured device 还会保留逐 component lifetime
+envelope。每个 temporal cut 都必须满足
+`reserved <= lifetime_high_water <= limit`，同一 authority 的 lifetime high-water 必须
+非递减。Reserved 高于 high-water 或 high-water 发生下降属于结构性 `Invalid` evidence；
+high-water 高于 limit 仍属于独立 memory failure。
 
 Lifecycle evidence 以同样 fail-closed 的方式 replay。每个 temporal snapshot 保留 capture
 ordinal 与请求的 `after_cursor`。Validation 从 cursor zero 开始，要求精确 page chain、连续

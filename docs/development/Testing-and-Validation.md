@@ -1810,7 +1810,7 @@ The mandatory M1 pre-boundary input-grid oracle is:
 | Cold origin and settlement | At `(C^M1,c^M1)`, establish the sole cold I1 origin and offer Graph A seed 252 with `(phase=cold,cycle=0,attempt=0)` after the boundary marker; an equal-time I1 admission follows that offer. Require the I1 `Q_end=C^M1+683,333,337 ns` first-excluded history cut and B252 terminal/owner settlement/output removal before `W^M1`; the fixed 316,666,663 ns I1 guard does not move `W^M1`, and a miss is invalid rather than a drain. |
 | Warmup origins and count | At `(W^M1,w^M1)`, verify cold already settled and establish exactly `E^M1_warmup,k=W^M1+k*750,000,000 ns`, `k=0..6`. Reject an omitted/duplicate origin, another count/index, a phase-continuous grid back-derived from `C^M1`, or a delayed transition. |
 | Fixed warmup B1 offer protocol | At `W^M1`, offer B253 then A254 with `w^M1<sequence(B253)<sequence(A254)` and warmup cycle/attempt zero; an equal-time first I1 admission follows both. Offer B255 synchronously only when B253 becomes terminal, with a greater same-time sequence, and require B255 to have been offered before `(B^M1,b^M1)`. Graph A has no warmup successor. The offered prefix is protocol-fixed; only its incomplete subset is terminal-history-derived. |
-| Deterministic cross-`B^M1` I1 | Warmup origin `k=6` is exactly `B^M1-500,000,000 ns` and has `Q_end=B^M1+183,333,337 ns`; require that settlement-pending warmup occurrence/generation and its twelfth-edit publication in the `B^M1` snapshot, with that publication still current. It remains current until the first measured edit's success-only accepted coordinate `(A_0,event_sequence_0)`. At its unchanged `Q_end`, require only that old occurrence/generation to be quiescent and settled, not the concurrent measured generation or the whole shared service. |
+| Deterministic cross-`B^M1` I1 | Warmup origin `k=6` is exactly `B^M1-500,000,000 ns` and has `Q_end=B^M1+183,333,337 ns`; require that settlement-pending warmup occurrence/generation and its twelfth-edit publication in the `B^M1` snapshot, with that publication still current. It remains current until the first measured edit's success-only accepted coordinate `(A_0,event_sequence_0)`. Derive the full first-admission/current-hold record from the retained final-warmup and measured-zero Issue #93 sources through the shared producer/reader projection before protocol early return; never trust a runner-authored duplicate. At its unchanged `Q_end`, require only that old occurrence/generation to be quiescent and settled, not the concurrent measured generation or the whole shared service. |
 | Immutable attribution and temporal effect | Keep every event/result owned by the last warmup generation in `phase=warmup`, including cancellation or settlement caused after measured latest-wins supersession. Exclude its occurrence-owned values from measured aggregates, but include every post-`B^M1` start, contention, reservation/grant, Compute I/O, and high-water effect in time-windowed evidence. |
 | No hidden transition | Cold/warmup transitions do not pause, wait, cool, restart, rebuild queues, release shared resources, or shift a boundary. Retain all origins/counts/indexes, fixed offers, terminal-derived B255 transition, phase endpoints, and failures in the existing workload-manifest/measurement sections and recompute their digests without adding an outer field. |
 
@@ -1824,7 +1824,7 @@ The mandatory M1 phase-boundary scenario oracle is:
 | Carryover identity and FIFO | Preserve warmup phase/cycle/job/attempt, queue predecessor, admission state, reservation/grant, and owner settlement. Measured cycle-zero offers follow each Graph's already-offered warmup prefix even when queued/running; this transition alone bypasses predecessor-terminal offer timing. Subsequent measured offers resume the normal per-Graph rule and never advance or rewrite an incomplete warmup identity. |
 | Occurrence attribution | Attribute terminal/completed service, output bytes, latency, receipt/golden/digest, determinism, retry/duplicate/discarded service, waste, and settlement by immutable phase. Exclude warmup occurrence-owned quantities after `B^M1` from measured throughput, Jain service `x`, latency, determinism, and waste aggregates. |
 | Temporal scheduler/resource effects | Include every post-boundary phase's actual class starts, headroom failures, queue contention, reservations/grants, Compute I/O state, and Host/device/ready-memory high-water. Count a warmup Throughput start in the measured class-start rule while retaining measured-only Jain completed service. |
-| Failure and terminal settlement | Invalidate on warmup carryover failure, missing event evidence, a duplicate event sequence or non-total coordinate, phase/identity/FIFO rewrite, boundary-only cancellation, snapshot mismatch, or unproved settlement. At `(U^M1,u^M1)`, stop new measured offers without cancelling outstanding work; retain endpoints at or after the cutoff but exclude them from 30-second numerators, then require exact-zero teardown. Quiescence is not required at `B^M1`. |
+| Failure and terminal settlement | Invalidate on warmup carryover failure, missing event evidence, a duplicate event sequence or non-total coordinate, phase/identity/FIFO rewrite, boundary-only cancellation, source-derived first-admission/current-hold mismatch, snapshot mismatch, or unproved settlement. At `(U^M1,u^M1)`, stop new measured offers without cancelling outstanding work; retain endpoints at or after the cutoff but exclude them from 30-second numerators, then require exact-zero teardown. Quiescence is not required at `B^M1`. |
 | Existing-envelope evidence | Retain `C^M1`, `W^M1`, `B^M1`, `U^M1`, all phase intervals/origins/counts/indexes, fixed pre-boundary offers, actual terminal-derived transitions, tie/step order, carryover snapshot, phase joins, first measured offers, per-Graph predecessor/next-cycle counters, counter epochs, queue/start/terminal/receipt events, resource effects, failures, and final settlement in existing manifest/measurement sections and digests. Any deliberate rule change needs a new workload id; outer row/bundle fields remain 15/5. |
 
 The v1 resource profile is 32 CPU slots, 1 GiB Host retained memory, 512 MiB
@@ -2448,7 +2448,7 @@ samples and a median summary cannot hide a failed process.
 | Fairness | For a complete one-second window where both B1 Graphs retain unconsumed offered demand without a producer pause, `J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`, where `x` is completed `work_units + ceil(ready_bytes/4096)`. Zero total service is invalid; p05 Jain >=0.95. While both classes remain scheduler-selectable without child-capacity prefiltering, at most three Interactive starts precede Throughput selection. M1 counts only committed starts whose product facts report both classes evidence-startable, including child capacity. M1 also has zero headroom-caused Interactive admission failures and independently passes latency/progress. |
 | Determinism | For the same B1 job index across three replicates, fresh-process restart, and Run caps 1/8, typed logical `ContentDigest`, raw payload SHA-256, canonical manifest SHA-256, `execution-profile-semantic-trace-v1` SHA-256, and job-indexed logical/raw golden mismatch counts are all zero. |
 | Waste | `discarded_started_service / all_started_service`, using `work_units + ceil(ready_bytes/4096)`. Every started callback whose result cannot commit is charged; for a visible successful I1/I2 Run, only the earliest causal start of each `(run_id,local_task_id)` is useful and later duplicates/retries are discarded, while distinct tasks remain useful. Entered non-preemptible work drains honestly. I1/I2 Interactive <=0.25 per replicate, and M1 applies that bound to Interactive service alone; work starting after accepted cancellation/supersession is exactly zero and is counted independently from discarded work. I2 extra filesystem/codec, CPU-copy, readback, transfer, and allocation bytes are zero under its permitted first-transfer rule. Fault-free isolated/mixed B1 discarded/duplicate/retry service is zero. |
-| Memory | Independent high-water bytes for Host retained, Host scratch, ready bytes, and configured-device memory/scratch, plus B1 active Compute I/O tasks/planned bytes. No absolute limit exceed; isolated row-owned deltas and B1 I/O counts return to the pre-row baseline/zero, and M1 shutdown returns to zero. I2 exact row-scoped resident release occurs after second-reuse evidence and before the final snapshot; every configured device's complete memory-and-scratch `reserved` vector equals its pre-row baseline. Candidate B1/I2 peaks are <=105% of the pinned same-environment reference. Process RSS is diagnostic only. B1 planned-byte charge and event-aligned samples are mandatory, authoritative evidence for Compute I/O admission, planned-byte high-water, and final settlement; they do not establish physical memory ownership or replace RSS or ledger/device ownership evidence. |
+| Memory | Independent high-water bytes for Host retained, Host scratch, ready bytes, and configured-device memory/scratch, plus B1 active Compute I/O tasks/planned bytes. Every Host component and stable configured-device identity satisfies `reserved <= lifetime_high_water <= limit` componentwise, and lifetime high-water never declines across ordered captures for the same authority. Reserved above high-water or a declining high-water is structural Invalid; an over-limit high-water fails the axis. Isolated row-owned deltas and B1 I/O counts return to the pre-row baseline/zero, and M1 shutdown returns to zero. I2 exact row-scoped resident release occurs after second-reuse evidence and before the final snapshot; every configured device's complete memory-and-scratch `reserved` vector equals its pre-row baseline. Candidate B1/I2 peaks are <=105% of the pinned same-environment reference. Process RSS is diagnostic only. B1 planned-byte charge and event-aligned samples are mandatory, authoritative evidence for Compute I/O admission, planned-byte high-water, and final settlement; they do not establish physical memory ownership or replace RSS or ledger/device ownership evidence. |
 
 Each required dimension emits `pass`, `fail`, `invalid`, or a schema-defined
 `not-applicable`; there is no composite score. Missing source evidence,
@@ -2612,7 +2612,9 @@ mapping/proof, the single canonical encoder/digests, eligibility and
 root-containment evidence, and cap-1/cap-8 plus candidate/reference checks.
 Issue #96 reuses #93's accepted-boundary collector and the exact manifest bytes
 for M1, binds the first measured edit to `edit_index=0`, `A_0`, and its reserved
-sequence without redefining acceptance, implements the frozen
+sequence without redefining acceptance, derives that full admission and the
+final-warmup current-hold solely from the retained Issue #93 sources before any
+protocol early return, implements the frozen
 `C^M1`/`W^M1` pre-boundary protocol, independent producer-local cycles, the
 exact final-warmup current-hold/accepted-admission exception without redefining
 it, and the cutoff/carryover/phase-attribution boundary, and enforces its same-
@@ -2786,12 +2788,13 @@ has been executed.
 
 Issue #96 registers the deterministic M1 contract in `test_m1_profile`,
 `test_evidence_envelope`, and, when the repository OpenCV operation provider is
-enabled, `test_m1_product_path`; the existing `ExecutionServicePolicy` cases in
-`test_compute_run` remain focused scheduler-policy guards. The unit suites
+enabled, `test_m1_product_path`; focused `test_compute_run` cases also prove the
+service-start coordinate reservation/commit/callback-or-abort fence. The unit suites
 check exact C/W/B/U arithmetic, the 1/7/40 origin grid, fixed warmup offers,
 carryover/current-hold evidence, independent producer-local cycles, all five
-axes, unknown-enum fail-closed behavior, finite lock-free callback publication,
-same-coordinate fanout, unchanged base-only-I1/full-B1 environment delegation,
+axes, unknown-enum fail-closed behavior, legal zero-based task zero, finite
+lock-free callback publication, sequence/time monotonicity under concurrent
+reservation, same-coordinate fanout, unchanged base-only-I1/full-B1 environment delegation,
 canonical golden digests, functional keys, exact-one/DAG resolution, and
 incomplete live authority. They also reject substituted isolated-I1 sources,
 omitted isolated-B1 outcomes, omitted M1 raw windows, outer/inner claim
@@ -2799,9 +2802,13 @@ tampering, denominator/source mismatches, missing/duplicate/reordered/unknown/
 over-limit I/O transitions, and nonzero final I/O state. A dedicated regression
 keeps every sparse temporal I/O current value at zero while proving that a
 short accepted/settled task still raises the event-derived high-water. The
-callback-boundary regression pauses after slot claim but before release
-publication and proves that unchanged copied-record counts cannot satisfy the
-entry/completion/claim/published cut. Lifecycle replay regressions use one
+observer-boundary regressions pause after coordinate reserve, after route
+commit, and after slot claim; they prove that unchanged copied-record counts
+cannot satisfy the reservation-entry/completion/claim/published cut. A
+test-product-only route-commit rejection proves explicit coordinate abort, no
+start publication, successful retry, and exact final frontier closure. The
+static product consumer smoke forbids that probe symbol in the production
+archive. Lifecycle replay regressions use one
 producer-faithful multi-Graph history with registration and candidate rollback,
 group plus standalone admission, and legal cross-bundle phase interleaving.
 They mutate each of the nine registry-derived counters in turn and reject
@@ -2826,6 +2833,13 @@ capacity-ready classes are both true. The positive and negative class-start
 cases distinguish a real dual-evidence-startable fourth Interactive start from
 nominal interval overlap. Timeouts are deadlock diagnostics, not latency
 thresholds.
+
+Memory regressions independently reject Host reserved-above-high-water, device
+reserved-above-high-water, and per-device declining lifetime high-water. Source
+closure regressions alter first measured admission/current hold directly, via
+canonical nested replay, and inside a fully rehashed outer envelope while
+synchronizing all six verdicts; every path preserves the exact source-derived
+diagnostic rather than stopping at an unrelated protocol verdict.
 
 The pair-object tests also exercise the real Issue #93 and #95 evaluator-to-
 producer paths, canonical pack round trips, exact section order/cardinality,
@@ -2888,9 +2902,10 @@ semantic/I/O observation source per protocol offer. The validator exact-joins
 phase/ordinal/origin and job/producer-ordinal/offer/endpoint identities,
 recomputes the I1 occurrence projections and B1 verified-endpoint/waste
 projection, and uses the runner's same checked function to source-derive and
-exact-match the thirty progress windows, thirty Graph A/B service/demand
-windows, 480 measured headroom outcomes, and their attempted/classified/failure
-aggregate. It then reuses the production protocol/fairness/waste/memory/B1-I/O
+exact-match first measured admission/current hold, the thirty progress windows,
+thirty Graph A/B service/demand windows, 480 measured headroom outcomes, and
+their attempted/classified/failure aggregate. That source gate runs before
+protocol early return. It then reuses the production protocol/fairness/waste/memory/B1-I/O
 evaluators and exact-matches all five axes plus overall. A source mismatch is
 not materializable even if another defect already makes the row `Invalid`.
 Tests include same-cardinality wrong identity/ordinal, I1 source/projection and
@@ -2903,6 +2918,9 @@ omit redundant full I1/B1
 diagnostic JSON; copied receipt observations never become a portable receipt,
 storage, or machine authority. The outer 15-field row and five-field bundle
 remain version one.
+The nested observation snapshot remains ten fields and the v2 manifest remains
+twenty fields; the correction changes frontier semantics without adding a
+schema version.
 A complete corpus validator exact-one resolves each named isolated row,
 recomputes the isolated I1 p99 and B1 successful-site-operation/measurement-
 interval tuple, and exact-checks both duplicated M1 claims. Missing, ambiguous,

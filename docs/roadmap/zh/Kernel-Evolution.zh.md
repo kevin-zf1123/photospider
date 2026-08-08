@@ -1063,9 +1063,12 @@ relation；一个固定容量共享 causal observer 与同坐标 workload fanout
 snapshot，该 snapshot 包含 Host/device、Compute I/O、ready-class、lifecycle 与 Throughput
 reservation state。`M1Host` 还有一个 source-private、幂等的 terminal evidence seam，只有在
 全部 Graph 与 Host operation 关闭后才合法，用于捕获 `ServiceStopped`；它不是通用 lifecycle
-控制面。Observer boundary 保留 callback entry/completion 与 slot
-claim/连续 publication frontier，因此相等 event count 不能隐藏 in-flight publisher。
-Lifecycle snapshot 保留 request cursor 与 capture ordinal，并作为精确 lossless page/event
+控制面。Observer boundary 保留 reservation entry/completion 与 slot claim/连续 publication
+frontier，并从
+commit 前 coordinate reservation 跨越到 callback completion 或显式 abort，因此相等 event
+count 不能隐藏 reserve、commit 或 claim 后暂停的 work。有界 lock-free coordinate allocator
+会把 timestamp sampling 与 sequence assignment 线性化，task zero 仍是合法的 zero-based
+semantic identity。Lifecycle snapshot 保留 request cursor 与 capture ordinal，并作为精确 lossless page/event
 chain 与 identity-aware Graph/candidate/bundle/Run/generation 状态机 replay。每个 event 与
 page cut 都精确校验全部九个 registry-derived counter。六个 physical counter 独立采样，只
 检查 capacity/ownership 可达性（包括 pending prepublication candidate），而不推导 event
@@ -1099,7 +1102,8 @@ observation source。每个保留的 progress duration 必须精确等于一秒�
 join source identity/order，重新计算每个 I1 projection 与 B1 verified-endpoint/waste
 projection，并通过唯一共享的 checked producer/reader 规则从 source 推导并精确匹配三十个
 progress window、三十个 Graph A/B service/demand window、480 个 measured headroom
-outcome 及其 attempted/classified/failure aggregate；随后再复用 production protocol、
+outcome 及其 attempted/classified/failure aggregate；同一规则还会在 protocol 提前返回前推导
+first measured admission/current hold；随后再复用 production protocol、
 fairness、waste、memory 与 B1-I/O evaluator，重新计算全部五个轴与 overall，精确匹配六个
 retained verdict，并复现相同 canonical byte。即使
 另一项缺陷已使 row 为 `Invalid`，source closure 仍是强制项。未知/重复/缺失/重排/截断/
@@ -1107,6 +1111,11 @@ retained verdict，并复现相同 canonical byte。即使
 矛盾或过期 verdict，即使 outer 层重新 hash 也仍为 Invalid。v2 不包含重复的完整 I1/B1
 diagnostic JSON；authority-free receipt observation 与 pair pack 都保持非 capability，因此不会
 创建 portable output、storage 或 machine authority。
+
+M1 memory replay 还要求每个 Host component 与稳定 device identity 满足
+`reserved <= lifetime_high_water <= limit`，且 lifetime high-water 在 temporal cut 之间
+非递减。Nested observation snapshot 仍为十个 field，v2 manifest 仍为二十个 field；schema
+version 与 outer field count 都不改变。
 
 I1、I2、B1 与 M1 runner 均为 `EXCLUDE_FROM_ALL` 且不属于 CTest；它们都不改变 installed
 ABI 或冻结的 outer field 数量。本文既不声明已经完成精确 111-slot I2 机器运行，也不声明

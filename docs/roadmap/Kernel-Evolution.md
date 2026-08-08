@@ -1315,9 +1315,12 @@ Host/device, Compute I/O, ready-class, lifecycle, and Throughput reservation
 state. `M1Host` also has one source-private, idempotent terminal evidence seam,
 legal only after every Graph and Host operation closes, to capture
 `ServiceStopped`; it is not a general lifecycle control surface. Observer
-boundaries retain callback entry/completion and slot claim/
-contiguous-publication frontiers, so equal event counts cannot conceal an
-in-flight publisher. Lifecycle snapshots retain request cursors and capture
+boundaries retain reservation entry/completion and slot claim/contiguous-
+publication frontiers from pre-commit coordinate reservation through callback
+completion or explicit abort, so equal event counts cannot conceal work paused
+after reserve, commit, or claim. The bounded lock-free coordinate allocator
+linearizes timestamp sampling with sequence assignment, and task zero remains a
+legal zero-based semantic identity. Lifecycle snapshots retain request cursors and capture
 ordinals and are replayed as an exact lossless page/event chain plus an
 identity-aware Graph/candidate/bundle/Run/generation state machine. Every event
 and page cut exact-checks all nine registry-derived counters. The six physical
@@ -1363,7 +1366,8 @@ validation exact-joins source identity/order, recomputes each I1 projection and
 the B1 verified-endpoint/waste projection, and uses one shared checked producer/
 reader rule to source-derive and exact-match the thirty progress windows, thirty
 Graph A/B service/demand windows, 480 measured headroom outcomes, and their
-attempted/classified/failure aggregate. It then reuses the production protocol,
+attempted/classified/failure aggregate. The same rule derives first measured
+admission/current hold before protocol early return. It then reuses the production protocol,
 fairness, waste, memory, and B1-I/O evaluators to recompute all five axes plus
 overall, exact-match the six retained verdicts, and reproduce the same canonical
 bytes. Source closure remains mandatory when another defect already
@@ -1373,6 +1377,12 @@ drift, denominator contradiction, or a stale verdict remains Invalid after
 outer rehashing. Redundant complete I1/B1 diagnostic JSON is not part of v2;
 authority-free receipt observations and pair packs remain non-capabilities, so
 no portable output, storage, or machine authority is created.
+
+M1 memory replay also requires each Host component and stable device identity
+to satisfy `reserved <= lifetime_high_water <= limit`, with nondecreasing
+lifetime high-water across temporal cuts. The nested observation snapshot
+remains ten fields and the v2 manifest remains twenty fields; no schema version
+or outer field count changes.
 
 The I1, I2, B1, and M1 runners are `EXCLUDE_FROM_ALL` and absent from CTest;
 none changes the installed ABI or the frozen outer field counts. This

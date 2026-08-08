@@ -631,6 +631,15 @@ Interactive starts, and complete classification of all 480 measured I1
 admissions. Environment pairing delegates unchanged to the base-only I1 and
 full eligible B1-cap-eight relations.
 
+First measured admission and final-warmup current hold are source-derived, not
+runner-minted. One shared producer/reader projection exact-joins the retained
+final-warmup and measured-zero Issue #93 inputs, derives the accepted coordinate,
+Host success, product-bound current/visible replacement, boundary-only
+cancellation, and old settlement facts, and closes those facts before protocol
+evaluation can return early. Direct, canonical, and fully rehashed outer replay
+therefore reject the same raw-source contradiction and recompute the same six
+verdicts.
+
 Applicability at each service start is a product-authored evidence cut, not a
 reconstruction from nominal I1/B1 intervals and not the scheduler-selection
 cut. `ExecutionService` first treats a ready lane head as scheduler-selectable
@@ -656,7 +665,12 @@ bounded observer-causal domain. `ComputeRunObservationFanout` forwards the
 same authority-owned product coordinate to that collector and the reused I1 or
 B1 collector; it does not merge that observer clock with I1's independent
 accepted-row sequence. Overflow, sequence exhaustion, or tag/QoS disagreement
-is sticky fail-closed evidence. The source-private `M1Host` adds no compute
+is sticky fail-closed evidence. Coordinate allocation samples steady time and
+assigns the next sequence in one bounded lock-free atomic section, so increasing
+causal sequence guarantees nondecreasing `observed_at` under concurrency. Local
+task identity is zero-based: task zero is valid for start and terminal events,
+while only non-task event kinds use zero as their scalar sentinel. The source-
+private `M1Host` adds no compute
 route: it joins Host/device ledger, Compute I/O, class-partitioned ready,
 lifecycle, and immutable Throughput capacity/reserved snapshots from the same
 service. Its only mutation is an idempotent evidence-finalization seam that is
@@ -664,12 +678,13 @@ legal after every Graph and Host operation has closed. That seam shuts down the
 same execution service so the runner can retain the terminal `ServiceStopped`
 cut; it is not a general compute, phase, or lifecycle control surface.
 
-The collector's boundary snapshot now closes both callback lifetime and slot
-publication. Bounded callback-entry/completion frontiers surround each whole
-attempt, while claimed and contiguous release-published frontiers track the
-slot prefix. A cut is stable only when all four frontiers are reconciled and
-unchanged before and after copying; equal copied-vector sizes do not hide a
-callback paused between claim and publication.
+The collector's boundary snapshot closes both coordinate reservation lifetime
+and slot publication. A bounded reservation-entry frontier advances before
+route commit; the matching completion advances only after callback delivery or
+explicit abort when commit rejects. Claimed and contiguous release-
+published frontiers track event slots. A cut is stable only when all four
+frontiers reconcile and remain unchanged before and after copying; equal copied-
+vector sizes cannot hide a pause after reserve, after commit, or after claim.
 
 M1 Compute I/O high-water is likewise event-derived. Every protocol B1 offer
 must resolve to exactly one complete Issue #95 job stream containing Initial,
@@ -681,6 +696,13 @@ structural `Invalid`. Sparse `M1Host` cuts retain only current-state diagnostics
 and cannot increase or repair high-water; the final process cut must still be
 zero. Consequently a short I/O task that starts and settles between two sparse
 cuts remains visible in the event-derived maximum.
+
+The Host ledger and every stable configured-device identity also retain a
+componentwise lifetime envelope. Every temporal cut must satisfy
+`reserved <= lifetime_high_water <= limit`, and lifetime high-water must be
+nondecreasing for the same authority. Reserved above high-water or a declining
+high-water is structural `Invalid` evidence; high-water above limit remains an
+independent memory failure.
 
 Lifecycle evidence is replayed with the same fail-closed discipline. Each
 temporal snapshot retains its capture ordinal and requested `after_cursor`.

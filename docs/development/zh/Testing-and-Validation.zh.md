@@ -1453,7 +1453,7 @@ observation 绝不进入 measured aggregate；M1 boundary 在不重启进程或�
 | Cold origin 与 settlement | 在 `(C^M1,c^M1)` 建立唯一 cold I1 origin，并在 boundary marker 后 offer Graph A seed 252，identity 为 `(phase=cold,cycle=0,attempt=0)`；同 timestamp 的 I1 admission 排在该 offer 之后。要求 I1 `Q_end=C^M1+683,333,337 ns` first-excluded history cut，以及 B252 terminal/owner settlement/output removal 全部位于 `W^M1` 前；固定 316,666,663 ns I1 guard 不移动 `W^M1`，miss 直接 invalid，而不是执行 drain。 |
 | Warmup origin 与 count | 在 `(W^M1,w^M1)` 验证 cold 已经 settled，并建立精确 `E^M1_warmup,k=W^M1+k*750,000,000 ns`，其中 `k=0..6`。遗漏/重复 origin、不同 count/index、从 `C^M1` 倒推的跨 phase 连续 grid 或 delayed transition 都应拒绝。 |
 | 固定 warmup B1 offer protocol | 在 `W^M1` 先 offer B253、再 offer A254，满足 `w^M1<sequence(B253)<sequence(A254)`，并使用 warmup cycle/attempt zero；同 timestamp 的第一个 I1 admission 排在两者之后。只有 B253 terminal 时才同步 offer B255，并使用更大的 same-time sequence；B255 必须在 `(B^M1,b^M1)` 前已经 offered。Graph A 在 A254 后没有 warmup successor。Offered prefix 由 protocol 固定，只有 incomplete subset 由 terminal history 派生。 |
-| 确定性跨 `B^M1` I1 | Warmup origin `k=6` 精确为 `B^M1-500,000,000 ns`，且 `Q_end=B^M1+183,333,337 ns`；要求该 settlement-pending warmup occurrence/generation 及其第十二次 edit publication 出现在 `B^M1` snapshot 中，且该 publication 仍为 current。它持续 current 到首个 measured edit 仅成功时存在的 accepted coordinate `(A_0,event_sequence_0)`。在未改变的 `Q_end`，只要求该旧 occurrence/generation 达到 quiescence 并 settled，不要求并发 measured generation 或整个 shared service 为空。 |
+| 确定性跨 `B^M1` I1 | Warmup origin `k=6` 精确为 `B^M1-500,000,000 ns`，且 `Q_end=B^M1+183,333,337 ns`；要求该 settlement-pending warmup occurrence/generation 及其第十二次 edit publication 出现在 `B^M1` snapshot 中，且该 publication 仍为 current。它持续 current 到首个 measured edit 仅成功时存在的 accepted coordinate `(A_0,event_sequence_0)`。必须在 protocol 提前返回前，通过共享 producer/reader projection 从保留的 final-warmup 与 measured-zero Issue #93 source 推导完整 first-admission/current-hold record；禁止信任 runner 创作的副本。在未改变的 `Q_end`，只要求该旧 occurrence/generation 达到 quiescence 并 settled，不要求并发 measured generation 或整个 shared service 为空。 |
 | 不可变 attribution 与 temporal effect | 最后一个 warmup generation 拥有的每个 event/result 都保持 `phase=warmup`，包括 measured latest-wins supersession 后产生的 cancellation 或 settlement。其 occurrence-owned value 不进入 measured aggregate，但 `B^M1` 后每个 start、contention、reservation/grant、Compute I/O 与 high-water effect 都进入按时间 window 归属的 evidence。 |
 | 无隐藏 transition | Cold/warmup transition 不得 pause、wait、cool、restart、rebuild queue、release shared resource 或移动 boundary。把全部 origin/count/index、固定 offer、由 terminal 派生的 B255 transition、phase endpoint 与 failure 保留在既有 workload-manifest/measurement section 中并复算 digest，不新增 outer field。 |
 
@@ -1467,7 +1467,7 @@ observation 绝不进入 measured aggregate；M1 boundary 在不重启进程或�
 | Carryover identity 与 FIFO | 保留 warmup phase/cycle/job/attempt、queue predecessor、admission state、reservation/grant 与 owner settlement。即使仍 queued/running，measured cycle-zero offer 也排在每个 Graph 已经 offered 的 warmup prefix 之后；只有该 transition 可以绕过 predecessor-terminal offer timing。后续 measured offer 恢复普通 per-Graph 规则，绝不推进或改写未完成的 warmup identity。 |
 | Occurrence attribution | 按不可变 phase 归属 terminal/completed service、output byte、latency、receipt/golden/digest、determinism、retry/duplicate/discarded service、waste 与 settlement。把 `B^M1` 后的 warmup occurrence-owned quantity 从 measured throughput、Jain service `x`、latency、determinism 与 waste aggregate 排除。 |
 | Temporal scheduler/resource effect | 包含 boundary 后每个 phase 的 actual class start、headroom failure、queue contention、reservation/grant、Compute I/O state 与 Host/device/ready-memory high-water。Measured class-start rule 计算 warmup Throughput start，而 Jain completed service 只使用 measured occurrence。 |
-| Failure 与 terminal settlement | Warmup carryover failure、event evidence 缺失、event sequence 重复或 coordinate 无法形成全序、phase/identity/FIFO rewrite、boundary-only cancellation、snapshot mismatch 或无法证明 settlement 都是 invalid。在 `(U^M1,u^M1)` 停止新的 measured offer，但不取消 outstanding work；保留排在 cutoff 或其后的 endpoint，但从 30-second numerator 排除，随后要求 exact-zero teardown。`B^M1` 不要求 quiescence。 |
+| Failure 与 terminal settlement | Warmup carryover failure、event evidence 缺失、event sequence 重复或 coordinate 无法形成全序、phase/identity/FIFO rewrite、boundary-only cancellation、source-derived first-admission/current-hold mismatch、snapshot mismatch 或无法证明 settlement 都是 invalid。在 `(U^M1,u^M1)` 停止新的 measured offer，但不取消 outstanding work；保留排在 cutoff 或其后的 endpoint，但从 30-second numerator 排除，随后要求 exact-zero teardown。`B^M1` 不要求 quiescence。 |
 | 既有 envelope evidence | 在既有 manifest/measurement section 与 digest 中保留 `C^M1`、`W^M1`、`B^M1`、`U^M1`、全部 phase interval/origin/count/index、固定 pre-boundary offer、由 actual terminal 派生的 transition、tie/step order、carryover snapshot、phase join、首批 measured offer、per-Graph predecessor/next-cycle counter、counter epoch、queue/start/terminal/receipt event、resource effect、failure 与 final settlement。任何有意规则变化都需要新 workload id；outer row/bundle field 保持 15/5。 |
 
 v1 resource profile 是 32 个 CPU slot、1 GiB Host retained memory、512 MiB
@@ -2001,7 +2001,7 @@ sample 或 median summary 不能隐藏失败进程。
 | Fairness | 对两个 B1 Graph 整个一秒 window 都保有未消费 offered demand、且 producer 均未暂停的窗口，`J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`，其中 `x` 是 completed `work_units + ceil(ready_bytes/4096)`。总 service 为零时 invalid；Jain p05 >=0.95。两个 class 在不预筛 child capacity 的情况下都保持 scheduler-selectable 时，最多三次 Interactive start 后出现 Throughput selection。M1 只统计产品 fact 报告两个 class 都 evidence-startable（包括 child capacity）的 committed start。M1 还要求 headroom 导致的 Interactive admission failure 为零，并独立通过 latency/progress。 |
 | Determinism | 对三个 replicate、fresh-process restart 与 Run cap 1/8 中相同的 B1 job index，typed logical `ContentDigest`、raw payload SHA-256、canonical manifest SHA-256、`execution-profile-semantic-trace-v1` SHA-256 与按 job index 区分的 logical/raw golden mismatch count 全部为零。 |
 | Waste | `discarded_started_service / all_started_service`，使用 `work_units + ceil(ready_bytes/4096)`。每个无法 commit 结果的已启动 callback 都会被计费；对于 visible successful I1/I2 Run，每个 `(run_id,local_task_id)` 只有 causal sequence 最早的 start 属于 useful，之后的 duplicate/retry 属于 discarded，而不同 task 仍属于 useful。已经进入的不可抢占 work 如实 drain。I1/I2 Interactive 每个 replicate <=0.25，M1 对 Interactive service 单独应用该上限；accepted cancellation/supersession 后才启动的 work 精确为零，并与 discarded work 独立计数。I2 在允许的首次 transfer 规则下，额外 filesystem/codec、CPU-copy、readback、transfer 与 allocation byte 为零。无故障 isolated/mixed B1 的 discarded/duplicate/retry service 为零。 |
-| Memory | Host retained、Host scratch、ready byte 与已配置 device memory/scratch 的独立 high-water byte，加上 B1 active Compute I/O task/planned byte。不得超过绝对 limit；isolated row-owned delta 与 B1 I/O count 回到 row 前 baseline/零，M1 shutdown 回到零。I2 精确 row-scoped resident release 发生在第二次 reuse evidence 之后、最终 snapshot 之前；每个已配置 device 的完整 memory-and-scratch `reserved` vector 等于 row 前 baseline。Candidate B1/I2 peak <=固定同环境 reference 的 105%。Process RSS 只作为 diagnostic。B1 planned-byte charge 与 event-aligned sample 是 Compute I/O admission、planned-byte high-water 与 final settlement 的强制性权威证据；它们不证明 physical memory ownership，也不能替代 RSS 或 ledger/device ownership evidence。 |
+| Memory | Host retained、Host scratch、ready byte 与已配置 device memory/scratch 的独立 high-water byte，加上 B1 active Compute I/O task/planned byte。每个 Host component 与 identity 稳定的 configured device 都逐 component 满足 `reserved <= lifetime_high_water <= limit`，且同一 authority 的 lifetime high-water 在有序 capture 间绝不下降。Reserved 高于 high-water 或 high-water 下降属于结构性 Invalid；high-water 超限会使该轴失败。Isolated row-owned delta 与 B1 I/O count 回到 row 前 baseline/零，M1 shutdown 回到零。I2 精确 row-scoped resident release 发生在第二次 reuse evidence 之后、最终 snapshot 之前；每个已配置 device 的完整 memory-and-scratch `reserved` vector 等于 row 前 baseline。Candidate B1/I2 peak <=固定同环境 reference 的 105%。Process RSS 只作为 diagnostic。B1 planned-byte charge 与 event-aligned sample 是 Compute I/O admission、planned-byte high-water 与 final settlement 的强制性权威证据；它们不证明 physical memory ownership，也不能替代 RSS 或 ledger/device ownership evidence。 |
 
 每个必需维度输出 `pass`、`fail`、`invalid` 或 schema 预定义的
 `not-applicable`；不存在 composite score。缺少源证据、算术 overflow、monotonic-
@@ -2141,7 +2141,9 @@ schema 的 adapter、mount normalizer、performance-configuration mapping/proof�
 canonical encoder/digest、eligibility 与 root-containment evidence，以及 cap-1/
 cap-8 和 candidate/reference check。Issue #96 为 M1 原样复用精确 manifest byte，
 复用 #93 的 accepted-boundary collector，把第一次 measured edit 绑定到
-`edit_index=0`、`A_0` 与其预留 sequence 且不得重新定义 acceptance，并实现冻结的
+`edit_index=0`、`A_0` 与其预留 sequence 且不得重新定义 acceptance。完整 admission 与
+final-warmup current-hold 必须只从保留的 Issue #93 source 推导，并在任何 protocol 提前返回
+前校验。Issue #96 同时实现冻结的
 `C^M1`/`W^M1` pre-boundary protocol、独立 producer-local cycle、不得
 重新定义的精确 final-warmup current-hold/accepted-admission 例外与
 cutoff/carryover/phase-attribution boundary，并强制执行其 same-ordinal 完整 B1 pair，
@@ -2285,18 +2287,23 @@ comparison-reference bundle digest。
 或三 replicate B1 机器运行。
 
 Issue #96 通过 `test_m1_profile`、`test_evidence_envelope`，以及在启用仓库 OpenCV
-operation provider 时的 `test_m1_product_path` 注册确定性 M1 合同；`test_compute_run` 中
-既有 `ExecutionServicePolicy` case 继续作为聚焦 scheduler-policy guard。Unit suite 覆盖
+operation provider 时的 `test_m1_product_path` 注册确定性 M1 合同；聚焦的
+`test_compute_run` case 还会证明 service-start coordinate reservation/commit/callback-or-abort
+fence。Unit suite 覆盖
 精确 C/W/B/U arithmetic、1/7/40 origin grid、固定 warmup offer、carryover/current-hold
-evidence、独立 producer-local cycle、全部五个轴、未知 enum 的 fail-closed 行为、有限
-lock-free callback publication、同坐标 fanout、不变的 base-only-I1/full-B1 environment
+evidence、独立 producer-local cycle、全部五个轴、未知 enum 的 fail-closed 行为、合法的
+zero-based task zero、有限 lock-free callback publication、并发 reservation 下的 sequence/
+time monotonicity、同坐标 fanout、不变的 base-only-I1/full-B1 environment
 delegation、canonical golden digest、functional key、exact-one/DAG resolution 与不完整
 live authority。它们还会拒绝 substituted isolated-I1 source、遗漏的 isolated-B1 outcome、
 遗漏的 M1 raw window、outer/inner claim 篡改、denominator/source 不匹配、缺失/重复/重排/
 未知/超限 I/O transition，以及非零 final I/O state。一项专门回归会让全部稀疏 temporal I/O
 current value 保持为零，同时证明短 accepted/settled task 仍会提高 event-derived high-water。
-Callback-boundary 回归在 slot claim 后、release publication 前暂停，并证明 copied-record
-count 不变不能满足 entry/completion/claim/published cut。Lifecycle replay 回归使用一份
+Observer-boundary 回归会在 coordinate reserve 后、route commit 后与 slot claim 后暂停，
+并证明 copied-record count 不变不能满足 reservation-entry/completion/claim/published cut。
+一个仅存在于 test product 的 route-commit rejection 会证明显式 coordinate abort、不发布
+start、retry 成功与 final frontier 精确闭合。Static product consumer smoke 禁止该 probe
+symbol 出现在 production archive。Lifecycle replay 回归使用一份
 producer-faithful multi-Graph history，包含 registration/candidate rollback、group 与 standalone
 admission，以及合法 cross-bundle phase interleave。测试会逐一篡改九个 registry-derived
 counter，并拒绝因果 phase 重排、错误 Graph/Run identity、跨 Run 拼接、group-child 损坏、
@@ -2314,6 +2321,12 @@ start observation 会证明已耗尽 class 的 evidence-startable 为 false、�
 为 true，并证明两个 capacity-ready class 都为 true。Class-start 正负 case 会区分真实 dual-
 evidence-startable 的第四次 Interactive start 与 nominal interval overlap。Timeout 只是
 deadlock diagnostic，不是 latency threshold。
+
+Memory 回归会独立拒绝 Host reserved-above-high-water、device reserved-above-high-water 与
+逐 device declining lifetime high-water。Source closure 回归会直接修改 first measured
+admission/current hold、通过 canonical nested replay 修改，并在同步全部六个 verdict 的完整
+重新 hash outer envelope 内修改；每条路径都保留精确 source-derived diagnostic，而不是在
+无关 protocol verdict 处停止。
 
 Pair-object 测试还会执行真实 Issue #93/#95 evaluator-to-producer 路径、canonical pack
 round trip、精确 section 顺序/数量、source rematerialization、digest/object 不匹配、错误
@@ -2365,16 +2378,19 @@ Compute I/O，以及稀疏 temporal/lifecycle stream。有效
 offer 对应的一个完整 B1 physical/output/golden/semantic/I/O observation source。Validator 会
 精确 join phase/ordinal/origin 与 job/producer-ordinal/offer/endpoint identity，重新计算 I1
 occurrence projection 与 B1 verified-endpoint/waste projection，并使用与 runner 相同的 checked
-函数，从 source 推导并精确匹配三十个 progress window、三十个 Graph A/B service/demand
-window、480 个 measured headroom outcome 及其 attempted/classified/failure aggregate；随后再
-复用 production protocol/fairness/waste/memory/B1-I/O evaluator，并精确匹配五个轴与 overall。即使另一项缺陷已使 row
+函数，从 source 推导并精确匹配 first measured admission/current hold、三十个 progress
+window、三十个 Graph A/B service/demand window、480 个 measured headroom outcome 及其
+attempted/classified/failure aggregate；该 source gate 在 protocol 提前返回前运行。随后再复用
+production protocol/fairness/waste/memory/B1-I/O evaluator，并精确匹配五个轴与 overall。即使另一项缺陷已使 row
 为 `Invalid`，source mismatch 也不得物化。测试覆盖同 cardinality 的错误 identity/ordinal、
 I1 source/projection 与 B1 raw-trace/waste 矛盾、同步 verdict 的 progress/Graph/headroom
 projection 矛盾、aggregate 与 checked-overflow failure、source 缺失/重复/重排、半秒、两秒、
 混合 duration、ratio-flip、nested schema、raw-value、stale-verdict、outer 全量重 hash 矛盾，以及
 producer shape 的正向 byte roundtrip。v2 byte 省略重复的完整 I1/B1 diagnostic JSON；复制的
 receipt observation 绝不会变成 portable receipt、storage 或 machine authority。Outer
-15-field row 与 five-field bundle 保持 version one。完整 corpus validator 会 exact-one 解析每个具名
+15-field row 与 five-field bundle 保持 version one。Nested observation snapshot 仍为十个
+field，v2 manifest 仍为二十个 field；该修正改变 frontier 语义，但不新增 schema version。
+完整 corpus validator 会 exact-one 解析每个具名
 isolated row，重新计算 isolated I1 p99 与 B1
 successful-site-operation/measurement-interval tuple，并精确
 核对两份重复的 M1 claim。证据缺失、歧义、遗漏、替换、篡改或不匹配会在 timing 前被拒绝，

@@ -1327,11 +1327,24 @@ current 状态、取消它或改写 snapshot。旧 generation 仍必须在未改
 cancellation、terminal 或 settlement event 都保留更晚的 event sequence 与不可变 warmup
 phase，而它在 boundary 后产生的物理 effect 仍属于 measured-window evidence。
 
-只有 callback lifecycle 与 slot publication lifecycle 都闭合时，observer boundary 才
-stable。每个 callback 围绕完整 attempt 推进有界 entry/completion frontier，而 reservation
-与 release publication 分别推进 claimed frontier 与连续 published frontier。Boundary
-snapshot 只复制 published prefix，并在 copy 前后比较全部四个 frontier。Record count
-相等不能证明 quiescence；callback 在 claim 后、publication 前暂停会使 cut invalid。
+第一次 measured admission 与 final-warmup current-hold 例外只从完整 final-warmup 与
+measured-zero Issue #93 source 重新计算。一条共享 producer/reader 规则会在 protocol
+evaluation 可能提前返回之前，校验 accepted coordinate、Host success、product-bound current
+与 visible record、replacement order、boundary-only cancellation 和旧 settlement fact。
+另一个独立 invalid protocol fact 不能隐藏 source 矛盾，包括全部六个 verdict 与外围 address
+均已同步重建的情况。
+
+只有 coordinate reservation lifecycle 与 slot publication lifecycle 都闭合时，observer
+boundary 才 stable。Reservation entry 在 route commit 前推进，并保持 open，直到 callback
+delivery 完成，或被拒绝的 commit 显式 abort。会产生 event 的 callback 会分别推进
+claimed 与连续 published slot frontier。Boundary snapshot 只复制 published prefix，并在
+copy 前后比较全部四个 frontier。Record count 相等不能证明 quiescence；reserve 后、commit
+后或 claim 后暂停都会使 cut invalid。
+
+Observer 会在一个有界 lock-free atomic gate 内采样 steady time 并分配下一个非零 causal
+sequence。因此并发 reservation 下递增 sequence 蕴含 time 非递减。Local task identity 从零
+开始：start 与 terminal event 在各自 charge 规则下允许 task zero，只有 non-task kind 才把零
+用作 sentinel scalar。
 
 同 timestamp 的 lifecycle event 排在 boundary 前时，snapshot 反映其新 state；排在
 其后时，它是 cross-boundary event。同 timestamp 的 terminal warmup event 绝不会在
@@ -1559,6 +1572,11 @@ B1 planned-byte stream 是 Compute I/O admission、planned-byte high-water 与 f
 settlement 的强制性权威证据；它不证明 physical memory ownership，也不能替代 RSS
 或 ledger/device ownership evidence。任何权威 dimension 都不得超过冻结 limit。
 Isolated 行必须精确结算到 row 前 baseline；M1 shutdown 必须结算到零。
+
+每个有序 Host cut 与每个 identity 稳定的 configured device 还必须逐 component 满足
+`reserved <= lifetime_high_water <= limit`。同一 authority 的 lifetime high-water 必须
+非递减。Reserved 高于 high-water 或 high-water 发生下降属于结构性 invalidity；high-water
+高于 limit 仍属于独立 memory failure。
 
 对于配置 Metal 的 I2，精确 row-scoped resident release 发生在复制第二次 reuse evidence
 之后、最终 row snapshot 之前。完整 device `reserved` vector（包括 persistent memory 与
@@ -1849,7 +1867,7 @@ reserved B1 namespace；面对不协作 same-UID mutator，POSIX 没有 portable
 selected `unlink`/`rmdir`。该 target 仍排除在 default build 与 CTest 之外，本文也不声明已经
 产生精确三 replicate B1 corpus 或完成 #96 composition。
 
-当前 #96 源码树组合了精确 mixed protocol 与五轴 evaluator，在 B boundary 保留 callback
+当前 #96 源码树组合了精确 mixed protocol 与五轴 evaluator，在 B boundary 保留 reservation
 entry/completion 与 claim/publication frontier，并为 memory closure 精确重放 lifecycle
 cursor、capture ordinal、page、Graph/candidate/bundle/Run/generation 因果关系与全部九个
 registry-derived counter。六个独立采样的 physical counter 只检查 capacity 与 ownership
@@ -1863,9 +1881,10 @@ reparse-point-aware Windows handle 完成同一 object validation 与 read。M1 
 Issue #93 episode input，以及每个 B1 offer 对应的精确一个完整 Issue #95 physical/output/
 golden/semantic/I/O observation source；receipt value 会被复制，但不携带其 store-private
 capability。Corpus replay 会精确 join source identity，重新计算 I1 occurrence projection 与
-B1 verified-endpoint/waste projection，随后从 source 推导并精确匹配全部三十个 progress
-window、全部三十个 Graph A/B service/demand window、全部 480 个 measured headroom
-outcome 及其 attempted/classified/failure aggregate，再计算五个轴 verdict 与 overall。Runner
+B1 verified-endpoint/waste projection，随后从 source 推导并精确匹配 first measured
+admission/current hold、全部三十个 progress window、全部三十个 Graph A/B service/demand
+window、全部 480 个 measured headroom outcome 及其 attempted/classified/failure aggregate，
+再计算五个轴 verdict 与 overall。该 source gate 在 protocol 提前返回前运行。Runner
 与 reader 使用同一套 checked projection 实现，并要求 canonical 重新物化产生逐 byte 相同结果。
 即使另一项缺陷已经使 row 为
 `Invalid`，source closure 仍是强制项。重复的完整 I1/B1 diagnostic JSON 会被省略。Outer
@@ -1873,6 +1892,9 @@ row/bundle schema 保持 version one，pair pack 继续仅具有 denominator 权
 不铸造 output、storage 或 machine authority。
 这些 mechanism 与 deterministic test 不宣称 timed three-replicate corpus、完整 live
 storage authority、Windows runtime execution 或 machine conformance。
+
+Nested observation snapshot 仍精确为十个 field，v2 manifest 仍精确为二十个 field；这些
+修正改变的是 frontier 语义，而不是 schema version 或 field count。
 
 每个 Issue 可以为其机制新增长期确定性行为测试，但不能重定义 workload，也不能
 用缺失、invalid 或不同版本的行提升目标。与机器相关的 latency、throughput 与
