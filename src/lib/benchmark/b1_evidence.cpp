@@ -726,7 +726,7 @@ bool known_b1_output_status(B1OutputCommitStatus status) noexcept {
 
 /**
  * @brief Evaluates event-aligned Compute I/O observations for one job.
- * @param evidence Complete job occurrence and output evidence.
+ * @param evidence Complete authority-free job/status/observation evidence.
  * @param reasons Row-level structural diagnostics.
  * @return I/O structural, fault-free, retry, and high-water facts.
  * @throws std::bad_alloc when maps or diagnostics allocate.
@@ -735,7 +735,8 @@ bool known_b1_output_status(B1OutputCommitStatus status) noexcept {
  * synthesized into this FSM and therefore fails closed below.
  */
 B1ComputeIoEvaluation evaluate_b1_io_evidence_impl(
-    const B1JobEvidence& evidence, std::vector<std::string>* reasons) {
+    const B1ComputeIoEvidenceInput& evidence,
+    std::vector<std::string>* reasons) {
   B1ComputeIoEvaluation result;
   const auto structural_failure = [&](const std::string& detail) {
     result.structurally_valid = false;
@@ -787,8 +788,7 @@ B1ComputeIoEvaluation evaluate_b1_io_evidence_impl(
            !value.settlement_event.has_value();
   };
 
-  for (const B1ComputeIoObservation& observation :
-       evidence.output.io_observations) {
+  for (const B1ComputeIoObservation& observation : evidence.io_observations) {
     if (!known_b1_io_observation_point(observation.point) ||
         (observation.admission.has_value() &&
          !known_b1_io_admission_status(*observation.admission)) ||
@@ -989,33 +989,33 @@ B1ComputeIoEvaluation evaluate_b1_io_evidence_impl(
       result.retry_records == 0U &&
       capacity_rejections[B1IoStage::PayloadStage] == 0U &&
       capacity_rejections[B1IoStage::ManifestCommit] == 0U;
-  if (!known_b1_output_status(evidence.output.status)) {
+  if (!known_b1_output_status(evidence.output_status)) {
     structural_failure("output contains an unknown terminal status");
   }
-  if ((evidence.output.status == B1OutputCommitStatus::Succeeded) !=
-      evidence.output.receipt.has_value()) {
+  if ((evidence.output_status == B1OutputCommitStatus::Succeeded) !=
+      evidence.output_receipt_present) {
     structural_failure("output status and receipt presence disagree");
   }
   const bool failed_task_status =
-      evidence.output.status == B1OutputCommitStatus::TaskFailed ||
-      evidence.output.status == B1OutputCommitStatus::RootUnavailable ||
-      evidence.output.status == B1OutputCommitStatus::DurabilityUnsupported ||
-      evidence.output.status == B1OutputCommitStatus::RevalidationFailed;
+      evidence.output_status == B1OutputCommitStatus::TaskFailed ||
+      evidence.output_status == B1OutputCommitStatus::RootUnavailable ||
+      evidence.output_status == B1OutputCommitStatus::DurabilityUnsupported ||
+      evidence.output_status == B1OutputCommitStatus::RevalidationFailed;
   if ((terminal_path == TerminalPath::AdmissionRejected &&
-       (evidence.output.status != B1OutputCommitStatus::AdmissionFailed ||
-        evidence.output.receipt.has_value())) ||
+       (evidence.output_status != B1OutputCommitStatus::AdmissionFailed ||
+        evidence.output_receipt_present)) ||
       (terminal_path == TerminalPath::SettlementFailed &&
-       (!failed_task_status || evidence.output.receipt.has_value())) ||
+       (!failed_task_status || evidence.output_receipt_present)) ||
       (terminal_path == TerminalPath::IoCompleted &&
-       !((evidence.output.status == B1OutputCommitStatus::Succeeded &&
-          evidence.output.receipt.has_value()) ||
-         (evidence.output.status == B1OutputCommitStatus::RevalidationFailed &&
-          !evidence.output.receipt.has_value())))) {
+       !((evidence.output_status == B1OutputCommitStatus::Succeeded &&
+          evidence.output_receipt_present) ||
+         (evidence.output_status == B1OutputCommitStatus::RevalidationFailed &&
+          !evidence.output_receipt_present)))) {
     structural_failure("terminal I/O path disagrees with output status");
   }
-  if (evidence.output.succeeded()) {
-    for (const B1ComputeIoObservation& observation :
-         evidence.output.io_observations) {
+  if (evidence.output_status == B1OutputCommitStatus::Succeeded &&
+      evidence.output_receipt_present) {
+    for (const B1ComputeIoObservation& observation : evidence.io_observations) {
       if (observation.point == B1IoObservationPoint::Settlement &&
           observation.completion !=
               execution::ComputeIoCompletionStatus::Succeeded) {
@@ -1294,14 +1294,28 @@ bool b1_verified_endpoint_from_evaluations(
 
 }  // namespace
 
+/** @copydoc make_b1_compute_io_evidence_input */
+B1ComputeIoEvidenceInput make_b1_compute_io_evidence_input(
+    const B1JobEvidence& evidence) {
+  return B1ComputeIoEvidenceInput{evidence.job, evidence.output.status,
+                                  evidence.output.receipt.has_value(),
+                                  evidence.output.io_observations};
+}
+
+/** @copydoc evaluate_b1_compute_io_evidence */
+B1ComputeIoEvaluation evaluate_b1_compute_io_evidence(
+    const B1ComputeIoEvidenceInput& input) {
+  std::vector<std::string> reasons;
+  B1ComputeIoEvaluation result = evaluate_b1_io_evidence_impl(input, &reasons);
+  result.validity_reasons = std::move(reasons);
+  return result;
+}
+
 /** @copydoc evaluate_b1_compute_io_evidence */
 B1ComputeIoEvaluation evaluate_b1_compute_io_evidence(
     const B1JobEvidence& evidence) {
-  std::vector<std::string> reasons;
-  B1ComputeIoEvaluation result =
-      evaluate_b1_io_evidence_impl(evidence, &reasons);
-  result.validity_reasons = std::move(reasons);
-  return result;
+  return evaluate_b1_compute_io_evidence(
+      make_b1_compute_io_evidence_input(evidence));
 }
 
 /** @copydoc b1_job_has_verified_endpoint */
@@ -1311,8 +1325,8 @@ bool b1_job_has_verified_endpoint(const B1JobEvidence& evidence) {
       evaluate_b1_physical_trace(evidence, &reasons);
   const B1DeterministicEvaluation deterministic =
       evaluate_b1_deterministic_evidence(evidence, &reasons);
-  const B1ComputeIoEvaluation io =
-      evaluate_b1_io_evidence_impl(evidence, &reasons);
+  const B1ComputeIoEvaluation io = evaluate_b1_io_evidence_impl(
+      make_b1_compute_io_evidence_input(evidence), &reasons);
   return b1_verified_endpoint_from_evaluations(evidence, physical,
                                                deterministic, io);
 }

@@ -33,9 +33,10 @@
 #include <unistd.h>
 #endif
 
-#include "benchmark/b1_evidence.hpp"  // NOLINT(build/include_subdir)
-#include "benchmark/m1_evidence.hpp"  // NOLINT(build/include_subdir)
-#include "benchmark/m1_profile.hpp"   // NOLINT(build/include_subdir)
+#include "benchmark/b1_evidence.hpp"   // NOLINT(build/include_subdir)
+#include "benchmark/m1_canonical.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1_evidence.hpp"   // NOLINT(build/include_subdir)
+#include "benchmark/m1_profile.hpp"    // NOLINT(build/include_subdir)
 
 namespace ps::benchmark {
 namespace {
@@ -1462,143 +1463,19 @@ M1DenominatorClaims parse_m1_denominator_claims(
     throw std::invalid_argument("M1 denominator claim is zero.");
   }
 
-  const B1CanonicalManifest inner = parse_b1_canonical_manifest(
-      decode_canonical_text_hex(measurement.fields[0U].payload));
-  const std::vector<std::string_view> names{"schema_version",
-                                            "replicate_ordinal",
-                                            "boundaries",
-                                            "protocol_flags",
-                                            "interactive_occurrences",
-                                            "batch_offers",
-                                            "carryover",
-                                            "first_measured_admission",
-                                            "progress_windows",
-                                            "graph_service_windows",
-                                            "class_starts",
-                                            "headroom_outcomes",
-                                            "batch_io_streams",
-                                            "temporal_snapshots",
-                                            "mixed_observations",
-                                            "paired_isolated_i1_p99_ns",
-                                            "paired_isolated_b1_source",
-                                            "batch_waste",
-                                            "verdicts"};
-  const std::vector<std::string_view> types{"uint64",
-                                            "uint64",
-                                            "m1-boundary-record-v1",
-                                            "m1-protocol-flags-v1",
-                                            "m1-i1-occurrence-list-v1",
-                                            "m1-b1-offer-list-v1",
-                                            "m1-carryover-list-v1",
-                                            "m1-first-admission-record-v1",
-                                            "m1-progress-window-list-v1",
-                                            "m1-graph-service-window-list-v1",
-                                            "m1-class-start-list-v1",
-                                            "m1-headroom-outcome-list-v1",
-                                            "m1-b1-io-stream-list-v1",
-                                            "m1-execution-snapshot-list-v1",
-                                            "m1-observation-list-v1",
-                                            "uint64",
-                                            "m1-b1-rate-source-v1",
-                                            "m1-batch-waste-record-v1",
-                                            "m1-five-axis-verdict-record-v1"};
-  if (inner.schema != kM1InnerRowSchema) {
-    throw std::invalid_argument("M1 nested inner schema is invalid.");
-  }
-  require_exact_known_fields(inner, names, types);
-  if (parse_b1_canonical_uint64(inner.fields[0U].payload) !=
-          kM1InnerRowSchemaVersion ||
-      parse_b1_canonical_uint64(inner.fields[1U].payload) !=
-          row.source.replicate_ordinal) {
-    throw std::invalid_argument("M1 nested schema version or ordinal drifted.");
-  }
-  const std::vector<std::string> protocol_flags =
-      parse_b1_fixed_record(inner.fields[3U].payload, 12U);
-  for (const std::string& flag : protocol_flags) {
-    static_cast<void>(parse_canonical_boolean(flag));
-  }
-  const std::size_t interactive_count =
-      parse_b1_framed_list(inner.fields[4U].payload).size();
-  const std::vector<std::string> offers =
-      parse_b1_framed_list(inner.fields[5U].payload);
-  const std::vector<std::string> progress =
-      parse_b1_framed_list(inner.fields[8U].payload);
-  const std::vector<std::string> graph =
-      parse_b1_framed_list(inner.fields[9U].payload);
-  const std::vector<std::string> headroom =
-      parse_b1_framed_list(inner.fields[11U].payload);
-  const std::vector<std::string> io =
-      parse_b1_framed_list(inner.fields[12U].payload);
-  const std::vector<std::string> snapshots =
-      parse_b1_framed_list(inner.fields[13U].payload);
-  if (interactive_count != kM1TotalI1OriginCount || offers.empty() ||
-      progress.size() != kM1MeasuredWindowCount ||
-      graph.size() != kM1MeasuredWindowCount ||
-      headroom.size() != kM1MeasuredI1AttemptCount ||
-      io.size() != offers.size() || snapshots.size() < 4U) {
-    throw std::invalid_argument("M1 nested raw evidence cardinality drifted.");
-  }
-  for (std::size_t index = 0U; index < progress.size(); ++index) {
-    const std::vector<std::string> fields =
-        parse_b1_fixed_record(progress[index], 3U);
-    if (parse_b1_canonical_uint64(fields[0U]) != index ||
-        parse_b1_canonical_uint64(fields[2U]) == 0U) {
-      throw std::invalid_argument("M1 raw progress window is invalid.");
-    }
-    static_cast<void>(parse_b1_canonical_uint64(fields[1U]));
-  }
-  for (std::size_t index = 0U; index < graph.size(); ++index) {
-    const std::vector<std::string> fields =
-        parse_b1_fixed_record(graph[index], 4U);
-    if (parse_b1_canonical_uint64(fields[0U]) != index) {
-      throw std::invalid_argument("M1 raw Graph window is unordered.");
-    }
-    static_cast<void>(parse_canonical_boolean(fields[1U]));
-    static_cast<void>(parse_b1_canonical_uint64(fields[2U]));
-    static_cast<void>(parse_b1_canonical_uint64(fields[3U]));
-  }
-  for (std::size_t index = 0U; index < headroom.size(); ++index) {
-    const std::vector<std::string> fields =
-        parse_b1_fixed_record(headroom[index], 10U);
-    if (parse_b1_canonical_uint64(fields[0U]) != index / kI1EditCount ||
-        parse_b1_canonical_uint64(fields[1U]) != index % kI1EditCount) {
-      throw std::invalid_argument("M1 raw headroom outcome is unordered.");
-    }
-    const bool attempted = parse_canonical_boolean(fields[2U]);
-    const bool has_status = parse_canonical_boolean(fields[3U]);
-    const bool status_ok = parse_canonical_boolean(fields[4U]);
-    static_cast<void>(parse_b1_canonical_uint64(fields[5U]));
-    const bool headroom_failure = parse_canonical_boolean(fields[9U]);
-    if (!attempted || !has_status || headroom_failure == status_ok) {
-      throw std::invalid_argument(
-          "M1 raw headroom status or classification is invalid.");
-    }
-  }
-  const std::vector<std::string> starts =
-      parse_b1_framed_list(inner.fields[10U].payload);
-  std::uint64_t prior_start_sequence = 0U;
-  for (const std::string& start : starts) {
-    const std::vector<std::string> fields = parse_b1_fixed_record(start, 5U);
-    const std::uint64_t sequence = parse_b1_canonical_uint64(fields[0U]);
-    const std::uint64_t service_class = parse_b1_canonical_uint64(fields[1U]);
-    if (sequence == 0U || sequence <= prior_start_sequence ||
-        service_class > static_cast<std::uint64_t>(
-                            compute::ComputeRunQosClass::Throughput) ||
-        !parse_canonical_boolean(fields[4U])) {
-      throw std::invalid_argument("M1 raw class start is invalid.");
-    }
-    static_cast<void>(parse_canonical_boolean(fields[2U]));
-    static_cast<void>(parse_canonical_boolean(fields[3U]));
-    prior_start_sequence = sequence;
-  }
-  const std::uint64_t inner_i1 =
-      parse_b1_canonical_uint64(inner.fields[15U].payload);
-  const std::vector<std::string> inner_b1 =
-      parse_b1_fixed_record(inner.fields[16U].payload, 2U);
-  if (inner_i1 != claims.isolated_i1_p99_ns ||
-      parse_b1_canonical_uint64(inner_b1[0U]) !=
+  const M1CanonicalReplay replay = parse_and_recompute_m1_inner_row(
+      decode_canonical_text_hex(measurement.fields[0U].payload),
+      row.source.replicate_ordinal);
+  if (!replay.row.evidence.paired_isolated_i1_p99.has_value() ||
+      !replay.row.evidence.fairness.paired_isolated_b1.has_value() ||
+      static_cast<std::uint64_t>(
+          replay.row.evidence.paired_isolated_i1_p99->count()) !=
+          claims.isolated_i1_p99_ns ||
+      replay.row.evidence.fairness.paired_isolated_b1
+              ->successful_site_operations !=
           claims.isolated_b1.successful_site_operations ||
-      parse_b1_canonical_uint64(inner_b1[1U]) !=
+      static_cast<std::uint64_t>(
+          replay.row.evidence.fairness.paired_isolated_b1->duration.count()) !=
           claims.isolated_b1.duration_ns) {
     throw std::invalid_argument(
         "M1 inner and measurement denominator claims disagree.");

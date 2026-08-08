@@ -15,6 +15,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -32,6 +33,7 @@
 
 #include "benchmark/b1_evidence.hpp"         // NOLINT(build/include_subdir)
 #include "benchmark/evidence_envelope.hpp"   // NOLINT(build/include_subdir)
+#include "benchmark/m1_canonical.hpp"        // NOLINT(build/include_subdir)
 #include "benchmark/m1_evidence.hpp"         // NOLINT(build/include_subdir)
 #include "benchmark/observation_fanout.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
@@ -1021,61 +1023,6 @@ void execute_batch_job(Host& host, B1Host& b1_host, B1OutputStore& output_store,
 }
 
 /**
- * @brief Returns whether one completed B1 occurrence has a verified endpoint.
- * @param occurrence Settled occurrence with physical and output evidence.
- * @return True only for success, exact semantic/golden identity, durable
- * receipt, and root-resource settlement.
- * @throws Profile encoding and allocation failures unchanged.
- */
-bool batch_job_verified(const BatchOccurrence& occurrence) {
-  if (!occurrence.evidence.has_value()) {
-    return false;
-  }
-  const B1JobEvidence& evidence = *occurrence.evidence;
-  if (!evidence.run_succeeded || evidence.physical_trace.overflowed ||
-      evidence.physical_trace.terminal_kind !=
-          compute::ComputeRunTerminalKind::Succeeded ||
-      !evidence.physical_trace.resource_settled.has_value() ||
-      evidence.output.status != B1OutputCommitStatus::Succeeded ||
-      !evidence.output.receipt.has_value() ||
-      !(evidence.output.receipt->job() == evidence.job) ||
-      !(evidence.output.receipt->logical_content_digest() ==
-        evidence.golden.logical_digest) ||
-      evidence.output.receipt->payload_digest() !=
-          evidence.golden.raw_payload_digest) {
-    return false;
-  }
-  const std::string expected =
-      encode_b1_semantic_trace(make_b1_success_semantic_records(
-          b1_frozen_semantic_plan(evidence.job.job_index)));
-  return evidence.semantic_trace == expected &&
-         evidence.semantic_trace_digest == b1_sha256(expected);
-}
-
-/**
- * @brief Sums actual physical starts for one B1 occurrence without overflow.
- * @param occurrence Completed occurrence.
- * @return Exact all-started service, or nullopt on overflow/missing evidence.
- * @throws Nothing.
- */
-std::optional<std::uint64_t> batch_started_service(
-    const BatchOccurrence& occurrence) noexcept {
-  if (!occurrence.evidence.has_value()) {
-    return std::nullopt;
-  }
-  std::uint64_t total = 0U;
-  for (const B1ObservedServiceStart& start :
-       occurrence.evidence->physical_trace.service_starts) {
-    if (total >
-        std::numeric_limits<std::uint64_t>::max() - start.service_charge) {
-      return std::nullopt;
-    }
-    total += start.service_charge;
-  }
-  return total;
-}
-
-/**
  * @brief Runs one measured Graph producer with independent local cycles.
  * @param parity Zero for Graph A or one for Graph B.
  * @param host Shared ordinary Host.
@@ -1380,122 +1327,29 @@ const char* verdict_text(I1Verdict verdict) {
 }
 
 /**
- * @brief Returns the stable phase token for one B1/M1 occurrence.
- * @param phase Closed phase value.
- * @return `cold`, `warmup`, or `measured`.
- * @throws std::invalid_argument for an unknown representation.
- */
-const char* phase_text(B1JobPhase phase) {
-  switch (phase) {
-    case B1JobPhase::Cold:
-      return "cold";
-    case B1JobPhase::Warmup:
-      return "warmup";
-    case B1JobPhase::Measured:
-      return "measured";
-  }
-  throw std::invalid_argument("unknown B1 phase");
-}
-
-/**
- * @brief Returns whether one Graph retains a continuous offered interval.
- * @param occurrences Complete settled offer set.
- * @param parity Zero for A or one for B.
- * @param start Inclusive window start.
- * @param end Exclusive window end.
- * @return True only when contiguous same-Graph offer intervals cover the full
- * window.
- * @throws Nothing.
- */
-bool graph_demand_covers(
-    const std::vector<std::shared_ptr<BatchOccurrence>>& occurrences,
-    std::uint64_t parity, std::chrono::steady_clock::time_point start,
-    std::chrono::steady_clock::time_point end) noexcept {
-  std::chrono::steady_clock::time_point covered = start;
-  bool began = false;
-  for (const std::shared_ptr<BatchOccurrence>& occurrence : occurrences) {
-    if (occurrence->offer.job.phase != B1JobPhase::Measured ||
-        (occurrence->offer.job.job_index & 1U) != parity ||
-        !occurrence->offer.endpoint.has_value()) {
-      continue;
-    }
-    const auto offered = occurrence->offer.offered.timestamp;
-    const auto endpoint = occurrence->offer.endpoint->timestamp;
-    if (!began) {
-      if (offered <= start && start < endpoint) {
-        began = true;
-        covered = endpoint;
-      }
-      continue;
-    }
-    if (offered <= covered && covered < endpoint) {
-      covered = endpoint;
-    }
-    if (end <= covered) {
-      return true;
-    }
-  }
-  return began && end <= covered;
-}
-
-/**
- * @brief Derives all measured M1 fairness and waste inputs from raw evidence.
+ * @brief Derives the independent mixed-observation fairness projection.
  * @param timeline Exact frozen row boundaries.
- * @param occurrences Complete settled B1 occurrences.
- * @param completed_i1 Complete Issue #93 rows for admission classification.
  * @param observations Shared mixed causal snapshot.
- * @param input Mutable M1 row input receiving fairness/waste aggregates.
- * @return Nothing.
- * @throws std::overflow_error for service aggregation overflow.
- * @throws std::bad_alloc when evidence vectors allocate.
+ * @param input Mutable M1 row input receiving observer flags and class starts.
+ * @return Nothing after every in-window committed start is retained.
+ * @throws std::invalid_argument when `input` is null.
+ * @throws std::bad_alloc when class-start vector storage allocates.
+ * @note Progress, Graph service, headroom outcomes, and their aggregates come
+ * only from `derive_m1_source_fairness_projection`.
  */
-void derive_m1_aggregates(
+void derive_m1_observation_projection(
     const M1Timeline& timeline,
-    const std::vector<std::shared_ptr<BatchOccurrence>>& occurrences,
-    const std::vector<CompletedI1Occurrence>& completed_i1,
     const M1FairnessObservationSnapshot& observations, M1InnerRowInput* input) {
+  if (input == nullptr) {
+    throw std::invalid_argument("M1 observation projection input is null.");
+  }
   input->fairness.observation_overflowed = observations.overflowed;
   input->fairness.observation_sequence_exhausted =
       observations.sequence_exhausted;
   input->fairness.observation_qos_mismatch = observations.qos_mismatch;
   input->fairness.observation_publication_unstable =
       !observations.stable_publication_cut;
-  for (std::size_t window = 0U; window < kM1MeasuredWindowCount; ++window) {
-    const auto start = checked_i1_time_add(
-        timeline.measurement_start,
-        std::chrono::seconds(static_cast<std::int64_t>(window)));
-    const auto end = checked_i1_time_add(start, std::chrono::seconds(1));
-    std::uint64_t verified_jobs = 0U;
-    std::uint64_t graph_service[2U]{0U, 0U};
-    for (const std::shared_ptr<BatchOccurrence>& occurrence : occurrences) {
-      if (occurrence->offer.job.phase != B1JobPhase::Measured ||
-          !occurrence->offer.endpoint.has_value()) {
-        continue;
-      }
-      const auto endpoint = occurrence->offer.endpoint->timestamp;
-      if (start <= endpoint && endpoint < end &&
-          batch_job_verified(*occurrence)) {
-        ++verified_jobs;
-        const std::optional<std::uint64_t> service =
-            batch_started_service(*occurrence);
-        if (!service.has_value() ||
-            graph_service[occurrence->offer.job.job_index & 1U] >
-                std::numeric_limits<std::uint64_t>::max() - *service) {
-          throw std::overflow_error("M1 Graph service sum overflowed");
-        }
-        graph_service[occurrence->offer.job.job_index & 1U] += *service;
-      }
-    }
-    input->fairness.progress_windows.push_back(M1ThroughputProgressSample{
-        window, verified_jobs * kB1SiteOperationsPerJob,
-        std::chrono::seconds(1)});
-    input->fairness.graph_service_windows.push_back(M1GraphServiceWindow{
-        window,
-        graph_demand_covers(occurrences, 0U, start, end) &&
-            graph_demand_covers(occurrences, 1U, start, end),
-        graph_service[0U], graph_service[1U]});
-  }
-
+  input->fairness.class_starts.clear();
   for (const M1FairnessObservation& observation : observations.events) {
     if (observation.kind != M1ObservationKind::ServiceStart ||
         observation.observed_at < timeline.measurement_start ||
@@ -1508,580 +1362,21 @@ void derive_m1_aggregates(
         observation.throughput_candidate_startable,
         observation.execution_grant_committed});
   }
-
-  for (const CompletedI1Occurrence& occurrence : completed_i1) {
-    if (occurrence.phase != B1JobPhase::Measured) {
-      continue;
-    }
-    for (const I1EditEvidence& edit : occurrence.row.evidence.edits) {
-      const bool headroom_failure =
-          edit.host_return.has_value() && !edit.host_return->status.ok;
-      input->fairness.headroom_outcomes.push_back(M1HeadroomAdmissionOutcome{
-          occurrence.phase_ordinal, edit.edit_index, edit.admission_attempted,
-          edit.host_return.has_value()
-              ? std::optional<OperationStatus>(edit.host_return->status)
-              : std::nullopt,
-          headroom_failure});
-      if (edit.admission_attempted) {
-        ++input->fairness.headroom_admissions.attempted_edits;
-      }
-      if (edit.host_return.has_value()) {
-        ++input->fairness.headroom_admissions.classified_outcomes;
-        if (headroom_failure) {
-          ++input->fairness.headroom_admissions.throughput_headroom_failures;
-        }
-      }
-    }
-  }
-
-  std::set<std::pair<std::uint64_t, std::uint64_t>> starts;
-  for (const std::shared_ptr<BatchOccurrence>& occurrence : occurrences) {
-    if (occurrence->offer.job.phase != B1JobPhase::Measured ||
-        !occurrence->evidence.has_value()) {
-      continue;
-    }
-    const bool verified = batch_job_verified(*occurrence);
-    const B1RunObservationSnapshot& trace =
-        occurrence->evidence->physical_trace;
-    for (const B1ObservedServiceStart& start : trace.service_starts) {
-      if (input->batch_waste.all_started_service >
-          std::numeric_limits<std::uint64_t>::max() - start.service_charge) {
-        throw std::overflow_error("M1 batch waste sum overflowed");
-      }
-      input->batch_waste.all_started_service += start.service_charge;
-      if (!starts.insert({start.run_id, start.local_task_id}).second) {
-        ++input->batch_waste.duplicate_service_starts;
-        ++input->batch_waste.retry_service_starts;
-      }
-      if (!verified) {
-        input->batch_waste.discarded_started_service += start.service_charge;
-      }
-      for (const B1ObservedCancellation& cancellation : trace.cancellations) {
-        if (cancellation.run_id == start.run_id &&
-            cancellation.coordinate.causal_sequence <
-                start.coordinate.causal_sequence) {
-          input->batch_waste.post_cancellation_started_service +=
-              start.service_charge;
-        }
-      }
-    }
-  }
 }
 
 /**
- * @brief Returns the canonical lowercase token for one boolean.
- * @param value Boolean evidence value.
- * @return `true` or `false`.
- * @throws Nothing.
- */
-const char* boolean_text(bool value) noexcept {
-  return value ? "true" : "false";
-}
-
-/**
- * @brief Encodes every dimension of one Host resource vector.
- * @param value Complete resource vector.
- * @return Canonical five-component fixed record.
- * @throws Canonical encoding and allocation failures unchanged.
- */
-std::string encode_m1_resource_vector(const ResourceVector& value) {
-  return encode_b1_fixed_record({std::to_string(value.cpu_slots),
-                                 std::to_string(value.retained_memory_bytes),
-                                 std::to_string(value.scratch_bytes),
-                                 std::to_string(value.ready_entries),
-                                 std::to_string(value.ready_bytes)});
-}
-
-/**
- * @brief Encodes every current/limit/phase bit of a Compute I/O snapshot.
- * @param value Exact event-aligned or sparse diagnostic snapshot.
- * @return Canonical nine-component fixed record.
- * @throws Canonical encoding and allocation failures unchanged.
- */
-std::string encode_m1_io_snapshot(
-    const execution::ComputeIoExecutorSnapshot& value) {
-  return encode_b1_fixed_record(
-      {std::to_string(value.task_limit),
-       std::to_string(value.planned_bytes_limit),
-       std::to_string(value.active_tasks),
-       std::to_string(value.active_planned_bytes),
-       std::to_string(value.constructing_tasks),
-       std::to_string(value.queued_tasks), std::to_string(value.running_tasks),
-       boolean_text(value.accepting), boolean_text(value.shutdown_complete)});
-}
-
-/**
- * @brief Encodes the complete lifecycle counter vector without aggregation.
- * @param value Exact post-transition or snapshot counters.
- * @return Canonical fifteen-component fixed record.
- * @throws Canonical encoding and allocation failures unchanged.
- */
-std::string encode_m1_lifecycle_counters(
-    const compute::ExecutionLifecycleCounters& value) {
-  return encode_b1_fixed_record(
-      {std::to_string(value.registered_graph_count),
-       std::to_string(value.open_graph_count),
-       std::to_string(value.closing_graph_count),
-       std::to_string(value.pending_candidate_count),
-       std::to_string(value.admitted_standalone_run_count),
-       std::to_string(value.admitted_run_group_count),
-       std::to_string(value.admitted_child_run_count),
-       std::to_string(value.terminal_not_quiescent_run_count),
-       std::to_string(value.finalizing_run_count),
-       std::to_string(value.ready_entry_count),
-       std::to_string(value.entered_callback_count),
-       std::to_string(value.live_root_reservation_count),
-       std::to_string(value.live_child_grant_count),
-       std::to_string(value.live_policy_invocation_count),
-       std::to_string(value.live_policy_binding_count)});
-}
-
-/**
- * @brief Encodes one complete lifecycle page including every retained event.
- * @param page Exact source-private page copied at one temporal cut.
- * @return Canonical page record with a nested raw-event list.
- * @throws Canonical encoding and allocation failures unchanged.
- */
-std::string encode_m1_lifecycle_page(
-    const compute::ExecutionLifecyclePage& page) {
-  std::vector<std::string> records;
-  records.reserve(page.records.size());
-  for (const compute::ExecutionLifecycleEvent& event : page.records) {
-    records.push_back(encode_b1_fixed_record(
-        {std::to_string(event.schema_version), std::to_string(event.sequence),
-         std::to_string(event.timestamp_us),
-         boolean_text(event.timestamp_saturated),
-         std::to_string(event.service_instance_id),
-         std::to_string(event.telemetry_epoch),
-         std::to_string(event.graph_instance_id), std::to_string(event.run_id),
-         std::to_string(event.run_group_id), std::to_string(event.generation),
-         std::to_string(static_cast<std::uint32_t>(event.kind)),
-         std::to_string(static_cast<std::uint32_t>(event.category)),
-         encode_m1_lifecycle_counters(event.counters)}));
-  }
-  return encode_b1_fixed_record(
-      {std::to_string(page.schema_version), std::to_string(page.capacity),
-       std::to_string(page.service_instance_id),
-       std::to_string(page.telemetry_epoch),
-       std::to_string(static_cast<std::uint32_t>(page.service_state)),
-       std::to_string(page.shutdown_generation),
-       std::to_string(page.snapshot_cut),
-       std::to_string(page.first_retained_sequence),
-       std::to_string(page.next_sequence),
-       std::to_string(page.global_dropped_total),
-       boolean_text(page.global_dropped_saturated),
-       encode_m1_lifecycle_counters(page.counters), encode_record_list(records),
-       std::to_string(page.cursor_gap), std::to_string(page.next_cursor),
-       boolean_text(page.has_more)});
-}
-
-/**
- * @brief Encodes one complete sparse M1 execution diagnostic cut.
- * @param snapshot Host/device/I/O/Throughput/ready/lifecycle evidence.
- * @return Canonical fixed record retaining every scalar and lifecycle event.
- * @throws Canonical encoding and allocation failures unchanged.
- */
-std::string encode_m1_execution_snapshot(const M1ExecutionSnapshot& snapshot) {
-  std::vector<std::string> devices;
-  devices.reserve(snapshot.device_resources.size());
-  for (const ResourceLedger::DeviceSnapshot& device :
-       snapshot.device_resources) {
-    devices.push_back(encode_b1_fixed_record(
-        {std::to_string(static_cast<std::uint32_t>(device.device.backend())),
-         std::to_string(device.device.ordinal()),
-         std::to_string(device.limits.device_memory_bytes),
-         std::to_string(device.limits.device_scratch_bytes),
-         std::to_string(device.reserved.device_memory_bytes),
-         std::to_string(device.reserved.device_scratch_bytes),
-         std::to_string(device.available.device_memory_bytes),
-         std::to_string(device.available.device_scratch_bytes),
-         std::to_string(device.high_water.device_memory_bytes),
-         std::to_string(device.high_water.device_scratch_bytes)}));
-  }
-  return encode_b1_fixed_record(
-      {encode_m1_resource_vector(snapshot.host_resources.limits),
-       encode_m1_resource_vector(snapshot.host_resources.reserved),
-       encode_m1_resource_vector(snapshot.host_resources.high_water),
-       encode_record_list(devices), encode_m1_io_snapshot(snapshot.compute_io),
-       encode_m1_resource_vector(snapshot.throughput.capacity),
-       encode_m1_resource_vector(snapshot.throughput.reserved),
-       encode_b1_fixed_record(
-           {std::to_string(snapshot.ready_classes.interactive_entries),
-            std::to_string(snapshot.ready_classes.throughput_entries),
-            std::to_string(snapshot.ready_classes.total_entries),
-            boolean_text(snapshot.ready_classes.valid)}),
-       encode_m1_lifecycle_page(snapshot.lifecycle),
-       std::to_string(snapshot.lifecycle_after_cursor),
-       std::to_string(snapshot.temporal_capture_ordinal)});
-}
-
-/**
- * @brief Encodes one executor-authored admission event or explicit absence.
- * @param event Optional immutable admission decision.
- * @return Nested exact record or `not-applicable`.
- * @throws Canonical encoding and allocation failures unchanged.
- */
-std::string encode_m1_io_admission_event(
-    const std::optional<execution::ComputeIoAdmissionEvent>& event) {
-  if (!event.has_value()) {
-    return "not-applicable";
-  }
-  return encode_b1_fixed_record(
-      {std::to_string(event->sequence),
-       std::to_string(static_cast<std::uint32_t>(event->status)),
-       std::to_string(event->offered_planned_bytes),
-       std::to_string(event->charged_tasks),
-       std::to_string(event->charged_planned_bytes),
-       encode_m1_io_snapshot(event->snapshot_after)});
-}
-
-/**
- * @brief Encodes one executor-authored settlement event or explicit absence.
- * @param event Optional immutable settlement decision.
- * @return Nested exact record or `not-applicable`.
- * @throws Canonical encoding and allocation failures unchanged.
- */
-std::string encode_m1_io_settlement_event(
-    const std::optional<execution::ComputeIoSettlementEvent>& event) {
-  if (!event.has_value()) {
-    return "not-applicable";
-  }
-  return encode_b1_fixed_record(
-      {std::to_string(event->sequence),
-       std::to_string(event->admission_sequence),
-       std::to_string(static_cast<std::uint32_t>(event->status)),
-       std::to_string(event->released_tasks),
-       std::to_string(event->released_planned_bytes),
-       encode_m1_io_snapshot(event->snapshot_after)});
-}
-
-/**
- * @brief Encodes one complete B1 Compute I/O observation without loss.
- * @param observation Exact row boundary or task transition.
- * @return Canonical fixed record including task, events, and same-lock cut.
- * @throws Canonical encoding and allocation failures unchanged.
- */
-std::string encode_m1_io_observation(
-    const B1ComputeIoObservation& observation) {
-  const std::string task =
-      observation.task.has_value()
-          ? encode_b1_fixed_record(
-                {encode_b1_job_instance(observation.task->job),
-                 std::to_string(
-                     static_cast<std::uint32_t>(observation.task->stage)),
-                 std::to_string(observation.task->attempt)})
-          : "not-applicable";
-  return encode_b1_fixed_record(
-      {std::to_string(static_cast<std::uint32_t>(observation.point)), task,
-       std::to_string(observation.planned_bytes),
-       observation.admission.has_value()
-           ? std::to_string(static_cast<std::uint32_t>(*observation.admission))
-           : "not-applicable",
-       observation.completion.has_value()
-           ? std::to_string(static_cast<std::uint32_t>(*observation.completion))
-           : "not-applicable",
-       encode_m1_io_admission_event(observation.admission_event),
-       encode_m1_io_settlement_event(observation.settlement_event),
-       encode_m1_io_snapshot(observation.snapshot)});
-}
-
-/**
- * @brief Encodes the closed M1 inner row and raw aggregate inputs canonically.
- * @param row Evaluated M1 inner row.
+ * @brief Materializes one M1 row through the sole shared canonical encoder.
+ * @param row Evaluated M1 inner row retaining every source row.
  * @param observations Complete shared causal event snapshot.
- * @param completed_i1 Complete reused Issue #93 rows in protocol order.
- * @return Nested canonical `execution-profile-m1-inner-row-v1` bytes.
- * @throws std::invalid_argument when the I1 source-row join is incomplete.
- * @throws Encoding and allocation failures unchanged.
+ * @return Nested canonical execution-profile-m1-inner-row-v2 bytes.
+ * @throws Canonical replay, encoding, and allocation failures unchanged.
+ * @note Source identity/order and all derived projections are verified by the
+ * shared materializer; the runner owns no second encoding implementation.
  */
 std::string encode_m1_inner_row(
-    const M1InnerRow& row, const M1FairnessObservationSnapshot& observations,
-    const std::vector<CompletedI1Occurrence>& completed_i1) {
-  if (completed_i1.size() !=
-      row.evidence.protocol.interactive_occurrences.size()) {
-    throw std::invalid_argument(
-        "M1 canonical row lacks one exact reused I1 source row");
-  }
-  std::vector<std::string> i1_records;
-  for (std::size_t index = 0U;
-       index < row.evidence.protocol.interactive_occurrences.size(); ++index) {
-    const M1InteractiveOccurrenceEvidence& occurrence =
-        row.evidence.protocol.interactive_occurrences[index];
-    i1_records.push_back(encode_b1_fixed_record(
-        {phase_text(occurrence.phase), std::to_string(occurrence.phase_ordinal),
-         std::to_string(monotonic_nanoseconds(occurrence.origin.timestamp)),
-         std::to_string(occurrence.origin.event_sequence),
-         std::to_string(monotonic_nanoseconds(occurrence.settlement_endpoint)),
-         occurrence.settlement_observed.has_value()
-             ? std::to_string(monotonic_nanoseconds(
-                   occurrence.settlement_observed->timestamp))
-             : "not-applicable",
-         occurrence.settlement_observed.has_value()
-             ? std::to_string(occurrence.settlement_observed->event_sequence)
-             : "not-applicable",
-         occurrence.final_latency.has_value()
-             ? std::to_string(occurrence.final_latency->count())
-             : "not-applicable",
-         std::to_string(occurrence.service.all_started_service),
-         std::to_string(occurrence.service.discarded_started_service),
-         std::to_string(occurrence.service.post_cancel_started_service),
-         verdict_text(occurrence.latency_verdict),
-         verdict_text(occurrence.waste_verdict),
-         verdict_text(occurrence.memory_verdict),
-         verdict_text(occurrence.output_verdict),
-         boolean_text(occurrence.phase_identity_immutable),
-         boolean_text(occurrence.publication_current_at_measurement),
-         boolean_text(occurrence.settlement_pending_at_measurement),
-         encode_b1_normalized_text(
-             i1_inner_row_json(completed_i1[index].row).dump())}));
-  }
-  std::vector<std::string> offer_records;
-  for (const M1BatchOfferEvidence& offer : row.evidence.protocol.batch_offers) {
-    offer_records.push_back(encode_b1_fixed_record(
-        {encode_b1_job_instance(offer.job),
-         std::to_string(offer.producer_offer_ordinal),
-         std::to_string(offer.attempt),
-         std::to_string(monotonic_nanoseconds(offer.offered.timestamp)),
-         std::to_string(offer.offered.event_sequence),
-         offer.predecessor.has_value()
-             ? encode_b1_job_instance(*offer.predecessor)
-             : "not-applicable",
-         offer.predecessor_terminal.has_value()
-             ? std::to_string(
-                   monotonic_nanoseconds(offer.predecessor_terminal->timestamp))
-             : "not-applicable",
-         offer.predecessor_terminal.has_value()
-             ? std::to_string(offer.predecessor_terminal->event_sequence)
-             : "not-applicable",
-         offer.endpoint.has_value()
-             ? std::to_string(monotonic_nanoseconds(offer.endpoint->timestamp))
-             : "not-applicable",
-         offer.endpoint.has_value()
-             ? std::to_string(offer.endpoint->event_sequence)
-             : "not-applicable",
-         boolean_text(offer.owner_settled), boolean_text(offer.output_removed),
-         boolean_text(offer.phase_identity_immutable),
-         boolean_text(offer.fifo_position_preserved),
-         boolean_text(offer.resource_authority_preserved)}));
-  }
-  std::vector<std::string> carryover_records;
-  for (const M1CarryoverEntry& carryover : row.evidence.protocol.carryover) {
-    carryover_records.push_back(encode_b1_fixed_record(
-        {carryover.occurrence_key, phase_text(carryover.phase),
-         std::to_string(static_cast<std::uint32_t>(carryover.state)),
-         carryover.queue_predecessor_key,
-         boolean_text(carryover.resource_authority_preserved),
-         boolean_text(carryover.publication_current),
-         boolean_text(carryover.owner_settled)}));
-  }
-  std::vector<std::string> progress_records;
-  for (const M1ThroughputProgressSample& window :
-       row.evidence.fairness.progress_windows) {
-    progress_records.push_back(encode_b1_fixed_record(
-        {std::to_string(window.window_ordinal),
-         std::to_string(window.successful_site_operations),
-         std::to_string(window.duration.count())}));
-  }
-  std::vector<std::string> graph_records;
-  for (const M1GraphServiceWindow& window :
-       row.evidence.fairness.graph_service_windows) {
-    graph_records.push_back(encode_b1_fixed_record(
-        {std::to_string(window.window_ordinal),
-         boolean_text(window.both_graphs_continuously_demanding),
-         std::to_string(window.graph_a_completed_service),
-         std::to_string(window.graph_b_completed_service)}));
-  }
-  std::vector<std::string> class_records;
-  for (const M1ClassStartSample& start : row.evidence.fairness.class_starts) {
-    class_records.push_back(encode_b1_fixed_record(
-        {std::to_string(start.causal_sequence),
-         std::to_string(static_cast<std::uint32_t>(start.service_class)),
-         boolean_text(start.interactive_candidate_startable),
-         boolean_text(start.throughput_candidate_startable),
-         boolean_text(start.execution_grant_committed)}));
-  }
-  std::vector<std::string> headroom_records;
-  for (const M1HeadroomAdmissionOutcome& outcome :
-       row.evidence.fairness.headroom_outcomes) {
-    headroom_records.push_back(encode_b1_fixed_record(
-        {std::to_string(outcome.origin_ordinal),
-         std::to_string(outcome.edit_index),
-         boolean_text(outcome.admission_attempted),
-         boolean_text(outcome.host_status.has_value()),
-         outcome.host_status.has_value() ? boolean_text(outcome.host_status->ok)
-                                         : "not-applicable",
-         outcome.host_status.has_value()
-             ? std::to_string(
-                   static_cast<std::uint32_t>(outcome.host_status->domain))
-             : "not-applicable",
-         outcome.host_status.has_value()
-             ? std::to_string(outcome.host_status->code)
-             : "not-applicable",
-         outcome.host_status.has_value() ? outcome.host_status->name
-                                         : "not-applicable",
-         outcome.host_status.has_value() ? outcome.host_status->message
-                                         : "not-applicable",
-         boolean_text(outcome.throughput_headroom_failure)}));
-  }
-  std::vector<std::string> io_records;
-  for (const B1JobEvidence& job : row.evidence.batch_jobs) {
-    std::vector<std::string> observations_for_job;
-    observations_for_job.reserve(job.output.io_observations.size());
-    for (const B1ComputeIoObservation& observation :
-         job.output.io_observations) {
-      observations_for_job.push_back(encode_m1_io_observation(observation));
-    }
-    io_records.push_back(encode_b1_fixed_record(
-        {encode_b1_job_instance(job.job),
-         std::to_string(job.producer_offer_ordinal),
-         std::to_string(monotonic_nanoseconds(job.offered_at)),
-         std::to_string(monotonic_nanoseconds(job.endpoint_at)),
-         std::to_string(static_cast<std::uint32_t>(job.output.status)),
-         encode_record_list(observations_for_job),
-         encode_b1_normalized_text(b1_job_evidence_json(job).dump())}));
-  }
-  std::vector<std::string> snapshot_records;
-  snapshot_records.reserve(row.evidence.temporal_snapshots.size());
-  for (const M1ExecutionSnapshot& snapshot : row.evidence.temporal_snapshots) {
-    snapshot_records.push_back(encode_m1_execution_snapshot(snapshot));
-  }
-  std::vector<std::string> mixed_records;
-  for (const M1FairnessObservation& observation : observations.events) {
-    mixed_records.push_back(encode_b1_fixed_record(
-        {std::to_string(static_cast<std::uint32_t>(observation.kind)),
-         std::to_string(static_cast<std::uint32_t>(observation.request_tag)),
-         std::to_string(static_cast<std::uint32_t>(observation.service_class)),
-         std::to_string(observation.causal_sequence),
-         std::to_string(monotonic_nanoseconds(observation.observed_at)),
-         std::to_string(observation.run_id),
-         std::to_string(observation.local_task_id),
-         std::to_string(observation.service_charge),
-         std::to_string(
-             static_cast<std::uint32_t>(observation.task_terminal_kind)),
-         std::to_string(
-             static_cast<std::uint32_t>(observation.run_terminal_kind)),
-         boolean_text(observation.qos_matches_tag),
-         boolean_text(observation.interactive_candidate_startable),
-         boolean_text(observation.throughput_candidate_startable),
-         boolean_text(observation.execution_grant_committed)}));
-  }
-  const auto& boundaries = row.evidence.protocol.boundaries;
-  const std::string boundary_record = encode_b1_fixed_record(
-      {std::to_string(monotonic_nanoseconds(boundaries.cold_start.timestamp)),
-       std::to_string(boundaries.cold_start.event_sequence),
-       std::to_string(monotonic_nanoseconds(boundaries.warmup_start.timestamp)),
-       std::to_string(boundaries.warmup_start.event_sequence),
-       std::to_string(
-           monotonic_nanoseconds(boundaries.measurement_start.timestamp)),
-       std::to_string(boundaries.measurement_start.event_sequence),
-       std::to_string(
-           monotonic_nanoseconds(boundaries.measurement_end.timestamp)),
-       std::to_string(boundaries.measurement_end.event_sequence)});
-  const M1FirstMeasuredAdmissionEvidence& first =
-      row.evidence.protocol.first_measured_admission;
-  const std::string first_admission_record = encode_b1_fixed_record(
-      {std::to_string(first.edit_index),
-       std::to_string(monotonic_nanoseconds(first.nominal_time)),
-       boolean_text(first.attempted),
-       std::to_string(monotonic_nanoseconds(first.admission_sample)),
-       first.reserved_event_sequence.has_value()
-           ? std::to_string(*first.reserved_event_sequence)
-           : "not-applicable",
-       boolean_text(first.host_succeeded),
-       first.accepted_coordinate.has_value()
-           ? std::to_string(monotonic_nanoseconds(
-                 first.accepted_coordinate->admission_time()))
-           : "not-applicable",
-       first.accepted_coordinate.has_value()
-           ? std::to_string(first.accepted_coordinate->event_sequence())
-           : "not-applicable",
-       boolean_text(first.warmup_publication_current_before_acceptance),
-       boolean_text(first.superseded_exactly_at_acceptance),
-       boolean_text(first.boundary_only_cancellation),
-       std::to_string(
-           monotonic_nanoseconds(first.old_generation_settlement_endpoint))});
-  const std::string protocol_flags = encode_b1_fixed_record(
-      {boolean_text(row.evidence.protocol.shared_execution_domain),
-       boolean_text(row.evidence.protocol.boundary_was_zero_duration),
-       boolean_text(row.evidence.protocol.raw_history_preserved),
-       boolean_text(row.evidence.protocol.warmup_sources_closed),
-       boolean_text(row.evidence.protocol.measured_counters_reset),
-       boolean_text(row.evidence.protocol.final_settlement_proved),
-       boolean_text(row.evidence.occurrence_attribution_proved),
-       boolean_text(row.evidence.temporal_effects_complete),
-       boolean_text(row.evidence.fairness.observation_overflowed),
-       boolean_text(row.evidence.fairness.observation_sequence_exhausted),
-       boolean_text(row.evidence.fairness.observation_qos_mismatch),
-       boolean_text(row.evidence.fairness.observation_publication_unstable)});
-  const M1BatchWasteEvidence& waste = row.evidence.batch_waste;
-  const std::string batch_waste_record = encode_b1_fixed_record(
-      {std::to_string(waste.all_started_service),
-       std::to_string(waste.discarded_started_service),
-       std::to_string(waste.post_cancellation_started_service),
-       std::to_string(waste.duplicate_service_starts),
-       std::to_string(waste.retry_service_starts)});
-  const std::string verdict_record = encode_b1_fixed_record(
-      {verdict_text(row.latency_verdict),
-       verdict_text(row.throughput_progress_verdict),
-       verdict_text(row.fairness_verdict), verdict_text(row.waste_verdict),
-       verdict_text(row.memory_verdict), verdict_text(row.overall_verdict)});
-  std::vector<B1CanonicalField> fields{
-      known_field("schema_version", "uint64",
-                  std::to_string(kM1InnerRowSchemaVersion)),
-      known_field("replicate_ordinal", "uint64",
-                  std::to_string(row.evidence.replicate_ordinal)),
-      known_field("boundaries", "m1-boundary-record-v1", boundary_record),
-      known_field("protocol_flags", "m1-protocol-flags-v1", protocol_flags),
-      known_field("interactive_occurrences", "m1-i1-occurrence-list-v1",
-                  encode_record_list(i1_records)),
-      known_field("batch_offers", "m1-b1-offer-list-v1",
-                  encode_record_list(offer_records)),
-      known_field("carryover", "m1-carryover-list-v1",
-                  encode_record_list(carryover_records)),
-      known_field("first_measured_admission", "m1-first-admission-record-v1",
-                  first_admission_record),
-      known_field("progress_windows", "m1-progress-window-list-v1",
-                  encode_record_list(progress_records)),
-      known_field("graph_service_windows", "m1-graph-service-window-list-v1",
-                  encode_record_list(graph_records)),
-      known_field("class_starts", "m1-class-start-list-v1",
-                  encode_record_list(class_records)),
-      known_field("headroom_outcomes", "m1-headroom-outcome-list-v1",
-                  encode_record_list(headroom_records)),
-      known_field("batch_io_streams", "m1-b1-io-stream-list-v1",
-                  encode_record_list(io_records)),
-      known_field("temporal_snapshots", "m1-execution-snapshot-list-v1",
-                  encode_record_list(snapshot_records)),
-      known_field("mixed_observations", "m1-observation-list-v1",
-                  encode_record_list(mixed_records))};
-  if (row.evidence.paired_isolated_i1_p99.has_value()) {
-    fields.push_back(known_field(
-        "paired_isolated_i1_p99_ns", "uint64",
-        std::to_string(row.evidence.paired_isolated_i1_p99->count())));
-  } else {
-    fields.push_back(not_applicable_field("paired_isolated_i1_p99_ns", "uint64",
-                                          "paired-isolated-row-not-resolved"));
-  }
-  if (row.evidence.fairness.paired_isolated_b1.has_value()) {
-    fields.push_back(known_field(
-        "paired_isolated_b1_source", "m1-b1-rate-source-v1",
-        encode_b1_fixed_record(
-            {std::to_string(row.evidence.fairness.paired_isolated_b1
-                                ->successful_site_operations),
-             std::to_string(row.evidence.fairness.paired_isolated_b1->duration
-                                .count())})));
-  } else {
-    fields.push_back(not_applicable_field("paired_isolated_b1_source",
-                                          "m1-b1-rate-source-v1",
-                                          "paired-isolated-row-not-resolved"));
-  }
-  fields.push_back(known_field("batch_waste", "m1-batch-waste-record-v1",
-                               batch_waste_record));
-  fields.push_back(known_field("verdicts", "m1-five-axis-verdict-record-v1",
-                               verdict_record));
-  return encode_b1_canonical_manifest(kM1InnerRowSchema, fields);
+    const M1InnerRow& row, const M1FairnessObservationSnapshot& observations) {
+  return materialize_m1_inner_row(row, observations);
 }
-
 /**
  * @brief Complete sealed output of one actual M1 manual invocation.
  * @throws std::bad_alloc when canonical objects and diagnostics are moved.
@@ -2152,7 +1447,6 @@ std::uint64_t latest_pair_seal(const EvidencePairObject& object) {
  * @param environment Complete retained claims plus portable live observation.
  * @param inner Evaluated five-axis row.
  * @param observations Complete shared causal event snapshot.
- * @param completed_i1 Complete reused Issue #93 rows in protocol order.
  * @param paired_i1 Exact pre-timed loaded isolated-I1 object.
  * @param paired_b1_cap8 Exact pre-timed loaded isolated-B1 cap-eight object.
  * @param i1_fixture Frozen embedded I1 fixture digest.
@@ -2167,12 +1461,12 @@ std::uint64_t latest_pair_seal(const EvidencePairObject& object) {
 M1RunResult seal_m1_result(
     const M1RunnerOptions& options, B1EnvironmentEvidence environment,
     M1InnerRow inner, const M1FairnessObservationSnapshot& observations,
-    const std::vector<CompletedI1Occurrence>& completed_i1,
     EvidencePairObject paired_i1, EvidencePairObject paired_b1_cap8,
     const B1Sha256Digest& i1_fixture, const B1Sha256Digest& b1_fixture,
     const B1Sha256Digest& b1_corpus, const B1Sha256Digest& b1_golden) {
-  const std::string nested_inner =
-      encode_m1_inner_row(inner, observations, completed_i1);
+  const std::string nested_inner = encode_m1_inner_row(inner, observations);
+  static_cast<void>(parse_and_recompute_m1_inner_row(
+      nested_inner, options.replicate_ordinal));
   const std::uint64_t latest_external_seal =
       std::max(latest_pair_seal(paired_i1), latest_pair_seal(paired_b1_cap8));
   if (latest_external_seal > std::numeric_limits<std::uint64_t>::max() - 8U) {
@@ -2752,6 +2046,9 @@ M1RunResult run_exact_m1_replicate(
   for (const CompletedI1Occurrence& occurrence : completed_i1) {
     input.protocol.interactive_occurrences.push_back(
         make_m1_i1_evidence(occurrence, &protocol_sequence));
+    input.interactive_sources.push_back(make_m1_interactive_source_evidence(
+        occurrence.phase, occurrence.phase_ordinal, occurrence.origin,
+        occurrence.row));
   }
   {
     std::lock_guard<std::mutex> lock(batch_state.mutex);
@@ -2792,11 +2089,37 @@ M1RunResult run_exact_m1_replicate(
   }
   for (const std::shared_ptr<BatchOccurrence>& occurrence : occurrences) {
     if (occurrence->evidence.has_value()) {
-      input.batch_jobs.push_back(*occurrence->evidence);
+      input.batch_sources.push_back(
+          make_m1_batch_source_evidence(*occurrence->evidence));
     }
   }
-  derive_m1_aggregates(timeline, occurrences, completed_i1, observations,
-                       &input);
+  const auto offer_rank = [&input](const B1JobInstance& job) {
+    const auto found = std::find_if(
+        input.protocol.batch_offers.begin(), input.protocol.batch_offers.end(),
+        [&job](const M1BatchOfferEvidence& offer) { return offer.job == job; });
+    if (found == input.protocol.batch_offers.end()) {
+      throw std::invalid_argument(
+          "M1 B1 I/O stream lacks its canonical protocol offer");
+    }
+    return static_cast<std::size_t>(
+        std::distance(input.protocol.batch_offers.begin(), found));
+  };
+  std::sort(input.batch_sources.begin(), input.batch_sources.end(),
+            [&offer_rank](const M1BatchSourceEvidence& lhs,
+                          const M1BatchSourceEvidence& rhs) {
+              return offer_rank(lhs.job) < offer_rank(rhs.job);
+            });
+  input.batch_waste = derive_m1_batch_waste_evidence(input.batch_sources);
+  M1SourceFairnessProjection source_fairness =
+      derive_m1_source_fairness_projection(
+          input.protocol, input.interactive_sources, input.batch_sources);
+  input.fairness.progress_windows = std::move(source_fairness.progress_windows);
+  input.fairness.graph_service_windows =
+      std::move(source_fairness.graph_service_windows);
+  input.fairness.headroom_admissions = source_fairness.headroom_admissions;
+  input.fairness.headroom_outcomes =
+      std::move(source_fairness.headroom_outcomes);
+  derive_m1_observation_projection(timeline, observations, &input);
   input.occurrence_attribution_proved =
       std::all_of(input.protocol.interactive_occurrences.begin(),
                   input.protocol.interactive_occurrences.end(),
@@ -2825,7 +2148,7 @@ M1RunResult run_exact_m1_replicate(
           output_store.retain_root_authority(), batch_state.measured_receipts);
   return seal_m1_result(
       options, std::move(environment), std::move(inner), observations,
-      completed_i1, std::move(paired_i1), std::move(paired_b1_cap8), i1_fixture,
+      std::move(paired_i1), std::move(paired_b1_cap8), i1_fixture,
       b1_components.fixture, b1_components.corpus, b1_components.golden);
 }
 

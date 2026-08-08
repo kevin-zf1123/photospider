@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -62,6 +63,560 @@ bool checked_accumulate(std::uint64_t* value,
   }
   *value += contribution;
   return true;
+}
+
+/**
+ * @brief Increments one size aggregate without wraparound.
+ * @param value Mutable aggregate.
+ * @return True when the exact increment was stored.
+ * @throws Nothing.
+ */
+bool checked_size_increment(std::size_t* value) noexcept {
+  if (*value == std::numeric_limits<std::size_t>::max()) {
+    return false;
+  }
+  ++*value;
+  return true;
+}
+
+/**
+ * @brief Returns the exact Issue #93 slot assigned to one M1 occurrence.
+ * @param phase Immutable M1 phase.
+ * @param ordinal Zero-based phase-local ordinal.
+ * @return Cold slot zero, warmup slots one through seven, or measured slots
+ * twenty-one through sixty.
+ * @throws std::invalid_argument for an unsupported phase/ordinal pair.
+ */
+std::size_t m1_i1_source_slot(B1JobPhase phase, std::size_t ordinal) {
+  switch (phase) {
+    case B1JobPhase::Cold:
+      if (ordinal == 0U) {
+        return 0U;
+      }
+      break;
+    case B1JobPhase::Warmup:
+      if (ordinal < kM1WarmupI1OriginCount) {
+        return 1U + ordinal;
+      }
+      break;
+    case B1JobPhase::Measured:
+      if (ordinal < kM1MeasuredI1OriginCount) {
+        return kI1WarmupSlotCount + 1U + ordinal;
+      }
+      break;
+  }
+  throw std::invalid_argument("M1 I1 source phase/ordinal is invalid.");
+}
+
+/**
+ * @brief Tests whether one I1 source replay exactly matches its M1 projection.
+ * @param source Retained source identity and raw Issue #93 input.
+ * @param occurrence Derived M1 projection to verify.
+ * @param replicate_ordinal Enclosing M1 replicate identity.
+ * @return True only when identity, latency, service, and four verdicts match.
+ * @throws std::bad_alloc when Issue #93 replay allocates.
+ * @throws Checked Issue #93 evaluation failures unchanged.
+ */
+bool m1_i1_source_matches(const M1InteractiveSourceEvidence& source,
+                          const M1InteractiveOccurrenceEvidence& occurrence,
+                          std::uint64_t replicate_ordinal) {
+  if (source.phase != occurrence.phase ||
+      source.phase_ordinal != occurrence.phase_ordinal ||
+      !(source.origin == occurrence.origin) ||
+      source.episode.replicate_ordinal != replicate_ordinal ||
+      source.episode.slot !=
+          m1_i1_source_slot(source.phase, source.phase_ordinal) ||
+      source.episode.episode_origin != source.origin.timestamp) {
+    return false;
+  }
+  const I1EpisodeInnerRow replay = evaluate_i1_episode(source.episode);
+  return replay.final_latency == occurrence.final_latency &&
+         replay.service.all_started_service ==
+             occurrence.service.all_started_service &&
+         replay.service.discarded_started_service ==
+             occurrence.service.discarded_started_service &&
+         replay.service.post_cancel_started_service ==
+             occurrence.service.post_cancel_started_service &&
+         replay.latency_verdict == occurrence.latency_verdict &&
+         replay.waste_verdict == occurrence.waste_verdict &&
+         replay.memory_verdict == occurrence.memory_verdict &&
+         replay.output_verdict == occurrence.output_verdict;
+}
+
+/**
+ * @brief Returns the frozen I1 identity assigned to one source-list index.
+ * @param index Zero-based index in the exact 48-source list.
+ * @return Cold/warmup/measured phase and its phase-local ordinal.
+ * @throws std::invalid_argument when the index is outside the exact list.
+ */
+std::pair<B1JobPhase, std::size_t> expected_m1_i1_source_identity(
+    std::size_t index) {
+  if (index < kM1ColdI1OriginCount) {
+    return {B1JobPhase::Cold, index};
+  }
+  if (index < kM1ColdI1OriginCount + kM1WarmupI1OriginCount) {
+    return {B1JobPhase::Warmup, index - kM1ColdI1OriginCount};
+  }
+  if (index < kM1TotalI1OriginCount) {
+    return {B1JobPhase::Measured,
+            index - kM1ColdI1OriginCount - kM1WarmupI1OriginCount};
+  }
+  throw std::invalid_argument("M1 I1 source index exceeds 48 occurrences.");
+}
+
+/**
+ * @brief Returns whether one B1 QoS value is the exact M1 Throughput shape.
+ * @param qos Immutable source service-start QoS.
+ * @param run_cap Exact occurrence cap.
+ * @return True only for Throughput/no-deadline/weight-one/exact cap.
+ * @throws Nothing.
+ */
+bool valid_m1_batch_qos(const compute::ComputeRunQos& qos,
+                        std::uint64_t run_cap) noexcept {
+  return qos.service_class == compute::ComputeRunQosClass::Throughput &&
+         !qos.deadline.has_value() && qos.weight == 1U &&
+         qos.maximum_parallelism.has_value() &&
+         *qos.maximum_parallelism == run_cap;
+}
+
+/**
+ * @brief Computes the stable B1 commit identity from one occurrence.
+ * @param job Complete immutable B1 identity.
+ * @return Lowercase SHA-256 commit id used by the output store.
+ * @throws Digest, validation, and allocation failures unchanged.
+ */
+std::string expected_m1_batch_commit_id(const B1JobInstance& job) {
+  B1Sha256 hash;
+  hash.update("execution-profile-output-commit-id-v1\n");
+  hash.update(encode_b1_job_instance(job));
+  return b1_digest_hex(hash.finish());
+}
+
+/**
+ * @brief Tests whether one observed rooted slot is a safe single component.
+ * @param slot Authority-free copied path.
+ * @return True only for one nonempty ordinary relative component.
+ * @throws Nothing.
+ */
+bool valid_m1_batch_rooted_slot(const std::filesystem::path& slot) noexcept {
+  return !slot.empty() && !slot.is_absolute() && slot.filename() == slot &&
+         slot != "." && slot != "..";
+}
+
+/**
+ * @brief Complete replay result for one authority-free B1 source.
+ * @throws std::bad_alloc when diagnostics allocate.
+ */
+struct M1BatchSourceReplay final {
+  /** @brief True when the retained raw source is lossless and coherent. */
+  bool structurally_valid = true;
+  /** @brief Exact Issue #95 successful endpoint eligibility. */
+  bool verified_endpoint = false;
+  /** @brief Sum of every retained physical service start. */
+  std::uint64_t all_started_service = 0U;
+  /** @brief Service not credited to a unique verified endpoint. */
+  std::uint64_t discarded_started_service = 0U;
+  /** @brief Service beginning after an accepted cancellation. */
+  std::uint64_t post_cancellation_started_service = 0U;
+  /** @brief Duplicate physical starts plus duplicate I/O admissions. */
+  std::size_t duplicate_service_starts = 0U;
+  /** @brief Explicit nonzero I/O attempt records. */
+  std::size_t retry_service_starts = 0U;
+};
+
+/**
+ * @brief Replays one complete authority-free B1 physical/output/I/O source.
+ * @param source Retained canonical source evidence.
+ * @return Verified endpoint and exact service accounting.
+ * @throws std::bad_alloc when temporary semantic/index storage allocates.
+ */
+M1BatchSourceReplay replay_m1_batch_source(
+    const M1BatchSourceEvidence& source) {
+  M1BatchSourceReplay result;
+  const B1RunObservationSnapshot& trace = source.physical_trace;
+  if (!(trace.job == source.job) || trace.overflowed ||
+      trace.current_generations.size() != 1U ||
+      trace.current_generations.front().generation == 0U) {
+    result.structurally_valid = false;
+  }
+
+  std::set<std::uint64_t> causal_sequences;
+  const auto reserve_sequence = [&](std::uint64_t sequence) {
+    if (sequence == 0U || !causal_sequences.insert(sequence).second) {
+      result.structurally_valid = false;
+    }
+  };
+  for (const B1ObservedCurrentGeneration& generation :
+       trace.current_generations) {
+    reserve_sequence(generation.coordinate.causal_sequence);
+  }
+  for (const B1ObservedTaskReady& ready : trace.task_readies) {
+    if (ready.run_id == 0U) {
+      result.structurally_valid = false;
+    }
+    reserve_sequence(ready.coordinate.causal_sequence);
+  }
+  for (const B1ObservedTaskTerminal& terminal : trace.task_terminals) {
+    if (terminal.run_id == 0U) {
+      result.structurally_valid = false;
+    }
+    reserve_sequence(terminal.coordinate.causal_sequence);
+  }
+  for (const B1ObservedCancellation& cancellation : trace.cancellations) {
+    if (cancellation.run_id == 0U) {
+      result.structurally_valid = false;
+    }
+    reserve_sequence(cancellation.coordinate.causal_sequence);
+  }
+
+  std::uint64_t run_id = 0U;
+  std::set<std::uint64_t> local_tasks;
+  std::uint64_t duplicate_service = 0U;
+  for (const B1ObservedServiceStart& start : trace.service_starts) {
+    reserve_sequence(start.coordinate.causal_sequence);
+    if (start.run_id == 0U || start.service_charge == 0U ||
+        !valid_m1_batch_qos(start.qos, source.job.run_cap)) {
+      result.structurally_valid = false;
+    }
+    if (run_id == 0U) {
+      run_id = start.run_id;
+    } else if (run_id != start.run_id) {
+      result.structurally_valid = false;
+    }
+    if (!checked_accumulate(&result.all_started_service,
+                            start.service_charge)) {
+      result.structurally_valid = false;
+    }
+    if (!local_tasks.insert(start.local_task_id).second) {
+      ++result.duplicate_service_starts;
+      if (!checked_accumulate(&duplicate_service, start.service_charge)) {
+        result.structurally_valid = false;
+      }
+    }
+    for (const B1ObservedCancellation& cancellation : trace.cancellations) {
+      if (cancellation.run_id == start.run_id &&
+          cancellation.coordinate.causal_sequence <
+              start.coordinate.causal_sequence &&
+          !checked_accumulate(&result.post_cancellation_started_service,
+                              start.service_charge)) {
+        result.structurally_valid = false;
+      }
+    }
+  }
+  if (trace.service_starts.size() != kB1TasksPerJob ||
+      local_tasks.size() != kB1TasksPerJob) {
+    result.structurally_valid = false;
+  } else {
+    std::uint64_t expected = 0U;
+    for (const std::uint64_t task : local_tasks) {
+      if (task != expected++) {
+        result.structurally_valid = false;
+        break;
+      }
+    }
+  }
+
+  bool lifecycle_valid =
+      trace.terminal_kind.has_value() && trace.terminal.has_value() &&
+      trace.visible.has_value() && trace.quiescent.has_value() &&
+      trace.resource_settled.has_value();
+  if (lifecycle_valid) {
+    reserve_sequence(trace.terminal->coordinate.causal_sequence);
+    reserve_sequence(trace.visible->coordinate.causal_sequence);
+    reserve_sequence(trace.quiescent->coordinate.causal_sequence);
+    reserve_sequence(trace.resource_settled->coordinate.causal_sequence);
+    const std::uint64_t terminal_run = trace.terminal->run_id;
+    lifecycle_valid = terminal_run != 0U && terminal_run == run_id &&
+                      trace.visible->run_id == terminal_run &&
+                      trace.quiescent->run_id == terminal_run &&
+                      trace.resource_settled->run_id == terminal_run &&
+                      trace.visible->coordinate.causal_sequence <
+                          trace.terminal->coordinate.causal_sequence &&
+                      trace.terminal->coordinate.causal_sequence <
+                          trace.quiescent->coordinate.causal_sequence &&
+                      trace.quiescent->coordinate.causal_sequence <
+                          trace.resource_settled->coordinate.causal_sequence;
+    for (const B1ObservedServiceStart& start : trace.service_starts) {
+      lifecycle_valid =
+          lifecycle_valid && start.coordinate.causal_sequence <
+                                 trace.terminal->coordinate.causal_sequence;
+    }
+  }
+  if (!lifecycle_valid) {
+    result.structurally_valid = false;
+  }
+
+  bool trace_valid = false;
+  try {
+    const std::vector<B1SemanticRecord> parsed =
+        parse_b1_semantic_trace(source.semantic_trace);
+    const std::string observed =
+        encode_b1_semantic_trace(make_b1_observed_semantic_records(trace));
+    trace_valid =
+        parsed.size() == kB1TasksPerJob * 3U &&
+        encode_b1_semantic_trace(parsed) == source.semantic_trace &&
+        observed == source.semantic_trace &&
+        b1_sha256(source.semantic_trace) == source.semantic_trace_digest;
+  } catch (const std::exception&) {
+    result.structurally_valid = false;
+  }
+
+  const B1ComputeIoEvidenceInput io_input{source.job, source.output_status,
+                                          source.output_receipt.has_value(),
+                                          source.io_observations};
+  const B1ComputeIoEvaluation io = evaluate_b1_compute_io_evidence(io_input);
+  if (!io.structurally_valid) {
+    result.structurally_valid = false;
+  }
+  result.duplicate_service_starts += io.duplicate_admissions;
+  result.retry_service_starts = io.retry_records;
+
+  bool artifact_valid = false;
+  bool logical_match = false;
+  bool raw_match = false;
+  bool manifest_match = false;
+  bool visible_digest_match = false;
+  const bool receipt_relation =
+      (source.output_status == B1OutputCommitStatus::Succeeded) ==
+      source.output_receipt.has_value();
+  if (!receipt_relation) {
+    result.structurally_valid = false;
+  }
+  if (source.output_receipt.has_value()) {
+    const M1BatchReceiptEvidence& receipt = *source.output_receipt;
+    try {
+      const B1JobGolden frozen = b1_frozen_job_golden(source.job.job_index);
+      const std::string commit_id = expected_m1_batch_commit_id(source.job);
+      const std::string manifest =
+          b1_artifact_manifest(source.job.job_index, receipt.payload_digest);
+      artifact_valid =
+          receipt.commit_id == commit_id && receipt.job == source.job &&
+          receipt.logical_descriptor ==
+              "dense-tensor-hwc-fp32-rgba-2048x2048" &&
+          receipt.committed_generation == 1U &&
+          receipt.payload_name == "output.rgba32le" &&
+          receipt.manifest_name == "manifest.txt" &&
+          receipt.payload_length == kB1PayloadBytes &&
+          receipt.manifest_length == b1_manifest_length(source.job.job_index) &&
+          receipt.requested_durability == B1OutputDurability::CrashDurable &&
+          receipt.achieved_durability == B1OutputDurability::CrashDurable &&
+          !receipt.published_manifest_identity.empty() &&
+          valid_m1_batch_rooted_slot(receipt.rooted_slot) &&
+          receipt.rooted_slot ==
+              std::filesystem::path("occurrence-" + commit_id) &&
+          receipt.resolved_root.is_absolute();
+      manifest_match = receipt.manifest_length == manifest.size() &&
+                       receipt.manifest_digest == b1_sha256(manifest);
+      logical_match = source.golden.job_index == source.job.job_index &&
+                      source.golden.logical_digest == frozen.logical_digest &&
+                      receipt.logical_content_digest == frozen.logical_digest;
+      raw_match =
+          source.golden.job_index == source.job.job_index &&
+          source.golden.raw_payload_digest == frozen.raw_payload_digest &&
+          receipt.payload_digest == frozen.raw_payload_digest;
+      visible_digest_match =
+          trace.visible_content_digest.state == ContentDigestState::Available &&
+          trace.visible_content_digest.digest.has_value() &&
+          *trace.visible_content_digest.digest ==
+              receipt.logical_content_digest;
+    } catch (const std::exception&) {
+      artifact_valid = false;
+    }
+  }
+
+  result.verified_endpoint =
+      result.structurally_valid && lifecycle_valid && source.run_succeeded &&
+      trace.terminal_kind == compute::ComputeRunTerminalKind::Succeeded &&
+      trace_valid && artifact_valid && manifest_match && logical_match &&
+      raw_match && visible_digest_match && io.fault_free_complete &&
+      source.output_status == B1OutputCommitStatus::Succeeded &&
+      source.output_receipt.has_value();
+  result.discarded_started_service =
+      result.verified_endpoint ? duplicate_service : result.all_started_service;
+  return result;
+}
+
+/**
+ * @brief Source replay facts bound to one exact protocol offer.
+ * @throws Nothing for value construction and copying.
+ */
+struct M1ProjectedBatchSource final {
+  /** @brief Exact protocol offer matched by list identity/order. */
+  const M1BatchOfferEvidence* offer = nullptr;
+  /** @brief Independently replayed endpoint and service facts. */
+  M1BatchSourceReplay replay;
+};
+
+/**
+ * @brief Tests whether one Graph has uninterrupted measured demand.
+ * @param offers Complete exact-order protocol offer stream.
+ * @param parity Zero for Graph A or one for Graph B.
+ * @param start Inclusive one-second window start.
+ * @param end Exclusive one-second window end.
+ * @return True only when contiguous same-Graph offer intervals cover the full
+ * window.
+ * @throws Nothing.
+ * @note Callers validate every offer endpoint before invoking this helper.
+ */
+bool m1_graph_demand_covers(
+    const std::vector<M1BatchOfferEvidence>& offers, std::uint64_t parity,
+    std::chrono::steady_clock::time_point start,
+    std::chrono::steady_clock::time_point end) noexcept {
+  std::chrono::steady_clock::time_point covered = start;
+  bool began = false;
+  for (const M1BatchOfferEvidence& offer : offers) {
+    if (offer.job.phase != B1JobPhase::Measured ||
+        (offer.job.job_index & 1U) != parity || !offer.endpoint.has_value()) {
+      continue;
+    }
+    const auto offered = offer.offered.timestamp;
+    const auto endpoint = offer.endpoint->timestamp;
+    if (!began) {
+      if (offered <= start && start < endpoint) {
+        began = true;
+        covered = endpoint;
+      }
+      continue;
+    }
+    if (offered <= covered && covered < endpoint) {
+      covered = endpoint;
+    }
+    if (end <= covered) {
+      return true;
+    }
+  }
+  return began && end <= covered;
+}
+
+/**
+ * @brief Tests exact equality of two Host status values.
+ * @param lhs First status.
+ * @param rhs Second status.
+ * @return True only when all five status fields match.
+ * @throws Nothing.
+ */
+bool same_m1_operation_status(const OperationStatus& lhs,
+                              const OperationStatus& rhs) noexcept {
+  return lhs.ok == rhs.ok && lhs.domain == rhs.domain && lhs.code == rhs.code &&
+         lhs.name == rhs.name && lhs.message == rhs.message;
+}
+
+/**
+ * @brief Tests exact equality of two optional Host status values.
+ * @param lhs First optional status.
+ * @param rhs Second optional status.
+ * @return True only when presence and every present field match.
+ * @throws Nothing.
+ */
+bool same_m1_optional_status(
+    const std::optional<OperationStatus>& lhs,
+    const std::optional<OperationStatus>& rhs) noexcept {
+  return lhs.has_value() == rhs.has_value() &&
+         (!lhs.has_value() || same_m1_operation_status(*lhs, *rhs));
+}
+
+/**
+ * @brief Tests exact equality of two progress-window vectors.
+ * @param lhs First ordered projection.
+ * @param rhs Second ordered projection.
+ * @return True only when cardinality, identity, numerator, and duration match.
+ * @throws Nothing.
+ */
+bool same_m1_progress_windows(
+    const std::vector<M1ThroughputProgressSample>& lhs,
+    const std::vector<M1ThroughputProgressSample>& rhs) noexcept {
+  return lhs.size() == rhs.size() &&
+         std::equal(lhs.begin(), lhs.end(), rhs.begin(),
+                    [](const M1ThroughputProgressSample& left,
+                       const M1ThroughputProgressSample& right) {
+                      return left.window_ordinal == right.window_ordinal &&
+                             left.successful_site_operations ==
+                                 right.successful_site_operations &&
+                             left.duration == right.duration;
+                    });
+}
+
+/**
+ * @brief Tests exact equality of two Graph-window vectors.
+ * @param lhs First ordered projection.
+ * @param rhs Second ordered projection.
+ * @return True only when cardinality, identity, demand, and both services
+ * match.
+ * @throws Nothing.
+ */
+bool same_m1_graph_windows(
+    const std::vector<M1GraphServiceWindow>& lhs,
+    const std::vector<M1GraphServiceWindow>& rhs) noexcept {
+  return lhs.size() == rhs.size() &&
+         std::equal(lhs.begin(), lhs.end(), rhs.begin(),
+                    [](const M1GraphServiceWindow& left,
+                       const M1GraphServiceWindow& right) {
+                      return left.window_ordinal == right.window_ordinal &&
+                             left.both_graphs_continuously_demanding ==
+                                 right.both_graphs_continuously_demanding &&
+                             left.graph_a_completed_service ==
+                                 right.graph_a_completed_service &&
+                             left.graph_b_completed_service ==
+                                 right.graph_b_completed_service;
+                    });
+}
+
+/**
+ * @brief Tests exact equality of two headroom aggregate values.
+ * @param lhs First aggregate.
+ * @param rhs Second aggregate.
+ * @return True only when attempted, classified, and failure counts match.
+ * @throws Nothing.
+ */
+bool same_m1_headroom_admissions(
+    const M1HeadroomAdmissionEvidence& lhs,
+    const M1HeadroomAdmissionEvidence& rhs) noexcept {
+  return lhs.attempted_edits == rhs.attempted_edits &&
+         lhs.classified_outcomes == rhs.classified_outcomes &&
+         lhs.throughput_headroom_failures == rhs.throughput_headroom_failures;
+}
+
+/**
+ * @brief Tests exact equality of two ordered headroom-outcome vectors.
+ * @param lhs First retained projection.
+ * @param rhs Second retained projection.
+ * @return True only when cardinality, identities, status fields, and flags
+ * match.
+ * @throws Nothing.
+ */
+bool same_m1_headroom_outcomes(
+    const std::vector<M1HeadroomAdmissionOutcome>& lhs,
+    const std::vector<M1HeadroomAdmissionOutcome>& rhs) noexcept {
+  return lhs.size() == rhs.size() &&
+         std::equal(lhs.begin(), lhs.end(), rhs.begin(),
+                    [](const M1HeadroomAdmissionOutcome& left,
+                       const M1HeadroomAdmissionOutcome& right) {
+                      return left.origin_ordinal == right.origin_ordinal &&
+                             left.edit_index == right.edit_index &&
+                             left.admission_attempted ==
+                                 right.admission_attempted &&
+                             same_m1_optional_status(left.host_status,
+                                                     right.host_status) &&
+                             left.throughput_headroom_failure ==
+                                 right.throughput_headroom_failure;
+                    });
+}
+
+/**
+ * @brief Tests exact equality of two projected B1 waste records.
+ * @param lhs First aggregate.
+ * @param rhs Second aggregate.
+ * @return True only when all five dimensions match.
+ * @throws Nothing.
+ */
+bool same_m1_batch_waste(const M1BatchWasteEvidence& lhs,
+                         const M1BatchWasteEvidence& rhs) noexcept {
+  return lhs.all_started_service == rhs.all_started_service &&
+         lhs.discarded_started_service == rhs.discarded_started_service &&
+         lhs.post_cancellation_started_service ==
+             rhs.post_cancellation_started_service &&
+         lhs.duplicate_service_starts == rhs.duplicate_service_starts &&
+         lhs.retry_service_starts == rhs.retry_service_starts;
 }
 
 /**
@@ -1393,7 +1948,7 @@ bool validate_m1_lifecycle_history(
  * @brief Validates temporal snapshots and event-derived Compute I/O evidence.
  * @param snapshots Chronological same-service samples including final cut.
  * @param offers Complete immutable B1 protocol offer set.
- * @param jobs Exact-one complete B1 evidence for every offer.
+ * @param jobs Exact-one authority-free B1 I/O evidence for every offer.
  * @param row Mutable result receiving high-water values and diagnostics.
  * @return Structural validity plus independently complete limit/settlement
  * outcomes.
@@ -1402,7 +1957,7 @@ bool validate_m1_lifecycle_history(
 M1MemoryValidation validate_m1_memory(
     const std::vector<M1ExecutionSnapshot>& snapshots,
     const std::vector<M1BatchOfferEvidence>& offers,
-    const std::vector<B1JobEvidence>& jobs, M1InnerRow* row) {
+    const std::vector<M1BatchSourceEvidence>& jobs, M1InnerRow* row) {
   M1MemoryValidation result;
   const auto invalid = [&result, row](std::string reason) {
     result.valid = false;
@@ -1413,8 +1968,8 @@ M1MemoryValidation validate_m1_memory(
     return result;
   }
 
-  std::map<B1JobInstance, const B1JobEvidence*> indexed_jobs;
-  for (const B1JobEvidence& job : jobs) {
+  std::map<B1JobInstance, const M1BatchSourceEvidence*> indexed_jobs;
+  for (const M1BatchSourceEvidence& job : jobs) {
     if (!indexed_jobs.emplace(job.job, &job).second) {
       invalid("multiple B1 I/O streams claim the same occurrence");
     }
@@ -1429,14 +1984,17 @@ M1MemoryValidation validate_m1_memory(
       invalid("a protocol B1 offer lacks its complete I/O stream");
       continue;
     }
-    const B1JobEvidence& job = *found->second;
+    const M1BatchSourceEvidence& job = *found->second;
     if (job.producer_offer_ordinal != offer.producer_offer_ordinal ||
         job.offered_at != offer.offered.timestamp ||
         !offer.endpoint.has_value() ||
         job.endpoint_at != offer.endpoint->timestamp) {
       invalid("B1 I/O stream identity or endpoint differs from its offer");
     }
-    const B1ComputeIoEvaluation io = evaluate_b1_compute_io_evidence(job);
+    const B1ComputeIoEvidenceInput io_input{job.job, job.output_status,
+                                            job.output_receipt.has_value(),
+                                            job.io_observations};
+    const B1ComputeIoEvaluation io = evaluate_b1_compute_io_evidence(io_input);
     if (!io.structurally_valid || !io.fault_free_complete) {
       invalid("B1 I/O stream is malformed or not fault-free complete");
       for (const std::string& reason : io.validity_reasons) {
@@ -1447,8 +2005,7 @@ M1MemoryValidation validate_m1_memory(
         std::max(row->compute_io_task_high_water, io.task_high_water);
     row->compute_io_planned_byte_high_water = std::max(
         row->compute_io_planned_byte_high_water, io.planned_byte_high_water);
-    for (const B1ComputeIoObservation& observation :
-         job.output.io_observations) {
+    for (const B1ComputeIoObservation& observation : job.io_observations) {
       std::optional<std::uint64_t> sequence;
       if (observation.point == B1IoObservationPoint::AcceptedAdmission ||
           observation.point == B1IoObservationPoint::OfferRejected) {
@@ -1581,12 +2138,332 @@ M1MemoryValidation validate_m1_memory(
 
 }  // namespace
 
+/** @copydoc make_m1_interactive_source_evidence */
+M1InteractiveSourceEvidence make_m1_interactive_source_evidence(
+    B1JobPhase phase, std::size_t phase_ordinal, M1EventCoordinate origin,
+    const I1EpisodeInnerRow& row) {
+  if (row.schema != kI1InnerRowSchema ||
+      row.schema_version != kI1InnerRowSchemaVersion ||
+      row.workload_id != kI1WorkloadId ||
+      row.evidence.slot != m1_i1_source_slot(phase, phase_ordinal) ||
+      row.evidence.episode_origin != origin.timestamp) {
+    throw std::invalid_argument(
+        "M1 I1 source identity differs from its Issue #93 row.");
+  }
+  const I1EpisodeInnerRow replay = evaluate_i1_episode(row.evidence);
+  if (replay.final_latency != row.final_latency ||
+      replay.service.all_started_service != row.service.all_started_service ||
+      replay.service.discarded_started_service !=
+          row.service.discarded_started_service ||
+      replay.service.post_cancel_started_service !=
+          row.service.post_cancel_started_service ||
+      replay.latency_verdict != row.latency_verdict ||
+      replay.waste_verdict != row.waste_verdict ||
+      replay.memory_verdict != row.memory_verdict ||
+      replay.output_verdict != row.output_verdict) {
+    throw std::invalid_argument(
+        "M1 I1 source row does not recompute its derived projection.");
+  }
+  return M1InteractiveSourceEvidence{phase, phase_ordinal, origin,
+                                     row.evidence};
+}
+
+/** @copydoc make_m1_batch_source_evidence */
+M1BatchSourceEvidence make_m1_batch_source_evidence(
+    const B1JobEvidence& evidence) {
+  M1BatchSourceEvidence source;
+  source.job = evidence.job;
+  source.producer_offer_ordinal = evidence.producer_offer_ordinal;
+  source.offered_at = evidence.offered_at;
+  source.endpoint_at = evidence.endpoint_at;
+  source.run_succeeded = evidence.run_succeeded;
+  source.verified_endpoint = b1_job_has_verified_endpoint(evidence);
+  source.physical_trace = evidence.physical_trace;
+  source.output_status = evidence.output.status;
+  source.io_observations = evidence.output.io_observations;
+  source.golden = evidence.golden;
+  source.semantic_trace = evidence.semantic_trace;
+  source.semantic_trace_digest = evidence.semantic_trace_digest;
+  if (evidence.output.receipt.has_value()) {
+    const B1OutputCommitReceipt& receipt = *evidence.output.receipt;
+    source.output_receipt =
+        M1BatchReceiptEvidence{receipt.commit_id(),
+                               receipt.resolved_root(),
+                               receipt.rooted_slot(),
+                               receipt.job(),
+                               receipt.logical_descriptor(),
+                               receipt.logical_content_digest(),
+                               receipt.committed_generation(),
+                               receipt.payload_name(),
+                               receipt.manifest_name(),
+                               receipt.payload_length(),
+                               receipt.manifest_length(),
+                               receipt.payload_digest(),
+                               receipt.manifest_digest(),
+                               receipt.requested_durability(),
+                               receipt.achieved_durability(),
+                               receipt.published_manifest_identity()};
+  }
+  return source;
+}
+
+/** @copydoc derive_m1_source_fairness_projection */
+M1SourceFairnessProjection derive_m1_source_fairness_projection(
+    const M1ProtocolEvidenceInput& protocol,
+    const std::vector<M1InteractiveSourceEvidence>& interactive_sources,
+    const std::vector<M1BatchSourceEvidence>& batch_sources) {
+  M1SourceFairnessProjection projection;
+  projection.progress_windows.reserve(kM1MeasuredWindowCount);
+  projection.graph_service_windows.reserve(kM1MeasuredWindowCount);
+  projection.headroom_outcomes.reserve(kM1MeasuredI1AttemptCount);
+
+  if (protocol.interactive_occurrences.size() != kM1TotalI1OriginCount ||
+      interactive_sources.size() != kM1TotalI1OriginCount ||
+      interactive_sources.size() != protocol.interactive_occurrences.size()) {
+    throw std::invalid_argument(
+        "M1 I1 source cardinality differs from 48 occurrences.");
+  }
+
+  std::size_t measured_source_count = 0U;
+  for (std::size_t index = 0U; index < interactive_sources.size(); ++index) {
+    const auto expected = expected_m1_i1_source_identity(index);
+    const M1InteractiveSourceEvidence& source = interactive_sources[index];
+    const M1InteractiveOccurrenceEvidence& occurrence =
+        protocol.interactive_occurrences[index];
+    if (source.phase != expected.first ||
+        source.phase_ordinal != expected.second ||
+        occurrence.phase != expected.first ||
+        occurrence.phase_ordinal != expected.second ||
+        !m1_i1_source_matches(source, occurrence, protocol.replicate_ordinal)) {
+      throw std::invalid_argument(
+          "M1 I1 source identity/order or derived projection drifted.");
+    }
+    if (source.phase != B1JobPhase::Measured) {
+      continue;
+    }
+    if (!checked_size_increment(&measured_source_count)) {
+      throw std::overflow_error("M1 measured I1 source count overflowed.");
+    }
+    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
+      const I1EditEvidence& edit = source.episode.edits[edit_index];
+      if (edit.edit_index != edit_index) {
+        throw std::invalid_argument(
+            "M1 measured I1 edit identity/order drifted.");
+      }
+      const bool headroom_failure =
+          edit.host_return.has_value() && !edit.host_return->status.ok;
+      projection.headroom_outcomes.push_back(M1HeadroomAdmissionOutcome{
+          source.phase_ordinal, edit.edit_index, edit.admission_attempted,
+          edit.host_return.has_value()
+              ? std::optional<OperationStatus>(edit.host_return->status)
+              : std::nullopt,
+          headroom_failure});
+      if ((edit.admission_attempted &&
+           !checked_size_increment(
+               &projection.headroom_admissions.attempted_edits)) ||
+          (edit.host_return.has_value() &&
+           !checked_size_increment(
+               &projection.headroom_admissions.classified_outcomes)) ||
+          (headroom_failure &&
+           !checked_size_increment(
+               &projection.headroom_admissions.throughput_headroom_failures))) {
+        throw std::overflow_error("M1 headroom aggregate overflowed.");
+      }
+    }
+  }
+  if (measured_source_count != kM1MeasuredI1OriginCount ||
+      projection.headroom_outcomes.size() != kM1MeasuredI1AttemptCount) {
+    throw std::invalid_argument(
+        "M1 measured I1 source projection differs from 40 by 12 outcomes.");
+  }
+
+  const auto measurement_start =
+      protocol.boundaries.measurement_start.timestamp;
+  const auto measurement_end =
+      checked_i1_time_add(measurement_start, kM1MeasurementDuration);
+  if (protocol.boundaries.measurement_end.timestamp != measurement_end) {
+    throw std::invalid_argument(
+        "M1 fairness projection boundaries do not span exactly 30 seconds.");
+  }
+  if (batch_sources.size() != protocol.batch_offers.size()) {
+    throw std::invalid_argument(
+        "M1 B1 source cardinality differs from protocol offers.");
+  }
+
+  std::set<B1JobInstance> source_jobs;
+  std::vector<M1ProjectedBatchSource> projected_sources;
+  projected_sources.reserve(batch_sources.size());
+  for (std::size_t index = 0U; index < batch_sources.size(); ++index) {
+    const M1BatchSourceEvidence& source = batch_sources[index];
+    const M1BatchOfferEvidence& offer = protocol.batch_offers[index];
+    validate_b1_job_instance(source.job);
+    if (!source_jobs.insert(source.job).second) {
+      throw std::invalid_argument("M1 B1 source identity/order is duplicated.");
+    }
+    if (!offer.endpoint.has_value() || !(source.job == offer.job) ||
+        source.producer_offer_ordinal != offer.producer_offer_ordinal ||
+        source.offered_at != offer.offered.timestamp ||
+        source.endpoint_at != offer.endpoint->timestamp ||
+        !(source.physical_trace.job == source.job)) {
+      throw std::invalid_argument(
+          "M1 B1 source identity/order or offer endpoint drifted.");
+    }
+    M1BatchSourceReplay replay = replay_m1_batch_source(source);
+    if (!replay.structurally_valid) {
+      throw std::invalid_argument("M1 B1 source replay is malformed or lossy.");
+    }
+    if (replay.verified_endpoint != source.verified_endpoint) {
+      throw std::invalid_argument(
+          "M1 B1 source verified-endpoint projection drifted.");
+    }
+    projected_sources.push_back(
+        M1ProjectedBatchSource{&offer, std::move(replay)});
+  }
+
+  for (std::size_t window = 0U; window < kM1MeasuredWindowCount; ++window) {
+    const auto start = checked_i1_time_add(
+        measurement_start,
+        std::chrono::seconds(static_cast<std::int64_t>(window)));
+    const auto end = checked_i1_time_add(start, std::chrono::seconds(1));
+    std::uint64_t successful_site_operations = 0U;
+    std::uint64_t graph_service[2U]{0U, 0U};
+    for (const M1ProjectedBatchSource& source : projected_sources) {
+      const M1BatchOfferEvidence& offer = *source.offer;
+      if (offer.job.phase != B1JobPhase::Measured ||
+          !source.replay.verified_endpoint || !offer.endpoint.has_value() ||
+          offer.endpoint->timestamp < start ||
+          !(offer.endpoint->timestamp < end)) {
+        continue;
+      }
+      const std::size_t graph =
+          static_cast<std::size_t>(offer.job.job_index & 1U);
+      if (!checked_accumulate(&successful_site_operations,
+                              kB1SiteOperationsPerJob) ||
+          !checked_accumulate(&graph_service[graph],
+                              source.replay.all_started_service)) {
+        throw std::overflow_error(
+            "M1 source-derived progress or Graph service overflowed.");
+      }
+    }
+    projection.progress_windows.push_back(M1ThroughputProgressSample{
+        window, successful_site_operations, std::chrono::seconds(1)});
+    projection.graph_service_windows.push_back(M1GraphServiceWindow{
+        window,
+        m1_graph_demand_covers(protocol.batch_offers, 0U, start, end) &&
+            m1_graph_demand_covers(protocol.batch_offers, 1U, start, end),
+        graph_service[0U], graph_service[1U]});
+  }
+  if (projection.progress_windows.size() != kM1MeasuredWindowCount ||
+      projection.graph_service_windows.size() != kM1MeasuredWindowCount) {
+    throw std::invalid_argument(
+        "M1 source-derived fairness projection cardinality drifted.");
+  }
+  return projection;
+}
+
+/** @copydoc derive_m1_batch_waste_evidence */
+M1BatchWasteEvidence derive_m1_batch_waste_evidence(
+    const std::vector<M1BatchSourceEvidence>& sources) {
+  M1BatchWasteEvidence result;
+  std::set<B1JobInstance> jobs;
+  for (const M1BatchSourceEvidence& source : sources) {
+    validate_b1_job_instance(source.job);
+    if (!jobs.insert(source.job).second) {
+      throw std::invalid_argument("M1 B1 source identity is duplicated.");
+    }
+    const M1BatchSourceReplay replay = replay_m1_batch_source(source);
+    if (!replay.structurally_valid) {
+      throw std::invalid_argument("M1 B1 source replay is malformed or lossy.");
+    }
+    if (replay.verified_endpoint != source.verified_endpoint) {
+      throw std::invalid_argument(
+          "M1 B1 source verified-endpoint projection drifted.");
+    }
+    if (source.job.phase != B1JobPhase::Measured) {
+      continue;
+    }
+    if (!checked_accumulate(&result.all_started_service,
+                            replay.all_started_service) ||
+        !checked_accumulate(&result.discarded_started_service,
+                            replay.discarded_started_service) ||
+        !checked_accumulate(&result.post_cancellation_started_service,
+                            replay.post_cancellation_started_service)) {
+      throw std::overflow_error("M1 B1 source service aggregate overflowed.");
+    }
+    if (result.duplicate_service_starts >
+            std::numeric_limits<std::size_t>::max() -
+                replay.duplicate_service_starts ||
+        result.retry_service_starts > std::numeric_limits<std::size_t>::max() -
+                                          replay.retry_service_starts) {
+      throw std::overflow_error("M1 B1 source count aggregate overflowed.");
+    }
+    result.duplicate_service_starts += replay.duplicate_service_starts;
+    result.retry_service_starts += replay.retry_service_starts;
+  }
+  return result;
+}
+
 /** @copydoc evaluate_m1_inner_row */
 M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
   M1InnerRow row;
   row.evidence = std::move(input);
   row.protocol = evaluate_m1_protocol(row.evidence.protocol);
   row.validity_reasons = row.protocol.validity_reasons;
+
+  bool fairness_sources_valid = true;
+  try {
+    const M1SourceFairnessProjection projection =
+        derive_m1_source_fairness_projection(row.evidence.protocol,
+                                             row.evidence.interactive_sources,
+                                             row.evidence.batch_sources);
+    if (!same_m1_progress_windows(projection.progress_windows,
+                                  row.evidence.fairness.progress_windows)) {
+      fairness_sources_valid = false;
+      invalidate_m1(&row.validity_reasons,
+                    "M1 progress projection differs from retained raw sources");
+    }
+    if (!same_m1_graph_windows(projection.graph_service_windows,
+                               row.evidence.fairness.graph_service_windows)) {
+      fairness_sources_valid = false;
+      invalidate_m1(&row.validity_reasons,
+                    "M1 Graph projection differs from retained raw sources");
+    }
+    if (!same_m1_headroom_outcomes(projection.headroom_outcomes,
+                                   row.evidence.fairness.headroom_outcomes)) {
+      fairness_sources_valid = false;
+      invalidate_m1(
+          &row.validity_reasons,
+          "M1 headroom outcome projection differs from retained raw sources");
+    }
+    if (!same_m1_headroom_admissions(
+            projection.headroom_admissions,
+            row.evidence.fairness.headroom_admissions)) {
+      fairness_sources_valid = false;
+      invalidate_m1(&row.validity_reasons,
+                    "M1 headroom aggregate differs from retained raw sources");
+    }
+  } catch (const std::exception& error) {
+    fairness_sources_valid = false;
+    invalidate_m1(&row.validity_reasons,
+                  std::string("M1 source-derived fairness replay failed "
+                              "closed: ") +
+                      error.what());
+  }
+
+  bool batch_waste_valid = true;
+  try {
+    const M1BatchWasteEvidence replayed =
+        derive_m1_batch_waste_evidence(row.evidence.batch_sources);
+    if (!same_m1_batch_waste(replayed, row.evidence.batch_waste)) {
+      batch_waste_valid = false;
+      invalidate_m1(&row.validity_reasons,
+                    "M1 B1 waste projection differs from retained raw sources");
+    }
+  } catch (const std::exception&) {
+    batch_waste_valid = false;
+    invalidate_m1(&row.validity_reasons, "M1 B1 source replay failed closed");
+  }
+  row.source_evidence_closed = fairness_sources_valid && batch_waste_valid;
 
   if (row.evidence.replicate_ordinal == 0U ||
       row.evidence.replicate_ordinal > 3U ||
@@ -1596,7 +2473,7 @@ M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
                   "M1 inner row replicate identity drifted");
   }
   const bool protocol_valid =
-      row.protocol.verdict == I1Verdict::Pass &&
+      row.protocol.verdict == I1Verdict::Pass && row.source_evidence_closed &&
       row.evidence.replicate_ordinal != 0U &&
       row.evidence.replicate_ordinal <= 3U &&
       row.evidence.protocol.replicate_ordinal == row.evidence.replicate_ordinal;
@@ -1728,7 +2605,7 @@ M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
 
   const M1MemoryValidation memory = validate_m1_memory(
       row.evidence.temporal_snapshots, row.evidence.protocol.batch_offers,
-      row.evidence.batch_jobs, &row);
+      row.evidence.batch_sources, &row);
   if (memory.valid && row.evidence.temporal_effects_complete) {
     row.memory_verdict = memory.within_limits && memory.settled
                              ? I1Verdict::Pass

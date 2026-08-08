@@ -1095,10 +1095,12 @@ M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input) {
     for (std::size_t index = 0U; index < input.progress_windows.size();
          ++index) {
       const M1ThroughputProgressSample& window = input.progress_windows[index];
-      if (window.window_ordinal != index || window.duration.count() <= 0) {
+      if (window.window_ordinal != index ||
+          window.duration != std::chrono::seconds(1)) {
         progress_valid = false;
         invalidate(&summary.validity_reasons,
-                   "M1 progress contains an unordered or invalid raw window");
+                   "M1 progress contains an unordered or non-one-second raw "
+                   "window");
         break;
       }
       const long double numerator =

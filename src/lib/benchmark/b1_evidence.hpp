@@ -297,6 +297,47 @@ struct B1ComputeIoEvaluation final {
 };
 
 /**
+ * @brief Authority-free complete input for the reusable B1 Compute I/O FSM.
+ *
+ * This projection retains exactly the job identity, terminal-status/receipt
+ * relation, and executor-authored observation stream consumed by the FSM. It
+ * deliberately carries no output receipt capability or storage authority.
+ *
+ * @throws std::bad_alloc when observation storage is copied.
+ */
+struct B1ComputeIoEvidenceInput final {
+  /** @brief Complete immutable occurrence identity. */
+  B1JobInstance job;
+  /** @brief Exact terminal output status paired with the stream. */
+  B1OutputCommitStatus output_status = B1OutputCommitStatus::InvalidRequest;
+  /** @brief Whether the source result retained a store-minted receipt. */
+  bool output_receipt_present = false;
+  /** @brief Complete ordered executor-authored I/O observations. */
+  std::vector<B1ComputeIoObservation> io_observations;
+};
+
+/**
+ * @brief Projects one complete B1 job onto the authority-free I/O FSM input.
+ * @param evidence Complete source-private B1 job evidence.
+ * @return Exact job/status/receipt-presence/observation projection.
+ * @throws std::bad_alloc when observation storage is copied.
+ * @note The returned value cannot mint or recover the source output receipt.
+ */
+B1ComputeIoEvidenceInput make_b1_compute_io_evidence_input(
+    const B1JobEvidence& evidence);
+
+/**
+ * @brief Replays one authority-free complete event-aligned Compute I/O stream.
+ * @param input Exact immutable job/status/receipt-presence/observation input.
+ * @return Structural, fault-free, retry, and high-water facts.
+ * @throws std::bad_alloc when maps or diagnostics allocate.
+ * @note This overload is the shared rule authority used by isolated B1 and
+ * canonical M1 replay; neither caller may substitute a second FSM.
+ */
+B1ComputeIoEvaluation evaluate_b1_compute_io_evidence(
+    const B1ComputeIoEvidenceInput& input);
+
+/**
  * @brief Replays one B1 job's complete event-aligned Compute I/O stream.
  * @param evidence Complete immutable job/output evidence.
  * @return Structural, fault-free, retry, and high-water facts.

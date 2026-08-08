@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -19,11 +20,13 @@
 #include <utility>
 #include <vector>
 
+#include "benchmark/m1_canonical.hpp"        // NOLINT(build/include_subdir)
 #include "benchmark/m1_evidence.hpp"         // NOLINT(build/include_subdir)
 #include "benchmark/m1_profile.hpp"          // NOLINT(build/include_subdir)
 #include "benchmark/observation_fanout.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/value.hpp"
 #include "support/b1_test_environment.hpp"
+#include "support/m1_test_evidence.hpp"
 
 namespace ps::benchmark {
 namespace {
@@ -330,8 +333,9 @@ std::array<B1EnvironmentEvidence, 3U> make_environment_triple(
 
 /**
  * @brief Builds one exact deterministic M1 phase/offer/carryover protocol.
- * @return Structurally passing evidence in which Graph A independently enters
- * local cycle one while Graph B remains in cycle zero.
+ * @return Structurally passing evidence in which both independent Graphs
+ * complete one verified occurrence in every measured window and retain one
+ * final offer through U.
  * @throws Checked time, job identity, and allocation failures unchanged.
  */
 M1ProtocolEvidenceInput make_passing_protocol() {
@@ -442,45 +446,38 @@ M1ProtocolEvidenceInput make_passing_protocol() {
                  2600U),
       true));
 
-  const B1JobInstance first_a{
-      kM1WorkloadId, 1U, B1JobPhase::Measured, 0U, 0U, 8U};
-  const B1JobInstance first_b{
-      kM1WorkloadId, 1U, B1JobPhase::Measured, 0U, 1U, 8U};
-  M1EventCoordinate first_a_offer =
-      coordinate(timeline.measurement_start, 2002U);
-  M1EventCoordinate first_b_offer =
-      coordinate(timeline.measurement_start, 2003U);
-  M1EventCoordinate first_a_endpoint = coordinate(
-      checked_i1_time_add(timeline.measurement_start, std::chrono::seconds(1)),
-      3000U);
-  input.batch_offers.push_back(make_offer(B1JobPhase::Measured, 0U, 0U, 2U,
-                                          first_a_offer, a254, std::nullopt,
-                                          first_a_endpoint, false));
-  input.batch_offers.push_back(make_offer(
-      B1JobPhase::Measured, 0U, 1U, 2U, first_b_offer, b255, std::nullopt,
-      coordinate(timeline.measurement_end, 10002U), false));
-
-  B1JobInstance prior_a = first_a;
-  M1EventCoordinate prior_endpoint = first_a_endpoint;
-  for (std::size_t local_index = 1U; local_index <= 15U; ++local_index) {
+  std::array<B1JobInstance, 2U> predecessors{a254, b255};
+  std::array<std::optional<M1EventCoordinate>, 2U> predecessor_endpoints;
+  for (std::size_t local_index = 0U; local_index <= kM1MeasuredWindowCount;
+       ++local_index) {
     const std::uint64_t cycle = local_index / 15U;
-    const std::uint64_t job = 2U * (local_index % 15U);
-    const B1JobInstance current{kM1WorkloadId, 1U,  B1JobPhase::Measured,
-                                cycle,         job, 8U};
-    const M1EventCoordinate offered =
-        coordinate(prior_endpoint.timestamp, 3000U + 2U * local_index);
-    const M1EventCoordinate endpoint =
-        local_index == 15U
-            ? coordinate(timeline.measurement_end, 10001U)
-            : coordinate(
-                  checked_i1_time_add(timeline.measurement_start,
-                                      std::chrono::seconds(local_index + 1U)),
-                  3001U + 2U * local_index);
-    input.batch_offers.push_back(make_offer(B1JobPhase::Measured, cycle, job,
-                                            2U + local_index, offered, prior_a,
-                                            prior_endpoint, endpoint, false));
-    prior_a = current;
-    prior_endpoint = endpoint;
+    const auto endpoint_time =
+        local_index == kM1MeasuredWindowCount
+            ? timeline.measurement_end
+            : checked_i1_time_add(
+                  timeline.measurement_start,
+                  std::chrono::milliseconds(500) +
+                      std::chrono::seconds(
+                          static_cast<std::int64_t>(local_index)));
+    for (std::size_t parity = 0U; parity < 2U; ++parity) {
+      const std::uint64_t job =
+          2U * (local_index % 15U) + static_cast<std::uint64_t>(parity);
+      const B1JobInstance current{kM1WorkloadId, 1U,  B1JobPhase::Measured,
+                                  cycle,         job, 8U};
+      const M1EventCoordinate offered =
+          local_index == 0U
+              ? coordinate(timeline.measurement_start, 2002U + parity)
+              : coordinate(predecessor_endpoints[parity]->timestamp,
+                           30000U + 4U * (local_index - 1U) + 2U + parity);
+      const M1EventCoordinate endpoint =
+          coordinate(endpoint_time, 30000U + 4U * local_index + parity);
+      input.batch_offers.push_back(
+          make_offer(B1JobPhase::Measured, cycle, job, 2U + local_index,
+                     offered, predecessors[parity],
+                     predecessor_endpoints[parity], endpoint, false));
+      predecessors[parity] = current;
+      predecessor_endpoints[parity] = endpoint;
+    }
   }
 
   input.carryover = {
@@ -807,95 +804,6 @@ compute::ExecutionLifecycleEvent& require_m1_lifecycle_event(
 }
 
 /**
- * @brief Builds one valid event-aligned executor snapshot for a test task.
- * @param active_tasks Zero or one active task.
- * @param active_bytes Exact active charge paired with `active_tasks`.
- * @return Frozen-limit snapshot with the task represented as queued.
- * @throws Nothing.
- */
-execution::ComputeIoExecutorSnapshot make_m1_io_event_snapshot(
-    std::uint64_t active_tasks, std::uint64_t active_bytes) noexcept {
-  execution::ComputeIoExecutorSnapshot snapshot;
-  snapshot.task_limit = kB1ComputeIoTaskLimit;
-  snapshot.planned_bytes_limit = kB1ComputeIoPlannedByteLimit;
-  snapshot.active_tasks = active_tasks;
-  snapshot.active_planned_bytes = active_bytes;
-  snapshot.queued_tasks = active_tasks;
-  snapshot.accepting = true;
-  return snapshot;
-}
-
-/**
- * @brief Builds one fault-free two-stage B1 I/O stream for an M1 offer.
- * @param offer Exact protocol offer and endpoint identity.
- * @param first_sequence First of four globally unique accounting sequences.
- * @return Minimal complete B1 job record accepted by the reusable I/O FSM.
- * @throws std::invalid_argument when the offer lacks its terminal endpoint.
- * @throws std::bad_alloc when observation storage allocates.
- */
-B1JobEvidence make_m1_batch_io_job(const M1BatchOfferEvidence& offer,
-                                   std::uint64_t first_sequence) {
-  if (!offer.endpoint.has_value()) {
-    throw std::invalid_argument("M1 test offer lacks an endpoint");
-  }
-  B1JobEvidence evidence;
-  evidence.job = offer.job;
-  evidence.producer_offer_ordinal = offer.producer_offer_ordinal;
-  evidence.offered_at = offer.offered.timestamp;
-  evidence.endpoint_at = offer.endpoint->timestamp;
-  evidence.output.status = B1OutputCommitStatus::RevalidationFailed;
-
-  const B1IoTaskIdentity payload{offer.job, B1IoStage::PayloadStage, 0U};
-  const B1IoTaskIdentity manifest{offer.job, B1IoStage::ManifestCommit, 0U};
-  const std::uint64_t manifest_bytes = b1_manifest_length(offer.job.job_index);
-  const auto zero = make_m1_io_event_snapshot(0U, 0U);
-  const auto payload_active = make_m1_io_event_snapshot(1U, kB1PayloadBytes);
-  const auto manifest_active = make_m1_io_event_snapshot(1U, manifest_bytes);
-  const execution::ComputeIoAdmissionEvent payload_admission{
-      first_sequence,  execution::ComputeIoAdmissionStatus::Accepted,
-      kB1PayloadBytes, 1U,
-      kB1PayloadBytes, payload_active};
-  const execution::ComputeIoSettlementEvent payload_settlement{
-      first_sequence + 1U,
-      first_sequence,
-      execution::ComputeIoCompletionStatus::Succeeded,
-      1U,
-      kB1PayloadBytes,
-      zero};
-  const execution::ComputeIoAdmissionEvent manifest_admission{
-      first_sequence + 2U, execution::ComputeIoAdmissionStatus::Accepted,
-      manifest_bytes,      1U,
-      manifest_bytes,      manifest_active};
-  const execution::ComputeIoSettlementEvent manifest_settlement{
-      first_sequence + 3U,
-      first_sequence + 2U,
-      execution::ComputeIoCompletionStatus::Succeeded,
-      1U,
-      manifest_bytes,
-      zero};
-  evidence.output.io_observations = {
-      {B1IoObservationPoint::Initial, std::nullopt, 0U, std::nullopt,
-       std::nullopt, std::nullopt, std::nullopt, zero},
-      {B1IoObservationPoint::AcceptedAdmission, payload, kB1PayloadBytes,
-       execution::ComputeIoAdmissionStatus::Accepted, std::nullopt,
-       payload_admission, std::nullopt, payload_active},
-      {B1IoObservationPoint::Settlement, payload, kB1PayloadBytes,
-       execution::ComputeIoAdmissionStatus::Accepted,
-       execution::ComputeIoCompletionStatus::Succeeded, payload_admission,
-       payload_settlement, zero},
-      {B1IoObservationPoint::AcceptedAdmission, manifest, manifest_bytes,
-       execution::ComputeIoAdmissionStatus::Accepted, std::nullopt,
-       manifest_admission, std::nullopt, manifest_active},
-      {B1IoObservationPoint::Settlement, manifest, manifest_bytes,
-       execution::ComputeIoAdmissionStatus::Accepted,
-       execution::ComputeIoCompletionStatus::Succeeded, manifest_admission,
-       manifest_settlement, zero},
-      {B1IoObservationPoint::Final, std::nullopt, 0U, std::nullopt,
-       std::nullopt, std::nullopt, std::nullopt, zero}};
-  return evidence;
-}
-
-/**
  * @brief Builds one complete passing five-axis M1 row input.
  * @return Exact protocol, SLO samples, fault-free waste, and zero settlement.
  * @throws Allocation and checked-time failures unchanged.
@@ -906,12 +814,9 @@ M1InnerRowInput make_passing_inner_row_input() {
   input.protocol = make_passing_protocol();
   input.fairness = make_passing_fairness_input();
   input.paired_isolated_i1_p99 = std::chrono::milliseconds(10);
-  input.batch_waste = M1BatchWasteEvidence{1000U, 0U, 0U, 0U, 0U};
-  std::uint64_t io_sequence = 1U;
-  for (const M1BatchOfferEvidence& offer : input.protocol.batch_offers) {
-    input.batch_jobs.push_back(make_m1_batch_io_job(offer, io_sequence));
-    io_sequence += 4U;
-  }
+  testing::attach_m1_test_i1_sources(&input);
+  testing::attach_m1_test_batch_sources(&input);
+  testing::attach_m1_test_source_fairness_projection(&input);
   const ResourceVector zero_high_water{};
   const ResourceVector active_high_water{4U, 1048576U, 524288U, 3U, 4096U};
   input.temporal_snapshots = {make_m1_snapshot(false, zero_high_water),
@@ -922,6 +827,82 @@ M1InnerRowInput make_passing_inner_row_input() {
   input.occurrence_attribution_proved = true;
   input.temporal_effects_complete = true;
   return input;
+}
+
+/**
+ * @brief Rewrites one B1 source to an exact positive total service charge.
+ * @param source Mutable complete B1 source.
+ * @param total Exact desired sum across all physical task starts.
+ * @return Nothing after distributing the total without per-source overflow.
+ * @throws std::invalid_argument when the source is null, empty, or the total
+ * cannot assign at least one service unit to every start.
+ * @note B1 semantic records bind task resources rather than this separately
+ * retained charged-service scalar, so no semantic-trace rewrite is required.
+ */
+void set_m1_source_service_total(M1BatchSourceEvidence* source,
+                                 std::uint64_t total) {
+  if (source == nullptr || source->physical_trace.service_starts.empty() ||
+      total < source->physical_trace.service_starts.size()) {
+    throw std::invalid_argument(
+        "M1 source service total cannot cover every physical start.");
+  }
+  const std::uint64_t count = source->physical_trace.service_starts.size();
+  const std::uint64_t quotient = total / count;
+  const std::uint64_t remainder = total % count;
+  for (std::size_t index = 0U;
+       index < source->physical_trace.service_starts.size(); ++index) {
+    source->physical_trace.service_starts[index].service_charge =
+        quotient + static_cast<std::uint64_t>(index < remainder);
+  }
+}
+
+/**
+ * @brief Builds closed mixed observations exactly backing one row's starts.
+ * @param row Evaluated row whose class-start projection is retained.
+ * @return Stable complete observation snapshot for canonical replay tests.
+ * @throws std::bad_alloc when event storage allocates.
+ */
+M1FairnessObservationSnapshot make_passing_observation_snapshot(
+    const M1InnerRow& row) {
+  M1FairnessObservationSnapshot observations;
+  observations.stable_publication_cut = true;
+  for (std::size_t index = 0U;
+       index < row.evidence.fairness.class_starts.size(); ++index) {
+    const M1ClassStartSample& start = row.evidence.fairness.class_starts[index];
+    observations.events.push_back(M1FairnessObservation{
+        M1ObservationKind::ServiceStart,
+        start.service_class == compute::ComputeRunQosClass::Interactive
+            ? M1ObservedRequestTag::Interactive
+            : M1ObservedRequestTag::ThroughputGraphA,
+        start.service_class, true, start.causal_sequence,
+        row.evidence.protocol.boundaries.measurement_start.timestamp +
+            std::chrono::milliseconds(static_cast<std::int64_t>(index + 1U)),
+        index + 1U, index + 1U, 1U,
+        compute::ComputeRunTaskTerminalKind::Succeeded,
+        compute::ComputeRunTerminalKind::Succeeded,
+        start.interactive_candidate_startable,
+        start.throughput_candidate_startable, start.execution_grant_committed});
+  }
+  observations.callback_entry_frontier = observations.events.size();
+  observations.callback_completion_frontier = observations.events.size();
+  observations.claimed_slot_frontier = observations.events.size();
+  observations.published_slot_frontier = observations.events.size();
+  return observations;
+}
+
+/**
+ * @brief Encodes one test-only ordered list using the canonical frame grammar.
+ * @param records Complete records in semantic order.
+ * @return Count-prefixed canonical framed list.
+ * @throws std::bad_alloc when output ownership allocates.
+ */
+std::string encode_m1_test_record_list(
+    const std::vector<std::string>& records) {
+  std::string result = std::to_string(records.size()) + ":";
+  for (const std::string& record : records) {
+    result.append(b1_environment_frame(record));
+  }
+  return result;
 }
 
 /**
@@ -958,8 +939,12 @@ TEST(M1Profile, PassesExactCrossBoundaryProtocolAndIndependentCycles) {
                                            : summary.validity_reasons.front());
   EXPECT_TRUE(summary.validity_reasons.empty());
   ASSERT_GT(input.batch_offers.size(), 6U);
-  EXPECT_EQ(input.batch_offers.back().job.cycle_ordinal, 1U);
-  EXPECT_EQ(input.batch_offers.back().job.job_index, 0U);
+  EXPECT_EQ(
+      input.batch_offers[input.batch_offers.size() - 2U].job.cycle_ordinal, 2U);
+  EXPECT_EQ(input.batch_offers[input.batch_offers.size() - 2U].job.job_index,
+            0U);
+  EXPECT_EQ(input.batch_offers.back().job.cycle_ordinal, 2U);
+  EXPECT_EQ(input.batch_offers.back().job.job_index, 1U);
   EXPECT_EQ(input.batch_offers[5U].job.cycle_ordinal, 0U);
   EXPECT_EQ(input.batch_offers[5U].job.job_index, 1U);
 }
@@ -1021,6 +1006,17 @@ TEST(M1Profile, PassesClosedFiveAxisInnerRow) {
   EXPECT_EQ(row.schema_version, kM1InnerRowSchemaVersion);
   EXPECT_EQ(row.workload_id, kM1WorkloadId);
   EXPECT_EQ(row.protocol.verdict, I1Verdict::Pass);
+  EXPECT_TRUE(row.source_evidence_closed);
+  EXPECT_EQ(row.evidence.fairness.progress_windows.size(),
+            kM1MeasuredWindowCount);
+  EXPECT_EQ(row.evidence.fairness.graph_service_windows.size(),
+            kM1MeasuredWindowCount);
+  EXPECT_EQ(row.evidence.fairness.headroom_outcomes.size(),
+            kM1MeasuredI1AttemptCount);
+  EXPECT_EQ(row.evidence.fairness.headroom_admissions.attempted_edits,
+            kM1MeasuredI1AttemptCount);
+  EXPECT_EQ(row.evidence.fairness.headroom_admissions.classified_outcomes,
+            kM1MeasuredI1AttemptCount);
   ASSERT_TRUE(row.latency.has_value());
   EXPECT_EQ(row.latency->p50, std::chrono::milliseconds(10));
   EXPECT_EQ(row.latency->p95, std::chrono::milliseconds(10));
@@ -1035,9 +1031,605 @@ TEST(M1Profile, PassesClosedFiveAxisInnerRow) {
   EXPECT_EQ(row.overall_verdict, I1Verdict::Pass)
       << (row.validity_reasons.empty() ? "no diagnostic"
                                        : row.validity_reasons.front());
-  EXPECT_DOUBLE_EQ(*row.interactive_discarded_ratio, 0.2);
+  EXPECT_DOUBLE_EQ(*row.interactive_discarded_ratio, 0.0);
   EXPECT_EQ(row.compute_io_task_high_water, 1U);
   EXPECT_EQ(row.compute_io_planned_byte_high_water, kB1PayloadBytes);
+}
+
+/**
+ * @brief Proves one passing producer row round-trips through strict replay.
+ * @throws GoogleTest assertion control and canonical/evaluator failures.
+ */
+TEST(M1Profile, RoundTripsPassingCanonicalInnerRowByRecomputation) {
+  M1InnerRowInput input = make_passing_inner_row_input();
+  ASSERT_TRUE(
+      input.interactive_sources[8U].episode.edits[0U].host_return.has_value());
+  input.interactive_sources[8U].episode.edits[0U].host_return->status.name =
+      "m1\nstatus";
+  input.interactive_sources[8U].episode.edits[0U].host_return->status.message =
+      std::string("m1\0message", 10U);
+  testing::attach_m1_test_source_fairness_projection(&input);
+  const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+  const M1FairnessObservationSnapshot observations =
+      make_passing_observation_snapshot(row);
+
+  const std::string canonical = materialize_m1_inner_row(row, observations);
+  const M1CanonicalReplay replay =
+      parse_and_recompute_m1_inner_row(canonical, 1U);
+  EXPECT_EQ(replay.row.latency_verdict, I1Verdict::Pass);
+  EXPECT_EQ(replay.row.throughput_progress_verdict, I1Verdict::Pass);
+  EXPECT_EQ(replay.row.fairness_verdict, I1Verdict::Pass);
+  EXPECT_EQ(replay.row.waste_verdict, I1Verdict::Pass);
+  EXPECT_EQ(replay.row.memory_verdict, I1Verdict::Pass);
+  EXPECT_EQ(replay.row.overall_verdict, I1Verdict::Pass);
+  ASSERT_TRUE(replay.row.evidence.fairness.headroom_outcomes.front()
+                  .host_status.has_value());
+  EXPECT_EQ(
+      replay.row.evidence.fairness.headroom_outcomes.front().host_status->name,
+      "m1\nstatus");
+  EXPECT_EQ(replay.row.evidence.fairness.headroom_outcomes.front()
+                .host_status->message,
+            std::string("m1\0message", 10U));
+  EXPECT_EQ(materialize_m1_inner_row(replay.row, replay.observations),
+            canonical);
+}
+
+/**
+ * @brief Proves I1 source joins reject missing, duplicate, reordered, and
+ * same-cardinality wrong identities before any five-axis result can survive.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, RejectsMissingDuplicateReorderedAndWrongI1Sources) {
+  const auto expect_invalid = [](M1InnerRowInput input,
+                                 std::string_view diagnostic,
+                                 std::string_view scenario) {
+    SCOPED_TRACE(scenario);
+    const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+    EXPECT_EQ(row.overall_verdict, I1Verdict::Invalid);
+    EXPECT_TRUE(
+        std::any_of(row.validity_reasons.begin(), row.validity_reasons.end(),
+                    [diagnostic](const std::string& reason) {
+                      return reason.find(diagnostic) != std::string::npos;
+                    }));
+  };
+
+  M1InnerRowInput missing = make_passing_inner_row_input();
+  missing.interactive_sources.pop_back();
+  expect_invalid(std::move(missing), "source cardinality", "missing");
+
+  M1InnerRowInput duplicate = make_passing_inner_row_input();
+  duplicate.interactive_sources[9U] = duplicate.interactive_sources[8U];
+  expect_invalid(std::move(duplicate), "source identity/order", "duplicate");
+
+  M1InnerRowInput reordered = make_passing_inner_row_input();
+  std::swap(reordered.interactive_sources[8U],
+            reordered.interactive_sources[9U]);
+  expect_invalid(std::move(reordered), "source identity/order", "reordered");
+
+  M1InnerRowInput wrong_ordinal = make_passing_inner_row_input();
+  ++wrong_ordinal.interactive_sources[8U].phase_ordinal;
+  expect_invalid(std::move(wrong_ordinal), "source identity/order",
+                 "wrong ordinal");
+
+  M1InnerRowInput wrong_slot = make_passing_inner_row_input();
+  ++wrong_slot.interactive_sources[8U].episode.slot;
+  expect_invalid(std::move(wrong_slot), "source identity/order", "wrong slot");
+}
+
+/**
+ * @brief Proves complete I1 replay, not retained occurrence scalars, controls
+ * the joined latency/service/verdict projection.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, RejectsI1SourceAndOccurrenceProjectionContradiction) {
+  M1InnerRowInput input = make_passing_inner_row_input();
+  ASSERT_TRUE(
+      input.protocol.interactive_occurrences[8U].final_latency.has_value());
+  ++*input.protocol.interactive_occurrences[8U].final_latency;
+  const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+  EXPECT_EQ(row.overall_verdict, I1Verdict::Invalid);
+  EXPECT_TRUE(std::any_of(
+      row.validity_reasons.begin(), row.validity_reasons.end(),
+      [](const std::string& reason) {
+        return reason.find("derived projection drifted") != std::string::npos;
+      }));
+}
+
+/**
+ * @brief Proves retained progress cardinality, identity, and numerator cannot
+ * diverge from replayed B1 sources even when the forged fairness facts pass.
+ * @throws GoogleTest assertion control and source replay allocation failures.
+ */
+TEST(M1Profile, RejectsSourceDerivedProgressProjectionContradictions) {
+  M1InnerRowInput numerator = make_passing_inner_row_input();
+  ++numerator.fairness.progress_windows[0U].successful_site_operations;
+  EXPECT_EQ(evaluate_m1_fairness(numerator.fairness).composite_fairness_verdict,
+            I1Verdict::Pass);
+  M1InnerRow numerator_row = evaluate_m1_inner_row(std::move(numerator));
+  EXPECT_FALSE(numerator_row.source_evidence_closed);
+  EXPECT_EQ(numerator_row.overall_verdict, I1Verdict::Invalid);
+  EXPECT_TRUE(std::any_of(
+      numerator_row.validity_reasons.begin(),
+      numerator_row.validity_reasons.end(), [](const std::string& reason) {
+        return reason.find("progress projection differs") != std::string::npos;
+      }));
+
+  M1InnerRowInput cardinality = make_passing_inner_row_input();
+  cardinality.fairness.progress_windows.pop_back();
+  EXPECT_FALSE(
+      evaluate_m1_inner_row(std::move(cardinality)).source_evidence_closed);
+
+  M1InnerRowInput identity = make_passing_inner_row_input();
+  ++identity.fairness.progress_windows[0U].window_ordinal;
+  EXPECT_FALSE(
+      evaluate_m1_inner_row(std::move(identity)).source_evidence_closed);
+}
+
+/**
+ * @brief Proves both Graph service fields, demand, cardinality, and window
+ * identity exact-match the source-derived projection.
+ * @throws GoogleTest assertion control and source replay allocation failures.
+ */
+TEST(M1Profile, RejectsSourceDerivedGraphProjectionContradictions) {
+  const std::vector<std::function<void(M1InnerRowInput*)>> rewrites{
+      [](M1InnerRowInput* input) {
+        ++input->fairness.graph_service_windows[0U].graph_a_completed_service;
+      },
+      [](M1InnerRowInput* input) {
+        ++input->fairness.graph_service_windows[0U].graph_b_completed_service;
+      },
+      [](M1InnerRowInput* input) {
+        input->fairness.graph_service_windows[0U]
+            .both_graphs_continuously_demanding = false;
+      },
+      [](M1InnerRowInput* input) {
+        input->fairness.graph_service_windows.pop_back();
+      },
+      [](M1InnerRowInput* input) {
+        ++input->fairness.graph_service_windows[0U].window_ordinal;
+      }};
+  for (std::size_t index = 0U; index < rewrites.size(); ++index) {
+    SCOPED_TRACE(index);
+    M1InnerRowInput input = make_passing_inner_row_input();
+    rewrites[index](&input);
+    if (index < 3U) {
+      EXPECT_EQ(evaluate_m1_fairness(input.fairness).composite_fairness_verdict,
+                I1Verdict::Pass);
+    }
+    const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+    EXPECT_FALSE(row.source_evidence_closed);
+    EXPECT_EQ(row.overall_verdict, I1Verdict::Invalid);
+    EXPECT_TRUE(std::any_of(
+        row.validity_reasons.begin(), row.validity_reasons.end(),
+        [](const std::string& reason) {
+          return reason.find("Graph projection differs") != std::string::npos;
+        }));
+  }
+}
+
+/**
+ * @brief Proves every headroom status/flag/identity/order field and all three
+ * aggregates exact-match the forty measured episode sources.
+ * @throws GoogleTest assertion control and source replay allocation failures.
+ */
+TEST(M1Profile, RejectsSourceDerivedHeadroomProjectionContradictions) {
+  const std::vector<std::function<void(M1InnerRowInput*)>> rewrites{
+      [](M1InnerRowInput* input) {
+        input->fairness.headroom_outcomes[0U].host_status->message = "forged";
+      },
+      [](M1InnerRowInput* input) {
+        input->fairness.headroom_outcomes[0U].throughput_headroom_failure =
+            true;
+      },
+      [](M1InnerRowInput* input) {
+        ++input->fairness.headroom_outcomes[0U].origin_ordinal;
+      },
+      [](M1InnerRowInput* input) {
+        ++input->fairness.headroom_outcomes[0U].edit_index;
+      },
+      [](M1InnerRowInput* input) {
+        std::swap(input->fairness.headroom_outcomes[0U],
+                  input->fairness.headroom_outcomes[1U]);
+      },
+      [](M1InnerRowInput* input) {
+        input->fairness.headroom_outcomes.pop_back();
+      }};
+  for (std::size_t index = 0U; index < rewrites.size(); ++index) {
+    SCOPED_TRACE(index);
+    M1InnerRowInput input = make_passing_inner_row_input();
+    rewrites[index](&input);
+    if (index == 0U) {
+      EXPECT_EQ(evaluate_m1_fairness(input.fairness).composite_fairness_verdict,
+                I1Verdict::Pass);
+    }
+    const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+    EXPECT_FALSE(row.source_evidence_closed);
+    EXPECT_EQ(row.overall_verdict, I1Verdict::Invalid);
+    EXPECT_TRUE(std::any_of(
+        row.validity_reasons.begin(), row.validity_reasons.end(),
+        [](const std::string& reason) {
+          return reason.find("headroom outcome projection differs") !=
+                 std::string::npos;
+        }));
+  }
+
+  const std::vector<std::function<void(M1HeadroomAdmissionEvidence*)>>
+      aggregate_rewrites{[](M1HeadroomAdmissionEvidence* aggregate) {
+                           --aggregate->attempted_edits;
+                         },
+                         [](M1HeadroomAdmissionEvidence* aggregate) {
+                           --aggregate->classified_outcomes;
+                         },
+                         [](M1HeadroomAdmissionEvidence* aggregate) {
+                           ++aggregate->throughput_headroom_failures;
+                         }};
+  for (std::size_t index = 0U; index < aggregate_rewrites.size(); ++index) {
+    SCOPED_TRACE(index);
+    M1InnerRowInput input = make_passing_inner_row_input();
+    aggregate_rewrites[index](&input.fairness.headroom_admissions);
+    const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+    EXPECT_FALSE(row.source_evidence_closed);
+    EXPECT_EQ(row.overall_verdict, I1Verdict::Invalid);
+    EXPECT_TRUE(std::any_of(
+        row.validity_reasons.begin(), row.validity_reasons.end(),
+        [](const std::string& reason) {
+          return reason.find("headroom aggregate differs") != std::string::npos;
+        }));
+  }
+}
+
+/**
+ * @brief Proves checked source-derived service aggregation cannot wrap.
+ * @throws GoogleTest assertion control and source replay allocation failures.
+ */
+TEST(M1Profile, RejectsSourceDerivedFairnessProjectionOverflow) {
+  M1InnerRowInput input = make_passing_inner_row_input();
+  std::vector<std::size_t> graph_a_sources;
+  for (std::size_t index = 0U; index < input.batch_sources.size(); ++index) {
+    const M1BatchSourceEvidence& source = input.batch_sources[index];
+    if (source.job.phase == B1JobPhase::Measured &&
+        (source.job.job_index & 1U) == 0U) {
+      graph_a_sources.push_back(index);
+    }
+  }
+  ASSERT_GE(graph_a_sources.size(), 2U);
+  const std::size_t first = graph_a_sources[0U];
+  const std::size_t second = graph_a_sources[1U];
+  const auto forced_endpoint =
+      checked_i1_time_add(input.protocol.boundaries.measurement_start.timestamp,
+                          std::chrono::milliseconds(750));
+  input.protocol.batch_offers[second].endpoint->timestamp = forced_endpoint;
+  input.batch_sources[second].endpoint_at = forced_endpoint;
+  const std::uint64_t half_plus_one =
+      std::numeric_limits<std::uint64_t>::max() / 2U + 1U;
+  set_m1_source_service_total(&input.batch_sources[first], half_plus_one);
+  set_m1_source_service_total(&input.batch_sources[second], half_plus_one);
+
+  EXPECT_THROW(
+      derive_m1_source_fairness_projection(
+          input.protocol, input.interactive_sources, input.batch_sources),
+      std::overflow_error);
+  const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+  EXPECT_FALSE(row.source_evidence_closed);
+  EXPECT_EQ(row.overall_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves B1 source joins and replay-derived waste reject cardinality,
+ * identity/order, raw-trace, and stale scalar contradictions.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, RejectsB1SourceJoinRawTraceAndWasteContradictions) {
+  const auto expect_invalid = [](M1InnerRowInput input,
+                                 std::string_view diagnostic,
+                                 std::string_view scenario) {
+    SCOPED_TRACE(scenario);
+    const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+    EXPECT_EQ(row.overall_verdict, I1Verdict::Invalid);
+    EXPECT_TRUE(
+        std::any_of(row.validity_reasons.begin(), row.validity_reasons.end(),
+                    [diagnostic](const std::string& reason) {
+                      return reason.find(diagnostic) != std::string::npos;
+                    }))
+        << ::testing::PrintToString(row.validity_reasons);
+  };
+
+  M1InnerRowInput missing = make_passing_inner_row_input();
+  missing.batch_sources.pop_back();
+  expect_invalid(std::move(missing), "source cardinality", "missing");
+
+  M1InnerRowInput duplicate = make_passing_inner_row_input();
+  duplicate.batch_sources[5U] = duplicate.batch_sources[4U];
+  expect_invalid(std::move(duplicate), "source identity/order", "duplicate");
+
+  M1InnerRowInput reordered = make_passing_inner_row_input();
+  std::swap(reordered.batch_sources[4U], reordered.batch_sources[5U]);
+  expect_invalid(std::move(reordered), "source identity/order", "reordered");
+
+  M1InnerRowInput wrong_ordinal = make_passing_inner_row_input();
+  ++wrong_ordinal.batch_sources[4U].producer_offer_ordinal;
+  expect_invalid(std::move(wrong_ordinal), "source identity/order",
+                 "wrong ordinal");
+
+  M1InnerRowInput missing_endpoint = make_passing_inner_row_input();
+  missing_endpoint.protocol.batch_offers[4U].endpoint.reset();
+  expect_invalid(std::move(missing_endpoint), "offer endpoint drifted",
+                 "missing endpoint");
+
+  M1InnerRowInput stale_waste = make_passing_inner_row_input();
+  ++stale_waste.batch_waste.discarded_started_service;
+  expect_invalid(std::move(stale_waste), "waste projection differs",
+                 "stale waste");
+
+  M1InnerRowInput raw_trace = make_passing_inner_row_input();
+  const auto measured = std::find_if(
+      raw_trace.batch_sources.begin(), raw_trace.batch_sources.end(),
+      [](const M1BatchSourceEvidence& source) {
+        return source.job.phase == B1JobPhase::Measured;
+      });
+  ASSERT_NE(measured, raw_trace.batch_sources.end());
+  ASSERT_FALSE(measured->physical_trace.service_starts.empty());
+  ++measured->physical_trace.service_starts[0U].service_charge;
+  expect_invalid(std::move(raw_trace), "waste projection differs", "raw trace");
+
+  M1InnerRowInput stale_endpoint = make_passing_inner_row_input();
+  const auto endpoint_source = std::find_if(
+      stale_endpoint.batch_sources.begin(), stale_endpoint.batch_sources.end(),
+      [](const M1BatchSourceEvidence& source) {
+        return source.job.phase == B1JobPhase::Measured;
+      });
+  ASSERT_NE(endpoint_source, stale_endpoint.batch_sources.end());
+  ASSERT_TRUE(endpoint_source->verified_endpoint);
+  endpoint_source->verified_endpoint = false;
+  expect_invalid(std::move(stale_endpoint), "source replay failed closed",
+                 "stale verified endpoint");
+}
+
+/**
+ * @brief Proves strict canonical replay rejects source-list and projection
+ * contradictions even when the enclosing manifest is re-encoded exactly.
+ * @throws GoogleTest assertion control and canonical/evaluator failures.
+ */
+TEST(M1Profile, RejectsCanonicalSourceJoinAndProjectionContradictions) {
+  const M1InnerRow row = evaluate_m1_inner_row(make_passing_inner_row_input());
+  const std::string canonical =
+      materialize_m1_inner_row(row, make_passing_observation_snapshot(row));
+  const auto rewrite_list =
+      [&canonical](
+          std::size_t field_index,
+          const std::function<void(std::vector<std::string>*)>& rewrite) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(canonical);
+        std::vector<std::string> records =
+            parse_b1_framed_list(manifest.fields[field_index].payload);
+        rewrite(&records);
+        manifest.fields[field_index].payload =
+            encode_m1_test_record_list(records);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      };
+
+  const std::vector<std::string> tampered{
+      rewrite_list(
+          5U, [](std::vector<std::string>* records) { records->pop_back(); }),
+      rewrite_list(5U,
+                   [](std::vector<std::string>* records) {
+                     (*records)[1U] = (*records)[0U];
+                   }),
+      rewrite_list(5U,
+                   [](std::vector<std::string>* records) {
+                     std::swap((*records)[0U], (*records)[1U]);
+                   }),
+      rewrite_list(5U,
+                   [](std::vector<std::string>* records) {
+                     std::vector<std::string> source =
+                         parse_b1_fixed_record((*records)[1U], 5U);
+                     source[1U] = "1";
+                     (*records)[1U] = encode_b1_fixed_record(source);
+                   }),
+      rewrite_list(4U,
+                   [](std::vector<std::string>* records) {
+                     std::vector<std::string> occurrence =
+                         parse_b1_fixed_record((*records)[8U], 18U);
+                     occurrence[8U] = std::to_string(
+                         parse_b1_canonical_uint64(occurrence[8U]) + 1U);
+                     (*records)[8U] = encode_b1_fixed_record(occurrence);
+                   }),
+      rewrite_list(
+          13U, [](std::vector<std::string>* records) { records->pop_back(); }),
+      rewrite_list(13U,
+                   [](std::vector<std::string>* records) {
+                     (*records)[1U] = (*records)[0U];
+                   }),
+      rewrite_list(13U,
+                   [](std::vector<std::string>* records) {
+                     std::swap((*records)[0U], (*records)[1U]);
+                   }),
+      rewrite_list(13U,
+                   [](std::vector<std::string>* records) {
+                     std::vector<std::string> source =
+                         parse_b1_fixed_record((*records)[1U], 13U);
+                     source[5U] = source[5U] == "true" ? "false" : "true";
+                     (*records)[1U] = encode_b1_fixed_record(source);
+                   }),
+      [&canonical]() {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(canonical);
+        std::vector<std::string> waste =
+            parse_b1_fixed_record(manifest.fields[18U].payload, 5U);
+        waste[1U] = std::to_string(parse_b1_canonical_uint64(waste[1U]) + 1U);
+        manifest.fields[18U].payload = encode_b1_fixed_record(waste);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      }()};
+  for (std::size_t index = 0U; index < tampered.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_THROW(parse_and_recompute_m1_inner_row(tampered[index], 1U),
+                 std::invalid_argument);
+  }
+}
+
+/**
+ * @brief Proves strict replay rejects duration rescaling and stale verdicts.
+ * @throws GoogleTest assertion control and canonical/evaluator failures.
+ */
+TEST(M1Profile, RejectsCanonicalDurationAndVerdictRehashContradictions) {
+  const M1InnerRow row = evaluate_m1_inner_row(make_passing_inner_row_input());
+  const std::string canonical =
+      materialize_m1_inner_row(row, make_passing_observation_snapshot(row));
+  const auto rewrite_progress =
+      [](const std::string& source,
+         const std::function<void(std::vector<std::string>*)>& rewrite) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> records =
+            parse_b1_framed_list(manifest.fields[9U].payload);
+        rewrite(&records);
+        manifest.fields[9U].payload = encode_m1_test_record_list(records);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      };
+  const auto set_duration = [](std::vector<std::string>* records,
+                               std::size_t index, std::string duration) {
+    std::vector<std::string> fields =
+        parse_b1_fixed_record((*records)[index], 3U);
+    fields[2U] = std::move(duration);
+    (*records)[index] = encode_b1_fixed_record(fields);
+  };
+
+  const std::vector<std::string> duration_tampering{
+      rewrite_progress(canonical,
+                       [&](std::vector<std::string>* records) {
+                         for (std::size_t index = 0U; index < records->size();
+                              ++index) {
+                           set_duration(records, index, "500000000");
+                         }
+                       }),
+      rewrite_progress(canonical,
+                       [&](std::vector<std::string>* records) {
+                         for (std::size_t index = 0U; index < records->size();
+                              ++index) {
+                           set_duration(records, index, "2000000000");
+                         }
+                       }),
+      rewrite_progress(canonical,
+                       [&](std::vector<std::string>* records) {
+                         set_duration(records, 17U, "500000000");
+                       }),
+      rewrite_progress(canonical, [&](std::vector<std::string>* records) {
+        for (std::size_t index : {0U, 1U}) {
+          std::vector<std::string> fields =
+              parse_b1_fixed_record((*records)[index], 3U);
+          fields[1U] = "100000";
+          fields[2U] = "500000000";
+          (*records)[index] = encode_b1_fixed_record(fields);
+        }
+      })};
+  for (const std::string& tampered : duration_tampering) {
+    EXPECT_THROW(parse_and_recompute_m1_inner_row(tampered, 1U),
+                 std::invalid_argument);
+  }
+
+  const std::string stale_progress =
+      rewrite_progress(canonical, [](std::vector<std::string>* records) {
+        for (std::size_t index : {0U, 1U}) {
+          std::vector<std::string> fields =
+              parse_b1_fixed_record((*records)[index], 3U);
+          fields[1U] = "0";
+          (*records)[index] = encode_b1_fixed_record(fields);
+        }
+      });
+  EXPECT_THROW(parse_and_recompute_m1_inner_row(stale_progress, 1U),
+               std::invalid_argument);
+
+  B1CanonicalManifest stale_verdict = parse_b1_canonical_manifest(canonical);
+  stale_verdict.fields[19U].payload =
+      encode_b1_fixed_record({"pass", "pass", "fail", "pass", "pass", "pass"});
+  EXPECT_THROW(parse_and_recompute_m1_inner_row(
+                   encode_b1_canonical_manifest(stale_verdict.schema,
+                                                stale_verdict.fields),
+                   1U),
+               std::invalid_argument);
+}
+
+/**
+ * @brief Proves protocol and every independently recomputed axis reject raw
+ * tampering while stale retained Pass verdicts remain unchanged.
+ * @throws GoogleTest assertion control and canonical/evaluator failures.
+ */
+TEST(M1Profile, RejectsProtocolAndFiveAxisRawTampering) {
+  const M1InnerRow row = evaluate_m1_inner_row(make_passing_inner_row_input());
+  const std::string canonical =
+      materialize_m1_inner_row(row, make_passing_observation_snapshot(row));
+  using ManifestMutation = std::function<void(B1CanonicalManifest*)>;
+  const auto mutate = [&canonical](const ManifestMutation& mutation) {
+    B1CanonicalManifest manifest = parse_b1_canonical_manifest(canonical);
+    mutation(&manifest);
+    return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+  };
+  const auto mutate_list_record =
+      [](B1CanonicalManifest* manifest, std::size_t field_index,
+         std::size_t record_index,
+         const std::function<void(std::vector<std::string>*)>& rewrite) {
+        std::vector<std::string> records =
+            parse_b1_framed_list(manifest->fields[field_index].payload);
+        std::vector<std::string> fields = parse_b1_fixed_record(
+            records[record_index], field_index == 4U    ? 18U
+                                   : field_index == 10U ? 4U
+                                                        : 11U);
+        rewrite(&fields);
+        records[record_index] = encode_b1_fixed_record(fields);
+        manifest->fields[field_index].payload =
+            encode_m1_test_record_list(records);
+      };
+
+  const std::vector<std::string> tampered{
+      mutate([](B1CanonicalManifest* manifest) {
+        std::vector<std::string> flags =
+            parse_b1_fixed_record(manifest->fields[3U].payload, 12U);
+        flags[0U] = "false";
+        manifest->fields[3U].payload = encode_b1_fixed_record(flags);
+      }),
+      mutate([&mutate_list_record](B1CanonicalManifest* manifest) {
+        mutate_list_record(manifest, 4U, 8U,
+                           [](std::vector<std::string>* fields) {
+                             (*fields)[7U] = "200000000";
+                           });
+      }),
+      mutate([](B1CanonicalManifest* manifest) {
+        std::vector<std::string> records =
+            parse_b1_framed_list(manifest->fields[9U].payload);
+        for (std::size_t index : {0U, 1U}) {
+          std::vector<std::string> fields =
+              parse_b1_fixed_record(records[index], 3U);
+          fields[1U] = "0";
+          records[index] = encode_b1_fixed_record(fields);
+        }
+        manifest->fields[9U].payload = encode_m1_test_record_list(records);
+      }),
+      mutate([&mutate_list_record](B1CanonicalManifest* manifest) {
+        for (std::size_t index : {0U, 1U}) {
+          mutate_list_record(manifest, 10U, index,
+                             [](std::vector<std::string>* fields) {
+                               (*fields)[2U] = "100";
+                               (*fields)[3U] = "1";
+                             });
+        }
+      }),
+      mutate([](B1CanonicalManifest* manifest) {
+        std::vector<std::string> waste =
+            parse_b1_fixed_record(manifest->fields[18U].payload, 5U);
+        waste[1U] = "1";
+        manifest->fields[18U].payload = encode_b1_fixed_record(waste);
+      }),
+      mutate([&mutate_list_record](B1CanonicalManifest* manifest) {
+        mutate_list_record(
+            manifest, 14U, 1U, [](std::vector<std::string>* snapshot) {
+              std::vector<std::string> high_water =
+                  parse_b1_fixed_record((*snapshot)[2U], 5U);
+              high_water[0U] = "1000";
+              (*snapshot)[2U] = encode_b1_fixed_record(high_water);
+            });
+      })};
+  for (std::size_t index = 0U; index < tampered.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_THROW(parse_and_recompute_m1_inner_row(tampered[index], 1U),
+                 std::invalid_argument);
+  }
 }
 
 /**
@@ -1074,7 +1666,18 @@ TEST(M1Profile, KeepsFiveAxisFailuresIndependent) {
   EXPECT_EQ(latency.memory_verdict, I1Verdict::Pass);
 
   M1InnerRowInput waste_input = make_passing_inner_row_input();
-  waste_input.batch_waste.discarded_started_service = 1U;
+  const auto measured_source = std::find_if(
+      waste_input.batch_sources.begin(), waste_input.batch_sources.end(),
+      [](const M1BatchSourceEvidence& source) {
+        return source.job.phase == B1JobPhase::Measured;
+      });
+  ASSERT_NE(measured_source, waste_input.batch_sources.end());
+  ASSERT_TRUE(measured_source->output_receipt.has_value());
+  measured_source->output_receipt->commit_id.push_back('x');
+  measured_source->verified_endpoint = false;
+  waste_input.batch_waste =
+      derive_m1_batch_waste_evidence(waste_input.batch_sources);
+  testing::attach_m1_test_source_fairness_projection(&waste_input);
   const M1InnerRow waste = evaluate_m1_inner_row(std::move(waste_input));
   EXPECT_EQ(waste.latency_verdict, I1Verdict::Pass);
   EXPECT_EQ(waste.waste_verdict, I1Verdict::Fail);
@@ -1095,16 +1698,15 @@ TEST(M1Profile, KeepsFiveAxisFailuresIndependent) {
  */
 TEST(M1Profile, RejectsMissingDuplicateMalformedAndOverlimitIoEvidence) {
   M1InnerRowInput missing = make_passing_inner_row_input();
-  missing.batch_jobs.pop_back();
+  missing.batch_sources.pop_back();
   EXPECT_EQ(evaluate_m1_inner_row(std::move(missing)).memory_verdict,
             I1Verdict::Invalid);
 
   M1InnerRowInput duplicate = make_passing_inner_row_input();
-  ASSERT_GE(duplicate.batch_jobs.size(), 2U);
-  const std::uint64_t duplicate_sequence = duplicate.batch_jobs[0U]
-                                               .output.io_observations[1U]
-                                               .admission_event->sequence;
-  auto& duplicate_stream = duplicate.batch_jobs[1U].output.io_observations;
+  ASSERT_GE(duplicate.batch_sources.size(), 2U);
+  const std::uint64_t duplicate_sequence =
+      duplicate.batch_sources[0U].io_observations[1U].admission_event->sequence;
+  auto& duplicate_stream = duplicate.batch_sources[1U].io_observations;
   duplicate_stream[1U].admission_event->sequence = duplicate_sequence;
   duplicate_stream[2U].admission_event->sequence = duplicate_sequence;
   duplicate_stream[2U].settlement_event->admission_sequence =
@@ -1113,26 +1715,26 @@ TEST(M1Profile, RejectsMissingDuplicateMalformedAndOverlimitIoEvidence) {
             I1Verdict::Invalid);
 
   M1InnerRowInput reordered = make_passing_inner_row_input();
-  std::swap(reordered.batch_jobs[0U].output.io_observations[1U],
-            reordered.batch_jobs[0U].output.io_observations[2U]);
+  std::swap(reordered.batch_sources[0U].io_observations[1U],
+            reordered.batch_sources[0U].io_observations[2U]);
   EXPECT_EQ(evaluate_m1_inner_row(std::move(reordered)).memory_verdict,
             I1Verdict::Invalid);
 
   M1InnerRowInput arithmetic = make_passing_inner_row_input();
-  auto& arithmetic_stream = arithmetic.batch_jobs[0U].output.io_observations;
+  auto& arithmetic_stream = arithmetic.batch_sources[0U].io_observations;
   --arithmetic_stream[1U].admission_event->charged_planned_bytes;
   --arithmetic_stream[2U].admission_event->charged_planned_bytes;
   EXPECT_EQ(evaluate_m1_inner_row(std::move(arithmetic)).memory_verdict,
             I1Verdict::Invalid);
 
   M1InnerRowInput unknown = make_passing_inner_row_input();
-  unknown.batch_jobs[0U].output.io_observations[1U].point =
+  unknown.batch_sources[0U].io_observations[1U].point =
       static_cast<B1IoObservationPoint>(255U);
   EXPECT_EQ(evaluate_m1_inner_row(std::move(unknown)).memory_verdict,
             I1Verdict::Invalid);
 
   M1InnerRowInput overlimit = make_passing_inner_row_input();
-  auto& overlimit_stream = overlimit.batch_jobs[0U].output.io_observations;
+  auto& overlimit_stream = overlimit.batch_sources[0U].io_observations;
   auto invalid_snapshot = overlimit_stream[1U].snapshot;
   invalid_snapshot.active_tasks = kB1ComputeIoTaskLimit + 1U;
   invalid_snapshot.queued_tasks = kB1ComputeIoTaskLimit + 1U;
@@ -1447,6 +2049,42 @@ TEST(M1Profile, ProgressP05FailsDespitePassingOverallAverage) {
   EXPECT_EQ(summary.throughput_progress_verdict, I1Verdict::Fail);
   EXPECT_EQ(summary.class_start_verdict, I1Verdict::Pass);
   EXPECT_EQ(summary.composite_fairness_verdict, I1Verdict::Fail);
+}
+
+/**
+ * @brief Proves positive non-one-second windows cannot rescale M1 progress.
+ * @throws GoogleTest assertion control and evaluator allocation failures.
+ */
+TEST(M1Profile, InvalidatesEveryNonOneSecondProgressDuration) {
+  const auto expect_invalid = [](M1FairnessEvidenceInput input) {
+    const M1FairnessSummary summary = evaluate_m1_fairness(std::move(input));
+    EXPECT_EQ(summary.throughput_progress_verdict, I1Verdict::Invalid);
+    EXPECT_EQ(summary.composite_fairness_verdict, I1Verdict::Invalid);
+  };
+
+  M1FairnessEvidenceInput half_second = make_passing_fairness_input();
+  for (M1ThroughputProgressSample& window : half_second.progress_windows) {
+    window.duration = std::chrono::milliseconds(500);
+  }
+  expect_invalid(std::move(half_second));
+
+  M1FairnessEvidenceInput two_seconds = make_passing_fairness_input();
+  for (M1ThroughputProgressSample& window : two_seconds.progress_windows) {
+    window.duration = std::chrono::seconds(2);
+  }
+  expect_invalid(std::move(two_seconds));
+
+  M1FairnessEvidenceInput mixed = make_passing_fairness_input();
+  mixed.progress_windows[17U].duration = std::chrono::milliseconds(500);
+  expect_invalid(std::move(mixed));
+
+  M1FairnessEvidenceInput ratio_flip = make_passing_fairness_input();
+  for (std::size_t index : {0U, 1U}) {
+    ratio_flip.progress_windows[index].successful_site_operations = 100000U;
+    ratio_flip.progress_windows[index].duration =
+        std::chrono::milliseconds(500);
+  }
+  expect_invalid(std::move(ratio_flip));
 }
 
 /**

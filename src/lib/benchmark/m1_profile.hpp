@@ -319,7 +319,7 @@ struct M1ThroughputProgressSample final {
   /** @brief Verified successful B1 pixel-site operations in this window. */
   std::uint64_t successful_site_operations = 0U;
 
-  /** @brief Exact positive measured window duration. */
+  /** @brief Exact one-second measured window duration. */
   std::chrono::nanoseconds duration{0};
 };
 
@@ -781,6 +781,8 @@ M1ProtocolSummary evaluate_m1_protocol(M1ProtocolEvidenceInput input);
  * @return Aggregates, reasons, independent verdicts, and composite verdict.
  * @throws std::bad_alloc when copied/sorted values or reasons allocate.
  * @note This inner summary is not a canonical outer row or machine claim.
+ * Every retained progress window must be exactly one second; positive shorter
+ * or longer durations are structurally invalid and cannot rescale the ratio.
  */
 M1FairnessSummary evaluate_m1_fairness(M1FairnessEvidenceInput input);
 

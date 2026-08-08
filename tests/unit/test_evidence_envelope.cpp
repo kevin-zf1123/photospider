@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -23,9 +24,11 @@
 #endif
 
 #include "benchmark/evidence_envelope.hpp"  // NOLINT(build/include_subdir)
+#include "benchmark/m1_canonical.hpp"       // NOLINT(build/include_subdir)
 #include "benchmark/m1_evidence.hpp"        // NOLINT(build/include_subdir)
 #include "benchmark/m1_profile.hpp"         // NOLINT(build/include_subdir)
 #include "support/b1_test_environment.hpp"
+#include "support/m1_test_evidence.hpp"
 
 namespace ps::benchmark {
 namespace {
@@ -147,6 +150,8 @@ struct M1EnvelopeDenominatorOptions final {
   /** @brief M1 nested isolated-B1 numerator claim. */
   std::uint64_t m1_inner_b1_successful_operations =
       kB1MeasuredJobCount * kB1SiteOperationsPerJob;
+  /** @brief Optional test-only rewrite applied before outer addressing. */
+  std::function<std::string(std::string)> rewrite_m1_inner;
 };
 
 /**
@@ -222,81 +227,114 @@ std::vector<B1CanonicalField> isolated_b1_measurement_fields(
  * @throws Canonical encoding and allocation failures unchanged.
  */
 std::string make_test_m1_inner(const M1EnvelopeDenominatorOptions& options) {
-  std::vector<std::string> interactive(kM1TotalI1OriginCount,
-                                       encode_b1_fixed_record({"occurrence"}));
-  std::vector<std::string> offers{encode_b1_fixed_record({"offer"})};
-  std::vector<std::string> carryover(3U, encode_b1_fixed_record({"carryover"}));
-  std::vector<std::string> progress;
-  std::vector<std::string> graph;
-  for (std::size_t index = 0U; index < options.m1_progress_window_count;
-       ++index) {
-    progress.push_back(encode_b1_fixed_record(
-        {std::to_string(index), "200000", "1000000000"}));
-    graph.push_back(
-        encode_b1_fixed_record({std::to_string(index), "true", "1", "1"}));
-  }
-  std::vector<std::string> headroom;
-  for (std::size_t origin = 0U; origin < kM1MeasuredI1OriginCount; ++origin) {
-    for (std::size_t edit = 0U; edit < kI1EditCount; ++edit) {
-      headroom.push_back(encode_b1_fixed_record(
-          {std::to_string(origin), std::to_string(edit), "true", "true", "true",
-           "0", "0", "", "", "false"}));
+  M1InnerRowInput input;
+  input.replicate_ordinal = 1U;
+  input.protocol.replicate_ordinal = 1U;
+  const auto measurement_start =
+      std::chrono::steady_clock::time_point(std::chrono::seconds(100));
+  const M1Timeline timeline = derive_m1_timeline(measurement_start);
+  input.protocol.boundaries =
+      M1BoundaryEvidence{{timeline.cold_start, 1U},
+                         {timeline.warmup_start, 2U},
+                         {timeline.measurement_start, 3U},
+                         {timeline.measurement_end, 4U}};
+  for (std::size_t index = 0U; index < kM1TotalI1OriginCount; ++index) {
+    B1JobPhase phase = B1JobPhase::Measured;
+    std::size_t ordinal = index - 1U - kM1WarmupI1OriginCount;
+    if (index == 0U) {
+      phase = B1JobPhase::Cold;
+      ordinal = 0U;
+    } else if (index <= kM1WarmupI1OriginCount) {
+      phase = B1JobPhase::Warmup;
+      ordinal = index - 1U;
     }
+    std::chrono::steady_clock::time_point origin = timeline.cold_start;
+    if (phase == B1JobPhase::Warmup) {
+      origin = checked_i1_time_add(
+          timeline.warmup_start,
+          std::chrono::nanoseconds(static_cast<std::int64_t>(ordinal) *
+                                   kI1EpisodeStride.count()));
+    } else if (phase == B1JobPhase::Measured) {
+      origin = checked_i1_time_add(
+          timeline.measurement_start,
+          std::chrono::nanoseconds(static_cast<std::int64_t>(ordinal) *
+                                   kI1EpisodeStride.count()));
+    }
+    input.protocol.interactive_occurrences.push_back(
+        M1InteractiveOccurrenceEvidence{phase,
+                                        ordinal,
+                                        {origin, index + 10U},
+                                        origin + kI1MeasurementEndOffset,
+                                        std::nullopt,
+                                        std::nullopt,
+                                        I1ServiceEvidence{},
+                                        I1Verdict::Invalid,
+                                        I1Verdict::Invalid,
+                                        I1Verdict::Invalid,
+                                        I1Verdict::Invalid,
+                                        false,
+                                        false,
+                                        false});
   }
-  const std::vector<std::string> io{encode_b1_fixed_record({"io"})};
-  const std::vector<std::string> snapshots(
-      4U, encode_b1_fixed_record({"snapshot"}));
-  return encode_b1_canonical_manifest(
-      kM1InnerRowSchema,
-      {testing::known_b1_field("schema_version", "uint64", "1"),
-       testing::known_b1_field("replicate_ordinal", "uint64", "1"),
-       testing::known_b1_field("boundaries", "m1-boundary-record-v1",
-                               encode_b1_fixed_record({"boundaries"})),
-       testing::known_b1_field(
-           "protocol_flags", "m1-protocol-flags-v1",
-           encode_b1_fixed_record({"true", "true", "true", "true", "true",
-                                   "true", "true", "true", "false", "false",
-                                   "false", "false"})),
-       testing::known_b1_field("interactive_occurrences",
-                               "m1-i1-occurrence-list-v1",
-                               encode_test_record_list(interactive)),
-       testing::known_b1_field("batch_offers", "m1-b1-offer-list-v1",
-                               encode_test_record_list(offers)),
-       testing::known_b1_field("carryover", "m1-carryover-list-v1",
-                               encode_test_record_list(carryover)),
-       testing::known_b1_field("first_measured_admission",
-                               "m1-first-admission-record-v1",
-                               encode_b1_fixed_record({"first"})),
-       testing::known_b1_field("progress_windows", "m1-progress-window-list-v1",
-                               encode_test_record_list(progress)),
-       testing::known_b1_field("graph_service_windows",
-                               "m1-graph-service-window-list-v1",
-                               encode_test_record_list(graph)),
-       testing::known_b1_field("class_starts", "m1-class-start-list-v1",
-                               encode_test_record_list({encode_b1_fixed_record(
-                                   {"1", "0", "true", "true", "true"})})),
-       testing::known_b1_field("headroom_outcomes",
-                               "m1-headroom-outcome-list-v1",
-                               encode_test_record_list(headroom)),
-       testing::known_b1_field("batch_io_streams", "m1-b1-io-stream-list-v1",
-                               encode_test_record_list(io)),
-       testing::known_b1_field("temporal_snapshots",
-                               "m1-execution-snapshot-list-v1",
-                               encode_test_record_list(snapshots)),
-       testing::known_b1_field(
-           "mixed_observations", "m1-observation-list-v1",
-           encode_test_record_list({encode_b1_fixed_record({"event"})})),
-       testing::known_b1_field("paired_isolated_i1_p99_ns", "uint64",
-                               std::to_string(options.m1_inner_i1_p99_ns)),
-       testing::known_b1_field(
-           "paired_isolated_b1_source", "m1-b1-rate-source-v1",
-           encode_b1_fixed_record(
-               {std::to_string(options.m1_inner_b1_successful_operations),
-                "30000000000"})),
-       testing::known_b1_field("batch_waste", "m1-batch-waste-record-v1",
-                               encode_b1_fixed_record({"waste"})),
-       testing::known_b1_field("verdicts", "m1-five-axis-verdict-record-v1",
-                               encode_b1_fixed_record({"pass"}))});
+  testing::attach_m1_test_i1_sources(&input);
+  const B1JobInstance job{kM1WorkloadId,   1U, B1JobPhase::Cold, 0U,
+                          kB1ColdJobIndex, 8U};
+  input.protocol.batch_offers.push_back(
+      M1BatchOfferEvidence{job,
+                           0U,
+                           0U,
+                           {timeline.cold_start, 100U},
+                           std::nullopt,
+                           std::nullopt,
+                           M1EventCoordinate{timeline.warmup_start, 101U},
+                           false,
+                           false,
+                           false,
+                           false,
+                           false});
+  input.protocol.carryover = {
+      {"i1:warmup:6", B1JobPhase::Warmup, M1CarryoverState::Running, "", false,
+       false, false},
+      {"b1:warmup:a", B1JobPhase::Warmup, M1CarryoverState::Running, "", false,
+       false, false},
+      {"b1:warmup:b", B1JobPhase::Warmup, M1CarryoverState::Queued, "", false,
+       false, false}};
+  input.protocol.first_measured_admission.nominal_time =
+      timeline.measurement_start;
+  input.protocol.first_measured_admission.admission_sample =
+      timeline.measurement_start;
+  input.protocol.first_measured_admission.old_generation_settlement_endpoint =
+      timeline.measurement_start + kI1MeasurementStartOffset;
+  input.paired_isolated_i1_p99 =
+      std::chrono::nanoseconds(options.m1_inner_i1_p99_ns);
+  input.fairness.paired_isolated_b1 = M1PairedB1RateEvidence{
+      options.m1_inner_b1_successful_operations, std::chrono::seconds(30)};
+  testing::attach_m1_test_batch_sources(&input);
+  testing::attach_m1_test_source_fairness_projection(&input);
+  for (std::size_t index = 0U; index < 4U; ++index) {
+    M1ExecutionSnapshot snapshot;
+    snapshot.temporal_capture_ordinal = index;
+    input.temporal_snapshots.push_back(std::move(snapshot));
+  }
+  M1FairnessObservationSnapshot observations;
+  observations.stable_publication_cut = true;
+  std::string canonical = materialize_m1_inner_row(
+      evaluate_m1_inner_row(std::move(input)), observations);
+  if (options.m1_progress_window_count != kM1MeasuredWindowCount) {
+    if (options.m1_progress_window_count > kM1MeasuredWindowCount) {
+      throw std::invalid_argument(
+          "M1 envelope fixture progress count exceeds the source projection.");
+    }
+    B1CanonicalManifest manifest = parse_b1_canonical_manifest(canonical);
+    std::vector<std::string> records =
+        parse_b1_framed_list(manifest.fields[9U].payload);
+    records.resize(options.m1_progress_window_count);
+    manifest.fields[9U].payload = encode_test_record_list(records);
+    canonical = encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+  }
+  return options.rewrite_m1_inner
+             ? options.rewrite_m1_inner(std::move(canonical))
+             : canonical;
 }
 
 /**
@@ -655,9 +693,9 @@ TEST(EvidenceEnvelope, MaterializesCanonicalM1RowAndBundle) {
             fixture.m1_row_digest);
   EXPECT_EQ(digest_evidence_bundle(root.manifest_bytes), fixture.root_digest);
   EXPECT_EQ(fixture.m1_row_digest,
-            "7c04ff4fa3bbd4e4702db393cd3be727331a088695e42e42ee8114e3f9d7e4ee");
+            "e583dca085141af4ec24af797ac5da4831c0fbfc8468eba64b240cf6fda24d13");
   EXPECT_EQ(fixture.root_digest,
-            "a5165d926517341779271ec198a8c8ae21480af9150d732707d56f2369439f94");
+            "cdc40e45e7916ab5f038a5eb216f5177bc71fcd966eb7ae55480b55b250cf8a0");
   EXPECT_EQ(
       digest_evidence_section(
           fixture.corpus.rows.back().source.workload_manifest.section_name,
@@ -952,7 +990,237 @@ TEST(EvidenceEnvelope, RejectsOmittedM1RawProgressWindow) {
   EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
   ASSERT_EQ(validation.reasons.size(), 1U);
   EXPECT_EQ(validation.reasons.front(),
-            "M1 nested raw evidence cardinality drifted.");
+            "M1 canonical row requires exactly 30 progress windows.");
+}
+
+/**
+ * @brief Proves every closed nested schema drift fails after outer rehashing.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope, RejectsClosedNestedM1SchemaDriftAfterRehash) {
+  using ManifestRewrite = std::function<void(B1CanonicalManifest*)>;
+  const auto rewrite_manifest = [](ManifestRewrite rewrite) {
+    return [rewrite = std::move(rewrite)](std::string source) {
+      B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+      rewrite(&manifest);
+      return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+    };
+  };
+  const std::vector<std::function<std::string(std::string)>> rewrites{
+      rewrite_manifest([](B1CanonicalManifest* manifest) {
+        manifest->fields.push_back(
+            testing::known_b1_field("extension", "uint64", "1"));
+      }),
+      rewrite_manifest(
+          [](B1CanonicalManifest* manifest) { manifest->fields.pop_back(); }),
+      rewrite_manifest([](B1CanonicalManifest* manifest) {
+        std::swap(manifest->fields[0U], manifest->fields[1U]);
+      }),
+      rewrite_manifest([](B1CanonicalManifest* manifest) {
+        manifest->fields[1U] = manifest->fields[0U];
+      }),
+      rewrite_manifest([](B1CanonicalManifest* manifest) {
+        manifest->fields[0U].payload = "02";
+      }),
+      [](std::string source) { return source + "\n"; }};
+
+  for (std::size_t index = 0U; index < rewrites.size(); ++index) {
+    SCOPED_TRACE(index);
+    M1EnvelopeDenominatorOptions options;
+    options.rewrite_m1_inner = rewrites[index];
+    const M1EnvelopeFixture fixture = make_m1_fixture(options);
+    EXPECT_EQ(
+        validate_evidence_corpus(fixture.corpus, fixture.root_digest).verdict,
+        I1Verdict::Invalid);
+  }
+}
+
+/**
+ * @brief Proves a well-formed I1 projection contradiction remains invalid after
+ * the nested manifest and every enclosing address are recomputed.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope, RejectsRehashedM1SourceProjectionContradiction) {
+  M1EnvelopeDenominatorOptions options;
+  options.rewrite_m1_inner = [](std::string source) {
+    B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+    std::vector<std::string> records =
+        parse_b1_framed_list(manifest.fields[4U].payload);
+    std::vector<std::string> occurrence =
+        parse_b1_fixed_record(records[8U], 18U);
+    occurrence[8U] =
+        std::to_string(parse_b1_canonical_uint64(occurrence[8U]) + 1U);
+    records[8U] = encode_b1_fixed_record(occurrence);
+    manifest.fields[4U].payload = encode_test_record_list(records);
+    return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+  };
+  const M1EnvelopeFixture fixture = make_m1_fixture(options);
+  const EvidenceCorpusValidation validation =
+      validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+  EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves rehashed progress, Graph, and headroom contradictions remain
+ * invalid after all retained verdicts are synchronized to the already-Invalid
+ * protocol row.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope,
+     RejectsRehashedM1SourceDerivedFairnessProjectionContradictions) {
+  const auto rewrite_list_record = [](std::size_t field_index,
+                                      std::size_t component_index,
+                                      std::string replacement) {
+    return [field_index, component_index,
+            replacement = std::move(replacement)](std::string source) {
+      B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+      std::vector<std::string> records =
+          parse_b1_framed_list(manifest.fields[field_index].payload);
+      std::vector<std::string> fields = parse_b1_fixed_record(
+          records[0U],
+          field_index == 9U ? 3U : (field_index == 10U ? 4U : 10U));
+      fields[component_index] = replacement;
+      records[0U] = encode_b1_fixed_record(fields);
+      manifest.fields[field_index].payload = encode_test_record_list(records);
+      manifest.fields[19U].payload = encode_b1_fixed_record(
+          {"invalid", "invalid", "invalid", "invalid", "invalid", "invalid"});
+      return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+    };
+  };
+  const std::vector<std::function<std::string(std::string)>> rewrites{
+      rewrite_list_record(9U, 1U, "1"), rewrite_list_record(10U, 1U, "true"),
+      rewrite_list_record(12U, 7U, "78")};
+
+  for (std::size_t index = 0U; index < rewrites.size(); ++index) {
+    SCOPED_TRACE(index);
+    M1EnvelopeDenominatorOptions options;
+    options.rewrite_m1_inner = rewrites[index];
+    const M1EnvelopeFixture fixture = make_m1_fixture(options);
+    const EvidenceCorpusValidation validation =
+        validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+    EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+  }
+}
+
+/**
+ * @brief Proves placeholder/tampered nested records cannot survive rehashing.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope, RejectsNestedPlaceholderAndVerdictTamperingAfterRehash) {
+  const auto replace_list_record = [](std::size_t field_index,
+                                      std::size_t record_index,
+                                      std::string replacement) {
+    return [field_index, record_index,
+            replacement = std::move(replacement)](std::string source) {
+      B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+      std::vector<std::string> records =
+          parse_b1_framed_list(manifest.fields[field_index].payload);
+      if (record_index < records.size()) {
+        records[record_index] = replacement;
+      } else {
+        records.push_back(replacement);
+      }
+      manifest.fields[field_index].payload = encode_test_record_list(records);
+      return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+    };
+  };
+  const auto replace_scalar = [](std::size_t field_index,
+                                 std::string replacement) {
+    return [field_index,
+            replacement = std::move(replacement)](std::string source) {
+      B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+      manifest.fields[field_index].payload = replacement;
+      return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+    };
+  };
+  const auto replace_observation_record = [](std::string replacement) {
+    return [replacement = std::move(replacement)](std::string source) {
+      B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+      std::vector<std::string> snapshot =
+          parse_b1_fixed_record(manifest.fields[15U].payload, 10U);
+      std::vector<std::string> records = parse_b1_framed_list(snapshot[0U]);
+      records.push_back(replacement);
+      snapshot[0U] = encode_test_record_list(records);
+      snapshot[4U] = "1";
+      snapshot[5U] = "1";
+      snapshot[6U] = "1";
+      snapshot[7U] = "1";
+      manifest.fields[15U].payload = encode_b1_fixed_record(snapshot);
+      return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+    };
+  };
+  const std::vector<std::function<std::string(std::string)>> rewrites{
+      replace_list_record(4U, 0U, encode_b1_fixed_record({"occurrence"})),
+      replace_list_record(6U, 0U, encode_b1_fixed_record({"offer"})),
+      replace_observation_record(encode_b1_fixed_record({"event"})),
+      replace_scalar(18U, encode_b1_fixed_record({"waste"})),
+      replace_scalar(19U, encode_b1_fixed_record({"pass"})),
+      replace_scalar(19U, encode_b1_fixed_record({"pass", "pass", "pass",
+                                                  "pass", "pass", "pass"})),
+      [](std::string source) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> records =
+            parse_b1_framed_list(manifest.fields[4U].payload);
+        records[1U] = records[0U];
+        manifest.fields[4U].payload = encode_test_record_list(records);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      },
+      [](std::string source) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> records =
+            parse_b1_framed_list(manifest.fields[4U].payload);
+        std::swap(records[0U], records[1U]);
+        manifest.fields[4U].payload = encode_test_record_list(records);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      },
+      [](std::string source) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> records =
+            parse_b1_framed_list(manifest.fields[4U].payload);
+        std::vector<std::string> fields =
+            parse_b1_fixed_record(records[0U], 18U);
+        fields[0U] = "future";
+        records[0U] = encode_b1_fixed_record(fields);
+        manifest.fields[4U].payload = encode_test_record_list(records);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      },
+      [](std::string source) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> records =
+            parse_b1_framed_list(manifest.fields[9U].payload);
+        std::vector<std::string> fields =
+            parse_b1_fixed_record(records[0U], 3U);
+        fields[2U] = "500000000";
+        records[0U] = encode_b1_fixed_record(fields);
+        manifest.fields[9U].payload = encode_test_record_list(records);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      },
+      [](std::string source) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> records =
+            parse_b1_framed_list(manifest.fields[14U].payload);
+        records.pop_back();
+        manifest.fields[14U].payload = encode_test_record_list(records);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      },
+      [](std::string source) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> snapshot =
+            parse_b1_fixed_record(manifest.fields[15U].payload, 10U);
+        snapshot[6U] = "1";
+        manifest.fields[15U].payload = encode_b1_fixed_record(snapshot);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      }};
+
+  for (std::size_t index = 0U; index < rewrites.size(); ++index) {
+    SCOPED_TRACE(index);
+    M1EnvelopeDenominatorOptions options;
+    options.rewrite_m1_inner = rewrites[index];
+    const M1EnvelopeFixture fixture = make_m1_fixture(options);
+    EXPECT_EQ(
+        validate_evidence_corpus(fixture.corpus, fixture.root_digest).verdict,
+        I1Verdict::Invalid);
+  }
 }
 
 /**

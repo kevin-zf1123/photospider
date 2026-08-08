@@ -702,6 +702,7 @@ set(KERNEL_FACADE_SOURCES
     src/lib/benchmark/i1_profile.cpp
     src/lib/benchmark/i2_evidence.cpp
     src/lib/benchmark/i2_profile.cpp
+    src/lib/benchmark/m1_canonical.cpp
     src/lib/benchmark/m1_evidence.cpp
     src/lib/benchmark/m1_profile.cpp
     src/lib/benchmark/observation_fanout.cpp
