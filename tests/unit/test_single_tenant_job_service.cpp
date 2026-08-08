@@ -801,9 +801,62 @@ TEST(SingleTenantJobService,
       service.wait_for(submission.job_id, std::chrono::seconds(2));
   ASSERT_TRUE(terminal.has_value());
   EXPECT_EQ(terminal->state, JobState::Failed);
+  ASSERT_TRUE(terminal->attempt_outcome.has_value());
+  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
   EXPECT_FALSE(terminal->attempt_settled);
-  EXPECT_EQ(terminal->failure, JobAttemptFailure::Settlement);
+  EXPECT_EQ(terminal->failure, JobAttemptFailure::Unexpected);
   EXPECT_FALSE(terminal->output_receipt.has_value());
+}
+
+TEST(SingleTenantJobService, AcceptedCancellationPreservesWorkerStageFailures) {
+  constexpr std::array<JobAttemptFailure, 3U> kStageFailures{
+      JobAttemptFailure::GraphResolution,
+      JobAttemptFailure::HostSetup,
+      JobAttemptFailure::GraphLoad,
+  };
+  constexpr std::array<bool, 2U> kSettlementFacts{false, true};
+  for (const JobAttemptFailure failure : kStageFailures) {
+    for (const bool settled : kSettlementFacts) {
+      SCOPED_TRACE(::testing::Message()
+                   << "failure=" << static_cast<unsigned int>(failure)
+                   << ", settled=" << settled);
+      auto gate = std::make_shared<WorkerGate>();
+      auto factory = std::make_shared<FunctionWorkerFactory>(
+          [gate, failure, settled](
+              const JobAssignment& assignment,
+              const std::function<bool()>& cancellation_requested) {
+            gate->enter_and_wait();
+            EXPECT_TRUE(cancellation_requested());
+            JobAttemptReport report;
+            report.identity = assignment.identity;
+            report.outcome = JobAttemptOutcome::Failed;
+            report.settled = settled;
+            report.failure = failure;
+            report.message = "worker stage failed after cancellation";
+            return report;
+          });
+      SingleTenantJobService service(TenantId("tenant.test"), factory);
+      const JobSubmission submission = service.submit(JobSpec(
+          GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U));
+      WorkerGateReleaseGuard gate_release(gate);
+      ASSERT_TRUE(gate->wait_until_entered());
+      EXPECT_TRUE(service.cancel(submission.job_id));
+      gate_release.release();
+
+      const std::optional<JobSnapshot> terminal =
+          service.wait_for(submission.job_id, std::chrono::seconds(2));
+      ASSERT_TRUE(terminal.has_value());
+      EXPECT_EQ(terminal->state, JobState::Failed);
+      EXPECT_TRUE(terminal->cancellation_requested);
+      ASSERT_TRUE(terminal->attempt_outcome.has_value());
+      EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+      EXPECT_EQ(terminal->attempt_settled, settled);
+      EXPECT_EQ(terminal->failure, failure);
+      EXPECT_EQ(terminal->message, "worker stage failed after cancellation");
+      EXPECT_FALSE(terminal->output_receipt.has_value());
+      EXPECT_FALSE(service.cancel(submission.job_id));
+    }
+  }
 }
 
 TEST(SingleTenantJobService, CancellationBeforeCommitWaitsForSettlement) {
@@ -833,6 +886,9 @@ TEST(SingleTenantJobService, CancellationBeforeCommitWaitsForSettlement) {
   ASSERT_TRUE(terminal.has_value());
   EXPECT_EQ(terminal->state, JobState::Cancelled);
   EXPECT_TRUE(terminal->attempt_settled);
+  ASSERT_TRUE(terminal->attempt_outcome.has_value());
+  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Succeeded);
+  EXPECT_EQ(terminal->failure, JobAttemptFailure::CancellationObserved);
   EXPECT_FALSE(terminal->output_receipt.has_value());
   EXPECT_FALSE(service.cancel(submission.job_id));
 }

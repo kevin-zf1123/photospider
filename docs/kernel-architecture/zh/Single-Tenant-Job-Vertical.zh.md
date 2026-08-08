@@ -88,6 +88,11 @@ worker report 词汇是闭合的：
 `ReportRejected` 和 `ArtifactCommit` 是 control-plane failure，绝不接受为 worker 上报值。
 `None` 只属于成功，`CancellationObserved` 只属于取消。非法底层 enum 表示不会扩展该词汇。
 
+shape 合法的 `Failed` 报告先于取消裁定处理。即使 graph resolution、Host setup、graph load、
+compute 或 settlement 进行时已经接受取消意图，Job 仍成为 `Failed`，`attempt_outcome` 仍为
+`Failed`，并保留报告中精确的 `settled`、failure 与 diagnostic 事实。单调取消意图继续记录，
+但不能把真实 worker failure 重新标记为 cancellation。
+
 控制面通过精确 worker thread 保留的 assignment 查找 Job，随后校验报告完整的 tenant/Job/
 spec-digest/attempt/worker/lease tuple。随后在复制任何 report outcome、settlement、failure、
 diagnostic 以及执行取消裁定之前，校验完整 enum 与 outcome/settlement/failure/image shape。
@@ -120,8 +125,10 @@ resolution 前、Host construction/load/compute 前以及 compute 后观察取�
 
 取消与 artifact commit 在 Job mutex 下线性化：
 
-- 若取消先发生，之后的 image 被丢弃，不提交 artifact，只有 `settled=true` 后才出现
-  `Cancelled`；
+- 若取消先发生，而 worker 随后返回合法的非失败 settled 报告，则丢弃 candidate image、
+  不提交 artifact，Job 成为 `Cancelled`；
+- 若 worker 转而返回合法 `Failed` 报告，则 Job 保持 `Failed`，并保留精确 outcome、
+  settlement、failure 与 diagnostic 事实；
 - 若成功 commit 与 terminal publication 先发生，之后 cancel 返回 false，不能改写回执或
   `Succeeded` 状态。
 
@@ -209,8 +216,9 @@ tenant-scoped identity allocation 属于 Issue #99。
 聚焦测试覆盖精确六字段规范字节与 SHA-256、path-shaped identity 拒绝、tight-row deep copy、
 相同内容的身份分离、receipt-gated success、缺失 output、不匹配 lease fencing、闭合
 malformed report shape 与非法 enum、全部 worker-owned typed failure/settlement 组合、返回 null/
-异常的 factory 与 worker settlement、malformed report 后取消，以及 cancel-before-commit 顺序。
-编译后的契约另行通过 static assertion 固定 submission move 不抛异常。Gate cleanup guard 保证
-即使 fatal 测试断言提前退出，也会在 service 析构前释放阻塞 worker。产品路径测试把 immutable
-graph identity 解析为微型 YAML 图，经新的 Embedded Host 执行、关闭、提交结果，并查询身份
-完整的工件。
+异常的 factory 与 worker settlement、malformed report 后取消、取消与已 settle 或未 settle 的
+graph-resolution/Host-setup/graph-load failure 竞态，以及 cancel-before-commit 顺序。编译后的
+契约另行通过 static assertion 固定 submission move 不抛异常。Gate cleanup guard 保证即使 fatal
+测试断言提前退出，也会在 service 析构前释放阻塞 worker。产品路径测试把 immutable graph
+identity 解析为微型 YAML 图，经新的 Embedded Host 执行、关闭、提交结果，并确定性证明接受
+取消后的 resolver 异常仍保持 `Failed` 且没有工件。

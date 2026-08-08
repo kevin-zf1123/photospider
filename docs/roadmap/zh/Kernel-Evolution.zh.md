@@ -1222,9 +1222,10 @@ compatibility；它不能让恶意 native code 在进程内安全执行。
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结
 `jobspec-v1`，使用不同的 Job/attempt/worker-lease/artifact 身份，每个 attempt 运行一个新的
 进程内 Embedded Host，在 process-lifetime artifact commit 与取消之间建立顺序，并要求
-settlement 加一份完整回执后 Job 才能成功。它没有把上表任何目标行实现为独立进程、持久服务、
-quota authority、network endpoint 或 untrusted-plugin boundary。Issues #99 至 #106 不得从
-这条首个可执行切片推导各自性质。
+settlement 加一份完整回执后 Job 才能成功。即使并发接受取消，合法 typed worker failure 仍保持
+`Failed`，并保留精确 settlement 与 failure 事实。它没有把上表任何目标行实现为独立进程、
+持久服务、quota authority、network endpoint 或 untrusted-plugin boundary。Issues #99 至
+#106 不得从这条首个可执行切片推导各自性质。
 
 Issue #97 只做分配，不吸收后续交付：
 

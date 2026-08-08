@@ -106,6 +106,13 @@ accepted from a worker. `None` belongs only to success, and
 `CancellationObserved` belongs only to cancellation. Invalid underlying enum
 representations are not extensions to this vocabulary.
 
+A shape-valid `Failed` report is applied before cancellation adjudication.
+Even when cancellation intent was accepted while resolution, Host setup,
+graph loading, compute, or settlement was active, the Job becomes `Failed`,
+`attempt_outcome` remains `Failed`, and the report's exact `settled`, failure,
+and diagnostic facts remain visible. The monotonic cancellation intent remains
+recorded, but it cannot relabel a real worker failure as cancellation.
+
 The control plane finds the Job through the assignment retained by the exact
 worker thread, then validates the report's full tenant/Job/spec-digest/attempt/
 worker/lease tuple. It then validates the complete enum and outcome/settlement/
@@ -146,8 +153,11 @@ The worker then closes the loaded graph and destroys its Host before reporting.
 
 Cancellation and artifact commit linearize under the Job mutex:
 
-- if cancellation wins first, a later image is discarded, no artifact is
-  committed, and `Cancelled` appears only after `settled=true`;
+- if cancellation wins first and the worker later returns a valid non-failed
+  settled report, a candidate image is discarded, no artifact is committed,
+  and the Job becomes `Cancelled`;
+- if the worker instead returns a valid `Failed` report, the Job remains
+  `Failed` with its exact outcome, settlement, failure, and diagnostic facts;
 - if successful commit and terminal publication win first, later cancel returns
   false and cannot rewrite the receipt or `Succeeded` state.
 
@@ -248,10 +258,12 @@ of path-shaped identity, tight-row deep copy, equal-content identity
 separation, receipt-gated success, missing output, mismatched lease fencing,
 closed malformed report shapes and invalid enums, all worker-owned typed
 failure/settlement combinations, null/exceptional factory and worker
-settlement, cancellation after malformed reporting, and cancel-before-commit
-ordering. The compiled contract independently static-asserts the no-throw
-submission move. Gate cleanup guards release blocked workers before service
-destruction even when a fatal test assertion exits early. The product-path test
-resolves an immutable graph identity to a tiny YAML graph, executes it through
-a fresh Embedded Host, closes it, commits the result, and queries the
-identity-complete artifact.
+settlement, cancellation after malformed reporting, cancellation racing with
+settled or unsettled graph-resolution/Host-setup/graph-load failures, and
+cancel-before-commit ordering. The compiled contract independently
+static-asserts the no-throw submission move. Gate cleanup guards release
+blocked workers before service destruction even when a fatal test assertion
+exits early. Product-path tests resolve an immutable graph identity to a tiny
+YAML graph, execute it through a fresh Embedded Host, close and commit the
+result, and deterministically prove that a resolver exception after accepted
+cancellation remains `Failed` without an artifact.

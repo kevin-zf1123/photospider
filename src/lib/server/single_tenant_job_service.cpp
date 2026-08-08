@@ -527,49 +527,46 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
   job.failure = report.failure;
   job.message = std::move(report.message);
 
-  if (job.cancellation_requested) {
+  if (report.outcome == JobAttemptOutcome::Failed) {
     job.output_receipt.reset();
-    if (report.settled) {
-      job.state = JobState::Cancelled;
-      job.failure = JobAttemptFailure::CancellationObserved;
-      if (job.message.empty()) {
-        job.message = "cancellation observed before artifact commit";
-      }
-    } else {
-      job.state = JobState::Failed;
-      job.failure = JobAttemptFailure::Settlement;
-      job.message = "cancelled worker did not prove settlement";
+    job.state = JobState::Failed;
+    if (job.message.empty()) {
+      job.message = "worker attempt failed without a diagnostic";
     }
     condition_.notify_all();
     return;
   }
 
-  if (report.outcome == JobAttemptOutcome::Failed) {
-    job.state = JobState::Failed;
+  if (job.cancellation_requested) {
+    job.output_receipt.reset();
+    job.state = JobState::Cancelled;
+    job.failure = JobAttemptFailure::CancellationObserved;
     if (job.message.empty()) {
-      job.message = "worker attempt failed without a diagnostic";
+      job.message = "cancellation observed before artifact commit";
     }
-  } else {
-    try {
-      const OutputCommitReceipt receipt =
-          artifact_store_.commit(ArtifactCommitRequest{
-              job.assignment, job.spec->output_slot_id(), *report.image});
-      if (receipt.attempt != job.assignment ||
-          receipt.output_slot_id != job.spec->output_slot_id() ||
-          !receipt.artifact_id.valid() || !receipt.output_commit_id.valid() ||
-          receipt.achieved_durability != job.spec->requested_durability()) {
-        throw std::logic_error("artifact receipt failed identity validation");
-      }
-      job.output_receipt = receipt;
-      job.state = JobState::Succeeded;
-      job.failure = JobAttemptFailure::None;
-      job.message.clear();
-    } catch (const std::exception& error) {
-      job.output_receipt.reset();
-      job.state = JobState::Failed;
-      job.failure = JobAttemptFailure::ArtifactCommit;
-      job.message = std::string("artifact commit failed: ") + error.what();
+    condition_.notify_all();
+    return;
+  }
+
+  try {
+    const OutputCommitReceipt receipt =
+        artifact_store_.commit(ArtifactCommitRequest{
+            job.assignment, job.spec->output_slot_id(), *report.image});
+    if (receipt.attempt != job.assignment ||
+        receipt.output_slot_id != job.spec->output_slot_id() ||
+        !receipt.artifact_id.valid() || !receipt.output_commit_id.valid() ||
+        receipt.achieved_durability != job.spec->requested_durability()) {
+      throw std::logic_error("artifact receipt failed identity validation");
     }
+    job.output_receipt = receipt;
+    job.state = JobState::Succeeded;
+    job.failure = JobAttemptFailure::None;
+    job.message.clear();
+  } catch (const std::exception& error) {
+    job.output_receipt.reset();
+    job.state = JobState::Failed;
+    job.failure = JobAttemptFailure::ArtifactCommit;
+    job.message = std::string("artifact commit failed: ") + error.what();
   }
   condition_.notify_all();
 }

@@ -1515,10 +1515,12 @@ The current Issue #98 baseline is the source-private
 It freezes `jobspec-v1`, uses distinct Job/attempt/worker-lease/artifact
 identities, runs one fresh in-process Embedded Host per attempt, orders
 cancellation against a process-lifetime artifact commit, and gates Job success
-on settlement plus one complete receipt. It does not implement any target row
-above as a separate process, persistent service, quota authority, network
-endpoint, or untrusted-plugin boundary. Issues #99 through #106 must not infer
-their properties from that first executable slice.
+on settlement plus one complete receipt. A valid typed worker failure remains
+`Failed` with its exact settlement and failure facts even when cancellation was
+accepted concurrently. It does not implement any target row above as a
+separate process, persistent service, quota authority, network endpoint, or
+untrusted-plugin boundary. Issues #99 through #106 must not infer their
+properties from that first executable slice.
 
 Delivery remains allocated rather than absorbed by Issue #97:
 

@@ -6,11 +6,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -155,6 +158,114 @@ class TestGraphArtifactResolver final : public GraphArtifactResolver {
   mutable std::atomic<std::uint64_t> resolve_calls_{0U};
 };
 
+/**
+ * @brief Blocks graph resolution until cancellation wins, then raises.
+ * @throws Synchronization errors from standard primitives; resolve raises the
+ * configured deterministic resolver failure after release.
+ * @note The gate makes the product cancellation/failure ordering independent
+ * of scheduler timing.
+ */
+class BlockingFailingGraphArtifactResolver final
+    : public GraphArtifactResolver {
+ public:
+  /**
+   * @brief Marks resolver entry, waits for test release, and raises.
+   * @param graph_artifact_id Candidate identity, unused by this failing seam.
+   * @return Never returns.
+   * @throws std::runtime_error after the gate is released.
+   * @throws std::system_error on synchronization failure.
+   */
+  ResolvedGraphArtifact resolve(
+      const GraphArtifactId& graph_artifact_id) const override {
+    (void)graph_artifact_id;
+    std::unique_lock<std::mutex> lock(mutex_);
+    entered_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [&] { return released_; });
+    throw std::runtime_error("resolver failed after cancellation");
+  }
+
+  /**
+   * @brief Waits a fixed bound for the worker to enter resolution.
+   * @return True when resolver entry was observed.
+   * @throws std::system_error on synchronization failure.
+   */
+  bool wait_until_entered() const {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, std::chrono::seconds(2),
+                               [&] { return entered_; });
+  }
+
+  /**
+   * @brief Releases the resolver gate monotonically.
+   * @return Nothing.
+   * @throws std::system_error on synchronization failure.
+   */
+  void release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    condition_.notify_all();
+  }
+
+ private:
+  /** @brief Serializes deterministic resolver-gate state. */
+  mutable std::mutex mutex_;
+  /** @brief Signals resolver entry and test release. */
+  mutable std::condition_variable condition_;
+  /** @brief Whether the worker entered graph resolution. */
+  mutable bool entered_ = false;
+  /** @brief Whether the test released graph resolution. */
+  mutable bool released_ = false;
+};
+
+/**
+ * @brief Releases a blocked product resolver before service destruction.
+ * @throws Nothing; an unexpected synchronization failure terminates because a
+ * blocked worker would otherwise make the service join nonrecoverable.
+ */
+class ResolverReleaseGuard final {
+ public:
+  /**
+   * @brief Retains one resolver cleanup obligation.
+   * @param resolver Resolver to release, or null for a disarmed guard.
+   * @throws Nothing.
+   */
+  explicit ResolverReleaseGuard(
+      std::shared_ptr<BlockingFailingGraphArtifactResolver> resolver) noexcept
+      : resolver_(std::move(resolver)) {}
+
+  /** @brief Releases an armed resolver gate before service destruction. */
+  ~ResolverReleaseGuard() noexcept { release(); }
+
+  /** @brief Prevents duplicate gate cleanup ownership. */
+  ResolverReleaseGuard(const ResolverReleaseGuard&) = delete;
+  /** @brief Prevents duplicate gate cleanup assignment. */
+  ResolverReleaseGuard& operator=(const ResolverReleaseGuard&) = delete;
+
+  /**
+   * @brief Releases the resolver immediately and disarms cleanup.
+   * @return Nothing.
+   * @throws Nothing; terminates on an unexpected synchronization failure.
+   */
+  void release() noexcept {
+    if (resolver_ == nullptr) {
+      return;
+    }
+    try {
+      resolver_->release();
+      resolver_.reset();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  /** @brief Armed resolver owner, or null after release. */
+  std::shared_ptr<BlockingFailingGraphArtifactResolver> resolver_;
+};
+
 TEST(SingleTenantJobProductPath,
      RealEmbeddedHostCompletesWithIdentityBoundArtifact) {
   ScopedJobProductRoot product_root;
@@ -218,6 +329,36 @@ TEST(SingleTenantJobProductPath, MissingGraphArtifactFailsBeforeHostExecution) {
   EXPECT_EQ(terminal->state, JobState::Failed);
   EXPECT_TRUE(terminal->attempt_settled);
   EXPECT_EQ(terminal->failure, JobAttemptFailure::GraphResolution);
+  EXPECT_FALSE(terminal->output_receipt.has_value());
+}
+
+TEST(SingleTenantJobProductPath,
+     ResolverFailureAfterAcceptedCancellationRemainsFailed) {
+  auto resolver = std::make_shared<BlockingFailingGraphArtifactResolver>();
+  auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(resolver);
+  SingleTenantJobService service(TenantId("tenant.issue98"), factory);
+  const JobSubmission submission = service.submit(JobSpec(
+      GraphArtifactId("graph.race"), 0, OutputSlotId("image.final"), 1U));
+  ResolverReleaseGuard resolver_release(resolver);
+
+  ASSERT_TRUE(resolver->wait_until_entered());
+  EXPECT_TRUE(service.cancel(submission.job_id));
+  const std::optional<JobSnapshot> cancelling =
+      service.query(submission.job_id);
+  ASSERT_TRUE(cancelling.has_value());
+  EXPECT_EQ(cancelling->state, JobState::Cancelling);
+  resolver_release.release();
+
+  const std::optional<JobSnapshot> terminal =
+      service.wait_for(submission.job_id, std::chrono::seconds(5));
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_EQ(terminal->state, JobState::Failed);
+  EXPECT_TRUE(terminal->cancellation_requested);
+  ASSERT_TRUE(terminal->attempt_outcome.has_value());
+  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_TRUE(terminal->attempt_settled);
+  EXPECT_EQ(terminal->failure, JobAttemptFailure::GraphResolution);
+  EXPECT_EQ(terminal->message, "resolver failed after cancellation");
   EXPECT_FALSE(terminal->output_receipt.has_value());
 }
 

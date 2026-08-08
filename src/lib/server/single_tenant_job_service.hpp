@@ -35,7 +35,8 @@ enum class JobState : std::uint8_t {
   Succeeded,
   /** @brief Current attempt or report validation failed. */
   Failed,
-  /** @brief Accepted cancellation won before commit and worker settled. */
+  /** @brief Accepted cancellation won before commit, no worker failure took
+   * precedence, and the worker settled. */
   Cancelled,
 };
 
@@ -69,7 +70,8 @@ enum class JobAttemptOutcome : std::uint8_t {
 enum class JobAttemptFailure : std::uint8_t {
   /** @brief No failure is present; valid only with successful outcome. */
   None,
-  /** @brief Cancellation was observed; valid only with cancelled outcome. */
+  /** @brief Cancellation was observed or adjudicated; valid only with a
+   * cancelled worker report or control-plane Cancelled Job. */
   CancellationObserved,
   /** @brief Assignment or immutable JobSpec validation failed. */
   InvalidAssignment,
@@ -288,9 +290,12 @@ struct JobSnapshot final {
   bool cancellation_requested = false;
   /** @brief Whether the current worker reported completed settlement. */
   bool attempt_settled = false;
-  /** @brief Worker attempt outcome when a report was accepted. */
+  /** @brief Accepted worker-local outcome, never rewritten by control-plane
+   * cancellation adjudication. */
   std::optional<JobAttemptOutcome> attempt_outcome;
-  /** @brief Typed current attempt/control failure, if any. */
+  /** @brief Typed accepted attempt or control-plane terminal failure, if any.
+   * A valid worker failure remains authoritative after accepted cancellation.
+   */
   JobAttemptFailure failure = JobAttemptFailure::None;
   /** @brief Human-readable current diagnostic. */
   std::string message;
@@ -305,7 +310,8 @@ struct JobSnapshot final {
  * The service validates and freezes JobSpec values, mints one current
  * assignment, starts one fresh in-process worker, records monotonic
  * cancellation intent, validates the complete returned tuple, linearizes
- * cancellation versus artifact commit, and alone publishes Job terminal state.
+ * cancellation versus artifact commit, preserves accepted worker failures,
+ * and alone publishes Job terminal state.
  *
  * @throws std::invalid_argument when construction receives an invalid tenant or
  * null factory.
@@ -418,10 +424,11 @@ class SingleTenantJobService final {
    * @throws Nothing; artifact exceptions become a typed failed Job.
    * @note Full identity, enum, outcome/failure/settlement/image shape, and
    * cancellation-context validation precede copying any report fact or
-   * cancellation adjudication. A rejected report leaves `attempt_outcome`
-   * unset and cannot establish settlement or an artifact receipt for the
-   * retained current assignment, even when its untrusted `settled` field is
-   * true.
+   * cancellation adjudication. An accepted `Failed` report takes precedence
+   * over cancellation intent and retains its exact settlement, failure, and
+   * diagnostic facts. A rejected report leaves `attempt_outcome` unset and
+   * cannot establish settlement or an artifact receipt for the retained
+   * current assignment, even when its untrusted `settled` field is true.
    */
   void apply_report(const AttemptIdentity& expected,
                     JobAttemptReport report) noexcept;
