@@ -2166,11 +2166,27 @@ checked for capacity and ownership reachability rather than inferred event
 deltas; physical retirement takes its registry cut under the lifecycle fence.
 After every Graph closes, the source-private M1 finalizer captures terminal
 `ServiceStopped` with all 15 counters zero. Its I1/B1 portable packs are
-explicitly denominator-only and require exact sample/occurrence shapes. The reader uses
-one no-follow POSIX descriptor or reparse-point-aware Windows handle for
-same-object validation and reading. These mechanisms and deterministic tests
-do not assert a timed three-replicate corpus, complete live storage authority,
-Windows runtime execution, or machine conformance.
+explicitly denominator-only and require exact sample/occurrence shapes. The
+reader uses one no-follow POSIX descriptor or reparse-point-aware Windows
+handle for same-object validation and reading. The M1 nested schema is now
+`execution-profile-m1-inner-row-v2`: it is closed and reversible, has exactly
+20 ordered fields, and requires every one of the thirty progress durations to
+equal exactly one second. It retains exactly 48 complete post-freeze Issue #93
+episode inputs and exactly one complete Issue #95 physical/output/golden/
+semantic/I/O observation source per B1 offer, with receipt values copied
+without their store-private capability. Corpus replay exact-joins source
+identities, recomputes the I1 occurrence projections and B1 verified-endpoint/
+waste projection, then source-derives and exact-matches all thirty progress
+windows, all thirty Graph A/B service/demand windows, all 480 measured headroom
+outcomes, and their attempted/classified/failure aggregate before the five axis
+verdicts plus overall. The runner and reader use the same checked projection
+implementation and require byte-identical canonical rematerialization. Source closure is
+mandatory even when another defect already makes the row `Invalid`. Redundant
+full I1/B1 diagnostic JSON is omitted. Outer row and bundle schemas remain
+version one, pair packs remain denominator-only, and retained bytes do not mint
+output, storage, or machine authority. These mechanisms and deterministic tests
+do not assert a timed three-replicate corpus, complete live storage
+authority, Windows runtime execution, or machine conformance.
 
 An issue may add lasting deterministic behavior tests for its mechanisms, but
 cannot redefine a workload or promote a target using a missing, invalid, or

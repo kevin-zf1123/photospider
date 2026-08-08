@@ -2878,8 +2878,31 @@ canonical sections plus `row.canonical`, `bundle.canonical`, copied canonical
 `paired-i1-object.canonical`/`paired-b1-object.canonical` packs, and
 `result.json`.
 Its nested M1 row preserves the 30 raw progress and Graph-service windows, 480
-raw Host outcomes, product-authored class-start cuts, complete reused I1/B1
-source rows, event-aligned Compute I/O, and sparse temporal/lifecycle streams.
+raw Host outcomes, product-authored class-start cuts, evaluator-authoritative
+I1/B1 source evidence, event-aligned Compute I/O, and sparse
+temporal/lifecycle streams.
+A valid `execution-profile-m1-inner-row-v2` requires every progress duration
+to be exactly one second. Its exact 20-field manifest retains 48 complete
+post-freeze I1 episode inputs and one complete B1 physical/output/golden/
+semantic/I/O observation source per protocol offer. The validator exact-joins
+phase/ordinal/origin and job/producer-ordinal/offer/endpoint identities,
+recomputes the I1 occurrence projections and B1 verified-endpoint/waste
+projection, and uses the runner's same checked function to source-derive and
+exact-match the thirty progress windows, thirty Graph A/B service/demand
+windows, 480 measured headroom outcomes, and their attempted/classified/failure
+aggregate. It then reuses the production protocol/fairness/waste/memory/B1-I/O
+evaluators and exact-matches all five axes plus overall. A source mismatch is
+not materializable even if another defect already makes the row `Invalid`.
+Tests include same-cardinality wrong identity/ordinal, I1 source/projection and
+B1 raw-trace/waste contradictions, synchronized-verdict progress/Graph/
+headroom projection contradictions, aggregate and checked-overflow failures,
+missing/duplicate/reordered sources, half-second, two-second, mixed-duration,
+ratio-flip, nested schema, raw-value, stale-verdict, and fully rehashed outer
+contradictions, plus a positive producer-shaped byte round trip. The v2 bytes
+omit redundant full I1/B1
+diagnostic JSON; copied receipt observations never become a portable receipt,
+storage, or machine authority. The outer 15-field row and five-field bundle
+remain version one.
 A complete corpus validator exact-one resolves each named isolated row,
 recomputes the isolated I1 p99 and B1 successful-site-operation/measurement-
 interval tuple, and exact-checks both duplicated M1 claims. Missing, ambiguous,

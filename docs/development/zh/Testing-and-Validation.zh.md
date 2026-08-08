@@ -2358,9 +2358,25 @@ counter 与全部 process resource 为零，并
 写入六个 canonical section，以及 `row.canonical`、`bundle.canonical`、复制的 canonical
 `paired-i1-object.canonical`/`paired-b1-object.canonical` pack 与 `result.json`。其
 nested M1 row 会保留 30 个 raw progress 与 Graph-service window、480 个 raw Host outcome、
-产品签发的 class-start cut、完整复用的 I1/B1 source row、event-aligned Compute I/O，以及
-稀疏 temporal/lifecycle stream。完整 corpus validator 会 exact-one 解析每个具名 isolated row，
-重新计算 isolated I1 p99 与 B1 successful-site-operation/measurement-interval tuple，并精确
+产品签发的 class-start cut、具备 evaluator 权威的 I1/B1 source evidence、event-aligned
+Compute I/O，以及稀疏 temporal/lifecycle stream。有效
+`execution-profile-m1-inner-row-v2` 要求每个 progress duration 精确等于一秒。该 schema
+的精确 20-field manifest 会保留 48 个完整 post-freeze I1 episode input，以及每个 protocol
+offer 对应的一个完整 B1 physical/output/golden/semantic/I/O observation source。Validator 会
+精确 join phase/ordinal/origin 与 job/producer-ordinal/offer/endpoint identity，重新计算 I1
+occurrence projection 与 B1 verified-endpoint/waste projection，并使用与 runner 相同的 checked
+函数，从 source 推导并精确匹配三十个 progress window、三十个 Graph A/B service/demand
+window、480 个 measured headroom outcome 及其 attempted/classified/failure aggregate；随后再
+复用 production protocol/fairness/waste/memory/B1-I/O evaluator，并精确匹配五个轴与 overall。即使另一项缺陷已使 row
+为 `Invalid`，source mismatch 也不得物化。测试覆盖同 cardinality 的错误 identity/ordinal、
+I1 source/projection 与 B1 raw-trace/waste 矛盾、同步 verdict 的 progress/Graph/headroom
+projection 矛盾、aggregate 与 checked-overflow failure、source 缺失/重复/重排、半秒、两秒、
+混合 duration、ratio-flip、nested schema、raw-value、stale-verdict、outer 全量重 hash 矛盾，以及
+producer shape 的正向 byte roundtrip。v2 byte 省略重复的完整 I1/B1 diagnostic JSON；复制的
+receipt observation 绝不会变成 portable receipt、storage 或 machine authority。Outer
+15-field row 与 five-field bundle 保持 version one。完整 corpus validator 会 exact-one 解析每个具名
+isolated row，重新计算 isolated I1 p99 与 B1
+successful-site-operation/measurement-interval tuple，并精确
 核对两份重复的 M1 claim。证据缺失、歧义、遗漏、替换、篡改或不匹配会在 timing 前被拒绝，
 或在 corpus replay 中成为 `Invalid`。两份已加载 pair 的 row、bundle 与 section 会先于 M1
 row/bundle，被 exact-once 插入本地 validation corpus。Portable storage observation 仍不会制造

@@ -1091,6 +1091,23 @@ descriptor，Windows 使用一个 reparse-point-aware `CreateFileW` handle，以
 type/size/read。这些已加载 object 会在 M1 corpus 中 exact-once 保留；digest-only 输入不再
 生成 sealed denominator claim。
 
+Canonical-replay 修正只把 nested M1 inner schema 迁移到
+`execution-profile-m1-inner-row-v2`；workload 与 outer 15-field row/five-field bundle 保持
+version one。v2 manifest 具有精确 20 个有序 field，其中包含 48 个完整 post-freeze Issue #93
+episode source，以及每个 B1 offer 对应的一个完整 Issue #95 physical/output/golden/semantic/I/O
+observation source。每个保留的 progress duration 必须精确等于一秒。Corpus validation 会精确
+join source identity/order，重新计算每个 I1 projection 与 B1 verified-endpoint/waste
+projection，并通过唯一共享的 checked producer/reader 规则从 source 推导并精确匹配三十个
+progress window、三十个 Graph A/B service/demand window、480 个 measured headroom
+outcome 及其 attempted/classified/failure aggregate；随后再复用 production protocol、
+fairness、waste、memory 与 B1-I/O evaluator，重新计算全部五个轴与 overall，精确匹配六个
+retained verdict，并复现相同 canonical byte。即使
+另一项缺陷已使 row 为 `Invalid`，source closure 仍是强制项。未知/重复/缺失/重排/截断/
+非规范的 nested input、source/projection mismatch、raw 篡改、duration 漂移、denominator
+矛盾或过期 verdict，即使 outer 层重新 hash 也仍为 Invalid。v2 不包含重复的完整 I1/B1
+diagnostic JSON；authority-free receipt observation 与 pair pack 都保持非 capability，因此不会
+创建 portable output、storage 或 machine authority。
+
 I1、I2、B1 与 M1 runner 均为 `EXCLUDE_FROM_ALL` 且不属于 CTest；它们都不改变 installed
 ABI 或冻结的 outer field 数量。本文既不声明已经完成精确 111-slot I2 机器运行，也不声明
 已经完成精确三 replicate B1 或 M1 machine corpus。M1 runner 在 timed execution 前必须取得

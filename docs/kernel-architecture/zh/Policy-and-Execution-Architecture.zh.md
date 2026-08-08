@@ -627,8 +627,30 @@ authority。任一 external storage declaration 缺少可信 observation，
 Darwin/Linux path 能观察 held root 与真实 receipt，但不能独立验证全部 mount、performance、
 hardware-cache、power-loss-protection 与 transaction-event fact；因此在取得可信完整 probe 前，
 它会输出 Invalid，而不是 machine-conformance claim。构建该 target、显示 help 或通过
-deterministic test 都不构成 B1 机器符合性结果；本文既不声明已完成精确三 replicate 机器运行，
-也不声明 #96 outer row/bundle/reference composition。
+deterministic test 都不构成 B1 机器符合性结果；该 target 本身既不声明已完成精确三
+replicate 机器运行，也不声明 #96 outer row/bundle/reference composition。
+
+Source-private M1 profile 会组合精确 shared I1/B1 cadence 与五个独立 inner axis，但不会新增
+installed policy 或 lifecycle control surface。其 canonical nested record 是封闭且可逆的
+`execution-profile-m1-inner-row-v2`；workload 与 outer 15-field row/five-field bundle 保持
+version one。v2 manifest 具有精确 20 个有序 field：`interactive_sources` 会为 48 个
+phase/ordinal/origin occurrence 各自保留完整的 post-freeze Issue #93 input；
+`batch_sources` 则为每个 protocol offer 保留精确一个 Issue #95 physical/output/golden/
+semantic/I/O observation source。Receipt field 只作为 observation 被复制；解析绝不铸造
+`B1OutputCommitReceipt` 或 live storage capability。三十个 retained progress duration 必须
+各自精确等于一秒。独立 corpus reader 会精确 join source identity 与顺序，重放 I1
+latency/service/四 verdict projection 与 B1 verified-endpoint/waste projection；并使用与 runner
+相同的 checked 规则，从 source 推导并精确匹配全部三十个 progress window、全部三十个 Graph
+A/B service/demand window、全部 480 个 measured headroom outcome 及其 attempted/classified/
+failure aggregate。随后它精确校验其余 mixed observation，复用 production protocol/fairness/
+waste/memory/B1-I/O evaluator，重新计算全部五个轴与 overall，精确匹配六个 retained verdict，并要求逐 byte 相同
+的重新物化。即使 row 已经为 `Invalid`，source closure 仍是独立的 materialization gate。
+因此，未知、重复、缺失、重排、截断、非规范、被篡改、source/projection 不匹配或 verdict
+过期的 nested evidence，即使 outer 层重新 hash 也会 fail closed。v2 record 省略重复的完整
+I1/B1 diagnostic JSON；它与仅具有 denominator 权威的 pair pack 都不能铸造 portable output
+receipt、live storage authority 或 machine conformance。`m1_shared_benchmark` 继续是
+CTest/CI 之外的手工 `EXCLUDE_FROM_ALL` target，本文不声明已完成精确 timed
+three-replicate M1 corpus。
 
 ## 实现与验证入口
 
@@ -652,6 +674,10 @@ deterministic test 都不构成 B1 机器符合性结果；本文既不声明已
 - `src/lib/benchmark/b1_environment.*`
 - `src/lib/benchmark/b1_output_store.*`
 - `src/lib/benchmark/b1_evidence.*`
+- `src/lib/benchmark/m1_profile.*`
+- `src/lib/benchmark/m1_evidence.*`
+- `src/lib/benchmark/m1_canonical.*`
+- `src/lib/benchmark/evidence_envelope.*`
 - `src/lib/compute/progressive_compute.*`
 - `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/resource_ledger.*`

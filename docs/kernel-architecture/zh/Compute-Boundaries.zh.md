@@ -564,6 +564,20 @@ latency sample；B1 保留 schema version one、精确一个 cold、三个 warmu
 或 B1 rate denominator 的 portable output/conformance authority；process-private actual
 storage authority 会被有意排除。
 
+Nested v2 manifest 具有精确 20 个有序 field。其 `interactive_sources` field 会保留精确
+48 个完整的 post-freeze `I1EpisodeEvidenceInput` value，并按 phase、phase-local ordinal 与
+origin 逐一绑定。其 `batch_sources` field 会为每个 protocol offer 保留精确一个 source：
+不可变 offer identity/cut、完整 physical Run trace、output status、存在时无权威的 receipt
+observation 副本、golden value、semantic trace byte 及其 digest，以及完整 Compute I/O
+observation。Replay 会先推导每个 I1 的 latency/service/四 verdict projection 与每个 B1 的
+verified-endpoint/waste projection。唯一共享的 checked runner/reader 规则随后会从 source 推导并
+精确匹配全部三十个 progress window、全部三十个 Graph A/B service/demand window、全部 480 个
+measured headroom outcome 及其 attempted/classified/failure aggregate。Cardinality、identity、
+endpoint、顺序或 checked arithmetic 失败时，source closure 必须保持 false。Source closure
+独立于六个最终 verdict，必须成立；因此，即使另一条 protocol fact 已使该 row 为 `Invalid`，source mismatch
+也不能被物化。复制的 receipt field 绝不会重建 store-private receipt capability 或当前 storage
+authority。
+
 在推导 timed boundary 前，M1 runner 必须同时取得两份 pack path 及其精确 row/bundle address。
 POSIX 通过一个 `O_NOFOLLOW` descriptor 完成 validation/read；Windows 使用一个带
 `FILE_FLAG_OPEN_REPARSE_POINT` 的 `CreateFileW` handle。Type/reparse status、有界 size、

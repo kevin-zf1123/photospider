@@ -793,8 +793,37 @@ performance, hardware-cache, power-loss-protection, and transaction-event
 facts, so it emits an Invalid row rather than a machine-conformance claim until
 a trusted complete probe is available. Building it, showing its help, or
 passing deterministic tests is not a B1 machine-conformance result; this
-document claims neither an exact three-replicate machine run nor the #96 outer
-row/bundle/reference composition.
+target by itself claims neither an exact three-replicate machine run nor the
+#96 outer row/bundle/reference composition.
+
+The source-private M1 profile composes the exact shared I1/B1 cadence and five
+independent inner axes, but does not add installed policy or lifecycle control
+surfaces. Its canonical nested record is the closed and reversible
+`execution-profile-m1-inner-row-v2`; the workload and outer 15-field row/
+five-field bundle stay version one. The v2 manifest has exactly 20 ordered
+fields: `interactive_sources` retains the complete post-freeze Issue #93 input
+for each of the 48 phase/ordinal/origin occurrences, while `batch_sources`
+retains exactly one Issue #95 physical/output/golden/semantic/I/O observation
+source for each protocol offer. Receipt fields are copied as observations only;
+parsing never mints a `B1OutputCommitReceipt` or live storage capability. Every
+one of the thirty retained progress durations must equal exactly one second.
+An independent corpus reader exact-joins source identity and order, replays the
+I1 latency/service/four-verdict and B1 verified-endpoint/waste projections, and
+uses the runner's same checked rule to source-derive and exact-match all thirty
+progress windows, all thirty Graph A/B service/demand windows, all 480 measured
+headroom outcomes, and their attempted/classified/failure aggregate. It then
+exact-checks the remaining mixed observations, reuses the production protocol/
+fairness/waste/memory/B1-I/O evaluators, recomputes all five axes plus overall,
+exact-matches the six retained verdicts, and requires byte-identical
+rematerialization. Source closure is a separate materialization gate even when
+the row is already `Invalid`. Unknown, duplicate, missing, reordered,
+truncated, noncanonical, tampered, source/projection-mismatched, or stale-
+verdict nested evidence therefore fails closed even after outer rehashing. The
+v2 record omits redundant complete I1/B1 diagnostic JSON; neither it nor the
+denominator-only pair packs mint portable output receipts, live storage
+authority, or machine conformance. `m1_shared_benchmark` remains a manual
+`EXCLUDE_FROM_ALL` target outside CTest/CI, and this document does not claim an
+exact timed three-replicate M1 corpus.
 
 ## Implementation and Validation Entry Points
 
@@ -818,6 +847,10 @@ row/bundle/reference composition.
 - `src/lib/benchmark/b1_environment.*`
 - `src/lib/benchmark/b1_output_store.*`
 - `src/lib/benchmark/b1_evidence.*`
+- `src/lib/benchmark/m1_profile.*`
+- `src/lib/benchmark/m1_evidence.*`
+- `src/lib/benchmark/m1_canonical.*`
+- `src/lib/benchmark/evidence_envelope.*`
 - `src/lib/compute/progressive_compute.*`
 - `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/resource_ledger.*`

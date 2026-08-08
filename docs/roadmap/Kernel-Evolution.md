@@ -1353,6 +1353,27 @@ one reparse-point-aware `CreateFileW` handle for same-object type/size/read
 validation. Those loaded objects are retained exactly once in the M1 corpus;
 digest-only input no longer yields a sealed denominator claim.
 
+The canonical-replay correction migrates only the nested M1 inner schema to
+`execution-profile-m1-inner-row-v2`; the workload and outer 15-field row/
+five-field bundle remain version one. The v2 manifest has exactly 20 ordered
+fields, including 48 complete post-freeze Issue #93 episode sources and one
+complete Issue #95 physical/output/golden/semantic/I/O observation source per
+B1 offer. Every retained progress duration must be exactly one second. Corpus
+validation exact-joins source identity/order, recomputes each I1 projection and
+the B1 verified-endpoint/waste projection, and uses one shared checked producer/
+reader rule to source-derive and exact-match the thirty progress windows, thirty
+Graph A/B service/demand windows, 480 measured headroom outcomes, and their
+attempted/classified/failure aggregate. It then reuses the production protocol,
+fairness, waste, memory, and B1-I/O evaluators to recompute all five axes plus
+overall, exact-match the six retained verdicts, and reproduce the same canonical
+bytes. Source closure remains mandatory when another defect already
+makes the row `Invalid`. Unknown/duplicate/missing/reordered/truncated/
+noncanonical nested input, source/projection mismatch, raw tampering, duration
+drift, denominator contradiction, or a stale verdict remains Invalid after
+outer rehashing. Redundant complete I1/B1 diagnostic JSON is not part of v2;
+authority-free receipt observations and pair packs remain non-capabilities, so
+no portable output, storage, or machine authority is created.
+
 The I1, I2, B1, and M1 runners are `EXCLUDE_FROM_ALL` and absent from CTest;
 none changes the installed ABI or the frozen outer field counts. This
 current-state document claims neither an exact 111-slot I2 machine run, an

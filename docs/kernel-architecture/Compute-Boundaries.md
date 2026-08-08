@@ -726,6 +726,25 @@ explicitly claim no portable output or conformance authority beyond the I1 p99
 or B1 rate denominator. Process-private actual storage authority is
 intentionally excluded.
 
+The nested v2 manifest has exactly 20 ordered fields. Its
+`interactive_sources` field retains exactly 48 complete post-freeze
+`I1EpisodeEvidenceInput` values and binds each one by phase, phase-local
+ordinal, and origin. Its `batch_sources` field retains exactly one source per
+protocol offer: immutable offer identity/cuts, the complete physical Run
+trace, output status, an authority-free copy of receipt observations when
+present, golden values, semantic trace bytes plus digest, and complete Compute
+I/O observations. Replay derives each I1 latency/service/four-verdict projection
+and each B1 verified-endpoint/waste projection. One shared checked runner/reader
+rule then source-derives and exact-matches all thirty progress windows, all
+thirty Graph A/B service/demand windows, all 480 measured headroom outcomes,
+and their attempted/classified/failure aggregate. Cardinality, identity,
+endpoint, ordering, or checked-arithmetic failure keeps source closure false.
+Source closure is mandatory independently of the six final verdicts, so a
+source mismatch cannot be materialized merely because another protocol fact
+already made the row `Invalid`. Copied receipt fields
+never reconstruct the store-private receipt capability or current storage
+authority.
+
 Before deriving its timed boundary, the M1 runner requires both pack paths plus
 their exact row/bundle addresses. POSIX validates and reads through one
 `O_NOFOLLOW` descriptor; Windows uses one `CreateFileW` handle opened with

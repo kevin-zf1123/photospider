@@ -1855,11 +1855,24 @@ cursor、capture ordinal、page、Graph/candidate/bundle/Run/generation 因果�
 registry-derived counter。六个独立采样的 physical counter 只检查 capacity 与 ownership
 可达性，不从 event 推导 delta；physical retirement 在 lifecycle fence 内取得 registry cut。
 全部 Graph 关闭后，source-private M1 finalizer 会捕获终态 `ServiceStopped`，其中全部 15 个
-counter 为零。其 I1/B1 portable pack 明确为 denominator-only，
-并要求精确 sample/occurrence shape。Reader 使用一个 no-follow POSIX descriptor 或
-reparse-point-aware Windows handle 完成同一 object validation 与 read。这些 mechanism 与
-deterministic test 不宣称 timed three-replicate corpus、完整 live storage authority、Windows
-runtime execution 或 machine conformance。
+counter 为零。其 I1/B1 portable pack 明确为 denominator-only，并要求精确
+sample/occurrence shape。Reader 使用一个 no-follow POSIX descriptor 或
+reparse-point-aware Windows handle 完成同一 object validation 与 read。M1 nested schema
+现为 `execution-profile-m1-inner-row-v2`：它封闭且可逆，具有精确 20 个有序 field，并要求
+三十个 progress duration 各自精确等于一秒。它会保留精确 48 个完整的 post-freeze
+Issue #93 episode input，以及每个 B1 offer 对应的精确一个完整 Issue #95 physical/output/
+golden/semantic/I/O observation source；receipt value 会被复制，但不携带其 store-private
+capability。Corpus replay 会精确 join source identity，重新计算 I1 occurrence projection 与
+B1 verified-endpoint/waste projection，随后从 source 推导并精确匹配全部三十个 progress
+window、全部三十个 Graph A/B service/demand window、全部 480 个 measured headroom
+outcome 及其 attempted/classified/failure aggregate，再计算五个轴 verdict 与 overall。Runner
+与 reader 使用同一套 checked projection 实现，并要求 canonical 重新物化产生逐 byte 相同结果。
+即使另一项缺陷已经使 row 为
+`Invalid`，source closure 仍是强制项。重复的完整 I1/B1 diagnostic JSON 会被省略。Outer
+row/bundle schema 保持 version one，pair pack 继续仅具有 denominator 权威，retained byte
+不铸造 output、storage 或 machine authority。
+这些 mechanism 与 deterministic test 不宣称 timed three-replicate corpus、完整 live
+storage authority、Windows runtime execution 或 machine conformance。
 
 每个 Issue 可以为其机制新增长期确定性行为测试，但不能重定义 workload，也不能
 用缺失、invalid 或不同版本的行提升目标。与机器相关的 latency、throughput 与
