@@ -369,10 +369,10 @@ struct M1ClassStartSample final {
   compute::ComputeRunQosClass service_class =
       compute::ComputeRunQosClass::Throughput;
 
-  /** @brief Real Interactive candidate startability at the scheduler cut. */
+  /** @brief Interactive evidence-startability at the product commit cut. */
   bool interactive_candidate_startable = false;
 
-  /** @brief Real Throughput candidate startability at the scheduler cut. */
+  /** @brief Throughput evidence-startability at the product commit cut. */
   bool throughput_candidate_startable = false;
 
   /** @brief True only after the selected execution child grant committed. */
@@ -587,10 +587,10 @@ struct M1FairnessObservation final {
   compute::ComputeRunTerminalKind run_terminal_kind =
       compute::ComputeRunTerminalKind::Succeeded;
 
-  /** @brief Real Interactive candidate startability for ServiceStart only. */
+  /** @brief Interactive evidence-startability for ServiceStart only. */
   bool interactive_candidate_startable = false;
 
-  /** @brief Real Throughput candidate startability for ServiceStart only. */
+  /** @brief Throughput evidence-startability for ServiceStart only. */
   bool throughput_candidate_startable = false;
 
   /** @brief Selected execution-grant commitment for ServiceStart only. */

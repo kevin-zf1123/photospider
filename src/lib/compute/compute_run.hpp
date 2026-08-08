@@ -405,14 +405,15 @@ enum class ComputeRunTaskTerminalKind : std::uint8_t {
 using ComputeRunServiceStartCommitCallback = bool (*)(void* context) noexcept;
 
 /**
- * @brief Immutable scheduler facts bound to one committed service start.
+ * @brief Immutable evidence facts bound to one committed service start.
  *
- * The two class facts are sampled by `ExecutionService` from its real
- * ready-store candidate, Run lifecycle, operation-gate, and physical-route
- * predicates immediately before the selected start stages its execution grant
- * and enters irreversible Run arbitration. They therefore describe the exact
- * scheduler applicability cut that owns the three-to-one class rule; nominal
- * request or offer intervals cannot mint either value.
+ * The two class facts are sampled by `ExecutionService` from real ready-store
+ * candidates, Run lifecycle, operation-gate, physical-route, and available
+ * execution child-grant capacity immediately before the selected start stages
+ * its own grant and enters irreversible Run arbitration. They describe the
+ * evidence-startable applicability cut, not the scheduler-selectable class
+ * competition that owns the three-to-one rule. Nominal request or offer
+ * intervals cannot mint either value.
  *
  * @throws Nothing for value construction and comparison.
  * @note `execution_grant_committed` is true only after the selected child
@@ -421,10 +422,10 @@ using ComputeRunServiceStartCommitCallback = bool (*)(void* context) noexcept;
  * Run, or cancellation authority.
  */
 struct ComputeRunServiceStartObservation final {
-  /** @brief Whether a real Interactive candidate was startable at the cut. */
+  /** @brief Whether a real Interactive candidate was evidence-startable. */
   bool interactive_candidate_startable = false;
 
-  /** @brief Whether a real Throughput candidate was startable at the cut. */
+  /** @brief Whether a real Throughput candidate was evidence-startable. */
   bool throughput_candidate_startable = false;
 
   /** @brief Whether the selected start committed its execution child grant. */
@@ -525,7 +526,7 @@ class ComputeRunObservationSink {
    * @param descriptor Immutable identity and policy inputs of the owning Run.
    * @param task_identity Exact Run-local callback identity.
    * @param service_charge Exact `work_units + ceil(ready_bytes/4096)` charge.
-   * @param observation Real scheduler applicability and committed-grant facts.
+   * @param observation Real evidence applicability and committed-grant facts.
    * @param coordinate Coordinate reserved at reserved-start commitment.
    * @return Nothing.
    * @throws Nothing; implementations must contain every failure.

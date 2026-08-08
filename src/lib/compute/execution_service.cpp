@@ -661,7 +661,7 @@ struct ExecutionService::QueueEntry final {
   bool operation_gate_started = false;
 
   /**
-   * @brief Real scheduler/grant facts committed with the physical start.
+   * @brief Real evidence-startability/grant facts bound to the physical start.
    * @note The worker publishes this immutable observation only after releasing
    * the pool, Run-state, and terminal-arbiter mutexes.
    */
@@ -1516,7 +1516,8 @@ class ExecutionService::BoundedReadyStore final {
    * commit revalidates exact identity and store ownership under the lock.
    */
   struct SelectionPin final {
-    /** @brief Exact selected object, or null when no candidate is startable. */
+    /** @brief Exact selected object, or null when no candidate is selectable.
+     */
     std::shared_ptr<QueueEntry> entry;
 
     /** @brief Selected class after current Host arbitration. */
@@ -1826,10 +1827,12 @@ class ExecutionService::BoundedReadyStore final {
    * coordinate and performs the irreversible route commit under one critical
    * section shared with cancellation acceptance. A rejected route leaves an
    * unpublished sequence gap, and every staged owner rolls back.
-   * Immediately before staging, both class-applicability facts are recomputed
-   * from real ready entries, Run lifecycle, operation/route eligibility, and
-   * available child-grant capacity. They are published only if this exact
-   * selected start subsequently commits every owner and counter.
+   * Immediately before staging, scheduler-selectable Throughput competition
+   * is recomputed from real ready entries, Run lifecycle, operation-gate, and
+   * physical-route eligibility without treating transient child-grant
+   * exhaustion as a policy filter. The separate evidence-startable class
+   * facts add available child-grant capacity and are published only if this
+   * exact selected start subsequently commits every owner and counter.
    * @note Caller holds `PoolState::mutex`; this method locks each probed
    * `RunState` separately and later holds the selected Run while staging its
    * child grant. `try_grant` acquires and releases the reservation mutex before
@@ -1842,10 +1845,12 @@ class ExecutionService::BoundedReadyStore final {
     if (!pin.entry || !pin.entry->run) {
       return StartResult::Obsolete;
     }
-    const bool interactive_startable =
-        has_startable(ComputeRunQosClass::Interactive, worker_id, lane, routes);
-    const bool throughput_startable =
-        has_startable(ComputeRunQosClass::Throughput, worker_id, lane, routes);
+    const bool throughput_selectable = has_scheduler_selectable(
+        ComputeRunQosClass::Throughput, worker_id, lane, routes);
+    const bool interactive_evidence_startable = has_evidence_startable(
+        ComputeRunQosClass::Interactive, worker_id, lane, routes);
+    const bool throughput_evidence_startable = has_evidence_startable(
+        ComputeRunQosClass::Throughput, worker_id, lane, routes);
     const auto run_found = run_states_.find(pin.entry->run->id.value());
     if (run_found == run_states_.end()) {
       return StartResult::Obsolete;
@@ -1864,7 +1869,7 @@ class ExecutionService::BoundedReadyStore final {
             std::numeric_limits<std::uint64_t>::max() ||
         run.committed_starts == std::numeric_limits<std::uint64_t>::max() ||
         (pin.service_class == ComputeRunQosClass::Interactive &&
-         throughput_startable &&
+         throughput_selectable &&
          consecutive_interactive_ ==
              std::numeric_limits<std::uint64_t>::max())) {
       return class_dispatch_count(pin.service_class) ==
@@ -1951,9 +1956,9 @@ class ExecutionService::BoundedReadyStore final {
     ++run.committed_starts;
     ++run.in_flight;
     pin.entry->service_start_observation = ComputeRunServiceStartObservation{
-        interactive_startable, throughput_startable, true};
+        interactive_evidence_startable, throughput_evidence_startable, true};
     if (pin.service_class == ComputeRunQosClass::Interactive &&
-        throughput_startable) {
+        throughput_selectable) {
       ++consecutive_interactive_;
     } else {
       consecutive_interactive_ = 0U;
@@ -1962,14 +1967,15 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
-   * @brief Tests whether one worker has any currently startable route.
+   * @brief Tests whether one worker has scheduler-selectable work.
    * @param worker_id Worker attempting selection.
    * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
-   * @return True when class arbitration can choose at least one entry.
+   * @return True when class arbitration can choose at least one entry without
+   * considering transient execution child-grant capacity.
    * @throws Nothing.
    */
-  bool has_startable_work(
+  bool has_scheduler_selectable_work(
       int worker_id, execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
     return choose_class(worker_id, lane, routes).has_value();
@@ -2590,7 +2596,7 @@ class ExecutionService::BoundedReadyStore final {
    * @param run Run whose mutex is held by the caller.
    * @return True only when live reservation capacity covers every dimension.
    * @throws Nothing; a reservation-state locking failure terminates because
-   * this helper is a no-throw scheduler probe.
+   * this helper is a no-throw evidence probe.
    * @note This copies authority-free capacity and never mints or consumes a
    * grant. A later `try_grant()` remains the sole commit linearization point.
    */
@@ -2601,15 +2607,50 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
-   * @brief Tests whether one class currently contains startable ready work.
+   * @brief Tests whether one class contains scheduler-selectable ready work.
    * @param service_class Class already independent from intent and route.
    * @param worker_id Worker attempting a start.
    * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
-   * @return True when at least one live Run exposes one lane head.
+   * @return True when at least one live Run exposes one route-, operation-,
+   * and lifecycle-eligible lane head for policy selection.
    * @throws Nothing.
+   * @note Execution child-grant capacity is deliberately excluded. A selected
+   * but grant-exhausted entry reaches `commit_start()`, receives a
+   * worker-local grant-block mark, and leaves the same selection cycle free to
+   * search other candidates without advancing dispatch or fairness state.
    */
-  bool has_startable(
+  bool has_scheduler_selectable(
+      ComputeRunQosClass service_class, int worker_id,
+      execution::PhysicalExecutionLane lane,
+      const execution::PhysicalExecutionRoutes& routes) noexcept {
+    for (auto& row : run_states_) {
+      PolicyRunState& state = row.second;
+      if (state.run->policy_qos.service_class != service_class) {
+        continue;
+      }
+      std::lock_guard<std::mutex> run_lock(state.run->mutex);
+      if (candidate_entry_for_lane(state, worker_id, lane, routes) != nullptr) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @brief Tests whether one class has evidence-startable ready work.
+   * @param service_class Class already independent from intent and route.
+   * @param worker_id Worker whose lane-local candidate visibility is sampled.
+   * @param lane Fixed physical lane owned by the worker.
+   * @param routes Host-owned route state used only for eligibility checks.
+   * @return True when one scheduler-selectable lane head can also mint its
+   * exact execution child grant from live reservation capacity.
+   * @throws Nothing.
+   * @note This observation-only probe never filters the policy frontier and
+   * never mints authority. `try_grant()` remains the sole commit linearization
+   * point, and a failed commit publishes no service-start observation.
+   */
+  bool has_evidence_startable(
       ComputeRunQosClass service_class, int worker_id,
       execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
@@ -2632,21 +2673,23 @@ class ExecutionService::BoundedReadyStore final {
    * @param worker_id Worker attempting a start.
    * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
-   * @return Selected class, or null when this worker has no startable route.
+   * @return Selected class, or null when this worker has no selectable route.
    * @throws Nothing.
+   * @note Class competition is intentionally independent of transient child-
+   * grant capacity. Grant exhaustion is handled only after policy selection.
    */
   std::optional<ComputeRunQosClass> choose_class(
       int worker_id, execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
-    const bool interactive_ready =
-        has_startable(ComputeRunQosClass::Interactive, worker_id, lane, routes);
-    const bool throughput_ready =
-        has_startable(ComputeRunQosClass::Throughput, worker_id, lane, routes);
-    if (!interactive_ready && !throughput_ready) {
+    const bool interactive_selectable = has_scheduler_selectable(
+        ComputeRunQosClass::Interactive, worker_id, lane, routes);
+    const bool throughput_selectable = has_scheduler_selectable(
+        ComputeRunQosClass::Throughput, worker_id, lane, routes);
+    if (!interactive_selectable && !throughput_selectable) {
       return std::nullopt;
     }
-    if (interactive_ready &&
-        (!throughput_ready ||
+    if (interactive_selectable &&
+        (!throughput_selectable ||
          consecutive_interactive_ < kInteractiveBurstLimit)) {
       return ComputeRunQosClass::Interactive;
     }
@@ -5772,7 +5815,7 @@ void ExecutionService::worker_loop(
       std::shared_ptr<policy::PolicyBinding> binding;
       {
         std::unique_lock<std::mutex> lock(pool_->mutex);
-        if (grant_blocked && !pool_->ready_store.has_startable_work(
+        if (grant_blocked && !pool_->ready_store.has_scheduler_selectable_work(
                                  worker_id, lane, pool_->physical_routes)) {
           const std::uint64_t observed_epoch = grant_blocked_epoch;
           if (!pool_->stopping &&
@@ -5795,8 +5838,8 @@ void ExecutionService::worker_loop(
         }
         pool_->ready_cv.wait(lock, [this, worker_id, lane]() {
           return pool_->stopping ||
-                 pool_->ready_store.has_startable_work(worker_id, lane,
-                                                       pool_->physical_routes);
+                 pool_->ready_store.has_scheduler_selectable_work(
+                     worker_id, lane, pool_->physical_routes);
         });
         if (pool_->stopping) {
           return;
