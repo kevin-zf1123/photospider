@@ -156,14 +156,19 @@ struct M1BatchSourceEvidence final {
  * sources.
  *
  * Progress and Graph service windows come from exact protocol boundaries,
- * offers, and replayed B1 endpoints/service charges. Headroom outcomes and
- * their aggregates come from the forty measured Issue #93 episode sources.
- * Class-start observations, pair denominators, and observer health flags stay
- * outside this projection because they have independent retained authorities.
+ * offers, and replayed B1 endpoints/service charges. Headroom outcomes,
+ * first-measured admission, and the final-warmup current-hold facts come from
+ * the forty measured and final warmup Issue #93 episode sources. Class-start
+ * observations, pair denominators, and observer health flags stay outside
+ * this projection because they have independent retained authorities.
  *
  * @throws std::bad_alloc when projected vector or status ownership allocates.
  */
 struct M1SourceFairnessProjection final {
+  /** @brief Source-derived first measured admission/current replacement. */
+  M1FirstMeasuredAdmissionEvidence first_measured_admission;
+  /** @brief Whether final warmup's immutable Q_end remained beyond B. */
+  bool final_warmup_settlement_pending_at_measurement = false;
   /** @brief Exact thirty source-derived one-second progress windows. */
   std::vector<M1ThroughputProgressSample> progress_windows;
   /** @brief Exact thirty source-derived Graph demand/service windows. */
@@ -207,16 +212,16 @@ M1BatchSourceEvidence make_m1_batch_source_evidence(
  * the 48 protocol occurrences.
  * @param batch_sources Exact ordered authority-free B1 source for every
  * protocol offer.
- * @return Exact thirty progress windows, thirty Graph windows, 480 headroom
- * outcomes, and checked headroom aggregates.
+ * @return Exact first admission/current hold, thirty progress windows, thirty
+ * Graph windows, 480 headroom outcomes, and checked headroom aggregates.
  * @throws std::invalid_argument when cardinality, identity/order, endpoint,
  * source replay, edit identity, or retained endpoint projection is malformed.
  * @throws std::overflow_error when an exact operation, service, or aggregate
  * count is unrepresentable.
  * @throws std::bad_alloc when replay indexes, canonical traces, or projection
  * storage allocate.
- * @note This is the sole producer/reader rule for source-derived fairness.
- * It does not derive class-start observations or paired denominators.
+ * @note This is the sole producer/reader rule for source-derived admission and
+ * fairness. It does not derive class-start observations or paired denominators.
  */
 M1SourceFairnessProjection derive_m1_source_fairness_projection(
     const M1ProtocolEvidenceInput& protocol,

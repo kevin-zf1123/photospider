@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "benchmark/m1_profile.hpp"  // NOLINT(build/include_subdir)
 #include "compute/compute_run.hpp"
 #include "compute/compute_task_submission.hpp"
 #include "compute/dirty_execution_common.hpp"
@@ -393,7 +394,7 @@ class ServiceStartArbitrationGate final {
  public:
   /**
    * @brief Selects the one checkpoint that must block.
-   * @param point Before Run arbitration or immediately before route commit.
+   * @param point Before Run arbitration, route commit, or start callback.
    * @throws Nothing.
    */
   explicit ServiceStartArbitrationGate(
@@ -9727,6 +9728,134 @@ TEST(ExecutionServiceCancellation,
   ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_NO_THROW(run_future.get());
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves one service-start reservation remains visible until callback.
+ * @param point Post-reservation checkpoint before route commit or callback.
+ * @return Nothing after the worker resumes and every reservation is closed.
+ * @throws Allocation, service, future, and synchronization failures unchanged.
+ * @note The test-product checkpoint blocks only the service worker. The M1
+ * collector snapshot remains lock-free and must reject the in-flight B-cut.
+ */
+void expect_m1_cut_rejects_in_flight_service_start(
+    testing::ServiceStartArbitrationPoint point) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  benchmark::M1FairnessObservationCollector collector(32U);
+  ComputeRunSubmission submission =
+      make_test_submission("m1-reservation-frontier", 614U, 714);
+  submission.observation_sink =
+      collector.make_sink(benchmark::M1ObservedRequestTag::ThroughputGraphA);
+  ComputeRun run(std::move(submission));
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(
+      make_counted_ready_submission(run.acquire_lease(), 0U, 714, entered));
+
+  const benchmark::M1FairnessObservationSnapshot before = collector.snapshot();
+  ASSERT_TRUE(before.stable_publication_cut);
+  ServiceStartArbitrationGate gate(point);
+  ScopedServiceStartArbitrationObserver observer(service, gate);
+  std::future<void> run_future =
+      std::async(std::launch::async,
+                 [&service, &host, ready = std::move(ready)]() mutable {
+                   service.execute_run(host, "cpu", std::move(ready), 1);
+                 });
+  const bool checkpoint_entered = wait_for_atomic_count(gate.entered(), 1);
+  if (!checkpoint_entered) {
+    gate.release();
+    run_future.wait();
+    FAIL() << "service start did not reach the reservation checkpoint";
+    return;
+  }
+
+  const benchmark::M1FairnessObservationSnapshot in_flight =
+      collector.snapshot();
+  EXPECT_FALSE(in_flight.stable_publication_cut);
+  EXPECT_GT(in_flight.reservation_entry_frontier,
+            in_flight.reservation_completion_frontier);
+  EXPECT_FALSE(benchmark::m1_observation_cut_unchanged(before, in_flight));
+
+  gate.release();
+  ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run_future.get());
+  const benchmark::M1FairnessObservationSnapshot after = collector.snapshot();
+  EXPECT_TRUE(after.stable_publication_cut);
+  EXPECT_EQ(after.reservation_entry_frontier,
+            after.reservation_completion_frontier);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Rejects a B-cut after coordinate reserve and before route commit.
+ * @throws Test helper failures unchanged.
+ */
+TEST(ExecutionServiceObservation,
+     M1CutRejectsReservedButUncommittedServiceStart) {
+  expect_m1_cut_rejects_in_flight_service_start(
+      testing::ServiceStartArbitrationPoint::BeforeRouteCommit);
+}
+
+/**
+ * @brief Rejects a B-cut after route commit and before callback delivery.
+ * @throws Test helper failures unchanged.
+ */
+TEST(ExecutionServiceObservation,
+     M1CutRejectsCommittedButUnpublishedServiceStart) {
+  expect_m1_cut_rejects_in_flight_service_start(
+      testing::ServiceStartArbitrationPoint::BeforeServiceStartCallback);
+}
+
+/**
+ * @brief Proves a rejected post-reservation route commit retires its frontier.
+ *
+ * The internal test product rejects exactly one physical route commit after
+ * `ComputeRunControl` reserves the service-start coordinate.  The ordinary
+ * worker retry then succeeds.  The final M1 snapshot must be stable, contain
+ * only the real service start, and have no abandoned reservation frontier.
+ *
+ * @throws Allocation, service, and test-probe failures unchanged.
+ */
+TEST(ExecutionServiceObservation,
+     FailedRouteCommitAbortsM1CoordinateWithoutFrontierLeak) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  benchmark::M1FairnessObservationCollector collector(32U);
+  ComputeRunSubmission submission =
+      make_test_submission("m1-route-commit-abort", 615U, 715);
+  submission.observation_sink =
+      collector.make_sink(benchmark::M1ObservedRequestTag::ThroughputGraphA);
+  ComputeRun run(std::move(submission));
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(
+      make_counted_ready_submission(run.acquire_lease(), 0U, 715, entered));
+
+  ::ps::testing::ExecutionServiceTestAccess::arm_route_commit_failure_probe(
+      service);
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(ready), 1));
+  const bool failure_triggered = ::ps::testing::ExecutionServiceTestAccess::
+      route_commit_failure_probe_triggered(service);
+  ::ps::testing::ExecutionServiceTestAccess::disarm_route_commit_failure_probe(
+      service);
+
+  EXPECT_TRUE(failure_triggered);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  const benchmark::M1FairnessObservationSnapshot snapshot =
+      collector.snapshot();
+  EXPECT_TRUE(snapshot.stable_publication_cut);
+  EXPECT_EQ(snapshot.reservation_entry_frontier,
+            snapshot.reservation_completion_frontier);
+  EXPECT_EQ(std::count_if(snapshot.events.begin(), snapshot.events.end(),
+                          [](const benchmark::M1FairnessObservation& event) {
+                            return event.kind ==
+                                   benchmark::M1ObservationKind::ServiceStart;
+                          }),
+            1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 

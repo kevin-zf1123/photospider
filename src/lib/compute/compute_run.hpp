@@ -473,6 +473,23 @@ class ComputeRunObservationSink {
   reserve_causal_coordinate() noexcept = 0;
 
   /**
+   * @brief Retires one reservation whose represented callback will not run.
+   * @param coordinate Exact coordinate returned by the preceding reservation.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Callers invoke this exactly once only when the product transition did
+   * not commit, or when a source-private causal marker deliberately has no
+   * callback. The default no-op preserves observers that do not track
+   * reservation lifecycle; collectors using reservation frontiers override it.
+   * The operation remains bounded, nonblocking, allocation-free, and owns no
+   * product authority.
+   */
+  virtual void abort_causal_coordinate(
+      ComputeRunObservationCoordinate coordinate) noexcept {
+    (void)coordinate;
+  }
+
+  /**
    * @brief Observes publication of one accepted current request generation.
    * @param identity Product-assigned key and generation becoming current.
    * @param coordinate Coordinate reserved immediately before currentness
@@ -1862,9 +1879,9 @@ class ComputeRunLease {
    * releasing the resource-reservation mutex. This method then takes the Run
    * terminal-arbiter mutex, reserves the observation coordinate, and invokes
    * the irreversible callback. Cancellation accepted first prevents the
-   * callback; a callback that returns false leaves only an unpublished
-   * coordinate gap. No service-start observation callback runs under this
-   * lock.
+   * callback; a callback that returns false explicitly retires the reserved
+   * coordinate through the observation sink. No service-start observation
+   * callback runs under this lock.
    */
   bool try_commit_service_start(
       ComputeRunServiceStartCommitCallback commit_callback, void* context,

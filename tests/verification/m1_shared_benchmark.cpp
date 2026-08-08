@@ -7,7 +7,6 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -605,19 +604,8 @@ struct LiveI1Occurrence final {
   std::shared_ptr<I1EpisodeObservationCollector> collector;
   /** @brief Serializes harness-only snapshot/freeze/release operations. */
   std::mutex collector_access;
-  /** @brief Protects accepted edit-zero evidence and readiness. */
-  std::mutex mutex;
-  /** @brief Signals that edit zero reached its immutable admission boundary. */
-  std::condition_variable admission_ready;
-  /** @brief True after edit-zero evidence is immutable. */
-  bool first_admission_ready = false;
-  /** @brief Copyable edit-zero admission facts before settlement consumption.
-   */
-  M1FirstMeasuredAdmissionEvidence first_admission;
   /** @brief True when the B snapshot found the final publication current. */
   bool publication_current_at_measurement = false;
-  /** @brief True while the occurrence-owned Q_end cut remains pending at B. */
-  bool settlement_pending_at_measurement = false;
 };
 
 /**
@@ -633,8 +621,6 @@ struct CompletedI1Occurrence final {
   M1EventCoordinate origin;
   /** @brief Complete Issue #93 episode evaluator result. */
   I1EpisodeInnerRow row;
-  /** @brief Boundary-visible state shared only with the coordinator. */
-  std::shared_ptr<LiveI1Occurrence> live;
 };
 
 /**
@@ -741,23 +727,6 @@ CompletedI1Occurrence run_i1_occurrence(
     results[edit] = admissions.admit_edit(
         origin.timestamp, edit, make_i1_host_compute_request(session, edit),
         make_compute_run_observation_fanout(mixed_sink, workload_sink));
-    if (edit == 0U) {
-      std::lock_guard<std::mutex> lock(live->mutex);
-      live->first_admission.edit_index = 0U;
-      live->first_admission.nominal_time = origin.timestamp;
-      live->first_admission.attempted = results[edit].admission_attempted;
-      live->first_admission.admission_sample = results[edit].admission_sample;
-      live->first_admission.reserved_event_sequence =
-          results[edit].reserved_event_sequence;
-      live->first_admission.host_succeeded =
-          results[edit].host_return.has_value() &&
-          results[edit].host_return->status.ok &&
-          results[edit].host_return->future_valid;
-      live->first_admission.accepted_coordinate =
-          results[edit].accepted_coordinate;
-      live->first_admission_ready = true;
-      live->admission_ready.notify_all();
-    }
     if (!results[edit].admission_attempted ||
         !results[edit].host_return.has_value() ||
         !results[edit].host_return->status.ok ||
@@ -775,6 +744,7 @@ CompletedI1Occurrence run_i1_occurrence(
       m1_collector.make_sink(M1ObservedRequestTag::Interactive);
   const compute::ComputeRunObservationCoordinate cut_coordinate =
       control_sink->reserve_causal_coordinate();
+  control_sink->abort_causal_coordinate(cut_coordinate);
   I1EpisodeEvidenceInput input;
   input.replicate_ordinal = replicate_ordinal;
   input.slot = slot;
@@ -812,8 +782,7 @@ CompletedI1Occurrence run_i1_occurrence(
       input.baseline.lifecycle.snapshot_cut, 4096U);
   input.final_snapshot_sample = std::chrono::steady_clock::now();
   return CompletedI1Occurrence{phase, phase_ordinal, origin,
-                               evaluate_i1_episode(std::move(input)),
-                               std::move(live)};
+                               evaluate_i1_episode(std::move(input))};
 }
 
 /** @brief Runner-visible lifecycle of one B1 occurrence. */
@@ -1176,10 +1145,6 @@ M1InteractiveOccurrenceEvidence make_m1_i1_evidence(
   evidence.memory_verdict = completed.row.memory_verdict;
   evidence.output_verdict = completed.row.output_verdict;
   evidence.phase_identity_immutable = true;
-  evidence.publication_current_at_measurement =
-      completed.live->publication_current_at_measurement;
-  evidence.settlement_pending_at_measurement =
-      completed.live->settlement_pending_at_measurement;
   return evidence;
 }
 
@@ -1942,7 +1907,6 @@ M1RunResult run_exact_m1_replicate(
       mixed_collector.snapshot();
   final_warmup_live->publication_current_at_measurement =
       final_warmup_publication_is_current(final_warmup_live);
-  final_warmup_live->settlement_pending_at_measurement = true;
   input.protocol.warmup_sources_closed = true;
   capture_boundary_carryover(&batch_state, final_warmup_live, &input.protocol);
   input.protocol.measured_counters_reset = true;
@@ -2063,24 +2027,6 @@ M1RunResult run_exact_m1_replicate(
         return lhs.offered < rhs.offered;
       });
 
-  {
-    std::lock_guard<std::mutex> lock(measured_zero_live->mutex);
-    input.protocol.first_measured_admission =
-        measured_zero_live->first_admission;
-  }
-  input.protocol.first_measured_admission
-      .warmup_publication_current_before_acceptance =
-      final_warmup_live->publication_current_at_measurement;
-  input.protocol.first_measured_admission.superseded_exactly_at_acceptance =
-      input.protocol.first_measured_admission.accepted_coordinate.has_value() &&
-      completed_i1[kM1ColdI1OriginCount + kM1WarmupI1OriginCount]
-          .row.accepted_products[0U]
-          .has_value();
-  input.protocol.first_measured_admission.boundary_only_cancellation = false;
-  input.protocol.first_measured_admission.old_generation_settlement_endpoint =
-      checked_i1_time_add(timeline.measurement_start,
-                          kI1MeasurementStartOffset);
-
   const M1FairnessObservationSnapshot observations = mixed_collector.snapshot();
   std::vector<std::shared_ptr<BatchOccurrence>> occurrences;
   {
@@ -2113,6 +2059,17 @@ M1RunResult run_exact_m1_replicate(
   M1SourceFairnessProjection source_fairness =
       derive_m1_source_fairness_projection(
           input.protocol, input.interactive_sources, input.batch_sources);
+  input.protocol.first_measured_admission =
+      source_fairness.first_measured_admission;
+  const std::size_t final_warmup_source_index =
+      kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+  input.protocol.interactive_occurrences[final_warmup_source_index]
+      .publication_current_at_measurement =
+      source_fairness.first_measured_admission
+          .warmup_publication_current_before_acceptance;
+  input.protocol.interactive_occurrences[final_warmup_source_index]
+      .settlement_pending_at_measurement =
+      source_fairness.final_warmup_settlement_pending_at_measurement;
   input.fairness.progress_windows = std::move(source_fairness.progress_windows);
   input.fairness.graph_service_windows =
       std::move(source_fairness.graph_service_windows);

@@ -63,6 +63,29 @@ reserved_start_rollback_probe_snapshot_for_testing() noexcept;
 void disarm_reserved_start_rollback_probe_for_testing() noexcept;
 
 /**
+ * @brief Arms one test-product physical-route commit rejection.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The next route commit returns false after its observation coordinate
+ * is reserved. The following retry uses the ordinary production path.
+ */
+void arm_route_commit_failure_probe_for_testing() noexcept;
+
+/**
+ * @brief Reports whether the armed route-commit rejection was consumed.
+ * @return True after one post-reservation route commit returned false.
+ * @throws Nothing.
+ */
+bool route_commit_failure_probe_triggered_for_testing() noexcept;
+
+/**
+ * @brief Disarms the test-product physical-route commit rejection.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void disarm_route_commit_failure_probe_for_testing() noexcept;
+
+/**
  * @brief Test-product checkpoints around Run-owned start arbitration.
  * @throws Nothing for value construction and comparison.
  * @note The production execution-service translation unit contains neither
@@ -73,6 +96,8 @@ enum class ServiceStartArbitrationPoint : std::uint8_t {
   BeforeRunArbitration,
   /** @brief Run arbiter held immediately before irreversible route commit. */
   BeforeRouteCommit,
+  /** @brief Route committed and service callback not yet delivered. */
+  BeforeServiceStartCallback,
 };
 
 /**
@@ -82,8 +107,9 @@ enum class ServiceStartArbitrationPoint : std::uint8_t {
  * @return Nothing.
  * @throws Nothing; callbacks must contain every failure.
  * @note The callback runs while service pool and Run-state locks are held; the
- * second point also holds the Run terminal-arbiter mutex. It may synchronize
- * with a bounded test fixture but must not re-enter product service code.
+ * second point also holds the Run terminal-arbiter mutex; the third holds none
+ * of those service/Run mutexes. It may synchronize with a bounded test fixture
+ * but must not re-enter product service code.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
 using ServiceStartArbitrationObserver =

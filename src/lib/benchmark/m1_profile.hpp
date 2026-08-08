@@ -614,11 +614,11 @@ struct M1FairnessObservationSnapshot final {
   /** @brief True when at least one tag disagreed with actual descriptor QoS. */
   bool qos_mismatch = false;
 
-  /** @brief Completed callback-entry count sampled at the snapshot cut. */
-  std::uint64_t callback_entry_frontier = 0U;
+  /** @brief Coordinate reservations entered before the snapshot cut. */
+  std::uint64_t reservation_entry_frontier = 0U;
 
-  /** @brief Completed callback-exit count sampled at the snapshot cut. */
-  std::uint64_t callback_completion_frontier = 0U;
+  /** @brief Reservations closed by callback or explicit abort at the cut. */
+  std::uint64_t reservation_completion_frontier = 0U;
 
   /** @brief Number of fixed slots claimed before the snapshot cut. */
   std::size_t claimed_slot_frontier = 0U;
@@ -626,24 +626,24 @@ struct M1FairnessObservationSnapshot final {
   /** @brief Contiguous prefix of claimed slots published before the cut. */
   std::size_t published_slot_frontier = 0U;
 
-  /** @brief True after either callback frontier can no longer advance. */
-  bool callback_frontier_exhausted = false;
+  /** @brief True after either reservation frontier can no longer advance. */
+  bool reservation_frontier_exhausted = false;
 
   /**
    * @brief True only for one quiescent, unchanged, contiguous publication cut.
-   * @note A callback entering, completing, claiming, or publishing while the
-   * snapshot is copied makes this false; callers must fail closed rather than
-   * compare only the retained vector length.
+   * @note A reservation entering, committing, aborting, entering its callback,
+   * claiming a slot, or publishing while the snapshot is copied makes this
+   * false. Callers must fail closed rather than compare only retained length.
    */
   bool stable_publication_cut = false;
 };
 
 /**
- * @brief Source-private deterministic hook after a callback claims its slot.
+ * @brief Source-private deterministic coordinate/publication test hook.
  *
- * Production collectors never install this hook. Tests may pause publication
- * after claim to prove that a snapshot cannot mistake an in-flight callback
- * for an unchanged boundary.
+ * Production collectors never install this hook. Tests may force coordinate
+ * sampling contention or pause publication after claim to prove that a
+ * snapshot cannot mistake in-flight observer work for an unchanged boundary.
  *
  * @throws Nothing for destruction or callback dispatch.
  * @note Implementations must not throw. A blocking implementation is allowed
@@ -657,6 +657,22 @@ class M1ObservationPublicationHook {
    * @throws Nothing.
    */
   virtual ~M1ObservationPublicationHook() noexcept = default;
+
+  /**
+   * @brief Runs while the coordinate gate is held after sampling time.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The default is a no-op so publication-only hooks remain minimal.
+   */
+  virtual void after_coordinate_sample() noexcept {}
+
+  /**
+   * @brief Runs after one bounded coordinate-gate contention attempt.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The default is a no-op so production-free test seams add no state.
+   */
+  virtual void after_coordinate_contention() noexcept {}
 
   /**
    * @brief Runs after a unique slot is claimed and before it is published.
@@ -743,11 +759,11 @@ class M1FairnessObservationCollector final {
 };
 
 /**
- * @brief Tests whether two snapshots prove one exact unchanged callback cut.
+ * @brief Tests whether two snapshots prove one unchanged reservation cut.
  * @param before Stable pre-boundary snapshot.
  * @param after Stable post-boundary snapshot.
- * @return True only when both cuts are stable and every entry, completion,
- * claim, publication, and retained-event frontier is exactly equal.
+ * @return True only when both cuts are stable and every reservation entry,
+ * completion, claim, publication, and retained-event frontier is equal.
  * @throws Nothing.
  */
 bool m1_observation_cut_unchanged(

@@ -1872,10 +1872,8 @@ std::vector<M1ClassStartSample> derive_class_starts(
     const bool service_start = event.kind == M1ObservationKind::ServiceStart;
     const bool task_terminal_event =
         event.kind == M1ObservationKind::TaskTerminal;
-    if ((service_start &&
-         (event.local_task_id == 0U || event.service_charge == 0U)) ||
-        (task_terminal_event &&
-         (event.local_task_id == 0U || event.service_charge != 0U)) ||
+    if ((service_start && event.service_charge == 0U) ||
+        (task_terminal_event && event.service_charge != 0U) ||
         (!service_start && !task_terminal_event &&
          (event.local_task_id != 0U || event.service_charge != 0U)) ||
         (!service_start && (event.interactive_candidate_startable ||
@@ -1918,15 +1916,15 @@ void validate_observation_projection(
     throw std::invalid_argument(
         "M1 observer flags disagree with the retained observation cut.");
   }
-  if (observations.callback_completion_frontier >
-          observations.callback_entry_frontier ||
+  if (observations.reservation_completion_frontier >
+          observations.reservation_entry_frontier ||
       observations.published_slot_frontier >
           observations.claimed_slot_frontier ||
       observations.published_slot_frontier != observations.events.size() ||
       (observations.stable_publication_cut &&
-       (observations.callback_frontier_exhausted ||
-        observations.callback_entry_frontier !=
-            observations.callback_completion_frontier ||
+       (observations.reservation_frontier_exhausted ||
+        observations.reservation_entry_frontier !=
+            observations.reservation_completion_frontier ||
         observations.claimed_slot_frontier !=
             observations.published_slot_frontier))) {
     throw std::invalid_argument(
@@ -2259,11 +2257,11 @@ std::string materialize_m1_inner_row(
       {encode_record_list(mixed_records), boolean_text(observations.overflowed),
        boolean_text(observations.sequence_exhausted),
        boolean_text(observations.qos_mismatch),
-       std::to_string(observations.callback_entry_frontier),
-       std::to_string(observations.callback_completion_frontier),
+       std::to_string(observations.reservation_entry_frontier),
+       std::to_string(observations.reservation_completion_frontier),
        std::to_string(observations.claimed_slot_frontier),
        std::to_string(observations.published_slot_frontier),
-       boolean_text(observations.callback_frontier_exhausted),
+       boolean_text(observations.reservation_frontier_exhausted),
        boolean_text(observations.stable_publication_cut)});
 
   const M1BatchWasteEvidence& waste = row.evidence.batch_waste;
@@ -2738,13 +2736,13 @@ M1CanonicalReplay parse_and_recompute_m1_inner_row(
   observations.overflowed = parse_boolean(observation_snapshot[1U]);
   observations.sequence_exhausted = parse_boolean(observation_snapshot[2U]);
   observations.qos_mismatch = parse_boolean(observation_snapshot[3U]);
-  observations.callback_entry_frontier =
+  observations.reservation_entry_frontier =
       parse_b1_canonical_uint64(observation_snapshot[4U]);
-  observations.callback_completion_frontier =
+  observations.reservation_completion_frontier =
       parse_b1_canonical_uint64(observation_snapshot[5U]);
   observations.claimed_slot_frontier = parse_size(observation_snapshot[6U]);
   observations.published_slot_frontier = parse_size(observation_snapshot[7U]);
-  observations.callback_frontier_exhausted =
+  observations.reservation_frontier_exhausted =
       parse_boolean(observation_snapshot[8U]);
   observations.stable_publication_cut = parse_boolean(observation_snapshot[9U]);
 

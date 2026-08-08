@@ -72,6 +72,76 @@ class PausingPublicationHook final : public M1ObservationPublicationHook {
 };
 
 /**
+ * @brief Forces one coordinate sampler to overlap a contending reservation.
+ * @throws Nothing for construction, destruction, or hook dispatch.
+ * @note The first sampler pauses while holding the test-only coordinate gate;
+ * the first contending reservation records the interleave and releases it.
+ */
+class PausingCoordinateSampleHook final : public M1ObservationPublicationHook {
+ public:
+  /** @copydoc M1ObservationPublicationHook::after_coordinate_sample */
+  void after_coordinate_sample() noexcept override {
+    if (sampled_.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
+    while (!released_.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    sample_finished_.store(true, std::memory_order_release);
+  }
+
+  /** @copydoc M1ObservationPublicationHook::after_coordinate_contention */
+  void after_coordinate_contention() noexcept override {
+    contention_.store(true, std::memory_order_release);
+    released_.store(true, std::memory_order_release);
+    while (!sample_finished_.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  }
+
+  /** @copydoc M1ObservationPublicationHook::after_slot_claim */
+  void after_slot_claim() noexcept override {}
+
+  /**
+   * @brief Tests whether the first reservation sampled while holding the gate.
+   * @return True after the deterministic pause was entered.
+   * @throws Nothing.
+   */
+  bool sampled() const noexcept {
+    return sampled_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Tests whether another reservation encountered the occupied gate.
+   * @return True after the deterministic contention interleave occurred.
+   * @throws Nothing.
+   */
+  bool contention() const noexcept {
+    return contention_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Releases the first sampler during defensive test cleanup.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void release() noexcept { released_.store(true, std::memory_order_release); }
+
+ private:
+  /** @brief True after the first coordinate time sample. */
+  std::atomic<bool> sampled_{false};
+
+  /** @brief True after another reservation observes the occupied gate. */
+  std::atomic<bool> contention_{false};
+
+  /** @brief True when the first sampler may finish sequence reservation. */
+  std::atomic<bool> released_{false};
+
+  /** @brief True after the first sampler leaves its deterministic pause. */
+  std::atomic<bool> sample_finished_{false};
+};
+
+/**
  * @brief Builds one complete passing inner-fairness input.
  * @return Exact 30-window evidence with every independent guard passing.
  * @throws std::bad_alloc when vector storage allocates.
@@ -156,6 +226,13 @@ class RecordingObservationSink final
       override {
     ++reservation_count;
     return coordinate_;
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::abort_causal_coordinate */
+  void abort_causal_coordinate(
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    ++abort_count;
+    last_coordinate = coordinate;
   }
 
   /** @copydoc compute::ComputeRunObservationSink::on_current_generation */
@@ -265,6 +342,9 @@ class RecordingObservationSink final
 
   /** @brief Number of callbacks forwarded to this child. */
   std::uint64_t callback_count = 0U;
+
+  /** @brief Number of abandoned reservations forwarded to this child. */
+  std::uint64_t abort_count = 0U;
 
   /** @brief Last exact coordinate received through a callback. */
   compute::ComputeRunObservationCoordinate last_coordinate;
@@ -527,6 +607,19 @@ M1ExecutionSnapshot make_m1_snapshot(bool active, ResourceVector high_water) {
       active ? ResourceVector{4U, 1048576U, 524288U, 3U, 4096U}
              : ResourceVector{};
   snapshot.host_resources.high_water = high_water;
+  const DeviceResourceVector device_limits{536870912U, 268435456U};
+  const DeviceResourceVector device_reserved =
+      active ? DeviceResourceVector{4096U, 2048U} : DeviceResourceVector{};
+  const DeviceResourceVector device_high_water =
+      high_water != ResourceVector{} ? DeviceResourceVector{8192U, 4096U}
+                                     : DeviceResourceVector{};
+  snapshot.device_resources.push_back(ResourceLedger::DeviceSnapshot{
+      DeviceId(DeviceBackend::Metal, 0U), device_limits, device_reserved,
+      device_high_water,
+      DeviceResourceVector{device_limits.device_memory_bytes -
+                               device_reserved.device_memory_bytes,
+                           device_limits.device_scratch_bytes -
+                               device_reserved.device_scratch_bytes}});
   snapshot.compute_io.task_limit = kB1ComputeIoTaskLimit;
   snapshot.compute_io.planned_bytes_limit = kB1ComputeIoPlannedByteLimit;
   snapshot.compute_io.active_tasks = 0U;
@@ -877,14 +970,13 @@ M1FairnessObservationSnapshot make_passing_observation_snapshot(
         start.service_class, true, start.causal_sequence,
         row.evidence.protocol.boundaries.measurement_start.timestamp +
             std::chrono::milliseconds(static_cast<std::int64_t>(index + 1U)),
-        index + 1U, index + 1U, 1U,
-        compute::ComputeRunTaskTerminalKind::Succeeded,
+        index + 1U, index, 1U, compute::ComputeRunTaskTerminalKind::Succeeded,
         compute::ComputeRunTerminalKind::Succeeded,
         start.interactive_candidate_startable,
         start.throughput_candidate_startable, start.execution_grant_committed});
   }
-  observations.callback_entry_frontier = observations.events.size();
-  observations.callback_completion_frontier = observations.events.size();
+  observations.reservation_entry_frontier = observations.events.size();
+  observations.reservation_completion_frontier = observations.events.size();
   observations.claimed_slot_frontier = observations.events.size();
   observations.published_slot_frontier = observations.events.size();
   return observations;
@@ -1005,7 +1097,8 @@ TEST(M1Profile, PassesClosedFiveAxisInnerRow) {
   EXPECT_EQ(row.schema, kM1InnerRowSchema);
   EXPECT_EQ(row.schema_version, kM1InnerRowSchemaVersion);
   EXPECT_EQ(row.workload_id, kM1WorkloadId);
-  EXPECT_EQ(row.protocol.verdict, I1Verdict::Pass);
+  EXPECT_EQ(row.protocol.verdict, I1Verdict::Pass)
+      << ::testing::PrintToString(row.protocol.validity_reasons);
   EXPECT_TRUE(row.source_evidence_closed);
   EXPECT_EQ(row.evidence.fairness.progress_windows.size(),
             kM1MeasuredWindowCount);
@@ -1037,6 +1130,140 @@ TEST(M1Profile, PassesClosedFiveAxisInnerRow) {
 }
 
 /**
+ * @brief Proves a self-consistent forged A0 cannot diverge from raw source.
+ * @throws GoogleTest assertion control and evaluator allocation failures.
+ * @note The protocol-only record remains internally valid; source closure must
+ * reject it before the six axis/overall verdicts can be composed.
+ */
+TEST(M1Profile, RejectsFirstAdmissionProjectionDriftBeforeProtocolReturn) {
+  M1InnerRowInput input = make_passing_inner_row_input();
+  M1FirstMeasuredAdmissionEvidence& first =
+      input.protocol.first_measured_admission;
+  const auto forged_sample =
+      checked_i1_time_add(first.admission_sample, std::chrono::nanoseconds(1));
+  ASSERT_TRUE(first.accepted_coordinate.has_value());
+  first.admission_sample = forged_sample;
+  first.accepted_coordinate.emplace(
+      forged_sample, first.accepted_coordinate->event_sequence());
+  EXPECT_EQ(evaluate_m1_protocol(input.protocol).verdict, I1Verdict::Pass);
+
+  const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+  EXPECT_EQ(row.protocol.verdict, I1Verdict::Pass);
+  EXPECT_FALSE(row.source_evidence_closed);
+  EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.throughput_progress_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.fairness_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(row.overall_verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Rejects raw final-warmup facts that contradict current hold at B.
+ *
+ * One case moves the final visible publication just beyond the measured
+ * boundary while keeping it before the later accepted replacement.  The
+ * other inserts a nominally `Superseded` cancellation before the measured
+ * product-current observation.  Each complete Issue #93 source is replayed
+ * back into its occurrence projection. The late-publication protocol remains
+ * independently valid; the cancellation protocol is independently Invalid.
+ * In both cases the shared source gate must derive and report the current-hold
+ * contradiction before the protocol result can return.
+ *
+ * @throws GoogleTest assertion control, replay, and allocation failures.
+ */
+TEST(M1Profile, RejectsFinalWarmupRawCurrentHoldDriftBeforeProtocolReturn) {
+  constexpr std::size_t final_warmup_index =
+      kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+  const auto synchronize_occurrence = [](M1InnerRowInput* input) {
+    const I1EpisodeInnerRow replay = evaluate_i1_episode(
+        input->interactive_sources[final_warmup_index].episode);
+    M1InteractiveOccurrenceEvidence& occurrence =
+        input->protocol.interactive_occurrences[final_warmup_index];
+    occurrence.final_latency = replay.final_latency;
+    occurrence.service = replay.service;
+    occurrence.latency_verdict = replay.latency_verdict;
+    occurrence.waste_verdict = replay.waste_verdict;
+    occurrence.memory_verdict = replay.memory_verdict;
+    occurrence.output_verdict = replay.output_verdict;
+  };
+  const auto expect_source_rejection = [](M1InnerRowInput input,
+                                          bool expected_current,
+                                          bool expected_boundary_cancellation,
+                                          I1Verdict expected_protocol) {
+    const M1SourceFairnessProjection projection =
+        derive_m1_source_fairness_projection(
+            input.protocol, input.interactive_sources, input.batch_sources);
+    EXPECT_EQ(projection.first_measured_admission
+                  .warmup_publication_current_before_acceptance,
+              expected_current);
+    EXPECT_EQ(projection.first_measured_admission.boundary_only_cancellation,
+              expected_boundary_cancellation);
+    EXPECT_EQ(evaluate_m1_protocol(input.protocol).verdict, expected_protocol);
+    const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+    EXPECT_FALSE(row.source_evidence_closed);
+    EXPECT_EQ(row.latency_verdict, I1Verdict::Invalid);
+    EXPECT_EQ(row.throughput_progress_verdict, I1Verdict::Invalid);
+    EXPECT_EQ(row.fairness_verdict, I1Verdict::Invalid);
+    EXPECT_EQ(row.waste_verdict, I1Verdict::Invalid);
+    EXPECT_EQ(row.memory_verdict, I1Verdict::Invalid);
+    EXPECT_EQ(row.overall_verdict, I1Verdict::Invalid);
+    EXPECT_TRUE(
+        std::any_of(row.validity_reasons.begin(), row.validity_reasons.end(),
+                    [](const std::string& reason) {
+                      return reason.find("current hold") != std::string::npos;
+                    }));
+  };
+
+  {
+    SCOPED_TRACE("visible publication after B");
+    M1InnerRowInput late_publication = make_passing_inner_row_input();
+    I1EpisodeEvidenceInput& late_source =
+        late_publication.interactive_sources[final_warmup_index].episode;
+    const auto measured_boundary =
+        late_publication.protocol.boundaries.measurement_start.timestamp;
+    late_source.observations.visible_outputs.back().observed_at =
+        checked_i1_time_add(measured_boundary, std::chrono::microseconds(1));
+    late_source.observations.terminals.back().observed_at =
+        checked_i1_time_add(measured_boundary, std::chrono::microseconds(2));
+    late_source.observations.run_quiescences.back().observed_at =
+        checked_i1_time_add(measured_boundary, std::chrono::microseconds(3));
+    late_source.observations.resource_settlements.back().observed_at =
+        checked_i1_time_add(measured_boundary, std::chrono::microseconds(4));
+    late_source.observations.host_settlements.back().observed_at =
+        checked_i1_time_add(measured_boundary, std::chrono::microseconds(5));
+    synchronize_occurrence(&late_publication);
+    expect_source_rejection(std::move(late_publication), false, false,
+                            I1Verdict::Pass);
+  }
+
+  {
+    SCOPED_TRACE("Superseded cancellation before replacement");
+    M1InnerRowInput boundary_cancellation = make_passing_inner_row_input();
+    I1EpisodeEvidenceInput& cancellation_source =
+        boundary_cancellation.interactive_sources[final_warmup_index].episode;
+    const auto measured_boundary =
+        boundary_cancellation.protocol.boundaries.measurement_start.timestamp;
+    const I1ObservedCurrentGeneration& warmup_current =
+        cancellation_source.observations.current_generations.back();
+    const std::uint64_t cancellation_sequence =
+        cancellation_source.observation_cut.causal_sequence;
+    cancellation_source.observations.cancellations.push_back(
+        I1ObservedCancellation{
+            kI1EditCount - 1U, 100U + kI1EditCount - 1U,
+            warmup_current.generation,
+            compute::ComputeRunCancellationReason::Superseded,
+            checked_i1_time_add(measured_boundary,
+                                std::chrono::microseconds(500)),
+            cancellation_sequence});
+    ++cancellation_source.observation_cut.causal_sequence;
+    synchronize_occurrence(&boundary_cancellation);
+    expect_source_rejection(std::move(boundary_cancellation), true, true,
+                            I1Verdict::Invalid);
+  }
+}
+
+/**
  * @brief Proves one passing producer row round-trips through strict replay.
  * @throws GoogleTest assertion control and canonical/evaluator failures.
  */
@@ -1052,6 +1279,8 @@ TEST(M1Profile, RoundTripsPassingCanonicalInnerRowByRecomputation) {
   const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
   const M1FairnessObservationSnapshot observations =
       make_passing_observation_snapshot(row);
+  ASSERT_FALSE(observations.events.empty());
+  EXPECT_EQ(observations.events.front().local_task_id, 0U);
 
   const std::string canonical = materialize_m1_inner_row(row, observations);
   const M1CanonicalReplay replay =
@@ -1433,6 +1662,32 @@ TEST(M1Profile, RejectsCanonicalSourceJoinAndProjectionContradictions) {
                          parse_b1_canonical_uint64(occurrence[8U]) + 1U);
                      (*records)[8U] = encode_b1_fixed_record(occurrence);
                    }),
+      [&canonical]() {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(canonical);
+        std::vector<std::string> first =
+            parse_b1_fixed_record(manifest.fields[8U].payload, 12U);
+        first[3U] = std::to_string(parse_b1_canonical_uint64(first[3U]) + 1U);
+        first[6U] = first[3U];
+        manifest.fields[8U].payload = encode_b1_fixed_record(first);
+        manifest.fields[19U].payload = encode_b1_fixed_record(
+            {"invalid", "invalid", "invalid", "invalid", "invalid", "invalid"});
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      }(),
+      [&canonical]() {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(canonical);
+        std::vector<std::string> occurrences =
+            parse_b1_framed_list(manifest.fields[4U].payload);
+        constexpr std::size_t final_warmup_index =
+            kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+        std::vector<std::string> final_warmup =
+            parse_b1_fixed_record(occurrences[final_warmup_index], 18U);
+        final_warmup[16U] = "false";
+        occurrences[final_warmup_index] = encode_b1_fixed_record(final_warmup);
+        manifest.fields[4U].payload = encode_m1_test_record_list(occurrences);
+        manifest.fields[19U].payload = encode_b1_fixed_record(
+            {"invalid", "invalid", "invalid", "invalid", "invalid", "invalid"});
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      }(),
       rewrite_list(
           13U, [](std::vector<std::string>* records) { records->pop_back(); }),
       rewrite_list(13U,
@@ -1650,6 +1905,106 @@ TEST(M1Profile, DerivesIoHighWaterBetweenSparseTemporalCuts) {
   EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
   EXPECT_EQ(row.compute_io_task_high_water, 1U);
   EXPECT_EQ(row.compute_io_planned_byte_high_water, kB1PayloadBytes);
+}
+
+/**
+ * @brief Rejects every Host/device high-water lower bound and device decline.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, RejectsUnderreportedHostAndDeviceLifetimeHighWater) {
+  const std::array<std::uint64_t ResourceVector::*, 5U> host_dimensions{
+      &ResourceVector::cpu_slots, &ResourceVector::retained_memory_bytes,
+      &ResourceVector::scratch_bytes, &ResourceVector::ready_entries,
+      &ResourceVector::ready_bytes};
+  for (std::uint64_t ResourceVector::* dimension : host_dimensions) {
+    M1InnerRowInput input = make_passing_inner_row_input();
+    ResourceLedger::Snapshot& active =
+        input.temporal_snapshots[1U].host_resources;
+    ASSERT_GT(active.reserved.*dimension, 0U);
+    active.high_water.*dimension = active.reserved.*dimension - 1U;
+    EXPECT_EQ(evaluate_m1_inner_row(std::move(input)).memory_verdict,
+              I1Verdict::Invalid);
+  }
+
+  const std::array<std::uint64_t DeviceResourceVector::*, 2U> device_dimensions{
+      &DeviceResourceVector::device_memory_bytes,
+      &DeviceResourceVector::device_scratch_bytes};
+  for (std::uint64_t DeviceResourceVector::* dimension : device_dimensions) {
+    M1InnerRowInput lower_bound = make_passing_inner_row_input();
+    ResourceLedger::DeviceSnapshot& active =
+        lower_bound.temporal_snapshots[1U].device_resources.front();
+    ASSERT_GT(active.reserved.*dimension, 0U);
+    active.high_water.*dimension = active.reserved.*dimension - 1U;
+    EXPECT_EQ(evaluate_m1_inner_row(std::move(lower_bound)).memory_verdict,
+              I1Verdict::Invalid);
+
+    M1InnerRowInput decreasing = make_passing_inner_row_input();
+    ResourceLedger::DeviceSnapshot& prior =
+        decreasing.temporal_snapshots[1U].device_resources.front();
+    ResourceLedger::DeviceSnapshot& current =
+        decreasing.temporal_snapshots[2U].device_resources.front();
+    ASSERT_GT(prior.high_water.*dimension, current.reserved.*dimension);
+    current.high_water.*dimension = current.reserved.*dimension;
+    EXPECT_EQ(evaluate_m1_inner_row(std::move(decreasing)).memory_verdict,
+              I1Verdict::Invalid);
+  }
+}
+
+/**
+ * @brief Rejects canonical Host/device lower bounds and device high-water drop.
+ * @throws GoogleTest assertion control and canonical/evaluator failures.
+ */
+TEST(M1Profile, RejectsCanonicalUnderreportedLifetimeHighWater) {
+  const M1InnerRow row = evaluate_m1_inner_row(make_passing_inner_row_input());
+  const std::string canonical =
+      materialize_m1_inner_row(row, make_passing_observation_snapshot(row));
+  const auto rewrite_snapshot =
+      [&canonical](
+          std::size_t snapshot_index,
+          const std::function<void(std::vector<std::string>*)>& rewrite) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(canonical);
+        std::vector<std::string> snapshots =
+            parse_b1_framed_list(manifest.fields[14U].payload);
+        std::vector<std::string> fields =
+            parse_b1_fixed_record(snapshots[snapshot_index], 11U);
+        rewrite(&fields);
+        snapshots[snapshot_index] = encode_b1_fixed_record(fields);
+        manifest.fields[14U].payload = encode_m1_test_record_list(snapshots);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      };
+  const auto rewrite_device = [&rewrite_snapshot](std::size_t snapshot_index,
+                                                  std::size_t component_index,
+                                                  std::string replacement) {
+    return rewrite_snapshot(
+        snapshot_index, [component_index, replacement = std::move(replacement)](
+                            std::vector<std::string>* snapshot) {
+          std::vector<std::string> devices =
+              parse_b1_framed_list((*snapshot)[3U]);
+          std::vector<std::string> device =
+              parse_b1_fixed_record(devices.front(), 10U);
+          device[component_index] = replacement;
+          devices.front() = encode_b1_fixed_record(device);
+          (*snapshot)[3U] = encode_m1_test_record_list(devices);
+        });
+  };
+
+  const std::vector<std::string> tampered{
+      rewrite_snapshot(1U,
+                       [](std::vector<std::string>* snapshot) {
+                         std::vector<std::string> reserved =
+                             parse_b1_fixed_record((*snapshot)[1U], 5U);
+                         std::vector<std::string> high_water =
+                             parse_b1_fixed_record((*snapshot)[2U], 5U);
+                         high_water[0U] = std::to_string(
+                             parse_b1_canonical_uint64(reserved[0U]) - 1U);
+                         (*snapshot)[2U] = encode_b1_fixed_record(high_water);
+                       }),
+      rewrite_device(1U, 8U, "4095"), rewrite_device(2U, 9U, "2048")};
+  for (std::size_t index = 0U; index < tampered.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_THROW(parse_and_recompute_m1_inner_row(tampered[index], 1U),
+                 std::invalid_argument);
+  }
 }
 
 /**
@@ -2239,6 +2594,14 @@ TEST(M1Profile, ObservationFanoutUsesOnlySharedSequenceAuthority) {
   EXPECT_EQ(authority->reservation_count, 1U);
   EXPECT_EQ(mirror->reservation_count, 0U);
 
+  const compute::ComputeRunObservationCoordinate aborted =
+      fanout->reserve_causal_coordinate();
+  fanout->abort_causal_coordinate(aborted);
+  EXPECT_EQ(authority->reservation_count, 2U);
+  EXPECT_EQ(authority->abort_count, 1U);
+  EXPECT_EQ(mirror->reservation_count, 0U);
+  EXPECT_EQ(mirror->abort_count, 0U);
+
   compute::ComputeRun run(make_observer_submission(
       "m1-fanout", 60U, compute::ComputeRunQosClass::Interactive));
   fanout->on_service_start(
@@ -2338,9 +2701,93 @@ TEST(M1Profile, ObservationExhaustionCannotWrapBackToPass) {
   EXPECT_EQ(last.causal_sequence, std::numeric_limits<std::uint64_t>::max());
   EXPECT_EQ(exhausted.causal_sequence, 0U);
   EXPECT_EQ(still_exhausted.causal_sequence, 0U);
+  sink->abort_causal_coordinate(last);
+  sink->abort_causal_coordinate(exhausted);
+  sink->abort_causal_coordinate(still_exhausted);
   const M1FairnessObservationSnapshot snapshot = collector.snapshot();
   EXPECT_TRUE(snapshot.sequence_exhausted);
   EXPECT_TRUE(snapshot.events.empty());
+}
+
+/**
+ * @brief Proves an explicitly aborted reservation closes the M1 cut frontier.
+ *
+ * The test reserves one causal coordinate without publishing an observation,
+ * verifies that the in-flight reservation prevents a stable cut, and then
+ * retires the coordinate through the production abort path.  The final
+ * snapshot must be stable without manufacturing an observation event.
+ *
+ * @throws GoogleTest assertion control and observer allocation failures.
+ */
+TEST(M1Profile, AbortedObservationReservationDoesNotLeakCutFrontier) {
+  M1FairnessObservationCollector collector(1U);
+  const auto sink = collector.make_sink(M1ObservedRequestTag::Interactive);
+  const M1FairnessObservationSnapshot before = collector.snapshot();
+  ASSERT_TRUE(before.stable_publication_cut);
+
+  const compute::ComputeRunObservationCoordinate coordinate =
+      sink->reserve_causal_coordinate();
+  ASSERT_NE(coordinate.causal_sequence, 0U);
+  const M1FairnessObservationSnapshot in_flight = collector.snapshot();
+  EXPECT_FALSE(in_flight.stable_publication_cut);
+  EXPECT_EQ(in_flight.reservation_entry_frontier, 1U);
+  EXPECT_EQ(in_flight.reservation_completion_frontier, 0U);
+  EXPECT_TRUE(in_flight.events.empty());
+
+  sink->abort_causal_coordinate(coordinate);
+  const M1FairnessObservationSnapshot after = collector.snapshot();
+  EXPECT_TRUE(after.stable_publication_cut);
+  EXPECT_EQ(after.reservation_entry_frontier, 1U);
+  EXPECT_EQ(after.reservation_completion_frontier, 1U);
+  EXPECT_EQ(after.claimed_slot_frontier, 0U);
+  EXPECT_EQ(after.published_slot_frontier, 0U);
+  EXPECT_TRUE(after.events.empty());
+  EXPECT_FALSE(m1_observation_cut_unchanged(before, after));
+}
+
+/**
+ * @brief Proves a forced sample-before-sequence overlap remains ordered.
+ *
+ * One reservation pauses after sampling its steady time and before assigning
+ * its sequence.  A second reservation must observe the occupied atomic gate,
+ * release the first, and then receive the next sequence with a nondecreasing
+ * timestamp.  Both reservations are explicitly retired after inspection.
+ *
+ * @throws GoogleTest assertion control, thread, and observer allocation
+ * failures.
+ */
+TEST(M1Profile, CoordinateReservationSerializesSampleAndSequence) {
+  const auto hook = std::make_shared<PausingCoordinateSampleHook>();
+  M1FairnessObservationCollector collector(2U, 1U, hook);
+  const auto sink = collector.make_sink(M1ObservedRequestTag::Interactive);
+  std::array<compute::ComputeRunObservationCoordinate, 2U> coordinates;
+
+  std::thread first(
+      [&] { coordinates[0U] = sink->reserve_causal_coordinate(); });
+  for (std::size_t attempt = 0U; attempt < 1000000U && !hook->sampled();
+       ++attempt) {
+    std::this_thread::yield();
+  }
+  if (!hook->sampled()) {
+    hook->release();
+    first.join();
+    FAIL() << "first coordinate did not reach its deterministic sample hook";
+    return;
+  }
+
+  std::thread second(
+      [&] { coordinates[1U] = sink->reserve_causal_coordinate(); });
+  first.join();
+  second.join();
+
+  EXPECT_TRUE(hook->contention());
+  EXPECT_NE(coordinates[0U].causal_sequence, 0U);
+  EXPECT_EQ(coordinates[1U].causal_sequence,
+            coordinates[0U].causal_sequence + 1U);
+  EXPECT_LE(coordinates[0U].observed_at, coordinates[1U].observed_at);
+  sink->abort_causal_coordinate(coordinates[0U]);
+  sink->abort_causal_coordinate(coordinates[1U]);
+  EXPECT_TRUE(collector.snapshot().stable_publication_cut);
 }
 
 /**
@@ -2368,9 +2815,8 @@ TEST(M1Profile, ObservationCallbacksRemainFiniteUnderConcurrency) {
         sink->on_service_start(
             run.descriptor(),
             compute::ComputeRunTaskIdentity(
-                run.descriptor().id(),
-                compute::ComputeRunLocalTaskId(thread * kEventsPerThread +
-                                               event + 1U)),
+                run.descriptor().id(), compute::ComputeRunLocalTaskId(
+                                           thread * kEventsPerThread + event)),
             1U, compute::ComputeRunServiceStartObservation{true, true, true},
             coordinate);
       }
@@ -2385,8 +2831,9 @@ TEST(M1Profile, ObservationCallbacksRemainFiniteUnderConcurrency) {
   EXPECT_FALSE(snapshot.sequence_exhausted);
   EXPECT_FALSE(snapshot.qos_mismatch);
   EXPECT_TRUE(snapshot.stable_publication_cut);
-  EXPECT_EQ(snapshot.callback_entry_frontier, kThreadCount * kEventsPerThread);
-  EXPECT_EQ(snapshot.callback_completion_frontier,
+  EXPECT_EQ(snapshot.reservation_entry_frontier,
+            kThreadCount * kEventsPerThread);
+  EXPECT_EQ(snapshot.reservation_completion_frontier,
             kThreadCount * kEventsPerThread);
   EXPECT_EQ(snapshot.claimed_slot_frontier, kThreadCount * kEventsPerThread);
   EXPECT_EQ(snapshot.published_slot_frontier, kThreadCount * kEventsPerThread);
@@ -2394,6 +2841,8 @@ TEST(M1Profile, ObservationCallbacksRemainFiniteUnderConcurrency) {
   for (std::size_t index = 1U; index < snapshot.events.size(); ++index) {
     EXPECT_LT(snapshot.events[index - 1U].causal_sequence,
               snapshot.events[index].causal_sequence);
+    EXPECT_LE(snapshot.events[index - 1U].observed_at,
+              snapshot.events[index].observed_at);
   }
 }
 
@@ -2436,8 +2885,8 @@ TEST(M1Profile, ObservationBoundaryRejectsClaimedUnpublishedCallback) {
 
   const M1FairnessObservationSnapshot in_flight = collector.snapshot();
   EXPECT_FALSE(in_flight.stable_publication_cut);
-  EXPECT_EQ(in_flight.callback_entry_frontier, 1U);
-  EXPECT_EQ(in_flight.callback_completion_frontier, 0U);
+  EXPECT_EQ(in_flight.reservation_entry_frontier, 1U);
+  EXPECT_EQ(in_flight.reservation_completion_frontier, 0U);
   EXPECT_EQ(in_flight.claimed_slot_frontier, 1U);
   EXPECT_EQ(in_flight.published_slot_frontier, 0U);
   EXPECT_TRUE(in_flight.events.empty());
@@ -2454,8 +2903,8 @@ TEST(M1Profile, ObservationBoundaryRejectsClaimedUnpublishedCallback) {
   worker.join();
   const M1FairnessObservationSnapshot after = collector.snapshot();
   EXPECT_TRUE(after.stable_publication_cut);
-  EXPECT_EQ(after.callback_entry_frontier, 1U);
-  EXPECT_EQ(after.callback_completion_frontier, 1U);
+  EXPECT_EQ(after.reservation_entry_frontier, 1U);
+  EXPECT_EQ(after.reservation_completion_frontier, 1U);
   EXPECT_EQ(after.claimed_slot_frontier, 1U);
   EXPECT_EQ(after.published_slot_frontier, 1U);
   ASSERT_EQ(after.events.size(), 1U);

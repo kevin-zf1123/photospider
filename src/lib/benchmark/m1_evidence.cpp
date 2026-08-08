@@ -144,6 +144,215 @@ bool m1_i1_source_matches(const M1InteractiveSourceEvidence& source,
 }
 
 /**
+ * @brief Compares two optional accepted-boundary coordinates exactly.
+ * @param lhs First optional coordinate.
+ * @param rhs Second optional coordinate.
+ * @return True only when absence or both scalar components match.
+ * @throws Nothing.
+ */
+bool same_m1_accepted_coordinate(
+    const std::optional<I1AcceptedCoordinate>& lhs,
+    const std::optional<I1AcceptedCoordinate>& rhs) noexcept {
+  return lhs.has_value() == rhs.has_value() &&
+         (!lhs.has_value() || (lhs->admission_time() == rhs->admission_time() &&
+                               lhs->event_sequence() == rhs->event_sequence()));
+}
+
+/**
+ * @brief Orders two product observation coordinates lexicographically.
+ * @param lhs_time First steady-clock sample.
+ * @param lhs_sequence First nonzero shared observation sequence.
+ * @param rhs_time Second steady-clock sample.
+ * @param rhs_sequence Second nonzero shared observation sequence.
+ * @return True only when the first coordinate precedes the second.
+ * @throws Nothing.
+ * @note M1's shared coordinate authority guarantees nondecreasing time in
+ * sequence order; the sequence breaks equal-time ties without minting a new
+ * acceptance or boundary rule.
+ */
+bool m1_observation_precedes(std::chrono::steady_clock::time_point lhs_time,
+                             std::uint64_t lhs_sequence,
+                             std::chrono::steady_clock::time_point rhs_time,
+                             std::uint64_t rhs_sequence) noexcept {
+  return lhs_time < rhs_time ||
+         (lhs_time == rhs_time && lhs_sequence < rhs_sequence);
+}
+
+/**
+ * @brief Finds exactly one current-generation record for an edit.
+ * @param source Complete retained Issue #93 source.
+ * @param edit_index Exact zero-based edit identity.
+ * @return Matching record, or null for missing/duplicate evidence.
+ * @throws Nothing.
+ */
+const I1ObservedCurrentGeneration* unique_m1_current_generation(
+    const M1InteractiveSourceEvidence& source,
+    std::size_t edit_index) noexcept {
+  const I1ObservedCurrentGeneration* result = nullptr;
+  for (const I1ObservedCurrentGeneration& current :
+       source.episode.observations.current_generations) {
+    if (current.edit_index != edit_index) {
+      continue;
+    }
+    if (result != nullptr) {
+      return nullptr;
+    }
+    result = &current;
+  }
+  return result;
+}
+
+/**
+ * @brief Finds exactly one visible publication for an edit and generation.
+ * @param source Complete retained Issue #93 source.
+ * @param edit_index Exact zero-based edit identity.
+ * @param generation Exact nonzero product generation.
+ * @return Matching record, or null for missing/duplicate evidence.
+ * @throws Nothing.
+ */
+const I1ObservedVisibleOutput* unique_m1_visible_output(
+    const M1InteractiveSourceEvidence& source, std::size_t edit_index,
+    std::uint64_t generation) noexcept {
+  const I1ObservedVisibleOutput* result = nullptr;
+  for (const I1ObservedVisibleOutput& visible :
+       source.episode.observations.visible_outputs) {
+    if (visible.edit_index != edit_index || visible.generation != generation) {
+      continue;
+    }
+    if (result != nullptr) {
+      return nullptr;
+    }
+    result = &visible;
+  }
+  return result;
+}
+
+/**
+ * @brief Source-only projection of the B-boundary current-hold exception.
+ * @throws Nothing for scalar construction.
+ */
+struct M1AdmissionSourceProjection final {
+  /** @brief Exact first measured admission/current replacement facts. */
+  M1FirstMeasuredAdmissionEvidence admission;
+  /** @brief Whether final warmup's immutable Q_end remained beyond B. */
+  bool final_warmup_settlement_pending_at_measurement = false;
+};
+
+/**
+ * @brief Derives first measured admission and old-publication replacement.
+ * @param interactive_sources Exact ordered 48-source Issue #93 list.
+ * @return Source-only admission/current-hold projection.
+ * @throws std::invalid_argument for cardinality or boundary identities.
+ * @note The rule reads no retained `first_measured_admission` field and is
+ * therefore shared unchanged by the producer and canonical reader.
+ */
+M1AdmissionSourceProjection derive_m1_admission_source_projection(
+    const std::vector<M1InteractiveSourceEvidence>& interactive_sources) {
+  if (interactive_sources.size() != kM1TotalI1OriginCount) {
+    throw std::invalid_argument(
+        "M1 admission projection requires exactly 48 I1 sources.");
+  }
+  const std::size_t final_warmup_index =
+      kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+  const std::size_t measured_zero_index =
+      kM1ColdI1OriginCount + kM1WarmupI1OriginCount;
+  const M1InteractiveSourceEvidence& final_warmup =
+      interactive_sources[final_warmup_index];
+  const M1InteractiveSourceEvidence& measured_zero =
+      interactive_sources[measured_zero_index];
+  if (final_warmup.phase != B1JobPhase::Warmup ||
+      final_warmup.phase_ordinal + 1U != kM1WarmupI1OriginCount ||
+      measured_zero.phase != B1JobPhase::Measured ||
+      measured_zero.phase_ordinal != 0U) {
+    throw std::invalid_argument(
+        "M1 admission projection source identities are out of order.");
+  }
+
+  const I1EditEvidence& warmup_final_edit =
+      final_warmup.episode.edits[kI1EditCount - 1U];
+  const I1EditEvidence& measured_first_edit = measured_zero.episode.edits[0U];
+  const I1ObservedCurrentGeneration* warmup_current =
+      unique_m1_current_generation(final_warmup, kI1EditCount - 1U);
+  const I1ObservedCurrentGeneration* measured_current =
+      unique_m1_current_generation(measured_zero, 0U);
+  const I1ObservedVisibleOutput* warmup_visible =
+      warmup_current == nullptr
+          ? nullptr
+          : unique_m1_visible_output(final_warmup, kI1EditCount - 1U,
+                                     warmup_current->generation);
+
+  const bool measured_coordinate_bound =
+      measured_current != nullptr && measured_current->generation != 0U &&
+      same_m1_accepted_coordinate(measured_current->accepted_coordinate,
+                                  measured_first_edit.accepted_coordinate) &&
+      measured_current->observed_at >= measured_first_edit.admission_sample;
+  const bool warmup_coordinate_bound =
+      warmup_current != nullptr && warmup_current->generation != 0U &&
+      same_m1_accepted_coordinate(warmup_current->accepted_coordinate,
+                                  warmup_final_edit.accepted_coordinate);
+  const bool warmup_cancelled_by_measurement =
+      warmup_coordinate_bound &&
+      std::any_of(
+          final_warmup.episode.observations.cancellations.begin(),
+          final_warmup.episode.observations.cancellations.end(),
+          [&warmup_current,
+           &measured_first_edit](const I1ObservedCancellation& cancellation) {
+            return cancellation.edit_index == kI1EditCount - 1U &&
+                   cancellation.generation == warmup_current->generation &&
+                   cancellation.observed_at <= measured_first_edit.nominal_time;
+          });
+  const bool warmup_publication_current =
+      warmup_coordinate_bound && warmup_visible != nullptr &&
+      warmup_current->observed_at <= warmup_visible->observed_at &&
+      warmup_visible->observed_at < measured_first_edit.nominal_time &&
+      !warmup_cancelled_by_measurement;
+  const bool replacement_ordered =
+      warmup_publication_current && measured_coordinate_bound &&
+      m1_observation_precedes(
+          warmup_visible->observed_at, warmup_visible->causal_sequence,
+          measured_current->observed_at, measured_current->causal_sequence);
+  const bool boundary_only_cancellation = std::any_of(
+      final_warmup.episode.observations.cancellations.begin(),
+      final_warmup.episode.observations.cancellations.end(),
+      [&measured_current, &measured_first_edit,
+       &warmup_current](const I1ObservedCancellation& cancellation) {
+        return cancellation.edit_index == kI1EditCount - 1U &&
+               warmup_current != nullptr &&
+               cancellation.generation == warmup_current->generation &&
+               cancellation.observed_at >= measured_first_edit.nominal_time &&
+               (measured_current == nullptr ||
+                m1_observation_precedes(cancellation.observed_at,
+                                        cancellation.causal_sequence,
+                                        measured_current->observed_at,
+                                        measured_current->causal_sequence));
+      });
+
+  M1AdmissionSourceProjection projection;
+  projection.admission.edit_index = measured_first_edit.edit_index;
+  projection.admission.nominal_time = measured_first_edit.nominal_time;
+  projection.admission.attempted = measured_first_edit.admission_attempted;
+  projection.admission.admission_sample = measured_first_edit.admission_sample;
+  projection.admission.reserved_event_sequence =
+      measured_first_edit.reserved_event_sequence;
+  projection.admission.host_succeeded =
+      measured_first_edit.host_return.has_value() &&
+      measured_first_edit.host_return->status.ok &&
+      measured_first_edit.host_return->future_valid;
+  projection.admission.accepted_coordinate =
+      measured_first_edit.accepted_coordinate;
+  projection.admission.warmup_publication_current_before_acceptance =
+      warmup_publication_current;
+  projection.admission.superseded_exactly_at_acceptance = replacement_ordered;
+  projection.admission.boundary_only_cancellation = boundary_only_cancellation;
+  projection.admission.old_generation_settlement_endpoint =
+      final_warmup.episode.measurement_end;
+  projection.final_warmup_settlement_pending_at_measurement =
+      final_warmup.episode.episode_origin < measured_first_edit.nominal_time &&
+      measured_first_edit.nominal_time < final_warmup.episode.measurement_end;
+  return projection;
+}
+
+/**
  * @brief Returns the frozen I1 identity assigned to one source-list index.
  * @param index Zero-based index in the exact 48-source list.
  * @return Cold/warmup/measured phase and its phase-local ordinal.
@@ -513,6 +722,33 @@ bool same_m1_optional_status(
     const std::optional<OperationStatus>& rhs) noexcept {
   return lhs.has_value() == rhs.has_value() &&
          (!lhs.has_value() || same_m1_operation_status(*lhs, *rhs));
+}
+
+/**
+ * @brief Tests exact equality of two first-admission/current-hold records.
+ * @param lhs First admission projection.
+ * @param rhs Second admission projection.
+ * @return True only when all twelve retained components match.
+ * @throws Nothing.
+ */
+bool same_m1_first_measured_admission(
+    const M1FirstMeasuredAdmissionEvidence& lhs,
+    const M1FirstMeasuredAdmissionEvidence& rhs) noexcept {
+  return lhs.edit_index == rhs.edit_index &&
+         lhs.nominal_time == rhs.nominal_time &&
+         lhs.attempted == rhs.attempted &&
+         lhs.admission_sample == rhs.admission_sample &&
+         lhs.reserved_event_sequence == rhs.reserved_event_sequence &&
+         lhs.host_succeeded == rhs.host_succeeded &&
+         same_m1_accepted_coordinate(lhs.accepted_coordinate,
+                                     rhs.accepted_coordinate) &&
+         lhs.warmup_publication_current_before_acceptance ==
+             rhs.warmup_publication_current_before_acceptance &&
+         lhs.superseded_exactly_at_acceptance ==
+             rhs.superseded_exactly_at_acceptance &&
+         lhs.boundary_only_cancellation == rhs.boundary_only_cancellation &&
+         lhs.old_generation_settlement_endpoint ==
+             rhs.old_generation_settlement_endpoint;
 }
 
 /**
@@ -2030,6 +2266,13 @@ M1MemoryValidation validate_m1_memory(
   ResourceVector prior_high_water = snapshots.front().host_resources.high_water;
   const std::vector<ResourceLedger::DeviceSnapshot>& initial_devices =
       snapshots.front().device_resources;
+  std::map<DeviceId, DeviceResourceVector> prior_device_high_water;
+  for (const ResourceLedger::DeviceSnapshot& device : initial_devices) {
+    if (!prior_device_high_water.emplace(device.device, device.high_water)
+             .second) {
+      invalid("configured device inventory contains a duplicate identity");
+    }
+  }
 
   for (const M1ExecutionSnapshot& snapshot : snapshots) {
     if (snapshot.host_resources.limits != kM1HostLimits ||
@@ -2038,6 +2281,8 @@ M1MemoryValidation validate_m1_memory(
     }
     if (!resources_fit(snapshot.host_resources.reserved,
                        snapshot.host_resources.limits) ||
+        !resources_fit(snapshot.host_resources.reserved,
+                       snapshot.host_resources.high_water) ||
         !resource_high_water_nondecreasing(
             prior_high_water, snapshot.host_resources.high_water)) {
       invalid("Host reservation or lifetime high-water is contradictory");
@@ -2094,8 +2339,18 @@ M1MemoryValidation validate_m1_memory(
                 current.limits.device_scratch_bytes) {
           invalid("device identity, limits, reservation, or available drifted");
         }
-        if (!device_resources_fit(current.reserved, current.limits) ||
-            !device_resources_fit(current.high_water, current.limits)) {
+        const auto prior = prior_device_high_water.find(current.device);
+        if (prior == prior_device_high_water.end() ||
+            !device_resources_fit(current.reserved, current.high_water) ||
+            !device_resources_fit(prior->second, current.high_water)) {
+          invalid("device reservation or lifetime high-water is contradictory");
+        } else {
+          prior->second = current.high_water;
+        }
+        if (!device_resources_fit(current.reserved, current.limits)) {
+          invalid("device reservation exceeds its configured limits");
+        }
+        if (!device_resources_fit(current.high_water, current.limits)) {
           result.within_limits = false;
         }
         if (current.device.backend() == DeviceBackend::Metal &&
@@ -2223,7 +2478,6 @@ M1SourceFairnessProjection derive_m1_source_fairness_projection(
     throw std::invalid_argument(
         "M1 I1 source cardinality differs from 48 occurrences.");
   }
-
   std::size_t measured_source_count = 0U;
   for (std::size_t index = 0U; index < interactive_sources.size(); ++index) {
     const auto expected = expected_m1_i1_source_identity(index);
@@ -2271,6 +2525,11 @@ M1SourceFairnessProjection derive_m1_source_fairness_projection(
       }
     }
   }
+  const M1AdmissionSourceProjection admission_projection =
+      derive_m1_admission_source_projection(interactive_sources);
+  projection.first_measured_admission = admission_projection.admission;
+  projection.final_warmup_settlement_pending_at_measurement =
+      admission_projection.final_warmup_settlement_pending_at_measurement;
   if (measured_source_count != kM1MeasuredI1OriginCount ||
       projection.headroom_outcomes.size() != kM1MeasuredI1AttemptCount) {
     throw std::invalid_argument(
@@ -2407,8 +2666,6 @@ M1BatchWasteEvidence derive_m1_batch_waste_evidence(
 M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
   M1InnerRow row;
   row.evidence = std::move(input);
-  row.protocol = evaluate_m1_protocol(row.evidence.protocol);
-  row.validity_reasons = row.protocol.validity_reasons;
 
   bool fairness_sources_valid = true;
   try {
@@ -2416,6 +2673,28 @@ M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
         derive_m1_source_fairness_projection(row.evidence.protocol,
                                              row.evidence.interactive_sources,
                                              row.evidence.batch_sources);
+    if (!same_m1_first_measured_admission(
+            projection.first_measured_admission,
+            row.evidence.protocol.first_measured_admission)) {
+      fairness_sources_valid = false;
+      invalidate_m1(
+          &row.validity_reasons,
+          "M1 first admission/current hold differs from retained raw sources");
+    }
+    const std::size_t final_warmup_index =
+        kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+    const M1InteractiveOccurrenceEvidence& final_warmup =
+        row.evidence.protocol.interactive_occurrences[final_warmup_index];
+    if (final_warmup.publication_current_at_measurement !=
+            projection.first_measured_admission
+                .warmup_publication_current_before_acceptance ||
+        final_warmup.settlement_pending_at_measurement !=
+            projection.final_warmup_settlement_pending_at_measurement) {
+      fairness_sources_valid = false;
+      invalidate_m1(
+          &row.validity_reasons,
+          "M1 final-warmup current hold differs from retained raw sources");
+    }
     if (!same_m1_progress_windows(projection.progress_windows,
                                   row.evidence.fairness.progress_windows)) {
       fairness_sources_valid = false;
@@ -2445,8 +2724,8 @@ M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
   } catch (const std::exception& error) {
     fairness_sources_valid = false;
     invalidate_m1(&row.validity_reasons,
-                  std::string("M1 source-derived fairness replay failed "
-                              "closed: ") +
+                  std::string("M1 source-derived admission/fairness replay "
+                              "failed closed: ") +
                       error.what());
   }
 
@@ -2465,6 +2744,11 @@ M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
   }
   row.source_evidence_closed = fairness_sources_valid && batch_waste_valid;
 
+  row.protocol = evaluate_m1_protocol(row.evidence.protocol);
+  for (const std::string& reason : row.protocol.validity_reasons) {
+    invalidate_m1(&row.validity_reasons, reason);
+  }
+
   if (row.evidence.replicate_ordinal == 0U ||
       row.evidence.replicate_ordinal > 3U ||
       row.evidence.protocol.replicate_ordinal !=
@@ -2477,6 +2761,9 @@ M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
       row.evidence.replicate_ordinal != 0U &&
       row.evidence.replicate_ordinal <= 3U &&
       row.evidence.protocol.replicate_ordinal == row.evidence.replicate_ordinal;
+  const M1MemoryValidation memory = validate_m1_memory(
+      row.evidence.temporal_snapshots, row.evidence.protocol.batch_offers,
+      row.evidence.batch_sources, &row);
   if (!protocol_valid) {
     return row;
   }
@@ -2603,9 +2890,6 @@ M1InnerRow evaluate_m1_inner_row(M1InnerRowInput input) {
                   "M1 measured Interactive/B1 waste evidence is incomplete");
   }
 
-  const M1MemoryValidation memory = validate_m1_memory(
-      row.evidence.temporal_snapshots, row.evidence.protocol.batch_offers,
-      row.evidence.batch_sources, &row);
   if (memory.valid && row.evidence.temporal_effects_complete) {
     row.memory_verdict = memory.within_limits && memory.settled
                              ? I1Verdict::Pass

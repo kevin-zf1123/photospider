@@ -29,6 +29,11 @@ ComputeRunObservationFanout::reserve_causal_coordinate() noexcept {
   return sequence_authority_->reserve_causal_coordinate();
 }
 
+void ComputeRunObservationFanout::abort_causal_coordinate(
+    compute::ComputeRunObservationCoordinate coordinate) noexcept {
+  sequence_authority_->abort_causal_coordinate(coordinate);
+}
+
 void ComputeRunObservationFanout::on_current_generation(
     const compute::SupersessionIdentity& identity,
     compute::ComputeRunObservationCoordinate coordinate) noexcept {

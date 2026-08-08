@@ -30,6 +30,9 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
 /** @brief Fixed maximum CAS attempts at one observer callback boundary. */
 constexpr std::size_t kM1AtomicAttemptLimit = 64U;
 
+/** @brief Fixed maximum attempts to enter the coordinate sampling gate. */
+constexpr std::size_t kM1CoordinateGateAttemptLimit = 4096U;
+
 /**
  * @brief Appends one fail-closed structural diagnostic.
  * @param reasons Mutable complete diagnostic list.
@@ -222,16 +225,34 @@ class M1FairnessObservationCollector::Impl final
       return impl_->reserve_causal_coordinate();
     }
 
+    /** @copydoc compute::ComputeRunObservationSink::abort_causal_coordinate */
+    void abort_causal_coordinate(
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+      impl_->complete_causal_coordinate(coordinate);
+    }
+
     /** @copydoc compute::ComputeRunObservationSink::on_current_generation */
     void on_current_generation(
         const compute::SupersessionIdentity& identity,
         compute::ComputeRunObservationCoordinate coordinate) noexcept override {
       (void)identity;
-      (void)coordinate;
+      impl_->complete_causal_coordinate(coordinate);
     }
 
     /** @copydoc compute::ComputeRunObservationSink::observes_task_semantics */
     bool observes_task_semantics() const noexcept override { return true; }
+
+    /** @copydoc compute::ComputeRunObservationSink::on_task_ready */
+    void on_task_ready(
+        const compute::ComputeRunDescriptor& descriptor,
+        compute::ComputeRunTaskIdentity task_identity,
+        const compute::ComputeRunTaskReadyObservation& observation,
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+      (void)descriptor;
+      (void)task_identity;
+      (void)observation;
+      impl_->complete_causal_coordinate(coordinate);
+    }
 
     /** @copydoc compute::ComputeRunObservationSink::on_service_start */
     void on_service_start(
@@ -273,7 +294,7 @@ class M1FairnessObservationCollector::Impl final
         compute::ComputeRunObservationCoordinate coordinate) noexcept override {
       (void)descriptor;
       (void)reason;
-      (void)coordinate;
+      impl_->complete_causal_coordinate(coordinate);
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_terminal */
@@ -295,7 +316,16 @@ class M1FairnessObservationCollector::Impl final
         compute::ComputeRunObservationCoordinate coordinate) noexcept override {
       (void)descriptor;
       (void)output;
-      (void)coordinate;
+      impl_->complete_causal_coordinate(coordinate);
+    }
+
+    /** @copydoc
+     * compute::ComputeRunObservationSink::on_progressive_final_triggered */
+    void on_progressive_final_triggered(
+        const compute::ComputeRunDescriptor& descriptor,
+        compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+      (void)descriptor;
+      impl_->complete_causal_coordinate(coordinate);
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_run_quiescent */
@@ -303,7 +333,7 @@ class M1FairnessObservationCollector::Impl final
         const compute::ComputeRunDescriptor& descriptor,
         compute::ComputeRunObservationCoordinate coordinate) noexcept override {
       (void)descriptor;
-      (void)coordinate;
+      impl_->complete_causal_coordinate(coordinate);
     }
 
     /** @copydoc compute::ComputeRunObservationSink::on_run_resource_settled */
@@ -323,7 +353,7 @@ class M1FairnessObservationCollector::Impl final
     /** @copydoc compute::ComputeRunObservationSink::on_host_settled */
     void on_host_settled(
         compute::ComputeRunObservationCoordinate coordinate) noexcept override {
-      (void)coordinate;
+      impl_->complete_causal_coordinate(coordinate);
     }
 
    private:
@@ -346,44 +376,39 @@ class M1FairnessObservationCollector::Impl final
   }
 
   /**
-   * @brief Completes one successfully counted callback on scope exit.
+   * @brief Completes one successfully reserved coordinate on scope exit.
    * @throws Nothing for construction and destruction.
    * @note The guard never owns product state and only advances the bounded
    * diagnostic completion frontier.
    */
-  class CallbackCompletionGuard final {
+  class ReservationCompletionGuard final {
    public:
     /**
-     * @brief Binds one active entry to its collector implementation.
+     * @brief Binds one reserved coordinate to its collector implementation.
      * @param impl Non-null collector implementation.
-     * @param active True only when the entry frontier advanced.
      * @throws Nothing.
      */
-    CallbackCompletionGuard(Impl* impl, bool active) noexcept
-        : impl_(impl), active_(active) {}
+    explicit ReservationCompletionGuard(Impl* impl) noexcept : impl_(impl) {}
 
     /**
-     * @brief Advances the matching completion frontier when active.
+     * @brief Advances the matching completion frontier.
      * @throws Nothing; bounded frontier failure becomes sticky evidence.
      */
-    ~CallbackCompletionGuard() noexcept {
-      if (active_) {
-        impl_->advance_callback_frontier(&impl_->callback_completion_frontier_);
-      }
+    ~ReservationCompletionGuard() noexcept {
+      impl_->advance_reservation_frontier(
+          &impl_->reservation_completion_frontier_);
     }
 
     /** @brief Prevents double completion through copied scope ownership. */
-    CallbackCompletionGuard(const CallbackCompletionGuard&) = delete;
+    ReservationCompletionGuard(const ReservationCompletionGuard&) = delete;
 
-    /** @brief Prevents replacing one active completion responsibility. */
-    CallbackCompletionGuard& operator=(const CallbackCompletionGuard&) = delete;
+    /** @brief Prevents replacing one completion responsibility. */
+    ReservationCompletionGuard& operator=(const ReservationCompletionGuard&) =
+        delete;
 
    private:
     /** @brief Non-owning implementation alive for the callback duration. */
     Impl* impl_;
-
-    /** @brief Whether the paired entry frontier advanced successfully. */
-    bool active_;
   };
 
   /**
@@ -393,30 +418,57 @@ class M1FairnessObservationCollector::Impl final
    */
   compute::ComputeRunObservationCoordinate
   reserve_causal_coordinate() noexcept {
-    const auto observed_at = std::chrono::steady_clock::now();
+    (void)advance_reservation_frontier(&reservation_entry_frontier_);
     if (sequence_exhausted_.load(std::memory_order_acquire)) {
-      return compute::ComputeRunObservationCoordinate{observed_at, 0U};
+      return compute::ComputeRunObservationCoordinate{
+          std::chrono::steady_clock::now(), 0U};
     }
-    std::uint64_t current = next_sequence_.load(std::memory_order_relaxed);
-    for (std::size_t attempt = 0U; attempt < kM1AtomicAttemptLimit; ++attempt) {
+    for (std::size_t attempt = 0U; attempt < kM1CoordinateGateAttemptLimit;
+         ++attempt) {
+      if (coordinate_reservation_gate_.test_and_set(
+              std::memory_order_acquire)) {
+        if (publication_hook_ != nullptr) {
+          publication_hook_->after_coordinate_contention();
+        }
+        continue;
+      }
+      const auto observed_at = std::chrono::steady_clock::now();
+      if (publication_hook_ != nullptr) {
+        publication_hook_->after_coordinate_sample();
+      }
+      const std::uint64_t current =
+          next_sequence_.load(std::memory_order_relaxed);
       if (current == 0U) {
         sequence_exhausted_.store(true, std::memory_order_release);
+        coordinate_reservation_gate_.clear(std::memory_order_release);
         return compute::ComputeRunObservationCoordinate{observed_at, 0U};
       }
       const std::uint64_t next =
           current == std::numeric_limits<std::uint64_t>::max() ? 0U
                                                                : current + 1U;
-      if (next_sequence_.compare_exchange_strong(current, next,
-                                                 std::memory_order_relaxed,
-                                                 std::memory_order_relaxed)) {
-        if (next == 0U) {
-          sequence_exhausted_.store(true, std::memory_order_release);
-        }
-        return compute::ComputeRunObservationCoordinate{observed_at, current};
+      next_sequence_.store(next, std::memory_order_relaxed);
+      if (next == 0U) {
+        sequence_exhausted_.store(true, std::memory_order_release);
       }
+      coordinate_reservation_gate_.clear(std::memory_order_release);
+      return compute::ComputeRunObservationCoordinate{observed_at, current};
     }
     sequence_exhausted_.store(true, std::memory_order_release);
-    return compute::ComputeRunObservationCoordinate{observed_at, 0U};
+    return compute::ComputeRunObservationCoordinate{
+        std::chrono::steady_clock::now(), 0U};
+  }
+
+  /**
+   * @brief Closes one reservation after callback delivery or explicit abort.
+   * @param coordinate Exact reserved coordinate; scalar contents are retained
+   * only by the caller-specific event path.
+   * @return Nothing.
+   * @throws Nothing; frontier failure becomes sticky invalidity evidence.
+   */
+  void complete_causal_coordinate(
+      compute::ComputeRunObservationCoordinate coordinate) noexcept {
+    (void)coordinate;
+    (void)advance_reservation_frontier(&reservation_completion_frontier_);
   }
 
   /**
@@ -426,9 +478,7 @@ class M1FairnessObservationCollector::Impl final
    * @throws Nothing; capacity/sequence exhaustion is recorded explicitly.
    */
   void record(M1FairnessObservation event) noexcept {
-    const bool entry_counted =
-        advance_callback_frontier(&callback_entry_frontier_);
-    CallbackCompletionGuard completion(this, entry_counted);
+    ReservationCompletionGuard completion(this);
     if (event.causal_sequence == 0U) {
       sequence_exhausted_.store(true, std::memory_order_release);
       return;
@@ -467,9 +517,9 @@ class M1FairnessObservationCollector::Impl final
   M1FairnessObservationSnapshot snapshot() const {
     M1FairnessObservationSnapshot result;
     const std::uint64_t entry_before =
-        callback_entry_frontier_.load(std::memory_order_acquire);
+        reservation_entry_frontier_.load(std::memory_order_acquire);
     const std::uint64_t completion_before =
-        callback_completion_frontier_.load(std::memory_order_acquire);
+        reservation_completion_frontier_.load(std::memory_order_acquire);
     const std::size_t claimed_before =
         next_slot_.load(std::memory_order_acquire);
     const std::size_t bounded_claimed = std::min(claimed_before, capacity_);
@@ -492,17 +542,17 @@ class M1FairnessObservationCollector::Impl final
     const std::size_t claimed_after =
         next_slot_.load(std::memory_order_acquire);
     const std::uint64_t completion_after =
-        callback_completion_frontier_.load(std::memory_order_acquire);
+        reservation_completion_frontier_.load(std::memory_order_acquire);
     const std::uint64_t entry_after =
-        callback_entry_frontier_.load(std::memory_order_acquire);
-    result.callback_entry_frontier = entry_after;
-    result.callback_completion_frontier = completion_after;
+        reservation_entry_frontier_.load(std::memory_order_acquire);
+    result.reservation_entry_frontier = entry_after;
+    result.reservation_completion_frontier = completion_after;
     result.claimed_slot_frontier = claimed_after;
     result.published_slot_frontier = published_prefix;
-    result.callback_frontier_exhausted =
-        callback_frontier_exhausted_.load(std::memory_order_acquire);
+    result.reservation_frontier_exhausted =
+        reservation_frontier_exhausted_.load(std::memory_order_acquire);
     result.stable_publication_cut =
-        !result.callback_frontier_exhausted &&
+        !result.reservation_frontier_exhausted &&
         entry_before == completion_before && entry_before == entry_after &&
         completion_before == completion_after &&
         entry_after == completion_after && claimed_before == claimed_after &&
@@ -512,18 +562,18 @@ class M1FairnessObservationCollector::Impl final
 
  private:
   /**
-   * @brief Advances one saturating callback frontier with bounded retries.
-   * @param frontier Entry or completion counter to advance once.
+   * @brief Advances one saturating reservation frontier with bounded retries.
+   * @param frontier Reservation-entry or completion counter to advance once.
    * @return True only when the counter advanced without wrapping.
    * @throws Nothing; exhaustion or excessive contention becomes sticky
    * invalidity evidence.
    */
-  bool advance_callback_frontier(
+  bool advance_reservation_frontier(
       std::atomic<std::uint64_t>* frontier) noexcept {
     std::uint64_t current = frontier->load(std::memory_order_relaxed);
     for (std::size_t attempt = 0U; attempt < kM1AtomicAttemptLimit; ++attempt) {
       if (current == std::numeric_limits<std::uint64_t>::max()) {
-        callback_frontier_exhausted_.store(true, std::memory_order_release);
+        reservation_frontier_exhausted_.store(true, std::memory_order_release);
         return false;
       }
       if (frontier->compare_exchange_strong(current, current + 1U,
@@ -532,7 +582,7 @@ class M1FairnessObservationCollector::Impl final
         return true;
       }
     }
-    callback_frontier_exhausted_.store(true, std::memory_order_release);
+    reservation_frontier_exhausted_.store(true, std::memory_order_release);
     return false;
   }
 
@@ -557,14 +607,17 @@ class M1FairnessObservationCollector::Impl final
   /** @brief Next unique event-cell index claimed by a callback. */
   std::atomic<std::size_t> next_slot_{0U};
 
-  /** @brief Monotonic count of callbacks that entered `record`. */
-  std::atomic<std::uint64_t> callback_entry_frontier_{0U};
+  /** @brief Monotonic count of entered coordinate reservations. */
+  std::atomic<std::uint64_t> reservation_entry_frontier_{0U};
 
-  /** @brief Monotonic count of callbacks that exited `record`. */
-  std::atomic<std::uint64_t> callback_completion_frontier_{0U};
+  /** @brief Monotonic count closed by callbacks or explicit aborts. */
+  std::atomic<std::uint64_t> reservation_completion_frontier_{0U};
 
-  /** @brief Sticky callback-frontier exhaustion/contention evidence. */
-  std::atomic<bool> callback_frontier_exhausted_{false};
+  /** @brief Sticky reservation-frontier exhaustion/contention evidence. */
+  std::atomic<bool> reservation_frontier_exhausted_{false};
+
+  /** @brief Bounded lock-free gate pairing sequence order with sample order. */
+  std::atomic_flag coordinate_reservation_gate_ = ATOMIC_FLAG_INIT;
 
   /** @brief Next shared nonzero observer-local causal sequence. */
   std::atomic<std::uint64_t> next_sequence_;
@@ -623,9 +676,10 @@ bool m1_observation_cut_unchanged(
     const M1FairnessObservationSnapshot& before,
     const M1FairnessObservationSnapshot& after) noexcept {
   return before.stable_publication_cut && after.stable_publication_cut &&
-         before.callback_entry_frontier == after.callback_entry_frontier &&
-         before.callback_completion_frontier ==
-             after.callback_completion_frontier &&
+         before.reservation_entry_frontier ==
+             after.reservation_entry_frontier &&
+         before.reservation_completion_frontier ==
+             after.reservation_completion_frontier &&
          before.claimed_slot_frontier == after.claimed_slot_frontier &&
          before.published_slot_frontier == after.published_slot_frontier &&
          before.events.size() == after.events.size();

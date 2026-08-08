@@ -293,8 +293,9 @@ class ComputeRunControl {
    * @throws std::invalid_argument for null callback or output storage.
    * @throws std::system_error when Run synchronization fails.
    * @note The coordinate is reserved immediately before callback invocation
-   * while `mutex` excludes cancellation acceptance. A rejected callback leaves
-   * an unpublished sequence gap; no observer callback runs under this lock.
+   * while `mutex` excludes cancellation acceptance. A rejected callback
+   * explicitly aborts the staged coordinate; no observer callback runs under
+   * this lock.
    */
   bool try_commit_service_start(
       ComputeRunServiceStartCommitCallback commit_callback, void* context,
@@ -669,6 +670,10 @@ bool ComputeRunControl::try_commit_service_start(
         descriptor.observation_sink()->reserve_causal_coordinate();
   }
   if (!commit_callback(context)) {
+    if (staged_coordinate.has_value()) {
+      descriptor.observation_sink()->abort_causal_coordinate(
+          *staged_coordinate);
+    }
     return false;
   }
   *committed_coordinate = staged_coordinate;

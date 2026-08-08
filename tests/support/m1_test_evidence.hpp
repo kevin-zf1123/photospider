@@ -62,14 +62,25 @@ inline std::size_t m1_test_i1_slot(B1JobPhase phase, std::size_t ordinal) {
  * @param ordinal Zero-based phase-local ordinal.
  * @param replicate_ordinal Enclosing M1 replicate identity.
  * @param origin Exact M1 episode origin timestamp.
+ * @param first_event_sequence First nonzero row-local admission sequence.
  * @param final_latency Final accepted-to-visible duration.
  * @return Complete raw evaluator input with no discarded or post-cancel work.
+ * @throws std::invalid_argument when the first event sequence is zero.
+ * @throws std::overflow_error when the twelve-sequence block would wrap.
  * @throws Checked-time, Value/digest, and allocation failures unchanged.
  */
 inline I1EpisodeEvidenceInput make_m1_test_i1_episode(
     B1JobPhase phase, std::size_t ordinal, std::uint64_t replicate_ordinal,
     std::chrono::steady_clock::time_point origin,
+    std::uint64_t first_event_sequence,
     std::chrono::nanoseconds final_latency = std::chrono::milliseconds(10)) {
+  if (first_event_sequence == 0U) {
+    throw std::invalid_argument("M1 test I1 sequence block starts at zero.");
+  }
+  if (first_event_sequence >
+      std::numeric_limits<std::uint64_t>::max() - (kI1EditCount - 1U)) {
+    throw std::overflow_error("M1 test I1 sequence block wraps.");
+  }
   I1EpisodeEvidenceInput input;
   input.replicate_ordinal = replicate_ordinal;
   input.slot = m1_test_i1_slot(phase, ordinal);
@@ -118,12 +129,14 @@ inline I1EpisodeEvidenceInput make_m1_test_i1_episode(
         true,
         admission,
         true,
-        static_cast<std::uint64_t>(edit_index + 1U),
+        first_event_sequence + static_cast<std::uint64_t>(edit_index),
         deadline,
         I1HostReturnEvidence{
             checked_i1_time_add(admission, std::chrono::microseconds(100)),
             OperationStatus{}, true},
-        I1AcceptedCoordinate(admission, edit_index + 1U),
+        I1AcceptedCoordinate(
+            admission,
+            first_event_sequence + static_cast<std::uint64_t>(edit_index)),
         OperationStatus{}};
 
     const std::uint64_t generation = edit_index + 1U;
@@ -131,7 +144,9 @@ inline I1EpisodeEvidenceInput make_m1_test_i1_episode(
     input.observations.current_generations.push_back(
         I1ObservedCurrentGeneration{
             edit_index, generation, admission, causal_sequence++,
-            I1AcceptedCoordinate(admission, edit_index + 1U)});
+            I1AcceptedCoordinate(admission,
+                                 first_event_sequence +
+                                     static_cast<std::uint64_t>(edit_index))});
     input.observations.service_starts.push_back(I1ObservedServiceStart{
         edit_index, run_id, generation, 0U, compute::ComputeRunQuality::Full,
         compute::ComputeRunQos{compute::ComputeRunQosClass::Interactive,
@@ -191,11 +206,20 @@ inline void attach_m1_test_i1_sources(M1InnerRowInput* input) {
         "M1 test requires exactly 48 I1 occurrence projections.");
   }
   input->interactive_sources.clear();
-  for (M1InteractiveOccurrenceEvidence& occurrence :
-       input->protocol.interactive_occurrences) {
+  for (std::size_t index = 0U;
+       index < input->protocol.interactive_occurrences.size(); ++index) {
+    M1InteractiveOccurrenceEvidence& occurrence =
+        input->protocol.interactive_occurrences[index];
+    const bool first_measured = occurrence.phase == B1JobPhase::Measured &&
+                                occurrence.phase_ordinal == 0U;
+    const std::uint64_t first_event_sequence =
+        first_measured && input->protocol.first_measured_admission
+                              .reserved_event_sequence.has_value()
+            ? *input->protocol.first_measured_admission.reserved_event_sequence
+            : 1U;
     const I1EpisodeInnerRow row = evaluate_i1_episode(make_m1_test_i1_episode(
         occurrence.phase, occurrence.phase_ordinal, input->replicate_ordinal,
-        occurrence.origin.timestamp));
+        occurrence.origin.timestamp, first_event_sequence));
     occurrence.final_latency = row.final_latency;
     occurrence.service = row.service;
     occurrence.latency_verdict = row.latency_verdict;
@@ -429,8 +453,8 @@ inline void attach_m1_test_batch_sources(M1InnerRowInput* input) {
 /**
  * @brief Rebuilds and attaches the shared source-derived fairness projection.
  * @param input Mutable M1 input with complete protocol and I1/B1 sources.
- * @return Nothing after progress, Graph, headroom outcomes, and aggregates are
- * replaced by the production derivation.
+ * @return Nothing after first admission/current hold, progress, Graph,
+ * headroom outcomes, and aggregates are replaced by production derivation.
  * @throws std::invalid_argument when `input` is null or source joins drift.
  * @throws std::overflow_error when checked source aggregation overflows.
  * @throws std::bad_alloc when replay or projection storage allocates.
@@ -443,6 +467,17 @@ inline void attach_m1_test_source_fairness_projection(M1InnerRowInput* input) {
   }
   M1SourceFairnessProjection projection = derive_m1_source_fairness_projection(
       input->protocol, input->interactive_sources, input->batch_sources);
+  input->protocol.first_measured_admission =
+      projection.first_measured_admission;
+  const std::size_t final_warmup_index =
+      kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+  input->protocol.interactive_occurrences[final_warmup_index]
+      .publication_current_at_measurement =
+      projection.first_measured_admission
+          .warmup_publication_current_before_acceptance;
+  input->protocol.interactive_occurrences[final_warmup_index]
+      .settlement_pending_at_measurement =
+      projection.final_warmup_settlement_pending_at_measurement;
   input->fairness.progress_windows = std::move(projection.progress_windows);
   input->fairness.graph_service_windows =
       std::move(projection.graph_service_windows);

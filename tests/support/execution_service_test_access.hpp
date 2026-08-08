@@ -307,6 +307,42 @@ class ExecutionServiceTestAccess final {
     (void)service;
     compute::testing::disarm_reserved_start_rollback_probe_for_testing();
   }
+
+  /**
+   * @brief Arms one post-coordinate physical-route commit rejection.
+   * @param service Isolated service used only to document test ownership.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void arm_route_commit_failure_probe(
+      compute::ExecutionService& service) noexcept {
+    (void)service;
+    compute::testing::arm_route_commit_failure_probe_for_testing();
+  }
+
+  /**
+   * @brief Reports whether the armed physical-route rejection occurred.
+   * @param service Isolated service whose worker consumed the probe.
+   * @return True after the post-coordinate commit callback returned false.
+   * @throws Nothing.
+   */
+  static bool route_commit_failure_probe_triggered(
+      const compute::ExecutionService& service) noexcept {
+    (void)service;
+    return compute::testing::route_commit_failure_probe_triggered_for_testing();
+  }
+
+  /**
+   * @brief Disarms the post-coordinate route-commit failure probe.
+   * @param service Isolated service whose test ownership is ending.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void disarm_route_commit_failure_probe(
+      compute::ExecutionService& service) noexcept {
+    (void)service;
+    compute::testing::disarm_route_commit_failure_probe_for_testing();
+  }
 #endif
 
   /**

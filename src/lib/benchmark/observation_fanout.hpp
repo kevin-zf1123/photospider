@@ -52,6 +52,10 @@ class ComputeRunObservationFanout final
   compute::ComputeRunObservationCoordinate reserve_causal_coordinate() noexcept
       override;
 
+  /** @copydoc compute::ComputeRunObservationSink::abort_causal_coordinate */
+  void abort_causal_coordinate(
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override;
+
   /** @copydoc compute::ComputeRunObservationSink::on_current_generation */
   void on_current_generation(
       const compute::SupersessionIdentity& identity,

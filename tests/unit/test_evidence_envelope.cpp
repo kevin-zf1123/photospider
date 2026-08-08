@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -693,9 +694,9 @@ TEST(EvidenceEnvelope, MaterializesCanonicalM1RowAndBundle) {
             fixture.m1_row_digest);
   EXPECT_EQ(digest_evidence_bundle(root.manifest_bytes), fixture.root_digest);
   EXPECT_EQ(fixture.m1_row_digest,
-            "e583dca085141af4ec24af797ac5da4831c0fbfc8468eba64b240cf6fda24d13");
+            "9afe8a2124e1c583b23aabe46e801c9994f4c16635844c82ce49f03d0685b8b7");
   EXPECT_EQ(fixture.root_digest,
-            "cdc40e45e7916ab5f038a5eb216f5177bc71fcd966eb7ae55480b55b250cf8a0");
+            "9a6e6885808f2d4688c1fbf13f2d6d4a34d71a57d21acef9146141701a77a7f7");
   EXPECT_EQ(
       digest_evidence_section(
           fixture.corpus.rows.back().source.workload_manifest.section_name,
@@ -1058,6 +1059,161 @@ TEST(EvidenceEnvelope, RejectsRehashedM1SourceProjectionContradiction) {
   const EvidenceCorpusValidation validation =
       validate_evidence_corpus(fixture.corpus, fixture.root_digest);
   EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves admission/current-hold forgeries survive no outer rehash.
+ * @throws GoogleTest assertion control and fixture construction failures.
+ * @note Each rewrite changes all six nested verdict claims to Invalid;
+ * retained Issue #93 sources remain unchanged and therefore source closure
+ * must still reject the completely re-addressed row and corpus.
+ */
+TEST(EvidenceEnvelope,
+     RejectsRehashedM1AdmissionCurrentHoldWithSynchronizedVerdicts) {
+  const std::vector<std::function<std::string(std::string)>> rewrites{
+      [](std::string source) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> first =
+            parse_b1_fixed_record(manifest.fields[8U].payload, 12U);
+        first[3U] = std::to_string(parse_b1_canonical_uint64(first[3U]) + 1U);
+        first[6U] = first[3U];
+        manifest.fields[8U].payload = encode_b1_fixed_record(first);
+        manifest.fields[19U].payload = encode_b1_fixed_record(
+            {"invalid", "invalid", "invalid", "invalid", "invalid", "invalid"});
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      },
+      [](std::string source) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> occurrences =
+            parse_b1_framed_list(manifest.fields[4U].payload);
+        const std::size_t final_warmup_index =
+            kM1ColdI1OriginCount + kM1WarmupI1OriginCount - 1U;
+        std::vector<std::string> final_warmup =
+            parse_b1_fixed_record(occurrences[final_warmup_index], 18U);
+        final_warmup[16U] = "false";
+        occurrences[final_warmup_index] = encode_b1_fixed_record(final_warmup);
+        manifest.fields[4U].payload = encode_test_record_list(occurrences);
+        manifest.fields[19U].payload = encode_b1_fixed_record(
+            {"invalid", "invalid", "invalid", "invalid", "invalid", "invalid"});
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      }};
+
+  for (std::size_t index = 0U; index < rewrites.size(); ++index) {
+    SCOPED_TRACE(index);
+    M1EnvelopeDenominatorOptions options;
+    options.rewrite_m1_inner = rewrites[index];
+    const M1EnvelopeFixture fixture = make_m1_fixture(options);
+    const EvidenceCorpusValidation validation =
+        validate_evidence_corpus(fixture.corpus, fixture.root_digest);
+    EXPECT_EQ(validation.verdict, I1Verdict::Invalid);
+  }
+}
+
+/**
+ * @brief Proves memory underreporting remains Invalid after complete rehash.
+ *
+ * Each rewrite changes the nested temporal snapshots before the enclosing
+ * section, row, bundle, and corpus-root addresses are materialized.  Honest
+ * retained Invalid verdicts keep the address corpus structurally valid, while
+ * strict nested replay must still report the exact Host/device contradiction.
+ *
+ * @throws GoogleTest assertion control and fixture construction failures.
+ */
+TEST(EvidenceEnvelope,
+     KeepsUnderreportedM1MemoryInvalidAfterCompleteOuterRehash) {
+  const auto rewrite_snapshot =
+      [](std::string source,
+         const std::function<void(std::vector<std::string>*)>& rewrite) {
+        B1CanonicalManifest manifest = parse_b1_canonical_manifest(source);
+        std::vector<std::string> snapshots =
+            parse_b1_framed_list(manifest.fields[14U].payload);
+        rewrite(&snapshots);
+        manifest.fields[14U].payload = encode_test_record_list(snapshots);
+        return encode_b1_canonical_manifest(manifest.schema, manifest.fields);
+      };
+  const auto encode_device = [](std::uint64_t reserved,
+                                std::uint64_t high_water) {
+    constexpr std::uint64_t kMemoryLimit = 536870912U;
+    constexpr std::uint64_t kScratchLimit = 268435456U;
+    return encode_b1_fixed_record(
+        {"1", "0", std::to_string(kMemoryLimit), std::to_string(kScratchLimit),
+         std::to_string(reserved), "0", std::to_string(kMemoryLimit - reserved),
+         std::to_string(kScratchLimit), std::to_string(high_water), "0"});
+  };
+  const auto replace_devices =
+      [&encode_device](std::vector<std::string>* snapshots,
+                       const std::array<std::uint64_t, 4U>& reserved,
+                       const std::array<std::uint64_t, 4U>& high_water) {
+        for (std::size_t index = 0U; index < snapshots->size(); ++index) {
+          std::vector<std::string> snapshot =
+              parse_b1_fixed_record((*snapshots)[index], 11U);
+          snapshot[3U] = encode_test_record_list(
+              {encode_device(reserved[index], high_water[index])});
+          (*snapshots)[index] = encode_b1_fixed_record(snapshot);
+        }
+      };
+
+  const std::vector<
+      std::pair<std::function<std::string(std::string)>, std::string>>
+      rewrites{{[rewrite_snapshot](std::string source) {
+                  return rewrite_snapshot(
+                      std::move(source),
+                      [](std::vector<std::string>* snapshots) {
+                        std::vector<std::string> snapshot =
+                            parse_b1_fixed_record((*snapshots)[1U], 11U);
+                        std::vector<std::string> reserved =
+                            parse_b1_fixed_record(snapshot[1U], 5U);
+                        std::vector<std::string> high_water =
+                            parse_b1_fixed_record(snapshot[2U], 5U);
+                        reserved[0U] = "1";
+                        high_water[0U] = "0";
+                        snapshot[1U] = encode_b1_fixed_record(reserved);
+                        snapshot[2U] = encode_b1_fixed_record(high_water);
+                        (*snapshots)[1U] = encode_b1_fixed_record(snapshot);
+                      });
+                },
+                "Host reservation or lifetime high-water is contradictory"},
+               {[rewrite_snapshot, replace_devices](std::string source) {
+                  return rewrite_snapshot(
+                      std::move(source),
+                      [&replace_devices](std::vector<std::string>* snapshots) {
+                        replace_devices(snapshots, {0U, 2U, 0U, 0U},
+                                        {0U, 1U, 2U, 2U});
+                      });
+                },
+                "device reservation or lifetime high-water is contradictory"},
+               {[rewrite_snapshot, replace_devices](std::string source) {
+                  return rewrite_snapshot(
+                      std::move(source),
+                      [&replace_devices](std::vector<std::string>* snapshots) {
+                        replace_devices(snapshots, {0U, 0U, 0U, 0U},
+                                        {0U, 2U, 1U, 2U});
+                      });
+                },
+                "device reservation or lifetime high-water is contradictory"}};
+
+  for (std::size_t index = 0U; index < rewrites.size(); ++index) {
+    SCOPED_TRACE(index);
+    const auto rewritten = std::make_shared<std::string>();
+    M1EnvelopeDenominatorOptions options;
+    options.rewrite_m1_inner = [rewritten, &rewrites,
+                                index](std::string source) {
+      *rewritten = rewrites[index].first(std::move(source));
+      return *rewritten;
+    };
+    const M1EnvelopeFixture fixture = make_m1_fixture(options);
+    EXPECT_EQ(
+        validate_evidence_corpus(fixture.corpus, fixture.root_digest).verdict,
+        I1Verdict::Pass);
+    const M1CanonicalReplay replay =
+        parse_and_recompute_m1_inner_row(*rewritten, 1U);
+    EXPECT_EQ(replay.row.memory_verdict, I1Verdict::Invalid);
+    EXPECT_TRUE(std::any_of(
+        replay.row.validity_reasons.begin(), replay.row.validity_reasons.end(),
+        [&rewrites, index](const std::string& reason) {
+          return reason.find(rewrites[index].second) != std::string::npos;
+        }));
+  }
 }
 
 /**

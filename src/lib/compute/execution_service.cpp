@@ -1111,6 +1111,19 @@ struct ReservedStartProbeState final {
 };
 
 /**
+ * @brief Process-local post-coordinate route-commit failure test state.
+ * @throws Nothing for atomic initialization and access.
+ * @note The state is compiled only into the internal test product and owns no
+ * service, Run, route, reservation, or callback authority.
+ */
+struct RouteCommitFailureProbeState final {
+  /** @brief True while one route-commit rejection remains armed. */
+  std::atomic_bool armed{false};
+  /** @brief True after the armed rejection has been consumed. */
+  std::atomic_bool triggered{false};
+};
+
+/**
  * @brief Process-local start-arbitration observer state for test products.
  * @throws Nothing for atomic initialization and access.
  * @note The callback may coordinate a bounded fixture but owns no service,
@@ -1156,6 +1169,16 @@ struct RetainedOperationStringChargeProbeState final {
  */
 ReservedStartProbeState& reserved_start_probe_state() noexcept {
   static ReservedStartProbeState state;
+  return state;
+}
+
+/**
+ * @brief Returns the unique test-product route-commit failure state.
+ * @return Process-lifetime allocation-free storage.
+ * @throws Nothing.
+ */
+RouteCommitFailureProbeState& route_commit_failure_probe_state() noexcept {
+  static RouteCommitFailureProbeState state;
   return state;
 }
 
@@ -1247,6 +1270,22 @@ bool record_reserved_start_attempt_for_testing(
     attempt.ready_bytes.store(resources.ready_bytes, std::memory_order_release);
   }
   return index == 0U;
+}
+
+/**
+ * @brief Consumes one armed rejection after coordinate reservation.
+ * @return True exactly once between arm and disarm operations.
+ * @throws Nothing.
+ * @note The caller holds the Run terminal arbiter and pool/RunState locks; this
+ * helper performs only finite lock-free atomic operations.
+ */
+bool consume_route_commit_failure_for_testing() noexcept {
+  RouteCommitFailureProbeState& state = route_commit_failure_probe_state();
+  if (!state.armed.exchange(false, std::memory_order_acq_rel)) {
+    return false;
+  }
+  state.triggered.store(true, std::memory_order_release);
+  return true;
 }
 
 /**
@@ -1825,8 +1864,9 @@ class ExecutionService::BoundedReadyStore final {
    * @note Exceptional exits precede every ready/fairness/in-flight mutation.
    * After grant/gate staging, the Run terminal arbiter reserves an observation
    * coordinate and performs the irreversible route commit under one critical
-   * section shared with cancellation acceptance. A rejected route leaves an
-   * unpublished sequence gap, and every staged owner rolls back.
+   * section shared with cancellation acceptance. A rejected route explicitly
+   * aborts the staged observation coordinate, publishes no callback, and rolls
+   * back every staged owner.
    * Immediately before staging, scheduler-selectable Throughput competition
    * is recomputed from real ready entries, Run lifecycle, operation-gate, and
    * physical-route eligibility without treating transient child-grant
@@ -1930,6 +1970,9 @@ class ExecutionService::BoundedReadyStore final {
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
       notify_service_start_arbitration_for_testing(
           testing::ServiceStartArbitrationPoint::BeforeRouteCommit);
+      if (consume_route_commit_failure_for_testing()) {
+        return false;
+      }
 #endif
       return context->routes->commit_start(*context->route, context->device);
     };
@@ -4071,6 +4114,26 @@ void disarm_reserved_start_rollback_probe_for_testing() noexcept {
   reserved_start_probe_state().armed.store(false, std::memory_order_release);
 }
 
+/** @copydoc arm_route_commit_failure_probe_for_testing */
+void arm_route_commit_failure_probe_for_testing() noexcept {
+  RouteCommitFailureProbeState& state = route_commit_failure_probe_state();
+  state.armed.store(false, std::memory_order_release);
+  state.triggered.store(false, std::memory_order_relaxed);
+  state.armed.store(true, std::memory_order_release);
+}
+
+/** @copydoc route_commit_failure_probe_triggered_for_testing */
+bool route_commit_failure_probe_triggered_for_testing() noexcept {
+  return route_commit_failure_probe_state().triggered.load(
+      std::memory_order_acquire);
+}
+
+/** @copydoc disarm_route_commit_failure_probe_for_testing */
+void disarm_route_commit_failure_probe_for_testing() noexcept {
+  route_commit_failure_probe_state().armed.store(false,
+                                                 std::memory_order_release);
+}
+
 /** @copydoc set_service_start_arbitration_observer_for_testing */
 void set_service_start_arbitration_observer_for_testing(
     ServiceStartArbitrationObserver observer, void* context) noexcept {
@@ -6050,6 +6113,10 @@ void ExecutionService::worker_loop(
           !entry->service_start_observation.has_value()) {
         std::terminate();
       }
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+      notify_service_start_arbitration_for_testing(
+          testing::ServiceStartArbitrationPoint::BeforeServiceStartCallback);
+#endif
       observation_sink->on_service_start(
           entry->submission.lease_.descriptor(), entry->submission.identity(),
           entry->policy_service_cost, *entry->service_start_observation,
