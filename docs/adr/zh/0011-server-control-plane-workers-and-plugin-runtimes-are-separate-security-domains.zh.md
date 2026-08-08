@@ -3,13 +3,16 @@
 ## 状态
 
 本决策作为 Issue #97 的目标契约被接受。它冻结 Issues #98 至 #106 所使用的
-tenant、Job、authentication、quota、artifact、worker 与 plugin 边界。它不表示
-Issue #97 已通过剩余 review/integration gate，也不表示任何 server、worker、durable
-artifact、sandbox 或 isolated-plugin runtime 已是当前软件行为。实时交付状态仍由
-所链接的 Issue 与 Project 维护。
+tenant、Job、authentication、quota、artifact、worker 与 plugin 边界。它不表示完整的
+server、worker-manager、durable artifact、sandbox 或 isolated-plugin 目标已是当前软件行为。
+实时交付状态仍由所链接的 Issue 与 Project 维护。
 
-当前 `photospiderd`、process execution domain 与 plugin loader 均保持不变。Issue #97
-只涉及架构与文档。
+当前 `photospiderd`、process execution domain 与 plugin loader 均保持不变。Issue #98
+现在实现了源码私有的单进程 JobSpec 纵向路径，其中包含进程内 Embedded Host worker 和
+process-lifetime artifact receipt。该切片保留本决策的身份与权威顺序，但不能证明
+multi-tenant authorization、server quota、独立 OS process、durable recovery、network
+transport 或 untrusted-plugin isolation。当前行为由
+[单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)定义。
 
 ## 背景
 

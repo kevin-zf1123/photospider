@@ -4,13 +4,19 @@
 
 Accepted as the target contract for Issue #97. This decision freezes the
 tenant, Job, authentication, quota, artifact, worker, and plugin boundaries
-consumed by Issues #98 through #106. It does not claim that Issue #97 has passed
-its remaining review/integration gates or that any server, worker, durable
-artifact, sandbox, or isolated-plugin runtime is current software behavior.
-Live delivery status remains in the linked Issue and Project.
+consumed by Issues #98 through #106. It does not claim that the full server,
+worker-manager, durable artifact, sandbox, or isolated-plugin target is current
+software behavior. Live delivery status remains in the linked Issue and
+Project.
 
 The current `photospiderd`, process execution domain, and plugin loaders remain
-unchanged. Issue #97 is architecture and documentation only.
+unchanged. Issue #98 now implements a source-private single-process JobSpec
+vertical with an in-process Embedded Host worker and process-lifetime artifact
+receipt. That slice preserves this decision's identity and authority ordering,
+but it is not evidence of multi-tenant authorization, server quota, separate OS
+processes, durable recovery, network transport, or untrusted-plugin isolation.
+Current behavior is defined by
+[Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
 
 ## Context
 

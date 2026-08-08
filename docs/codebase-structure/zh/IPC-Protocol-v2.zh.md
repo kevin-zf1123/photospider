@@ -25,6 +25,14 @@ transport、identity、authentication/authorization、isolation 与 lifecycle �
 `OutputStore` 解释成 server authentication、tenant authority、durable Job identity 或
 durable artifact authority。
 
+Issue #98 现在通过独立的源码私有
+[单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)
+实现 immutable JobSpec、submit/query/cancel/completion 与 process-lifetime artifact
+identity。它只通过 internal CMake target 链接，没有 wire codec 或 daemon route，也不组合进
+`photospiderd`。其 `JobId`、`JobAttemptId`、`WorkerInstanceId`、`ArtifactId` 与 commit
+receipt 都是独立类型；protocol-v2 compute id、`OutputArtifactId`、delivery id、session name
+与 output lease 既不序列化也不授权这些身份。因此下文精确的 60-method inventory 保持不变。
+
 Public client header 是 `photospider/ipc/protocol.hpp`、`photospider/ipc/client.hpp` 与
 `photospider/ipc/host.hpp`。它们只暴露 typed owned value 和完整 Host factory，不暴露 JSON
 type、socket descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend ownership。

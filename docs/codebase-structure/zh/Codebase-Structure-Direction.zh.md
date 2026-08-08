@@ -46,6 +46,7 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter。 | 只发现并链接 OpenCV `core`。 |
 | `photospider_policy_sdk` | 可安装、dependency-neutral 的纯 C policy ABI v1 SDK。 | 只携带一个兼容 C11/C++17 的 header，不带 execution/runtime dependency。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 已符合目标静态产品和 public Host 形态，同时把按角色归属的后端源码折叠进单一归档。 |
+| `photospider_single_tenant_job_internal` | 不安装的 Issue #98 immutable JobSpec、Job truth、进程内 attempt worker 与 process-lifetime artifact authority。 | 链接 Embedded Host 产品但不导出 package/API，不进入 `photospiderd`，也不声明 durable storage 或 OS isolation。 |
 | `photospider_cli_common` | `apps/graph_cli/` 下的静态 CLI 命令、TUI、自动补全代码、可复用 `run_graph_cli` 边界，以及两个按角色归属的 benchmark service 翻译单元。 | Benchmark 源只属于这个不可安装的 helper 与完整 CLI closure，不会进入可安装的 `photospider` 静态产品。 |
 | `graph_cli` | 位于 `apps/graph_cli/main.cpp`、只负责 process policy 的入口。 | 禁用 OpenCL，拥有不依赖分配的 fatal exit policy，创建 embedded `Host` adapter，尚无 daemon-client 模式。 |
 | `photospider_ipc_client` | 可安装 static typed Unix IPC client 与完整 Host adapter。 | 为 version 2 全部 60 个方法实现 typed owned call，并通过 `create_ipc_host` 实现当前全部 58 个非析构 Host virtual；不链接 backend，也不暴露 JSON/POSIX type。 |
@@ -698,7 +699,8 @@ scratch 字节。权威的无环依赖表位于
      与 resource surface 现在位于 `apps/graph_cli/`。完整 target closure 还精确拥有
      `src/lib/benchmark/` 下两个按角色归属的 benchmark service 翻译单元；它们只属于不可安装的
      CLI helper/closure，不会进入可安装静态产品。
-   - 现有 backend 实现/私有头位于按角色归属的 `src/lib/**`；production plugin 位于
+   - 现有 backend 实现/私有头位于按角色归属的 `src/lib/**`；源码私有 single-tenant Job
+     control/worker/artifact 切片位于 `src/lib/server/`；production plugin 位于
      `plugins/**`；维护中的测试位于明确的 unit/integration/fixture/support/verification 角色。
    - 物理迁移保持现有 target 与 test 身份，不隐含内部 target rename 或重新设计。
 6. **已完成 daemon slice：** `apps/photospiderd/` 现在拥有 foreground process、self-pipe

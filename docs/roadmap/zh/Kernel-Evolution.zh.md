@@ -1138,10 +1138,11 @@ overlap 与稀疏 I/O sampling 不能制造 fairness 或 memory authority。既�
 ## 服务器与插件隔离
 
 [ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
-冻结了该目标。它是目标契约，不表示 Issue #97 或任何 server/isolation runtime 已完成。
-`photospiderd` 继续作为 IPC protocol v2 所述的同用户本地 workstation sidecar。其 `0700`/`0600`
-路径、session、opaque id、process-global plugin control 与私有 `OutputStore` 都不是 network
-authentication、tenant authority、durable Job state 或 durable artifact authority。
+冻结了该目标。它是目标契约，不能证明完整的多进程 server/isolation runtime 已存在。
+`photospiderd` 继续作为 IPC protocol v2 所述的同用户本地 workstation sidecar。其
+`0700`/`0600` 路径、session、opaque id、process-global plugin control 与私有 `OutputStore`
+都不是 network authentication、tenant authority、durable Job state 或 durable artifact
+authority。
 
 目标拆分为五个安全域：
 
@@ -1216,6 +1217,14 @@ descriptor 与 checked range，而不携带 C++ object、Host callback、raw poi
 credential、artifact capability 或 resource token。可信 Host 代码会在 Run 使用前重新校验全部返回
 descriptor、offset、ownership、size、readiness、identity 与 declared bound。纯 C 能改善 record
 compatibility；它不能让恶意 native code 在进程内安全执行。
+
+当前 Issue #98 基线是源码私有的
+[单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结
+`jobspec-v1`，使用不同的 Job/attempt/worker-lease/artifact 身份，每个 attempt 运行一个新的
+进程内 Embedded Host，在 process-lifetime artifact commit 与取消之间建立顺序，并要求
+settlement 加一份完整回执后 Job 才能成功。它没有把上表任何目标行实现为独立进程、持久服务、
+quota authority、network endpoint 或 untrusted-plugin boundary。Issues #99 至 #106 不得从
+这条首个可执行切片推导各自性质。
 
 Issue #97 只做分配，不吸收后续交付：
 

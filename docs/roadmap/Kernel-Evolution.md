@@ -1412,12 +1412,12 @@ boundary are documented in
 ## Server and Plugin Isolation
 
 [ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
-freezes this target. It is a target contract, not a claim that Issue #97 or any
-server/isolation runtime is complete. `photospiderd` remains the same-user local
-workstation sidecar described by IPC protocol v2. Its `0700`/`0600` paths,
-sessions, opaque ids, process-global plugin controls, and private `OutputStore`
-are not network authentication, tenant authority, durable Job state, or durable
-artifact authority.
+freezes this target. It is a target contract, not evidence that its full
+multi-process server/isolation runtime exists. `photospiderd` remains the
+same-user local workstation sidecar described by IPC protocol v2. Its
+`0700`/`0600` paths, sessions, opaque ids, process-global plugin controls, and
+private `OutputStore` are not network authentication, tenant authority,
+durable Job state, or durable artifact authority.
 
 The target separates five security domains:
 
@@ -1509,6 +1509,16 @@ tokens. Trusted Host code revalidates all returned descriptors, offsets,
 ownership, sizes, readiness, identities, and declared bounds before Run use.
 Pure C improves record compatibility; it does not make hostile native code
 safe in-process.
+
+The current Issue #98 baseline is the source-private
+[Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
+It freezes `jobspec-v1`, uses distinct Job/attempt/worker-lease/artifact
+identities, runs one fresh in-process Embedded Host per attempt, orders
+cancellation against a process-lifetime artifact commit, and gates Job success
+on settlement plus one complete receipt. It does not implement any target row
+above as a separate process, persistent service, quota authority, network
+endpoint, or untrusted-plugin boundary. Issues #99 through #106 must not infer
+their properties from that first executable slice.
 
 Delivery remains allocated rather than absorbed by Issue #97:
 

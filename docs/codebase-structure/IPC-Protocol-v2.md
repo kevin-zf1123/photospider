@@ -29,6 +29,16 @@ its same-UID path protection, session names, opaque ids, process-global plugin
 methods, or private `OutputStore` into server authentication, tenant authority,
 durable Job identity, or durable artifact authority.
 
+Issue #98 now provides a separate source-private
+[single-tenant Job vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md)
+for immutable JobSpec, submit/query/cancel/completion, and process-lifetime
+artifact identity. It is linked only through an internal CMake target, has no
+wire codec or daemon route, and is not composed into `photospiderd`. Its
+`JobId`, `JobAttemptId`, `WorkerInstanceId`, `ArtifactId`, and commit receipt
+are independent types; protocol-v2 compute ids, `OutputArtifactId`, delivery
+ids, session names, and output leases neither serialize nor authorize them.
+The exact 60-method inventory below is therefore unchanged.
+
 The public client headers are `photospider/ipc/protocol.hpp`,
 `photospider/ipc/client.hpp`, and `photospider/ipc/host.hpp`. They expose typed
 owned values plus the complete Host factory and no JSON type, socket descriptor,
