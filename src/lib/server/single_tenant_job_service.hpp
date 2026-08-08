@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "server/job_contract.hpp"  // NOLINT(build/include_subdir)
@@ -52,11 +53,12 @@ bool is_terminal_job_state(JobState state);
  * @note A worker outcome never publishes overall Job state.
  */
 enum class JobAttemptOutcome : std::uint8_t {
-  /** @brief Host compute returned one candidate image after settlement. */
+  /** @brief Settled Host compute returned one image and no failure. */
   Succeeded,
-  /** @brief Resolution, Host, validation, compute, or settlement failed. */
+  /** @brief A typed worker failure returned no image; settlement stays exact.
+   */
   Failed,
-  /** @brief Worker observed control-plane cancellation and settled. */
+  /** @brief Worker observed cancellation, settled, and returned no image. */
   Cancelled,
 };
 
@@ -65,9 +67,9 @@ enum class JobAttemptOutcome : std::uint8_t {
  * @throws Nothing for value operations.
  */
 enum class JobAttemptFailure : std::uint8_t {
-  /** @brief No failure is present. */
+  /** @brief No failure is present; valid only with successful outcome. */
   None,
-  /** @brief Cancellation was observed before authoritative output commit. */
+  /** @brief Cancellation was observed; valid only with cancelled outcome. */
   CancellationObserved,
   /** @brief Assignment or immutable JobSpec validation failed. */
   InvalidAssignment,
@@ -81,9 +83,9 @@ enum class JobAttemptFailure : std::uint8_t {
   Compute,
   /** @brief Loaded graph close/settlement failed. */
   Settlement,
-  /** @brief Control plane rejected a stale or malformed report. */
+  /** @brief Control-plane-only rejection; never valid in a worker report. */
   ReportRejected,
-  /** @brief Artifact validation, copy, hash, or commit failed. */
+  /** @brief Control-plane-only artifact commit failure. */
   ArtifactCommit,
   /** @brief An unexpected exception crossed the worker adapter. */
   Unexpected,
@@ -105,7 +107,11 @@ struct JobAssignment final {
 /**
  * @brief Immutable attempt facts returned by one worker execution.
  * @throws Nothing for default construction; values may allocate on mutation.
- * @note A successful report carries a candidate image, not artifact authority.
+ * @note The semantic shape is closed. `Succeeded` requires `settled=true`,
+ * `failure=None`, and one image. `Cancelled` requires `settled=true`,
+ * `failure=CancellationObserved`, and no image. `Failed` requires a
+ * worker-owned non-None failure and no image; `settled` records actual cleanup.
+ * A successful image remains only a candidate, never artifact authority.
  */
 struct JobAttemptReport final {
   /** @brief Full assignment identity echoed by the reporting worker. */
@@ -245,6 +251,8 @@ class ProcessLifetimeArtifactStore final {
 /**
  * @brief Immutable receipt returned immediately after Job acceptance.
  * @throws Nothing for default construction; copied ids may allocate.
+ * @note Move construction must remain non-throwing so `submit()` cannot report
+ * failure after the Job and its worker have already been accepted.
  */
 struct JobSubmission final {
   /** @brief Newly accepted Job identity. */
@@ -254,6 +262,10 @@ struct JobSubmission final {
   /** @brief Exact first and only Issue #98 assignment tuple. */
   AttemptIdentity assignment;
 };
+
+/** @brief Guards the post-acceptance submission return as a no-throw move. */
+static_assert(std::is_nothrow_move_constructible_v<JobSubmission>,
+              "JobSubmission must move without throwing after acceptance");
 
 /**
  * @brief Copied control-plane truth returned by query or wait.
@@ -333,7 +345,10 @@ class SingleTenantJobService final {
    * @throws std::invalid_argument for invalid JobSpec or service shutdown.
    * @throws std::bad_alloc when Job state or worker setup exhausts memory.
    * @throws std::system_error when process-local worker-thread creation fails.
-   * @note Acceptance creates no retry policy or server quota authority.
+   * @note The complete return value is allocated before acceptance. Acceptance
+   * linearizes only after state insertion and successful worker-thread start;
+   * the remaining return path is a non-throwing move. Acceptance creates no
+   * retry policy or server quota authority.
    */
   JobSubmission submit(JobSpec spec);
 
@@ -401,8 +416,11 @@ class SingleTenantJobService final {
    * @param report Immutable attempt facts and candidate image.
    * @return Nothing after terminal state derivation and observer notification.
    * @throws Nothing; artifact exceptions become a typed failed Job.
-   * @note A rejected report cannot establish settlement for the retained
-   * current assignment even when its untrusted `settled` field is true.
+   * @note Full identity, enum, outcome/failure/settlement/image shape, and
+   * cancellation-context validation precede copying any report fact or
+   * cancellation adjudication. A rejected report cannot establish settlement
+   * for the retained current assignment even when its untrusted `settled`
+   * field is true.
    */
   void apply_report(const AttemptIdentity& expected,
                     JobAttemptReport report) noexcept;

@@ -89,6 +89,7 @@ std::string host_failure_message(std::string_view stage,
 
 }  // namespace
 
+/** @copydoc ps::server::EmbeddedHostJobWorker::EmbeddedHostJobWorker */
 EmbeddedHostJobWorker::EmbeddedHostJobWorker(
     std::shared_ptr<const GraphArtifactResolver> resolver)
     : resolver_(std::move(resolver)) {
@@ -97,6 +98,7 @@ EmbeddedHostJobWorker::EmbeddedHostJobWorker(
   }
 }
 
+/** @copydoc ps::server::EmbeddedHostJobWorker::execute */
 JobAttemptReport EmbeddedHostJobWorker::execute(
     const JobAssignment& assignment,
     const std::function<bool()>& cancellation_requested) {
@@ -275,6 +277,7 @@ JobAttemptReport EmbeddedHostJobWorker::execute(
   return report;
 }
 
+/** @copydoc EmbeddedHostJobWorkerFactory::EmbeddedHostJobWorkerFactory */
 EmbeddedHostJobWorkerFactory::EmbeddedHostJobWorkerFactory(
     std::shared_ptr<const GraphArtifactResolver> resolver)
     : resolver_(std::move(resolver)) {
@@ -283,6 +286,7 @@ EmbeddedHostJobWorkerFactory::EmbeddedHostJobWorkerFactory(
   }
 }
 
+/** @copydoc ps::server::EmbeddedHostJobWorkerFactory::create */
 std::unique_ptr<JobAttemptWorker> EmbeddedHostJobWorkerFactory::create(
     const JobAssignment& assignment) {
   validate_attempt_identity(assignment.identity);

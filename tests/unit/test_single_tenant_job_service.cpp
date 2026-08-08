@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -150,6 +151,100 @@ JobAttemptReport successful_report(const JobAssignment& assignment) {
   return report;
 }
 
+/** @brief Closed malformed report cases exercised at the control boundary. */
+enum class MalformedReportShape : std::uint8_t {
+  /** @brief Successful outcome without settlement proof. */
+  SucceededUnsettled,
+  /** @brief Successful outcome with a failure category. */
+  SucceededWithFailure,
+  /** @brief Failed outcome without a failure category. */
+  FailedWithoutFailure,
+  /** @brief Failed outcome that improperly carries an image. */
+  FailedWithImage,
+  /** @brief Failed outcome using the cancellation-only category. */
+  FailedWithCancellationFailure,
+  /** @brief Failed outcome using the control-plane rejection category. */
+  FailedWithReportRejected,
+  /** @brief Failed outcome using the control-plane commit category. */
+  FailedWithArtifactCommit,
+  /** @brief Cancelled outcome without settlement proof. */
+  CancelledUnsettled,
+  /** @brief Cancelled outcome using a non-cancellation failure. */
+  CancelledWithWorkerFailure,
+  /** @brief Cancelled outcome that improperly carries an image. */
+  CancelledWithImage,
+  /** @brief Outcome containing an invalid underlying enum representation. */
+  InvalidOutcome,
+  /** @brief Failure containing an invalid underlying enum representation. */
+  InvalidFailure,
+};
+
+/**
+ * @brief Builds one identity-correct but semantically malformed worker report.
+ * @param assignment Exact current assignment to preserve identity fencing.
+ * @param shape Malformed outcome/settlement/failure/image combination.
+ * @return Candidate report that the control plane must reject fail closed.
+ * @throws std::invalid_argument for an invalid shape enum representation.
+ * @throws std::bad_alloc when image or identity construction exhausts memory.
+ */
+JobAttemptReport malformed_report(const JobAssignment& assignment,
+                                  MalformedReportShape shape) {
+  JobAttemptReport report = successful_report(assignment);
+  switch (shape) {
+    case MalformedReportShape::SucceededUnsettled:
+      report.settled = false;
+      return report;
+    case MalformedReportShape::SucceededWithFailure:
+      report.failure = JobAttemptFailure::Compute;
+      return report;
+    case MalformedReportShape::FailedWithoutFailure:
+      report.outcome = JobAttemptOutcome::Failed;
+      report.image.reset();
+      return report;
+    case MalformedReportShape::FailedWithImage:
+      report.outcome = JobAttemptOutcome::Failed;
+      report.failure = JobAttemptFailure::Compute;
+      return report;
+    case MalformedReportShape::FailedWithCancellationFailure:
+      report.outcome = JobAttemptOutcome::Failed;
+      report.failure = JobAttemptFailure::CancellationObserved;
+      report.image.reset();
+      return report;
+    case MalformedReportShape::FailedWithReportRejected:
+      report.outcome = JobAttemptOutcome::Failed;
+      report.failure = JobAttemptFailure::ReportRejected;
+      report.image.reset();
+      return report;
+    case MalformedReportShape::FailedWithArtifactCommit:
+      report.outcome = JobAttemptOutcome::Failed;
+      report.failure = JobAttemptFailure::ArtifactCommit;
+      report.image.reset();
+      return report;
+    case MalformedReportShape::CancelledUnsettled:
+      report.outcome = JobAttemptOutcome::Cancelled;
+      report.settled = false;
+      report.failure = JobAttemptFailure::CancellationObserved;
+      report.image.reset();
+      return report;
+    case MalformedReportShape::CancelledWithWorkerFailure:
+      report.outcome = JobAttemptOutcome::Cancelled;
+      report.failure = JobAttemptFailure::Compute;
+      report.image.reset();
+      return report;
+    case MalformedReportShape::CancelledWithImage:
+      report.outcome = JobAttemptOutcome::Cancelled;
+      report.failure = JobAttemptFailure::CancellationObserved;
+      return report;
+    case MalformedReportShape::InvalidOutcome:
+      report.outcome = static_cast<JobAttemptOutcome>(0xffU);
+      return report;
+    case MalformedReportShape::InvalidFailure:
+      report.failure = static_cast<JobAttemptFailure>(0xffU);
+      return report;
+  }
+  throw std::invalid_argument("malformed report shape is invalid");
+}
+
 /**
  * @brief Coordinates one deliberately blocked worker with its test thread.
  * @throws Synchronization failures from standard primitives.
@@ -201,6 +296,61 @@ class WorkerGate final {
   bool entered_ = false;
   /** @brief Whether the test released the worker. */
   bool released_ = false;
+};
+
+/**
+ * @brief Releases one worker gate before later-declared service destruction.
+ *
+ * Tests construct this guard after `SingleTenantJobService`, so fatal Google
+ * Test assertions and exception unwinding release the blocked worker before
+ * the service destructor joins it.
+ *
+ * @throws Nothing; synchronization failure during cleanup terminates because
+ * allowing service destruction to join a permanently blocked worker cannot
+ * recover test-process progress.
+ */
+class WorkerGateReleaseGuard final {
+ public:
+  /**
+   * @brief Retains one gate for monotonic scope-exit release.
+   * @param gate Gate shared with the blocked worker; null creates a disarmed
+   * guard.
+   * @throws Nothing.
+   */
+  explicit WorkerGateReleaseGuard(std::shared_ptr<WorkerGate> gate) noexcept
+      : gate_(std::move(gate)) {}
+
+  /**
+   * @brief Releases an armed gate before the service join can run.
+   * @throws Nothing; terminates on an unexpected synchronization failure.
+   */
+  ~WorkerGateReleaseGuard() noexcept { release(); }
+
+  /** @brief Prevents duplicate ownership of one cleanup obligation. */
+  WorkerGateReleaseGuard(const WorkerGateReleaseGuard&) = delete;
+  /** @brief Prevents duplicate assignment of one cleanup obligation. */
+  WorkerGateReleaseGuard& operator=(const WorkerGateReleaseGuard&) = delete;
+
+  /**
+   * @brief Releases the gate immediately and disarms scope-exit cleanup.
+   * @return Nothing.
+   * @throws Nothing; terminates on an unexpected synchronization failure.
+   */
+  void release() noexcept {
+    if (gate_ == nullptr) {
+      return;
+    }
+    try {
+      gate_->release();
+      gate_.reset();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  /** @brief Armed gate owner, or null after successful explicit release. */
+  std::shared_ptr<WorkerGate> gate_;
 };
 
 /** @brief Stage at which a test double raises its configured exception. */
@@ -433,6 +583,121 @@ TEST(SingleTenantJobService, MissingRequiredImageFailsClosed) {
       service.wait_for(submission.job_id, std::chrono::seconds(2));
   ASSERT_TRUE(terminal.has_value());
   EXPECT_EQ(terminal->state, JobState::Failed);
+  ASSERT_TRUE(terminal->attempt_outcome.has_value());
+  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_FALSE(terminal->attempt_settled);
+  EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
+  EXPECT_FALSE(terminal->output_receipt.has_value());
+}
+
+TEST(SingleTenantJobService, MalformedReportShapesFailClosedBeforeFactCopy) {
+  constexpr std::array<MalformedReportShape, 12U> kShapes{
+      MalformedReportShape::SucceededUnsettled,
+      MalformedReportShape::SucceededWithFailure,
+      MalformedReportShape::FailedWithoutFailure,
+      MalformedReportShape::FailedWithImage,
+      MalformedReportShape::FailedWithCancellationFailure,
+      MalformedReportShape::FailedWithReportRejected,
+      MalformedReportShape::FailedWithArtifactCommit,
+      MalformedReportShape::CancelledUnsettled,
+      MalformedReportShape::CancelledWithWorkerFailure,
+      MalformedReportShape::CancelledWithImage,
+      MalformedReportShape::InvalidOutcome,
+      MalformedReportShape::InvalidFailure,
+  };
+  for (const MalformedReportShape shape : kShapes) {
+    SCOPED_TRACE(::testing::Message()
+                 << "shape=" << static_cast<unsigned int>(shape));
+    auto factory = std::make_shared<FunctionWorkerFactory>(
+        [shape](const JobAssignment& assignment,
+                const std::function<bool()>& cancellation_requested) {
+          (void)cancellation_requested;
+          return malformed_report(assignment, shape);
+        });
+    SingleTenantJobService service(TenantId("tenant.test"), factory);
+    const JobSubmission submission = service.submit(JobSpec(
+        GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U));
+    const std::optional<JobSnapshot> terminal =
+        service.wait_for(submission.job_id, std::chrono::seconds(2));
+
+    ASSERT_TRUE(terminal.has_value());
+    EXPECT_EQ(terminal->state, JobState::Failed);
+    ASSERT_TRUE(terminal->attempt_outcome.has_value());
+    EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+    EXPECT_FALSE(terminal->attempt_settled);
+    EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
+    EXPECT_FALSE(terminal->output_receipt.has_value());
+  }
+}
+
+TEST(SingleTenantJobService,
+     LegalFailedReportShapesPreserveFailureAndSettlement) {
+  constexpr std::array<JobAttemptFailure, 7U> kWorkerFailures{
+      JobAttemptFailure::InvalidAssignment, JobAttemptFailure::GraphResolution,
+      JobAttemptFailure::HostSetup,         JobAttemptFailure::GraphLoad,
+      JobAttemptFailure::Compute,           JobAttemptFailure::Settlement,
+      JobAttemptFailure::Unexpected,
+  };
+  constexpr std::array<bool, 2U> kSettlementFacts{false, true};
+  for (const JobAttemptFailure failure : kWorkerFailures) {
+    for (const bool settled : kSettlementFacts) {
+      SCOPED_TRACE(::testing::Message()
+                   << "failure=" << static_cast<unsigned int>(failure)
+                   << ", settled=" << settled);
+      auto factory = std::make_shared<FunctionWorkerFactory>(
+          [failure, settled](
+              const JobAssignment& assignment,
+              const std::function<bool()>& cancellation_requested) {
+            (void)cancellation_requested;
+            JobAttemptReport report;
+            report.identity = assignment.identity;
+            report.outcome = JobAttemptOutcome::Failed;
+            report.settled = settled;
+            report.failure = failure;
+            report.message = "typed worker failure";
+            return report;
+          });
+      SingleTenantJobService service(TenantId("tenant.test"), factory);
+      const JobSubmission submission = service.submit(JobSpec(
+          GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U));
+      const std::optional<JobSnapshot> terminal =
+          service.wait_for(submission.job_id, std::chrono::seconds(2));
+
+      ASSERT_TRUE(terminal.has_value());
+      EXPECT_EQ(terminal->state, JobState::Failed);
+      ASSERT_TRUE(terminal->attempt_outcome.has_value());
+      EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+      EXPECT_EQ(terminal->attempt_settled, settled);
+      EXPECT_EQ(terminal->failure, failure);
+      EXPECT_FALSE(terminal->output_receipt.has_value());
+    }
+  }
+}
+
+TEST(SingleTenantJobService,
+     CancellationReportWithoutControlIntentFailsClosed) {
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [](const JobAssignment& assignment,
+         const std::function<bool()>& cancellation_requested) {
+        (void)cancellation_requested;
+        JobAttemptReport report;
+        report.identity = assignment.identity;
+        report.outcome = JobAttemptOutcome::Cancelled;
+        report.settled = true;
+        report.failure = JobAttemptFailure::CancellationObserved;
+        return report;
+      });
+  SingleTenantJobService service(TenantId("tenant.test"), factory);
+  const JobSubmission submission = service.submit(JobSpec(
+      GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U));
+  const std::optional<JobSnapshot> terminal =
+      service.wait_for(submission.job_id, std::chrono::seconds(2));
+
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_EQ(terminal->state, JobState::Failed);
+  ASSERT_TRUE(terminal->attempt_outcome.has_value());
+  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_FALSE(terminal->attempt_settled);
   EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
   EXPECT_FALSE(terminal->output_receipt.has_value());
 }
@@ -528,9 +793,10 @@ TEST(SingleTenantJobService,
   SingleTenantJobService service(TenantId("tenant.test"), factory);
   const JobSubmission submission = service.submit(JobSpec(
       GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U));
+  WorkerGateReleaseGuard gate_release(gate);
   ASSERT_TRUE(gate->wait_until_entered());
   EXPECT_TRUE(service.cancel(submission.job_id));
-  gate->release();
+  gate_release.release();
 
   const std::optional<JobSnapshot> terminal =
       service.wait_for(submission.job_id, std::chrono::seconds(2));
@@ -553,6 +819,7 @@ TEST(SingleTenantJobService, CancellationBeforeCommitWaitsForSettlement) {
   SingleTenantJobService service(TenantId("tenant.test"), factory);
   const JobSubmission submission = service.submit(JobSpec(
       GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U));
+  WorkerGateReleaseGuard gate_release(gate);
   ASSERT_TRUE(gate->wait_until_entered());
   EXPECT_TRUE(service.cancel(submission.job_id));
   const std::optional<JobSnapshot> cancelling =
@@ -561,7 +828,7 @@ TEST(SingleTenantJobService, CancellationBeforeCommitWaitsForSettlement) {
   EXPECT_EQ(cancelling->state, JobState::Cancelling);
   EXPECT_FALSE(cancelling->attempt_settled);
 
-  gate->release();
+  gate_release.release();
   const std::optional<JobSnapshot> terminal =
       service.wait_for(submission.job_id, std::chrono::seconds(2));
   ASSERT_TRUE(terminal.has_value());
@@ -569,6 +836,36 @@ TEST(SingleTenantJobService, CancellationBeforeCommitWaitsForSettlement) {
   EXPECT_TRUE(terminal->attempt_settled);
   EXPECT_FALSE(terminal->output_receipt.has_value());
   EXPECT_FALSE(service.cancel(submission.job_id));
+}
+
+TEST(SingleTenantJobService,
+     CancellationCannotTurnMalformedSettledReportIntoCancelled) {
+  auto gate = std::make_shared<WorkerGate>();
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [gate](const JobAssignment& assignment,
+             const std::function<bool()>& cancellation_requested) {
+        gate->enter_and_wait();
+        EXPECT_TRUE(cancellation_requested());
+        return malformed_report(assignment,
+                                MalformedReportShape::FailedWithoutFailure);
+      });
+  SingleTenantJobService service(TenantId("tenant.test"), factory);
+  const JobSubmission submission = service.submit(JobSpec(
+      GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U));
+  WorkerGateReleaseGuard gate_release(gate);
+  ASSERT_TRUE(gate->wait_until_entered());
+  EXPECT_TRUE(service.cancel(submission.job_id));
+  gate_release.release();
+
+  const std::optional<JobSnapshot> terminal =
+      service.wait_for(submission.job_id, std::chrono::seconds(2));
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_EQ(terminal->state, JobState::Failed);
+  ASSERT_TRUE(terminal->attempt_outcome.has_value());
+  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_FALSE(terminal->attempt_settled);
+  EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
+  EXPECT_FALSE(terminal->output_receipt.has_value());
 }
 
 }  // namespace

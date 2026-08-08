@@ -11,6 +11,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -110,8 +111,79 @@ std::string unexpected_message(const std::exception& error) {
   return std::string("worker execution raised: ") + error.what();
 }
 
+/**
+ * @brief Reports whether a failure category may originate from a failed
+ * worker report.
+ * @param failure Candidate failure enum, including potentially invalid
+ * underlying representations.
+ * @return True only for a worker-owned failure accepted with `Failed`.
+ * @throws Nothing.
+ * @note `None`, `CancellationObserved`, `ReportRejected`, and
+ * `ArtifactCommit` belong to other outcome or control-plane domains.
+ */
+bool is_worker_owned_failure(JobAttemptFailure failure) noexcept {
+  switch (failure) {
+    case JobAttemptFailure::InvalidAssignment:
+    case JobAttemptFailure::GraphResolution:
+    case JobAttemptFailure::HostSetup:
+    case JobAttemptFailure::GraphLoad:
+    case JobAttemptFailure::Compute:
+    case JobAttemptFailure::Settlement:
+    case JobAttemptFailure::Unexpected:
+      return true;
+    case JobAttemptFailure::None:
+    case JobAttemptFailure::CancellationObserved:
+    case JobAttemptFailure::ReportRejected:
+    case JobAttemptFailure::ArtifactCommit:
+      return false;
+  }
+  return false;
+}
+
+/**
+ * @brief Validates the closed outcome/settlement/failure/image report shape.
+ * @param report Identity-fenced candidate report.
+ * @return True only for one complete supported worker report shape.
+ * @throws Nothing.
+ * @note Diagnostics are intentionally unconstrained. Failed reports preserve
+ * either settlement value because it records the worker's actual cleanup.
+ */
+bool has_valid_worker_report_shape(const JobAttemptReport& report) noexcept {
+  switch (report.outcome) {
+    case JobAttemptOutcome::Succeeded:
+      return report.settled && report.failure == JobAttemptFailure::None &&
+             report.image.has_value();
+    case JobAttemptOutcome::Failed:
+      return is_worker_owned_failure(report.failure) &&
+             !report.image.has_value();
+    case JobAttemptOutcome::Cancelled:
+      return report.settled &&
+             report.failure == JobAttemptFailure::CancellationObserved &&
+             !report.image.has_value();
+  }
+  return false;
+}
+
+/**
+ * @brief Publishes one fail-closed report rejection without trusting facts.
+ * @param job Mutable current Job record held under the service mutex.
+ * @param message Stable control-plane diagnostic.
+ * @return Nothing.
+ * @throws std::bad_alloc when storing the diagnostic exhausts memory.
+ * @note The rejected report cannot establish outcome, settlement, or receipt.
+ */
+void reject_report(JobSnapshot& job, std::string_view message) {
+  job.state = JobState::Failed;
+  job.attempt_outcome = JobAttemptOutcome::Failed;
+  job.attempt_settled = false;
+  job.failure = JobAttemptFailure::ReportRejected;
+  job.message.assign(message);
+  job.output_receipt.reset();
+}
+
 }  // namespace
 
+/** @copydoc ps::server::is_terminal_job_state */
 bool is_terminal_job_state(JobState state) {
   switch (state) {
     case JobState::Queued:
@@ -126,6 +198,7 @@ bool is_terminal_job_state(JobState state) {
   throw std::invalid_argument("Job state is invalid");
 }
 
+/** @copydoc ps::server::ProcessLifetimeArtifactStore::commit */
 OutputCommitReceipt ProcessLifetimeArtifactStore::commit(
     const ArtifactCommitRequest& request) {
   validate_attempt_identity(request.attempt);
@@ -180,6 +253,7 @@ OutputCommitReceipt ProcessLifetimeArtifactStore::commit(
   return receipt;
 }
 
+/** @copydoc ps::server::ProcessLifetimeArtifactStore::find */
 std::shared_ptr<const ArtifactRecord> ProcessLifetimeArtifactStore::find(
     const ArtifactId& artifact_id) const {
   if (!artifact_id.valid()) {
@@ -190,11 +264,13 @@ std::shared_ptr<const ArtifactRecord> ProcessLifetimeArtifactStore::find(
   return found == records_.end() ? nullptr : found->second;
 }
 
+/** @copydoc ps::server::ProcessLifetimeArtifactStore::size */
 std::size_t ProcessLifetimeArtifactStore::size() const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   return records_.size();
 }
 
+/** @copydoc ps::server::SingleTenantJobService::SingleTenantJobService */
 SingleTenantJobService::SingleTenantJobService(
     TenantId tenant_id, std::shared_ptr<JobAttemptWorkerFactory> worker_factory)
     : tenant_id_(std::move(tenant_id)),
@@ -207,6 +283,7 @@ SingleTenantJobService::SingleTenantJobService(
   }
 }
 
+/** @copydoc ps::server::SingleTenantJobService::~SingleTenantJobService */
 SingleTenantJobService::~SingleTenantJobService() noexcept {
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -227,6 +304,7 @@ SingleTenantJobService::~SingleTenantJobService() noexcept {
   }
 }
 
+/** @copydoc ps::server::SingleTenantJobService::submit */
 JobSubmission SingleTenantJobService::submit(JobSpec spec) {
   validate_job_spec(spec);
   auto immutable_spec = std::make_shared<const JobSpec>(std::move(spec));
@@ -240,6 +318,10 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
   assignment.identity.worker_lease_generation = WorkerLeaseGeneration{1U};
   assignment.spec = immutable_spec;
   validate_attempt_identity(assignment.identity);
+
+  JobSubmission submission{assignment.identity.job_id,
+                           assignment.identity.job_spec_digest,
+                           assignment.identity};
 
   JobSnapshot snapshot;
   snapshot.tenant_id = tenant_id_;
@@ -265,11 +347,10 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
     throw;
   }
 
-  return JobSubmission{assignment.identity.job_id,
-                       assignment.identity.job_spec_digest,
-                       assignment.identity};
+  return submission;
 }
 
+/** @copydoc ps::server::SingleTenantJobService::query */
 std::optional<JobSnapshot> SingleTenantJobService::query(
     const JobId& job_id) const {
   if (!job_id.valid()) {
@@ -283,6 +364,7 @@ std::optional<JobSnapshot> SingleTenantJobService::query(
   return found->second;
 }
 
+/** @copydoc ps::server::SingleTenantJobService::wait_for */
 std::optional<JobSnapshot> SingleTenantJobService::wait_for(
     const JobId& job_id, std::chrono::milliseconds timeout) const {
   if (timeout.count() < 0) {
@@ -307,6 +389,7 @@ std::optional<JobSnapshot> SingleTenantJobService::wait_for(
                               : std::optional<JobSnapshot>(found->second);
 }
 
+/** @copydoc ps::server::SingleTenantJobService::cancel */
 bool SingleTenantJobService::cancel(const JobId& job_id) noexcept {
   if (!job_id.valid()) {
     return false;
@@ -325,11 +408,13 @@ bool SingleTenantJobService::cancel(const JobId& job_id) noexcept {
   return true;
 }
 
+/** @copydoc ps::server::SingleTenantJobService::find_artifact */
 std::shared_ptr<const ArtifactRecord> SingleTenantJobService::find_artifact(
     const ArtifactId& artifact_id) const {
   return artifact_store_.find(artifact_id);
 }
 
+/** @copydoc ps::server::SingleTenantJobService::run_assignment */
 void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
   try {
     {
@@ -387,6 +472,7 @@ void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
   }
 }
 
+/** @copydoc ps::server::SingleTenantJobService::cancellation_requested_for */
 bool SingleTenantJobService::cancellation_requested_for(
     const JobId& job_id) const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -395,6 +481,7 @@ bool SingleTenantJobService::cancellation_requested_for(
          found->second.cancellation_requested;
 }
 
+/** @copydoc ps::server::SingleTenantJobService::apply_report */
 void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
                                           JobAttemptReport report) noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -416,12 +503,20 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
     }
   }();
   if (!identity_valid) {
-    job.state = JobState::Failed;
-    job.attempt_outcome = JobAttemptOutcome::Failed;
-    job.attempt_settled = false;
-    job.failure = JobAttemptFailure::ReportRejected;
-    job.message = "worker report identity does not match current assignment";
-    job.output_receipt.reset();
+    reject_report(job,
+                  "worker report identity does not match current assignment");
+    condition_.notify_all();
+    return;
+  }
+  if (!has_valid_worker_report_shape(report)) {
+    reject_report(job, "worker report has an invalid semantic shape");
+    condition_.notify_all();
+    return;
+  }
+  if (report.outcome == JobAttemptOutcome::Cancelled &&
+      !job.cancellation_requested) {
+    reject_report(job,
+                  "worker reported cancellation without control-plane intent");
     condition_.notify_all();
     return;
   }
@@ -448,61 +543,32 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
     return;
   }
 
-  switch (report.outcome) {
-    case JobAttemptOutcome::Cancelled:
+  if (report.outcome == JobAttemptOutcome::Failed) {
+    job.state = JobState::Failed;
+    if (job.message.empty()) {
+      job.message = "worker attempt failed without a diagnostic";
+    }
+  } else {
+    try {
+      const OutputCommitReceipt receipt =
+          artifact_store_.commit(ArtifactCommitRequest{
+              job.assignment, job.spec->output_slot_id(), *report.image});
+      if (receipt.attempt != job.assignment ||
+          receipt.output_slot_id != job.spec->output_slot_id() ||
+          !receipt.artifact_id.valid() || !receipt.output_commit_id.valid() ||
+          receipt.achieved_durability != job.spec->requested_durability()) {
+        throw std::logic_error("artifact receipt failed identity validation");
+      }
+      job.output_receipt = receipt;
+      job.state = JobState::Succeeded;
+      job.failure = JobAttemptFailure::None;
+      job.message.clear();
+    } catch (const std::exception& error) {
+      job.output_receipt.reset();
       job.state = JobState::Failed;
-      job.failure = JobAttemptFailure::ReportRejected;
-      job.message = "worker reported cancellation without control-plane intent";
-      break;
-    case JobAttemptOutcome::Failed:
-      job.state = JobState::Failed;
-      if (job.failure == JobAttemptFailure::None) {
-        job.failure = JobAttemptFailure::Unexpected;
-      }
-      if (job.message.empty()) {
-        job.message = "worker attempt failed without a diagnostic";
-      }
-      break;
-    case JobAttemptOutcome::Succeeded:
-      if (!report.settled) {
-        job.state = JobState::Failed;
-        job.failure = JobAttemptFailure::Settlement;
-        job.message = "successful worker report did not prove settlement";
-        break;
-      }
-      if (report.failure != JobAttemptFailure::None ||
-          !report.image.has_value()) {
-        job.state = JobState::Failed;
-        job.failure = JobAttemptFailure::ReportRejected;
-        job.message = "successful worker report is missing its required image";
-        break;
-      }
-      try {
-        const OutputCommitReceipt receipt =
-            artifact_store_.commit(ArtifactCommitRequest{
-                job.assignment, job.spec->output_slot_id(), *report.image});
-        if (receipt.attempt != job.assignment ||
-            receipt.output_slot_id != job.spec->output_slot_id() ||
-            !receipt.artifact_id.valid() || !receipt.output_commit_id.valid() ||
-            receipt.achieved_durability != job.spec->requested_durability()) {
-          throw std::logic_error("artifact receipt failed identity validation");
-        }
-        job.output_receipt = receipt;
-        job.state = JobState::Succeeded;
-        job.failure = JobAttemptFailure::None;
-        job.message.clear();
-      } catch (const std::exception& error) {
-        job.output_receipt.reset();
-        job.state = JobState::Failed;
-        job.failure = JobAttemptFailure::ArtifactCommit;
-        job.message = std::string("artifact commit failed: ") + error.what();
-      }
-      break;
-    default:
-      job.state = JobState::Failed;
-      job.failure = JobAttemptFailure::ReportRejected;
-      job.message = "worker report outcome is invalid";
-      break;
+      job.failure = JobAttemptFailure::ArtifactCommit;
+      job.message = std::string("artifact commit failed: ") + error.what();
+    }
   }
   condition_.notify_all();
 }

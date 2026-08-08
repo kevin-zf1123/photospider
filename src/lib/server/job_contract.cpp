@@ -294,7 +294,9 @@ std::string canonical_job_spec(const GraphArtifactId& graph, int target_node,
  * @param bytes Borrowed bytes, null only when size is zero.
  * @param size Number of bytes.
  * @return Exact 32-byte digest.
- * @throws As `Sha256::update` and `Sha256::finish`.
+ * @throws std::invalid_argument for null nonempty input.
+ * @throws std::overflow_error when the encoded bit length would overflow.
+ * @throws std::logic_error if the internal single-use lifecycle is violated.
  */
 std::array<std::byte, 32U> sha256(const std::byte* bytes, std::size_t size) {
   Sha256 hash;
@@ -304,6 +306,7 @@ std::array<std::byte, 32U> sha256(const std::byte* bytes, std::size_t size) {
 
 }  // namespace
 
+/** @copydoc ps::server::AttemptIdentity::operator== */
 bool AttemptIdentity::operator==(const AttemptIdentity& other) const noexcept {
   return tenant_id == other.tenant_id && job_id == other.job_id &&
          job_spec_digest == other.job_spec_digest &&
@@ -312,6 +315,7 @@ bool AttemptIdentity::operator==(const AttemptIdentity& other) const noexcept {
          worker_lease_generation == other.worker_lease_generation;
 }
 
+/** @copydoc ps::server::JobSpec::JobSpec */
 JobSpec::JobSpec(GraphArtifactId graph_artifact_id, int target_node,
                  OutputSlotId output_slot_id, std::uint32_t maximum_parallelism,
                  JobExecutionProfile execution_profile,
@@ -329,6 +333,7 @@ JobSpec::JobSpec(GraphArtifactId graph_artifact_id, int target_node,
           reinterpret_cast<const std::byte*>(canonical_bytes_.data()),
           canonical_bytes_.size())) {}
 
+/** @copydoc ps::server::ArtifactImageDescriptor::operator== */
 bool ArtifactImageDescriptor::operator==(
     const ArtifactImageDescriptor& other) const noexcept {
   return width == other.width && height == other.height &&
@@ -336,12 +341,14 @@ bool ArtifactImageDescriptor::operator==(
          row_bytes == other.row_bytes && payload_bytes == other.payload_bytes;
 }
 
+/** @copydoc ps::server::hash_job_spec_bytes */
 JobSpecDigest hash_job_spec_bytes(const std::byte* bytes, std::size_t size) {
   JobSpecDigest digest;
   digest.bytes = sha256(bytes, size);
   return digest;
 }
 
+/** @copydoc ps::server::hash_artifact_content */
 ArtifactContentDigest hash_artifact_content(const std::byte* bytes,
                                             std::size_t size) {
   ArtifactContentDigest digest;
@@ -349,6 +356,7 @@ ArtifactContentDigest hash_artifact_content(const std::byte* bytes,
   return digest;
 }
 
+/** @copydoc ps::server::validate_attempt_identity */
 void validate_attempt_identity(const AttemptIdentity& identity) {
   if (!identity.tenant_id.valid() || !identity.job_id.valid() ||
       !identity.attempt_id.valid() || !identity.worker_instance_id.valid() ||
@@ -357,6 +365,7 @@ void validate_attempt_identity(const AttemptIdentity& identity) {
   }
 }
 
+/** @copydoc ps::server::validate_job_spec */
 void validate_job_spec(const JobSpec& spec) {
   const std::string canonical =
       canonical_job_spec(spec.graph_artifact_id(), spec.target_node(),
