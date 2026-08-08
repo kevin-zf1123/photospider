@@ -2794,9 +2794,10 @@ check exact C/W/B/U arithmetic, the 1/7/40 origin grid, fixed warmup offers,
 carryover/current-hold evidence, independent producer-local cycles, all five
 axes, unknown-enum fail-closed behavior, legal zero-based task zero, finite
 lock-free callback publication, sequence/time monotonicity under concurrent
-reservation, same-coordinate fanout, unchanged base-only-I1/full-B1 environment delegation,
-canonical golden digests, functional keys, exact-one/DAG resolution, and
-incomplete live authority. They also reject substituted isolated-I1 sources,
+reservation, mirror-before-authority same-coordinate fanout for every product
+callback, unchanged base-only-I1/full-B1 environment delegation, canonical
+golden digests, functional keys, exact-one/DAG resolution, and incomplete live
+authority. They also reject substituted isolated-I1 sources,
 omitted isolated-B1 outcomes, omitted M1 raw windows, outer/inner claim
 tampering, denominator/source mismatches, missing/duplicate/reordered/unknown/
 over-limit I/O transitions, and nonzero final I/O state. A dedicated regression
@@ -2805,10 +2806,14 @@ short accepted/settled task still raises the event-derived high-water. The
 observer-boundary regressions pause after coordinate reserve, after route
 commit, and after slot claim; they prove that unchanged copied-record counts
 cannot satisfy the reservation-entry/completion/claim/published cut. A
-test-product-only route-commit rejection proves explicit coordinate abort, no
-start publication, successful retry, and exact final frontier closure. The
-static product consumer smoke forbids that probe symbol in the production
-archive. Lifecycle replay regressions use one
+centralized spy enumerates all eleven fanout product callbacks and requires the
+mirror/authority pair order for each one. A deterministic barrier before mirror
+publication further proves that the M1 reservation-completion frontier remains
+open and the cut remains unstable until the same-coordinate source history is
+visible. A test-product-only route-commit rejection proves explicit coordinate
+abort, no start publication, successful retry, and exact final frontier
+closure. The static product consumer smoke forbids that probe symbol in the
+production archive. Lifecycle replay regressions use one
 producer-faithful multi-Graph history with registration and candidate rollback,
 group plus standalone admission, and legal cross-bundle phase interleaving.
 They mutate each of the nine registry-derived counters in turn and reject

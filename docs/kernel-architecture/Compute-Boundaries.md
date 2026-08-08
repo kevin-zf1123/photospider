@@ -672,13 +672,17 @@ One preallocated `M1FairnessObservationCollector` gives tagged I1/B1 Runs one
 bounded observer-causal domain. `ComputeRunObservationFanout` forwards the
 same authority-owned product coordinate to that collector and the reused I1 or
 B1 collector; it does not merge that observer clock with I1's independent
-accepted-row sequence. Overflow, sequence exhaustion, or tag/QoS disagreement
-is sticky fail-closed evidence. Coordinate allocation samples steady time and
-assigns the next sequence in one bounded lock-free atomic section, so increasing
-causal sequence guarantees nondecreasing `observed_at` under concurrency. Local
-task identity is zero-based: task zero is valid for start and terminal events,
-while only non-task event kinds use zero as their scalar sentinel. The source-
-private `M1Host` adds no compute
+accepted-row sequence. Every fanout product callback publishes to the reused
+source collector first and enters the M1 sequence authority last. The authority
+callback return is the reservation-completion edge, so a stable M1 cut cannot
+precede publication of the source-history record carrying the same coordinate;
+coordinate reservation and explicit abort remain authority-only. Overflow,
+sequence exhaustion, or tag/QoS disagreement is sticky fail-closed evidence.
+Coordinate allocation samples steady time and assigns the next sequence in one
+bounded lock-free atomic section, so increasing causal sequence guarantees
+nondecreasing `observed_at` under concurrency. Local task identity is zero-based:
+task zero is valid for start and terminal events, while only non-task event kinds
+use zero as their scalar sentinel. The source-private `M1Host` adds no compute
 route: it joins Host/device ledger, Compute I/O, class-partitioned ready,
 lifecycle, and immutable Throughput capacity/reserved snapshots from the same
 service. Its only mutation is an idempotent evidence-finalization seam that is

@@ -2293,16 +2293,20 @@ fence。Unit suite 覆盖
 精确 C/W/B/U arithmetic、1/7/40 origin grid、固定 warmup offer、carryover/current-hold
 evidence、独立 producer-local cycle、全部五个轴、未知 enum 的 fail-closed 行为、合法的
 zero-based task zero、有限 lock-free callback publication、并发 reservation 下的 sequence/
-time monotonicity、同坐标 fanout、不变的 base-only-I1/full-B1 environment
-delegation、canonical golden digest、functional key、exact-one/DAG resolution 与不完整
-live authority。它们还会拒绝 substituted isolated-I1 source、遗漏的 isolated-B1 outcome、
+time monotonicity、每个 product callback 都保持 mirror-before-authority 的同坐标 fanout、
+不变的 base-only-I1/full-B1 environment delegation、canonical golden digest、functional
+key、exact-one/DAG resolution 与不完整 live authority。它们还会拒绝 substituted
+isolated-I1 source、遗漏的 isolated-B1 outcome、
 遗漏的 M1 raw window、outer/inner claim 篡改、denominator/source 不匹配、缺失/重复/重排/
 未知/超限 I/O transition，以及非零 final I/O state。一项专门回归会让全部稀疏 temporal I/O
 current value 保持为零，同时证明短 accepted/settled task 仍会提高 event-derived high-water。
 Observer-boundary 回归会在 coordinate reserve 后、route commit 后与 slot claim 后暂停，
 并证明 copied-record count 不变不能满足 reservation-entry/completion/claim/published cut。
-一个仅存在于 test product 的 route-commit rejection 会证明显式 coordinate abort、不发布
-start、retry 成功与 final frontier 精确闭合。Static product consumer smoke 禁止该 probe
+一个集中式 spy 会枚举全部十一种 fanout product callback，并要求每一种都按 mirror/authority
+成对排序。Mirror 发布前的确定性 barrier 还会证明：在同坐标 source history 可见之前，M1
+reservation-completion frontier 必须保持开放，cut 也必须保持不稳定。一个仅存在于 test
+product 的 route-commit rejection 会证明显式 coordinate abort、不发布 start、retry 成功与
+final frontier 精确闭合。Static product consumer smoke 禁止该 probe
 symbol 出现在 production archive。Lifecycle replay 回归使用一份
 producer-faithful multi-Graph history，包含 registration/candidate rollback、group 与 standalone
 admission，以及合法 cross-bundle phase interleave。测试会逐一篡改九个 registry-derived

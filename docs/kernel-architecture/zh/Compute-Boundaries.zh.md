@@ -525,13 +525,17 @@ diagnostic，不能重置或豁免任一规则。
 一个预分配的 `M1FairnessObservationCollector` 为带 tag 的 I1/B1 Run 提供一个有界 observer-
 causal domain。`ComputeRunObservationFanout` 把同一个 authority-owned product coordinate
 转发给该 collector 与复用的 I1 或 B1 collector；它不会把 observer clock 与 I1 独立的
-accepted-row sequence 合并。Overflow、sequence exhaustion 或 tag/QoS 不一致都是 sticky
-fail-closed evidence。Coordinate allocation 会在同一个有界 lock-free atomic section 中
-采样 steady time 并分配下一个 sequence，因此并发下递增 causal sequence 保证
-`observed_at` 非递减。Local task identity 从零开始：start 与 terminal event 允许 task zero，
-只有 non-task event kind 才把零用作 scalar sentinel。Source-private 的 `M1Host` 不增加 compute route：它从同一个 service
-组合 Host/device ledger、Compute I/O、按 class 分区的 ready、lifecycle 与不可变 Throughput
-capacity/reserved snapshot。它唯一的 mutation 是幂等 evidence-finalization seam，且只有在
+accepted-row sequence 合并。每个 fanout product callback 都先发布到复用的 source collector，
+最后才进入 M1 sequence authority。Authority callback 的返回是 reservation-completion edge，
+因此 stable M1 cut 不可能早于携带同一 coordinate 的 source-history record 发布；coordinate
+reservation 与显式 abort 仍只进入 authority。Overflow、sequence exhaustion 或 tag/QoS
+不一致都是 sticky fail-closed evidence。Coordinate allocation 会在同一个有界 lock-free
+atomic section 中采样 steady time 并分配下一个 sequence，因此并发下递增 causal sequence
+保证 `observed_at` 非递减。Local task identity 从零开始：start 与 terminal event 允许 task
+zero，只有 non-task event kind 才把零用作 scalar sentinel。Source-private 的 `M1Host` 不增加
+compute route：它从同一个 service 组合 Host/device ledger、Compute I/O、按 class 分区的
+ready、lifecycle 与不可变 Throughput capacity/reserved snapshot。它唯一的 mutation 是幂等
+evidence-finalization seam，且只有在
 全部 Graph 与 Host operation 已关闭后才合法。该 seam 会关闭同一个 execution service，使
 runner 能保留终态 `ServiceStopped` cut；它不是通用 compute、phase 或 lifecycle 控制面。
 
