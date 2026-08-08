@@ -418,9 +418,10 @@ class SingleTenantJobService final {
    * @throws Nothing; artifact exceptions become a typed failed Job.
    * @note Full identity, enum, outcome/failure/settlement/image shape, and
    * cancellation-context validation precede copying any report fact or
-   * cancellation adjudication. A rejected report cannot establish settlement
-   * for the retained current assignment even when its untrusted `settled`
-   * field is true.
+   * cancellation adjudication. A rejected report leaves `attempt_outcome`
+   * unset and cannot establish settlement or an artifact receipt for the
+   * retained current assignment, even when its untrusted `settled` field is
+   * true.
    */
   void apply_report(const AttemptIdentity& expected,
                     JobAttemptReport report) noexcept;

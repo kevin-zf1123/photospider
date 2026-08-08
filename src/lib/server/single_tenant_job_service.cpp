@@ -170,11 +170,12 @@ bool has_valid_worker_report_shape(const JobAttemptReport& report) noexcept {
  * @param message Stable control-plane diagnostic.
  * @return Nothing.
  * @throws std::bad_alloc when storing the diagnostic exhausts memory.
- * @note The rejected report cannot establish outcome, settlement, or receipt.
+ * @note `Failed` is a control-plane state, not a worker outcome. The rejected
+ * report leaves no retained outcome, settlement, or receipt fact.
  */
 void reject_report(JobSnapshot& job, std::string_view message) {
   job.state = JobState::Failed;
-  job.attempt_outcome = JobAttemptOutcome::Failed;
+  job.attempt_outcome.reset();
   job.attempt_settled = false;
   job.failure = JobAttemptFailure::ReportRejected;
   job.message.assign(message);

@@ -583,8 +583,7 @@ TEST(SingleTenantJobService, MissingRequiredImageFailsClosed) {
       service.wait_for(submission.job_id, std::chrono::seconds(2));
   ASSERT_TRUE(terminal.has_value());
   EXPECT_EQ(terminal->state, JobState::Failed);
-  ASSERT_TRUE(terminal->attempt_outcome.has_value());
-  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_FALSE(terminal->attempt_outcome.has_value());
   EXPECT_FALSE(terminal->attempt_settled);
   EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
   EXPECT_FALSE(terminal->output_receipt.has_value());
@@ -622,8 +621,7 @@ TEST(SingleTenantJobService, MalformedReportShapesFailClosedBeforeFactCopy) {
 
     ASSERT_TRUE(terminal.has_value());
     EXPECT_EQ(terminal->state, JobState::Failed);
-    ASSERT_TRUE(terminal->attempt_outcome.has_value());
-    EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+    EXPECT_FALSE(terminal->attempt_outcome.has_value());
     EXPECT_FALSE(terminal->attempt_settled);
     EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
     EXPECT_FALSE(terminal->output_receipt.has_value());
@@ -695,8 +693,7 @@ TEST(SingleTenantJobService,
 
   ASSERT_TRUE(terminal.has_value());
   EXPECT_EQ(terminal->state, JobState::Failed);
-  ASSERT_TRUE(terminal->attempt_outcome.has_value());
-  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_FALSE(terminal->attempt_outcome.has_value());
   EXPECT_FALSE(terminal->attempt_settled);
   EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
   EXPECT_FALSE(terminal->output_receipt.has_value());
@@ -718,6 +715,7 @@ TEST(SingleTenantJobService, MismatchedWorkerLeaseFailsCurrentAttemptClosed) {
       service.wait_for(submission.job_id, std::chrono::seconds(2));
   ASSERT_TRUE(terminal.has_value());
   EXPECT_EQ(terminal->state, JobState::Failed);
+  EXPECT_FALSE(terminal->attempt_outcome.has_value());
   EXPECT_FALSE(terminal->attempt_settled);
   EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
   EXPECT_FALSE(terminal->output_receipt.has_value());
@@ -739,6 +737,7 @@ TEST(SingleTenantJobService, MismatchedReportedJobIdFailsOwningJobClosed) {
       service.wait_for(submission.job_id, std::chrono::seconds(2));
   ASSERT_TRUE(terminal.has_value());
   EXPECT_EQ(terminal->state, JobState::Failed);
+  EXPECT_FALSE(terminal->attempt_outcome.has_value());
   EXPECT_FALSE(terminal->attempt_settled);
   EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
   EXPECT_FALSE(terminal->output_receipt.has_value());
@@ -861,8 +860,7 @@ TEST(SingleTenantJobService,
       service.wait_for(submission.job_id, std::chrono::seconds(2));
   ASSERT_TRUE(terminal.has_value());
   EXPECT_EQ(terminal->state, JobState::Failed);
-  ASSERT_TRUE(terminal->attempt_outcome.has_value());
-  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_FALSE(terminal->attempt_outcome.has_value());
   EXPECT_FALSE(terminal->attempt_settled);
   EXPECT_EQ(terminal->failure, JobAttemptFailure::ReportRejected);
   EXPECT_FALSE(terminal->output_receipt.has_value());
