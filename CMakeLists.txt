@@ -948,6 +948,22 @@ add_library(photospider STATIC
     $<TARGET_OBJECTS:photospider_product_seam_objects>)
 configure_photospider_product_archive(photospider)
 
+# Source-private Issue #98 delivery slice. This target preserves independent
+# Job/attempt/artifact authority while deliberately remaining outside the
+# installed Embedded Host ABI and local protocol-v2 sidecar composition.
+add_library(photospider_single_tenant_job_internal STATIC
+    src/lib/server/job_contract.cpp
+    src/lib/server/single_tenant_job_service.cpp
+    src/lib/server/embedded_job_worker.cpp)
+target_compile_features(photospider_single_tenant_job_internal PRIVATE
+    cxx_std_17)
+target_include_directories(photospider_single_tenant_job_internal PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src/lib")
+target_link_libraries(photospider_single_tenant_job_internal PRIVATE
+    photospider
+    Threads::Threads)
+
 set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
     PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING
     PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
@@ -1800,6 +1816,13 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     gtest_discover_tests(test_optional_opencv_operation_provider
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+
+    add_ps_test(test_single_tenant_job_service
+        tests/unit/test_single_tenant_job_service.cpp
+        photospider_single_tenant_job_internal)
+    gtest_discover_tests(test_single_tenant_job_service
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
 endif()
 
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
@@ -2024,6 +2047,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             photospider_internal_test_product)
         target_link_libraries(test_b1_product_path PRIVATE
             PkgConfig::UTF8PROC)
+        add_ps_test(test_single_tenant_job_product_path
+            tests/integration/test_single_tenant_job_product_path.cpp
+            photospider_single_tenant_job_internal)
         add_ps_test(test_m1_product_path
             tests/integration/test_m1_product_path.cpp
             photospider_internal_test_product)
@@ -2595,6 +2621,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             PROPERTIES
                 LABELS kernel-concurrency
                 TIMEOUT 30)
+        gtest_discover_tests(test_single_tenant_job_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 30)
         gtest_discover_tests(test_m1_product_path
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
