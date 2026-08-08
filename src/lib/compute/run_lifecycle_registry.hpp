@@ -771,6 +771,25 @@ class RunLifecycleRegistry final {
    */
   std::uint64_t shutdown_generation() const;
 
+  /**
+   * @brief Publishes one physical-retirement event at an exact registry cut.
+   * @param kind WorkerJoined or BindingRetired.
+   * @param category None, or FailureOther for BindingRetired destruction.
+   * @param generation Exact nonzero worker-shutdown or binding generation.
+   * @return Nothing after telemetry publication under the lifecycle fence.
+   * @throws std::invalid_argument for an unsupported kind/category/generation.
+   * @throws std::logic_error when WorkerJoined is outside Stopping or any
+   * retirement is attempted after Stopped.
+   * @throws std::system_error when registry or telemetry locking fails.
+   * @note The physical owner transition occurs before this call. Holding the
+   * lifecycle fence through telemetry publication makes the nine
+   * registry-derived event counters an exact same-sequence cut; the six
+   * physical fields remain telemetry-mutex samples and mint no authority.
+   */
+  void publish_physical_retirement(ExecutionLifecycleEventKind kind,
+                                   ExecutionLifecycleCategory category,
+                                   std::uint64_t generation);
+
  private:
   friend class ::ps::testing::RunLifecycleRegistryTestAccess;
   friend class RunLifecycleAdmissionCandidate;

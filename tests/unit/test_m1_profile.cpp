@@ -567,48 +567,33 @@ M1ExecutionSnapshot make_m1_snapshot(bool active, ResourceVector high_water) {
  * @param sequence Exact positive telemetry order.
  * @param kind Closed event transition kind.
  * @param counters Complete post-transition counters.
+ * @param graph_instance_id Optional exact Graph identity.
+ * @param run_id Optional exact child Run identity.
+ * @param run_group_id Optional exact realtime group identity.
+ * @param generation Optional candidate, bundle, close, or shutdown identity.
+ * @param category Exact cancellation/terminal category or None.
  * @return Versioned event with deterministic identities and timestamp.
  * @throws Nothing.
  */
 compute::ExecutionLifecycleEvent make_m1_lifecycle_event(
     std::uint64_t sequence, compute::ExecutionLifecycleEventKind kind,
-    compute::ExecutionLifecycleCounters counters) noexcept {
+    compute::ExecutionLifecycleCounters counters,
+    std::uint64_t graph_instance_id = 0U, std::uint64_t run_id = 0U,
+    std::uint64_t run_group_id = 0U, std::uint64_t generation = 0U,
+    compute::ExecutionLifecycleCategory category =
+        compute::ExecutionLifecycleCategory::None) noexcept {
   compute::ExecutionLifecycleEvent event;
   event.sequence = sequence;
   event.timestamp_us = sequence;
   event.service_instance_id = 1U;
   event.telemetry_epoch = 1U;
+  event.graph_instance_id = graph_instance_id;
+  event.run_id = run_id;
+  event.run_group_id = run_group_id;
+  event.generation = generation;
   event.kind = kind;
+  event.category = category;
   event.counters = counters;
-  if (kind != compute::ExecutionLifecycleEventKind::ServiceStarted &&
-      kind != compute::ExecutionLifecycleEventKind::ServiceStopped) {
-    event.graph_instance_id = 1U;
-  }
-  switch (kind) {
-    case compute::ExecutionLifecycleEventKind::CandidateBegan:
-      event.generation = 1U;
-      break;
-    case compute::ExecutionLifecycleEventKind::BundleAdmitted:
-    case compute::ExecutionLifecycleEventKind::RunTerminal:
-    case compute::ExecutionLifecycleEventKind::RunQuiescent:
-    case compute::ExecutionLifecycleEventKind::ResourceSettled:
-    case compute::ExecutionLifecycleEventKind::RunUnregistered:
-      event.run_id = 1U;
-      event.generation = 1U;
-      break;
-    case compute::ExecutionLifecycleEventKind::GraphClosing:
-      event.category = compute::ExecutionLifecycleCategory::GraphClose;
-      event.generation = 1U;
-      break;
-    case compute::ExecutionLifecycleEventKind::GraphRowRemoved:
-      event.generation = 1U;
-      break;
-    default:
-      break;
-  }
-  if (kind == compute::ExecutionLifecycleEventKind::RunTerminal) {
-    event.category = compute::ExecutionLifecycleCategory::Succeeded;
-  }
   return event;
 }
 
@@ -633,6 +618,9 @@ void set_m1_lifecycle_page(
   snapshot->lifecycle.next_sequence = snapshot_cut + 1U;
   snapshot->lifecycle.records = std::move(records);
   snapshot->lifecycle.next_cursor = snapshot_cut;
+  if (!snapshot->lifecycle.records.empty()) {
+    snapshot->lifecycle.counters = snapshot->lifecycle.records.back().counters;
+  }
 }
 
 /**
@@ -648,35 +636,174 @@ void configure_passing_m1_lifecycle_history(
     throw std::invalid_argument(
         "M1 lifecycle test history requires exactly four snapshots");
   }
-  const auto zero = snapshots->front().lifecycle.counters;
-  const auto active = (*snapshots)[1U].lifecycle.counters;
+  using Category = compute::ExecutionLifecycleCategory;
+  using Kind = compute::ExecutionLifecycleEventKind;
+  compute::ExecutionLifecycleCounters counters;
+  counters.live_policy_binding_count = 2U;
+  const compute::ExecutionLifecycleCounters service_started = counters;
+
+  counters.registered_graph_count = 1U;
+  counters.open_graph_count = 1U;
+  const compute::ExecutionLifecycleCounters graph_one = counters;
+  counters.registered_graph_count = 2U;
+  counters.open_graph_count = 2U;
+  const compute::ExecutionLifecycleCounters graph_two = counters;
   set_m1_lifecycle_page(
-      &(*snapshots)[0U], 0U, 0U, 2U,
-      {make_m1_lifecycle_event(
-           1U, compute::ExecutionLifecycleEventKind::ServiceStarted, zero),
-       make_m1_lifecycle_event(
-           2U, compute::ExecutionLifecycleEventKind::GraphRegistered, zero)});
+      &(*snapshots)[0U], 0U, 0U, 3U,
+      {make_m1_lifecycle_event(1U, Kind::ServiceStarted, service_started),
+       make_m1_lifecycle_event(2U, Kind::GraphRegistered, graph_one, 1U),
+       make_m1_lifecycle_event(3U, Kind::GraphRegistered, graph_two, 2U)});
+
+  counters.pending_candidate_count = 1U;
+  const compute::ExecutionLifecycleCounters candidate_one = counters;
+  counters.pending_candidate_count = 2U;
+  const compute::ExecutionLifecycleCounters candidate_two = counters;
+  counters.pending_candidate_count = 1U;
+  const compute::ExecutionLifecycleCounters candidate_rollback = counters;
+  counters.pending_candidate_count = 2U;
+  counters.live_root_reservation_count = 1U;
+  counters.live_child_grant_count = 2U;
+  const compute::ExecutionLifecycleCounters cross_graph_candidates = counters;
+  counters.pending_candidate_count = 1U;
+  counters.admitted_run_group_count = 1U;
+  counters.admitted_child_run_count = 2U;
+  const compute::ExecutionLifecycleCounters group_admitted = counters;
+  counters.pending_candidate_count = 0U;
+  counters.admitted_standalone_run_count = 1U;
+  counters.ready_entry_count = 3U;
+  counters.entered_callback_count = 2U;
+  counters.live_root_reservation_count = 2U;
+  counters.live_child_grant_count = 5U;
+  const compute::ExecutionLifecycleCounters mixed_active = counters;
+  counters.open_graph_count = 1U;
+  counters.closing_graph_count = 1U;
+  const compute::ExecutionLifecycleCounters graph_one_closing = counters;
   set_m1_lifecycle_page(
-      &(*snapshots)[1U], 1U, 2U, 8U,
-      {make_m1_lifecycle_event(
-           3U, compute::ExecutionLifecycleEventKind::CandidateBegan, active),
-       make_m1_lifecycle_event(
-           4U, compute::ExecutionLifecycleEventKind::BundleAdmitted, active),
-       make_m1_lifecycle_event(
-           5U, compute::ExecutionLifecycleEventKind::RunTerminal, active),
-       make_m1_lifecycle_event(
-           6U, compute::ExecutionLifecycleEventKind::RunQuiescent, active),
-       make_m1_lifecycle_event(
-           7U, compute::ExecutionLifecycleEventKind::ResourceSettled, active),
-       make_m1_lifecycle_event(
-           8U, compute::ExecutionLifecycleEventKind::RunUnregistered, active)});
-  set_m1_lifecycle_page(&(*snapshots)[2U], 2U, 8U, 8U, {});
-  set_m1_lifecycle_page(
-      &(*snapshots)[3U], 3U, 8U, 10U,
-      {make_m1_lifecycle_event(
-           9U, compute::ExecutionLifecycleEventKind::GraphClosing, zero),
-       make_m1_lifecycle_event(
-           10U, compute::ExecutionLifecycleEventKind::GraphRowRemoved, zero)});
+      &(*snapshots)[1U], 1U, 3U, 10U,
+      {make_m1_lifecycle_event(4U, Kind::CandidateBegan, candidate_one, 1U, 0U,
+                               0U, 101U),
+       make_m1_lifecycle_event(5U, Kind::CandidateBegan, candidate_two, 1U, 0U,
+                               0U, 102U),
+       make_m1_lifecycle_event(6U, Kind::CandidateRolledBack,
+                               candidate_rollback, 1U, 0U, 0U, 102U),
+       make_m1_lifecycle_event(7U, Kind::CandidateBegan, cross_graph_candidates,
+                               2U, 0U, 0U, 201U),
+       make_m1_lifecycle_event(8U, Kind::BundleAdmitted, group_admitted, 1U,
+                               11U, 51U, 301U),
+       make_m1_lifecycle_event(9U, Kind::BundleAdmitted, mixed_active, 2U, 21U,
+                               0U, 302U),
+       make_m1_lifecycle_event(10U, Kind::GraphClosing, graph_one_closing, 1U,
+                               0U, 0U, 1U, Category::GraphClose)});
+  (*snapshots)[2U].lifecycle.counters = graph_one_closing;
+  set_m1_lifecycle_page(&(*snapshots)[2U], 2U, 10U, 10U, {});
+
+  std::vector<compute::ExecutionLifecycleEvent> final_events;
+  final_events.push_back(make_m1_lifecycle_event(
+      11U, Kind::CancellationRequested, graph_one_closing, 1U, 0U, 0U, 1U,
+      Category::GraphClose));
+  counters = graph_one_closing;
+  counters.ready_entry_count = 0U;
+  counters.entered_callback_count = 0U;
+  counters.live_root_reservation_count = 0U;
+  counters.live_child_grant_count = 0U;
+  counters.terminal_not_quiescent_run_count = 1U;
+  counters.finalizing_run_count = 1U;
+  final_events.push_back(make_m1_lifecycle_event(12U, Kind::RunTerminal,
+                                                 counters, 1U, 11U, 51U, 301U,
+                                                 Category::Cancelled));
+  counters.terminal_not_quiescent_run_count = 2U;
+  counters.finalizing_run_count = 2U;
+  final_events.push_back(make_m1_lifecycle_event(13U, Kind::RunTerminal,
+                                                 counters, 1U, 12U, 51U, 301U,
+                                                 Category::Cancelled));
+  counters.terminal_not_quiescent_run_count = 3U;
+  counters.finalizing_run_count = 3U;
+  final_events.push_back(make_m1_lifecycle_event(14U, Kind::RunTerminal,
+                                                 counters, 2U, 21U, 0U, 302U,
+                                                 Category::Succeeded));
+  counters.terminal_not_quiescent_run_count = 2U;
+  final_events.push_back(make_m1_lifecycle_event(15U, Kind::RunQuiescent,
+                                                 counters, 2U, 21U, 0U, 302U));
+  counters.terminal_not_quiescent_run_count = 1U;
+  final_events.push_back(make_m1_lifecycle_event(16U, Kind::RunQuiescent,
+                                                 counters, 1U, 11U, 51U, 301U));
+  counters.terminal_not_quiescent_run_count = 0U;
+  final_events.push_back(make_m1_lifecycle_event(17U, Kind::RunQuiescent,
+                                                 counters, 1U, 12U, 51U, 301U));
+  final_events.push_back(make_m1_lifecycle_event(18U, Kind::ResourceSettled,
+                                                 counters, 2U, 21U, 0U, 302U));
+  final_events.push_back(make_m1_lifecycle_event(19U, Kind::ResourceSettled,
+                                                 counters, 1U, 11U, 51U, 301U));
+  final_events.push_back(make_m1_lifecycle_event(20U, Kind::ResourceSettled,
+                                                 counters, 1U, 12U, 51U, 301U));
+  counters.admitted_standalone_run_count = 0U;
+  counters.finalizing_run_count = 2U;
+  final_events.push_back(make_m1_lifecycle_event(21U, Kind::RunUnregistered,
+                                                 counters, 2U, 21U, 0U, 302U));
+  counters.admitted_run_group_count = 0U;
+  counters.admitted_child_run_count = 0U;
+  counters.finalizing_run_count = 0U;
+  final_events.push_back(make_m1_lifecycle_event(22U, Kind::RunUnregistered,
+                                                 counters, 1U, 11U, 51U, 301U));
+  final_events.push_back(make_m1_lifecycle_event(23U, Kind::RunUnregistered,
+                                                 counters, 1U, 12U, 51U, 301U));
+  counters.registered_graph_count = 1U;
+  counters.open_graph_count = 1U;
+  counters.closing_graph_count = 0U;
+  final_events.push_back(make_m1_lifecycle_event(24U, Kind::GraphRowRemoved,
+                                                 counters, 1U, 0U, 0U, 1U));
+  counters.open_graph_count = 0U;
+  counters.closing_graph_count = 1U;
+  final_events.push_back(make_m1_lifecycle_event(
+      25U, Kind::GraphClosing, counters, 2U, 0U, 0U, 1U, Category::GraphClose));
+  counters.registered_graph_count = 0U;
+  counters.closing_graph_count = 0U;
+  final_events.push_back(make_m1_lifecycle_event(26U, Kind::GraphRowRemoved,
+                                                 counters, 2U, 0U, 0U, 1U));
+  final_events.push_back(make_m1_lifecycle_event(27U, Kind::WorkerJoined,
+                                                 counters, 0U, 0U, 0U, 77U));
+  final_events.push_back(make_m1_lifecycle_event(28U, Kind::WorkerJoined,
+                                                 counters, 0U, 0U, 0U, 77U));
+  counters.live_policy_binding_count = 1U;
+  final_events.push_back(make_m1_lifecycle_event(29U, Kind::BindingRetired,
+                                                 counters, 0U, 0U, 0U, 1U));
+  counters.live_policy_binding_count = 0U;
+  final_events.push_back(make_m1_lifecycle_event(30U, Kind::BindingRetired,
+                                                 counters, 0U, 0U, 0U, 1U));
+  final_events.push_back(make_m1_lifecycle_event(31U, Kind::ServiceStopped,
+                                                 counters, 0U, 0U, 0U, 77U));
+  set_m1_lifecycle_page(&(*snapshots)[3U], 3U, 10U, 31U,
+                        std::move(final_events));
+  (*snapshots)[3U].lifecycle.next_sequence =
+      std::numeric_limits<std::uint64_t>::max();
+  (*snapshots)[3U].lifecycle.shutdown_generation = 77U;
+  (*snapshots)[3U].lifecycle.service_state =
+      compute::ExecutionLifecycleServiceState::Stopped;
+}
+
+/**
+ * @brief Returns one mutable lifecycle event by its global sequence.
+ * @param snapshots Complete mutable temporal snapshot chain.
+ * @param sequence Exact nonzero event sequence to locate.
+ * @return Stable reference into the owning snapshot record vector.
+ * @throws std::invalid_argument when the input is null or sequence is absent.
+ * @note Tests must not retain the reference across vector reallocation.
+ */
+compute::ExecutionLifecycleEvent& require_m1_lifecycle_event(
+    std::vector<M1ExecutionSnapshot>* snapshots, std::uint64_t sequence) {
+  if (snapshots != nullptr) {
+    for (M1ExecutionSnapshot& snapshot : *snapshots) {
+      const auto found = std::find_if(
+          snapshot.lifecycle.records.begin(), snapshot.lifecycle.records.end(),
+          [sequence](const compute::ExecutionLifecycleEvent& event) {
+            return event.sequence == sequence;
+          });
+      if (found != snapshot.lifecycle.records.end()) {
+        return *found;
+      }
+    }
+  }
+  throw std::invalid_argument("M1 lifecycle test event sequence is absent");
 }
 
 /**
@@ -1078,29 +1205,29 @@ TEST(M1Profile, RejectsLifecyclePageContinuityAndPostStopEvidence) {
   EXPECT_EQ(evaluate_m1_inner_row(std::move(broken_identity)).memory_verdict,
             I1Verdict::Invalid);
 
-  M1InnerRowInput post_stop = make_passing_inner_row_input();
-  M1ExecutionSnapshot& stopped = post_stop.temporal_snapshots.back();
-  compute::ExecutionLifecycleEvent stop = make_m1_lifecycle_event(
-      11U, compute::ExecutionLifecycleEventKind::ServiceStopped,
-      stopped.lifecycle.counters);
-  stop.generation = 1U;
-  stopped.lifecycle.records.push_back(stop);
-  stopped.lifecycle.snapshot_cut = 11U;
-  stopped.lifecycle.next_cursor = 11U;
-  stopped.lifecycle.next_sequence = std::numeric_limits<std::uint64_t>::max();
-  stopped.lifecycle.shutdown_generation = 1U;
-  stopped.lifecycle.service_state =
-      compute::ExecutionLifecycleServiceState::Stopped;
+  M1InnerRowInput missing_stop = make_passing_inner_row_input();
+  compute::ExecutionLifecyclePage& stopping_page =
+      missing_stop.temporal_snapshots.back().lifecycle;
+  stopping_page.records.pop_back();
+  stopping_page.snapshot_cut = 30U;
+  stopping_page.next_cursor = 30U;
+  stopping_page.next_sequence = 31U;
+  stopping_page.service_state =
+      compute::ExecutionLifecycleServiceState::Stopping;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(missing_stop)).memory_verdict,
+            I1Verdict::Invalid);
 
+  M1InnerRowInput post_stop = make_passing_inner_row_input();
+  const M1ExecutionSnapshot& stopped = post_stop.temporal_snapshots.back();
   M1ExecutionSnapshot after_stop = stopped;
   set_m1_lifecycle_page(
-      &after_stop, 4U, 11U, 12U,
+      &after_stop, 4U, 31U, 32U,
       {make_m1_lifecycle_event(
-          12U, compute::ExecutionLifecycleEventKind::GraphRegistered,
-          stopped.lifecycle.counters)});
+          32U, compute::ExecutionLifecycleEventKind::GraphRegistered,
+          stopped.lifecycle.counters, 3U)});
   after_stop.lifecycle.next_sequence =
       std::numeric_limits<std::uint64_t>::max();
-  after_stop.lifecycle.shutdown_generation = 1U;
+  after_stop.lifecycle.shutdown_generation = 77U;
   after_stop.lifecycle.service_state =
       compute::ExecutionLifecycleServiceState::Stopped;
   post_stop.temporal_snapshots.push_back(std::move(after_stop));
@@ -1112,6 +1239,142 @@ TEST(M1Profile, RejectsLifecyclePageContinuityAndPostStopEvidence) {
         return reason.find("ordinary event appears after ServiceStopped") !=
                std::string::npos;
       }));
+}
+
+/**
+ * @brief Proves a producer-faithful group/rollback/interleaving replay passes.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, AcceptsProducerFaithfulLifecycleReplay) {
+  M1InnerRowInput input = make_passing_inner_row_input();
+  const auto& rollback =
+      require_m1_lifecycle_event(&input.temporal_snapshots, 6U);
+  const auto& group = require_m1_lifecycle_event(&input.temporal_snapshots, 8U);
+  const auto& standalone_terminal =
+      require_m1_lifecycle_event(&input.temporal_snapshots, 14U);
+  const auto& group_quiescent =
+      require_m1_lifecycle_event(&input.temporal_snapshots, 16U);
+  EXPECT_EQ(rollback.kind,
+            compute::ExecutionLifecycleEventKind::CandidateRolledBack);
+  EXPECT_NE(group.run_group_id, 0U);
+  EXPECT_EQ(standalone_terminal.run_group_id, 0U);
+  EXPECT_NE(group_quiescent.run_group_id, 0U);
+
+  const M1InnerRow row = evaluate_m1_inner_row(std::move(input));
+  EXPECT_EQ(row.memory_verdict, I1Verdict::Pass);
+}
+
+/**
+ * @brief Proves all nine registry-derived fields are replayed exactly.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, RejectsEveryRegistryCounterMutation) {
+  using Counters = compute::ExecutionLifecycleCounters;
+  const std::array<std::uint64_t Counters::*, 9U> registry_fields{
+      &Counters::registered_graph_count,
+      &Counters::open_graph_count,
+      &Counters::closing_graph_count,
+      &Counters::pending_candidate_count,
+      &Counters::admitted_standalone_run_count,
+      &Counters::admitted_run_group_count,
+      &Counters::admitted_child_run_count,
+      &Counters::terminal_not_quiescent_run_count,
+      &Counters::finalizing_run_count};
+
+  for (std::size_t index = 0U; index < registry_fields.size(); ++index) {
+    SCOPED_TRACE(index);
+    M1InnerRowInput input = make_passing_inner_row_input();
+    compute::ExecutionLifecycleEvent& origin =
+        require_m1_lifecycle_event(&input.temporal_snapshots, 1U);
+    origin.counters.*registry_fields[index] = 1U;
+    EXPECT_EQ(evaluate_m1_inner_row(std::move(input)).memory_verdict,
+              I1Verdict::Invalid);
+  }
+}
+
+/**
+ * @brief Proves causal, identity, group, and rollback corruption fails closed.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, RejectsLifecycleCausalAndIdentitySplices) {
+  M1InnerRowInput causal = make_passing_inner_row_input();
+  require_m1_lifecycle_event(&causal.temporal_snapshots, 15U).kind =
+      compute::ExecutionLifecycleEventKind::ResourceSettled;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(causal)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput graph_association = make_passing_inner_row_input();
+  require_m1_lifecycle_event(&graph_association.temporal_snapshots, 14U)
+      .graph_instance_id = 1U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(graph_association)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput cross_run = make_passing_inner_row_input();
+  require_m1_lifecycle_event(&cross_run.temporal_snapshots, 18U).run_id = 11U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(cross_run)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput group_admission = make_passing_inner_row_input();
+  --require_m1_lifecycle_event(&group_admission.temporal_snapshots, 8U)
+        .counters.admitted_child_run_count;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(group_admission)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput rollback = make_passing_inner_row_input();
+  require_m1_lifecycle_event(&rollback.temporal_snapshots, 6U).generation =
+      999U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(rollback)).memory_verdict,
+            I1Verdict::Invalid);
+}
+
+/**
+ * @brief Proves the six physical fields obey only conservative producer facts.
+ * @throws GoogleTest assertion control and row-evaluation allocation failures.
+ */
+TEST(M1Profile, RejectsImpossibleLifecyclePhysicalFacts) {
+  M1InnerRowInput ready_limit = make_passing_inner_row_input();
+  const std::uint64_t ready_entry_limit =
+      ready_limit.temporal_snapshots.front()
+          .host_resources.limits.ready_entries;
+  require_m1_lifecycle_event(&ready_limit.temporal_snapshots, 9U)
+      .counters.ready_entry_count = ready_entry_limit + 1U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(ready_limit)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput grant_bound = make_passing_inner_row_input();
+  require_m1_lifecycle_event(&grant_bound.temporal_snapshots, 9U)
+      .counters.ready_entry_count = 4U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(grant_bound)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput root_reachability = make_passing_inner_row_input();
+  require_m1_lifecycle_event(&root_reachability.temporal_snapshots, 9U)
+      .counters.live_root_reservation_count = 0U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(root_reachability)).memory_verdict,
+            I1Verdict::Invalid);
+
+  M1InnerRowInput binding_reachability = make_passing_inner_row_input();
+  compute::ExecutionLifecycleCounters& binding_counters =
+      require_m1_lifecycle_event(&binding_reachability.temporal_snapshots, 9U)
+          .counters;
+  binding_counters.live_policy_invocation_count = 1U;
+  binding_counters.live_policy_binding_count = 0U;
+  EXPECT_EQ(
+      evaluate_m1_inner_row(std::move(binding_reachability)).memory_verdict,
+      I1Verdict::Invalid);
+
+  M1InnerRowInput admission_reachability = make_passing_inner_row_input();
+  require_m1_lifecycle_event(&admission_reachability.temporal_snapshots, 2U)
+      .counters.live_root_reservation_count = 1U;
+  EXPECT_EQ(
+      evaluate_m1_inner_row(std::move(admission_reachability)).memory_verdict,
+      I1Verdict::Invalid);
+
+  M1InnerRowInput final_zero = make_passing_inner_row_input();
+  require_m1_lifecycle_event(&final_zero.temporal_snapshots, 31U)
+      .counters.live_policy_binding_count = 1U;
+  EXPECT_EQ(evaluate_m1_inner_row(std::move(final_zero)).memory_verdict,
+            I1Verdict::Invalid);
 }
 
 /**

@@ -175,15 +175,13 @@ class ShutdownWorkerJoinGuard final {
   /**
    * @brief Binds local workers to their exact shutdown telemetry generation.
    * @param workers Local worker owners transferred from PoolState.
-   * @param telemetry Stable process execution telemetry.
    * @param registry Stable lifecycle counter/generation authority.
    * @throws Nothing.
-   * @note workers, telemetry, and registry must outlive this stack guard.
+   * @note workers and registry must outlive this stack guard.
    */
   ShutdownWorkerJoinGuard(std::vector<std::thread>& workers,
-                          ExecutionLifecycleTelemetry& telemetry,
                           RunLifecycleRegistry& registry) noexcept
-      : workers_(workers), telemetry_(telemetry), registry_(registry) {}
+      : workers_(workers), registry_(registry) {}
 
   /**
    * @brief Joins and publishes every not-yet-accounted local worker.
@@ -201,10 +199,9 @@ class ShutdownWorkerJoinGuard final {
         complete_shutdown_action_or_terminate([&worker]() { worker.join(); });
       }
       complete_shutdown_action_or_terminate([this]() {
-        telemetry_.publish(ExecutionLifecycleEventKind::WorkerJoined,
-                           ExecutionLifecycleCategory::None, 0U, 0U, 0U,
-                           registry_.shutdown_generation(),
-                           registry_.counters());
+        registry_.publish_physical_retirement(
+            ExecutionLifecycleEventKind::WorkerJoined,
+            ExecutionLifecycleCategory::None, registry_.shutdown_generation());
       });
       ++next_worker_;
     }
@@ -235,8 +232,6 @@ class ShutdownWorkerJoinGuard final {
  private:
   /** @brief Local worker vector that outlives this guard. */
   std::vector<std::thread>& workers_;
-  /** @brief Stable physical lifecycle telemetry owner. */
-  ExecutionLifecycleTelemetry& telemetry_;
   /** @brief Stable shutdown generation and logical counter authority. */
   RunLifecycleRegistry& registry_;
   /** @brief First worker whose join event is not yet complete. */
@@ -4252,11 +4247,11 @@ void ExecutionService::observe_policy_binding_retired(
   service->lifecycle_telemetry_->decrement_physical_counter(
       ExecutionLifecyclePhysicalCounter::LivePolicyBinding);
   try {
-    service->lifecycle_telemetry_->publish(
+    service->lifecycle_registry_->publish_physical_retirement(
         ExecutionLifecycleEventKind::BindingRetired,
         destroy_failed ? ExecutionLifecycleCategory::FailureOther
                        : ExecutionLifecycleCategory::None,
-        0U, 0U, 0U, generation, service->lifecycle_registry_->counters());
+        generation);
   } catch (...) {
     std::terminate();
   }
@@ -4685,8 +4680,7 @@ void ExecutionService::shutdown() {
     std::vector<std::thread> workers;
     std::shared_ptr<policy::PolicyBinding> interactive_binding;
     std::shared_ptr<policy::PolicyBinding> throughput_binding;
-    ShutdownWorkerJoinGuard worker_join_guard(workers, *lifecycle_telemetry_,
-                                              *lifecycle_registry_);
+    ShutdownWorkerJoinGuard worker_join_guard(workers, *lifecycle_registry_);
     {
       std::lock_guard<std::mutex> lock(pool_->mutex);
       pool_->stopping = true;

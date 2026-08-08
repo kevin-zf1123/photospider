@@ -6,11 +6,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -199,11 +202,6 @@ bool valid_lifecycle_event_identity(
   const bool group = event.run_group_id != 0U;
   const bool generation = event.generation != 0U;
   const bool none = event.category == Category::None;
-  const bool cancellation = event.category == Category::ExplicitRequest ||
-                            event.category == Category::Deadline ||
-                            event.category == Category::Superseded ||
-                            event.category == Category::GraphClose ||
-                            event.category == Category::ProcessShutdown;
   const bool terminal = event.category == Category::Succeeded ||
                         event.category == Category::Cancelled ||
                         event.category == Category::FailureResourceExhausted ||
@@ -214,15 +212,21 @@ bool valid_lifecycle_event_identity(
     case Kind::GraphRegistered:
       return graph && !run && !group && !generation && none;
     case Kind::GraphClosing:
-      return graph && !run && !group && generation && cancellation;
+      return graph && !run && !group && generation &&
+             (event.category == Category::GraphClose ||
+              event.category == Category::ProcessShutdown);
     case Kind::CandidateBegan:
       return graph && !run && !group && generation && none;
     case Kind::CandidateRolledBack:
-      return graph && !run && !group && generation && (none || cancellation);
+      return graph && !run && !group && generation &&
+             (none || event.category == Category::GraphClose ||
+              event.category == Category::ProcessShutdown);
     case Kind::BundleAdmitted:
       return graph && run && generation && none;
     case Kind::CancellationRequested:
-      return graph && !run && !group && generation && cancellation;
+      return graph && !run && !group && generation &&
+             (event.category == Category::GraphClose ||
+              event.category == Category::ProcessShutdown);
     case Kind::RunTerminal:
       return graph && run && generation && terminal;
     case Kind::RunQuiescent:
@@ -282,6 +286,877 @@ struct M1MemoryValidation final {
   bool settled = true;
 };
 
+/** @brief Exact number of policy bindings published before ServiceStarted. */
+constexpr std::uint64_t kM1InitialPolicyBindingCount = 2U;
+
+/**
+ * @brief Monotonic state of one replayed Graph registry row.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class M1ReplayGraphState : std::uint8_t {
+  /** @brief Candidate and bundle admission remains legal. */
+  Open,
+  /** @brief Admission is closed while candidates and bundles settle. */
+  Closing,
+};
+
+/**
+ * @brief Monotonic state of one replayed child Run.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class M1ReplayRunState : std::uint8_t {
+  /** @brief The child is installed and has not published terminal state. */
+  Admitted,
+  /** @brief Terminal state is published but non-registry leases may remain. */
+  Terminal,
+  /** @brief Only the registry lease remains. */
+  Quiescent,
+  /** @brief Root reservation and every child grant have returned. */
+  ResourceSettled,
+  /** @brief The child has left every registry index. */
+  Unregistered,
+};
+
+/**
+ * @brief Replay state for one live Graph row and its anonymous candidates.
+ *
+ * BundleAdmitted does not carry the consumed candidate id. The replay
+ * therefore proves the only producer-observable relation: every explicit
+ * rollback names a unique begun candidate and the number of commits plus
+ * rollbacks never exceeds the number begun on this Graph.
+ *
+ * @throws std::bad_alloc when candidate identities are retained.
+ */
+struct M1ReplayGraph final {
+  /** @brief Current monotonic row state. */
+  M1ReplayGraphState state = M1ReplayGraphState::Open;
+  /** @brief Nonzero close generation after Open-to-Closing. */
+  std::uint64_t close_generation = 0U;
+  /** @brief Cancellation category currently visible to pending candidates. */
+  compute::ExecutionLifecycleCategory candidate_cancellation =
+      compute::ExecutionLifecycleCategory::None;
+  /** @brief Every unique candidate identity begun on this row. */
+  std::set<std::uint64_t> candidate_ids;
+  /** @brief Candidate identities that explicitly rolled back. */
+  std::set<std::uint64_t> rolled_back_candidate_ids;
+  /** @brief Number of anonymous candidates consumed by BundleAdmitted. */
+  std::uint64_t committed_candidate_count = 0U;
+};
+
+/**
+ * @brief Replay state for one child Run identity.
+ * @throws Nothing for value construction and movement.
+ */
+struct M1ReplayRun final {
+  /** @brief Exact globally non-reused child identity. */
+  std::uint64_t run_id = 0U;
+  /** @brief Current monotonic settlement phase. */
+  M1ReplayRunState state = M1ReplayRunState::Admitted;
+};
+
+/**
+ * @brief Replay state for one standalone or two-child realtime bundle.
+ * @throws std::bad_alloc when the second realtime child identity is learned.
+ */
+struct M1ReplayBundle final {
+  /** @brief Exact registry-private bundle identity. */
+  std::uint64_t bundle_id = 0U;
+  /** @brief Exact owning Graph identity. */
+  std::uint64_t graph_instance_id = 0U;
+  /** @brief Zero for standalone or the exact realtime group identity. */
+  std::uint64_t run_group_id = 0U;
+  /** @brief One for standalone or two for realtime. */
+  std::size_t expected_run_count = 0U;
+  /** @brief Children in producer order; realtime child two is learned later. */
+  std::vector<M1ReplayRun> runs;
+  /** @brief True after the admission was erased before unregister events. */
+  bool detached = false;
+  /** @brief True after close/shutdown captured its cancellation record. */
+  bool cancellation_captured = false;
+};
+
+/**
+ * @brief One pending second child event emitted under the registry fence.
+ * @throws Nothing for value construction.
+ */
+struct M1ReplayGroupStep final {
+  /** @brief Exact bundle whose second child must be emitted next. */
+  std::uint64_t bundle_id = 0U;
+  /** @brief Exact child transition kind that must complete the pair. */
+  compute::ExecutionLifecycleEventKind kind =
+      compute::ExecutionLifecycleEventKind::RunTerminal;
+};
+
+/** @brief Comparable key for one captured cancellation publication count. */
+using M1CancelKey = std::tuple<std::uint64_t, std::uint16_t, std::uint64_t>;
+
+/**
+ * @brief Tests exact equality of the nine registry-derived counter fields.
+ * @param observed Event/page counter view supplied by telemetry.
+ * @param expected Independently replayed registry counter view.
+ * @return True only when every registry-derived field is identical.
+ * @throws Nothing.
+ */
+bool equal_registry_counters(
+    const compute::ExecutionLifecycleCounters& observed,
+    const compute::ExecutionLifecycleCounters& expected) noexcept {
+  return observed.registered_graph_count == expected.registered_graph_count &&
+         observed.open_graph_count == expected.open_graph_count &&
+         observed.closing_graph_count == expected.closing_graph_count &&
+         observed.pending_candidate_count == expected.pending_candidate_count &&
+         observed.admitted_standalone_run_count ==
+             expected.admitted_standalone_run_count &&
+         observed.admitted_run_group_count ==
+             expected.admitted_run_group_count &&
+         observed.admitted_child_run_count ==
+             expected.admitted_child_run_count &&
+         observed.terminal_not_quiescent_run_count ==
+             expected.terminal_not_quiescent_run_count &&
+         observed.finalizing_run_count == expected.finalizing_run_count;
+}
+
+/**
+ * @brief Replays one complete lossless lifecycle stream as producer state.
+ *
+ * The replay owns no product authority. It reconstructs Graph rows,
+ * anonymous candidate consumption, standalone/group admission, ordered child
+ * settlement, cancellation fan-out, Graph removal, and the no-event service
+ * Stopping transition. Every event and page counter view is checked against
+ * the resulting registry state. Physical counters remain independently
+ * sampled facts and are checked only for producer-guaranteed capacity,
+ * ownership reachability, origin, and final-zero constraints.
+ *
+ * @throws std::bad_alloc when replay maps, sets, vectors, or diagnostics grow.
+ */
+class M1LifecycleReplay final {
+ public:
+  /**
+   * @brief Binds stable invalidation output for the complete replay.
+   * @param reasons Mutable row diagnostics that outlive this replay.
+   * @throws Nothing.
+   */
+  explicit M1LifecycleReplay(std::vector<std::string>* reasons) noexcept
+      : reasons_(reasons) {}
+
+  /**
+   * @brief Reports whether the no-event service Stopping transition occurred.
+   * @return True after begin_shutdown() accepts one generation.
+   * @throws Nothing.
+   */
+  bool shutdown_started() const noexcept { return shutdown_started_; }
+
+  /**
+   * @brief Applies producer-atomic Accepting-to-Stopping state.
+   *
+   * Every live row becomes Closing before the first ProcessShutdown
+   * GraphClosing event, candidate cancellation changes to ProcessShutdown,
+   * and every not-yet-captured admission cancellation record is captured.
+   *
+   * @param generation Exact nonzero page shutdown generation.
+   * @return True when the transition is new or idempotently identical.
+   * @throws std::bad_alloc when shutdown enumeration/cancellation state grows.
+   */
+  bool begin_shutdown(std::uint64_t generation) {
+    if (generation == 0U || service_stopped_) {
+      return reject("shutdown transition has an invalid generation or state");
+    }
+    if (shutdown_started_) {
+      if (shutdown_generation_ != generation) {
+        return reject("shutdown generation changed during replay");
+      }
+      return true;
+    }
+    shutdown_started_ = true;
+    shutdown_generation_ = generation;
+    for (const std::uint64_t graph_id : graph_registration_order_) {
+      const auto found = graphs_.find(graph_id);
+      if (found == graphs_.end()) {
+        continue;
+      }
+      M1ReplayGraph& graph = found->second;
+      if (graph.state == M1ReplayGraphState::Open) {
+        graph.state = M1ReplayGraphState::Closing;
+        graph.close_generation = 1U;
+      }
+      graph.candidate_cancellation =
+          compute::ExecutionLifecycleCategory::ProcessShutdown;
+      shutdown_graph_closing_order_.push_back(graph_id);
+      capture_cancellations(
+          graph_id, compute::ExecutionLifecycleCategory::ProcessShutdown,
+          generation);
+    }
+    return true;
+  }
+
+  /**
+   * @brief Applies and validates one exact lifecycle event.
+   * @param event Next globally sequenced producer record.
+   * @return True when its transition and complete counter view are valid.
+   * @throws std::bad_alloc when state or diagnostics grow.
+   */
+  bool apply(const compute::ExecutionLifecycleEvent& event) {
+    if (service_stopped_) {
+      return reject("ordinary event appears after ServiceStopped");
+    }
+    if (!expected_atomic_event(event)) {
+      return false;
+    }
+
+    bool transition_valid = true;
+    using Kind = compute::ExecutionLifecycleEventKind;
+    switch (event.kind) {
+      case Kind::ServiceStarted:
+        if (service_started_ || event.sequence != 1U || !graphs_.empty() ||
+            !bundles_.empty()) {
+          transition_valid = reject(
+              "ServiceStarted is duplicated or has prior producer state");
+        } else {
+          service_started_ = true;
+        }
+        break;
+      case Kind::GraphRegistered:
+        transition_valid = register_graph(event);
+        break;
+      case Kind::GraphClosing:
+        transition_valid = close_graph(event);
+        break;
+      case Kind::CandidateBegan:
+        transition_valid = begin_candidate(event);
+        break;
+      case Kind::CandidateRolledBack:
+        transition_valid = rollback_candidate(event);
+        break;
+      case Kind::BundleAdmitted:
+        transition_valid = admit_bundle(event);
+        break;
+      case Kind::CancellationRequested:
+        transition_valid = consume_cancellation(event);
+        break;
+      case Kind::RunTerminal:
+      case Kind::RunQuiescent:
+      case Kind::ResourceSettled:
+      case Kind::RunUnregistered:
+        transition_valid = advance_run(event);
+        break;
+      case Kind::GraphRowRemoved:
+        transition_valid = remove_graph(event);
+        break;
+      case Kind::WorkerJoined:
+        if (!shutdown_started_ || event.generation != shutdown_generation_) {
+          transition_valid =
+              reject("WorkerJoined is outside its shutdown generation");
+        }
+        break;
+      case Kind::BindingRetired:
+        break;
+      case Kind::ServiceStopped:
+        transition_valid = stop_service(event);
+        break;
+    }
+
+    const bool counters_valid = validate_counter_view(
+        event.counters, event.kind == Kind::ServiceStarted,
+        event.kind == Kind::ServiceStopped, "event");
+    return transition_valid && counters_valid;
+  }
+
+  /**
+   * @brief Validates the complete counter view at one atomic page cut.
+   * @param page Exact copied telemetry page after all returned records.
+   * @return True when registry and physical counter constraints hold.
+   * @throws std::bad_alloc when diagnostics grow.
+   */
+  bool validate_page(const compute::ExecutionLifecyclePage& page) {
+    bool valid = validate_counter_view(
+        page.counters, false,
+        page.service_state == compute::ExecutionLifecycleServiceState::Stopped,
+        "page");
+    if (shutdown_started_ && page.shutdown_generation != shutdown_generation_) {
+      valid = reject("page shutdown generation differs from replay") && valid;
+    }
+    if (!shutdown_started_ && page.shutdown_generation != 0U) {
+      valid = reject("Accepting replay has a shutdown generation") && valid;
+    }
+    if (page.service_state ==
+            compute::ExecutionLifecycleServiceState::Accepting &&
+        shutdown_started_) {
+      valid = reject("page service state moved behind replay") && valid;
+    }
+    if (page.service_state ==
+            compute::ExecutionLifecycleServiceState::Stopping &&
+        (!shutdown_started_ || service_stopped_)) {
+      valid =
+          reject("Stopping page contradicts replayed service state") && valid;
+    }
+    if (page.service_state ==
+            compute::ExecutionLifecycleServiceState::Stopped &&
+        !service_stopped_) {
+      valid = reject("Stopped page lacks replayed ServiceStopped") && valid;
+    }
+    return valid;
+  }
+
+  /**
+   * @brief Verifies no producer-atomic transition or owned row remains open.
+   * @return True only for a complete M1 final capture.
+   * @throws std::bad_alloc when diagnostics grow.
+   */
+  bool complete() {
+    bool valid = true;
+    if (!service_started_) {
+      valid = reject("history lacks the unique ServiceStarted origin") && valid;
+    }
+    if (!shutdown_started_ || !service_stopped_) {
+      valid =
+          reject("history lacks the final ServiceStopped settlement") && valid;
+    }
+    if (pending_group_step_.has_value() ||
+        shutdown_graph_closing_index_ != shutdown_graph_closing_order_.size()) {
+      valid = reject("history ends inside one producer-atomic event batch") &&
+              valid;
+    }
+    if (!graphs_.empty() || !bundles_.empty() ||
+        !pending_cancellations_.empty()) {
+      valid = reject("history ends with live Graph, bundle, or cancellation") &&
+              valid;
+    }
+    return valid;
+  }
+
+ private:
+  /**
+   * @brief Appends one stable lifecycle replay invalidation.
+   * @param reason Detail without the common M1 prefix.
+   * @return Always false for direct guard composition.
+   * @throws std::bad_alloc when diagnostics allocate.
+   */
+  bool reject(std::string reason) {
+    invalidate_m1(reasons_, "M1 memory evidence: lifecycle " + reason);
+    return false;
+  }
+
+  /**
+   * @brief Returns one Graph's current producer-visible candidate count.
+   * @param graph Exact retained Graph state.
+   * @return Begun minus rolled-back minus anonymously committed candidates.
+   * @throws Nothing; impossible arithmetic terminates replay through caller
+   * validation before this helper is used.
+   */
+  static std::uint64_t pending_candidates(const M1ReplayGraph& graph) noexcept {
+    const std::uint64_t begun =
+        static_cast<std::uint64_t>(graph.candidate_ids.size());
+    const std::uint64_t rolled_back =
+        static_cast<std::uint64_t>(graph.rolled_back_candidate_ids.size());
+    return begun - rolled_back - graph.committed_candidate_count;
+  }
+
+  /**
+   * @brief Recomputes the exact nine registry-derived counters.
+   * @return Fresh authority-free replay view with physical fields left zero.
+   * @throws Nothing.
+   */
+  compute::ExecutionLifecycleCounters counters() const noexcept {
+    compute::ExecutionLifecycleCounters result;
+    result.registered_graph_count = static_cast<std::uint64_t>(graphs_.size());
+    for (const auto& entry : graphs_) {
+      const M1ReplayGraph& graph = entry.second;
+      if (graph.state == M1ReplayGraphState::Open) {
+        ++result.open_graph_count;
+      } else {
+        ++result.closing_graph_count;
+      }
+      result.pending_candidate_count += pending_candidates(graph);
+    }
+    for (const auto& entry : bundles_) {
+      const M1ReplayBundle& bundle = entry.second;
+      if (bundle.detached) {
+        continue;
+      }
+      if (bundle.run_group_id == 0U) {
+        ++result.admitted_standalone_run_count;
+      } else {
+        ++result.admitted_run_group_count;
+        result.admitted_child_run_count +=
+            static_cast<std::uint64_t>(bundle.expected_run_count);
+      }
+      for (const M1ReplayRun& run : bundle.runs) {
+        if (run.state == M1ReplayRunState::Terminal) {
+          ++result.terminal_not_quiescent_run_count;
+        }
+        if (run.state == M1ReplayRunState::Terminal ||
+            run.state == M1ReplayRunState::Quiescent ||
+            run.state == M1ReplayRunState::ResourceSettled) {
+          ++result.finalizing_run_count;
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * @brief Validates exact registry counters and conservative physical facts.
+   * @param observed Complete event/page counter view.
+   * @param service_origin Whether this is the unique ServiceStarted record.
+   * @param final_stop Whether this cut is the final ServiceStopped state.
+   * @param context Stable `event` or `page` diagnostic label.
+   * @return True only when every producer-guaranteed relation holds.
+   * @throws std::bad_alloc when diagnostics allocate.
+   * @note Physical current counters may rise or fall between lifecycle events;
+   * this method deliberately derives no event-kind delta from them.
+   */
+  bool validate_counter_view(
+      const compute::ExecutionLifecycleCounters& observed, bool service_origin,
+      bool final_stop, const char* context) {
+    bool valid = true;
+    const compute::ExecutionLifecycleCounters expected = counters();
+    if (!equal_registry_counters(observed, expected)) {
+      valid = reject(std::string(context) +
+                     " registry-derived counters differ from replay") &&
+              valid;
+    }
+
+    if (observed.ready_entry_count > kM1HostLimits.ready_entries ||
+        observed.ready_entry_count > std::numeric_limits<std::uint64_t>::max() -
+                                         observed.entered_callback_count ||
+        observed.ready_entry_count + observed.entered_callback_count >
+            observed.live_child_grant_count) {
+      valid = reject(std::string(context) +
+                     " physical ready/callback/grant bounds are impossible") &&
+              valid;
+    }
+    if (observed.live_child_grant_count != 0U &&
+        observed.live_root_reservation_count == 0U) {
+      valid = reject(std::string(context) +
+                     " child grant has no reachable root reservation") &&
+              valid;
+    }
+    if (observed.live_policy_invocation_count != 0U &&
+        observed.live_policy_binding_count == 0U) {
+      valid = reject(std::string(context) +
+                     " policy invocation has no live binding") &&
+              valid;
+    }
+
+    const std::uint64_t admitted_run_count =
+        expected.admitted_standalone_run_count +
+        expected.admitted_child_run_count;
+    const bool execution_owner = observed.ready_entry_count != 0U ||
+                                 observed.entered_callback_count != 0U ||
+                                 observed.live_policy_invocation_count != 0U;
+    if (execution_owner && admitted_run_count == 0U) {
+      valid = reject(std::string(context) +
+                     " executing Run owner has no admitted child") &&
+              valid;
+    }
+    const bool resource_owner = observed.live_root_reservation_count != 0U ||
+                                observed.live_child_grant_count != 0U;
+    if (resource_owner && admitted_run_count == 0U &&
+        expected.pending_candidate_count == 0U) {
+      valid = reject(std::string(context) +
+                     " resource owner has no admitted child or staged "
+                     "candidate") &&
+              valid;
+    }
+
+    if (service_origin &&
+        (execution_owner || resource_owner ||
+         observed.live_policy_binding_count != kM1InitialPolicyBindingCount)) {
+      valid =
+          reject("ServiceStarted physical origin is not producer-reachable") &&
+          valid;
+    }
+    if (final_stop && !lifecycle_settled(observed)) {
+      valid = reject("ServiceStopped counters are not exactly zero") && valid;
+    }
+    return valid;
+  }
+
+  /**
+   * @brief Enforces multi-record batches published under one registry fence.
+   * @param event Next event candidate.
+   * @return True when no batch is open or this is its required next record.
+   * @throws std::bad_alloc when diagnostics allocate.
+   */
+  bool expected_atomic_event(const compute::ExecutionLifecycleEvent& event) {
+    if (pending_group_step_.has_value() &&
+        (event.generation != pending_group_step_->bundle_id ||
+         event.kind != pending_group_step_->kind)) {
+      return reject("another event split one realtime child transition pair");
+    }
+    if (shutdown_graph_closing_index_ < shutdown_graph_closing_order_.size()) {
+      const std::uint64_t expected_graph =
+          shutdown_graph_closing_order_[shutdown_graph_closing_index_];
+      if (event.kind != compute::ExecutionLifecycleEventKind::GraphClosing ||
+          event.category !=
+              compute::ExecutionLifecycleCategory::ProcessShutdown ||
+          event.graph_instance_id != expected_graph) {
+        return reject(
+            "another event split the process-shutdown GraphClosing batch");
+      }
+    }
+    return true;
+  }
+
+  /**
+   * @brief Applies one GraphRegistered event.
+   * @param event Exact candidate event.
+   * @return True only for a fresh Graph during Accepting.
+   * @throws std::bad_alloc when Graph/order storage grows.
+   */
+  bool register_graph(const compute::ExecutionLifecycleEvent& event) {
+    if (!service_started_ || shutdown_started_ ||
+        all_graph_ids_.count(event.graph_instance_id) != 0U) {
+      return reject("GraphRegistered is not a fresh Accepting row");
+    }
+    graphs_.emplace(event.graph_instance_id, M1ReplayGraph{});
+    all_graph_ids_.insert(event.graph_instance_id);
+    graph_registration_order_.push_back(event.graph_instance_id);
+    return true;
+  }
+
+  /**
+   * @brief Captures every still-indexed cancellation record for one Graph.
+   * @param graph_id Exact Graph identity.
+   * @param category GraphClose or ProcessShutdown publication category.
+   * @param generation Close or shutdown generation carried by cancellation.
+   * @return Nothing.
+   * @throws std::bad_alloc when a new expectation key is inserted.
+   */
+  void capture_cancellations(std::uint64_t graph_id,
+                             compute::ExecutionLifecycleCategory category,
+                             std::uint64_t generation) {
+    const M1CancelKey key{graph_id, static_cast<std::uint16_t>(category),
+                          generation};
+    for (auto& entry : bundles_) {
+      M1ReplayBundle& bundle = entry.second;
+      if (bundle.graph_instance_id != graph_id || bundle.detached ||
+          bundle.cancellation_captured) {
+        continue;
+      }
+      bundle.cancellation_captured = true;
+      ++pending_cancellations_[key];
+    }
+  }
+
+  /**
+   * @brief Applies explicit or process-shutdown GraphClosing publication.
+   * @param event Exact next GraphClosing event.
+   * @return True only when row state, generation, and shutdown order match.
+   * @throws std::bad_alloc when cancellation expectations grow.
+   */
+  bool close_graph(const compute::ExecutionLifecycleEvent& event) {
+    const auto found = graphs_.find(event.graph_instance_id);
+    if (found == graphs_.end()) {
+      return reject("GraphClosing names no live row");
+    }
+    M1ReplayGraph& graph = found->second;
+    if (shutdown_started_) {
+      if (event.category !=
+              compute::ExecutionLifecycleCategory::ProcessShutdown ||
+          shutdown_graph_closing_index_ >=
+              shutdown_graph_closing_order_.size() ||
+          shutdown_graph_closing_order_[shutdown_graph_closing_index_] !=
+              event.graph_instance_id ||
+          event.generation != graph.close_generation) {
+        return reject("process-shutdown GraphClosing identity drifted");
+      }
+      ++shutdown_graph_closing_index_;
+      return true;
+    }
+    if (graph.state != M1ReplayGraphState::Open || event.generation != 1U) {
+      return reject("explicit GraphClosing did not perform Open-to-Closing");
+    }
+    graph.state = M1ReplayGraphState::Closing;
+    graph.close_generation = event.generation;
+    graph.candidate_cancellation = event.category;
+    capture_cancellations(event.graph_instance_id, event.category,
+                          event.generation);
+    return true;
+  }
+
+  /**
+   * @brief Applies one CandidateBegan event.
+   * @param event Exact candidate identity publication.
+   * @return True only for a fresh candidate on an Open Accepting row.
+   * @throws std::bad_alloc when candidate identity sets grow.
+   */
+  bool begin_candidate(const compute::ExecutionLifecycleEvent& event) {
+    const auto found = graphs_.find(event.graph_instance_id);
+    if (shutdown_started_ || found == graphs_.end() ||
+        found->second.state != M1ReplayGraphState::Open ||
+        !all_candidate_ids_.insert(event.generation).second) {
+      return reject("CandidateBegan is stale, reused, or not admissible");
+    }
+    found->second.candidate_ids.insert(event.generation);
+    return true;
+  }
+
+  /**
+   * @brief Applies one identity-bearing candidate rollback.
+   * @param event Exact rollback publication.
+   * @return True only for one unresolved candidate with the current reason.
+   * @throws std::bad_alloc when rollback identity storage grows.
+   */
+  bool rollback_candidate(const compute::ExecutionLifecycleEvent& event) {
+    const auto found = graphs_.find(event.graph_instance_id);
+    if (found == graphs_.end()) {
+      return reject("CandidateRolledBack names no live Graph");
+    }
+    M1ReplayGraph& graph = found->second;
+    if (graph.candidate_ids.count(event.generation) == 0U ||
+        graph.rolled_back_candidate_ids.count(event.generation) != 0U ||
+        event.category != graph.candidate_cancellation) {
+      return reject("CandidateRolledBack identity or cancellation drifted");
+    }
+    const std::uint64_t begun =
+        static_cast<std::uint64_t>(graph.candidate_ids.size());
+    const std::uint64_t next_rolled_back =
+        static_cast<std::uint64_t>(graph.rolled_back_candidate_ids.size() + 1U);
+    if (graph.committed_candidate_count > begun - next_rolled_back) {
+      return reject("candidate rollback conflicts with anonymous commit");
+    }
+    graph.rolled_back_candidate_ids.insert(event.generation);
+    return true;
+  }
+
+  /**
+   * @brief Applies one standalone or realtime bundle admission.
+   * @param event Bundle identity plus first child and optional group identity.
+   * @return True only when one pending candidate can be consumed.
+   * @throws std::bad_alloc when bundle/run/group identity storage grows.
+   */
+  bool admit_bundle(const compute::ExecutionLifecycleEvent& event) {
+    const auto graph_found = graphs_.find(event.graph_instance_id);
+    if (shutdown_started_ || graph_found == graphs_.end() ||
+        graph_found->second.state != M1ReplayGraphState::Open ||
+        pending_candidates(graph_found->second) == 0U ||
+        !all_bundle_ids_.insert(event.generation).second ||
+        !all_run_ids_.insert(event.run_id).second ||
+        (event.run_group_id != 0U &&
+         !all_run_group_ids_.insert(event.run_group_id).second)) {
+      return reject("BundleAdmitted identity or candidate consumption drifted");
+    }
+    ++graph_found->second.committed_candidate_count;
+    M1ReplayBundle bundle;
+    bundle.bundle_id = event.generation;
+    bundle.graph_instance_id = event.graph_instance_id;
+    bundle.run_group_id = event.run_group_id;
+    bundle.expected_run_count = event.run_group_id == 0U ? 1U : 2U;
+    bundle.runs.push_back(
+        M1ReplayRun{event.run_id, M1ReplayRunState::Admitted});
+    bundles_.emplace(bundle.bundle_id, std::move(bundle));
+    return true;
+  }
+
+  /**
+   * @brief Consumes one previously captured cancellation publication.
+   * @param event Graph/category/generation correlation record.
+   * @return True only when one captured bundle record remains.
+   * @throws std::bad_alloc when diagnostics allocate.
+   */
+  bool consume_cancellation(const compute::ExecutionLifecycleEvent& event) {
+    const M1CancelKey key{event.graph_instance_id,
+                          static_cast<std::uint16_t>(event.category),
+                          event.generation};
+    const auto found = pending_cancellations_.find(key);
+    if (found == pending_cancellations_.end() || found->second == 0U) {
+      return reject("CancellationRequested has no captured bundle");
+    }
+    if (--found->second == 0U) {
+      pending_cancellations_.erase(found);
+    }
+    return true;
+  }
+
+  /**
+   * @brief Maps one Run event kind to its required prior and next state.
+   * @param kind RunTerminal, RunQuiescent, ResourceSettled, or RunUnregistered.
+   * @return Exact prior/next pair.
+   * @throws std::logic_error for a non-Run kind.
+   */
+  static std::pair<M1ReplayRunState, M1ReplayRunState> run_transition(
+      compute::ExecutionLifecycleEventKind kind) {
+    using Kind = compute::ExecutionLifecycleEventKind;
+    switch (kind) {
+      case Kind::RunTerminal:
+        return {M1ReplayRunState::Admitted, M1ReplayRunState::Terminal};
+      case Kind::RunQuiescent:
+        return {M1ReplayRunState::Terminal, M1ReplayRunState::Quiescent};
+      case Kind::ResourceSettled:
+        return {M1ReplayRunState::Quiescent, M1ReplayRunState::ResourceSettled};
+      case Kind::RunUnregistered:
+        return {M1ReplayRunState::ResourceSettled,
+                M1ReplayRunState::Unregistered};
+      default:
+        throw std::logic_error("M1 lifecycle replay received a non-Run kind");
+    }
+  }
+
+  /**
+   * @brief Applies one child transition with bundle-wide phase barriers.
+   * @param event Exact child/bundle/Graph/group identity publication.
+   * @return True only for terminal-to-quiescent-to-settled-to-unregistered.
+   * @throws std::bad_alloc when the second realtime child is retained.
+   */
+  bool advance_run(const compute::ExecutionLifecycleEvent& event) {
+    const auto bundle_found = bundles_.find(event.generation);
+    if (bundle_found == bundles_.end()) {
+      return reject("Run transition names no live or unregistering bundle");
+    }
+    M1ReplayBundle& bundle = bundle_found->second;
+    if (event.graph_instance_id != bundle.graph_instance_id ||
+        event.run_group_id != bundle.run_group_id) {
+      return reject("Run transition crosses Graph or group identity");
+    }
+
+    auto run_found = std::find_if(bundle.runs.begin(), bundle.runs.end(),
+                                  [&event](const M1ReplayRun& run) {
+                                    return run.run_id == event.run_id;
+                                  });
+    if (run_found == bundle.runs.end()) {
+      const bool learns_second_child =
+          bundle.expected_run_count == 2U && bundle.runs.size() == 1U &&
+          event.kind == compute::ExecutionLifecycleEventKind::RunTerminal &&
+          pending_group_step_.has_value() &&
+          pending_group_step_->bundle_id == bundle.bundle_id &&
+          all_run_ids_.insert(event.run_id).second;
+      if (!learns_second_child) {
+        return reject(
+            "Run transition uses an unknown or reused child identity");
+      }
+      bundle.runs.push_back(
+          M1ReplayRun{event.run_id, M1ReplayRunState::Admitted});
+      run_found = std::prev(bundle.runs.end());
+    }
+
+    const std::size_t run_index =
+        static_cast<std::size_t>(std::distance(bundle.runs.begin(), run_found));
+    const auto transition = run_transition(event.kind);
+    if (run_found->state != transition.first) {
+      return reject(
+          "Run settlement phase is duplicated, skipped, or reordered");
+    }
+    if (bundle.expected_run_count == 2U) {
+      if (run_index == 0U) {
+        if (bundle.runs.size() != 2U &&
+            event.kind != compute::ExecutionLifecycleEventKind::RunTerminal) {
+          return reject("realtime second child is absent before later phases");
+        }
+        if (event.kind != compute::ExecutionLifecycleEventKind::RunTerminal &&
+            bundle.runs[1U].state != transition.first) {
+          return reject("realtime phase began before both children arrived");
+        }
+      } else if (run_index != 1U ||
+                 bundle.runs[0U].state != transition.second) {
+        return reject("realtime children are not in producer order");
+      }
+    }
+
+    run_found->state = transition.second;
+    if (event.kind == compute::ExecutionLifecycleEventKind::RunUnregistered &&
+        run_index == 0U) {
+      bundle.detached = true;
+    }
+    if (bundle.expected_run_count == 2U) {
+      if (run_index == 0U) {
+        pending_group_step_ = M1ReplayGroupStep{bundle.bundle_id, event.kind};
+      } else {
+        pending_group_step_.reset();
+      }
+    }
+
+    const bool complete = std::all_of(
+        bundle.runs.begin(), bundle.runs.end(), [](const M1ReplayRun& run) {
+          return run.state == M1ReplayRunState::Unregistered;
+        });
+    if (complete) {
+      bundles_.erase(bundle_found);
+    }
+    return true;
+  }
+
+  /**
+   * @brief Applies registration rollback or empty Closing-row removal.
+   * @param event Exact GraphRowRemoved publication.
+   * @return True only after candidate/bundle settlement and valid generation.
+   * @throws std::bad_alloc when diagnostics allocate.
+   */
+  bool remove_graph(const compute::ExecutionLifecycleEvent& event) {
+    const auto found = graphs_.find(event.graph_instance_id);
+    if (found == graphs_.end() || pending_candidates(found->second) != 0U) {
+      return reject("GraphRowRemoved names no empty live row");
+    }
+    const bool has_bundle = std::any_of(
+        bundles_.begin(), bundles_.end(), [&event](const auto& entry) {
+          return entry.second.graph_instance_id == event.graph_instance_id;
+        });
+    if (has_bundle) {
+      return reject("GraphRowRemoved precedes complete bundle unregistration");
+    }
+    if (found->second.state == M1ReplayGraphState::Open) {
+      if (event.generation != 0U || !found->second.candidate_ids.empty()) {
+        return reject("Graph registration rollback is not pristine");
+      }
+    } else if (event.generation != found->second.close_generation) {
+      return reject("GraphRowRemoved close generation drifted");
+    }
+    graphs_.erase(found);
+    return true;
+  }
+
+  /**
+   * @brief Applies the final service event after complete logical settlement.
+   * @param event Exact ServiceStopped record.
+   * @return True only for matching generation and empty replay ownership.
+   * @throws std::bad_alloc when diagnostics allocate.
+   */
+  bool stop_service(const compute::ExecutionLifecycleEvent& event) {
+    if (!shutdown_started_ || event.generation != shutdown_generation_ ||
+        !graphs_.empty() || !bundles_.empty() ||
+        !pending_cancellations_.empty() || pending_group_step_.has_value() ||
+        shutdown_graph_closing_index_ != shutdown_graph_closing_order_.size()) {
+      return reject("ServiceStopped precedes complete lifecycle settlement");
+    }
+    service_stopped_ = true;
+    return true;
+  }
+
+  /** @brief Stable mutable diagnostic target supplied by the evaluator. */
+  std::vector<std::string>* reasons_ = nullptr;
+  /** @brief True after the unique sequence-one service origin. */
+  bool service_started_ = false;
+  /** @brief True after the no-event Accepting-to-Stopping transition. */
+  bool shutdown_started_ = false;
+  /** @brief True after the unique final ServiceStopped record. */
+  bool service_stopped_ = false;
+  /** @brief Stable process-shutdown generation after Stopping. */
+  std::uint64_t shutdown_generation_ = 0U;
+  /** @brief Live Graph rows keyed by exact GraphInstanceId scalar. */
+  std::map<std::uint64_t, M1ReplayGraph> graphs_;
+  /** @brief Process-nonreused Graph identities observed in this service. */
+  std::set<std::uint64_t> all_graph_ids_;
+  /** @brief Live-row insertion order used by shutdown enumeration. */
+  std::vector<std::uint64_t> graph_registration_order_;
+  /** @brief Process-nonreused candidate identities observed in this service. */
+  std::set<std::uint64_t> all_candidate_ids_;
+  /** @brief Live or mid-unregistration bundles keyed by bundle identity. */
+  std::map<std::uint64_t, M1ReplayBundle> bundles_;
+  /** @brief Process-nonreused bundle identities observed in this service. */
+  std::set<std::uint64_t> all_bundle_ids_;
+  /** @brief Process-nonreused child Run identities observed in this service. */
+  std::set<std::uint64_t> all_run_ids_;
+  /** @brief Process-nonreused realtime group identities in this service. */
+  std::set<std::uint64_t> all_run_group_ids_;
+  /** @brief Captured cancellation publications remaining by correlation. */
+  std::map<M1CancelKey, std::uint64_t> pending_cancellations_;
+  /** @brief Required second child transition in one fence-held group phase. */
+  std::optional<M1ReplayGroupStep> pending_group_step_;
+  /** @brief Exact row order emitted by begin_service_shutdown(). */
+  std::vector<std::uint64_t> shutdown_graph_closing_order_;
+  /** @brief Next required row in the shutdown GraphClosing batch. */
+  std::size_t shutdown_graph_closing_index_ = 0U;
+};
+
 /**
  * @brief Replays every retained lifecycle page as one lossless cursor chain.
  *
@@ -321,6 +1196,7 @@ bool validate_m1_lifecycle_history(
   std::set<compute::ExecutionLifecycleEventKind> observed_kinds;
   bool observed_any_event = false;
   bool observed_service_stopped = false;
+  M1LifecycleReplay replay(reasons);
 
   for (std::size_t index = 0U; index < snapshots.size(); ++index) {
     const M1ExecutionSnapshot& snapshot = snapshots[index];
@@ -419,6 +1295,22 @@ bool validate_m1_lifecycle_history(
       observed_any_event = true;
       observed_kinds.insert(event.kind);
 
+      const bool shutdown_event =
+          (event.kind == compute::ExecutionLifecycleEventKind::GraphClosing &&
+           event.category ==
+               compute::ExecutionLifecycleCategory::ProcessShutdown) ||
+          event.kind == compute::ExecutionLifecycleEventKind::WorkerJoined ||
+          event.kind == compute::ExecutionLifecycleEventKind::ServiceStopped;
+      if (!replay.shutdown_started() &&
+          page.service_state !=
+              compute::ExecutionLifecycleServiceState::Accepting &&
+          shutdown_event && !replay.begin_shutdown(page.shutdown_generation)) {
+        valid = false;
+      }
+      if (!replay.apply(event)) {
+        valid = false;
+      }
+
       if (event.sequence == 1U &&
           (event.kind != compute::ExecutionLifecycleEventKind::ServiceStarted ||
            event.category != compute::ExecutionLifecycleCategory::None ||
@@ -445,6 +1337,16 @@ bool validate_m1_lifecycle_history(
       } else if (observed_service_stopped) {
         invalid("ordinary event appears after ServiceStopped");
       }
+    }
+
+    if (!replay.shutdown_started() &&
+        page.service_state !=
+            compute::ExecutionLifecycleServiceState::Accepting &&
+        !replay.begin_shutdown(page.shutdown_generation)) {
+      valid = false;
+    }
+    if (!replay.validate_page(page)) {
+      valid = false;
     }
 
     if (page.service_state ==
@@ -480,6 +1382,9 @@ bool validate_m1_lifecycle_history(
         break;
       }
     }
+  }
+  if (!replay.complete()) {
+    valid = false;
   }
   return valid;
 }

@@ -64,15 +64,17 @@ struct M1ExecutionSnapshot final {
 };
 
 /**
- * @brief Source-private M1 diagnostic capability of the embedded Host.
+ * @brief Source-private M1 evidence capability of the embedded Host.
  *
  * Computation remains exclusively on `I1Host` and `B1Host`. This interface
- * only composes read-only evidence samples from the same process-owned
- * execution service.
+ * composes read-only evidence samples from the same process-owned execution
+ * service and exposes one terminal shutdown operation so the manual runner can
+ * retain the producer's final-zero ServiceStopped cut.
  *
- * @throws As documented by `m1_execution_snapshot`.
+ * @throws As documented by each method.
  * @note This interface is neither installed nor exposed through IPC, CLI,
- * plugins, providers, or policy contracts.
+ * plugins, providers, or policy contracts. Shutdown is not a benchmark phase
+ * control: it is permitted only after every runner-owned Graph has closed.
  */
 class M1Host {
  public:
@@ -98,6 +100,18 @@ class M1Host {
    */
   virtual M1ExecutionSnapshot m1_execution_snapshot(
       std::uint64_t after_cursor, std::size_t limit) const = 0;
+
+  /**
+   * @brief Irreversibly settles the process execution domain for final proof.
+   * @return Nothing after idempotent ExecutionService shutdown completes.
+   * @throws std::logic_error when a Host Graph, synchronous admission, or
+   * asynchronous compute remains owned by the embedded adapter.
+   * @throws ExecutionService shutdown synchronization failures unchanged.
+   * @note The runner must call this only after closing all Graph sessions and
+   * before its final `m1_execution_snapshot`. No later Host computation or
+   * Graph load is permitted; repeated calls are idempotent.
+   */
+  virtual void m1_shutdown_execution() = 0;
 };
 
 /**

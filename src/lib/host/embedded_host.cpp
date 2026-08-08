@@ -985,6 +985,25 @@ struct EmbeddedHostState {
     }
   }
 
+  /**
+   * @brief Verifies the adapter edge is empty before terminal M1 shutdown.
+   * @return Nothing when no Graph record, admitted Host call, or async compute
+   * remains owned by this adapter.
+   * @throws std::logic_error while any such ownership remains.
+   * @throws std::system_error when lifecycle synchronization fails.
+   * @note The source-private M1 runner is the sole caller and must exclude new
+   * public Host calls after this check; this method itself changes no state.
+   */
+  void require_m1_execution_shutdown_ready() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (!session_close_records_.empty() || !active_admissions_.empty() ||
+        !outstanding_async_.empty()) {
+      throw std::logic_error(
+          "M1 execution shutdown requires every Host Graph and operation "
+          "to settle first.");
+    }
+  }
+
  private:
   /**
    * @brief Releases one admitted synchronous session operation.
@@ -2954,6 +2973,12 @@ class EmbeddedHost final : public Host,
             after_cursor, static_cast<std::uint32_t>(limit)),
         after_cursor,
         std::numeric_limits<std::size_t>::max()};
+  }
+
+  /** @copydoc benchmark::M1Host::m1_shutdown_execution */
+  void m1_shutdown_execution() override {
+    state_->require_m1_execution_shutdown_ready();
+    state_->execution_service->shutdown();
   }
 
   /** @copydoc benchmark::I2Host::acquire_i2_value */

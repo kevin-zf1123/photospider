@@ -472,6 +472,31 @@ void close_sessions(Host& host, const std::vector<GraphSessionId>& sessions) {
 }
 
 /**
+ * @brief Tests whether all logical and physical lifecycle ownership is zero.
+ * @param counters Complete producer snapshot to inspect.
+ * @return True only when all fifteen version-1 fields are exactly zero.
+ * @throws Nothing.
+ */
+bool all_m1_lifecycle_counters_zero(
+    const compute::ExecutionLifecycleCounters& counters) noexcept {
+  return counters.registered_graph_count == 0U &&
+         counters.open_graph_count == 0U &&
+         counters.closing_graph_count == 0U &&
+         counters.pending_candidate_count == 0U &&
+         counters.admitted_standalone_run_count == 0U &&
+         counters.admitted_run_group_count == 0U &&
+         counters.admitted_child_run_count == 0U &&
+         counters.terminal_not_quiescent_run_count == 0U &&
+         counters.finalizing_run_count == 0U &&
+         counters.ready_entry_count == 0U &&
+         counters.entered_callback_count == 0U &&
+         counters.live_root_reservation_count == 0U &&
+         counters.live_child_grant_count == 0U &&
+         counters.live_policy_invocation_count == 0U &&
+         counters.live_policy_binding_count == 0U;
+}
+
+/**
  * @brief Builds complete non-timing fairness input around observed starts.
  * @param snapshot Settled real mixed observation snapshot.
  * @return Passing synthetic threshold inputs plus actual class-start order.
@@ -555,6 +580,7 @@ TEST(M1ProductPath,
     sessions.push_back(session);
     load_single_task_session(*host, temp.root(), session, index + 20U);
   }
+  EXPECT_THROW(m1_host->m1_shutdown_execution(), std::logic_error);
 
   M1FairnessObservationCollector blocker_observations(16U);
   blocker_future = std::async(std::launch::async, [&] {
@@ -715,6 +741,15 @@ TEST(M1ProductPath,
       wait_for_cpu_reservations(*m1_host, 0U, 0U, 5s);
   EXPECT_EQ(settled.host_resources.reserved, ResourceVector{});
   close_sessions(*host, sessions);
+  m1_host->m1_shutdown_execution();
+  m1_host->m1_shutdown_execution();
+  const M1ExecutionSnapshot stopped = m1_host->m1_execution_snapshot(0U, 4096U);
+  EXPECT_EQ(stopped.lifecycle.service_state,
+            compute::ExecutionLifecycleServiceState::Stopped);
+  EXPECT_TRUE(all_m1_lifecycle_counters_zero(stopped.lifecycle.counters));
+  ASSERT_FALSE(stopped.lifecycle.records.empty());
+  EXPECT_EQ(stopped.lifecycle.records.back().kind,
+            compute::ExecutionLifecycleEventKind::ServiceStopped);
 }
 
 /**

@@ -1474,6 +1474,34 @@ std::uint64_t RunLifecycleRegistry::shutdown_generation() const {
   return impl_->shutdown_generation;
 }
 
+/** @copydoc RunLifecycleRegistry::publish_physical_retirement */
+void RunLifecycleRegistry::publish_physical_retirement(
+    ExecutionLifecycleEventKind kind, ExecutionLifecycleCategory category,
+    std::uint64_t generation) {
+  const bool worker = kind == ExecutionLifecycleEventKind::WorkerJoined &&
+                      category == ExecutionLifecycleCategory::None;
+  const bool binding = kind == ExecutionLifecycleEventKind::BindingRetired &&
+                       (category == ExecutionLifecycleCategory::None ||
+                        category == ExecutionLifecycleCategory::FailureOther);
+  if ((!worker && !binding) || generation == 0U) {
+    throw std::invalid_argument(
+        "Physical lifecycle retirement kind, category, or generation is "
+        "invalid.");
+  }
+
+  std::lock_guard<std::mutex> lock(impl_->fence);
+  if (impl_->service_state == Impl::ServiceState::Stopped) {
+    throw std::logic_error(
+        "Physical lifecycle retirement cannot follow ServiceStopped.");
+  }
+  if (worker && impl_->service_state != Impl::ServiceState::Stopping) {
+    throw std::logic_error(
+        "Worker retirement requires service shutdown to be Stopping.");
+  }
+  impl_->telemetry.publish(kind, category, 0U, 0U, 0U, generation,
+                           impl_->counters_locked());
+}
+
 /** @copydoc RunLifecycleRegistry::rollback_candidate */
 void RunLifecycleRegistry::rollback_candidate(
     const std::shared_ptr<RunLifecycleAdmissionCandidateControl>&

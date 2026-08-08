@@ -2358,10 +2358,11 @@ M1RunResult seal_m1_result(
  * @throws Cadence, product, evidence, environment, and allocation failures
  * unchanged.
  * @note All three Graphs use one EmbeddedHost, one ExecutionService, one
- * ResourceLedger, and one ComputeIoExecutor. No transition drains or restarts
- * the service; B1 producers remain independent and stop offers only at U. Both
- * isolated pair packs are loaded, rebound, and reduced before the timed
- * boundary or portable output authority is created.
+ * ResourceLedger, and one ComputeIoExecutor. No protocol transition drains or
+ * restarts the service; after every Graph closes, one terminal service shutdown
+ * exposes the final-zero ServiceStopped proof. B1 producers remain independent
+ * and stop offers only at U. Both isolated pair packs are loaded, rebound, and
+ * reduced before the timed boundary or portable output authority is created.
  */
 M1RunResult run_exact_m1_replicate(
     const M1RunnerOptions& options,
@@ -2812,6 +2813,7 @@ M1RunResult run_exact_m1_replicate(
                                     !observations.qos_mismatch;
 
   graphs.close_all();
+  m1_host->m1_shutdown_execution();
   input.temporal_snapshots.push_back(capture_m1_snapshot(
       *m1_host, &m1_cursor, input.temporal_snapshots.size()));
   input.protocol.final_settlement_proved =

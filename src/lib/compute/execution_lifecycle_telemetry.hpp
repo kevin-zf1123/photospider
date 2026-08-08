@@ -194,7 +194,7 @@ struct ExecutionLifecycleEvent final {
   std::uint64_t run_id = 0U;
   /** @brief Optional exact RunGroupId scalar. */
   std::uint64_t run_group_id = 0U;
-  /** @brief Optional close/shutdown generation scalar. */
+  /** @brief Optional candidate/bundle/close/shutdown generation scalar. */
   std::uint64_t generation = 0U;
   /** @brief Exact event transition kind. */
   ExecutionLifecycleEventKind kind =
