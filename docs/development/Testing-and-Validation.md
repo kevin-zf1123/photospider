@@ -2445,7 +2445,7 @@ samples and a median summary cannot hide a failed process.
 | --- | --- |
 | Latency | I1 starts immediately before final Host admission and ends at matching current visibility. I2 twelfth-edit (`edit_index=11`) preview starts before preview admission and ends at preview visibility; final uses that same start and ends at final visibility. I1 p50/p95/p99 <=50/100/150 ms and 100% final success; I2 preview p50/p95/p99 <=50/75/100 ms and final p95/p99 <=500/1000 ms, with required `ContentDigest` matches; M1 also satisfies I1 absolute bounds and p99 <=2.0x its same-ordinal paired isolated I1. Cancelled intermediates are excluded; accepted-cancel-to-quiescence is separate. |
 | Throughput | Successful logical RGBA pixel-site transforms per second, reported as MPix-op/s; one B1 job contributes 16,777,216 site-operations only after Run success + crash-durable receipt + logical/raw golden verification. The interval ends at final golden verification. Pair candidate/reference replicate ordinals under one exactly compatible storage environment: median ratio >=0.95 and every ratio >=0.90. Each M1 one-second B1 rate uses its same-subject, same-ordinal, storage-compatible paired isolated cap-8 B1 rate; p05 >=0.20, and a missing/zero/incompatible denominator or storage fingerprint is invalid. |
-| Fairness | For a complete one-second window where both B1 Graphs retain unconsumed offered demand without a producer pause, `J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`, where `x` is completed `work_units + ceil(ready_bytes/4096)`. Zero total service is invalid; p05 Jain >=0.95. While both classes remain startable, at most three Interactive starts precede Throughput. M1 also has zero headroom-caused Interactive admission failures and independently passes latency/progress. |
+| Fairness | For a complete one-second window where both B1 Graphs retain unconsumed offered demand without a producer pause, `J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`, where `x` is completed `work_units + ceil(ready_bytes/4096)`. Zero total service is invalid; p05 Jain >=0.95. While both classes remain scheduler-selectable without child-capacity prefiltering, at most three Interactive starts precede Throughput selection. M1 counts only committed starts whose product facts report both classes evidence-startable, including child capacity. M1 also has zero headroom-caused Interactive admission failures and independently passes latency/progress. |
 | Determinism | For the same B1 job index across three replicates, fresh-process restart, and Run caps 1/8, typed logical `ContentDigest`, raw payload SHA-256, canonical manifest SHA-256, `execution-profile-semantic-trace-v1` SHA-256, and job-indexed logical/raw golden mismatch counts are all zero. |
 | Waste | `discarded_started_service / all_started_service`, using `work_units + ceil(ready_bytes/4096)`. Every started callback whose result cannot commit is charged; for a visible successful I1/I2 Run, only the earliest causal start of each `(run_id,local_task_id)` is useful and later duplicates/retries are discarded, while distinct tasks remain useful. Entered non-preemptible work drains honestly. I1/I2 Interactive <=0.25 per replicate, and M1 applies that bound to Interactive service alone; work starting after accepted cancellation/supersession is exactly zero and is counted independently from discarded work. I2 extra filesystem/codec, CPU-copy, readback, transfer, and allocation bytes are zero under its permitted first-transfer rule. Fault-free isolated/mixed B1 discarded/duplicate/retry service is zero. |
 | Memory | Independent high-water bytes for Host retained, Host scratch, ready bytes, and configured-device memory/scratch, plus B1 active Compute I/O tasks/planned bytes. No absolute limit exceed; isolated row-owned deltas and B1 I/O counts return to the pre-row baseline/zero, and M1 shutdown returns to zero. I2 exact row-scoped resident release occurs after second-reuse evidence and before the final snapshot; every configured device's complete memory-and-scratch `reserved` vector equals its pre-row baseline. Candidate B1/I2 peaks are <=105% of the pinned same-environment reference. Process RSS is diagnostic only. B1 planned-byte charge and event-aligned samples are mandatory, authoritative evidence for Compute I/O admission, planned-byte high-water, and final settlement; they do not establish physical memory ownership or replace RSS or ledger/device ownership evidence. |
@@ -2801,15 +2801,30 @@ keeps every sparse temporal I/O current value at zero while proving that a
 short accepted/settled task still raises the event-derived high-water. The
 callback-boundary regression pauses after slot claim but before release
 publication and proves that unchanged copied-record counts cannot satisfy the
-entry/completion/claim/published cut. Lifecycle replay regressions retain
-request cursors and capture ordinals, then reject an empty chain, missing page
-or record, duplicate, reorder, broken cursor/cut, and post-stop event. The
-product suite consumes product-authored per-start ready/lifecycle/candidate/
-resource facts, proves a Throughput Run reaches terminal and resource
-settlement while Interactive work remains outstanding, and proves the exact
-31-CPU Throughput/32-CPU shared-headroom boundary. The positive and negative
-class-start cases distinguish a real dual-startable fourth Interactive start
-from nominal interval overlap. Timeouts are deadlock diagnostics, not latency
+entry/completion/claim/published cut. Lifecycle replay regressions use one
+producer-faithful multi-Graph history with registration and candidate rollback,
+group plus standalone admission, and legal cross-bundle phase interleaving.
+They mutate each of the nine registry-derived counters in turn and reject
+causal phase reordering, wrong Graph or Run identity, cross-Run splicing,
+group-child corruption, nonexistent rollback identity, missing/duplicate/
+reordered/cursor-broken records, post-stop events, and a nonzero final physical
+sample. Separate negative cases enforce ready capacity, ready-plus-entered
+child-grant reachability, child-to-root and policy-invocation-to-binding
+ownership, and admitted-or-pending-candidate resource reachability without
+inventing physical event deltas. Registry tests prove that worker-join and
+binding-retirement records take their nine-counter registry cut under the
+lifecycle fence. The product suite consumes product-authored per-start ready/
+lifecycle/candidate/resource facts, proves a Throughput Run reaches terminal
+and resource settlement while Interactive work remains outstanding, and proves
+the exact 31-CPU Throughput/32-CPU shared-headroom boundary. Policy execution
+regressions also prove that a scheduler-selectable but child-grant-exhausted
+candidate reaches `GrantUnavailable`, is marked only for the current worker
+cycle, and cannot starve an independent Run or spin during cancellation.
+Deterministic service-start observations prove the exhausted class is
+evidence-startable false while the committing class is true, and that two
+capacity-ready classes are both true. The positive and negative class-start
+cases distinguish a real dual-evidence-startable fourth Interactive start from
+nominal interval overlap. Timeouts are deadlock diagnostics, not latency
 thresholds.
 
 The pair-object tests also exercise the real Issue #93 and #95 evaluator-to-
@@ -2856,7 +2871,9 @@ the M1 evaluator and sealed denominator claims.
 
 The runner uses one `EmbeddedHost` for the I1 Graph and both B1 Graphs, executes
 the exact cold/warmup/measured cadence, classifies all 480 measured edits, stops
-new offers at U, closes all Graphs, requires final-zero state, and writes six
+new offers at U, closes all Graphs, invokes the source-private idempotent M1
+evidence-finalization seam, requires a terminal `ServiceStopped` snapshot with
+all 15 lifecycle counters and all process resources at zero, and writes six
 canonical sections plus `row.canonical`, `bundle.canonical`, copied canonical
 `paired-i1-object.canonical`/`paired-b1-object.canonical` packs, and
 `result.json`.

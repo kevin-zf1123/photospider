@@ -1310,12 +1310,22 @@ offer cadence; cross-boundary current-hold, carryover/FIFO, immutable
 attribution, independent producer cycles, U cutoff, and final settlement; a
 fail-closed five-axis inner evaluator; unchanged base-only-I1/full-B1
 environment delegation; one fixed-capacity shared causal observer plus
-same-coordinate workload fanout; and an observation-only `M1Host` snapshot of
+same-coordinate workload fanout; and immutable `M1Host` snapshots of
 Host/device, Compute I/O, ready-class, lifecycle, and Throughput reservation
-state. Observer boundaries retain callback entry/completion and slot claim/
+state. `M1Host` also has one source-private, idempotent terminal evidence seam,
+legal only after every Graph and Host operation closes, to capture
+`ServiceStopped`; it is not a general lifecycle control surface. Observer
+boundaries retain callback entry/completion and slot claim/
 contiguous-publication frontiers, so equal event counts cannot conceal an
 in-flight publisher. Lifecycle snapshots retain request cursors and capture
-ordinals and are replayed as an exact lossless page/event chain. It also adds
+ordinals and are replayed as an exact lossless page/event chain plus an
+identity-aware Graph/candidate/bundle/Run/generation state machine. Every event
+and page cut exact-checks all nine registry-derived counters. The six physical
+counters are independently sampled and checked for capacity/ownership
+reachability, including pending prepublication candidates, rather than inferred
+event deltas; physical retirement publishes its registry cut under the
+lifecycle fence. The final event must be `ServiceStopped` with all 15 counters
+zero. It also adds
 the source-private canonical 15-field row/five-field bundle
 materializer and exact-one/DAG validator, and an exact manual
 `m1_shared_benchmark` target. Deterministic product tests exercise real mixed
@@ -1323,10 +1333,11 @@ backlog and the exact 31-CPU Throughput/32-CPU shared-headroom boundary without
 a wall-time SLO. The completed evidence correction removes caller-supplied M1
 denominator scalars, recomputes them from exact-one canonical isolated rows,
 retains complete reusable I1/B1 source rows plus all 30/480/temporal raw M1
-inputs, records product-authored per-start dual-class startability and committed
-grants, and derives Compute I/O high-water only from complete event-aligned job
-streams. Sparse current snapshots remain diagnostic and final process I/O must
-be zero.
+inputs, records product-authored per-start dual-class evidence-startability
+including child capacity and committed grants without changing scheduler-
+selectable three-to-one accounting, and derives Compute I/O high-water only
+from complete event-aligned job streams. Sparse current snapshots remain
+diagnostic, and final process I/O plus all lifecycle ownership must be zero.
 
 The executable-pair correction now closes the source-object boundary as well.
 The actual Issue #93 I1 and Issue #95 B1 manual producers emit canonical

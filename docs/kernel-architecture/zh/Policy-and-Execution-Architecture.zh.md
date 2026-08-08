@@ -103,13 +103,15 @@ Host 会立即以本地方式打开 DSO；在精确确认 ABI 相等之前，只
 
 ## Host 生成的前沿
 
-Host 在调用策略前先选择服务类别。两个类别都有可启动工作时，最多允许连续启动
-三个 Interactive 工作，随后必须启动一个 Throughput 工作。在选定类别内，
-每个活动 Run 最多暴露一个 lane 头。
+Host 在调用策略前先选择服务类别。两个类别都有 scheduler-selectable 工作时，最多允许
+连续启动三个 Interactive 工作，随后必须启动一个 Throughput 工作。Scheduler-selectable
+表示某个 current ready lane 头对该 worker 通过 Run lifecycle、cancellation、operation-gate
+与 physical-route eligibility；它刻意不包含暂时性的 execution child-grant capacity。在选定
+类别内，每个活动 Run 最多暴露一个 lane 头。
 
 插件看到候选项之前，Host 会按以下规则收缩候选集合：
 
-1. 只考虑当前、可启动、取消安全、路由兼容的 lane 头；
+1. 只考虑当前、scheduler-selectable、取消安全、路由兼容的 lane 头；
 2. 同类别连续启动八次后，只保留年龄最大的前沿；
 3. 否则，只保留具有最早有限截止期限的 Interactive 工作；
 4. 移除不在最低预计 Graph 服务量子内的候选项；
@@ -172,10 +174,17 @@ completion/grant release、cancellation/failure purge、policy replacement 与 s
 该 epoch。spurious wake 不触发 retry；50 ms low-frequency fallback 覆盖其他不可观测的外部
 child-grant release，随后清除 cycle mark，并重验 current Host state。
 
-Implementation cap 或已占用 exclusive key 会把对应 candidate 从 startable frontier 移除，
-但不会向 policy plugin 暴露 operation metadata。Worker retirement 释放 gate 时会推进同一个
-notification epoch。Direct sequential caller 会在不持有 resource reservation 的情况下进行
-cancellation-aware wait，随后只在 provider entry 周围获取同一 gate 以及一份 CPU/byte/scratch root。
+只有成功提交的 service start 才会发布 evidence-startable class fact。该 observation cut 会
+重验相同的 ready/lifecycle/operation/route predicate，并额外要求每个 class 至少一个
+candidate 的 live child-grant capacity 足够。这些 capacity-aware evidence fact 只决定 M1
+applicability；既不筛除 policy snapshot，也不更新三比一 `consecutive_interactive_` state。
+失败的 `try_grant()` 不发布 start observation。
+
+Implementation cap 或已占用 exclusive key 会把对应 candidate 从 scheduler-selectable
+frontier 移除，但不会向 policy plugin 暴露 operation metadata。Worker retirement 释放 gate
+时会推进同一个 notification epoch。Direct sequential caller 会在不持有 resource reservation
+的情况下进行 cancellation-aware wait，随后只在 provider entry 周围获取同一 gate 以及一份
+CPU/byte/scratch root。
 
 每个由 Host 拥有的 retained operation 或 constraint key 都按实际复制的
 `std::string::capacity()` 加空终止符计费。Full-plan admission 会为每个逻辑 task（包括每个
@@ -414,6 +423,15 @@ callback 会如实阻塞 shutdown，而不会被伪装成可恢复状态。同�
 caller 会被 mutation-free preflight 拒绝；Kernel 一旦关闭 publication gate，意外 transition
 failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执行属于 Issue #77；
 进程隔离的插件监管属于 Issue #91。
+
+Registry mutation 与 `WorkerJoined`、`BindingRetired` record 中由 registry 派生的部分由同一个
+lifecycle fence 串行化。因此，这些 physical-retirement record 携带一个精确的九 counter registry
+cut，而 ready、entered-callback、root、child、policy-invocation 与 binding ownership 独立采样。
+M1 evidence replay 会重建 Graph/candidate/bundle/Run/generation 因果关系，并在每个 event 与
+page cut 精确校验九个 registry counter。对于六个 physical sample，它只验证 capacity 与
+ownership 可达性，包括 bundle publication 前由 pending candidate 持有的 resource；绝不从
+event kind 虚构精确 physical delta。最终 M1 evidence 必须以 `ServiceStopped` 结束，且全部
+15 个 counter 为零。
 
 ## 当前执行画像证据与限制
 

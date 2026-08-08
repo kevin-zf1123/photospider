@@ -350,7 +350,13 @@ non-destructive atomic-cut pages of 1..4,096 records with explicit cursor gaps
 and saturating drop totals. Six trusted physical counter selectors cover ready
 entries, entered operation callbacks, live root reservations, live child
 grants, policy invocations, and current/displaced bindings; registry-derived
-counters come only from `RunLifecycleRegistry`. Records contain copied scalar
+counters come only from `RunLifecycleRegistry`. M1 lifecycle replay treats the
+nine registry-derived counters as an exact state-machine projection over
+Graph, candidate, bundle, Run, group, and generation identity. The six physical
+counters remain independent samples checked for capacity and ownership
+reachability, not event-kind deltas; physical retirement publishes its exact
+registry cut under the registry lifecycle fence. `ServiceStopped` is the final
+record and carries zero in all 15 fields. Records contain copied scalar
 identities and grant no lifecycle, queue, callback, plugin, Graph, or Run
 authority. No Host, CLI, or IPC method exposes this store.
 
@@ -367,6 +373,22 @@ aging never changes the selected class. Initial and dependency-released
 submissions cross the same boundary, and Run rows persist across temporary
 emptiness. Removing an entry releases its ready grant only after execution
 authority is acquired or the entry is purged.
+
+**Scheduler-selectable candidate**
+A worker-local ready lane head that passes current Run lifecycle,
+cancellation, operation-gate, physical-route, and cycle-local grant-block
+visibility. It participates in class choice, the policy frontier, and the
+three-to-one Interactive burst state. Remaining execution child-grant capacity
+is deliberately not a selector predicate: exhaustion is classified only by
+reserved start, which marks the exact entry for that worker without charging
+dispatch or fairness state.
+
+**Evidence-startable class fact**
+An observation-only per-class Boolean sampled for a service start from the
+scheduler-visible ready/lifecycle/operation/route predicates plus sufficient
+live child-grant capacity. It is published only with a successfully committed
+start and controls M1 applicability, not candidate selection or burst
+accounting. It mints no grant and cannot replace `try_grant()`.
 
 **Resource reservation and grant**
 A reservation is the move-only RAII owner of one atomically admitted root

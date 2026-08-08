@@ -17,9 +17,11 @@ targets can be promoted into current architecture documentation.
 The process execution domain already distinguishes Interactive and Throughput
 QoS. Current Host policy applies deadline preference, trusted work/ready-byte
 charging, hierarchical Graph/Run fairness, eight-dispatch aging, at most three
-Interactive starts before a Throughput start while both remain startable, and
-Interactive admission headroom. Those are ordering and admission mechanisms,
-not end-to-end execution-profile SLOs.
+Interactive starts before a Throughput start while both remain scheduler-
+selectable, and Interactive admission headroom. Scheduler selection excludes
+transient child-grant capacity; committed M1 start applicability separately
+records capacity-aware evidence-startable facts. Those are ordering,
+admission, and evidence mechanisms, not end-to-end execution-profile SLOs.
 
 Current measurement evidence is narrower:
 
@@ -1583,9 +1585,17 @@ lifecycle request cursor. The evaluator replays the bounded lifecycle pages
 from cursor zero, requiring exact page/capture order, one service and epoch,
 contiguous lossless event sequence, producer-defined empty-ring/next-cursor
 semantics, monotonic states and timestamps, closed event/category values, and
-all service/Graph/admission/terminal/quiescence/resource/close effects required
-by nonempty M1 execution. Missing, duplicated, reordered, truncated,
-cursor-inconsistent, or post-stop evidence makes memory Invalid.
+an identity-aware state machine for Graphs, candidates, bundles, Runs, groups,
+and generations. It exact-checks registration/candidate rollback, standalone
+and ordered group admission, every child terminal-to-quiescent-to-resource-
+settled-to-unregistered chain, whole-bundle detachment, Graph close, shutdown
+cancellation, and service stop. Each event and retained page cut must exactly
+match the replayed nine registry-derived counters. The six physical counters
+remain independently sampled facts constrained by capacity and ownership
+reachability, including pending prepublication candidates; event kinds do not
+imply exact physical deltas. Missing, duplicated, reordered, identity-spliced,
+counter-inconsistent, truncated, cursor-inconsistent, or post-stop evidence
+makes memory Invalid.
 
 Warmup evidence remains required: a carryover failure, missing event evidence,
 duplicate event sequence, non-total event coordinate, illegal phase rewrite,
@@ -1594,9 +1604,11 @@ settlement invalidates the replicate even though its occurrence-owned
 quantities are excluded from measured aggregates. At `(U^M1,u^M1)`, the
 ordered cutoff stops new measured B1 offers without cancelling already offered
 work. An endpoint ordered at or after that cutoff is retained but does not
-enter a 30-second numerator. Teardown must drain all phases and reach the
-existing exact-zero resource/Compute-I/O settlement; quiescence is deliberately
-not required at `B^M1`.
+enter a 30-second numerator. Teardown must drain all phases, close every Graph,
+invoke the source-private idempotent M1 evidence finalizer, and retain final
+`ServiceStopped` with all 15 lifecycle counters plus the existing resource/
+Compute-I/O settlement at exact zero; quiescence is deliberately not required
+at `B^M1`.
 
 The workload manifest retains `C^M1`, `W^M1`, `B^M1`, `U^M1`, exact phase
 intervals, I1 origin/count/index and `Q_end` arithmetic, the cold/warmup B1
@@ -1677,12 +1689,17 @@ The nearest-rank p05 Jain index must be at least 0.95. A zero-total-service
 window is `invalid`. Charged service uses the Host policy unit
 `work_units + ceil(ready_bytes/4096)`.
 
-While both classes remain continuously startable, no more than three
-Interactive starts may precede one Throughput start. M1 additionally requires
-zero Interactive admission failures caused by Throughput consuming declared
-headroom, the Interactive latency gates, and the 0.20 Throughput progress
-floor. Start order, completed progress, headroom admission, and latency are
-independent evidence.
+While both classes remain continuously scheduler-selectable by ready,
+lifecycle, operation-gate, and route predicates, no more than three Interactive
+starts may precede one Throughput selection. Transient child-grant exhaustion
+is resolved after selection and does not rewrite that burst accounting. For
+M1 evidence, a committed start is class-start applicable only when its
+product-authored observation reports both classes evidence-startable, including
+live child-grant capacity; this narrower fact cannot control scheduler choice.
+M1 additionally requires zero Interactive admission failures caused by
+Throughput consuming declared headroom, the Interactive latency gates, and the
+0.20 Throughput progress floor. Start order, completed progress, headroom
+admission, and latency are independent evidence.
 
 #### Determinism
 
@@ -2143,8 +2160,13 @@ B1 corpus nor #96 composition is asserted here.
 The current #96 source tree composes the exact mixed protocol and five-axis
 evaluator, retains callback entry/completion and claim/publication frontiers at
 the B boundary, and exactly replays lifecycle cursors, capture ordinals, pages,
-and events for memory closure. Its I1/B1 portable packs are explicitly
-denominator-only and require exact sample/occurrence shapes. The reader uses
+Graph/candidate/bundle/Run/generation causality, and all nine registry-derived
+counters for memory closure. Six independently sampled physical counters are
+checked for capacity and ownership reachability rather than inferred event
+deltas; physical retirement takes its registry cut under the lifecycle fence.
+After every Graph closes, the source-private M1 finalizer captures terminal
+`ServiceStopped` with all 15 counters zero. Its I1/B1 portable packs are
+explicitly denominator-only and require exact sample/occurrence shapes. The reader uses
 one no-follow POSIX descriptor or reparse-point-aware Windows handle for
 same-object validation and reading. These mechanisms and deterministic tests
 do not assert a timed three-replicate corpus, complete live storage authority,

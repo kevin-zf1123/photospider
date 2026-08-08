@@ -1998,7 +1998,7 @@ sample 或 median summary 不能隐藏失败进程。
 | --- | --- |
 | Latency | I1 从 final Host admission 前立即开始，到匹配的 current visibility 结束。I2 第十二次 edit（`edit_index=11`）preview 从 preview admission 前开始，到 preview visibility 结束；final 使用同一起点，到 final visibility 结束。I1 p50/p95/p99 <=50/100/150 ms 且 final success 为 100%；I2 preview p50/p95/p99 <=50/75/100 ms，final p95/p99 <=500/1000 ms，并匹配必需 `ContentDigest`；M1 还要满足 I1 绝对上界，且 p99 <=其 same-ordinal paired isolated I1 的 2.0 倍。被取消的 intermediate 不进入 percentile；accepted-cancel-to-quiescence 单独报告。 |
 | Throughput | 每秒成功的 logical RGBA pixel-site transform，以 MPix-op/s 报告；一个 B1 job 只有在 Run success + crash-durable receipt + logical/raw golden verification 后才贡献 16,777,216 个 site-operation。Interval 在 final golden verification 结束。Candidate/reference replicate 按 ordinal 在一个精确兼容 storage environment 下配对：ratio 中位数 >=0.95，且每个 ratio >=0.90。每个 M1 一秒 B1 rate 使用 same-subject、same-ordinal 且 storage-compatible 的 paired isolated cap-8 B1 rate；p05 >=0.20，denominator 或 storage fingerprint 缺失、为零或不兼容时 invalid。 |
-| Fairness | 对两个 B1 Graph 整个一秒 window 都保有未消费 offered demand、且 producer 均未暂停的窗口，`J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`，其中 `x` 是 completed `work_units + ceil(ready_bytes/4096)`。总 service 为零时 invalid；Jain p05 >=0.95。两个 class 都保持 startable 时，最多三次 Interactive start 后出现 Throughput。M1 还要求 headroom 导致的 Interactive admission failure 为零，并独立通过 latency/progress。 |
+| Fairness | 对两个 B1 Graph 整个一秒 window 都保有未消费 offered demand、且 producer 均未暂停的窗口，`J=(x_A+x_B)^2/(2*(x_A^2+x_B^2))`，其中 `x` 是 completed `work_units + ceil(ready_bytes/4096)`。总 service 为零时 invalid；Jain p05 >=0.95。两个 class 在不预筛 child capacity 的情况下都保持 scheduler-selectable 时，最多三次 Interactive start 后出现 Throughput selection。M1 只统计产品 fact 报告两个 class 都 evidence-startable（包括 child capacity）的 committed start。M1 还要求 headroom 导致的 Interactive admission failure 为零，并独立通过 latency/progress。 |
 | Determinism | 对三个 replicate、fresh-process restart 与 Run cap 1/8 中相同的 B1 job index，typed logical `ContentDigest`、raw payload SHA-256、canonical manifest SHA-256、`execution-profile-semantic-trace-v1` SHA-256 与按 job index 区分的 logical/raw golden mismatch count 全部为零。 |
 | Waste | `discarded_started_service / all_started_service`，使用 `work_units + ceil(ready_bytes/4096)`。每个无法 commit 结果的已启动 callback 都会被计费；对于 visible successful I1/I2 Run，每个 `(run_id,local_task_id)` 只有 causal sequence 最早的 start 属于 useful，之后的 duplicate/retry 属于 discarded，而不同 task 仍属于 useful。已经进入的不可抢占 work 如实 drain。I1/I2 Interactive 每个 replicate <=0.25，M1 对 Interactive service 单独应用该上限；accepted cancellation/supersession 后才启动的 work 精确为零，并与 discarded work 独立计数。I2 在允许的首次 transfer 规则下，额外 filesystem/codec、CPU-copy、readback、transfer 与 allocation byte 为零。无故障 isolated/mixed B1 的 discarded/duplicate/retry service 为零。 |
 | Memory | Host retained、Host scratch、ready byte 与已配置 device memory/scratch 的独立 high-water byte，加上 B1 active Compute I/O task/planned byte。不得超过绝对 limit；isolated row-owned delta 与 B1 I/O count 回到 row 前 baseline/零，M1 shutdown 回到零。I2 精确 row-scoped resident release 发生在第二次 reuse evidence 之后、最终 snapshot 之前；每个已配置 device 的完整 memory-and-scratch `reserved` vector 等于 row 前 baseline。Candidate B1/I2 peak <=固定同环境 reference 的 105%。Process RSS 只作为 diagnostic。B1 planned-byte charge 与 event-aligned sample 是 Compute I/O admission、planned-byte high-water 与 final settlement 的强制性权威证据；它们不证明 physical memory ownership，也不能替代 RSS 或 ledger/device ownership evidence。 |
@@ -2296,14 +2296,24 @@ live authority。它们还会拒绝 substituted isolated-I1 source、遗漏的 i
 未知/超限 I/O transition，以及非零 final I/O state。一项专门回归会让全部稀疏 temporal I/O
 current value 保持为零，同时证明短 accepted/settled task 仍会提高 event-derived high-water。
 Callback-boundary 回归在 slot claim 后、release publication 前暂停，并证明 copied-record
-count 不变不能满足 entry/completion/claim/published cut。Lifecycle replay 回归保留 request
-cursor 与 capture ordinal，随后拒绝 empty chain、缺失 page/record、重复、重排、损坏的
-cursor/cut 与 stop 后 event。
+count 不变不能满足 entry/completion/claim/published cut。Lifecycle replay 回归使用一份
+producer-faithful multi-Graph history，包含 registration/candidate rollback、group 与 standalone
+admission，以及合法 cross-bundle phase interleave。测试会逐一篡改九个 registry-derived
+counter，并拒绝因果 phase 重排、错误 Graph/Run identity、跨 Run 拼接、group-child 损坏、
+不存在的 rollback identity、缺失/重复/重排/cursor 损坏的 record、stop 后 event 与 final 非零
+physical sample。独立负例会强制 ready capacity、ready-plus-entered 对 child grant 的可达性、
+child-to-root 与 policy-invocation-to-binding ownership，以及 resource 必须可达 admitted child
+或 pending candidate，同时不会虚构 physical event delta。Registry 测试证明 worker-join 与
+binding-retirement record 在 lifecycle fence 内取得其九 counter registry cut。
 Product suite 使用产品签发的 per-start ready/lifecycle/candidate/resource fact，证明 Throughput
 Run 到达 terminal 与 resource settlement 时 Interactive work 仍为 outstanding，并证明精确
-31-CPU Throughput/32-CPU shared-headroom boundary。Class-start 正负 case 会区分真实 dual-
-startable 的第四次 Interactive start 与 nominal interval overlap。Timeout 只是 deadlock
-diagnostic，不是 latency threshold。
+31-CPU Throughput/32-CPU shared-headroom boundary。Policy execution 回归还会证明：一个
+scheduler-selectable 但 child grant 已耗尽的 candidate 会到达 `GrantUnavailable`，只在当前
+worker cycle 被标记，且不能饿死独立 Run，也不能在 cancellation 期间 spin。确定性 service-
+start observation 会证明已耗尽 class 的 evidence-startable 为 false、正在 commit 的 class
+为 true，并证明两个 capacity-ready class 都为 true。Class-start 正负 case 会区分真实 dual-
+evidence-startable 的第四次 Interactive start 与 nominal interval overlap。Timeout 只是
+deadlock diagnostic，不是 latency threshold。
 
 Pair-object 测试还会执行真实 Issue #93/#95 evaluator-to-producer 路径、canonical pack
 round trip、精确 section 顺序/数量、source rematerialization、digest/object 不匹配、错误
@@ -2342,7 +2352,9 @@ B1 environment relation，并重算 I1 p99 与 B1 successful-site-operation/inte
 
 Runner 通过一个
 `EmbeddedHost` 运行 I1 Graph 与两个 B1 Graph，执行精确 cold/warmup/measured cadence，分类
-全部 480 个 measured edit，在 U 停止新增 offer，关闭全部 Graph，要求 final-zero state，并
+全部 480 个 measured edit，在 U 停止新增 offer，关闭全部 Graph，调用 source-private 且幂等的
+M1 evidence-finalization seam，要求终态 `ServiceStopped` snapshot 的全部 15 个 lifecycle
+counter 与全部 process resource 为零，并
 写入六个 canonical section，以及 `row.canonical`、`bundle.canonical`、复制的 canonical
 `paired-i1-object.canonical`/`paired-b1-object.canonical` pack 与 `result.json`。其
 nested M1 row 会保留 30 个 raw progress 与 Graph-service window、480 个 raw Host outcome、

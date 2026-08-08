@@ -631,16 +631,25 @@ Interactive starts, and complete classification of all 480 measured I1
 admissions. Environment pairing delegates unchanged to the base-only I1 and
 full eligible B1-cap-eight relations.
 
-Applicability at each service start is now a product-authored scheduler cut,
-not a reconstruction from nominal I1/B1 intervals. Immediately before a
-physical start commits, `ExecutionService` probes real ready entries, Run
-lifecycle, operation/route eligibility, and remaining child-grant capacity for
-both classes. The observation is published only after the selected operation
-gate, route, ready removal, counters, and execution grant commit. The M1
-collector retains both class facts and the committed-grant bit in its existing
-preallocated, allocation-free, nonblocking, lock-free callback store. Nominal
+Applicability at each service start is a product-authored evidence cut, not a
+reconstruction from nominal I1/B1 intervals and not the scheduler-selection
+cut. `ExecutionService` first treats a ready lane head as scheduler-selectable
+when its Run lifecycle, operation gate, and physical route permit selection;
+transient child-grant capacity does not filter that policy frontier. A selected
+entry whose child grant is unavailable reaches reserved start, receives only a
+worker-cycle grant-block mark, and leaves policy/fairness counters unchanged
+while that worker searches the remaining candidates.
+
+Immediately before a physical start commits, the separate evidence-startable
+probe adds remaining child-grant capacity for both classes. The observation is
+published only after the selected operation gate, route, ready removal,
+counters, and execution grant commit. The M1 collector retains both capacity-
+aware class facts and the committed-grant bit in its existing preallocated,
+allocation-free, nonblocking, lock-free callback store. The scheduler's
+three-to-one `consecutive_interactive_` accounting continues to use scheduler-
+selectable Throughput competition, not these narrower evidence facts. Nominal
 intervals remain useful only for Graph-demand diagnostics and cannot reset or
-excuse the three-to-one start rule.
+excuse either rule.
 
 One preallocated `M1FairnessObservationCollector` gives tagged I1/B1 Runs one
 bounded observer-causal domain. `ComputeRunObservationFanout` forwards the
@@ -650,7 +659,10 @@ accepted-row sequence. Overflow, sequence exhaustion, or tag/QoS disagreement
 is sticky fail-closed evidence. The source-private `M1Host` adds no compute
 route: it joins Host/device ledger, Compute I/O, class-partitioned ready,
 lifecycle, and immutable Throughput capacity/reserved snapshots from the same
-service.
+service. Its only mutation is an idempotent evidence-finalization seam that is
+legal after every Graph and Host operation has closed. That seam shuts down the
+same execution service so the runner can retain the terminal `ServiceStopped`
+cut; it is not a general compute, phase, or lifecycle control surface.
 
 The collector's boundary snapshot now closes both callback lifetime and slot
 publication. Bounded callback-entry/completion frontiers surround each whole
@@ -675,8 +687,27 @@ temporal snapshot retains its capture ordinal and requested `after_cursor`.
 Validation starts at cursor zero and requires the exact page chain, contiguous
 lossless event sequence, stable service/epoch identity, producer cursor/state
 semantics, and the complete service/Graph/admission/terminal/quiescence/
-resource/close effects required by nonempty M1 work. Missing, duplicated,
-reordered, cursor-inconsistent, or post-stop records make memory `Invalid`.
+resource/close effects required by nonempty M1 work. The replay maintains
+Graph, candidate, bundle, Run, group, and generation identity, including
+registration rollback, candidate rollback, group admission order, each child
+terminal-to-quiescent-to-resource-settled-to-unregistered chain, whole-bundle
+detachment, Graph close, shutdown cancellation, and final service stop. Because
+`BundleAdmitted` does not carry a candidate id, candidate commit is assigned
+existentially to one still-pending candidate of the same Graph; no evidence
+field is invented.
+
+At every event and retained page cut, the replay recomputes and exact-checks all
+nine registry-derived counters. The six physical counters remain independent
+producer samples: validation checks configured ready capacity, ready-plus-
+entered child-grant reachability, child-to-root ownership, policy-invocation-to-
+binding reachability, and that physical owners belong either to an admitted
+child or to a pending prepublication candidate. It does not infer exact physical
+deltas from event kinds. Worker joins and policy-binding retirement publish the
+registry counter cut under the registry lifecycle fence while sampling those
+six physical values independently. The runner closes every Graph before using
+the terminal M1 seam; `ServiceStopped` must be last and all 15 counters must be
+zero. Missing, duplicated, reordered, identity-spliced, counter-inconsistent,
+cursor-inconsistent, or post-stop records make memory `Invalid`.
 
 The manual `m1_shared_benchmark` target is `EXCLUDE_FROM_ALL` and absent from
 CTest/CI. It runs all three Graphs through one `EmbeddedHost`, emits a closed M1

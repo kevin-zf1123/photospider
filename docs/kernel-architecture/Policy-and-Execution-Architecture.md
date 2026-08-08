@@ -122,14 +122,17 @@ forced recovery guarantee; process isolation is a separate future boundary.
 ## Host-Authored Frontier
 
 The Host chooses the service class before invoking a policy. When both classes
-have startable work, it permits at most three consecutive Interactive starts
-before one Throughput start. Within the chosen class it exposes at most one lane
-head per live Run.
+have scheduler-selectable work, it permits at most three consecutive
+Interactive starts before one Throughput start. Scheduler-selectable means a
+current ready lane head passes Run lifecycle, cancellation, operation-gate,
+and physical-route eligibility for that worker; it deliberately excludes
+transient execution child-grant capacity. Within the chosen class the Host
+exposes at most one lane head per live Run.
 
 Before a plugin sees candidates, the Host reduces them through these rules:
 
-1. only current, startable, cancellation-safe, route-compatible lane heads are
-   considered;
+1. only current, scheduler-selectable, cancellation-safe, route-compatible
+   lane heads are considered;
 2. after eight same-class starts, only the maximum-age frontier remains;
 3. otherwise Interactive work with the earliest finite deadline remains;
 4. candidates outside the minimum projected Graph-service quantum are removed;
@@ -204,8 +207,17 @@ replacement, and shutdown. Spurious wakes do not retry; a 50 ms low-frequency
 fallback covers an otherwise unobservable external child-grant release, after
 which cycle marks are cleared and current Host state is revalidated.
 
+Only a successfully committed service start publishes evidence-startable
+class facts. That observation cut rechecks the same ready/lifecycle/operation/
+route predicates and additionally requires enough live child-grant capacity
+for at least one candidate in each class. These capacity-aware evidence facts
+drive M1 applicability only; they neither filter policy snapshots nor update
+the three-to-one `consecutive_interactive_` state. A failed `try_grant()`
+publishes no start observation.
+
 An implementation cap or occupied exclusive key removes that candidate from
-the startable frontier without exposing operation metadata to policy plugins.
+the scheduler-selectable frontier without exposing operation metadata to
+policy plugins.
 Worker retirement advances the same notification epoch when it releases the
 gate. Direct sequential callers wait cancellation-aware without holding a
 resource reservation, then acquire the same gate and one CPU/byte/scratch root
@@ -516,6 +528,18 @@ mutation-free preflight; after Kernel closes its publication gate, unexpected
 transition failure is fail-stop because that gate cannot reopen. General-data
 heterogeneous execution belongs to Issue #77;
 process-isolated plugin supervision belongs to Issue #91.
+
+Registry mutations and the registry-derived portion of `WorkerJoined` and
+`BindingRetired` records are serialized by the same lifecycle fence. Those
+physical-retirement records therefore carry one exact nine-counter registry
+cut, while ready, entered-callback, root, child, policy-invocation, and binding
+ownership are sampled independently. The M1 evidence replay reconstructs
+Graph/candidate/bundle/Run/generation causality and exact-checks the nine
+registry counters at every event and page cut. It validates only capacity and
+ownership reachability for the six physical samples, including resources held
+by a pending candidate before bundle publication; it never fabricates exact
+physical deltas from an event kind. Final M1 evidence must terminate with
+`ServiceStopped` and all 15 counters zero.
 
 ## Current Execution-Profile Evidence and Limitations
 

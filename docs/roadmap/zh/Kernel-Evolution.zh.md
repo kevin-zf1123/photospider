@@ -1059,19 +1059,26 @@ cleanup promise 只覆盖遵守该 lock 与 reserved B1 namespace 的协作 acto
 M1 phase arithmetic；精确 cold/warmup/measured origin 与 offer cadence；跨 boundary
 current-hold、carryover/FIFO、不可变 attribution、独立 producer cycle、U cutoff 与 final
 settlement；fail-closed 的五轴 inner evaluator；原样委托的 base-only-I1/full-B1 environment
-relation；一个固定容量共享 causal observer 与同坐标 workload fanout；以及只用于观测的
-`M1Host` snapshot，该 snapshot 包含 Host/device、Compute I/O、ready-class、lifecycle 与
-Throughput reservation state。Observer boundary 保留 callback entry/completion 与 slot
+relation；一个固定容量共享 causal observer 与同坐标 workload fanout；以及 `M1Host` 的不可变
+snapshot，该 snapshot 包含 Host/device、Compute I/O、ready-class、lifecycle 与 Throughput
+reservation state。`M1Host` 还有一个 source-private、幂等的 terminal evidence seam，只有在
+全部 Graph 与 Host operation 关闭后才合法，用于捕获 `ServiceStopped`；它不是通用 lifecycle
+控制面。Observer boundary 保留 callback entry/completion 与 slot
 claim/连续 publication frontier，因此相等 event count 不能隐藏 in-flight publisher。
 Lifecycle snapshot 保留 request cursor 与 capture ordinal，并作为精确 lossless page/event
-chain replay。它还新增 source-private canonical 15-field row/five-field
+chain 与 identity-aware Graph/candidate/bundle/Run/generation 状态机 replay。每个 event 与
+page cut 都精确校验全部九个 registry-derived counter。六个 physical counter 独立采样，只
+检查 capacity/ownership 可达性（包括 pending prepublication candidate），而不推导 event
+delta；physical retirement 会在 lifecycle fence 内发布 registry cut。最终 event 必须是
+`ServiceStopped`，且全部 15 个 counter 为零。它还新增 source-private canonical 15-field row/five-field
 bundle materializer 与 exact-one/DAG validator，以及精确手工 `m1_shared_benchmark` target。
 确定性产品测试通过真实 mixed backlog 与精确 31-CPU Throughput/32-CPU shared-headroom
 boundary 验证机制，不采用 wall-time SLO。已完成的 evidence 纠错移除调用者提供的 M1
 denominator scalar，改为从 exact-one canonical isolated row 重新计算；保留完整可复用 I1/B1
-source row 与全部 30/480/temporal M1 raw input；记录产品签发的 per-start 双类 startability 与
-committed grant；并且只从完整 event-aligned job stream 推导 Compute I/O high-water。稀疏
-current snapshot 继续只作 diagnostic，最终 process I/O 必须归零。
+source row 与全部 30/480/temporal M1 raw input；记录产品签发且包含 child capacity 的 per-start
+双类 evidence-startability 与 committed grant，但不改变 scheduler-selectable 三比一计账；并且
+只从完整 event-aligned job stream 推导 Compute I/O high-water。稀疏
+current snapshot 继续只作 diagnostic，最终 process I/O 与全部 lifecycle ownership 必须归零。
 
 Executable-pair 修正还闭合了 source-object boundary。真实 Issue #93 I1 与 Issue #95 B1
 手工 producer 会从尚未 compact 的 evaluator result 生成 canonical、denominator-only

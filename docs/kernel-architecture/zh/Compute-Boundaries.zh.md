@@ -493,13 +493,20 @@ service Jain p05、至多三次适用的 Interactive start，以及全部 480 �
 的完整分类。Environment pairing 原样委托给 base-only I1 与完整 eligible B1-cap-eight
 relation。
 
-每次 service start 的 applicability 现在来自产品签发的 scheduler cut，而不是根据 I1/B1
-nominal interval 事后重建。物理 start commit 前，`ExecutionService` 会分别根据两类真实
-ready entry、Run lifecycle、operation/route eligibility 与剩余 child-grant capacity 进行
-probe。只有所选 operation gate、route、ready removal、counter 与 execution grant 全部
+每次 service start 的 applicability 来自产品签发的 evidence cut，而不是根据 I1/B1 nominal
+interval 事后重建，也不是 scheduler-selection cut。`ExecutionService` 首先在 Run lifecycle、
+operation gate 与 physical route 允许选择时，把 ready lane 头视为 scheduler-selectable；暂时性的
+child-grant capacity 不会筛除 policy frontier。若所选 entry 在 reserved start 无法取得 child
+grant，它只会得到当前 worker cycle 的 grant-block mark；policy/fairness counter 保持不变，
+该 worker 会继续搜索其余 candidate。
+
+物理 start commit 前，独立的 evidence-startable probe 会为两类额外检查剩余 child-grant
+capacity。只有所选 operation gate、route、ready removal、counter 与 execution grant 全部
 commit 后，才会发布这条 observation。M1 collector 在既有预分配、allocation-free、
-nonblocking、lock-free callback store 中保留两类事实与 committed-grant bit。Nominal
-interval 只保留为 Graph-demand diagnostic，不能重置或豁免 three-to-one start rule。
+nonblocking、lock-free callback store 中保留两类 capacity-aware fact 与 committed-grant bit。
+Scheduler 的三比一 `consecutive_interactive_` 计账继续使用 scheduler-selectable Throughput
+competition，而不是这些更窄的 evidence fact。Nominal interval 只保留为 Graph-demand
+diagnostic，不能重置或豁免任一规则。
 
 一个预分配的 `M1FairnessObservationCollector` 为带 tag 的 I1/B1 Run 提供一个有界 observer-
 causal domain。`ComputeRunObservationFanout` 把同一个 authority-owned product coordinate
@@ -507,7 +514,9 @@ causal domain。`ComputeRunObservationFanout` 把同一个 authority-owned produ
 accepted-row sequence 合并。Overflow、sequence exhaustion 或 tag/QoS 不一致都是 sticky
 fail-closed evidence。Source-private 的 `M1Host` 不增加 compute route：它从同一个 service
 组合 Host/device ledger、Compute I/O、按 class 分区的 ready、lifecycle 与不可变 Throughput
-capacity/reserved snapshot。
+capacity/reserved snapshot。它唯一的 mutation 是幂等 evidence-finalization seam，且只有在
+全部 Graph 与 Host operation 已关闭后才合法。该 seam 会关闭同一个 execution service，使
+runner 能保留终态 `ServiceStopped` cut；它不是通用 compute、phase 或 lifecycle 控制面。
 
 Collector 的 boundary snapshot 现在同时闭合 callback lifetime 与 slot publication。有界
 callback-entry/completion frontier 围绕每次完整 attempt，而 claimed 与连续 release-published
@@ -525,8 +534,22 @@ transition 都会结构性 `Invalid`。稀疏 `M1Host` cut 只保留 current-sta
 Lifecycle evidence 以同样 fail-closed 的方式 replay。每个 temporal snapshot 保留 capture
 ordinal 与请求的 `after_cursor`。Validation 从 cursor zero 开始，要求精确 page chain、连续
 lossless event sequence、稳定 service/epoch identity、producer cursor/state 语义，以及非空
-M1 work 要求的完整 service/Graph/admission/terminal/quiescence/resource/close effect。缺失、
-重复、重排、cursor 不一致或 stop 后 record 都会使 memory 为 `Invalid`。
+M1 work 要求的完整 service/Graph/admission/terminal/quiescence/resource/close effect。Replay
+会维护 Graph、candidate、bundle、Run、group 与 generation identity，包括 registration
+rollback、candidate rollback、group admission 顺序、每个 child 的 terminal → quiescent →
+resource-settled → unregistered 因果链、whole-bundle detachment、Graph close、shutdown
+cancellation 与最终 service stop。由于 `BundleAdmitted` 不携带 candidate id，candidate commit
+以存在性方式关联到同一 Graph 尚未结束的一个 candidate；不会虚构 evidence field。
+
+Replay 会在每个 event 与每个 retained page cut 重新计算并精确校验全部九个 registry-derived
+counter。六个 physical counter 仍是独立 producer sample：validation 检查配置的 ready
+capacity、ready-plus-entered 对 child grant 的可达性、child-to-root ownership、policy-
+invocation-to-binding 可达性，以及 physical owner 必须属于 admitted child 或 pending
+prepublication candidate。它不会从 event kind 推导精确 physical delta。Worker join 与 policy-
+binding retirement 会在 registry lifecycle fence 内发布 registry counter cut，同时独立采样
+这六个 physical value。Runner 会在使用 terminal M1 seam 前关闭全部 Graph；
+`ServiceStopped` 必须是最后一个 event，且全部 15 个 counter 必须为零。缺失、重复、重排、
+identity 拼接、counter 不一致、cursor 不一致或 stop 后 record 都会使 memory 为 `Invalid`。
 
 手工 `m1_shared_benchmark` target 为 `EXCLUDE_FROM_ALL`，且不属于 CTest/CI。它通过一个
 `EmbeddedHost` 运行全部三个 Graph，生成封闭 M1 inner row，并物化六个 retained section，

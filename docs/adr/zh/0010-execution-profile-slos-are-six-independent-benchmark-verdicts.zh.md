@@ -14,9 +14,10 @@ benchmark result field、collector、workload harness、CTest entry、CI 性能�
 
 进程执行域已经区分 Interactive 与 Throughput QoS。当前 Host policy 会执行
 deadline 优先、可信 work/ready-byte 计费、分层 Graph/Run 公平性、八次 dispatch
-aging、两个 class 都可启动时最多三次 Interactive start 后一次 Throughput start，
-以及 Interactive admission headroom。这些是排序与准入机制，不是端到端执行画像
-SLO。
+aging、两个 class 都 scheduler-selectable 时最多三次 Interactive start 后一次 Throughput
+start，以及 Interactive admission headroom。Scheduler selection 不包含暂时性的 child-grant
+capacity；已提交的 M1 start applicability 会另行记录 capacity-aware evidence-startable fact。
+这些是排序、准入与 evidence 机制，不是端到端执行画像 SLO。
 
 当前测量证据范围更窄：
 
@@ -1366,9 +1367,14 @@ warmup start；Jain completed service 则只使用 measured-occurrence service�
 每个 retained temporal capture 还记录其 row-local ordinal 与精确 lifecycle request cursor。
 Evaluator 从 cursor zero 重放有界 lifecycle page，要求精确 page/capture order、单一 service
 与 epoch、连续 lossless event sequence、producer 定义的 empty-ring/next-cursor 语义、
-单调 state/timestamp、封闭 event/category value，以及非空 M1 execution 要求的全部
-service/Graph/admission/terminal/quiescence/resource/close effect。缺失、重复、重排、截断、
-cursor 不一致或 stop 后 evidence 会使 memory 为 Invalid。
+单调 state/timestamp、封闭 event/category value，以及覆盖 Graph、candidate、bundle、Run、
+group 与 generation 的 identity-aware 状态机。它会精确校验 registration/candidate rollback、
+standalone 与有序 group admission、每个 child 的 terminal → quiescent → resource-settled →
+unregistered 因果链、whole-bundle detachment、Graph close、shutdown cancellation 与 service
+stop。每个 event 与 retained page cut 必须精确匹配 replay 得到的九个 registry-derived counter。
+六个 physical counter 仍是独立采样事实，只受 capacity 与 ownership 可达性约束，包括 pending
+prepublication candidate；event kind 不意味着精确 physical delta。缺失、重复、重排、identity
+拼接、counter 不一致、截断、cursor 不一致或 stop 后 evidence 会使 memory 为 Invalid。
 
 Warmup evidence 仍是必需项：carryover failure、event evidence 缺失、event sequence
 重复、event coordinate 无法形成全序、非法 phase rewrite、boundary-only
@@ -1376,8 +1382,9 @@ cancellation、queue reorder、snapshot mismatch 或无法证明 settlement，�
 replicate 无效，即使它的 occurrence-owned 数量不进入 measured aggregate。在
 `(U^M1,u^M1)`，有序 cutoff 会停止新的 measured B1 offer，但不取消已经 offered 的
 work。排在该 cutoff 或其后的 endpoint 会被保留，但不进入 30-second numerator。
-Teardown 必须 drain 全部 phase，并达到既有 resource/Compute-I/O exact-zero
-settlement；`B^M1` 刻意不要求 quiescence。
+Teardown 必须 drain 全部 phase、关闭每个 Graph、调用 source-private 且幂等的 M1 evidence
+finalizer，并保留最终 `ServiceStopped`，其中全部 15 个 lifecycle counter 与既有 resource/
+Compute-I/O settlement 都精确为零；`B^M1` 刻意不要求 quiescence。
 
 Workload manifest 保留 `C^M1`、`W^M1`、`B^M1`、`U^M1`、精确 phase interval、
 I1 origin/count/index 与 `Q_end` 算术、cold/warmup B1 offer protocol、event-order/tie
@@ -1449,11 +1456,14 @@ Nearest-rank p05 Jain index 必须至少为 0.95。总 service 为零的窗口�
 `invalid`。Charged service 使用 Host policy 单位
 `work_units + ceil(ready_bytes/4096)`。
 
-两个 class 都持续 startable 时，最多三次 Interactive start 后必须出现一次
-Throughput start。M1 还要求：因 Throughput 消耗已声明 headroom 导致的
-Interactive admission failure 为零、Interactive latency 门禁通过、Throughput
-progress floor 为 0.20。Start order、completed progress、headroom admission 与
-latency 是彼此独立的证据。
+两个 class 按 ready、lifecycle、operation-gate 与 route predicate 持续 scheduler-selectable
+时，最多三次 Interactive start 后必须出现一次 Throughput selection。暂时性的 child-grant
+exhaustion 在 selection 后处理，不会重写该 burst accounting。对于 M1 evidence，只有产品
+签发的 observation 报告两个 class 都 evidence-startable（包括 live child-grant capacity）时，
+一次 committed start 才具有 class-start applicability；这个更窄的 fact 不能控制 scheduler
+choice。M1 还要求：因 Throughput 消耗已声明 headroom 导致的 Interactive admission failure
+为零、Interactive latency 门禁通过、Throughput progress floor 为 0.20。Start order、
+completed progress、headroom admission 与 latency 是彼此独立的证据。
 
 #### Determinism
 
@@ -1841,7 +1851,11 @@ selected `unlink`/`rmdir`。该 target 仍排除在 default build 与 CTest 之�
 
 当前 #96 源码树组合了精确 mixed protocol 与五轴 evaluator，在 B boundary 保留 callback
 entry/completion 与 claim/publication frontier，并为 memory closure 精确重放 lifecycle
-cursor、capture ordinal、page 与 event。其 I1/B1 portable pack 明确为 denominator-only，
+cursor、capture ordinal、page、Graph/candidate/bundle/Run/generation 因果关系与全部九个
+registry-derived counter。六个独立采样的 physical counter 只检查 capacity 与 ownership
+可达性，不从 event 推导 delta；physical retirement 在 lifecycle fence 内取得 registry cut。
+全部 Graph 关闭后，source-private M1 finalizer 会捕获终态 `ServiceStopped`，其中全部 15 个
+counter 为零。其 I1/B1 portable pack 明确为 denominator-only，
 并要求精确 sample/occurrence shape。Reader 使用一个 no-follow POSIX descriptor 或
 reparse-point-aware Windows handle 完成同一 object validation 与 read。这些 mechanism 与
 deterministic test 不宣称 timed three-replicate corpus、完整 live storage authority、Windows
