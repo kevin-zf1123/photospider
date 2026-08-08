@@ -1147,8 +1147,12 @@ void RunLifecycleRegistry::finalize_admission(
         throw std::logic_error(
             "Run lifecycle bundle disappeared during finalization.");
       }
+      std::size_t index = 0U;
       for (Impl::RunRecord& run : admission->runs) {
         if (!run.quiescent) {
+          const std::optional<ComputeRunObservationCoordinate> coordinate =
+              settlement_observers[index]
+                  .reserve_lifecycle_observation_coordinate();
           run.quiescent = true;
           publish_committed_transition([&]() {
             impl_->telemetry.publish(
@@ -1157,7 +1161,9 @@ void RunLifecycleRegistry::finalize_admission(
                 admission->graph_instance_id.value(), run.run_id.value(),
                 admission->run_group_id, bundle_id, impl_->counters_locked());
           });
+          settlement_observers[index].observe_run_quiescent(coordinate);
         }
+        ++index;
       }
     }
 
@@ -1176,12 +1182,16 @@ void RunLifecycleRegistry::finalize_admission(
         throw std::logic_error(
             "Run lifecycle bundle disappeared during resource settlement.");
       }
+      std::size_t index = 0U;
       for (Impl::RunRecord& run : admission->runs) {
         if (!run.quiescent) {
           throw std::logic_error(
               "Run lifecycle resource settlement preceded quiescence.");
         }
         if (!run.resource_settled) {
+          const std::optional<ComputeRunObservationCoordinate> coordinate =
+              settlement_observers[index]
+                  .reserve_lifecycle_observation_coordinate();
           run.resource_settled = true;
           publish_committed_transition([&]() {
             impl_->telemetry.publish(
@@ -1190,7 +1200,9 @@ void RunLifecycleRegistry::finalize_admission(
                 admission->graph_instance_id.value(), run.run_id.value(),
                 admission->run_group_id, bundle_id, impl_->counters_locked());
           });
+          settlement_observers[index].observe_run_resource_settled(coordinate);
         }
+        ++index;
       }
       std::array<std::uint64_t, 2U> run_ids{0U, 0U};
       std::size_t run_id_count = 0U;
@@ -1460,6 +1472,34 @@ bool RunLifecycleRegistry::accepting() const {
 std::uint64_t RunLifecycleRegistry::shutdown_generation() const {
   std::lock_guard<std::mutex> lock(impl_->fence);
   return impl_->shutdown_generation;
+}
+
+/** @copydoc RunLifecycleRegistry::publish_physical_retirement */
+void RunLifecycleRegistry::publish_physical_retirement(
+    ExecutionLifecycleEventKind kind, ExecutionLifecycleCategory category,
+    std::uint64_t generation) {
+  const bool worker = kind == ExecutionLifecycleEventKind::WorkerJoined &&
+                      category == ExecutionLifecycleCategory::None;
+  const bool binding = kind == ExecutionLifecycleEventKind::BindingRetired &&
+                       (category == ExecutionLifecycleCategory::None ||
+                        category == ExecutionLifecycleCategory::FailureOther);
+  if ((!worker && !binding) || generation == 0U) {
+    throw std::invalid_argument(
+        "Physical lifecycle retirement kind, category, or generation is "
+        "invalid.");
+  }
+
+  std::lock_guard<std::mutex> lock(impl_->fence);
+  if (impl_->service_state == Impl::ServiceState::Stopped) {
+    throw std::logic_error(
+        "Physical lifecycle retirement cannot follow ServiceStopped.");
+  }
+  if (worker && impl_->service_state != Impl::ServiceState::Stopping) {
+    throw std::logic_error(
+        "Worker retirement requires service shutdown to be Stopping.");
+  }
+  impl_->telemetry.publish(kind, category, 0U, 0U, 0U, generation,
+                           impl_->counters_locked());
 }
 
 /** @copydoc RunLifecycleRegistry::rollback_candidate */

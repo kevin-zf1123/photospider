@@ -309,11 +309,13 @@ provider，并返回独立的 CPU compatibility image。
 binding 的访问会抛错，而不会隐式 map、等待或 transfer。CPU-to-CPU、CPU-to-Metal 与
 Metal-to-CPU transfer 会发布保留同一逻辑 `ValueRevisionId` 的独立 binding。进程级
 `ResidencyManager` 会准入完整的 Run/task/producer/revision/binding identity，并在同一把锁下
-线性化 current-generation 校验、producer Ready 发布与 replica 插入。因此，新 generation
-要么让旧 callback 在 destination Ready 前进入 typed Failed，要么发生在一个已经以 current
-身份完成的 completion 之后；mismatched 与 duplicate identity 不能消费或重新发布另一条
-admission。Pending operation Value 会让其 Run 保持未 settlement，并且只有 terminal success
-之后才能通过同一个 `ExecutionService` ready store 释放 dependant。Metal Perlin 路径会编码
+线性化 current-generation 校验、producer Ready 发布与 replica 插入。对于 coordinator-managed
+lineage，更新的 accepted current identity 要么让旧 callback 在 destination Ready 前进入 typed
+Failed，要么发生在一个已经按当时 exact current generation 发布的 completion 之后。Generation
+数值大小不能建立 managed currentness；standalone lineage 保留 numeric-maximum order。
+Mismatched 与 duplicate identity 不能消费或重新发布另一条 admission。Pending operation Value
+会让其 Run 保持未 settlement，并且只有 terminal success 之后才能通过同一个
+`ExecutionService` ready store 释放 dependant。Metal Perlin 路径会编码
 显式 texture-to-shared-buffer blit、安装 completion handler、commit 并立即返回，不再调用
 `waitUntilCompleted` 或 `getBytes`。V-9 保持 Host `ResourceVector` 不变，并为每个已配置的
 非 CPU `DeviceId` 新增隔离且 immutable 的 memory/scratch account。Perlin 与 CPU-to-Metal
@@ -325,10 +327,12 @@ Memory lease 由 `BufferHandle` 会复制、residency 会保留的同一个 type
 
 Current-generation handoff 会分阶段完成，而不会在 coordinator critical section 中
 allocation。Kernel 会在提交 publication 前预跟踪一个零 generation lineage row。只有
-accepted current candidate 才会通过 no-throw callback 推进该预跟踪行，而且 callback
-紧邻 coordinator currentness 可观察之前执行。被拒绝或 born-stale 的 candidate 保持该行
-不变；在 N+1 publication 后才启动的 generation-N Run 不能让单调 manager row 倒退。
-Prepared candidate 会在这个可失败 pretracking 步骤前拥有一个 compute-request-lane reserved
+accepted current candidate 才会通过 no-throw callback 把精确已发布 generation 赋给该行，
+而且 callback 紧邻 coordinator currentness 可观察之前执行。被拒绝或 born-stale 的 candidate
+保持该行不变；在另一个 accepted identity 成为 current 后才启动的 stale Run 无法覆盖这个
+exact managed identity，无论 generation 数值向哪个方向变化。Standalone row 则另行保留
+numeric-maximum order。Prepared candidate 会在这个可失败 pretracking 步骤前拥有一个
+compute-request-lane reserved
 ticket。因此 Graph close 会先 drain 并 join 该 lane，再退役精确 Graph 的 lineage row，从而
 防止暂停的 caller 在 retirement 后重建 maintenance state。
 

@@ -580,9 +580,12 @@ a distinct physical replica while preserving the same logical
 `ResidencyManager` is the single process owner of exact eligible replicas and
 publishes destination readiness and residency in one freshness-checked
 transaction. Kernel pretracks a lineage before fallible coordinator
-publication, and an accepted current-generation callback advances that
-preallocated row under coordinator-to-manager ordering before currentness is
-observable. A later older Run observation cannot regress it. Pending Values
+publication without assigning a managed current identity. Under
+coordinator-to-manager ordering, an accepted current-generation callback
+assigns the exact published generation, including a coordinate-authorized
+numeric decrease, immediately before currentness becomes observable. Later
+stale Run observations and transfer admissions cannot replace that exact
+managed identity; standalone lineages retain numeric-maximum ordering. Pending Values
 re-enter the existing `ExecutionService` ready
 store through Run-scoped continuations, so CPU workers do not wait for Metal
 completion. The Metal Perlin route produces a pending native Value and uses

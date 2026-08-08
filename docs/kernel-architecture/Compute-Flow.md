@@ -54,6 +54,32 @@ optional positive Run concurrency ceiling through the adapter to that QoS.
 The remaining identity and QoS values stay private descriptor inputs; the
 plugin ABI is unchanged.
 
+The source-private Issue #93 `I1Host` seam uses this same embedded path rather
+than a benchmark-only executor. It wraps an ordinary `HostComputeRequest` with
+explicit Interactive QoS, weight one, cap eight, an immutable per-edit
+deadline, a read-only observation sink, and the pre-call row-local accepted
+coordinate. The embedded Host carries that coordinate into the private Kernel
+request; Kernel binds it into the product `SupersessionIdentity` before
+coordinator publication. The seam is implemented only by the embedded Host and
+is not installed or exposed through Host, IPC, CLI, or a plugin record. Its
+successful asynchronous scheduling return is the frozen I1 acceptance
+boundary; the returned future still represents later product settlement.
+
+Public and I1 asynchronous admission share one Host-side preparation
+transaction. Before entering `InteractionService`, the embedded adapter creates
+the caller future, successful `Result` envelope, one backend-delivery bridge,
+the joined status worker, and close-visible tracking. Kernel publication may
+make a candidate current concurrently before `cmd_compute_async()` returns, so
+the accepted return path performs only no-throw `future::share()`, one
+single-producer bridge delivery, and a no-throw move of the prebuilt result.
+Worker creation, promise/future creation, container growth, diagnostic/result
+construction, and testable resource failure all precede Kernel entry. A
+rejected preparation or pre-publication Kernel failure sends an empty bridge
+sentinel, extracts tracking ownership, joins outside the lifecycle mutex, and
+returns failure without an accepted coordinate, current observation, or
+product output binding. Structural violation of the one-delivery bridge is
+fail-stop rather than a recoverable post-publication Host rejection.
+
 The dirty ROI remains a kernel-owned `PixelRect` while it is copied from
 `HostComputeRequest` through `Kernel::ComputeRequest`, graph propagation,
 planning, task selection, staged execution, and `NodeExecutor`. Extents use
@@ -379,13 +405,41 @@ supersession key/generation, performs eligible deferred HP cache persistence,
 and swaps complete visible state in the same graph-state work item. It publishes
 Run success only after that transaction succeeds.
 
+For an observed Run, the product path emits source-private read-only boundaries
+without changing publication order: current-generation assignment, physically
+committed callback start, accepted cancellation, current-visible output,
+terminal outcome, physical Run quiescence, exact root-resource return, and
+caller-visible future plus Host-tracking settlement. Every boundary reserves an
+immutable coordinate from one request-scoped causal sequence at its product
+linearization point, before callback delivery. The logical service-start commit
+and cancellation acceptance therefore share the same ordering authority even
+when their callbacks run on different threads. Service start carries the exact
+`(RunId, RunLocalTaskId)`, generation, QoS, and policy charge. Current-visible
+output is reported only after the ordinary live Graph swap succeeds; terminal
+success remains ordered after that observation. The sole HP contender resolves
+both observations under one Run-arbiter claim, so a rejected or already-resolved
+contender emits neither. These callbacks retain scalar facts or an immutable
+Value only and cannot start, cancel, prioritize, settle, or publish work.
+This causal sequence is independent from I1's row-local accepted sequence even
+though both allocators start at one. Current-generation observation copies the
+accepted binding already stored in the product identity; it does not recreate
+that binding from callback order or causal sequence.
+
 This is the current baseline through issue #76. A private request source can
 cooperatively cancel one HP Run or both current realtime child Runs; immutable
 deadlines propose `DeadlineExceeded` at bounded observation points, and the
 Run-owned terminal arbiter orders cancellation, failure, and visible commit.
-Per-Graph latest-wins publication makes the newest generation authoritative for
-that exact key, requests cancellation of an older active owner, coalesces one
-pending owner, and still denies stale commit if cancellation arrives late.
+Per-Graph latest-wins publication makes the newest complete identity
+authoritative for that exact key, requests cancellation of an older active
+owner, coalesces one pending owner, and still denies stale commit if
+cancellation arrives late. For two source-private identities carrying accepted
+coordinates, currentness advances solely by the accepted coordinate; equal
+accepted timestamps are ordered by row-local event sequence. Generation is a
+unique preparation identity and Run join key, not the bound logical admission
+order, so a newer coordinate can become current with a lower generation and an
+older coordinate cannot win with a higher one. Traffic with either side
+unbound retains the established generation rule. Coordinator-managed native
+freshness follows the exact published generation rather than a numeric maximum.
 The process-owned `RunLifecycleRegistry` now begins a candidate before capture
 or planning, retains a Graph lifetime lease, and atomically installs either one
 standalone Run or both realtime children as a complete bundle. Empty/no-op and
@@ -439,6 +493,46 @@ accepts a target that moves optional cache persistence behind an independent
 outcome and introduces a separate, receipt-bearing durable output commit. The
 executor mechanism is current; the target post-publication ordering and
 durable output commit are not.
+
+Issue #95 adds one deliberately narrower source-private exception for the B1
+manual/release profile. `B1OutputStore` reuses the current process
+`ComputeIoExecutor` to perform two exact charged tasks, then proves synchronized
+payload bytes, manifest-last assembly, atomic no-replace directory publication,
+directory barriers, and a typed crash-durable receipt below a selected
+canonical root. It holds a nonblocking advisory exclusive root lock and writes
+only inside a verified mode-`0700` private staging anchor/slot held by no-follow
+descriptors; every cooperating actor must honor that lock and reserve B1 names
+to the single store owner. The mkdir-to-open identity must match before any
+artifact mutation. After both tasks settle, one Darwin `RENAME_EXCL` or Linux
+`RENAME_NOREPLACE` transition publishes the complete occurrence. Root-path or
+public-slot replacement cannot redirect writes. Before publication, a
+transaction guard settles accepted Compute I/O charge before strict checked
+private cleanup. It checks each identity twice, every removal result, and
+following absence, then fail-stops on detected extra leaves, type/identity drift,
+unlink/rmdir failure, or unproved absence. Because POSIX separates the final
+identity check from name removal, the cleanup guarantee is scoped to the
+cooperating exclusive-owner contract; arbitrary non-cooperating same-UID
+namespace mutation is not covered. A pre-guard anchor handoff failure retains
+ambiguous residue and makes no retryability claim. The atomic rename then
+revokes public cleanup authority: later barrier, final-validation, or receipt
+failure preserves the occurrence and empty anchor. Same-commit retry verifies
+the exact public payload/manifest and finishes missing barriers without new
+output tasks or rewriting. A non-directory or real directory with no
+transaction-looking leaf (empty or marker-only) is plainly foreign and remains
+untouched with `SlotExists`; any payload, manifest, or private-manifest presence
+makes incomplete/extra/drifted state a `RevalidationFailed` transaction
+occurrence that also remains untouched. Reconciliation returns an empty
+`io_observations` sequence and cannot fabricate the current two-task FSM; the
+evaluator needs the retained earlier new-work stream or fails closed. This path
+is invoked only after the B1 Run result is acquired through
+the ordinary embedded Host compute path. Its retained environment files are
+expected claims only: required-storage compatibility additionally needs each
+side's own process-private held-root observation, actual typed receipt, and
+complete independently produced probe. JSON cannot restore that authority,
+and an unverified external storage field makes the row machine-ineligible. The
+path does not move general HP cache persistence after Graph publication,
+replace the daemon delivery store, or make durable output part of public Host/
+CLI/IPC success.
 
 ## GlobalHighPrecision
 
@@ -553,6 +647,26 @@ These constants are not permanent ABI.
 
 ## Events and Timing
 
+The I1 evidence path is separate from the public graph-event ring. Its bounded
+request-scoped collector preallocates observation slots for the twelve edits
+and assigns one collector-local causal sequence to every product transition.
+The evaluator separately requires each current generation's product-bound
+accepted coordinate to equal that edit's pre-call `(A_i,event_sequence_i)` and
+requires product generations to be nonzero and unique without ordering them
+numerically. Accepted-coordinate order alone defines currentness for these
+bound identities.
+Overflow invalidates the row rather than dropping evidence silently. At the
+frozen `Q_end`, the runner first reserves the sequence of the first excluded
+event. A product event belongs to the boundary history only when its monotonic
+sample is no later than `Q_end` and its sequence precedes that cut. The runner
+may then consume already-produced futures and take an eventual Host/device
+`ResourceLedger` plus `ExecutionLifecycleTelemetry` snapshot, but that later
+snapshot cannot backdate terminal, quiescence, root-resource return, or Host
+settlement across the cut. The evaluator requires one causally coherent Run
+state machine and matching Host status for each edit. All snapshots and
+callbacks remain observation only: they wait for no product transition, reset
+no counter, and mint no Run/ledger/queue capability.
+
 `GraphEventService` publishes per-node compute events into a thread-safe,
 fixed-capacity ring. The production capacity is 8,192 events per graph. Each
 accepted publication receives a monotonically increasing unsigned 64-bit
@@ -614,6 +728,27 @@ compute may already have returned successfully. Graph-document save remains a
 separate graph-state operation with its own status and never rewrites a Run
 terminal state.
 
+Issue #94 adds one optional source-private progressive branch to the existing
+realtime request flow. Embedded Host and Kernel forward
+`ProgressiveComputeOptions` only when the private I2 caller supplies it.
+ComputeService then keeps the RT and HP child descriptors distinct, forces the
+progressive RT dirty path to sequential execution, and withholds HP submission.
+After a current RT preview commits, the graph-state lane publishes its immutable
+Value to the observation sink; the progressive gate is then consumed, the
+final-trigger coordinate is emitted, and the HP child is submitted immediately.
+Cancellation or supersession that wins before gate consumption suppresses the
+final submission. After consumption, ordinary generation/currentness commit
+checks still prevent a stale HP result from becoming visible.
+
+Only that progressive RT branch asks dirty-source execution to perform the
+exact aligned factor-four RGBA FP32 box average. It rounds each 4x4 channel mean
+once to binary32, seals the proxy output as an immutable rank-three HWC Value,
+and then executes the same four curve stages. The HP child continues from the
+original 2048x2048 source through the unchanged full-resolution I1 path; it is
+never derived from preview pixels. When `ProgressiveComputeOptions` is absent,
+ordinary realtime requests retain their previous concurrent RT/HP planning,
+submission, and publication behavior.
+
 ## Boundaries and Rationale
 
 - One request plan supplies both sequential and parallel execution semantics;
@@ -666,12 +801,19 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
+- `src/lib/benchmark/i1_host.hpp`
+- `src/lib/benchmark/i1_profile.*`
+- `src/lib/benchmark/i1_evidence.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/compute_io_executor.*`
 - `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/progressive_compute.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/compute/compute_supersession.*`
@@ -682,6 +824,7 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/compute/compute_task_dispatcher.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/compute/dirty_update_executor.*`
+- `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_compute_io_executor.cpp`
@@ -691,4 +834,11 @@ retains the durable ownership direction without changing these current facts.
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/unit/test_i1_profile.cpp`
+- `tests/unit/test_i1_evidence.cpp`
+- `tests/integration/test_i1_product_path.cpp`
 - `tests/unit/test_event_stream_boundaries.cpp`

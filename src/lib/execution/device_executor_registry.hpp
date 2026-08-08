@@ -301,6 +301,9 @@ class DeviceExecutorRegistry final {
    * @param seed Representative Run/task seed for its canonical lineage.
    * @return Nothing.
    * @throws ResidencyManager synchronization or allocation errors unchanged.
+   * @note Standalone lineages retain the numeric maximum. Coordinator-managed
+   * lineages retain the exact generation selected by product publication, so
+   * Run observation cannot change currentness.
    */
   void observe_generation(const DeviceCompletionSeed& seed);
 
@@ -312,7 +315,8 @@ class DeviceExecutorRegistry final {
    * @return Nothing.
    * @throws ResidencyManager validation, allocation, or synchronization errors.
    * @note This fallible step runs before the coordinator publication is
-   * submitted and advances no generation.
+   * submitted, marks the lineage as coordinator-managed, and assigns no
+   * current identity.
    */
   void track_lineage(std::uint64_t graph_instance_id, int target_node_id,
                      ComputeIntent request_intent);
@@ -322,11 +326,12 @@ class DeviceExecutorRegistry final {
    * @param graph_instance_id Nonzero live Graph identity scalar.
    * @param target_node_id Canonical nonnegative request target.
    * @param request_intent Canonical request intent.
-   * @param supersession_generation Nonzero newly current generation.
+   * @param supersession_generation Nonzero exact newly current generation.
    * @return Nothing.
    * @throws Nothing; invariant or synchronization failure terminates.
    * @note This no-allocation path is called while the Graph request
-   * coordinator still excludes currentness observation.
+   * coordinator still excludes currentness observation. Accepted-coordinate
+   * ordering may make the exact managed generation move numerically backward.
    */
   void publish_current_generation(
       std::uint64_t graph_instance_id, int target_node_id,

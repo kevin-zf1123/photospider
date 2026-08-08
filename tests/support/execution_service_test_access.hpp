@@ -116,9 +116,47 @@ class ExecutionServiceTestAccess final {
   }
 
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+  /** @brief Test-product start-arbitration checkpoint. */
+  using ServiceStartArbitrationPoint =
+      compute::testing::ServiceStartArbitrationPoint;
+
+  /** @brief Test-product callback for one start-arbitration checkpoint. */
+  using ServiceStartArbitrationObserver =
+      compute::testing::ServiceStartArbitrationObserver;
+
   /** @brief Test-product callback for one denied operation-gate start. */
   using OperationAdmissionWaitObserver =
       compute::testing::OperationAdmissionWaitObserver;
+
+  /**
+   * @brief Installs the start-arbitration checkpoint observer.
+   * @param service Isolated service used only to document test ownership.
+   * @param observer Allocation-free callback, or null to disable observation.
+   * @param context Opaque callback context, or null when disabling.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The observer may coordinate a bounded fixture but must not re-enter
+   * service code while production locks are held.
+   */
+  static void set_service_start_arbitration_observer(
+      compute::ExecutionService& service,
+      ServiceStartArbitrationObserver observer, void* context) noexcept {
+    (void)service;
+    compute::testing::set_service_start_arbitration_observer_for_testing(
+        observer, context);
+  }
+
+  /**
+   * @brief Clears the start-arbitration observer after work settles.
+   * @param service Isolated service whose test ownership is ending.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void clear_service_start_arbitration_observer(
+      compute::ExecutionService& service) noexcept {
+    (void)service;
+    compute::testing::clear_service_start_arbitration_observer_for_testing();
+  }
 
   /** @brief Test-product retained operation-string owner category. */
   using RetainedOperationStringOwner =
@@ -269,19 +307,55 @@ class ExecutionServiceTestAccess final {
     (void)service;
     compute::testing::disarm_reserved_start_rollback_probe_for_testing();
   }
+
+  /**
+   * @brief Arms one post-coordinate physical-route commit rejection.
+   * @param service Isolated service used only to document test ownership.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void arm_route_commit_failure_probe(
+      compute::ExecutionService& service) noexcept {
+    (void)service;
+    compute::testing::arm_route_commit_failure_probe_for_testing();
+  }
+
+  /**
+   * @brief Reports whether the armed physical-route rejection occurred.
+   * @param service Isolated service whose worker consumed the probe.
+   * @return True after the post-coordinate commit callback returned false.
+   * @throws Nothing.
+   */
+  static bool route_commit_failure_probe_triggered(
+      const compute::ExecutionService& service) noexcept {
+    (void)service;
+    return compute::testing::route_commit_failure_probe_triggered_for_testing();
+  }
+
+  /**
+   * @brief Disarms the post-coordinate route-commit failure probe.
+   * @param service Isolated service whose test ownership is ending.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void disarm_route_commit_failure_probe(
+      compute::ExecutionService& service) noexcept {
+    (void)service;
+    compute::testing::disarm_route_commit_failure_probe_for_testing();
+  }
 #endif
 
   /**
-   * @brief Copies active built-in Throughput reservation charges.
+   * @brief Copies built-in Throughput capacity and reservation charges.
    * @param service Isolated service under test.
-   * @return Exact class-owned vector excluding Interactive owners.
+   * @return Fixed general capacity and class-owned total excluding Interactive.
    * @throws std::system_error when private accounting locking fails.
    * @note This is a non-authoritative test diagnostic; the ledger snapshot
    * remains the physical-capacity source of truth.
    */
-  static ResourceVector throughput_reservation_snapshot(
-      const compute::ExecutionService& service) {
-    return service.throughput_reservation_snapshot_for_testing();
+  static compute::ExecutionThroughputReservationSnapshot
+  throughput_reservation_snapshot(const compute::ExecutionService& service) {
+    return service.throughput_reservation_snapshot();
   }
 };
 

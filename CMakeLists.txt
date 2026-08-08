@@ -266,6 +266,7 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
 # embedded product dependency. DataDefinitionRegistry is an injected object;
 # this shared runtime owns its one implementation but creates no singleton.
 add_library(photospider_operation_runtime SHARED
+    src/lib/core/dense_tensor_content_digest.cpp
     src/lib/core/extension.cpp
     src/lib/core/image_buffer.cpp
     src/lib/core/ready_fence.cpp
@@ -336,6 +337,8 @@ if(APPLE)
 endif()
 
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(UTF8PROC REQUIRED IMPORTED_TARGET libutf8proc)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 endif()
@@ -491,6 +494,7 @@ endif()
 # Module: dependency-neutral private core values, display formatting, and the
 # build-selected image-processing/image-artifact implementations.
 set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
+    src/lib/core/exact_box_downsample.cpp
     src/lib/core/ps_types.cpp
     src/lib/core/parameter_value_text.cpp
 )
@@ -689,6 +693,19 @@ target_link_libraries(photospider_graph_internal PRIVATE
 
 # Module: compute, dirty execution, GraphRuntime, and interaction ownership.
 set(KERNEL_FACADE_SOURCES
+    src/lib/benchmark/b1_environment.cpp
+    src/lib/benchmark/b1_evidence.cpp
+    src/lib/benchmark/b1_output_store.cpp
+    src/lib/benchmark/b1_profile.cpp
+    src/lib/benchmark/evidence_envelope.cpp
+    src/lib/benchmark/i1_evidence.cpp
+    src/lib/benchmark/i1_profile.cpp
+    src/lib/benchmark/i2_evidence.cpp
+    src/lib/benchmark/i2_profile.cpp
+    src/lib/benchmark/m1_canonical.cpp
+    src/lib/benchmark/m1_evidence.cpp
+    src/lib/benchmark/m1_profile.cpp
+    src/lib/benchmark/observation_fanout.cpp
     src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp
@@ -712,6 +729,7 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_task_submission.cpp
     src/lib/compute/execution_lifecycle_telemetry.cpp
     src/lib/compute/execution_service.cpp
+    src/lib/compute/progressive_compute.cpp
     src/lib/compute/run_lifecycle_registry.cpp
     src/lib/compute/task_graph_planning.cpp
     src/lib/compute/task_population_strategy.cpp
@@ -765,7 +783,8 @@ target_link_libraries(photospider_host_internal PRIVATE
     photospider_policy_internal
     photospider_execution_internal
     photospider_compute_internal
-    Photospider::operation_sdk)
+    Photospider::operation_sdk
+    PkgConfig::UTF8PROC)
 if(PHOTOSPIDER_ENABLE_YAML)
     target_compile_definitions(photospider_host_internal PRIVATE
         PHOTOSPIDER_HAS_YAML)
@@ -815,12 +834,12 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-# These eight translation units own the Issue #72, Issue #75, Issue #76, and
-# Issue #82 deterministic observation seams. The installable archive always
-# receives their production objects; focused tests receive a non-installed
-# variant while reusing every common object. Keeping the split at
-# translation-unit granularity avoids compiling a second copy of the complete
-# embedded product.
+# These nine translation units own the Issue #72, Issue #75, Issue #76,
+# Issue #82, and Issue #93 deterministic observation/failure seams. The
+# installable archive always receives their production objects; focused tests
+# receive a non-installed variant while reusing every common object. Keeping
+# the split at translation-unit granularity avoids compiling a second copy of
+# the complete embedded product.
 set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
     src/lib/compute/compute_task_submission.cpp
     src/lib/compute/dirty_update_executor.cpp
@@ -828,6 +847,7 @@ set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
     src/lib/compute/resource_demand_estimator.cpp
     src/lib/graph/graph_cache_service.cpp
     src/lib/graph/graph_state_executor.cpp
+    src/lib/host/embedded_host.cpp
     src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp)
 foreach(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE
@@ -844,7 +864,7 @@ list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
 
 # Apply the private compile environment shared by production and test-only
 # product object variants. Test-seam definitions are intentionally added by
-# the caller only to the eight-source test object target.
+# the caller only to the nine-source test object target.
 function(configure_photospider_product_objects TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
@@ -854,6 +874,7 @@ function(configure_photospider_product_objects TARGET_NAME)
         Photospider::operation_sdk
         Photospider::operation_runtime
         Photospider::policy_sdk
+        PkgConfig::UTF8PROC
         Threads::Threads
         ${CMAKE_DL_LIBS})
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
@@ -932,6 +953,7 @@ set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
     PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+    PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
@@ -945,6 +967,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_compile_definitions(
             photospider_internal_test_product_seam_objects PRIVATE
+            PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
+            PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
             PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
     endif()
 
@@ -956,8 +980,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 endif()
 
 # Fail configuration if a future refactor accidentally restores an Issue #72,
-# Issue #75, Issue #76, or Issue #82 test definition on any production product
-# target.
+# Issue #75, Issue #76, Issue #82, or Issue #93 test definition on any
+# production product target.
 function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
     get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
         ${TARGET_NAME} COMPILE_DEFINITIONS)
@@ -1231,8 +1255,11 @@ if(PHOTOSPIDER_BUILD_GRAPH_CLI)
     target_compile_definitions(photospider_cli_common PRIVATE
         PHOTOSPIDER_GRAPH_CLI_HELP_DIR=\"${PROJECT_SOURCE_DIR}/apps/graph_cli/resources/help\")
 
+    # Keep reusable frontend logic independent of the embedded product
+    # variant. Final executables and tests select exactly one production or
+    # internal-test archive, which prevents test-seam consumers from also
+    # inheriting the installable product through this helper.
     target_link_libraries(photospider_cli_common PUBLIC
-        photospider
         ${FTXUI_TARGETS}
     )
     target_link_libraries(photospider_cli_common PRIVATE
@@ -1253,7 +1280,9 @@ if(PHOTOSPIDER_BUILD_GRAPH_CLI)
         "${PROJECT_SOURCE_DIR}/src/lib"
         ${OpenCV_INCLUDE_DIRS}
     )
-    target_link_libraries(graph_cli PRIVATE photospider_cli_common)
+    target_link_libraries(graph_cli PRIVATE
+        photospider_cli_common
+        photospider)
 
     if(UNIX AND NOT APPLE)
         target_link_libraries(graph_cli PRIVATE dl pthread)
@@ -1962,6 +1991,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+        PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING
     )
@@ -1978,6 +2008,29 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_compile_definitions(test_resource_admission PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        add_ps_test(test_i1_product_path
+            tests/integration/test_i1_product_path.cpp
+            photospider_internal_test_product)
+        target_compile_definitions(test_i1_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+        add_ps_test(test_i2_product_path
+            tests/integration/test_i2_product_path.cpp
+            photospider_internal_test_product)
+        target_compile_definitions(test_i2_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+        add_ps_test(test_b1_product_path
+            tests/integration/test_b1_product_path.cpp
+            photospider_internal_test_product)
+        target_link_libraries(test_b1_product_path PRIVATE
+            PkgConfig::UTF8PROC)
+        add_ps_test(test_m1_product_path
+            tests/integration/test_m1_product_path.cpp
+            photospider_internal_test_product)
+        target_compile_definitions(test_m1_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+        target_link_libraries(test_m1_product_path PRIVATE
+            PkgConfig::UTF8PROC)
         add_ps_test(test_opencv_operation_concurrency
             tests/integration/test_opencv_operation_concurrency.cpp)
         target_compile_definitions(test_opencv_operation_concurrency PRIVATE
@@ -2003,10 +2056,125 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         target_link_libraries(opencv_operation_concurrency_benchmark PRIVATE
             photospider_cli_common
+            photospider
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
+        add_executable(i1_edit_storm_benchmark EXCLUDE_FROM_ALL
+            tests/verification/i1_edit_storm_benchmark.cpp
+            tests/verification/i1_evidence_json.cpp
+            tests/verification/i1_evidence_workflow.cpp)
+        set_target_properties(i1_edit_storm_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(i1_edit_storm_benchmark PRIVATE cxx_std_17)
+        target_include_directories(i1_edit_storm_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(i1_edit_storm_benchmark PRIVATE
+            PHOTOSPIDER_I1_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(i1_edit_storm_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            PkgConfig::UTF8PROC
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
+        add_executable(i2_progressive_benchmark EXCLUDE_FROM_ALL
+            tests/verification/i2_progressive_benchmark.cpp
+            tests/verification/i2_evidence_json.cpp)
+        set_target_properties(i2_progressive_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(i2_progressive_benchmark PRIVATE cxx_std_17)
+        target_include_directories(i2_progressive_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(i2_progressive_benchmark PRIVATE
+            PHOTOSPIDER_I2_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(i2_progressive_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
+        add_executable(b1_immutable_benchmark EXCLUDE_FROM_ALL
+            tests/verification/b1_immutable_benchmark.cpp
+            tests/verification/b1_evidence_json.cpp)
+        set_target_properties(b1_immutable_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(b1_immutable_benchmark PRIVATE cxx_std_17)
+        target_include_directories(b1_immutable_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(b1_immutable_benchmark PRIVATE
+            PHOTOSPIDER_B1_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(b1_immutable_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            PkgConfig::UTF8PROC
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
+        add_executable(m1_shared_benchmark EXCLUDE_FROM_ALL
+            tests/verification/m1_shared_benchmark.cpp
+            tests/verification/i1_evidence_json.cpp
+            tests/verification/b1_evidence_json.cpp)
+        set_target_properties(m1_shared_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(m1_shared_benchmark PRIVATE cxx_std_17)
+        target_include_directories(m1_shared_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(m1_shared_benchmark PRIVATE
+            PHOTOSPIDER_M1_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        target_link_libraries(m1_shared_benchmark PRIVATE
+            photospider
+            nlohmann_json::nlohmann_json
+            PkgConfig::UTF8PROC
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
     endif()
     add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
+    add_ps_test(test_i1_evidence tests/unit/test_i1_evidence.cpp)
+    target_sources(test_i1_evidence PRIVATE
+        tests/verification/i1_evidence_json.cpp
+        tests/verification/i1_evidence_workflow.cpp)
+    target_link_libraries(test_i1_evidence PRIVATE
+        nlohmann_json::nlohmann_json
+        PkgConfig::UTF8PROC)
+    add_ps_test(test_i1_profile tests/unit/test_i1_profile.cpp)
+    add_ps_test(test_i2_evidence tests/unit/test_i2_evidence.cpp)
+    target_sources(test_i2_evidence PRIVATE
+        tests/verification/i2_evidence_json.cpp)
+    target_link_libraries(test_i2_evidence PRIVATE
+        nlohmann_json::nlohmann_json)
+    add_ps_test(test_i2_profile tests/unit/test_i2_profile.cpp)
+    add_ps_test(test_b1_profile tests/unit/test_b1_profile.cpp)
+    add_ps_test(test_b1_environment tests/unit/test_b1_environment.cpp)
+    target_link_libraries(test_b1_environment PRIVATE PkgConfig::UTF8PROC)
+    add_ps_test(test_b1_evidence tests/unit/test_b1_evidence.cpp)
+    target_sources(test_b1_evidence PRIVATE
+        tests/verification/b1_evidence_json.cpp)
+    target_link_libraries(test_b1_evidence PRIVATE
+        nlohmann_json::nlohmann_json
+        PkgConfig::UTF8PROC)
+    add_ps_test(test_b1_output_store tests/unit/test_b1_output_store.cpp)
+    add_ps_test(test_m1_profile tests/unit/test_m1_profile.cpp)
+    target_link_libraries(test_m1_profile PRIVATE PkgConfig::UTF8PROC)
+    add_ps_test(test_evidence_envelope
+        tests/unit/test_evidence_envelope.cpp)
+    target_link_libraries(test_evidence_envelope PRIVATE PkgConfig::UTF8PROC)
+    add_ps_test(test_progressive_compute
+        tests/unit/test_progressive_compute.cpp)
+    add_ps_test(test_dense_tensor_content_digest
+        tests/unit/test_dense_tensor_content_digest.cpp)
     add_ps_test(test_physical_execution_routes
         tests/unit/test_physical_execution_routes.cpp
         photospider_execution_internal)
@@ -2043,7 +2211,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_compute_supersession
         tests/unit/test_compute_supersession.cpp)
     add_ps_test(test_bad_alloc_boundaries
-        tests/integration/test_bad_alloc_boundaries.cpp)
+        tests/integration/test_bad_alloc_boundaries.cpp
+        photospider_internal_test_product)
     target_sources(test_bad_alloc_boundaries PRIVATE
         plugins/ops/threshold_op.cpp)
     target_include_directories(test_bad_alloc_boundaries PRIVATE
@@ -2374,6 +2543,64 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_resource_ledger
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i1_evidence
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i2_evidence
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_i2_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_environment
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_evidence
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_b1_output_store
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_m1_profile
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_evidence_envelope
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_progressive_compute
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_dense_tensor_content_digest
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        gtest_discover_tests(test_i1_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+        gtest_discover_tests(test_i2_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+        gtest_discover_tests(test_b1_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+        gtest_discover_tests(test_m1_product_path
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS kernel-concurrency
+                TIMEOUT 30)
+    endif()
     gtest_discover_tests(test_device_executor_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
@@ -2491,7 +2718,12 @@ if(TARGET photospider_internal_test_product)
     set(PHOTOSPIDER_ALLOWED_INTERNAL_TEST_PRODUCT_CONSUMERS
         test_compute_run
         test_compute_service_split
+        test_bad_alloc_boundaries
         test_host_adapter
+        test_i1_product_path
+        test_i2_product_path
+        test_b1_product_path
+        test_m1_product_path
         test_kernel_contracts
         test_policy_execution)
     set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS "")

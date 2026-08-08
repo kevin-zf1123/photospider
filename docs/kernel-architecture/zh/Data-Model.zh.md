@@ -314,11 +314,13 @@ Host access 仍同时要求 producer Ready 与 host-visible binding；否则会�
 map、import、transfer 或 readback。显式 CPU/Metal transfer 会发布独立 binding，同时保留同一
 逻辑 `ValueRevisionId`。进程级 `ResidencyManager` 只索引精确 Ready replica，并以完整
 completion identity 加 current supersession generation 原子门控 destination readiness。
-一个可失败的 prepublication 步骤会创建 lineage row 而不推进它；accepted coordinator
-publication 随后会在暴露 currentness 前推进该行，因此晚启动的较旧 Run observation
-不能让 freshness 倒退。已结算 replica 可以比 producing Run 活得更久，但 manager 默认
+一个可失败的 prepublication 步骤会创建 lineage row，但不会指派 managed current identity；
+accepted coordinator publication 随后会在暴露 currentness 前指派精确 generation，包括
+coordinate 授权的数值下降。之后的 stale Run observation 或 transfer admission 不能替换该
+exact managed identity；standalone lineage 另行保持 numeric-maximum ordering。已结算
+replica 可以比 producing Run 活得更久，但 manager 默认
 最多保留 64 个 entry，从而限制强 native/provider ownership；publication pressure 会释放
-revision 最低的 entry。Generation 推进本身不会清除 residency，而且这个 entry 数量不是
+revision 最低的 entry。Managed-current 指派本身不会清除 residency，而且这个 entry 数量不是
 device-byte 或 scratch admission。在精确 Graph close 排空全部 Run 与 pending native
 completion 后，manager 会退役该不复用 `GraphInstanceId` 的全部 generation row。Close tail
 还会在本次退役前 join compute-request lane：prepared candidate 会在执行其可失败 lineage
@@ -416,6 +418,20 @@ byte 增量送入 SHA-256。两次 invocation 使用独立的 callback-local dia
 三个可选 digest identity，但它不是 graph document、manifest/chunk store、filesystem codec 或
 cache-policy integration。
 
+同一个已安装的 `compute_content_digest(Value)` 入口现在也为内建 DenseTensor value 提供
+冻结的 canonical-v1 逻辑 identity，且不会调用 provider callback。其保留的内建 Schema
+record 会编码 rank、shape、element semantics、storage encoding kind/width，以及可选的
+quantization block shape 和 binary32 scale bit。可选的保留 `ImageFacet` record 会编码 x/y
+axis 与可选 channel axis。Content traversal 按 row-major logical coordinate 执行：whole-byte
+scalar 以 little-endian 发出，blocked FP4 则为每个 logical element 发出一个 low-nibble code
+byte。Stride、byte/bit offset、padding、block placement、nibble order、allocation/binding
+identity、device identity、readiness metadata 与 Value revision 均不进入 logical content
+identity；descriptor-bound quantization metadata 会进入 descriptor digest。Non-Ready 或不可读
+payload 返回 `PayloadUnavailable`；malformed 或 unsupported retained state 返回
+`InvalidDescriptor`；allocation failure 仍以 `std::bad_alloc` 传播。这些规则让经过 repack、
+但逻辑相等的 DenseTensor output 可以用带类型的 `Sha256CanonicalV1` `ContentDigest` 比较，
+而不是比较 raw storage byte。
+
 V-15 为这套未改变的 v3 definition suite 提供首个可选具体 generation。仓库自有 OpenEXR
 provider 会发布一个 `VariableSampleField` Schema、`ImageFacet`、`DeepSampleFacet` 与一个
 multi-buffer Layout。其版本化 descriptor payload 会保留有符号半开 data/display window，以及
@@ -482,6 +498,7 @@ dependency 工作由
 - `src/lib/ipc/output_store.*`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/value_image_adapter.*`
@@ -506,6 +523,7 @@ dependency 工作由
 - `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
+- `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`

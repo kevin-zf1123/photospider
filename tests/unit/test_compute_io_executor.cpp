@@ -274,6 +274,14 @@ TEST(ComputeIoExecutor, TaskLimitRejectsBeforeLazyFactory) {
       });
   EXPECT_EQ(rejected.admission_status(), ComputeIoAdmissionStatus::TaskLimit);
   EXPECT_FALSE(rejected.completion().active());
+  EXPECT_EQ(rejected.admission_event().status,
+            ComputeIoAdmissionStatus::TaskLimit);
+  EXPECT_EQ(rejected.admission_event().offered_planned_bytes, 1U);
+  EXPECT_EQ(rejected.admission_event().charged_tasks, 0U);
+  EXPECT_EQ(rejected.admission_event().charged_planned_bytes, 0U);
+  EXPECT_EQ(rejected.admission_event().snapshot_after.active_tasks, 1U);
+  EXPECT_EQ(rejected.admission_event().snapshot_after.active_planned_bytes,
+            16U);
   EXPECT_EQ(factory_entries.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(executor.snapshot().active_planned_bytes, 16U);
 
@@ -282,6 +290,61 @@ TEST(ComputeIoExecutor, TaskLimitRejectsBeforeLazyFactory) {
     EXPECT_EQ(first.completion().wait().status(),
               ComputeIoCompletionStatus::Succeeded);
   }
+  EXPECT_EQ(executor.snapshot().active_tasks, 0U);
+  EXPECT_EQ(executor.snapshot().active_planned_bytes, 0U);
+}
+
+/**
+ * @brief Proves atomic events retain one task's exact charge amid other work.
+ *
+ * The target task is admitted and entered first. A second task remains charged
+ * while the target settles, so its global post-release snapshot is nonzero.
+ * The target settlement must nevertheless bind exactly one task and eleven
+ * bytes to its own admission sequence.
+ *
+ * @throws Test infrastructure exceptions from executor and synchronization.
+ */
+TEST(ComputeIoExecutor,
+     AtomicAdmissionAndSettlementEventsBindOwnChargeUnderConcurrency) {
+  ComputeIoExecutor executor(ComputeIoExecutorLimits{2U, 32U});
+  BlockingIoTask target_gate;
+  BlockingIoTask unrelated_gate;
+  const std::shared_ptr<const void> lifetime = std::make_shared<int>(15);
+
+  const ComputeIoSubmission target = executor.try_submit(
+      11U, lifetime, [&target_gate]() { return target_gate.task(); });
+  ASSERT_TRUE(target.accepted());
+  ASSERT_TRUE(target_gate.wait_until_entered());
+  const ComputeIoAdmissionEvent target_admission = target.admission_event();
+  EXPECT_EQ(target_admission.status, ComputeIoAdmissionStatus::Accepted);
+  EXPECT_EQ(target_admission.offered_planned_bytes, 11U);
+  EXPECT_EQ(target_admission.charged_tasks, 1U);
+  EXPECT_EQ(target_admission.charged_planned_bytes, 11U);
+  EXPECT_EQ(target_admission.snapshot_after.active_tasks, 1U);
+  EXPECT_EQ(target_admission.snapshot_after.active_planned_bytes, 11U);
+
+  const ComputeIoSubmission unrelated = executor.try_submit(
+      7U, lifetime, [&unrelated_gate]() { return unrelated_gate.task(); });
+  ASSERT_TRUE(unrelated.accepted());
+  EXPECT_GT(unrelated.admission_event().sequence, target_admission.sequence);
+
+  target_gate.release();
+  const ComputeIoTaskResult target_result = target.completion().wait();
+  ASSERT_EQ(target_result.status(), ComputeIoCompletionStatus::Succeeded);
+  const ComputeIoSettlementEvent& target_settlement =
+      target_result.settlement_event();
+  EXPECT_GT(target_settlement.sequence, unrelated.admission_event().sequence);
+  EXPECT_EQ(target_settlement.admission_sequence, target_admission.sequence);
+  EXPECT_EQ(target_settlement.status, ComputeIoCompletionStatus::Succeeded);
+  EXPECT_EQ(target_settlement.released_tasks, 1U);
+  EXPECT_EQ(target_settlement.released_planned_bytes, 11U);
+  EXPECT_EQ(target_settlement.snapshot_after.active_tasks, 1U);
+  EXPECT_EQ(target_settlement.snapshot_after.active_planned_bytes, 7U);
+
+  ASSERT_TRUE(unrelated_gate.wait_until_entered());
+  unrelated_gate.release();
+  EXPECT_EQ(unrelated.completion().wait().status(),
+            ComputeIoCompletionStatus::Succeeded);
   EXPECT_EQ(executor.snapshot().active_tasks, 0U);
   EXPECT_EQ(executor.snapshot().active_planned_bytes, 0U);
 }
@@ -362,6 +425,61 @@ TEST(ComputeIoExecutor, FailuresReleaseCapacityAndWorkerContinues) {
   }
   EXPECT_TRUE(recovered.load(std::memory_order_acquire));
   EXPECT_EQ(executor.snapshot().active_planned_bytes, 0U);
+}
+
+/**
+ * @brief Proves factory failures leave no orphan Accepted event or phase
+ * charge.
+ * @throws Executor, allocation, synchronization, and test failures unchanged.
+ */
+TEST(ComputeIoExecutor,
+     FactoryThrowAndEmptyTaskRollbackBeforeAcceptedIdentityPublication) {
+  ComputeIoExecutor executor(ComputeIoExecutorLimits{1U, 8U});
+  const std::shared_ptr<const void> lifetime = std::make_shared<int>(31);
+
+  EXPECT_THROW(static_cast<void>(executor.try_submit(
+                   8U, lifetime,
+                   []() -> ComputeIoExecutor::Task {
+                     throw ComputeIoSentinel("provisional factory failure");
+                   })),
+               ComputeIoSentinel);
+  ComputeIoExecutorSnapshot snapshot = executor.snapshot();
+  EXPECT_EQ(snapshot.active_tasks, 0U);
+  EXPECT_EQ(snapshot.active_planned_bytes, 0U);
+  EXPECT_EQ(snapshot.constructing_tasks, 0U);
+  EXPECT_EQ(snapshot.queued_tasks, 0U);
+  EXPECT_EQ(snapshot.running_tasks, 0U);
+
+  EXPECT_THROW(
+      static_cast<void>(executor.try_submit(
+          8U, lifetime, []() -> ComputeIoExecutor::Task { return {}; })),
+      std::invalid_argument);
+  snapshot = executor.snapshot();
+  EXPECT_EQ(snapshot.active_tasks, 0U);
+  EXPECT_EQ(snapshot.active_planned_bytes, 0U);
+  EXPECT_EQ(snapshot.constructing_tasks, 0U);
+  EXPECT_EQ(snapshot.queued_tasks, 0U);
+  EXPECT_EQ(snapshot.running_tasks, 0U);
+
+  const ComputeIoSubmission accepted = executor.try_submit(
+      8U, lifetime, []() -> ComputeIoExecutor::Task { return []() {}; });
+  ASSERT_TRUE(accepted.accepted());
+  EXPECT_EQ(accepted.admission_event().sequence, 1U);
+  EXPECT_EQ(accepted.admission_event().charged_tasks, 1U);
+  EXPECT_EQ(accepted.admission_event().charged_planned_bytes, 8U);
+  EXPECT_EQ(accepted.admission_event().snapshot_after.active_tasks, 1U);
+  EXPECT_EQ(accepted.admission_event().snapshot_after.constructing_tasks, 0U);
+  EXPECT_EQ(accepted.admission_event().snapshot_after.queued_tasks, 1U);
+  EXPECT_EQ(accepted.admission_event().snapshot_after.running_tasks, 0U);
+  const ComputeIoTaskResult settled = accepted.completion().wait();
+  EXPECT_EQ(settled.status(), ComputeIoCompletionStatus::Succeeded);
+  EXPECT_EQ(settled.settlement_event().sequence, 2U);
+  EXPECT_EQ(settled.settlement_event().admission_sequence,
+            accepted.admission_event().sequence);
+  EXPECT_EQ(settled.settlement_event().snapshot_after.active_tasks, 0U);
+  EXPECT_EQ(settled.settlement_event().snapshot_after.constructing_tasks, 0U);
+  EXPECT_EQ(settled.settlement_event().snapshot_after.queued_tasks, 0U);
+  EXPECT_EQ(settled.settlement_event().snapshot_after.running_tasks, 0U);
 }
 
 /**
@@ -856,7 +974,8 @@ TEST(ComputeIoExecutor,
 }
 
 /**
- * @brief Verifies shutdown cancels an admitted factory before queue publish.
+ * @brief Verifies shutdown atomically accepts and cancels constructed work.
+ * @throws Executor, allocation, synchronization, and test failures unchanged.
  */
 TEST(ComputeIoExecutor, ShutdownRacingConstructionCancelsBeforeCallbackEntry) {
   ComputeIoExecutor executor(ComputeIoExecutorLimits{1U, 8U});
@@ -894,11 +1013,42 @@ TEST(ComputeIoExecutor, ShutdownRacingConstructionCancelsBeforeCallbackEntry) {
   EXPECT_EQ(submission.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   ComputeIoSubmission accepted = submission.get();
-  EXPECT_TRUE(accepted.accepted());
-  if (accepted.accepted()) {
-    EXPECT_EQ(accepted.completion().wait().status(),
-              ComputeIoCompletionStatus::Cancelled);
-  }
+  ASSERT_TRUE(accepted.accepted());
+  const ComputeIoAdmissionEvent& admission = accepted.admission_event();
+  EXPECT_EQ(admission.status, ComputeIoAdmissionStatus::Accepted);
+  EXPECT_EQ(admission.sequence, 1U);
+  EXPECT_EQ(admission.offered_planned_bytes, 8U);
+  EXPECT_EQ(admission.charged_tasks, 1U);
+  EXPECT_EQ(admission.charged_planned_bytes, 8U);
+  EXPECT_EQ(admission.snapshot_after.task_limit, 1U);
+  EXPECT_EQ(admission.snapshot_after.planned_bytes_limit, 8U);
+  EXPECT_EQ(admission.snapshot_after.active_tasks, 1U);
+  EXPECT_EQ(admission.snapshot_after.active_planned_bytes, 8U);
+  EXPECT_EQ(admission.snapshot_after.constructing_tasks, 1U);
+  EXPECT_EQ(admission.snapshot_after.queued_tasks, 0U);
+  EXPECT_EQ(admission.snapshot_after.running_tasks, 0U);
+  EXPECT_FALSE(admission.snapshot_after.accepting);
+  EXPECT_FALSE(admission.snapshot_after.shutdown_complete);
+
+  const ComputeIoTaskResult cancelled = accepted.completion().wait();
+  EXPECT_EQ(cancelled.status(), ComputeIoCompletionStatus::Cancelled);
+  EXPECT_EQ(cancelled.work_duration(), std::chrono::nanoseconds{0});
+  EXPECT_FALSE(cancelled.failure());
+  const ComputeIoSettlementEvent& settlement = cancelled.settlement_event();
+  EXPECT_EQ(settlement.status, ComputeIoCompletionStatus::Cancelled);
+  EXPECT_EQ(settlement.sequence, 2U);
+  EXPECT_EQ(settlement.admission_sequence, admission.sequence);
+  EXPECT_EQ(settlement.released_tasks, 1U);
+  EXPECT_EQ(settlement.released_planned_bytes, 8U);
+  EXPECT_EQ(settlement.snapshot_after.task_limit, 1U);
+  EXPECT_EQ(settlement.snapshot_after.planned_bytes_limit, 8U);
+  EXPECT_EQ(settlement.snapshot_after.active_tasks, 0U);
+  EXPECT_EQ(settlement.snapshot_after.active_planned_bytes, 0U);
+  EXPECT_EQ(settlement.snapshot_after.constructing_tasks, 0U);
+  EXPECT_EQ(settlement.snapshot_after.queued_tasks, 0U);
+  EXPECT_EQ(settlement.snapshot_after.running_tasks, 0U);
+  EXPECT_FALSE(settlement.snapshot_after.accepting);
+  EXPECT_FALSE(settlement.snapshot_after.shutdown_complete);
   EXPECT_EQ(callback_entries.load(std::memory_order_relaxed), 0);
 
   EXPECT_EQ(shutdown.wait_for(std::chrono::seconds(2)),

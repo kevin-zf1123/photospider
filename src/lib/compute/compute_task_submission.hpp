@@ -559,6 +559,36 @@ class TaskSubmissionPlan {
       bool is_initial_ready);
 
   /**
+   * @brief Publishes one opted-in actual dependency-ready task observation.
+   * @param lease Matching Run lease providing descriptor and sink lifetime.
+   * @param identity Exact materialized Run-local task identity.
+   * @param task Exact plan record used to construct the owned submission.
+   * @param device Device selected with the retained operation implementation.
+   * @return Nothing.
+   * @throws Nothing; the opted-in sink must contain every failure.
+   * @note The caller invokes this only after `ReadyTaskSubmission`
+   * construction succeeds. Sinks that do not opt in reserve no coordinate.
+   */
+  void observe_task_ready(const ComputeRunLease& lease,
+                          const ComputeRunTaskIdentity& identity,
+                          const PlannedTask& task,
+                          Device device) const noexcept;
+
+  /**
+   * @brief Publishes one opted-in task-local terminal observation.
+   * @param lease Matching Run lease providing descriptor and sink lifetime.
+   * @param identity Exact entered task identity.
+   * @param kind Actual task-local success, failure, or cancellation category.
+   * @return Nothing.
+   * @throws Nothing; the opted-in sink must contain every failure.
+   * @note Deferred Values call this only after fence settlement. The callback
+   * neither mutates Run terminal state nor releases dependencies.
+   */
+  void observe_task_terminal(const ComputeRunLease& lease,
+                             const ComputeRunTaskIdentity& identity,
+                             ComputeRunTaskTerminalKind kind) const noexcept;
+
+  /**
    * @brief Appends one initially ready composite identity.
    *
    * @param task_id Dense candidate task id.

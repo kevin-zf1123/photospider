@@ -649,6 +649,46 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 插件仍在 Host 进程内执行受信任的原生代码，可能阻塞、破坏内存、在计账外分配
 或创建未申报线程；它只是无法通过 ABI 合法获得执行能力。
 
+Issue #93 不会改变上述三条 ABI 的 inventory 或 record layout。其 `I1Host`、
+`ComputeRunObservationSink`、accepted-boundary collector、inner-row evaluator 与精确 runner
+均是 source-private benchmark/Host mechanism。它们不会进入 installed Host request、operation
+registrar record、data-provider v3 record、policy-plugin v1 record、SDK target、IPC 或 CLI。
+Observer 只接收 copied fact 与 immutable final Value；它不是第四条 extension boundary，也不向
+DSO 暴露 callback。
+
+Issue #94 同样不会改变 installed ABI inventory、layout、symbol 或 package component。
+`ProgressiveComputeOptions`、`ProgressiveFinalGate`、I2 Host/profile/evidence type 及其
+observation callback 都保留在 `src/lib` 下；installed Host request、IPC 或 CLI grammar、
+operation registrar、data-provider v3 table 与 policy-plugin v1 table 都不会新增 field。精确
+preview primitive 是内部 CPU helper。Rank-three HWC Metal upload 是既有进程自有 executor 的
+内部泛化，并通过未改变的 `Value`、`AccessPlan`、residency 与 ledger contract 发布；它既不
+export native handle，也不新增 provider callback。手工 runner 与 deterministic test 只是这些
+私有 seam 的 consumer，不是 SDK 或 extension surface。
+
+已安装的 `compute_content_digest(Value)` 现在除既有 provider-defined traversal 外，也会通过
+Host/runtime canonical-v1 实现处理内建 DenseTensor value。内建路径使用保留的
+Schema/ImageFacet identity、descriptor metadata 与 logical payload byte；它不会调用或新增
+data-provider callback。Provider-defined value 继续使用未改变的 v3 mandatory `visit_content`
+callback。因此 data-provider API table 仍为 160 byte，冻结的 v2/v3/v1 record 与 symbol
+inventory 均保持不变，也不会引入新的 compatibility generation。
+
+执行画像证据不会加强这条信任边界。有效的 `execution-profile-slo-v1` 行会冻结并
+hash 精确的进程内 operation/provider 与 policy generation，拒绝未申报的 worker
+pool 或 resource authority，并把当前 ledger/device authority 之外的 allocation
+作为 diagnostic，而不是静默算入 memory。其 latency、throughput、fairness、
+determinism、waste 与 memory 判定不声明 sandbox 或 hostile-code containment。
+[ADR 0010](../../adr/zh/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
+定义这项证据边界；process supervision 与 isolated invocation 仍属于独立的
+server/plugin-isolation 目标。
+
+[ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
+冻结了该目标边界。Server control plane 与 WorkerManager 不加载任何 DSO。凡是加载到 Host
+进程内的 DSO 都仍是 operator-trusted native code，其中也包括纯 C policy 与
+data-definition record。Tenant-supplied CPU operation code 改为跨越单独版本化、绑定 attempt
+的进程协议，该协议只传递有界 descriptor 与 shared-memory/FD capability；可信 Host 代码会
+重新校验每个返回 descriptor 与 ownership 声明。纯 C 是 record compatibility 选择，不是
+sandbox。
+
 影子发布阻止操作注册表或策略类型 map 局部可见。DSO 租约让回调状态和插件拥有
 的值或上下文保持在其定义库的生命周期内。匹配的操作恢复 token 和策略绑定代次
 可防止已移除或替换的插件静默夺回当前所有权。
@@ -701,12 +741,18 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - `include/photospider/plugin/op_contract.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/core/value.cpp`
+- `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `src/lib/compute/progressive_compute.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
@@ -726,5 +772,8 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - `tests/unit/test_device_residency.cpp`
 - `tests/fixtures/value_identity_dso.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
+- `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/unit/test_progressive_compute.cpp`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

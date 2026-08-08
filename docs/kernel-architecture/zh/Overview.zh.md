@@ -475,9 +475,11 @@ V-8 新增经过检查的 `DeviceId`、`MemoryDomain`、`StorageBinding`、nativ
 producer identity 与显式 `AccessPlan`。Transfer 会创建不同的物理 replica，同时保留同一个逻辑
 `ValueRevisionId`；device-local binding 不会被伪造出 host pointer。`ResidencyManager` 是精确
 合格 replica 的唯一进程 owner，并在同一个 freshness-checked transaction 中发布 destination
-readiness 与 residency。Kernel 会在可失败的 coordinator publication 前预跟踪 lineage；
-accepted current-generation callback 会按 coordinator-to-manager 顺序推进该预分配行，
-然后 currentness 才可观察。较旧 Run 随后的 observation 不能让该行倒退。Pending Value
+readiness 与 residency。Kernel 会在可失败的 coordinator publication 前预跟踪 lineage，
+但不指派 managed current identity。Accepted current-generation callback 会按
+coordinator-to-manager 顺序，在 currentness 可观察前把精确发布的 generation 指派给该行，
+包括 coordinate 授权的数值下降。之后的 stale Run observation 与 transfer admission
+不能替换这个 exact managed identity；standalone lineage 保持 numeric-maximum ordering。Pending Value
 通过 Run-scoped continuation 重新进入既有
 `ExecutionService` ready store，因此 CPU worker 不会等待 Metal completion。Metal Perlin route
 会产生 pending native Value，并在下游 CPU access 前执行显式 asynchronous

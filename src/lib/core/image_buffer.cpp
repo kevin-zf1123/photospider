@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "core/image_buffer_storage.hpp"
+
 #if defined(_MSC_VER)
 #include <malloc.h>
 #endif
@@ -205,30 +207,37 @@ std::byte* mutable_pixel_address(const ImageBuffer& buffer, int row, int x,
 }
 
 /**
- * @brief Conservatively detects whether two validated CPU payloads may alias.
- * @param left First nonempty CPU descriptor.
- * @param right Second nonempty CPU descriptor.
- * @return True when shared ownership or declared address ranges can overlap.
- * @throws std::invalid_argument or std::overflow_error only if a caller breaks
- * the precondition that both descriptors were already validated.
- * @note Unrepresentable uintptr_t endpoints are treated as overlapping. False
- * is returned only when both control blocks and declared byte ranges prove the
- * payloads independent.
+ * @brief Computes the checked byte size of one active storage envelope.
+ * @param buffer Valid nonempty descriptor with addressable data.
+ * @return Bytes from the first row start through the final active row byte.
+ * @throws std::invalid_argument when active row width cannot be computed.
+ * @throws std::overflow_error when row-offset or envelope addition overflows.
+ * @note Callers validate the complete descriptor before invoking this helper.
  */
-bool image_payloads_may_overlap(const ImageBuffer& left,
-                                const ImageBuffer& right) {
+std::size_t image_buffer_active_storage_bytes(const ImageBuffer& buffer) {
+  const std::size_t final_row_offset = checked_size_multiply(
+      static_cast<std::size_t>(buffer.height - 1), buffer.step,
+      "ImageBuffer active storage row offset exceeds std::size_t.");
+  return checked_size_add(
+      final_row_offset, image_buffer_row_bytes(buffer),
+      "ImageBuffer active storage envelope exceeds std::size_t.");
+}
+
+}  // namespace
+
+namespace detail {
+
+/** @copydoc image_buffer_storage_envelopes_may_overlap */
+bool image_buffer_storage_envelopes_may_overlap(const ImageBuffer& left,
+                                                const ImageBuffer& right) {
   const bool shares_owner = !left.data.owner_before(right.data) &&
                             !right.data.owner_before(left.data);
   if (shares_owner) {
     return true;
   }
 
-  const std::size_t left_bytes =
-      static_cast<std::size_t>(left.height - 1) * left.step +
-      image_buffer_row_bytes(left);
-  const std::size_t right_bytes =
-      static_cast<std::size_t>(right.height - 1) * right.step +
-      image_buffer_row_bytes(right);
+  const std::size_t left_bytes = image_buffer_active_storage_bytes(left);
+  const std::size_t right_bytes = image_buffer_active_storage_bytes(right);
   const std::uintptr_t left_begin =
       reinterpret_cast<std::uintptr_t>(left.data.get());
   const std::uintptr_t right_begin =
@@ -245,7 +254,7 @@ bool image_payloads_may_overlap(const ImageBuffer& left,
   return left_begin < right_end && right_begin < left_end;
 }
 
-}  // namespace
+}  // namespace detail
 
 /**
  * @brief Returns the scalar byte width for one public image data type.
@@ -571,7 +580,8 @@ void copy_image_buffer_region(const InputTileView& input,
       active_row_bytes, static_cast<std::size_t>(input.roi.height),
       "ImageBuffer copy size exceeds std::size_t.");
 
-  if (!image_payloads_may_overlap(*input.buffer, *output.buffer)) {
+  if (!detail::image_buffer_storage_envelopes_may_overlap(*input.buffer,
+                                                          *output.buffer)) {
     for (int row = 0; row < input.roi.height; ++row) {
       const std::byte* source = const_pixel_address(
           *input.buffer, input.roi.y + row, input.roi.x, pixel_bytes);

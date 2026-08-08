@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -22,6 +23,7 @@ namespace ps {
 class GraphModel;
 class GraphTraversalService;
 class ExecutionTaskRuntime;
+class Value;
 }  // namespace ps
 
 namespace ps::testing {
@@ -32,12 +34,16 @@ namespace ps::compute {
 class ComputeRunControl;
 class ComputeRunCancellationSlot;
 class ComputeRequestCancellationControl;
+class ComputeRunDescriptor;
 class HighPrecisionDirtyWriteBuffer;
 class TaskSubmissionPlan;
 class ComputeRun;
 class ExecutionService;
 class ExecutionLifecycleTelemetry;
+class ProgressiveFinalGate;
 class RunLifecycleRegistry;
+enum class ComputeRunTerminalKind;
+enum class ComputeRunCancellationReason;
 
 /**
  * @brief Opaque stable identity for one request-owned compute Run.
@@ -298,6 +304,391 @@ struct ComputeRunQos {
 };
 
 /**
+ * @brief Observation-only coordinate reserved at one product linearization.
+ *
+ * The observation sink samples the process steady clock and reserves one
+ * strictly increasing observer-local sequence before the owning product state
+ * transition. Product code then carries this immutable coordinate to the
+ * corresponding callback even when callback delivery occurs later.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note The value grants no scheduling, cancellation, lifecycle, resource, or
+ * commit authority. Sequence zero is reserved for absent/overflow evidence.
+ */
+struct ComputeRunObservationCoordinate final {
+  /** @brief Steady-clock sample taken immediately before sequence reservation.
+   */
+  std::chrono::steady_clock::time_point observed_at;
+
+  /** @brief Strictly increasing observer-local causal sequence. */
+  std::uint64_t causal_sequence = 0U;
+};
+
+/**
+ * @brief Borrowed dependency-ready task facts for source-private observation.
+ *
+ * The dispatcher assembles this value from the exact `PlannedTask`, selected
+ * device, and immutable resource declaration that are about to enter one
+ * `ReadyTaskSubmission`. Dependency storage remains owned by the Run plan and
+ * is valid only for the synchronous callback.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note This value grants no readiness, queue, resource, Graph, operation, or
+ * completion authority. ROI fields describe the actual planned output shape;
+ * consumers remain responsible for workload-specific logical byte mapping.
+ */
+struct ComputeRunTaskReadyObservation final {
+  /** @brief Borrowed dense upstream task ids in plan-owned order. */
+  const int* dependency_task_ids = nullptr;
+
+  /** @brief Number of borrowed dependency ids. */
+  std::size_t dependency_task_count = 0U;
+
+  /** @brief Whether the actual planned task uses tiled execution. */
+  bool tiled = false;
+
+  /** @brief Planned output ROI left coordinate. */
+  int output_x = 0;
+
+  /** @brief Planned output ROI top coordinate. */
+  int output_y = 0;
+
+  /** @brief Planned output ROI width. */
+  int output_width = 0;
+
+  /** @brief Planned output ROI height. */
+  int output_height = 0;
+
+  /** @brief Device selected with the retained operation implementation. */
+  Device device = Device::CPU;
+
+  /** @brief Actual ready submission's declared logical work units. */
+  std::uint64_t work_units = 0U;
+
+  /** @brief Actual ready submission's declared retained Host bytes. */
+  std::uint64_t retained_memory_bytes = 0U;
+
+  /** @brief Actual ready submission's declared Host scratch bytes. */
+  std::uint64_t scratch_bytes = 0U;
+
+  /** @brief Actual ready submission's declared ready-store bytes. */
+  std::uint64_t ready_bytes = 0U;
+};
+
+/**
+ * @brief Closed logical terminal category for one actually entered task.
+ * @throws Nothing for value construction and comparison.
+ * @note The category is task-local evidence. It neither publishes nor
+ * replaces the owning Run's terminal outcome.
+ */
+enum class ComputeRunTaskTerminalKind : std::uint8_t {
+  /** @brief Task work and any deferred producer completion succeeded. */
+  Succeeded,
+
+  /** @brief Task execution or deferred producer completion failed. */
+  Failed,
+
+  /** @brief An already-terminal cancelled Run suppressed task work. */
+  Cancelled,
+};
+
+/**
+ * @brief Allocation-free irreversible service-start commit callback.
+ * @param context Borrowed caller-owned context valid for the complete call.
+ * @return True only after the physical route start commits irreversibly.
+ * @throws Nothing; implementations must contain every failure.
+ * @note `ExecutionService` supplies this callback while holding its pool and
+ * Run-state locks. `ComputeRunControl` invokes it under the matching Run's
+ * terminal-arbiter mutex so cancellation acceptance and route commitment share
+ * one linearization authority.
+ */
+using ComputeRunServiceStartCommitCallback = bool (*)(void* context) noexcept;
+
+/**
+ * @brief Immutable evidence facts bound to one committed service start.
+ *
+ * The two class facts are sampled by `ExecutionService` from real ready-store
+ * candidates, Run lifecycle, operation-gate, physical-route, and available
+ * execution child-grant capacity immediately before the selected start stages
+ * its own grant and enters irreversible Run arbitration. They describe the
+ * evidence-startable applicability cut, not the scheduler-selectable class
+ * competition that owns the three-to-one rule. Nominal request or offer
+ * intervals cannot mint either value.
+ *
+ * @throws Nothing for value construction and comparison.
+ * @note `execution_grant_committed` is true only after the selected child
+ * grant, operation gate, physical route, ready removal, and start counters
+ * commit. The value is observation-only and grants no queue, route, resource,
+ * Run, or cancellation authority.
+ */
+struct ComputeRunServiceStartObservation final {
+  /** @brief Whether a real Interactive candidate was evidence-startable. */
+  bool interactive_candidate_startable = false;
+
+  /** @brief Whether a real Throughput candidate was evidence-startable. */
+  bool throughput_candidate_startable = false;
+
+  /** @brief Whether the selected start committed its execution child grant. */
+  bool execution_grant_committed = false;
+};
+
+/**
+ * @brief Source-private, observation-only sink for one product compute request.
+ *
+ * The sink receives immutable identities, scalar service facts, terminal
+ * categories, and a retained immutable output Value at the exact product
+ * boundaries that own those facts. It cannot reach a Graph, scheduler, ready
+ * queue, cancellation source, ledger token, resource grant, commit contender,
+ * or mutable output, and its return values never participate in runtime
+ * decisions.
+ *
+ * @throws Nothing. Implementations must contain every failure; an escaping
+ * exception terminates because callbacks run on product correctness
+ * boundaries.
+ * @note Callbacks may run while the coordinator, Run, execution-service, or
+ * lifecycle-registry fence is held. Implementations must remain bounded,
+ * nonblocking, and must not re-enter compute services. The interface is
+ * source-private and is absent from installed Host, operation, policy, CLI,
+ * and IPC contracts.
+ */
+class ComputeRunObservationSink {
+ public:
+  /**
+   * @brief Releases observation-only implementation state.
+   * @throws Nothing.
+   * @note Destruction owns no product work and requests no cancellation.
+   */
+  virtual ~ComputeRunObservationSink() noexcept = default;
+
+  /**
+   * @brief Reserves one coordinate at an authoritative product boundary.
+   * @return Nonzero observer-local sequence paired with its steady-clock
+   * sample.
+   * @throws Nothing; implementations must contain sequence exhaustion.
+   * @note Callers invoke this immediately before the transition represented by
+   * the later callback. Reservation is bounded, nonblocking, allocation-free,
+   * and does not itself publish an event.
+   */
+  virtual ComputeRunObservationCoordinate
+  reserve_causal_coordinate() noexcept = 0;
+
+  /**
+   * @brief Retires one reservation whose represented callback will not run.
+   * @param coordinate Exact coordinate returned by the preceding reservation.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Callers invoke this exactly once only when the product transition did
+   * not commit, or when a source-private causal marker deliberately has no
+   * callback. The default no-op preserves observers that do not track
+   * reservation lifecycle; collectors using reservation frontiers override it.
+   * The operation remains bounded, nonblocking, allocation-free, and owns no
+   * product authority.
+   */
+  virtual void abort_causal_coordinate(
+      ComputeRunObservationCoordinate coordinate) noexcept {
+    (void)coordinate;
+  }
+
+  /**
+   * @brief Observes publication of one accepted current request generation.
+   * @param identity Product-assigned key and generation becoming current.
+   * @param coordinate Coordinate reserved immediately before currentness
+   * publication.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The coordinator invokes this immediately before publishing the same
+   * generation to `is_current()`.
+   */
+  virtual void on_current_generation(
+      const SupersessionIdentity& identity,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Reports whether this sink requests task-semantic observations.
+   * @return True only for bounded collectors that consume ready/terminal task
+   * facts.
+   * @throws Nothing.
+   * @note The default false preserves existing observation sequence domains:
+   * dispatchers reserve no additional coordinates for sinks that do not opt
+   * in. The result grants no product authority.
+   */
+  virtual bool observes_task_semantics() const noexcept { return false; }
+
+  /**
+   * @brief Observes one actual dependency-ready task materialization.
+   * @param descriptor Immutable identity and policy inputs of the owning Run.
+   * @param task_identity Exact Run-local ready task identity.
+   * @param observation Borrowed actual dependency, shape, device, and resource
+   * declaration valid only for this synchronous call.
+   * @param coordinate Coordinate reserved immediately before callback
+   * delivery after the owned ready submission is fully constructed.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Only sinks returning true from `observes_task_semantics()` receive
+   * this callback. It does not imply later service admission or start.
+   */
+  virtual void on_task_ready(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunTaskIdentity task_identity,
+      const ComputeRunTaskReadyObservation& observation,
+      ComputeRunObservationCoordinate coordinate) noexcept {
+    (void)descriptor;
+    (void)task_identity;
+    (void)observation;
+    (void)coordinate;
+  }
+
+  /**
+   * @brief Observes one physically committed callback service start.
+   * @param descriptor Immutable identity and policy inputs of the owning Run.
+   * @param task_identity Exact Run-local callback identity.
+   * @param service_charge Exact `work_units + ceil(ready_bytes/4096)` charge.
+   * @param observation Real evidence applicability and committed-grant facts.
+   * @param coordinate Coordinate reserved at reserved-start commitment.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The service reserves `coordinate` and commits the route under the
+   * Run terminal arbiter, then invokes this after ready removal,
+   * grant/gate commitment, and start counters become authoritative. Callback
+   * delivery occurs without the service pool, service Run-state, or terminal
+   * arbiter mutex held. The shared sink sequence, rather than callback
+   * scheduling order, total-orders start and cancellation.
+   */
+  virtual void on_service_start(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunTaskIdentity task_identity, std::uint64_t service_charge,
+      const ComputeRunServiceStartObservation& observation,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes the logical terminal category of one entered task.
+   * @param descriptor Immutable identity and policy inputs of the owning Run.
+   * @param task_identity Exact Run-local task reaching terminal state.
+   * @param kind Succeeded, Failed, or Cancelled task-local category.
+   * @param coordinate Coordinate reserved at task terminal publication.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Only opted-in task-semantic sinks receive this callback. Deferred
+   * Values publish terminal only after their producer fence settles; the
+   * callback changes no Run terminal or dependency authority.
+   */
+  virtual void on_task_terminal(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunTaskIdentity task_identity, ComputeRunTaskTerminalKind kind,
+      ComputeRunObservationCoordinate coordinate) noexcept {
+    (void)descriptor;
+    (void)task_identity;
+    (void)kind;
+    (void)coordinate;
+  }
+
+  /**
+   * @brief Observes acceptance of one Run cancellation reason.
+   * @param descriptor Immutable identity and policy inputs of the cancelled
+   * Run.
+   * @param reason Stable cancellation reason that won terminal arbitration.
+   * @param coordinate Coordinate reserved at cancellation acceptance.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Rejected or repeated cancellation requests produce no callback.
+   */
+  virtual void on_cancellation(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunCancellationReason reason,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes the exactly-once terminal category of one Run.
+   * @param descriptor Immutable identity and policy inputs of the terminal Run.
+   * @param kind Succeeded, Failed, or Cancelled terminal category.
+   * @param coordinate Coordinate reserved at terminal publication.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Failure exception payload is deliberately excluded from the
+   * authority-free evidence seam.
+   */
+  virtual void on_terminal(
+      const ComputeRunDescriptor& descriptor, ComputeRunTerminalKind kind,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes one current domain publication and retains its Value.
+   * @param descriptor Immutable identity of the Run whose contender committed.
+   * @param output Copy of the exact immutable image Value published visibly.
+   * @param coordinate Coordinate reserved at visible publication.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Value copying retains immutable shared state and grants no mutation
+   * or graph ownership. HP emits the full result and progressive RT emits the
+   * preview result. The commit contender emits this callback and its succeeding
+   * terminal callback in one Run-arbiter resolution, so a stale, failed,
+   * empty, or already-resolved contender produces no visibility.
+   */
+  virtual void on_current_visible(
+      const ComputeRunDescriptor& descriptor, Value output,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes consumption of progressive final permission.
+   * @param descriptor Immutable HP Full child descriptor about to be entered.
+   * @param coordinate Coordinate reserved immediately before HP submission.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The default no-op preserves existing source-private observers. The
+   * event grants no authority. A Run-owned operation consumes the bound gate,
+   * reserves this coordinate, and delivers the callback while holding the HP
+   * Run terminal arbiter; successful return is immediately before HP provider
+   * or ExecutionService entry. Implementations must not block or re-enter Run
+   * state (tests may use a deliberate barrier to verify the lock boundary).
+   */
+  virtual void on_progressive_final_triggered(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept {
+    (void)descriptor;
+    (void)coordinate;
+  }
+
+  /**
+   * @brief Observes physical Run quiescence selected by lifecycle finalization.
+   * @param descriptor Immutable identity of the quiescent Run.
+   * @param coordinate Coordinate reserved at the quiescence transition.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Terminal publication precedes this event. The registry remains the
+   * sole lifecycle authority; this callback cannot retain a Run lease.
+   */
+  virtual void on_run_quiescent(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes exact return of one Run's physical root resources.
+   * @param descriptor Immutable identity of the settled Run.
+   * @param coordinate Coordinate reserved at resource settlement.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note Quiescence precedes this event. The callback carries no ledger token,
+   * reservation, grant, or lifecycle-finalization authority.
+   */
+  virtual void on_run_resource_settled(
+      const ComputeRunDescriptor& descriptor,
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+
+  /**
+   * @brief Observes publication and Host tracking settlement of one request.
+   * @param coordinate Coordinate reserved only after the caller-visible status
+   * future is ready and Host tracking records that publication.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   * @note The request-scoped sink already identifies the edit. This event owns
+   * no Run descriptor because supersession may settle before Run
+   * materialization.
+   */
+  virtual void on_host_settled(
+      ComputeRunObservationCoordinate coordinate) noexcept = 0;
+};
+
+/**
  * @brief Caller-supplied immutable inputs used to construct one domain Run.
  *
  * @throws std::bad_alloc when graph_identity is copied into Run ownership.
@@ -332,6 +723,13 @@ struct ComputeRunSubmission {
    * request retains the realtime request key carried here.
    */
   SupersessionIdentity supersession;
+
+  /**
+   * @brief Optional source-private read-only observer retained by the Run.
+   * @note The observer owns no product authority and is absent from installed
+   * request or ABI values.
+   */
+  std::shared_ptr<ComputeRunObservationSink> observation_sink;
 };
 
 /**
@@ -427,6 +825,18 @@ class ComputeRunDescriptor {
     return supersession_;
   }
 
+  /**
+   * @brief Returns the optional observation-only request sink.
+   * @return Shared sink retained for the complete Run lifetime, or null.
+   * @throws Nothing.
+   * @note Copying the owner grants no scheduling, cancellation, resource, or
+   * commit authority.
+   */
+  const std::shared_ptr<ComputeRunObservationSink>& observation_sink()
+      const noexcept {
+    return observation_sink_;
+  }
+
  private:
   friend class ComputeRun;
   friend class ComputeRunControl;
@@ -469,6 +879,9 @@ class ComputeRunDescriptor {
 
   /** @brief Canonical request lineage version captured before planning. */
   SupersessionIdentity supersession_;
+
+  /** @brief Optional observation-only owner retained through settlement. */
+  std::shared_ptr<ComputeRunObservationSink> observation_sink_;
 };
 
 /**
@@ -597,7 +1010,8 @@ class ComputeRunCancellationSource {
    * @throws std::system_error if Run-state or cleanup synchronization fails.
    * @throws Any exception from a registered cleanup callback after
    * cancellation becomes terminal.
-   * @note Cleanup notifications run after the terminal mutex is released.
+   * @note A bound progressive gate is denied before cancellation becomes
+   * terminal. Cleanup notifications run after the terminal mutex is released.
    * Every selected notification is attempted; the first callback exception is
    * rethrown only after the remaining slots have been invoked.
    */
@@ -889,6 +1303,18 @@ class ComputeRunCommitContender final {
   bool publish_succeeded();
 
   /**
+   * @brief Resolves visible HP success and its terminal event atomically.
+   * @param output Exact immutable Value already published to the live Graph.
+   * @return True only for this still-active matching contender; false emits
+   * neither the current-visible nor terminal callback.
+   * @throws std::system_error if Run-state locking fails.
+   * @note The current-visible callback is emitted before the Succeeded terminal
+   * callback while the same `CommitClaimed` arbitration remains owned. Product
+   * code calls this only after no-throw live Graph publication.
+   */
+  bool publish_visible_succeeded(Value output);
+
+  /**
    * @brief Resolves this accepted commit with its exact predicate/persist
    * error.
    * @param failure Non-null exception captured inside the commit transaction.
@@ -987,6 +1413,39 @@ class ComputeRunSettlementObserver final {
    * @throws std::system_error when Run synchronization or waiting fails.
    */
   void wait_for_resource_settlement() const;
+
+  /**
+   * @brief Reserves one coordinate for a registry-owned lifecycle transition.
+   * @return Coordinate from the Run's sink, or nullopt when observation is
+   * disabled.
+   * @throws Nothing; sink exhaustion remains encoded in returned evidence.
+   * @note RunLifecycleRegistry calls this while its lifecycle fence excludes a
+   * competing transition, then commits the matching state before delivery.
+   */
+  std::optional<ComputeRunObservationCoordinate>
+  reserve_lifecycle_observation_coordinate() const noexcept;
+
+  /**
+   * @brief Delivers one already-reserved physical-quiescence observation.
+   * @param coordinate Optional coordinate reserved before the transition.
+   * @return Nothing.
+   * @throws Nothing; sink callbacks contain every failure.
+   * @note A missing coordinate means the Run has no observation sink. This
+   * method changes no Run or registry lifecycle state.
+   */
+  void observe_run_quiescent(
+      std::optional<ComputeRunObservationCoordinate> coordinate) const noexcept;
+
+  /**
+   * @brief Delivers one already-reserved resource-settlement observation.
+   * @param coordinate Optional coordinate reserved before the transition.
+   * @return Nothing.
+   * @throws Nothing; sink callbacks contain every failure.
+   * @note The registry invokes this only after exact root settlement and never
+   * uses the callback result for lifecycle decisions.
+   */
+  void observe_run_resource_settled(
+      std::optional<ComputeRunObservationCoordinate> coordinate) const noexcept;
 
   /**
    * @brief Reports whether this value retains one Run control block.
@@ -1209,6 +1668,38 @@ class ComputeRunLease {
       std::function<void(ComputeRunCancellationReason)> callback) const;
 
   /**
+   * @brief Binds one progressive final gate to cancellation arbitration.
+   * @param gate Non-null request gate shared by the progressive RT/HP children.
+   * @return Nothing.
+   * @throws std::invalid_argument when `gate` is null.
+   * @throws std::logic_error when this Run is already bound to another gate.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @note Accepted cancellation denies the bound gate while holding the Run
+   * terminal mutex and before publishing `Cancelled`; cleanup callbacks remain
+   * outside that mutex and are not part of final-trigger linearization. Binding
+   * an already-cancelled Run denies the gate before return. The gate retains no
+   * Run, scheduler, currentness, resource, or commit authority.
+   */
+  void bind_progressive_final_gate(
+      const std::shared_ptr<ProgressiveFinalGate>& gate) const;
+
+  /**
+   * @brief Atomically consumes and observes progressive final permission.
+   * @return True only when this open Run consumed its bound Armed gate and
+   * published the unique final-trigger observation.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @throws Any exception from a contract-violating injected clock or from a
+   * cancellation cleanup callback when deadline cancellation wins.
+   * @note Deadline cancellation is observed first. The subsequent Open check,
+   * gate consumption, coordinate reservation, and observation callback all
+   * occur while the same Run terminal-arbiter mutex is held. Cancellation that
+   * wins first publishes no trigger; a trigger winner is observed before any
+   * later cancellation or terminal observation. A missing or non-Armed gate
+   * returns false without creating HP submission authority.
+   */
+  bool try_publish_progressive_final_trigger() const;
+
+  /**
    * @brief Attempts to reserve the terminal arbiter for visible commit.
    * @return Active one-shot contender when phase/deadline/arbiter permit
    * commit, otherwise nullopt without changing an existing terminal outcome.
@@ -1216,8 +1707,9 @@ class ComputeRunLease {
    * @throws Any exception from a contract-violating injected clock.
    * @throws Any exception from a registered cleanup callback when deadline
    * cancellation wins.
-   * @note Deadline is observed immediately before the atomic claim. Only the
-   * returned contender can resolve an accepted commit claim.
+   * @note Deadline is observed immediately before the atomic claim. A deadline
+   * winner denies any bound progressive gate before publishing cancellation.
+   * Only the returned contender can resolve an accepted commit claim.
    */
   std::optional<ComputeRunCommitContender> try_claim_commit() const;
 
@@ -1373,6 +1865,28 @@ class ComputeRunLease {
    * @throws Nothing; missing telemetry or counter underflow terminates.
    */
   static void observe_child_released(void* context) noexcept;
+
+  /**
+   * @brief Arbitrates one irreversible physical start against Run terminal.
+   * @param commit_callback Non-null allocation-free route commit operation.
+   * @param context Borrowed callback context valid until return.
+   * @param committed_coordinate Output coordinate present only when the sink
+   * exists and the route commit succeeds.
+   * @return True only when the Run remained open and the callback committed.
+   * @throws std::invalid_argument when callback or output storage is null.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @note ExecutionService already holds `pool -> RunState` locks after
+   * releasing the resource-reservation mutex. This method then takes the Run
+   * terminal-arbiter mutex, reserves the observation coordinate, and invokes
+   * the irreversible callback. Cancellation accepted first prevents the
+   * callback; a callback that returns false explicitly retires the reserved
+   * coordinate through the observation sink. No service-start observation
+   * callback runs under this lock.
+   */
+  bool try_commit_service_start(
+      ComputeRunServiceStartCommitCallback commit_callback, void* context,
+      std::optional<ComputeRunObservationCoordinate>* committed_coordinate)
+      const;
 
   /** @brief Shared Run control retained independently from observers. */
   std::shared_ptr<ComputeRunControl> control_;

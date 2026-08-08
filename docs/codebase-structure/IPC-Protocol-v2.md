@@ -21,6 +21,14 @@ It is not a background system service, multi-user or multi-tenant service,
 remote endpoint, or TCP server. Those profiles require a separate transport,
 identity, authentication/authorization, isolation, and lifecycle design.
 
+[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
+now fixes that future design as a separate network control plane, worker
+manager, one constrained worker per Job attempt, artifact data plane, and
+isolated untrusted CPU-plugin runtime. It does not extend this protocol or turn
+its same-UID path protection, session names, opaque ids, process-global plugin
+methods, or private `OutputStore` into server authentication, tenant authority,
+durable Job identity, or durable artifact authority.
+
 The public client headers are `photospider/ipc/protocol.hpp`,
 `photospider/ipc/client.hpp`, and `photospider/ipc/host.hpp`. They expose typed
 owned values plus the complete Host factory and no JSON type, socket descriptor,

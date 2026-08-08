@@ -523,6 +523,13 @@ struct DirtyUpdateRequest {
   bool suppress_graph_downsample = false;
 
   /**
+   * @brief Selects frozen exact factor-four RT source normalization.
+   * @note Only source nodes in the progressive RT child consume this flag.
+   * Downstream operations and the HP final retain their established paths.
+   */
+  bool exact_factor_four_preview = false;
+
+  /**
    * @brief Optional sibling commit gate for RealTimeUpdate HP work.
    *
    * @note When present, HP dirty execution may compute concurrently but must

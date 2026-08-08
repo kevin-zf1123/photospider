@@ -18,6 +18,13 @@ socket，其 process shell 恰好创建一个由 server/router 借用的 embedde
 system service、多用户或 multi-tenant service、远程 endpoint 或 TCP server。这些画像需要独立的
 transport、identity、authentication/authorization、isolation 与 lifecycle 设计。
 
+[ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
+现已把该未来设计裁定为相互独立的 network control plane、worker manager、每个 Job attempt
+独占的受限 worker、artifact data plane，以及隔离的非可信 CPU-plugin runtime。该决策不会扩展
+本协议，也不会把同 UID 路径保护、session name、opaque id、process-global plugin method 或私有
+`OutputStore` 解释成 server authentication、tenant authority、durable Job identity 或
+durable artifact authority。
+
 Public client header 是 `photospider/ipc/protocol.hpp`、`photospider/ipc/client.hpp` 与
 `photospider/ipc/host.hpp`。它们只暴露 typed owned value 和完整 Host factory，不暴露 JSON
 type、socket descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend ownership。

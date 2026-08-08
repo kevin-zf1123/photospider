@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <variant>
@@ -78,6 +80,62 @@ NodeOutput execute_active_resize() {
 }
 
 /**
+ * @brief Resolves and executes the frozen coordinate-pattern generator.
+ *
+ * @return Complete `2x2` RGBA FP32 output for seed zero.
+ * @throws GraphError when the active registry does not expose the required
+ *         monolithic callback or the provider rejects the request.
+ * @throws std::bad_alloc if callback snapshot or output allocation fails.
+ * @note The compact fixture retains every term in the frozen coordinate
+ *       formula while keeping exact-bit assertions inexpensive.
+ */
+NodeOutput execute_coordinate_pattern() {
+  auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_generator", "coordinate_pattern",
+      ComputeIntent::GlobalHighPrecision);
+  if (!resolved ||
+      !std::holds_alternative<MonolithicOpFunc>(resolved.value())) {
+    throw GraphError(GraphErrc::NoOperation,
+                     "image_generator:coordinate_pattern is not monolithic");
+  }
+
+  Node node;
+  node.id = 60;
+  node.type = "image_generator";
+  node.subtype = "coordinate_pattern";
+  node.runtime_parameters["width"] = 2;
+  node.runtime_parameters["height"] = 2;
+  node.runtime_parameters["channels"] = 4;
+  node.runtime_parameters["seed"] = 0;
+  return std::get<MonolithicOpFunc>(resolved.value())(node, {});
+}
+
+/**
+ * @brief Reads one FP32 image sample as its exact IEEE 754 bit pattern.
+ *
+ * @param image Provider output with CPU-backed FLOAT32 storage.
+ * @param x Zero-based horizontal coordinate.
+ * @param y Zero-based vertical coordinate.
+ * @param channel Zero-based interleaved channel coordinate.
+ * @return Raw 32-bit encoding of the selected sample.
+ * @throws Nothing.
+ * @note The caller owns bounds and image-format validation. `memcpy` avoids
+ *       aliasing undefined behavior and preserves signed-zero distinctions.
+ */
+std::uint32_t sample_bits(const ImageBuffer& image, int x, int y,
+                          int channel) noexcept {
+  const auto* base = static_cast<const std::byte*>(image.data.get());
+  const auto* sample =
+      base + static_cast<std::size_t>(y) * image.step +
+      (static_cast<std::size_t>(x) * static_cast<std::size_t>(image.channels) +
+       static_cast<std::size_t>(channel)) *
+          sizeof(float);
+  std::uint32_t bits = 0U;
+  std::memcpy(&bits, sample, sizeof(bits));
+  return bits;
+}
+
+/**
  * @brief Forces a deterministic OpenCV construction failure through constant.
  *
  * @return Nothing when the active provider unexpectedly accepts the invalid
@@ -119,6 +177,7 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
       PS_EXPECT_OPENCV_OPERATION_PROVIDER != 0;
   constexpr char kResizeKey[] = "image_process:resize";
   constexpr char kConstantKey[] = "image_generator:constant";
+  constexpr char kCoordinatePatternKey[] = "image_generator:coordinate_pattern";
 
   PluginManager& manager = PluginManager::process_instance();
   EXPECT_EQ(manager.unload_all_plugins(), 0);
@@ -128,12 +187,25 @@ TEST(OptionalOpenCvOperationProvider, ReplacementExecutesAndRestores) {
   EXPECT_TRUE(registry_contains("math:divide"));
   EXPECT_EQ(registry_contains(kResizeKey), kExpectOpenCvProvider);
   EXPECT_EQ(registry_contains(kConstantKey), kExpectOpenCvProvider);
+  EXPECT_EQ(registry_contains(kCoordinatePatternKey), kExpectOpenCvProvider);
 
   if (kExpectOpenCvProvider) {
     const NodeOutput original = execute_active_resize();
     EXPECT_EQ(original.image_buffer.width, 4);
     EXPECT_EQ(original.image_buffer.height, 3);
     EXPECT_EQ(original.image_buffer.channels, 1);
+
+    const NodeOutput pattern = execute_coordinate_pattern();
+    ASSERT_EQ(pattern.image_buffer.width, 2);
+    ASSERT_EQ(pattern.image_buffer.height, 2);
+    ASSERT_EQ(pattern.image_buffer.channels, 4);
+    ASSERT_EQ(pattern.image_buffer.type, DataType::FLOAT32);
+    ASSERT_NE(pattern.image_buffer.data, nullptr);
+    EXPECT_EQ(sample_bits(pattern.image_buffer, 0, 0, 0), 0x00000000U);
+    EXPECT_EQ(sample_bits(pattern.image_buffer, 0, 0, 1), 0x3e3cbcbdU);
+    EXPECT_EQ(sample_bits(pattern.image_buffer, 1, 0, 0), 0x3d888889U);
+    EXPECT_EQ(sample_bits(pattern.image_buffer, 0, 1, 0), 0x3df8f8f9U);
+    EXPECT_EQ(sample_bits(pattern.image_buffer, 1, 1, 1), 0x3ebebebfU);
 
     try {
       execute_invalid_opencv_constant();

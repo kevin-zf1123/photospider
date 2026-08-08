@@ -683,7 +683,8 @@ ComputeRunSubmission make_metal_run_submission(std::string label,
       ComputeRunQos{ComputeRunQosClass::Throughput, std::nullopt, 1U, 1U},
       SupersessionIdentity{SupersessionKey(static_cast<int>(identity),
                                            ComputeIntent::GlobalHighPrecision),
-                           SupersessionGeneration(1U)}};
+                           SupersessionGeneration(1U)},
+      nullptr};
 }
 
 /**
@@ -1199,6 +1200,87 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(diagnostics.total_allocations, 2U);
   EXPECT_EQ(diagnostics.live_allocations, 0U);
   EXPECT_EQ(diagnostics.pipeline_cache_entries, 0U);
+}
+
+/**
+ * @brief Proves the real upload path flattens only the native texture row while
+ * preserving rank-three HWC logical and physical Value metadata.
+ *
+ * @return Nothing; GoogleTest reports native transfer, identity, metadata, or
+ * resource failures.
+ * @throws Native executor, Value publication, and synchronization exceptions
+ * unchanged.
+ * @note Runtime absence of a usable Metal device reports a platform skip. No
+ * readback is requested; readiness and process residency are the only payload
+ * completion observations.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     HostToTexturePreservesRankThreeHwcValueMetadata) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(Device::GPU_METAL)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  constexpr std::size_t kWidth = 3U;
+  constexpr std::size_t kHeight = 2U;
+  constexpr std::size_t kChannels = 4U;
+  std::array<float, kWidth * kHeight * kChannels> samples{};
+  for (std::size_t index = 0U; index < samples.size(); ++index) {
+    samples[index] = static_cast<float>(index) * 0.03125F;
+  }
+  std::vector<std::byte> bytes(sizeof(samples));
+  std::memcpy(bytes.data(), samples.data(), sizeof(samples));
+  const DenseTensorDescriptor descriptor{
+      {kHeight, kWidth, kChannels},
+      ElementSemantics::FloatingPoint,
+      StorageEncoding{32U},
+  };
+  const std::optional<ImageFacet> image_facet = ImageFacet{1U, 0U, 2U};
+  const StridedLayout layout{
+      {static_cast<std::ptrdiff_t>(kWidth * kChannels * sizeof(float)),
+       static_cast<std::ptrdiff_t>(kChannels * sizeof(float)),
+       static_cast<std::ptrdiff_t>(sizeof(float))},
+      0U};
+  Value source = Value::from_cpu_dense_tensor(descriptor, image_facet, layout,
+                                              std::move(bytes));
+  Value destination;
+  const execution::DeviceCompletionSeed seed(
+      8502U, 8502, ComputeIntent::RealTimeUpdate, 1U, 8502U, 0U);
+  CallbackDeviceExecutorInvocation upload(
+      [&source, &destination] {
+        execution::MetalExecutionContext& context =
+            execution::require_current_metal_execution_context();
+        context.publish_float32_host_to_texture(
+            source, static_cast<std::uint32_t>(kWidth),
+            static_cast<std::uint32_t>(kHeight));
+        destination = context.take_published_value();
+      },
+      seed);
+
+  ASSERT_NO_THROW(registry.execute(Device::GPU_METAL, upload));
+  ASSERT_TRUE(destination.valid());
+  EXPECT_EQ(wait_for_terminal_value(destination).state(),
+            ReadyFenceState::Ready);
+  EXPECT_EQ(destination.revision_id(), source.revision_id());
+  EXPECT_EQ(destination.dense_tensor_descriptor(), descriptor);
+  EXPECT_EQ(destination.image_facet(), image_facet);
+  EXPECT_EQ(destination.strided_layout(), layout);
+  EXPECT_EQ(destination.storage_size(), source.storage_size());
+  EXPECT_EQ(destination.storage_size(), sizeof(samples));
+  EXPECT_NE(destination.allocation_identity(), source.allocation_identity());
+  EXPECT_EQ(destination.storage_binding().device,
+            DeviceId(DeviceBackend::Metal));
+  EXPECT_EQ(destination.storage_binding().memory_domain,
+            MemoryDomain::DeviceLocal);
+  EXPECT_FALSE(destination.storage_binding().host_visible);
+
+  const std::optional<Value> resident = registry.residency_manager()->find(
+      source.revision_id(), DeviceId(DeviceBackend::Metal),
+      MemoryDomain::DeviceLocal);
+  ASSERT_TRUE(resident.has_value());
+  EXPECT_EQ(resident->storage_binding(), destination.storage_binding());
+  EXPECT_EQ(wait_for_scratch_release(upload).reserved.device_scratch_bytes, 0U);
 }
 
 /**

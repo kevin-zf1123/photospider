@@ -98,15 +98,18 @@ lane 会串行化同一 Graph 的 compute 与 execution-route access。
 structural、document、cache、dirty 与 lifecycle mutation 会推进该值；compute snapshot 与成功的
 compute publication 会保留该值。当前 commit compatibility 规则要求 identity 与 revision 精确
 相等。Topology generation 仍是独立的 planning cache key。
-产品 compute 还要求 Run 捕获的 supersession key 与 generation 精确保持 current。
+产品 compute 还要求 Run 捕获的完整 supersession identity 精确保持 current。
 
-**`SupersessionKey` / `SupersessionGeneration`**
+**`SupersessionKey` / `SupersessionGeneration` / `SupersessionIdentity`**
 一个 live Graph 内部的私有 latest-wins identity。Key 由 target node 与 canonical request intent
 组成：缺失 intent 与显式 HP 属于同一 lineage，realtime 则保持独立。Checked nonzero graph-wide
-allocator 为每个 prepared candidate 分配严格递增且永不 wrap/reuse 的 generation。Allocation 只是
-准备；graph-state publication 才是 current-generation linearization point。每个 admitted key
-至多拥有一个 reserved compute-lane ticket、一个 active/draining candidate 与一个 latest pending
-mailbox value。
+allocator 为每个 prepared candidate 分配严格递增且永不 wrap/reuse 的 generation。完整 identity
+由该 key、generation 与可选的源码私有 `AcceptedBoundaryCoordinate` 组成。Allocation 只负责
+preparation；graph-state publication 会指派完整 current identity。两个 identity 都绑定 coordinate
+时，由 accepted coordinate 排列 replacement，并可授权数值更低的 generation；mixed 与 unbound
+identity 继续按 generation 排序。Exact currentness 要求 generation 与可选 coordinate 都相等，
+而不是选择数值最大的 generation。每个 admitted key 至多拥有一个 reserved compute-lane ticket、
+一个 active/draining candidate 与一个 latest pending mailbox value。
 
 **`GraphLifetimeAnchor` / Graph lifetime lease**
 仅在完整 `GraphRuntime` 可发布后注册的稳定逐 Graph lifetime root。Candidate 会从第一次
@@ -272,8 +275,13 @@ singleton；service construction 只为 frozen registry 中匹配的 executor �
 提供非破坏性的 1..4,096 条 atomic-cut page、显式 cursor gap 与饱和 drop total。六种可信 physical
 counter selector 覆盖 ready entry、已进入 operation callback、live root reservation、live child
 grant、policy invocation 与 current/displaced binding；registry-derived counter 只来自
-`RunLifecycleRegistry`。Record 只含复制的 scalar identity，不授予 lifecycle、queue、callback、
-plugin、Graph 或 Run authority。Host、CLI 与 IPC 都不暴露该 store。
+`RunLifecycleRegistry`。M1 lifecycle replay 把九个 registry-derived counter 视为 Graph、
+candidate、bundle、Run、group 与 generation identity 状态机的精确投影。六个 physical counter
+仍是独立 sample，只检查 capacity 与 ownership 可达性，而不把它们解释为 event-kind delta；
+physical retirement 会在 registry lifecycle fence 内发布其精确 registry cut。
+`ServiceStopped` 是最终 record，全部 15 个 field 都为零。Record 只含复制的 scalar identity，
+不授予 lifecycle、queue、callback、plugin、Graph 或 Run authority。Host、CLI 与 IPC 都不暴露
+该 store。
 
 **有界 ready store**
 由 `ExecutionService` 拥有的 policy-aware store，其聚合 entry 与 accounted-byte 计数不得超过
@@ -285,6 +293,19 @@ class；在已选 class 内，ready entry 会在八次成功 dispatch 后先于�
 且 aging 绝不会改变已选 class。Initial 与 dependency-released submission 会跨越同一边界，Run
 row 也会跨越临时为空的阶段继续存在。从 store 移除 entry 时，只会在取得 execution authority 或
 清除该 entry 后释放其 ready grant。
+
+**Scheduler-selectable candidate**
+对某个 worker 而言，通过 current Run lifecycle、cancellation、operation-gate、physical-route
+以及 cycle-local grant-block 可见性检查的 ready lane 头。它参与 class choice、policy frontier
+与三比一 Interactive burst state。剩余 execution child-grant capacity 刻意不作为 selector
+predicate：只有 reserved start 才会把耗尽分类出来，并只为该 worker 标记精确 entry，不 charge
+dispatch 或 fairness state。
+
+**Evidence-startable class fact**
+为一次 service start 按 class 采样的只读 Boolean，来自 scheduler 可见的 ready/lifecycle/
+operation/route predicate，并额外要求足够的 live child-grant capacity。它只随成功提交的 start
+发布，只控制 M1 applicability，不参与 candidate selection 或 burst accounting。它不会签发
+grant，也不能替代 `try_grant()`。
 
 **Resource reservation 与 grant**
 Reservation 是一个原子准入 root vector 的 move-only RAII owner；grant 是在该 vector 内签发的

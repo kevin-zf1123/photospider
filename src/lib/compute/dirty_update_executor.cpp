@@ -1550,7 +1550,8 @@ struct PreparedRealTimeDirtyRunState final {
         node_synchronization(std::move(synchronization)),
         execution_type(std::move(route_type)),
         rt_write_buffer(std::make_unique<RealtimeProxyWriteBuffer>(
-            active_proxy, !dirty_request.force_recache)) {}
+            active_proxy, !dirty_request.force_recache,
+            dirty_request.exact_factor_four_preview)) {}
 
   /** @brief Request-local Graph snapshot. */
   GraphModel* graph = nullptr;
@@ -1872,7 +1873,8 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
       *state->node_synchronization,
       request.stabilized_parameters.get(),
       state->run_lease.has_value() ? &*state->run_lease : nullptr,
-      direct_execution_service};
+      direct_execution_service,
+      false};
   state->node_executor = std::make_unique<HighPrecisionDirtyNodeExecutor>(
       node_context, hp_write_buffer);
 
@@ -2224,7 +2226,8 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
       *state->node_synchronization,
       request.stabilized_parameters.get(),
       state->run_lease.has_value() ? &*state->run_lease : nullptr,
-      direct_execution_service};
+      direct_execution_service,
+      request.exact_factor_four_preview};
   state->node_executor = std::make_unique<RealTimeDirtyNodeExecutor>(
       node_context, proxy_graph, *state->rt_write_buffer);
   PreparedRealTimeDirtyRunState* state_ptr = state.get();

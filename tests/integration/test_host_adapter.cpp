@@ -157,6 +157,18 @@ void set_embedded_host_operation_test_hook(
     const EmbeddedOperationTestHook* hook) noexcept;
 #endif
 
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+/**
+ * @brief Enables or clears deterministic prepared async-admission failure.
+ * @param enabled True to fail after complete Host setup and before Kernel
+ * entry.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void set_embedded_host_async_admission_failure_for_testing(
+    bool enabled) noexcept;
+#endif
+
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING) &&      \
     defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING) && \
     defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
@@ -383,6 +395,45 @@ std::atomic<int> g_offset_tiled_output_value{3};
 
 /** @brief Number of offset tiled Host test operation invocations. */
 std::atomic<int> g_offset_tiled_invocation_count{0};
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+/**
+ * @brief Owns one lexical prepared-admission failure injection.
+ *
+ * @throws Nothing.
+ * @note Tests are serialized and destruction always restores the process-local
+ * switch before Host teardown or another async request.
+ */
+class ScopedEmbeddedAsyncAdmissionFailure final {
+ public:
+  /** @brief Enables deterministic pre-Kernel failure. @throws Nothing. */
+  ScopedEmbeddedAsyncAdmissionFailure() noexcept {
+    set_embedded_host_async_admission_failure_for_testing(true);
+  }
+
+  /** @brief Clears deterministic pre-Kernel failure. @throws Nothing. */
+  ~ScopedEmbeddedAsyncAdmissionFailure() noexcept {
+    set_embedded_host_async_admission_failure_for_testing(false);
+  }
+
+  /**
+   * @brief Prevents duplicate switch ownership.
+   * @param other Guard that retains the installed switch.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedEmbeddedAsyncAdmissionFailure(
+      const ScopedEmbeddedAsyncAdmissionFailure& other) = delete;
+
+  /**
+   * @brief Prevents replacing switch ownership.
+   * @param other Guard that retains the installed switch.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedEmbeddedAsyncAdmissionFailure& operator=(
+      const ScopedEmbeddedAsyncAdmissionFailure& other) = delete;
+};
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
@@ -1406,6 +1457,50 @@ class OneShotSignal final {
   std::promise<void> promise_;
   /** @brief Whether signal() already attempted promise fulfilment. */
   bool signalled_ = false;
+};
+
+/**
+ * @brief Owns one configured blocking-source release for a lexical test scope.
+ *
+ * @throws std::system_error if configuration mutex acquisition fails.
+ * @note Destruction clears the borrowed shared state only after the test has
+ * closed or otherwise joined every potentially submitted operation.
+ */
+class ScopedHostBlockingSource final {
+ public:
+  /**
+   * @brief Installs one test-owned release future.
+   * @param release Future that outlives this guard or is copied into it.
+   * @throws std::system_error if configuration synchronization fails.
+   */
+  explicit ScopedHostBlockingSource(std::shared_future<void> release) {
+    configure_host_blocking_source(std::move(release));
+  }
+
+  /** @brief Clears configured blocking-source state. @throws Nothing. */
+  ~ScopedHostBlockingSource() noexcept {
+    try {
+      reset_host_blocking_source();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate cleanup ownership.
+   * @param other Guard that retains its configured source.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedHostBlockingSource(const ScopedHostBlockingSource& other) = delete;
+
+  /**
+   * @brief Prevents replacing cleanup ownership.
+   * @param other Guard that retains its configured source.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedHostBlockingSource& operator=(const ScopedHostBlockingSource& other) =
+      delete;
 };
 
 /**
@@ -2876,6 +2971,51 @@ TEST(EmbeddedHostAdapter, CompletedAsyncComputeStatusSurvivesCloseGraph) {
   EXPECT_EQ(checked_graph_error_code(ids_after_close.status),
             GraphErrc::NotFound);
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING)
+/**
+ * @brief Proves prepared public async failure precedes all backend publication.
+ *
+ * @return Nothing; GoogleTest assertions report status, tracking, or execution
+ * mismatches.
+ * @throws std::bad_alloc or synchronization/filesystem exceptions from fixture
+ * setup.
+ * @note A ready release prevents cleanup deadlock if a regression submits the
+ * blocking operation. Graph close drains every accepted backend task before the
+ * final callback-entry assertion, so the negative observation is deterministic
+ * rather than timing-based.
+ */
+TEST(EmbeddedHostAdapter,
+     PreparedAsyncAdmissionFailureDoesNotEnterKernelForPublicRequest) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_prepared_async_failure_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "prepared_async_failure_graph", "blocking_source");
+
+  OneShotSignal release_compute;
+  const std::shared_future<void> ready_release = release_compute.future();
+  release_compute.signal();
+  ScopedHostBlockingSource blocking_source(ready_release);
+
+  Result<std::future<OperationStatus>> rejected;
+  {
+    ScopedEmbeddedAsyncAdmissionFailure injected_failure;
+    rejected = host->compute_async(make_compute_request(session));
+  }
+  EXPECT_FALSE(rejected.status.ok);
+  EXPECT_EQ(checked_graph_error_code(rejected.status), GraphErrc::ComputeError);
+  EXPECT_NE(rejected.status.message.find(
+                "injected embedded Host async admission preparation failure"),
+            std::string::npos);
+  EXPECT_FALSE(rejected.value.valid());
+
+  const VoidResult closed = host->close_graph(session);
+  EXPECT_TRUE(closed.status.ok) << closed.status.message;
+  EXPECT_FALSE(wait_for_host_blocking_source(std::chrono::milliseconds(0)));
+}
+#endif
 
 /**
  * @brief Verifies the close marker rejects work after one installed Run.

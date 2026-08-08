@@ -806,7 +806,8 @@ TensorRouteMutationPreparationResult prepare_after_tensor_route_mutation(
         compute::SupersessionIdentity{
             compute::SupersessionKey(target_node_id,
                                      ComputeIntent::GlobalHighPrecision),
-            compute::SupersessionGeneration(1U)}});
+            compute::SupersessionGeneration(1U)},
+        nullptr});
     const compute::ComputeRunLease run_lease = run.acquire_lease();
     GraphEventService events;
     compute::DirtyNodeSynchronization synchronization(graph.node_ids());

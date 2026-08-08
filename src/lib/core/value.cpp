@@ -11,6 +11,7 @@
 #include <variant>
 #include <vector>
 
+#include "core/dense_tensor_content_digest.hpp"
 #include "core/pending_value.hpp"
 #include "core/value_validation.hpp"
 #include "photospider/data/image_view.hpp"
@@ -1936,11 +1937,16 @@ ValueRevisionId Value::revision_id() const {
 
 /** @copydoc ps::compute_content_digest */
 ContentDigestResult compute_content_digest(const Value& value) {
-  if (!value.impl_ ||
-      value.impl_->representation != ValueRepresentationKind::ProviderDefined ||
-      !value.impl_->provider_descriptor.has_value()) {
+  if (!value.impl_) {
     return {ContentDigestState::InvalidDescriptor, std::nullopt,
-            "ContentDigest requires a valid provider-defined Value."};
+            "ContentDigest requires a valid Value."};
+  }
+  if (value.impl_->representation == ValueRepresentationKind::DenseTensor) {
+    return internal::compute_dense_tensor_content_digest(value);
+  }
+  if (!value.impl_->provider_descriptor.has_value()) {
+    return {ContentDigestState::InvalidDescriptor, std::nullopt,
+            "Provider ContentDigest requires a valid descriptor."};
   }
   if (!value.impl_->provider_lease.valid()) {
     return {ContentDigestState::MissingProvider, std::nullopt,

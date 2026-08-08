@@ -1,0 +1,466 @@
+# ADR 0011: Server Control Plane, Workers, and Plugin Runtimes Are Separate Security Domains
+
+## Status
+
+Accepted as the target contract for Issue #97. This decision freezes the
+tenant, Job, authentication, quota, artifact, worker, and plugin boundaries
+consumed by Issues #98 through #106. It does not claim that Issue #97 has passed
+its remaining review/integration gates or that any server, worker, durable
+artifact, sandbox, or isolated-plugin runtime is current software behavior.
+Live delivery status remains in the linked Issue and Project.
+
+The current `photospiderd`, process execution domain, and plugin loaders remain
+unchanged. Issue #97 is architecture and documentation only.
+
+## Context
+
+The repository has a strong local/process baseline, but it is not a network
+service security model:
+
+- `photospiderd` is a foreground same-user Unix-domain sidecar. Its protected
+  directory, socket, lock, and output files form a same-UID local access
+  boundary. Protocol v2 has no tenant identity, end-user authentication, or
+  remote transport trust model.
+- The daemon's session, compute-request, cursor, output, delivery, and
+  server-instance ids are process/local-transport identities. Its private
+  `OutputStore` is a protected lease/TTL delivery store, not a durable artifact
+  authority.
+- `ExecutionService`, `RunLifecycleRegistry`, and `ResourceLedger` own one
+  injected Host process's physical execution, Run lifecycle, and admitted
+  Host/device resources. A `ComputeRun` and its Graph/Run/task identities are
+  process-local; they do not own durable Job state or tenant quota.
+- Operation, data-definition, and policy DSOs execute native code in the Host
+  address space. ABI checks, shadow transactions, callback fences, and DSO
+  leases protect compatibility, publication, exception, and lifetime
+  invariants. They do not prevent memory corruption, syscalls, unreported
+  threads, unbounded allocation, crashes, or callbacks that never return.
+- `ValueRevisionId`, `AllocationIdentity`, `StorageBinding`, and
+  `BufferHandle` are runtime observations/capabilities. They are not durable
+  artifact or cross-process identities.
+
+Project #5 introduces remote clients, multiple tenants, constrained Job
+workers, durable artifacts, and tenant-supplied operation code. The threat model
+therefore includes malicious or compromised tenant principals, malformed
+JobSpecs/artifacts/protocol messages, replayed or stale worker reports, worker
+crash/hang/OOM, malicious plugin code and output, and confused-deputy attempts
+across tenant, Job, artifact, quota, and process boundaries.
+
+The trusted computing base contains the operating system, configured network
+identity/credential roots, the network control plane, worker manager, artifact
+authority, authenticated local channels, and the trusted worker executable and
+operator-approved built-ins. A constrained general worker is a lower-trust
+execution domain. A tenant operation-plugin process is untrusted.
+
+This decision extends the process ownership of ADR 0003 and ADR 0007 rather
+than replacing it. It also preserves ADR 0008's runtime/persistent identity
+separation and ADR 0009's independent output-commit authority.
+
+## Decision
+
+### Process and security domains
+
+The target server profile has five distinct domains:
+
+| Domain | Authority | Explicit non-authority |
+| --- | --- | --- |
+| Network control-plane process | Network authentication, principal-to-tenant mapping, authorization, immutable `JobSpec`, `JobId` and Job state, cancellation intent, retry policy, tenant/Job quota reservations, artifact references | Graph/Run execution, native plugin loading, worker OS lifecycle, bulk artifact bytes |
+| Worker-manager process | Worker spawn/reap, `WorkerInstanceId`, assignment lease, authenticated local channel, OS resource envelope, heartbeat and cancellation/termination escalation | End-user authentication, JobSpec mutation, final Job/retry decisions, Graph/Run commit, artifact bytes/commit |
+| One constrained `photospider-worker` per active `JobAttemptId` | One immutable attempt, Embedded Host/Kernel, Graph/Run lifecycle, one attempt-local `ExecutionService`/`ResourceLedger`, validated attempt report | Network listener, user credentials, another Job/tenant assignment, server quota mint, artifact root, final Job/retry state |
+| Artifact-store/data-plane service | Immutable payloads/manifests, `ArtifactId`, content/descriptor bindings, idempotent commit, typed durability receipt, retention/recovery, artifact/output quota | Job/Run state, Graph execution, plugin execution, tenant policy beyond supplied authorization context |
+| Isolated CPU operation-plugin runtime | One bounded invocation's tenant code and invocation-local private state | Network, arbitrary filesystem roots, user credentials, tenant/Job/Graph/Run state, server/Host tokens, artifact publication, native GPU authority |
+
+The network control plane and worker manager are separate OS processes. The
+artifact data plane is a separate service/process boundary. Each
+`photospider-worker` is fresh for one JobAttempt, accepts no second assignment,
+and exits after normal settlement or manager termination. A plugin runtime may
+serve multiple invocations only for one JobAttempt and approved plugin
+generation; attempt end, lease revocation, protocol fault, or supervisor
+retirement destroys it.
+
+```mermaid
+flowchart LR
+  CLIENT["Authenticated client"] --> CP["Network control plane"]
+  CP -->|"Job metadata + quota reservation"| WM["WorkerManager"]
+  CP -->|"ArtifactId / receipt metadata"| AS["Artifact store / data plane"]
+  WM -->|"One attempt lease"| W["photospider-worker"]
+  AS -->|"Scoped read/stage capabilities"| W
+  W --> EXEC["Attempt-local Host / ExecutionService"]
+  EXEC --> PIE["PluginInvocationExecutor"]
+  PIE --> PRS["PluginRuntimeSupervisor"]
+  PRS -->|"Validated descriptors + invocation handles"| P["Untrusted CPU plugin process"]
+  P -->|"Untrusted result descriptors"| PRS
+  W -->|"Typed attempt facts + receipts"| WM
+  WM -->|"Authenticated current-attempt report"| CP
+```
+
+The control plane and WorkerManager load no plugin DSO and execute no Graph
+operation. A general worker exposes no network listener and cannot own or spawn
+another general worker. An isolated plugin process receives no Job, Graph, Run,
+artifact, credential, quota, or Host resource authority.
+
+### Local sidecar is not the server protocol
+
+`photospiderd` and protocol v2 remain the same-user local workstation sidecar.
+Modes `0700`/`0600` and same-UID path identity are its local access boundary;
+they are not remote authentication, tenant isolation, or peer attestation.
+
+The future network service uses a new versioned protocol and composition root.
+It does not expose or tunnel the local router unchanged, reinterpret a session
+name as a tenant, promote process-global plugin mutation methods, or translate
+local opaque ids into server authority. Putting TLS in front of
+`photospiderd` is not a conforming server profile.
+
+### Authentication and tenant authority
+
+The control plane authenticates each request through a configured identity
+root and maps the immutable `PrincipalId` to one authoritative `TenantId` and
+permission set. It authorizes the exact `{principal, tenant, action, resource}`
+tuple before protected lookup or disclosure. Caller-provided tenant labels,
+object ids, local daemon ids, trace ids, and identifier secrecy do not grant
+authority.
+
+End-user bearer credentials and identity-provider secrets stop at the control
+plane. Cross-process operations use authenticated, audience-bound, expiry- or
+revocation-aware capabilities scoped to the exact tenant, Job, attempt, action,
+resource, and budget. Delegation may narrow but never widen authority. Receivers
+validate channel/process identity as well as message fields. The credential
+encoding, TLS implementation, and identity-provider product remain downstream
+choices; these authority properties do not.
+
+### Identity domains
+
+The target identity chain is:
+
+```text
+PrincipalId -> TenantId -> JobId + JobSpecDigest
+                         -> JobAttemptId + WorkerInstanceId
+                                         + WorkerLeaseGeneration
+                         -> process-local GraphInstanceId / RunId
+                                                   / RunLocalTaskId
+                         -> PluginInvocationId
+                         -> ArtifactId + OutputCommitReceipt
+```
+
+- `TenantId` scopes every Job, quota, artifact, plugin policy, audit, and
+  idempotency key.
+- `JobId` identifies one immutable accepted `JobSpec`. Retry preserves JobId
+  and `JobSpecDigest` and mints a new, non-reused `JobAttemptId`.
+- `WorkerInstanceId` identifies one OS process. `WorkerLeaseGeneration` binds
+  its exact assignment and revocation epoch.
+- Graph/Run/task identities remain internal to one worker attempt. They may be
+  copied for trace correlation but grant no server authority.
+- `PluginInvocationId` identifies one exact attempt, approved plugin
+  generation, and invocation. It grants no Graph or artifact authority.
+- `ArtifactId` identifies an immutable persisted manifest/version. It is not a
+  path, process pointer, Run id, content digest, `OutputArtifactId`,
+  `ValueRevisionId`, `AllocationIdentity`, or `BufferHandle`.
+
+Every message carries and validates the identities needed to join it to
+retained current state. Equality in one domain never substitutes for another.
+An old attempt/lease report is stale even when JobId and content match.
+
+### Immutable JobSpec and Job truth
+
+The control plane validates and freezes canonical `JobSpec` bytes before
+acceptance and records `JobSpecDigest`. The spec references graph/configuration,
+input, plugin, and checkpoint material by authorized immutable identity and
+declares output slots, execution profile, requested resource policy,
+durability, and retention. It contains no unrestricted Host path, file
+descriptor, pointer, native/runtime handle, mutable store location, local
+session id, or bearer credential.
+
+The worker validates the complete spec and resolved artifact descriptors again
+before Graph construction or provider entry. It reports attempt facts: start,
+process-local Run outcomes, quiescence, resource settlement, artifact receipts,
+and typed failure. It does not own overall Job state.
+
+The control plane alone owns current attempt selection, cancellation intent,
+retry, and terminal Job outcome. Job success requires a successful current
+attempt and every artifact receipt promised by the JobSpec. Run success,
+artifact commit, Job terminal, cancellation, and response observation remain
+independent facts. Retry creates a new attempt; it never reopens an old worker
+lease or mutates an old Run.
+
+### Hierarchical quota without a second ResourceLedger
+
+One server quota authority owns tenant/Job limits for concurrency, CPU, Host
+memory, configured GPU/device capacity, output/staging bytes, artifact
+retention, and later licensed resources. Job admission reserves one complete
+envelope atomically or rejects it without partial authority.
+
+WorkerManager derives one attempt-scoped OS/process budget and assignment
+capability from that reservation. Inside `photospider-worker`, the existing
+process-owned `ResourceLedger` remains the sole mint for its current Host/device
+execution dimensions, configured no larger than the attempt envelope. It
+suballocates Runs and device work but cannot mint tenant concurrency, server
+GPU ownership, output, or artifact capacity. The artifact authority enforces
+its delegated output/staging/retention quota at stage and commit.
+
+Usage and release reconcile upward exactly once against trusted assignment and
+process-lifecycle state. Worker reports, JobSpec values, policies, plugins, and
+plugin runtimes may declare demand but cannot construct, duplicate, enlarge, or
+directly release server quota or Host ledger tokens.
+
+This is a hierarchy of different scopes, not two competing resource mints:
+server quota authorizes an attempt envelope; WorkerManager/OS enforce it; the
+attempt-local ledger subdivides only its current execution dimensions.
+
+### Worker lifecycle and bounded termination
+
+WorkerManager exclusively owns spawn, process identity, assignment, heartbeat,
+cancellation delivery, revocation, termination escalation, exit
+classification, and reaping. It targets the current
+`{WorkerInstanceId, WorkerLeaseGeneration}`, never an unqualified PID. The
+control plane does not kill or reuse worker processes directly.
+
+Cancellation proceeds through four owners:
+
+1. the control plane records monotonic cancellation intent for the current
+   JobAttempt;
+2. WorkerManager routes cooperative cancellation to the exact worker lease;
+3. the worker maps it to existing Run/Graph shutdown and reports quiescence;
+4. after a configured bound, WorkerManager revokes capabilities and
+   terminates/reaps that exact process.
+
+Normal completion requires Run/Graph settlement, attempt-local resource
+release, required artifact receipts, authenticated report acceptance,
+capability closure, and process exit. Crash, hang, OOM, signal death, malformed
+protocol, or channel loss fails only the current JobAttempt. WorkerManager
+revokes and reconciles its assignment without trusting a final worker report;
+the control plane alone applies retry policy.
+
+### Artifact store and data plane
+
+The artifact authority owns immutable payloads, canonical manifests,
+descriptor/content bindings, stable tenant-scoped `ArtifactId`, commit
+idempotency, typed achieved-durability receipts, retention, recovery, and
+artifact/output quota. Durable output follows ADR 0009's manifest-last,
+no-replace, identity-revalidated, capability-aware transaction.
+
+The control plane retains authorized artifact references and verified receipt
+facts, not bulk bytes. Target control messages carry bounded authentication,
+tenant, Job, quota, ArtifactId, receipt, and capability metadata. Bulk input,
+output, and checkpoint bytes move through the data plane.
+
+A worker receives immutable-read capabilities for exact inputs and private
+stage/commit capabilities for exact output slots. It receives no artifact root,
+unrestricted namespace listing, another tenant's ids, or mutable published
+path. A plugin runtime receives invocation buffers only, never an artifact
+capability. Every data-plane capability checks audience, tenant, resource,
+action/direction, byte/range limits, content/descriptor binding, and
+expiry/revocation.
+
+Loading an artifact creates new process-local Value, binding, allocation, and
+fence state. Current `OutputArtifactId`, delivery lease, cache path, content
+digest, and runtime identities never substitute for `ArtifactId` or a receipt.
+
+### Plugin trust and isolation
+
+Operation v2, data-definition-provider v3, and policy v1 DSOs are trusted
+native code whenever loaded in a Host process. Pure-C records and minimized
+legitimate authority do not sandbox native code. The server control plane and
+WorkerManager load none. A worker may load only operator-trusted generations
+accepted by configured allowlist/signature policy. Tenant-supplied CPU
+operation code always uses the isolated path. Policy and data-definition DSOs
+remain trusted/allowlisted until separately ratified isolation protocols exist.
+
+`ExecutionService` reaches isolated CPU operation code only through a private
+`PluginInvocationExecutor`. A trusted `PluginRuntimeSupervisor` in the general
+worker owns plugin-process creation, authenticated protocol, heartbeat,
+invocation deadline, termination/restart backoff, sandbox/capability policy,
+resource limits, and shared-memory/file-descriptor transport.
+
+Each invocation contains exact tenant/Job/attempt/worker-lease binding,
+`PluginInvocationId`, approved plugin package/generation, operation identity,
+immutable scalar parameters, bounded versioned descriptors, access direction,
+and checked byte ranges. It carries no C++ object graph, Host callback, raw
+pointer, allocator owner, Graph/Run owner, native GPU handle, artifact
+capability, credential, or resource token.
+
+Trusted Host code validates every input before transfer and every output before
+Run use. Validation includes version/kind, count, rank/extent, layout/stride,
+checked range arithmetic, overlap/write permission, byte size,
+descriptor/content binding, readiness, ownership, plugin/generation/invocation
+identity, current worker lease, and declared resource bounds. Returned
+descriptors, handles, offsets, digests, statuses, and diagnostics are untrusted
+data and never mint authority.
+
+Issue #101 owns the pure-C operation ABI decision. Issue #102 owns the first
+CPU shared-memory/FD invocation record. Issue #103 owns heartbeat, deadlines,
+and fault isolation. Issue #104 owns allowlist/signature and enforceable plugin
+resource policy. This ADR fixes their authority and process boundaries without
+preselecting their wire layouts. Cross-process GPU handles/fences remain a
+later decision.
+
+### Failure, revocation, and replay
+
+Capabilities are non-forgeable, audience/action/resource scoped,
+tenant/Job/attempt bound where applicable, bounded by an expiry or monotonic
+revocation generation, and never widened by delegation. Cancellation,
+assignment replacement, worker exit, plugin retirement, and artifact commit
+are monotonic transitions.
+
+Duplicate, reordered, replayed, stale, over-limit, unknown-generation, or
+identity-mismatched messages fail closed. After revocation, a late message may
+perform idempotent private cleanup but cannot restore admission, publish Job or
+Run/plugin output, attach an artifact, mint/release quota, or disclose another
+tenant's state.
+
+- Plugin crash, hang, deadline, OOM, sandbox denial, protocol fault, or bad
+  output fails the exact invocation and then its owning Run/attempt according to
+  operation semantics. The supervisor revokes and terminates only that
+  attempt-scoped plugin process.
+- Worker crash, hang, OOM, protocol fault, or channel loss fails the exact
+  JobAttempt. Other workers, tenants, the control plane, and committed
+  artifacts continue.
+- A committed artifact receipt remains authoritative after worker/plugin/Job
+  cancellation. Private uncommitted stages remain artifact-authority cleanup.
+- Restart reconstructs only durable control and artifact facts. Process-local
+  session, output, Graph, Run, task, Value, or buffer ids are not recovery
+  authority.
+
+### Audit correlation is observation only
+
+Accepted boundaries emit bounded facts that correlate `PrincipalId`,
+`TenantId`, `JobId`, `JobSpecDigest`, `JobAttemptId`, `WorkerInstanceId`,
+`WorkerLeaseGeneration`, process-local Graph/Run/task identities when present,
+plugin package/generation, `PluginInvocationId`, `ArtifactId`/receipt,
+decisions, and typed failures. Records omit bearer credentials, private keys,
+raw capability secrets, and unrestricted payload data.
+
+Audit ids, trace ids, log text, and caller correlation fields grant no
+authority and never substitute for identity/lease validation, current-attempt
+selection, or quota. Issue #106 owns long-lived fuzz, audit, and cross-layer
+trace implementation.
+
+### Delivery boundaries
+
+The downstream delivery ownership is fixed:
+
+| Issue | Delivery boundary |
+| --- | --- |
+| #98 | Immutable JobSpec, single-tenant control-plane-to-worker submit/query/cancel/completion, and artifact-identity closure |
+| #99 | Tenant quota, durable artifact, retry/checkpoint, and recovery semantics |
+| #100 | WorkerManager/`photospider-worker` supervision, worker-crash containment, bounded cancellation/shutdown |
+| #101 | Separate pure-C operation-plugin ABI decision |
+| #102 | Isolated CPU invocation over shared memory/FD with exact descriptor/stride/size/ownership validation |
+| #103 | `PluginRuntimeSupervisor` heartbeat, deadline, crash/hang/OOM/bad-output containment |
+| #104 | Plugin allowlist/signature and enforceable resource quota/token policy |
+| #105 | Network control metadata and bulk artifact data-plane separation |
+| #106 | Long-lived codec/descriptor fuzzing, security audit, and Session/Revision/Run/Task cross-layer trace |
+
+An earlier slice advertises only the narrower profile it actually implements.
+A single-tenant Job vertical is not a multi-tenant server. A pure-C ABI without
+process isolation is not safe for hostile native code. No network
+multi-tenant claim is valid before authentication/authorization, tenant Job
+state, quota, one-attempt workers, durable artifacts, replay-safe capabilities,
+bounded cancellation/shutdown, and long-lived isolation tests are current. No
+untrusted-plugin claim is valid before isolated invocation, exact
+descriptor/ownership validation, supervisor fault handling, plugin trust and
+resource policy, and crash/hang/OOM/bad-output/fuzz tests are current.
+
+## Consequences
+
+- Network parsing, worker lifecycle, Job execution, durable bytes, and tenant
+  native code no longer share one failure or authority domain.
+- Fresh one-attempt workers simplify tenant isolation and stale-state proof at
+  the cost of process startup and memory overhead. Worker reuse requires a new
+  ADR and process-global/native-state scrubbing proof.
+- Authentication, Job truth, quota, artifact commit, Run commit, and plugin
+  invocation gain explicit independent owners. Callers must preserve more typed
+  states, but failure and recovery no longer rely on ambiguous "complete".
+- Server quota and attempt-local `ResourceLedger` remain hierarchical rather
+  than competing. A plugin cannot mint either authority.
+- CPU plugin isolation adds protocol, validation, copy/mapping, supervision,
+  and platform-sandbox cost. Pure C improves record compatibility but does not
+  itself provide security.
+- OS sandbox capability differs by platform. A product must publish a closed
+  supported capability profile and fail unsupported isolation explicitly; it
+  cannot silently run tenant code in-process.
+- Trusted policy and data-definition DSOs remain able to compromise a worker.
+  Only operator-approved generations are permitted until separate isolation
+  decisions exist.
+
+## Rejected Alternatives
+
+### Put a network listener or TLS proxy around `photospiderd`
+
+Rejected because local filesystem ownership and protocol-v2 opaque ids do not
+provide tenant identity, Job truth, quota delegation, worker isolation,
+durable artifacts, or plugin containment.
+
+### Run control plane, manager, worker, artifact store, and plugins in one process
+
+Rejected because a network parser, malformed artifact, worker fault, or native
+plugin would gain every tenant, Job, resource, and persistence authority.
+
+### Reuse a general worker across tenants or Job attempts
+
+Rejected for the first generation because process-global registries, native
+runtimes, DSO state, threads, mappings, and allocator state do not have a
+ratified complete scrub boundary.
+
+### Treat ComputeRun or a daemon compute request as Job identity
+
+Rejected because Run/request identities are process-local and ADR 0009 keeps
+Run success, durable output, daemon result, and response observation separate.
+
+### Serialize ValueRevisionId, BufferHandle, or OutputArtifactId as ArtifactId
+
+Rejected because those values identify runtime publication, allocation/range,
+or process-scoped delivery, not a durable manifest/version and receipt.
+
+### Give one global ResourceLedger server and worker authority
+
+Rejected because the worker-local ledger cannot observe other processes or
+durable artifact retention, while an independent unrestricted worker mint
+would double-account capacity. The accepted hierarchy assigns each scope one
+owner.
+
+### Treat a pure-C plugin ABI as hostile-code containment
+
+Rejected because fixed records do not constrain arbitrary native memory,
+threads, syscalls, allocation, crashes, or hangs. Untrusted code requires a
+process, sandbox, scoped transport capabilities, and supervisor.
+
+### Rely only on cooperative cancellation
+
+Rejected because native code may never return. The worker and plugin process
+boundaries provide capability revocation and bounded termination while
+preserving attempt/Run cleanup semantics.
+
+### Send bulk values through the network control plane
+
+Rejected because it combines authentication/Job-state availability with
+unbounded payload parsing, storage bandwidth, and artifact authority. The data
+plane owns payload transfer and the control plane owns identities/metadata.
+
+## Relationship to Current Facts and Other Decisions
+
+- [ADR 0003](0003-process-owned-execution-resources.md) remains authoritative
+  for process-owned execution resources. In the server profile, each
+  `photospider-worker` is one explicit composition root; server quota bounds
+  rather than replaces its execution domain.
+- [ADR 0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
+  requires this accepted target, current local facts, and Issue delivery status
+  to remain distinct.
+- [ADR 0007](0007-compute-runs-and-process-execution-have-separate-owners.md)
+  remains authoritative for worker-local Run identity, lifecycle, ledger,
+  Graph close, and process execution shutdown. This ADR owns the higher-level
+  Job/attempt/worker authority.
+- [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+  remains authoritative for runtime/persistent identity separation and provider
+  generations.
+- [ADR 0009](0009-compute-io-durability-and-completion-semantics.md) remains
+  authoritative for Artifact/OutputStore commit, receipts, failure ordering,
+  and durability. This ADR places that authority in the separate artifact data
+  plane.
+- [ADR 0010](0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
+  remains an execution-profile evidence contract; its rows do not prove
+  sandboxing or tenant isolation.
+- Current facts remain authoritative in
+  [IPC Protocol v2](../codebase-structure/IPC-Protocol-v2.md),
+  [Plugin ABI](../kernel-architecture/Plugin-ABI.md), and
+  [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md).
+- The [server and plugin isolation roadmap](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation)
+  records this decision as a target and the Issue #98 through #106 sequence.

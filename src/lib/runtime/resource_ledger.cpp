@@ -5,6 +5,7 @@
 
 #include "runtime/resource_ledger.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <exception>
 #include <limits>
@@ -90,6 +91,41 @@ DeviceResourceVector subtract_device_resources(
   };
 }
 
+/**
+ * @brief Selects the component-wise maximum of two Host resource vectors.
+ * @param lhs First complete vector.
+ * @param rhs Second complete vector.
+ * @return Vector containing the larger value in every independent dimension.
+ * @throws Nothing.
+ * @note The helper performs no arithmetic and therefore cannot overflow.
+ */
+ResourceVector maximum_resources(const ResourceVector& lhs,
+                                 const ResourceVector& rhs) noexcept {
+  return ResourceVector{
+      std::max(lhs.cpu_slots, rhs.cpu_slots),
+      std::max(lhs.retained_memory_bytes, rhs.retained_memory_bytes),
+      std::max(lhs.scratch_bytes, rhs.scratch_bytes),
+      std::max(lhs.ready_entries, rhs.ready_entries),
+      std::max(lhs.ready_bytes, rhs.ready_bytes),
+  };
+}
+
+/**
+ * @brief Selects the component-wise maximum of two device resource vectors.
+ * @param lhs First complete device vector.
+ * @param rhs Second complete device vector.
+ * @return Vector containing both independent byte maxima.
+ * @throws Nothing.
+ * @note The helper performs no arithmetic and therefore cannot overflow.
+ */
+DeviceResourceVector maximum_device_resources(
+    const DeviceResourceVector& lhs, const DeviceResourceVector& rhs) noexcept {
+  return DeviceResourceVector{
+      std::max(lhs.device_memory_bytes, rhs.device_memory_bytes),
+      std::max(lhs.device_scratch_bytes, rhs.device_scratch_bytes),
+  };
+}
+
 }  // namespace
 
 /**
@@ -97,7 +133,7 @@ DeviceResourceVector subtract_device_resources(
  *
  * @throws std::system_error when mutex operations fail.
  * @note Limits never change after construction. Only the mutex-protected
- * `reserved` vector is mutable.
+ * `reserved` and monotonic `high_water` vectors are mutable.
  */
 struct ResourceLedgerRootState final {
   /**
@@ -112,6 +148,9 @@ struct ResourceLedgerRootState final {
 
     /** @brief Current planned or actual byte commitment. */
     DeviceResourceVector reserved;
+
+    /** @brief Component-wise lifetime maximum of `reserved`. */
+    DeviceResourceVector high_water;
   };
 
   /**
@@ -131,7 +170,7 @@ struct ResourceLedgerRootState final {
             "ResourceLedger device limits must not contain CPU.");
       }
       const auto [unused, inserted] = devices.emplace(
-          configured.device, DeviceAccount{configured.resources, {}});
+          configured.device, DeviceAccount{configured.resources, {}, {}});
       static_cast<void>(unused);
       if (!inserted) {
         throw std::invalid_argument(
@@ -148,6 +187,9 @@ struct ResourceLedgerRootState final {
 
   /** @brief Current vector committed by root reservations. */
   ResourceVector reserved;
+
+  /** @brief Component-wise lifetime maximum of `reserved`. */
+  ResourceVector high_water;
 
   /** @brief Deterministically ordered configured device accounts. */
   std::map<DeviceId, DeviceAccount> devices;
@@ -796,6 +838,7 @@ std::optional<ResourceLedger::Reservation> ResourceLedger::try_reserve(
     return std::nullopt;
   }
   state_->reserved = *next_reserved;
+  state_->high_water = maximum_resources(state_->high_water, state_->reserved);
   return Reservation(std::move(reservation_state));
 }
 
@@ -819,6 +862,7 @@ std::optional<ResourceLedger::ReservationPair> ResourceLedger::try_reserve_pair(
     return std::nullopt;
   }
   state_->reserved = *next_reserved;
+  state_->high_water = maximum_resources(state_->high_water, state_->reserved);
   return ReservationPair{Reservation(std::move(first_state)),
                          Reservation(std::move(second_state))};
 }
@@ -839,13 +883,15 @@ ResourceLedger::try_reserve_device(DeviceId device,
     return std::nullopt;
   }
   account->second.reserved = *next_reserved;
+  account->second.high_water = maximum_device_resources(
+      account->second.high_water, account->second.reserved);
   return DeviceReservation(state_, device, planned);
 }
 
 /** @copydoc ResourceLedger::snapshot */
 ResourceLedger::Snapshot ResourceLedger::snapshot() const {
   std::lock_guard<std::mutex> lock(state_->mutex);
-  return Snapshot{state_->limits, state_->reserved};
+  return Snapshot{state_->limits, state_->reserved, state_->high_water};
 }
 
 /** @copydoc ResourceLedger::device_snapshot */
@@ -860,6 +906,7 @@ std::optional<ResourceLedger::DeviceSnapshot> ResourceLedger::device_snapshot(
       device,
       account->second.limits,
       account->second.reserved,
+      account->second.high_water,
       subtract_device_resources(account->second.limits,
                                 account->second.reserved),
   };
@@ -876,6 +923,7 @@ std::vector<ResourceLedger::DeviceSnapshot> ResourceLedger::device_snapshots()
         device,
         account.limits,
         account.reserved,
+        account.high_water,
         subtract_device_resources(account.limits, account.reserved),
     });
   }

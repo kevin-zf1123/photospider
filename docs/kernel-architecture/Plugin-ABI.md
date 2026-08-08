@@ -846,6 +846,55 @@ block, corrupt memory, allocate outside accounting, or create unreported
 threads. It simply receives no legitimate execution capability through the
 ABI.
 
+Issue #93 changes none of these three ABI inventories or record layouts. Its
+`I1Host`, `ComputeRunObservationSink`, accepted-boundary collector, inner-row
+evaluator, and exact runner are source-private benchmark/Host mechanisms. They
+are absent from installed Host requests, operation registrar records,
+data-provider v3 records, policy-plugin v1 records, SDK targets, IPC, and CLI.
+The observer receives copied facts and an immutable final Value only; it is not
+a fourth extension boundary and exposes no callback to a DSO.
+
+Issue #94 likewise changes none of the installed ABI inventories, layouts,
+symbols, or package components. `ProgressiveComputeOptions`,
+`ProgressiveFinalGate`, I2 Host/profile/evidence types, and their observation
+callbacks remain under `src/lib`; no field enters the installed Host request,
+IPC or CLI grammar, operation registrar, data-provider v3 table, or policy-
+plugin v1 table. The exact preview primitive is an internal CPU helper. The
+rank-three HWC Metal upload is an internal generalization of the existing
+process-owned executor and publishes through unchanged `Value`, `AccessPlan`,
+residency, and ledger contracts; it exports neither native handles nor a new
+provider callback. The manual runner and deterministic tests are consumers of
+these private seams, not SDK or extension surfaces.
+
+The installed `compute_content_digest(Value)` now handles built-in DenseTensor
+values through a Host/runtime canonical-v1 implementation in addition to the
+existing provider-defined traversal. The built-in path uses reserved
+Schema/ImageFacet identities, descriptor metadata, and logical payload bytes;
+it does not invoke or add a data-provider callback. Provider-defined values
+continue to use the unchanged mandatory v3 `visit_content` callback. Therefore
+the data-provider API table remains 160 bytes, every frozen v2/v3/v1 record and
+symbol inventory remains unchanged, and no compatibility generation is
+introduced.
+
+Execution-profile evidence does not strengthen that trust boundary. A valid
+`execution-profile-slo-v1` row freezes and hashes the exact in-process
+operation/provider and policy generations, rejects unreported worker pools or
+resource authorities, and treats allocations outside current ledger/device
+authority as diagnostic rather than silently accounted memory. Its latency,
+throughput, fairness, determinism, waste, and memory verdicts say nothing about
+sandboxing or hostile-code containment. [ADR 0010](../adr/0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
+defines that evidence boundary; process supervision and isolated invocation
+remain the separate server/plugin-isolation target.
+
+[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
+fixes that target boundary. The server control plane and WorkerManager load no
+DSO. Every DSO loaded into a Host remains operator-trusted native code,
+including pure-C policy and data-definition records. Tenant-supplied CPU
+operation code instead crosses a separately versioned, attempt-scoped process
+protocol carrying only bounded descriptors and shared-memory/file-descriptor
+capabilities; trusted Host code revalidates every returned descriptor and
+ownership claim. Pure C is a record-compatibility choice, not a sandbox.
+
 Shadow publication prevents partial operation-registry or policy-type-map
 visibility. DSO leases keep callback state and plugin-owned values or contexts
 inside the lifetime of their defining library. Matching operation restoration
@@ -907,12 +956,18 @@ record the follow-up direction.
 - `include/photospider/plugin/op_contract.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/core/value.cpp`
+- `src/lib/core/dense_tensor_content_digest.*`
 - `src/lib/core/extension.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `src/lib/compute/progressive_compute.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
@@ -928,9 +983,12 @@ record the follow-up direction.
 - `tests/unit/test_device_residency.cpp`
 - `tests/fixtures/value_identity_dso.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
+- `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/test_variable_sample_field_extensions.cpp`
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `tests/integration/openexr_deep_provider_option_off_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/unit/test_progressive_compute.cpp`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

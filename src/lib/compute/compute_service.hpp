@@ -11,6 +11,7 @@
 #include "compute/compute_commit_policy.hpp"
 #include "compute/compute_run.hpp"
 #include "compute/compute_supersession.hpp"
+#include "compute/progressive_compute.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -126,6 +127,14 @@ class ComputeService {
     std::optional<PixelRect> dirty_roi;
 
     /**
+     * @brief Optional private ordered preview/final execution contract.
+     * @note Presence is legal only for a RealTimeUpdate request. The ordinary
+     * `qos` field describes the RT preview child and this value supplies the
+     * HP final child QoS. It is source-private and changes no installed ABI.
+     */
+    std::optional<compute::ProgressiveComputeOptions> progressive_options;
+
+    /**
      * @brief Stable graph/session identity captured in every created Run.
      *
      * @note Kernel supplies its session label. Direct private service callers
@@ -177,6 +186,14 @@ class ComputeService {
      * that grants no product supersession authority.
      */
     std::optional<compute::SupersessionIdentity> supersession;
+
+    /**
+     * @brief Optional source-private read-only Run observation sink.
+     * @note Kernel may supply this for maintained verification. ComputeService
+     * copies it into every materialized child Run; it owns no execution or
+     * commit authority and is absent from installed request contracts.
+     */
+    std::shared_ptr<compute::ComputeRunObservationSink> observation_sink;
   };
 
   /**
@@ -497,8 +514,10 @@ class ComputeService {
    * operation lookup, resource reservation, and preflight staging.
    * @note Candidate preparation freezes connected-preflight providers,
    * devices, callables, and service reservations without entering provider
-   * code. No physical callback, Run phase, lifecycle record, Graph output, or
-   * proxy output is published.
+   * code. Progressive preparation also binds one final gate to both child Run
+   * arbiters so cancellation denial precedes terminal publication and the HP
+   * callback consumes that same gate. No physical callback, Run phase,
+   * lifecycle record, Graph output, or proxy output is published.
    */
   std::unique_ptr<PreparedIntentUpdateState> prepare_intent_update(
       GraphModel& graph, const ExecutionStrategy& strategy,

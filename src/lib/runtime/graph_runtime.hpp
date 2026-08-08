@@ -404,14 +404,19 @@ class GraphRuntime : public ExecutionHostContext {
   /**
    * @brief Prepares one canonical compute candidate and reserves key capacity.
    * @param key Target/request-intent supersession lineage.
+   * @param accepted_coordinate Optional source-private pre-call ordering
+   * coordinate bound into the prepared product identity.
    * @return Move-only identity and provisional ticket adoption.
    * @throws The allocation, admission, and synchronization errors documented
    * by compute::ComputeRequestCoordinator::prepare.
    * @note This is private Kernel infrastructure, not public Host ABI.
    */
   compute::ComputeRequestCoordinator::PreparedCandidate prepare_compute_request(
-      const compute::SupersessionKey& key) {
-    return compute_request_coordinator_.prepare(key);
+      const compute::SupersessionKey& key,
+      std::optional<compute::AcceptedBoundaryCoordinate> accepted_coordinate =
+          std::nullopt) {
+    return compute_request_coordinator_.prepare(key,
+                                                std::move(accepted_coordinate));
   }
 
   /**
@@ -445,7 +450,7 @@ class GraphRuntime : public ExecutionHostContext {
 
   /**
    * @brief Tests exact request currency inside product commit arbitration.
-   * @param identity Run-captured canonical key/generation.
+   * @param identity Run-captured canonical key/generation/accepted binding.
    * @return True only for the latest graph-state-published generation.
    * @throws std::system_error for synchronization failure.
    */

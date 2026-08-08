@@ -273,8 +273,10 @@ host-visible 或 device-local；metadata observation 不授予 pointer，host ac
 启动隐式 transfer。CPU/Metal transfer 为同一逻辑 revision 生成独立 binding。精确且仍属于
 current generation 的 completion 会原子发布 Ready 与进程 residency；stale completion 会在
 dependant 能看到 Ready 前发布 typed failure。Lineage row 会在 coordinator submission 前被
-预跟踪，并且只由 accepted current publication 推进，因此在较新 publication 后才启动的旧
-Run 仍为 stale。Run settlement 本身不会使合格 replica 失效；publication pressure 下，
+预跟踪，但此时没有 managed current identity。Accepted current publication 会在 currentness
+可观察前指派精确 generation，包括 coordinate 授权的数值下降；之后启动的 stale Run
+不能替换该 exact identity。Standalone lineage 另行保持 numeric-maximum ordering。
+Run settlement 本身不会使合格 replica 失效；publication pressure 下，
 manager 默认的 64-entry 上限会释放 revision 最低的强 native/provider owner。这个 entry
 数量不是 device-byte 或 scratch admission。当前 source-private Metal 路径同时实现
 buffer-to-texture upload 与 texture-to-buffer download。
@@ -363,6 +365,25 @@ artifact format。Run publication 之后的 cache outcome 与 durable output 仍
 compatibility contract；V-15 adapter 不会让其 provider-defined Value 经过这套 compatibility
 representation。
 
+Issue #94 保持 `ImageBuffer` 与全部 installed memory contract 不变。其 source-private
+progressive RT branch 使用 `exact_box_average_factor_four_region()`，从原始 2048x2048
+source 创建对齐的 512x512 RGBA FP32 preview。每个 4x4 channel sum 先完成累加，再只进行一次
+binary32 result rounding，并在每条退出路径恢复 caller 的 floating-point environment。首次
+写入之前，source/destination 共享 owner、二者经检查的 active storage-envelope 半开
+`uintptr_t` 区间重叠，或端点不可表示，都会以 fail-closed 方式被拒绝。这既覆盖同一 owner 下
+起始地址偏移的别名，也覆盖 owner 不同但地址区间重叠的情况，且不会对无关指针进行关系比较。
+生成的 proxy storage 被封装为不可变 rank-three HWC `Value`，具有自身 revision、binding、
+allocation、`ImageFacet`、layout 与精确 storage-byte envelope。Final Value 则从原始 full-
+resolution source 独立计算。
+
+I2 Host 会对每个 visible preview/final Value 记录两次 Direct access plan，并要求复用相同
+revision、binding、allocation 与 byte count，且 transfer 为零。存在已配置 Metal executor 时，
+第一次 acquisition 通过进程自有 registry、residency manager 与 ledger 上传紧密步幅的 rank-three
+HWC Value。原生 R32 texture 只在 Metal 边界把 channel 展平进 row width，而发布的 device Value
+保持原始 descriptor、facet、layout、logical revision 与 byte envelope。第二次 acquisition
+必须复用该精确 residency，不能再次 transfer 或 allocation；全程不发生 readback。缺少可用
+Metal executor 时，只有 device component 为 N/A，Host 与 no-I/O evidence 不得放宽。
+
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。
 
@@ -373,6 +394,9 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 ## 实现与验证入口
 
 - `include/photospider/core/image_buffer.hpp`
+- `src/lib/core/image_buffer_processing.hpp`
+- `src/lib/core/image_buffer_storage.hpp`
+- `src/lib/core/exact_box_downsample.cpp`
 - `include/photospider/core/device.hpp`
 - `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
@@ -393,6 +417,9 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 - `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `src/lib/compute/execution_service.*`
+- `src/lib/benchmark/i2_host.hpp`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`

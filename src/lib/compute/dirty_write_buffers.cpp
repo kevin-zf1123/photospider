@@ -65,7 +65,8 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source,
  * @throws GraphError when image payload cloning otherwise fails.
  * @note Named ParameterValue data, spatial context, and debug metadata are
  * value-copied. Clearing `image_value` prevents mutable staged bytes from
- * retaining the source cache revision; HP commit reseals final bytes.
+ * retaining the source cache revision; HP commit and progressive RT commit
+ * reseal final bytes at their respective publication boundaries.
  */
 NodeOutput clone_node_output(const NodeOutput& source,
                              const std::string& label) {
@@ -318,9 +319,11 @@ HighPrecisionDirtyWriteBuffer::ensure_entry_locked(const Node& node) {
 }
 
 RealtimeProxyWriteBuffer::RealtimeProxyWriteBuffer(
-    RealtimeProxyGraph& proxy_graph, bool seed_existing_outputs)
+    RealtimeProxyGraph& proxy_graph, bool seed_existing_outputs,
+    bool seal_image_values_on_commit)
     : proxy_graph_(proxy_graph),
-      seed_existing_outputs_(seed_existing_outputs) {}  // NOLINT
+      seed_existing_outputs_(seed_existing_outputs),
+      seal_image_values_on_commit_(seal_image_values_on_commit) {}  // NOLINT
 
 const NodeOutput* RealtimeProxyWriteBuffer::find_output(int node_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -371,6 +374,10 @@ void RealtimeProxyWriteBuffer::commit_to_proxy_graph() {
     Entry& entry = item.second;
     if (!entry.has_output) {
       continue;
+    }
+    if (seal_image_values_on_commit_ && entry.state.output.has_value()) {
+      value_image_adapter::normalize_node_output_image_value(
+          &*entry.state.output);
     }
     proxy_graph_.commit_node_state(node_id, std::move(entry.state));
   }

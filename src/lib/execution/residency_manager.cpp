@@ -52,10 +52,21 @@ void ResidencyManager::observe_generation(const DeviceCompletionSeed& seed) {
   std::lock_guard<std::mutex> lock(mutex_);
   const LineageKey key = lineage_key(seed);
   auto current = current_generations_.find(key);
+  if (seed.completion_use() == DeviceCompletionUse::PublishedValueAcquisition) {
+    if (current == current_generations_.end() ||
+        !current->second.coordinator_managed ||
+        current->second.generation == 0U) {
+      throw std::invalid_argument(
+          "Published Value acquisition requires a live managed lineage.");
+    }
+    return;
+  }
   if (current == current_generations_.end()) {
-    current_generations_.emplace(key, seed.supersession_generation());
-  } else if (current->second < seed.supersession_generation()) {
-    current->second = seed.supersession_generation();
+    current_generations_.emplace(
+        key, LineageCurrentness{seed.supersession_generation(), false});
+  } else if (!current->second.coordinator_managed &&
+             current->second.generation < seed.supersession_generation()) {
+    current->second.generation = seed.supersession_generation();
   }
 }
 
@@ -70,8 +81,11 @@ void ResidencyManager::track_lineage(std::uint64_t graph_instance_id,
         "Residency lineage tracking requires canonical request facts.");
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  current_generations_.try_emplace(
-      lineage_key(graph_instance_id, target_node_id, request_intent), 0U);
+  auto [current, inserted] = current_generations_.try_emplace(
+      lineage_key(graph_instance_id, target_node_id, request_intent),
+      LineageCurrentness{});
+  (void)inserted;
+  current->second.coordinator_managed = true;
 }
 
 /** @copydoc ResidencyManager::publish_current_generation */
@@ -90,11 +104,11 @@ void ResidencyManager::publish_current_generation(
     const LineageKey key =
         lineage_key(graph_instance_id, target_node_id, request_intent);
     auto current = current_generations_.find(key);
-    if (current == current_generations_.end() ||
-        current->second > supersession_generation) {
+    if (current == current_generations_.end()) {
       std::terminate();
     }
-    current->second = supersession_generation;
+    current->second.generation = supersession_generation;
+    current->second.coordinator_managed = true;
   } catch (...) {
     std::terminate();
   }
@@ -150,17 +164,33 @@ void ResidencyManager::register_transfer(
     const DeviceCompletionIdentity& identity) {
   std::lock_guard<std::mutex> lock(mutex_);
   const LineageKey key = lineage_key(identity.seed());
-  const auto current = current_generations_.find(key);
-  if (current != current_generations_.end() &&
-      current->second > identity.seed().supersession_generation()) {
-    throw std::invalid_argument(
-        "Cannot register a stale device transfer completion.");
+  auto current = current_generations_.find(key);
+  const std::uint64_t generation = identity.seed().supersession_generation();
+  const bool published_value_acquisition =
+      identity.seed().completion_use() ==
+      DeviceCompletionUse::PublishedValueAcquisition;
+  if (published_value_acquisition) {
+    if (current == current_generations_.end() ||
+        !current->second.coordinator_managed ||
+        current->second.generation == 0U) {
+      throw std::invalid_argument(
+          "Published Value acquisition requires a live managed lineage.");
+    }
+  } else if (current != current_generations_.end()) {
+    const bool stale = current->second.coordinator_managed
+                           ? current->second.generation != generation
+                           : current->second.generation > generation;
+    if (stale) {
+      throw std::invalid_argument(
+          "Cannot register a non-current device transfer completion.");
+    }
   }
-  if (current == current_generations_.end()) {
-    current_generations_.emplace(key,
-                                 identity.seed().supersession_generation());
-  } else if (current->second < identity.seed().supersession_generation()) {
-    current->second = identity.seed().supersession_generation();
+  if (!published_value_acquisition && current == current_generations_.end()) {
+    current_generations_.emplace(key, LineageCurrentness{generation, false});
+  } else if (!published_value_acquisition &&
+             !current->second.coordinator_managed &&
+             current->second.generation < generation) {
+    current->second.generation = generation;
   }
   const std::uint64_t producer = identity.destination_producer().value();
   const auto pending = pending_transfers_.find(producer);
@@ -213,10 +243,25 @@ ResidencyCompletionDisposition ResidencyManager::publish_ready_transfer(
     return ResidencyCompletionDisposition::Rejected;
   }
 
+  const bool published_value_acquisition =
+      identity.seed().completion_use() ==
+      DeviceCompletionUse::PublishedValueAcquisition;
+  if (published_value_acquisition && source_producer != nullptr) {
+    pending_transfers_.erase(pending);
+    return ResidencyCompletionDisposition::Rejected;
+  }
+
   const LineageKey key = lineage_key(identity.seed());
   const auto current = current_generations_.find(key);
-  if (current == current_generations_.end() ||
-      current->second != identity.seed().supersession_generation()) {
+  const bool currentness_valid =
+      published_value_acquisition
+          ? current != current_generations_.end() &&
+                current->second.coordinator_managed &&
+                current->second.generation != 0U
+          : current != current_generations_.end() &&
+                current->second.generation ==
+                    identity.seed().supersession_generation();
+  if (!currentness_valid) {
     pending_transfers_.erase(pending);
     return ResidencyCompletionDisposition::Stale;
   }
@@ -224,8 +269,8 @@ ResidencyCompletionDisposition ResidencyManager::publish_ready_transfer(
   const StorageBinding binding = destination.storage_binding();
   const ReplicaKey replica_key{destination.revision_id().value(),
                                binding.device, binding.memory_domain};
-  std::map<ReplicaKey, Value> staged_replica;
-  staged_replica.emplace(replica_key, destination);
+  std::map<ReplicaKey, ResidentEntry> staged_replica;
+  staged_replica.emplace(replica_key, ResidentEntry{destination, identity});
   if (source_producer != nullptr && !source_producer->complete_ready()) {
     pending_transfers_.erase(pending);
     return ResidencyCompletionDisposition::Rejected;
@@ -241,7 +286,7 @@ ResidencyCompletionDisposition ResidencyManager::publish_ready_transfer(
       resident_values_.erase(resident_values_.begin());
     }
   } else {
-    resident->second = destination;
+    resident->second = ResidentEntry{destination, identity};
   }
   pending_transfers_.erase(pending);
   return ResidencyCompletionDisposition::Published;
@@ -260,6 +305,80 @@ bool ResidencyManager::discard_transfer(
   return true;
 }
 
+/** @copydoc ResidencyManager::release_resident */
+bool ResidencyManager::release_resident(ValueRevisionId revision,
+                                        const StorageBinding& binding,
+                                        ProducerIdentity producer) {
+  if (!revision.valid() || !binding.allocation.valid() || !producer.valid()) {
+    return false;
+  }
+
+  std::map<ReplicaKey, ResidentEntry>::node_type released;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto resident = resident_values_.find(
+        ReplicaKey{revision.value(), binding.device, binding.memory_domain});
+    if (resident == resident_values_.end() ||
+        resident->second.value.revision_id() != revision ||
+        resident->second.value.storage_binding() != binding ||
+        resident->second.value.producer_identity() != producer) {
+      return false;
+    }
+    released = resident_values_.extract(resident);
+  }
+  return !released.empty();
+}
+
+/** @copydoc ResidencyManager::find_published_value_acquisition */
+std::optional<Value> ResidencyManager::find_published_value_acquisition(
+    const DeviceCompletionSeed& seed, const Value& source, DeviceId device,
+    MemoryDomain memory_domain) const {
+  if (seed.completion_use() != DeviceCompletionUse::PublishedValueAcquisition ||
+      !source.valid()) {
+    throw std::invalid_argument(
+        "Published Value lookup requires exact acquisition seed and source.");
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto current = current_generations_.find(lineage_key(seed));
+  if (current == current_generations_.end() ||
+      !current->second.coordinator_managed ||
+      current->second.generation == 0U) {
+    throw std::invalid_argument(
+        "Published Value lookup requires a live managed lineage.");
+  }
+
+  const ReadyFenceSnapshot source_state = source.ready_fence().poll();
+  if (!source_state.ready()) {
+    throw std::invalid_argument(
+        "Published Value lookup requires a Ready source fence.");
+  }
+
+  const auto resident = resident_values_.find(
+      ReplicaKey{source.revision_id().value(), device, memory_domain});
+  if (resident == resident_values_.end()) {
+    return std::nullopt;
+  }
+  const ResidentEntry& entry = resident->second;
+  const DeviceCompletionIdentity& publication = entry.publication_identity;
+  const ReadyFenceSnapshot resident_state = entry.value.ready_fence().poll();
+  if (!resident_state.ready() || !(publication.seed() == seed) ||
+      publication.source_revision() != source.revision_id() ||
+      publication.source_producer() != source.producer_identity() ||
+      publication.source_binding() != source.storage_binding() ||
+      !entry.value.valid() ||
+      publication.destination_revision() != entry.value.revision_id() ||
+      publication.destination_producer() != entry.value.producer_identity() ||
+      publication.destination_binding() != entry.value.storage_binding() ||
+      entry.value.revision_id() != source.revision_id() ||
+      entry.value.storage_binding().device != device ||
+      entry.value.storage_binding().memory_domain != memory_domain) {
+    throw std::invalid_argument(
+        "Published Value resident does not match exact publication identity.");
+  }
+  return entry.value;
+}
+
 /** @copydoc ResidencyManager::find */
 std::optional<Value> ResidencyManager::find(ValueRevisionId revision,
                                             DeviceId device,
@@ -273,7 +392,7 @@ std::optional<Value> ResidencyManager::find(ValueRevisionId revision,
   if (resident == resident_values_.end()) {
     return std::nullopt;
   }
-  return resident->second;
+  return resident->second.value;
 }
 
 }  // namespace ps::execution

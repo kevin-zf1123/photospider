@@ -139,14 +139,16 @@ the exact command-completion owner. Perlin publishes a pending native Value,
 encodes texture-to-buffer readback, and returns without a command-buffer wait.
 Completion freshness, applicable producer Ready publication, destination Ready
 publication, and resident insertion are one manager-locked transaction.
-Kernel first pretracks the lineage without advancing it before fallible
-coordinator submission. An accepted current publication then performs a
-no-allocation manager advance while the coordinator still excludes currentness
-observation; rejected and born-stale candidates do not. This prevents a late
-older Run start from regressing the manager generation. Because a prepared
-candidate owns compute-request-lane admission before the fallible pretrack,
-Graph close joins that lane before retiring the exact Graph's generation rows;
-no permanent closed-identity tombstone is required.
+Kernel first pretracks the lineage without assigning a managed current identity
+before fallible coordinator submission. An accepted current publication then
+assigns the exact generation without allocation while the coordinator still
+excludes currentness observation; accepted-coordinate order may authorize a
+numerically lower generation. Rejected and born-stale candidates assign
+nothing, and a later stale Run observation cannot replace the exact managed
+identity. Standalone lineages separately retain numeric-maximum ordering.
+Because a prepared candidate owns compute-request-lane admission before the
+fallible pretrack, Graph close joins that lane before retiring the exact
+Graph's generation rows; no permanent closed-identity tombstone is required.
 Pending-Value continuation reuses the existing Run and ready store. This adds
 no public device-executor API, no Graph/cache authority, and no second
 device-capacity ledger. The service-owned `ResourceLedger` remains the sole

@@ -44,6 +44,27 @@ session identity 与显式 Run QoS 数据。parallel/runtime 选择则通过独�
 `HostComputeExecutionOptions::maximum_parallelism` 字段会把单次 Run 的一个可选正并发上限
 穿过 adapter 传入该 QoS。其余 identity 与 QoS 仍只是私有 descriptor input；plugin ABI 不变。
 
+Source-private 的 Issue #93 `I1Host` seam 会复用同一 embedded path，而不是使用 benchmark-only
+executor。它会在普通 `HostComputeRequest` 外附加显式 Interactive QoS、weight one、cap eight、
+每次 edit 的 immutable deadline、只读 observation sink，以及调用前 row-local accepted
+coordinate。Embedded Host 会把该 coordinate 传入私有 Kernel request；Kernel 会在
+coordinator publication 前把它绑定到产品 `SupersessionIdentity`。该 seam 只由 embedded Host
+实现，不会安装，也不会通过 Host、IPC、CLI 或 plugin record 暴露。其 asynchronous
+scheduling 成功返回是冻结的 I1 acceptance boundary；返回的 future 仍表示稍后的产品
+settlement。
+
+Public 与 I1 asynchronous admission 共享同一个 Host-side preparation transaction。Embedded
+adapter 在进入 `InteractionService` 前，会创建 caller future、成功 `Result` envelope、一个
+backend-delivery bridge、已 join 的 status worker，以及 close-visible tracking。Kernel
+publication 可能在 `cmd_compute_async()` 返回前并发地令 candidate 成为 current，因此 accepted
+return path 只执行 no-throw `future::share()`、一次 single-producer bridge delivery，以及
+prebuilt result 的 no-throw move。Worker creation、promise/future creation、container growth、
+diagnostic/result construction 和可测试的 resource failure 都发生在进入 Kernel 前。Preparation
+被拒绝或 Kernel 在 publication 前失败时，Host 会发送 empty bridge sentinel、抽取 tracking
+ownership、在 lifecycle mutex 外 join，并返回失败；该请求不会产生 accepted coordinate、current
+observation 或 product output binding。违反 one-delivery bridge 的结构性 invariant 会 fail-stop，
+而不会成为可恢复的 post-publication Host rejection。
+
 Dirty ROI 从 `HostComputeRequest` 复制到 `Kernel::ComputeRequest`，再经过 graph propagation、
 planning、task selection、staged execution 与 `NodeExecutor` 时，始终保持为内核自有的
 `PixelRect`；extent 使用 `PixelSize`。这条路径不会进行 OpenCV geometry 转换；provider 只有在
@@ -295,11 +316,32 @@ revision 与 current supersession key/generation，执行符合条件的延迟 H
 同一 graph-state work item 中交换完整可见状态。
 只有该 transaction 成功后才会发布 Run success。
 
+对于被观察的 Run，产品路径会在不改变 publication order 的前提下发出 source-private
+只读 boundary：current-generation assignment、physically committed callback start、accepted
+cancellation、current-visible output、terminal outcome、Run physical quiescence、精确 root-resource
+return，以及 caller-visible future 与 Host-tracking settlement。每个 boundary 都会在自己的产品
+linearization point、callback delivery 之前，从同一个 request-scoped causal sequence 预留不可变
+coordinate。因此，即使 service-start 与 cancellation callback 位于不同 thread，逻辑 service-start
+commit 和 cancellation acceptance 仍共享同一个 ordering authority。Service start 会携带精确
+`(RunId, RunLocalTaskId)`、generation、QoS 与 policy charge。Current-visible output 只在普通 live
+Graph swap 成功后报告；terminal success 仍排在该 observation 之后。唯一 HP contender 会在同一个
+Run-arbiter claim 下解析这两个 observation，因此被拒绝或已经解析的 contender 不会发出其中任何
+一个。这些 callback 只保留 scalar fact 或 immutable Value，不能启动、取消、提高优先级、settle
+或发布 work。这套 causal sequence 与 I1 的 row-local accepted sequence 相互独立，尽管两个
+allocator 都从一开始。Current-generation observation 复制产品 identity 中已经存储的 accepted
+binding；它不会从 callback order 或 causal sequence 重新构造该 binding。
+
 这是截至 issue #76 的当前基线。私有 request source 可以 cooperative cancel 一个 HP Run，或当前
 realtime request 的两个 child Run；immutable deadline 会在有界 observation point 提议
 `DeadlineExceeded`，Run-owned terminal arbiter 则会排列 cancellation、failure 与 visible commit。
-每个 Graph 的 latest-wins publication 会让精确 key 的最新 generation 成为权威、请求取消旧的
-active owner、合并一个 pending owner，并在 cancellation 迟到时仍拒绝 stale commit。这是
+每个 Graph 的 latest-wins publication 会让精确 key 的最新完整 identity 成为权威、请求取消旧的
+active owner、合并一个 pending owner，并在 cancellation 迟到时仍拒绝 stale commit。对于两个
+携带 accepted coordinate 的 source-private identity，currentness 只按 accepted coordinate 推进；
+accepted timestamp 相同时按 row-local event sequence 排序。Generation 是唯一 preparation
+identity 与 Run join key，而不是已绑定的逻辑 admission 顺序，因此较新 coordinate 可以用更低
+generation 成为 current，较旧 coordinate 也不能凭更高 generation 获胜。任一侧没有 binding 的
+traffic 保持既有 generation rule。Coordinator-managed native freshness 跟随精确发布的 generation，
+而不是数值最大值。这是
 process-owned `RunLifecycleRegistry` 现在会在 capture 或 planning 前开始 candidate、保留 Graph
 lifetime lease，并原子安装一个 standalone Run 或包含两个 realtime child 的完整 bundle。
 Empty/no-op 与 connected-preflight 路径使用相同的 admission/finalization 边界。connected
@@ -341,6 +383,36 @@ transaction 作为 task lifetime token，并等待 typed completion。该等待�
 接受一个目标：把可选 cache persistence 移到独立结果之后，并引入带 receipt 的独立 durable
 output commit。Executor mechanism 已是当前行为；Run publication 之后的目标顺序与 durable
 output commit 尚未实现。
+
+Issue #95 增加了一个有意更窄、只用于 B1 manual/release profile 的源码私有例外。
+`B1OutputStore` 会复用当前进程 `ComputeIoExecutor` 执行两个带精确 charge 的 task，随后
+证明 payload byte 已同步、manifest-last assembly、atomic no-replace directory
+publication、directory barrier 与位于所选 canonical root 下的类型化 crash-durable
+receipt。它会持有 nonblocking advisory exclusive root lock，并且只会在由 no-follow
+descriptor 持有、且经过验证的 mode-`0700` private staging anchor/slot 内写入；所有协作 actor
+都必须遵守该 lock，并把 B1 name 保留给单一 store owner。mkdir-to-open identity 必须在任何
+artifact mutation 前匹配。两个 task 均结算后，一次 Darwin `RENAME_EXCL` 或 Linux
+`RENAME_NOREPLACE` transition 会发布完整 occurrence。Root-path 或 public-slot replacement
+都不能重定向写入。在 publication 之前，transaction guard 会先结算 accepted Compute I/O
+charge，再进行严格的 checked private cleanup。它会两次检查每个 identity、每个 removal 结果及
+随后 absence，并对检测到的 extra leaf、type/identity 漂移、unlink/rmdir 失败或无法证明 absence
+执行 fail-stop。由于 POSIX 会把最终 identity 检查与按 name 删除分开，cleanup 保证仅限协作式
+exclusive-owner contract；任意不协作 same-UID namespace mutation 不在覆盖范围内。Guard 建立
+前的 anchor handoff failure 会保留含义不确定的 residue，且不声称可重试。Atomic rename 随后
+撤销 public cleanup authority：后续 barrier、最终 validation 或 receipt failure 会保留 occurrence
+与空 anchor。Same-commit retry 会验证精确 public payload/manifest 并完成缺失 barrier，且不产生
+新 output task 或 rewrite。非 directory，或完全没有 transaction-looking leaf 的 real directory
+（空目录或仅含 marker），属于 plainly foreign collision，会保持原状并返回 `SlotExists`；一旦
+出现 payload、manifest 或 private-manifest，不完整/额外/漂移 state 就属于 transaction
+occurrence，会保持原状并返回 `RevalidationFailed`。Reconciliation 返回空
+`io_observations`，不能伪造当前两 task FSM；evaluator 必须取得早先保留的 new-work stream，
+否则 fail closed。该路径只会在 B1 Run result 已
+通过普通 embedded Host compute path 获取之后调用。其 retained environment file 只是 expected
+claim：required-storage compatibility 还要求每一侧自己的进程私有 held-root observation、实际
+typed receipt 与独立产生的完整 probe。JSON 不能恢复该 authority，任一未验证 external storage
+field 都会使 row machine-ineligible。该路径不会把通用 HP cache persistence 移到 Graph
+publication 之后，不会替换 daemon delivery store，也不会让 durable output 成为 public Host/
+CLI/IPC success 的一部分。
 
 ## GlobalHighPrecision
 
@@ -434,6 +506,20 @@ subscription surface 都不属于当前软件契约。
 
 ## 事件和计时
 
+I1 evidence path 与 public graph-event ring 分离。其有界 request-scoped collector 会为十二次
+edit 预分配 observation slot，并为每次产品 transition 分配一个 collector-local causal
+sequence。Evaluator 会独立要求每个 current generation 的 product-bound accepted coordinate
+精确等于该 edit 调用前的 `(A_i,event_sequence_i)`，并要求 product generation 非零且唯一，
+但不按数值对其排序。对于这些已绑定 identity，currentness 只由 accepted-coordinate order 定义。
+Overflow 会使 row invalid，而不会静默丢弃 evidence。在冻结的 `Q_end`，runner 会先
+预留首个被排除 event 的 sequence。只有 monotonic sample 不晚于 `Q_end` 且 sequence 位于 cut
+之前的 product event 才属于 boundary history。随后 runner 可以消费已经产生的 future，并取得
+eventual Host/device `ResourceLedger` 与 `ExecutionLifecycleTelemetry` snapshot；但该较晚 snapshot
+不能把 terminal、quiescence、root-resource return 或 Host settlement 回填到 cut 之前。Evaluator
+会为每次 edit 要求一条因果一致的 Run state machine 和匹配的 Host status。所有 snapshot 与
+callback 仍只用于 observation：它们不等待任何产品 transition、不重置 counter，也不 mint
+Run/ledger/queue capability。
+
 `GraphEventService` 把每节点计算事件发布到线程安全、固定容量的 ring。Production 容量是每图
 8,192 个事件。每条被接纳的 publication 都会获得 `1..UINT64_MAX-1` 范围内单调递增的
 unsigned 64-bit sequence；`UINT64_MAX` 是 exhaustion sentinel，绝不会分配给事件。Ring 满时
@@ -481,6 +567,22 @@ item 的一部分，因此 codec/filesystem error 可能让 Run 失败且不发�
 成功返回。Graph 文档保存仍是拥有自身 status 的独立 graph-state operation，绝不会改写 Run
 terminal state。
 
+Issue #94 在既有 realtime request flow 上增加一条可选的 source-private progressive branch。
+Embedded Host 与 Kernel 只有在私有 I2 caller 提供时才转发 `ProgressiveComputeOptions`。
+ComputeService 随后保持 RT 与 HP child descriptor 彼此独立，强制 progressive RT dirty path
+顺序执行，并暂缓 HP submission。Current RT preview commit 后，graph-state lane 会把其不可变
+Value 发布给 observation sink；接着消费 progressive gate、发出 final-trigger coordinate，并
+立即提交 HP child。若 cancellation 或 supersession 在 gate consumption 前获胜，则会抑制 final
+submission。Gate 已消费后，普通 generation/currentness commit check 仍会阻止 stale HP
+result 成为 visible。
+
+只有这条 progressive RT branch 会要求 dirty-source execution 执行精确对齐的 factor-four
+RGBA FP32 box average。它把每个 4x4 channel mean 只舍入一次到 binary32，将 proxy output
+封装为不可变 rank-three HWC Value，再执行相同的四个 curve stage。HP child 始终从原始
+2048x2048 source 进入未改变的 I1 full-resolution path，绝不从 preview pixel 派生。
+`ProgressiveComputeOptions` 缺失时，普通 realtime request 保留原先的并发 RT/HP planning、
+submission 与 publication 行为。
+
 ## 边界与原理
 
 - 同一份 request plan 同时提供顺序与并行执行语义；execution strategy 只改变机制，不改变
@@ -524,12 +626,19 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
+- `src/lib/benchmark/i1_host.hpp`
+- `src/lib/benchmark/i1_profile.*`
+- `src/lib/benchmark/i1_evidence.*`
+- `src/lib/benchmark/i2_host.hpp`
+- `src/lib/benchmark/i2_profile.*`
+- `src/lib/benchmark/i2_evidence.*`
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/compute_io_executor.*`
 - `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/progressive_compute.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/compute/compute_supersession.*`
@@ -540,6 +649,7 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/compute/compute_task_dispatcher.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/compute/dirty_update_executor.*`
+- `src/lib/core/exact_box_downsample.cpp`
 - `src/lib/runtime/graph_event_service.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_compute_io_executor.cpp`
@@ -549,4 +659,11 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_progressive_compute.cpp`
+- `tests/unit/test_i2_profile.cpp`
+- `tests/unit/test_i2_evidence.cpp`
+- `tests/integration/test_i2_product_path.cpp`
+- `tests/unit/test_i1_profile.cpp`
+- `tests/unit/test_i1_evidence.cpp`
+- `tests/integration/test_i1_product_path.cpp`
 - `tests/unit/test_event_stream_boundaries.cpp`

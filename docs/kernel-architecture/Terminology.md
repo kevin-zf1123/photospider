@@ -120,18 +120,23 @@ Graph instance. Scoped structural, document, cache, dirty, and lifecycle
 mutations advance it; compute snapshots and successful compute publication
 preserve it. Exact identity and revision equality is the current commit
 compatibility rule. Product compute additionally requires the Run-captured
-supersession key and generation to remain exactly current. Topology generation
+complete supersession identity to remain exactly current. Topology generation
 remains a separate planning cache key.
 
-**`SupersessionKey` / `SupersessionGeneration`**
+**`SupersessionKey` / `SupersessionGeneration` / `SupersessionIdentity`**
 The private latest-wins identity inside one live Graph. The key is target node
 plus canonical request intent: missing intent and explicit HP are the same
 lineage, while realtime is distinct. A checked nonzero graph-wide allocator
 gives every prepared candidate a strictly increasing generation and never
-wraps or reuses a value. Allocation is preparatory; graph-state publication is
-the current-generation linearization point. Each admitted key owns at most one
-reserved compute-lane ticket, one active/draining candidate, and one latest
-pending mailbox value.
+wraps or reuses a value. The complete identity contains that key and generation
+plus an optional source-private `AcceptedBoundaryCoordinate`. Allocation is
+preparatory; graph-state publication assigns the complete current identity. For
+two coordinate-bound identities, the accepted coordinate orders replacement
+and may authorize a numerically lower generation; mixed and unbound identities
+remain generation-ordered. Exact currentness requires equality of generation
+and optional coordinate, not numeric-maximum generation. Each admitted key owns
+at most one reserved compute-lane ticket, one active/draining candidate, and
+one latest pending mailbox value.
 
 **`GraphLifetimeAnchor` / graph lifetime lease**
 The stable per-Graph lifetime root registered only after a complete
@@ -345,7 +350,13 @@ non-destructive atomic-cut pages of 1..4,096 records with explicit cursor gaps
 and saturating drop totals. Six trusted physical counter selectors cover ready
 entries, entered operation callbacks, live root reservations, live child
 grants, policy invocations, and current/displaced bindings; registry-derived
-counters come only from `RunLifecycleRegistry`. Records contain copied scalar
+counters come only from `RunLifecycleRegistry`. M1 lifecycle replay treats the
+nine registry-derived counters as an exact state-machine projection over
+Graph, candidate, bundle, Run, group, and generation identity. The six physical
+counters remain independent samples checked for capacity and ownership
+reachability, not event-kind deltas; physical retirement publishes its exact
+registry cut under the registry lifecycle fence. `ServiceStopped` is the final
+record and carries zero in all 15 fields. Records contain copied scalar
 identities and grant no lifecycle, queue, callback, plugin, Graph, or Run
 authority. No Host, CLI, or IPC method exposes this store.
 
@@ -362,6 +373,22 @@ aging never changes the selected class. Initial and dependency-released
 submissions cross the same boundary, and Run rows persist across temporary
 emptiness. Removing an entry releases its ready grant only after execution
 authority is acquired or the entry is purged.
+
+**Scheduler-selectable candidate**
+A worker-local ready lane head that passes current Run lifecycle,
+cancellation, operation-gate, physical-route, and cycle-local grant-block
+visibility. It participates in class choice, the policy frontier, and the
+three-to-one Interactive burst state. Remaining execution child-grant capacity
+is deliberately not a selector predicate: exhaustion is classified only by
+reserved start, which marks the exact entry for that worker without charging
+dispatch or fairness state.
+
+**Evidence-startable class fact**
+An observation-only per-class Boolean sampled for a service start from the
+scheduler-visible ready/lifecycle/operation/route predicates plus sufficient
+live child-grant capacity. It is published only with a successfully committed
+start and controls M1 applicability, not candidate selection or burst
+accounting. It mints no grant and cannot replace `try_grant()`.
 
 **Resource reservation and grant**
 A reservation is the move-only RAII owner of one atomically admitted root

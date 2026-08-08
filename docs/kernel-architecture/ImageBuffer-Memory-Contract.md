@@ -333,8 +333,11 @@ implicit transfer. CPU/Metal transfer produces a distinct binding for the same
 logical revision. Exact current-generation completion publishes Ready and
 process residency atomically; stale completion publishes typed failure before
 dependants can observe Ready. The lineage row is pretracked before coordinator
-submission and advanced only by accepted current publication, so an older Run
-that starts after a newer publication remains stale. Run settlement does not
+submission without a managed current identity. Accepted current publication
+assigns the exact generation, including a coordinate-authorized numeric
+decrease, before currentness becomes observable; a stale Run that starts later
+cannot replace that exact identity. Standalone lineages separately retain
+numeric-maximum ordering. Run settlement does not
 itself invalidate an eligible replica, while the manager's 64-entry default
 releases the lowest-revision strong native/provider owner under publication
 pressure. This entry count is not device-byte or scratch admission. The current
@@ -450,6 +453,32 @@ Post-publication cache outcomes and durable output remain future.
 writes, existing image codecs, and Host surfaces; the V-15 adapter does not
 route its provider-defined Value through that compatibility representation.
 
+Issue #94 keeps `ImageBuffer` and every installed memory contract unchanged.
+Its source-private progressive RT branch uses
+`exact_box_average_factor_four_region()` to create an aligned 512x512
+RGBA FP32 preview from the original 2048x2048 source. Each 4x4 channel sum is
+accumulated before one binary32 result rounding, and the caller's floating-
+point environment is restored on every exit. Before the first write, a shared
+source/destination owner, overlap between their checked active storage-envelope
+half-open `uintptr_t` intervals, or an unrepresentable endpoint is rejected
+fail-closed. This covers offset aliases under one owner and overlapping ranges
+with different owners without relationally comparing unrelated pointers. The
+resulting proxy storage is sealed as an immutable rank-three HWC `Value` with
+its own revision, binding, allocation, `ImageFacet`, layout, and exact storage-
+byte envelope. The final Value is independently computed from the original
+full-resolution source.
+
+The I2 Host records two Direct access plans to each visible preview/final Value
+and requires the same revision, binding, allocation, and byte count with zero
+transfer. When a configured Metal executor exists, the first acquisition uses
+the process-owned registry, residency manager, and ledger to upload the tightly
+strided rank-three HWC Value. The native R32 texture flattens channels into row
+width only at the Metal boundary while the published device Value preserves the
+original descriptor, facet, layout, logical revision, and byte envelope. A
+second acquisition must reuse that exact residency without another transfer or
+allocation; no readback occurs. Absence of a usable Metal executor makes only
+the device component N/A and does not relax Host or no-I/O evidence.
+
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.
 
@@ -462,6 +491,9 @@ operation ABI.
 ## Implementation and Validation Entry Points
 
 - `include/photospider/core/image_buffer.hpp`
+- `src/lib/core/image_buffer_processing.hpp`
+- `src/lib/core/image_buffer_storage.hpp`
+- `src/lib/core/exact_box_downsample.cpp`
 - `include/photospider/core/device.hpp`
 - `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
@@ -482,6 +514,9 @@ operation ABI.
 - `src/lib/core/extension.cpp`
 - `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
+- `src/lib/compute/execution_service.*`
+- `src/lib/benchmark/i2_host.hpp`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/plugin/data_definition_registry.cpp`
