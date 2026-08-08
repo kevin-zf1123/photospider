@@ -369,6 +369,421 @@ class RecordingObservationSink final
 };
 
 /**
+ * @brief Closed product callback set forwarded by the observation fanout.
+ * @throws Nothing for value construction and comparison.
+ * @note Reservation and abort lifecycle calls are deliberately excluded
+ * because they belong only to the sequence authority.
+ */
+enum class FanoutProductEvent : std::uint8_t {
+  /** @brief Accepted current-generation publication. */
+  CurrentGeneration,
+  /** @brief Dependency-ready task materialization. */
+  TaskReady,
+  /** @brief Physically committed callback service start. */
+  ServiceStart,
+  /** @brief Entered task terminal publication. */
+  TaskTerminal,
+  /** @brief Accepted Run cancellation. */
+  Cancellation,
+  /** @brief Exactly-once Run terminal publication. */
+  Terminal,
+  /** @brief Current-visible immutable Value publication. */
+  CurrentVisible,
+  /** @brief Progressive final permission consumption. */
+  ProgressiveFinalTriggered,
+  /** @brief Physical Run quiescence. */
+  RunQuiescent,
+  /** @brief Exact Run root-resource settlement. */
+  RunResourceSettled,
+  /** @brief Caller-visible Host settlement. */
+  HostSettled,
+};
+
+/** @brief Exact number of product callback kinds forwarded by the fanout. */
+inline constexpr std::size_t kFanoutProductEventCount = 11U;
+
+/**
+ * @brief Identifies which fanout child entered one recorded callback.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class FanoutRecipient : std::uint8_t {
+  /** @brief Workload-specific same-coordinate mirror. */
+  Mirror,
+  /** @brief Shared coordinate authority and completion barrier. */
+  SequenceAuthority,
+};
+
+/**
+ * @brief Fixed scalar record of one fanout child callback entry.
+ * @throws Nothing for value construction and copying.
+ */
+struct FanoutDeliveryRecord final {
+  /** @brief Product event whose callback entered the child. */
+  FanoutProductEvent event = FanoutProductEvent::CurrentGeneration;
+
+  /** @brief Child role receiving the callback. */
+  FanoutRecipient recipient = FanoutRecipient::Mirror;
+
+  /** @brief Exact authority-owned coordinate delivered to the child. */
+  compute::ComputeRunObservationCoordinate coordinate;
+
+  /** @brief Whether a current-visible callback received a valid Value. */
+  bool value_valid = false;
+
+  /** @brief Current-visible Value revision, or the invalid sentinel. */
+  ValueRevisionId value_revision;
+};
+
+/**
+ * @brief Allocation-free ordered log shared by two fanout spy children.
+ * @throws Nothing after construction.
+ * @note Tests serialize callback entry through one fanout thread. Readers
+ * inspect either after worker join or while the writer is stopped at the
+ * release/acquire-synchronized current-visible barrier.
+ */
+class FanoutDeliveryLog final {
+ public:
+  /**
+   * @brief Appends one child callback entry to fixed storage.
+   * @param event Product event entering the child.
+   * @param recipient Child role receiving the event.
+   * @param coordinate Exact authority-owned coordinate.
+   * @param output Optional borrowed current-visible Value.
+   * @return Nothing.
+   * @throws Nothing; excess entries set a sticky overflow flag.
+   */
+  void record(FanoutProductEvent event, FanoutRecipient recipient,
+              compute::ComputeRunObservationCoordinate coordinate,
+              const Value* output = nullptr) noexcept {
+    if (size_ >= records_.size()) {
+      overflowed_ = true;
+      return;
+    }
+    const bool value_valid = output != nullptr && output->valid();
+    records_[size_] = FanoutDeliveryRecord{
+        event, recipient, coordinate, value_valid,
+        value_valid ? output->revision_id() : ValueRevisionId{}};
+    ++size_;
+  }
+
+  /**
+   * @brief Returns the number of retained callback entries.
+   * @return Count in `[0, 22]`.
+   * @throws Nothing.
+   */
+  std::size_t size() const noexcept { return size_; }
+
+  /**
+   * @brief Returns one retained callback entry.
+   * @param index Zero-based index strictly below `size()`.
+   * @return Immutable record stored at `index`.
+   * @throws Nothing.
+   * @note The caller must validate the index before access.
+   */
+  const FanoutDeliveryRecord& at(std::size_t index) const noexcept {
+    return records_[index];
+  }
+
+  /**
+   * @brief Reports whether fixed callback storage was exceeded.
+   * @return True after the first excess callback entry.
+   * @throws Nothing.
+   */
+  bool overflowed() const noexcept { return overflowed_; }
+
+ private:
+  /** @brief One mirror/authority pair for every product callback kind. */
+  std::array<FanoutDeliveryRecord, kFanoutProductEventCount * 2U> records_{};
+
+  /** @brief Number of initialized records in fixed storage. */
+  std::size_t size_ = 0U;
+
+  /** @brief Sticky fixed-capacity overflow indicator. */
+  bool overflowed_ = false;
+};
+
+/**
+ * @brief Records every product callback and optionally wraps one real sink.
+ *
+ * The wrapper preserves the child sink's coordinate and publication behavior.
+ * A test-only barrier can stop current-visible delivery after fanout entry but
+ * before the wrapped mirror publishes its source observation.
+ *
+ * @throws Nothing after construction.
+ * @note The barrier is deterministic test instrumentation and would violate
+ * the production sink's nonblocking contract.
+ */
+class FanoutObservationSpySink final
+    : public compute::ComputeRunObservationSink {
+ public:
+  /**
+   * @brief Binds one child role, fixed log, and optional wrapped sink.
+   * @param recipient Role represented by this wrapper.
+   * @param log Non-null caller-owned log outliving every callback.
+   * @param coordinate Fixed coordinate used without a wrapped authority.
+   * @param task_semantics Fixed task opt-in used without a wrapped sink.
+   * @param downstream Optional real collector receiving each callback.
+   * @param pause_current_visible Whether to pause before wrapped publication.
+   * @throws Nothing after shared-owner argument evaluation.
+   * @note Tests must provide a non-null `log`; this test helper deliberately
+   * avoids runtime validation inside the `noexcept` callback seam.
+   */
+  FanoutObservationSpySink(
+      FanoutRecipient recipient, FanoutDeliveryLog* log,
+      compute::ComputeRunObservationCoordinate coordinate, bool task_semantics,
+      std::shared_ptr<compute::ComputeRunObservationSink> downstream = nullptr,
+      bool pause_current_visible = false) noexcept
+      : recipient_(recipient),
+        log_(log),
+        coordinate_(coordinate),
+        task_semantics_(task_semantics),
+        downstream_(std::move(downstream)),
+        pause_current_visible_(pause_current_visible) {}
+
+  /** @copydoc compute::ComputeRunObservationSink::reserve_causal_coordinate */
+  compute::ComputeRunObservationCoordinate reserve_causal_coordinate() noexcept
+      override {
+    ++reservation_count_;
+    return downstream_ ? downstream_->reserve_causal_coordinate() : coordinate_;
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::abort_causal_coordinate */
+  void abort_causal_coordinate(
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    ++abort_count_;
+    if (downstream_) {
+      downstream_->abort_causal_coordinate(coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_current_generation */
+  void on_current_generation(
+      const compute::SupersessionIdentity& identity,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::CurrentGeneration, coordinate);
+    if (downstream_) {
+      downstream_->on_current_generation(identity, coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::observes_task_semantics */
+  bool observes_task_semantics() const noexcept override {
+    return downstream_ ? downstream_->observes_task_semantics()
+                       : task_semantics_;
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_task_ready */
+  void on_task_ready(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunTaskIdentity task_identity,
+      const compute::ComputeRunTaskReadyObservation& observation,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::TaskReady, coordinate);
+    if (downstream_) {
+      downstream_->on_task_ready(descriptor, task_identity, observation,
+                                 coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_service_start */
+  void on_service_start(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunTaskIdentity task_identity,
+      std::uint64_t service_charge,
+      const compute::ComputeRunServiceStartObservation& observation,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::ServiceStart, coordinate);
+    if (downstream_) {
+      downstream_->on_service_start(descriptor, task_identity, service_charge,
+                                    observation, coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_task_terminal */
+  void on_task_terminal(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunTaskIdentity task_identity,
+      compute::ComputeRunTaskTerminalKind kind,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::TaskTerminal, coordinate);
+    if (downstream_) {
+      downstream_->on_task_terminal(descriptor, task_identity, kind,
+                                    coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_cancellation */
+  void on_cancellation(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunCancellationReason reason,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::Cancellation, coordinate);
+    if (downstream_) {
+      downstream_->on_cancellation(descriptor, reason, coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_terminal */
+  void on_terminal(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunTerminalKind kind,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::Terminal, coordinate);
+    if (downstream_) {
+      downstream_->on_terminal(descriptor, kind, coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_current_visible */
+  void on_current_visible(
+      const compute::ComputeRunDescriptor& descriptor, Value output,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    log_->record(FanoutProductEvent::CurrentVisible, recipient_, coordinate,
+                 &output);
+    ++callback_count_;
+    if (pause_current_visible_) {
+      current_visible_paused_.store(true, std::memory_order_release);
+      while (!current_visible_released_.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+    }
+    if (downstream_) {
+      downstream_->on_current_visible(descriptor, std::move(output),
+                                      coordinate);
+    }
+  }
+
+  /**
+   * @copydoc compute::ComputeRunObservationSink::on_progressive_final_triggered
+   */
+  void on_progressive_final_triggered(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::ProgressiveFinalTriggered, coordinate);
+    if (downstream_) {
+      downstream_->on_progressive_final_triggered(descriptor, coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_run_quiescent */
+  void on_run_quiescent(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::RunQuiescent, coordinate);
+    if (downstream_) {
+      downstream_->on_run_quiescent(descriptor, coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_run_resource_settled */
+  void on_run_resource_settled(
+      const compute::ComputeRunDescriptor& descriptor,
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::RunResourceSettled, coordinate);
+    if (downstream_) {
+      downstream_->on_run_resource_settled(descriptor, coordinate);
+    }
+  }
+
+  /** @copydoc compute::ComputeRunObservationSink::on_host_settled */
+  void on_host_settled(
+      compute::ComputeRunObservationCoordinate coordinate) noexcept override {
+    record(FanoutProductEvent::HostSettled, coordinate);
+    if (downstream_) {
+      downstream_->on_host_settled(coordinate);
+    }
+  }
+
+  /**
+   * @brief Reports whether the current-visible callback reached its barrier.
+   * @return True after callback entry and before wrapped publication.
+   * @throws Nothing.
+   */
+  bool current_visible_paused() const noexcept {
+    return current_visible_paused_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Releases the current-visible callback to the wrapped sink.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void release_current_visible() noexcept {
+    current_visible_released_.store(true, std::memory_order_release);
+  }
+
+  /**
+   * @brief Returns the number of coordinates reserved through this wrapper.
+   * @return Exact reservation count.
+   * @throws Nothing.
+   */
+  std::uint64_t reservation_count() const noexcept {
+    return reservation_count_;
+  }
+
+  /**
+   * @brief Returns the number of callbacks entering this wrapper.
+   * @return Exact product callback count.
+   * @throws Nothing.
+   */
+  std::uint64_t callback_count() const noexcept { return callback_count_; }
+
+  /**
+   * @brief Returns the number of aborted coordinates through this wrapper.
+   * @return Exact abort count.
+   * @throws Nothing.
+   */
+  std::uint64_t abort_count() const noexcept { return abort_count_; }
+
+ private:
+  /**
+   * @brief Records one non-Value product callback entry.
+   * @param event Product event entering this wrapper.
+   * @param coordinate Exact authority-owned coordinate.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void record(FanoutProductEvent event,
+              compute::ComputeRunObservationCoordinate coordinate) noexcept {
+    log_->record(event, recipient_, coordinate);
+    ++callback_count_;
+  }
+
+  /** @brief Child role represented by this wrapper. */
+  FanoutRecipient recipient_;
+
+  /** @brief Caller-owned fixed callback log. */
+  FanoutDeliveryLog* log_ = nullptr;
+
+  /** @brief Fixed coordinate used when no real collector is wrapped. */
+  compute::ComputeRunObservationCoordinate coordinate_;
+
+  /** @brief Fixed task opt-in used when no real collector is wrapped. */
+  bool task_semantics_ = false;
+
+  /** @brief Optional real collector receiving each callback after the spy. */
+  std::shared_ptr<compute::ComputeRunObservationSink> downstream_;
+
+  /** @brief Whether current-visible callback entry activates the barrier. */
+  bool pause_current_visible_ = false;
+
+  /** @brief True after current-visible callback entry reaches the barrier. */
+  std::atomic<bool> current_visible_paused_{false};
+
+  /** @brief True when current-visible publication may proceed. */
+  std::atomic<bool> current_visible_released_{false};
+
+  /** @brief Number of coordinate reservations through this wrapper. */
+  std::uint64_t reservation_count_ = 0U;
+
+  /** @brief Number of product callbacks entering this wrapper. */
+  std::uint64_t callback_count_ = 0U;
+
+  /** @brief Number of aborted coordinates through this wrapper. */
+  std::uint64_t abort_count_ = 0U;
+};
+
+/**
  * @brief Recasts one eligible required-storage M1 environment as its I1 peer.
  * @param m1 Same-subject, same-ordinal M1 environment.
  * @return Base-identical storage-N/A isolated I1 environment evidence.
@@ -2738,6 +3153,228 @@ TEST(M1Profile, ObservationFanoutUsesOnlySharedSequenceAuthority) {
             authority_coordinate.causal_sequence);
   EXPECT_EQ(mirror->last_coordinate.causal_sequence,
             authority_coordinate.causal_sequence);
+}
+
+/**
+ * @brief Proves every fanout product callback publishes mirror-first.
+ *
+ * One centralized spy exercises the complete closed callback set, including
+ * the Value-bearing current-visible path. Every event must enter the mirror
+ * before the sequence authority, retain the exact authority-owned coordinate,
+ * and preserve the immutable Value revision in both child calls.
+ *
+ * @throws GoogleTest assertion, Value, and shared-owner allocation failures.
+ */
+TEST(M1Profile, ObservationFanoutDeliversEveryProductEventMirrorFirst) {
+  const compute::ComputeRunObservationCoordinate coordinate{
+      std::chrono::steady_clock::time_point(std::chrono::nanoseconds(23)), 47U};
+  FanoutDeliveryLog log;
+  const auto authority = std::make_shared<FanoutObservationSpySink>(
+      FanoutRecipient::SequenceAuthority, &log, coordinate, true);
+  const auto mirror = std::make_shared<FanoutObservationSpySink>(
+      FanoutRecipient::Mirror, &log, coordinate, true);
+  const auto fanout = make_compute_run_observation_fanout(authority, mirror);
+  ASSERT_NE(fanout, nullptr);
+
+  compute::ComputeRun run(make_observer_submission(
+      "m1-fanout-order", 61U, compute::ComputeRunQosClass::Interactive));
+  const compute::ComputeRunTaskIdentity task_identity(
+      run.descriptor().id(), compute::ComputeRunLocalTaskId(1U));
+  const Value output = testing::make_m1_test_output();
+  const ValueRevisionId output_revision = output.revision_id();
+
+  fanout->on_current_generation(run.descriptor().supersession(), coordinate);
+  fanout->on_task_ready(run.descriptor(), task_identity,
+                        compute::ComputeRunTaskReadyObservation{}, coordinate);
+  fanout->on_service_start(
+      run.descriptor(), task_identity, 8U,
+      compute::ComputeRunServiceStartObservation{true, true, true}, coordinate);
+  fanout->on_task_terminal(run.descriptor(), task_identity,
+                           compute::ComputeRunTaskTerminalKind::Succeeded,
+                           coordinate);
+  fanout->on_cancellation(run.descriptor(),
+                          compute::ComputeRunCancellationReason::Superseded,
+                          coordinate);
+  fanout->on_terminal(run.descriptor(),
+                      compute::ComputeRunTerminalKind::Cancelled, coordinate);
+  fanout->on_current_visible(run.descriptor(), output, coordinate);
+  fanout->on_progressive_final_triggered(run.descriptor(), coordinate);
+  fanout->on_run_quiescent(run.descriptor(), coordinate);
+  fanout->on_run_resource_settled(run.descriptor(), coordinate);
+  fanout->on_host_settled(coordinate);
+
+  constexpr std::array<FanoutProductEvent, kFanoutProductEventCount>
+      kExpectedEvents{
+          FanoutProductEvent::CurrentGeneration,
+          FanoutProductEvent::TaskReady,
+          FanoutProductEvent::ServiceStart,
+          FanoutProductEvent::TaskTerminal,
+          FanoutProductEvent::Cancellation,
+          FanoutProductEvent::Terminal,
+          FanoutProductEvent::CurrentVisible,
+          FanoutProductEvent::ProgressiveFinalTriggered,
+          FanoutProductEvent::RunQuiescent,
+          FanoutProductEvent::RunResourceSettled,
+          FanoutProductEvent::HostSettled,
+      };
+  ASSERT_FALSE(log.overflowed());
+  ASSERT_EQ(log.size(), kExpectedEvents.size() * 2U);
+  for (std::size_t index = 0U; index < kExpectedEvents.size(); ++index) {
+    const FanoutDeliveryRecord& mirror_record = log.at(index * 2U);
+    const FanoutDeliveryRecord& authority_record = log.at(index * 2U + 1U);
+    EXPECT_EQ(mirror_record.event, kExpectedEvents[index]);
+    EXPECT_EQ(authority_record.event, kExpectedEvents[index]);
+    EXPECT_EQ(mirror_record.recipient, FanoutRecipient::Mirror);
+    EXPECT_EQ(authority_record.recipient, FanoutRecipient::SequenceAuthority);
+    EXPECT_EQ(mirror_record.coordinate.observed_at, coordinate.observed_at);
+    EXPECT_EQ(authority_record.coordinate.observed_at, coordinate.observed_at);
+    EXPECT_EQ(mirror_record.coordinate.causal_sequence,
+              coordinate.causal_sequence);
+    EXPECT_EQ(authority_record.coordinate.causal_sequence,
+              coordinate.causal_sequence);
+  }
+  const FanoutDeliveryRecord& mirror_visible = log.at(12U);
+  const FanoutDeliveryRecord& authority_visible = log.at(13U);
+  EXPECT_TRUE(mirror_visible.value_valid);
+  EXPECT_TRUE(authority_visible.value_valid);
+  EXPECT_EQ(mirror_visible.value_revision, output_revision);
+  EXPECT_EQ(authority_visible.value_revision, output_revision);
+  EXPECT_EQ(mirror->callback_count(), kFanoutProductEventCount);
+  EXPECT_EQ(authority->callback_count(), kFanoutProductEventCount);
+}
+
+/**
+ * @brief Proves a mirror-paused fanout callback keeps the M1 cut open.
+ *
+ * Current-generation publication first establishes one source record. A
+ * worker then pauses at current-visible mirror entry before the wrapped I1
+ * collector publishes. A boundary marker reserved and aborted during that
+ * pause must leave the visible coordinate outstanding in M1, so the cut is
+ * unstable and the source has no visible output. Releasing the mirror must
+ * publish both sides at the same coordinate and close the cut exactly once.
+ *
+ * @throws GoogleTest assertion, thread, Value, observer, and snapshot
+ * allocation failures.
+ */
+TEST(M1Profile, MirrorPausedFanoutPublicationKeepsObservationCutOpen) {
+  M1FairnessObservationCollector mixed_collector(1U);
+  I1EpisodeObservationCollector source_collector;
+  const auto mixed_sink =
+      mixed_collector.make_sink(M1ObservedRequestTag::Interactive);
+  const auto source_sink = source_collector.make_edit_sink(0U);
+  FanoutDeliveryLog log;
+  const compute::ComputeRunObservationCoordinate unused_coordinate{};
+  const auto authority = std::make_shared<FanoutObservationSpySink>(
+      FanoutRecipient::SequenceAuthority, &log, unused_coordinate, true,
+      mixed_sink);
+  const auto mirror = std::make_shared<FanoutObservationSpySink>(
+      FanoutRecipient::Mirror, &log, unused_coordinate, false, source_sink,
+      true);
+  const auto fanout = make_compute_run_observation_fanout(authority, mirror);
+  ASSERT_NE(fanout, nullptr);
+
+  compute::ComputeRun run(make_observer_submission(
+      "m1-fanout-frontier", 62U, compute::ComputeRunQosClass::Interactive));
+  const compute::ComputeRunObservationCoordinate current_coordinate =
+      fanout->reserve_causal_coordinate();
+  fanout->on_current_generation(run.descriptor().supersession(),
+                                current_coordinate);
+  const I1EpisodeObservationSnapshot source_before =
+      source_collector.snapshot();
+  ASSERT_EQ(source_before.current_generations.size(), 1U);
+  ASSERT_TRUE(source_before.visible_outputs.empty());
+
+  const Value output = testing::make_m1_test_output();
+  const ValueRevisionId output_revision = output.revision_id();
+  compute::ComputeRunObservationCoordinate visible_coordinate;
+  std::thread worker([&] {
+    visible_coordinate = fanout->reserve_causal_coordinate();
+    fanout->on_current_visible(run.descriptor(), output, visible_coordinate);
+  });
+  for (std::size_t attempt = 0U;
+       attempt < 1000000U && !mirror->current_visible_paused(); ++attempt) {
+    std::this_thread::yield();
+  }
+  if (!mirror->current_visible_paused()) {
+    mirror->release_current_visible();
+    worker.join();
+    FAIL() << "mirror callback did not reach its deterministic barrier";
+    return;
+  }
+
+  const auto boundary_sink =
+      mixed_collector.make_sink(M1ObservedRequestTag::Interactive);
+  const compute::ComputeRunObservationCoordinate boundary_coordinate =
+      boundary_sink->reserve_causal_coordinate();
+  boundary_sink->abort_causal_coordinate(boundary_coordinate);
+  const M1FairnessObservationSnapshot in_flight = mixed_collector.snapshot();
+  const I1EpisodeObservationSnapshot source_in_flight =
+      source_collector.snapshot();
+  EXPECT_FALSE(in_flight.stable_publication_cut);
+  EXPECT_EQ(in_flight.reservation_entry_frontier, 3U);
+  EXPECT_EQ(in_flight.reservation_completion_frontier, 2U);
+  EXPECT_EQ(in_flight.claimed_slot_frontier, 0U);
+  EXPECT_EQ(in_flight.published_slot_frontier, 0U);
+  ASSERT_EQ(source_in_flight.current_generations.size(), 1U);
+  EXPECT_TRUE(source_in_flight.visible_outputs.empty());
+  EXPECT_EQ(log.size(), 3U);
+
+  mirror->release_current_visible();
+  worker.join();
+  const M1FairnessObservationSnapshot after = mixed_collector.snapshot();
+  const I1EpisodeObservationSnapshot source_after = source_collector.snapshot();
+  EXPECT_TRUE(after.stable_publication_cut);
+  EXPECT_EQ(after.reservation_entry_frontier, 3U);
+  EXPECT_EQ(after.reservation_completion_frontier, 3U);
+  EXPECT_EQ(after.claimed_slot_frontier, 0U);
+  EXPECT_EQ(after.published_slot_frontier, 0U);
+  ASSERT_EQ(source_after.current_generations.size(), 1U);
+  ASSERT_EQ(source_after.visible_outputs.size(), 1U);
+  const I1ObservedCurrentGeneration& current =
+      source_after.current_generations.front();
+  const I1ObservedVisibleOutput& visible = source_after.visible_outputs.front();
+  EXPECT_EQ(current.generation,
+            run.descriptor().supersession().generation.value());
+  EXPECT_EQ(visible.generation, current.generation);
+  EXPECT_EQ(visible.run_id, run.descriptor().id().value());
+  EXPECT_EQ(current.observed_at, current_coordinate.observed_at);
+  EXPECT_EQ(current.causal_sequence, current_coordinate.causal_sequence);
+  EXPECT_EQ(visible.observed_at, visible_coordinate.observed_at);
+  EXPECT_EQ(visible.causal_sequence, visible_coordinate.causal_sequence);
+  EXPECT_LT(current.causal_sequence, visible.causal_sequence);
+  ASSERT_TRUE(visible.output.valid());
+  EXPECT_EQ(visible.output.revision_id(), output_revision);
+
+  ASSERT_FALSE(log.overflowed());
+  ASSERT_EQ(log.size(), 4U);
+  EXPECT_EQ(log.at(0U).event, FanoutProductEvent::CurrentGeneration);
+  EXPECT_EQ(log.at(0U).recipient, FanoutRecipient::Mirror);
+  EXPECT_EQ(log.at(0U).coordinate.observed_at, current_coordinate.observed_at);
+  EXPECT_EQ(log.at(0U).coordinate.causal_sequence,
+            current_coordinate.causal_sequence);
+  EXPECT_EQ(log.at(1U).event, FanoutProductEvent::CurrentGeneration);
+  EXPECT_EQ(log.at(1U).recipient, FanoutRecipient::SequenceAuthority);
+  EXPECT_EQ(log.at(1U).coordinate.observed_at, current_coordinate.observed_at);
+  EXPECT_EQ(log.at(1U).coordinate.causal_sequence,
+            current_coordinate.causal_sequence);
+  EXPECT_EQ(log.at(2U).event, FanoutProductEvent::CurrentVisible);
+  EXPECT_EQ(log.at(2U).recipient, FanoutRecipient::Mirror);
+  EXPECT_EQ(log.at(2U).coordinate.observed_at, visible_coordinate.observed_at);
+  EXPECT_EQ(log.at(2U).coordinate.causal_sequence,
+            visible_coordinate.causal_sequence);
+  EXPECT_EQ(log.at(3U).event, FanoutProductEvent::CurrentVisible);
+  EXPECT_EQ(log.at(3U).recipient, FanoutRecipient::SequenceAuthority);
+  EXPECT_EQ(log.at(3U).coordinate.observed_at, visible_coordinate.observed_at);
+  EXPECT_EQ(log.at(3U).coordinate.causal_sequence,
+            visible_coordinate.causal_sequence);
+  EXPECT_TRUE(log.at(2U).value_valid);
+  EXPECT_TRUE(log.at(3U).value_valid);
+  EXPECT_EQ(log.at(2U).value_revision, output_revision);
+  EXPECT_EQ(log.at(3U).value_revision, output_revision);
+  EXPECT_EQ(authority->reservation_count(), 2U);
+  EXPECT_EQ(mirror->reservation_count(), 0U);
+  EXPECT_EQ(authority->abort_count(), 0U);
+  EXPECT_EQ(mirror->abort_count(), 0U);
 }
 
 /**
