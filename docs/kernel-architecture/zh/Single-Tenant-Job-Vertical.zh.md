@@ -74,6 +74,14 @@ payload/directory cleanup 失败也会释放 charge。启动时会从已校验 a
 charge；如果 configured retention 低于 recovered data，则 fail closed。Active attempt
 reservation 永不重建。
 
+Active-attempt release 会在首次 mutation 前校验完整 subtraction，并提供强异常保证。如果
+release 抛出异常，service 会把精确 reservation owner 保留在 terminal Job control 上；若
+submit/retry rollback 没有 durable Job，则转移到一个 service-owned stranded slot。随后它会
+单调 fail-stop submit、retry、cancellation、worker report、artifact deletion 和其他所有
+durable mutation。Query、bounded wait、artifact lookup 与 quota inspection 仍然可用。同一
+进程内，service 不会重试 release，也不会发布补偿性的 terminal record。Restart 会丢弃
+process-local active reservation、重建 durable Job/artifact truth，并清除此 fail-stop。
+
 CPU slot 同时限制 Embedded Host `maximum_parallelism`。Host-memory 与 device 值是保守的
 进程内 admission declaration，不是 OS memory/device enforcement，也不替代 worker-local
 `ResourceLedger`；Issue #100 拥有该 process 与 OS-resource boundary。
@@ -164,7 +172,10 @@ ownership record，在 service mutex 仍阻塞 worker progress 时启动唯一 a
 然后发布 accepted truth。因此 native-thread 启动失败发生在 durable publication 之前，不会
 暴露 Job 或 handle。`NotPublished` journal failure 会移除 candidate 并释放其 quota；任一
 published failure 会保留与 visible record 对齐的 Job、worker authority 与 quota，并进入单调
-journal fail-stop。`query()` 复制当前 truth；`wait_for()` 只限制
+journal fail-stop。如果 native-thread-start 或 `NotPublished` rollback 无法释放 quota，
+candidate Job 仍未发布，精确 reservation owner 会转移到 service 的 stranded slot，原始
+submit error 会被重新抛出，后续所有 mutation 在 restart 前均被 fail-stop。`query()` 复制
+当前 truth；`wait_for()` 只限制
 observer wait，二者在 fail-stop 后仍可用。
 
 `retry(JobId)` 只接受已经 settled、且没有 current worker/reservation 的 `Failed` Job。它
@@ -174,6 +185,9 @@ replacement。`NotPublished` 会恢复先前 failed truth 并释放新 reservati
 outcome 都会保留新 attempt 与 reservation、fence worker progress，并 fail-stop 后续 durable
 mutation。Report 必须匹配完整 current tenant/Job/spec/attempt/worker/lease tuple，因此 stale
 attempt 会被 fence，不能 settle、fail、cancel 或 commit replacement。
+如果 thread-start 或 `NotPublished` retry rollback 无法释放 fresh reservation，先前 failed
+Job truth 仍是 authoritative，fresh owner 会转移到 stranded slot，触发 retry 的 error 会被
+重新抛出，并且同一 fail-stop 生效，不会在同一进程内重试。
 
 Worker report 一旦通过 identity 与 semantic-shape fence，后续 control-plane durability
 failure 就不会抹除其 outcome 或 settlement evidence。Manifest 发布前失败会成为已 settled
@@ -186,6 +200,11 @@ lookup/revalidation 仍存在 manifest-visible 歧义，后续任何 barrier rep
 conversion 失败时保留 active reservation；conversion 成功但随后 Job journal 在 publication
 前失败时保留 retained charge。Worker 以及后续 report/mutation 都会被 fence，直至 restart
 重建并 reconcile 当前最强 durable truth。
+
+Failed、Cancelled、`ReportRejected`、malformed-report 和 manifest 发布前
+`ArtifactCommit` terminal publication 之后，也适用同一 release-failure 规则。不能只因 quota
+settlement 抛出异常就重写 durable terminal truth；reservation 仍有 owner，所有 mutation 与
+后续 report 都会被 fence，restart 会以零 active reservation 恢复已记录的 terminal state。
 
 重启绝不会恢复进程内 Graph/Run/Host/thread 或 ledger object。没有 matching committed
 artifact 的 nonterminal durable record 会变为已 settled 的
@@ -245,7 +264,8 @@ isolation、forced termination 或 bounded shutdown。这些属性仍属于 Issu
   `tests/integration/test_single_tenant_job_product_path.cpp`。
 
 持续维护测试覆盖 canonical digest/validation、共享的 128-device admission/recovery 上限与
-129-device rejection、每个 quota dimension 与多设备核算、精确 settlement、所有 Job-record
+129-device rejection、每个 quota dimension 与多设备核算、精确 settlement 与强异常保证的
+release fault、所有 Job-record
 publication/barrier fault stage 的内存与重启 truth、manifest 前后 failure、manifest
 前双 index preparation rollback、manifest-visible pending lookup/retry barrier replay 与 replay
 failure、root barrier 后 acknowledgement 丢失、quota-conversion reconciliation fail-stop、
@@ -255,7 +275,10 @@ idempotent reconciliation、所有 artifact-deletion fault stage 的双 alias �
 fail-stop 与 restart cleanup、同进程 deleted-checkpoint rejection、checkpoint
 authorization/re-authorization、显式 retry 与 fresh fencing、submit/retry thread-start
 rollback、submit/retry/cancel journal fail-stop、interrupted/successful restart、cancellation
-ordering、stale/malformed report、持续 thread reaping、target-inventory platform gating，以及
+ordering、stale/malformed report、submit/retry thread-start 与 `NotPublished` rollback 的
+release-failure ownership、Failed/Cancelled/rejected/malformed/pre-manifest terminal truth、
+read-only availability、report/mutation fencing 与 restart convergence、持续 thread reaping、
+target-inventory platform gating，以及
 真实 Embedded Host output/checkpoint/restart 行为。
 
 目标 multi-process model 仍由

@@ -83,6 +83,17 @@ cleanup later fails. Startup reconstructs retained charges from validated
 artifacts and fails closed if configured retention is below recovered data;
 active attempt reservations are never reconstructed.
 
+Active-attempt release validates the complete subtraction before its first
+mutation and has a strong exception guarantee. If release raises, the service
+keeps the exact reservation owner on the terminal Job control, or transfers a
+submit/retry rollback owner with no durable Job into one service-owned stranded
+slot. It then monotonically fail-stops submit, retry, cancellation, worker
+reports, artifact deletion, and every other durable mutation. Query, bounded
+wait, artifact lookup, and quota inspection remain available. The service does
+not retry release or publish a compensating terminal record in the same
+process. Restart drops process-local active reservations, reconstructs durable
+Job/artifact truth, and clears this fail-stop.
+
 CPU slots also cap Embedded Host `maximum_parallelism`. Host-memory and device
 values are conservative in-process admission declarations. They are not OS
 memory/device enforcement and do not replace the worker-local
@@ -194,6 +205,10 @@ before durable publication and exposes neither a Job nor a handle. A
 `NotPublished` journal failure removes the candidate and releases its quota. A
 published failure keeps the Job, worker authority, and quota aligned with the
 visible record and enters the monotonic journal fail-stop.
+If native-thread-start or `NotPublished` rollback cannot release quota, the
+candidate Job remains unpublished, the exact reservation owner moves to the
+service's stranded slot, the original submit error is rethrown, and all later
+mutation is fail-stopped until restart.
 `query()` copies current truth; `wait_for()` bounds only observer waiting, and
 both remain available while fail-stopped.
 
@@ -207,6 +222,10 @@ fences worker progress, and fail-stops later durable mutation. Reports must
 match the complete current tenant/Job/spec/attempt/worker/lease tuple, so a
 stale attempt is fenced without settling, failing, cancelling, or committing
 the replacement.
+If thread-start or `NotPublished` retry rollback cannot release the fresh
+reservation, the prior failed Job truth remains authoritative, the fresh owner
+moves to the stranded slot, the triggering retry error is rethrown, and the
+same fail-stop applies without a same-process retry.
 
 Once a worker report passes the identity and semantic-shape fence, a later
 control-plane durability failure does not erase its outcome or settlement
@@ -223,6 +242,13 @@ reservation. A failed quota conversion keeps the active reservation; a
 successful conversion followed by pre-publication Job-journal failure keeps
 the retained charge. Workers and later reports/mutations are fenced until
 restart reconstructs and reconciles the strongest durable truth.
+
+The same release-failure rule applies after Failed, Cancelled,
+`ReportRejected`, malformed-report, and pre-manifest `ArtifactCommit` terminal
+publication. Durable terminal truth is not rewritten merely because quota
+settlement raised; the reservation remains owned, all mutation and later
+reports are fenced, and restart recovers the recorded terminal state with zero
+active reservations.
 
 Restart never resumes process-local Graph/Run/Host/thread or ledger objects. A
 nonterminal durable record with no matching committed artifact becomes settled
@@ -292,7 +318,8 @@ Long-lived entry points are:
 
 Maintained tests cover canonical digest/validation, the shared 128-device
 admission/recovery maximum and 129-device rejection, every quota dimension and
-multi-device accounting, exact settlement, all Job-record publication/barrier
+multi-device accounting, exact settlement and strong-guarantee release fault,
+all Job-record publication/barrier
 fault stages with in-memory and restart truth, manifest-before/after failure,
 pre-manifest dual-index preparation rollback, manifest-visible pending
 lookup/retry barrier replay and replay failure, post-root-barrier acknowledgement
@@ -305,6 +332,9 @@ cleanup, same-process deleted-checkpoint rejection, checkpoint
 authorization/re-authorization, explicit retry and fresh fencing, submit/retry
 thread-start rollback, submit/retry/cancel journal fail-stop,
 interrupted/successful restart, cancellation ordering, stale/malformed reports,
+release-failure ownership for submit/retry thread-start and `NotPublished`
+rollback, Failed/Cancelled/rejected/malformed/pre-manifest terminal truth,
+read-only availability, report/mutation fencing, and restart convergence,
 ongoing thread reaping, target-inventory platform gating, and real Embedded Host
 output/checkpoint/restart behavior.
 
