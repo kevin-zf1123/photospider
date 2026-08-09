@@ -110,21 +110,30 @@ Artifact commit 会校验 server-owned request 与 CPU image，把 active row �
 payload，校验 output/staging/retention bound，并 reconcile 已存在的 durable occurrence 或
 安全 residue。新的 publication 随后会：
 
-1. 准备完整的 private `ArtifactId` 与 `OutputCommitId` index 副本，并以可回滚方式同时安装；
+1. 准备完整的 private `ArtifactId` 与 `OutputCommitId` index 副本，以及一个以 ArtifactId 为键的
+   durability-confirmation 副本，然后以可回滚方式同时安装三者；
 2. 创建固定 opaque artifact directory；
 3. 写入、同步、重新打开并 hash `payload.bin`；
 4. 写入 private canonical manifest；
-5. 以 no-replace 原子发布固定 `manifest` 名称，并立即令两个已安装 index 成为 authority；
+5. 以 no-replace 原子发布固定 `manifest` 名称，并立即令两个已安装 alias 成为 authority 且可识别，
+   同时让它们共享的 confirmation state 保持 pending；
 6. 删除 private manifest；
-7. 同步 artifact directory、artifacts directory 与 root。
+7. 同步 artifact directory、artifacts directory 与 root，然后在确认完成 acknowledgement 前，
+   于同一 mutex 下记录 confirmation。
 
 Manifest presence 是 visibility point。Manifest 前的明确 residue 会被删除，两个 index
-副本也会恢复；manifest 发布后，在后续任何可能抛异常的 cleanup、revalidation、observer 或
-barrier 之前，按 `ArtifactId` 与 `OutputCommitId` 的直接查询都已经可用。Recovery 与 lazy
-lookup 会校验 descriptor、payload length/digest、tenant/Job/spec/slot/artifact/commit join，
-原子修复两个精确 alias，只清理安全 residue，并重新执行 barrier chain。使用相同 stable
-commit 的 retry，只有在全部 stable identity、descriptor、digest 与 payload fact 匹配时才
-返回原 receipt。Reporting attempt 可以不同，因为原始 acknowledgement 可能丢失。任何其他
+及 confirmation 副本也会恢复。Manifest 发布后，在后续任何可能抛异常的 cleanup、validation、
+observer 或 barrier 之前，两个 alias 都已经成为 authority 并可在内部识别，因此不会只索引
+其中一个 alias，也不会把任一 alias 误报为 absent。但在 confirmation 仍为 pending 时，它们
+还不能向外返回 artifact/receipt。首次 `ArtifactId` lookup、`OutputCommitId` lookup、
+same-commit retry 或 service reconciliation 必须重新加载并校验精确 descriptor、payload
+length/digest、tenant/Job/spec/slot/artifact/commit join，并重放完整 artifact-directory、
+artifacts-directory 与 root barrier chain。只有随后一次在锁内进行且不抛异常的 confirmation
+transition 才允许返回 crash-durable 结果。Confirmation 会先于最终 completion observer，
+所以 root barrier 后丢失 acknowledgement 仍会保留 confirmed truth。Recovery 与 lazy repair
+会把两个精确 alias 及 confirmation 作为一个 transaction 安装。使用相同 stable commit 的
+retry，只有在全部 stable identity、descriptor、digest 与 payload fact 匹配时才返回原
+receipt。Reporting attempt 可以不同，因为原始 acknowledgement 可能丢失。任何其他
 collision 都会 fail closed。
 
 Deletion 会先准备已移除目标的两个 index，然后报告四个不可逆状态之一：`NotRemoved`、
@@ -169,8 +178,14 @@ attempt 会被 fence，不能 settle、fail、cancel 或 commit replacement。
 Worker report 一旦通过 identity 与 semantic-shape fence，后续 control-plane durability
 failure 就不会抹除其 outcome 或 settlement evidence。Manifest 发布前失败会成为已 settled
 的 `Failed(ArtifactCommit)`，释放 active reservation，并保持可显式 retry。Manifest 发布后
-失败则先重新校验 stable occurrence，将其 reconcile 为 `Succeeded`，且 retention 恰好 charge
-一次。
+失败则先重新校验并重放 pending barrier chain，再将 stable occurrence reconcile 为
+`Succeeded`，且 retention 恰好 charge 一次。一旦观察到精确匹配的 artifact truth，或者
+lookup/revalidation 仍存在 manifest-visible 歧义，后续任何 barrier replay、quota conversion
+或 `Succeeded` Job-record publication failure 都会进入单调 reconciliation fail-stop。它绝不会
+写入补偿性的 `Failed/ArtifactCommit` record，也不会释放仍然有效的 reservation。Quota
+conversion 失败时保留 active reservation；conversion 成功但随后 Job journal 在 publication
+前失败时保留 retained charge。Worker 以及后续 report/mutation 都会被 fence，直至 restart
+重建并 reconcile 当前最强 durable truth。
 
 重启绝不会恢复进程内 Graph/Run/Host/thread 或 ledger object。没有 matching committed
 artifact 的 nonterminal durable record 会变为已 settled 的
@@ -232,8 +247,10 @@ isolation、forced termination 或 bounded shutdown。这些属性仍属于 Issu
 持续维护测试覆盖 canonical digest/validation、共享的 128-device admission/recovery 上限与
 129-device rejection、每个 quota dimension 与多设备核算、精确 settlement、所有 Job-record
 publication/barrier fault stage 的内存与重启 truth、manifest 前后 failure、manifest
-前双 index preparation rollback、manifest 发布后立即按 OutputCommitId 查询、root
-lock/no-follow/identity drift、safe cleanup、corruption 与精确 Job/artifact recovery join、
+前双 index preparation rollback、manifest-visible pending lookup/retry barrier replay 与 replay
+failure、root barrier 后 acknowledgement 丢失、quota-conversion reconciliation fail-stop、
+连续 `Succeeded` pre-publication journal failure、worker/report fencing 与 restart quota truth、
+root lock/no-follow/identity drift、safe cleanup、corruption 与精确 Job/artifact recovery join、
 idempotent reconciliation、所有 artifact-deletion fault stage 的双 alias 撤销、精确 quota、
 fail-stop 与 restart cleanup、同进程 deleted-checkpoint rejection、checkpoint
 authorization/re-authorization、显式 retry 与 fresh fencing、submit/retry thread-start

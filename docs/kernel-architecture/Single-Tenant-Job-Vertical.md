@@ -128,25 +128,36 @@ reconciles any pre-existing durable occurrence or safe residue. A fresh
 publication then:
 
 1. prepares complete private `ArtifactId` and `OutputCommitId` index copies and
-   installs both with rollback authority;
+   one ArtifactId-keyed durability-confirmation copy, then installs all three
+   with rollback authority;
 2. creates the fixed opaque artifact directory;
 3. writes, synchronizes, reopens, and hashes `payload.bin`;
 4. writes a private canonical manifest;
 5. atomically publishes the fixed `manifest` name without replacement and
-   immediately makes both installed indexes authoritative;
+   immediately makes both installed aliases authoritative and recognizable,
+   with their shared confirmation state still pending;
 6. removes the private manifest; and
-7. synchronizes the artifact directory, artifacts directory, and root.
+7. synchronizes the artifact directory, artifacts directory, and root, then
+   records confirmation under the same mutex before acknowledging completion.
 
 Manifest presence is the visibility point. Pre-manifest unambiguous residue is
-removed and both index copies are restored; after publication both direct
-`ArtifactId` and `OutputCommitId` lookup are already available before any later
-throwing cleanup, revalidation, observer, or barrier. Recovery and lazy lookup
-verify descriptor, payload length/digest, tenant/Job/spec/slot/artifact/commit
-joins, atomically repair both exact aliases, clean only safe residue, and
-reapply the barrier chain. A retry with the same stable commit returns the
-original receipt only when all stable identity, descriptor, digest, and payload
-facts match. The reporting attempt may differ because the original
-acknowledgement can be lost. Any other collision fails closed.
+removed and both alias plus confirmation copies are restored. After manifest
+publication both aliases are authoritative and internally recognizable before
+any later throwing cleanup, validation, observer, or barrier, so neither alias
+can be partially indexed or misreported absent. They are not yet eligible for
+an external artifact/receipt return while confirmation is pending. The first
+`ArtifactId` lookup, `OutputCommitId` lookup, same-commit retry, or service
+reconciliation must reload and verify the exact descriptor, payload
+length/digest, tenant/Job/spec/slot/artifact/commit joins and replay the complete
+artifact-directory, artifacts-directory, and root barrier chain. Only the
+single locked no-throw confirmation transition then permits a crash-durable
+return. Confirmation occurs before the final completion observer, so a lost
+acknowledgement after the root barrier preserves confirmed truth. Recovery and
+lazy repair install both exact aliases plus confirmation as one transaction.
+A retry with the same stable commit returns the original receipt only when all
+stable identity, descriptor, digest, and payload facts match. The reporting
+attempt may differ because the original acknowledgement can be lost. Any other
+collision fails closed.
 
 Deletion pre-stages both indexes without the target, then reports one of four
 irreversible states: `NotRemoved`,
@@ -201,9 +212,17 @@ Once a worker report passes the identity and semantic-shape fence, a later
 control-plane durability failure does not erase its outcome or settlement
 evidence. A failure before manifest publication becomes settled `Failed` with
 `ArtifactCommit`, releases the active reservation, and remains explicitly
-retryable. A failure after manifest publication first revalidates and
-reconciles that stable occurrence to `Succeeded` and charges retention exactly
-once.
+retryable. A failure after manifest publication first revalidates and replays
+the pending barrier chain before reconciling that stable occurrence to
+`Succeeded` and charging retention exactly once. Once exact matching artifact
+truth is observed—or lookup/revalidation remains manifest-visible ambiguous—any
+later barrier replay, quota conversion, or `Succeeded` Job-record publication
+failure enters monotonic reconciliation fail-stop. It never writes a
+compensating `Failed/ArtifactCommit` record and never releases a still-valid
+reservation. A failed quota conversion keeps the active reservation; a
+successful conversion followed by pre-publication Job-journal failure keeps
+the retained charge. Workers and later reports/mutations are fenced until
+restart reconstructs and reconciles the strongest durable truth.
 
 Restart never resumes process-local Graph/Run/Host/thread or ledger objects. A
 nonterminal durable record with no matching committed artifact becomes settled
@@ -275,13 +294,16 @@ Maintained tests cover canonical digest/validation, the shared 128-device
 admission/recovery maximum and 129-device rejection, every quota dimension and
 multi-device accounting, exact settlement, all Job-record publication/barrier
 fault stages with in-memory and restart truth, manifest-before/after failure,
-pre-manifest dual-index preparation rollback, immediate post-manifest
-OutputCommitId lookup, root locking/no-follow/identity drift, safe cleanup,
-corruption and exact Job/artifact recovery joins, idempotent reconciliation,
-all artifact-deletion fault stages with dual-alias revocation, exact quota,
-fail-stop and restart cleanup, same-process deleted-checkpoint rejection,
-checkpoint authorization/re-authorization, explicit retry and fresh fencing,
-submit/retry thread-start rollback, submit/retry/cancel journal fail-stop,
+pre-manifest dual-index preparation rollback, manifest-visible pending
+lookup/retry barrier replay and replay failure, post-root-barrier acknowledgement
+loss, quota-conversion reconciliation fail-stop, repeated `Succeeded`
+pre-publication journal failure, worker/report fencing and restart quota truth,
+root locking/no-follow/identity drift, safe cleanup, corruption and exact
+Job/artifact recovery joins, idempotent reconciliation, all artifact-deletion
+fault stages with dual-alias revocation, exact quota, fail-stop and restart
+cleanup, same-process deleted-checkpoint rejection, checkpoint
+authorization/re-authorization, explicit retry and fresh fencing, submit/retry
+thread-start rollback, submit/retry/cancel journal fail-stop,
 interrupted/successful restart, cancellation ordering, stale/malformed reports,
 ongoing thread reaping, target-inventory platform gating, and real Embedded Host
 output/checkpoint/restart behavior.
