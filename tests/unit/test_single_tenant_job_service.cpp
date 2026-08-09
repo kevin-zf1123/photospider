@@ -1448,6 +1448,115 @@ TEST(DurableServerState,
   EXPECT_EQ(record->receipt.content_digest, original.content_digest);
 }
 
+TEST(DurableServerState,
+     PendingDurabilityReplaysBarriersBeforeEveryReceiptReturnPath) {
+  constexpr std::size_t kReturnPathCount = 3U;
+  for (std::size_t return_path = 0U; return_path < kReturnPathCount;
+       ++return_path) {
+    SCOPED_TRACE(return_path);
+    ScopedTestStateRoot root;
+    std::atomic<bool> manifest_failure_armed{true};
+    std::atomic<bool> replay_failure_armed{true};
+    std::atomic<std::size_t> revalidations{0U};
+    std::atomic<std::size_t> root_replays{0U};
+    DurableServerStateOptions options;
+    options.artifact_commit_observer = [&manifest_failure_armed,
+                                        &replay_failure_armed, &revalidations,
+                                        &root_replays](
+                                           DurableArtifactCommitStage stage) {
+      if (stage == DurableArtifactCommitStage::ManifestPublished &&
+          manifest_failure_armed.exchange(false, std::memory_order_acq_rel)) {
+        throw std::runtime_error(
+            "injected manifest-visible acknowledgement failure");
+      }
+      if (stage == DurableArtifactCommitStage::DurabilityRevalidationStarted) {
+        revalidations.fetch_add(1U, std::memory_order_relaxed);
+      }
+      if (stage == DurableArtifactCommitStage::RootDirectoryBarrierReplay) {
+        root_replays.fetch_add(1U, std::memory_order_relaxed);
+        if (replay_failure_armed.exchange(false, std::memory_order_acq_rel)) {
+          throw std::runtime_error(
+              "injected pending durability root-barrier failure");
+        }
+      }
+    };
+    DurableServerState store(root.path(), TenantId("tenant.test"), options);
+    const DurableArtifactCommitRequest request =
+        make_test_commit_request(90U + return_path);
+    ImageBuffer image = make_test_image();
+    EXPECT_THROW(store.commit_artifact(request, image), std::runtime_error);
+
+    DurableArtifactCommitRequest retry = request;
+    retry.attempt.attempt_id = JobAttemptId("attempt.test.pending-retry");
+    retry.attempt.worker_instance_id =
+        WorkerInstanceId("worker.test.pending-retry");
+    ++retry.attempt.worker_lease_generation.value;
+    const auto exercise_return_path = [&]() -> OutputCommitReceipt {
+      if (return_path == 0U) {
+        const auto record = store.find_commit(request.output_commit_id);
+        if (record == nullptr) {
+          throw std::runtime_error("pending commit alias was reported absent");
+        }
+        return record->receipt;
+      }
+      if (return_path == 1U) {
+        const auto record = store.find_artifact(request.artifact_id);
+        if (record == nullptr) {
+          throw std::runtime_error(
+              "pending artifact alias was reported absent");
+        }
+        return record->receipt;
+      }
+      return store.commit_artifact(retry, image);
+    };
+
+    EXPECT_THROW(static_cast<void>(exercise_return_path()), std::runtime_error);
+    EXPECT_EQ(revalidations.load(std::memory_order_relaxed), 1U);
+    EXPECT_EQ(root_replays.load(std::memory_order_relaxed), 1U);
+
+    const OutputCommitReceipt confirmed = exercise_return_path();
+    EXPECT_EQ(confirmed.artifact_id, request.artifact_id);
+    EXPECT_EQ(confirmed.output_commit_id, request.output_commit_id);
+    EXPECT_EQ(confirmed.achieved_durability, ArtifactDurability::CrashDurable);
+    EXPECT_EQ(revalidations.load(std::memory_order_relaxed), 2U);
+    EXPECT_EQ(root_replays.load(std::memory_order_relaxed), 2U);
+
+    static_cast<void>(exercise_return_path());
+    EXPECT_EQ(revalidations.load(std::memory_order_relaxed), 2U);
+    EXPECT_EQ(root_replays.load(std::memory_order_relaxed), 2U);
+  }
+}
+
+TEST(DurableServerState,
+     CompletedBarrierTruthSurvivesFinalObserverAcknowledgementFailure) {
+  ScopedTestStateRoot root;
+  std::atomic<bool> completion_failure_armed{true};
+  std::atomic<std::size_t> revalidations{0U};
+  DurableServerStateOptions options;
+  options.artifact_commit_observer = [&completion_failure_armed,
+                                      &revalidations](
+                                         DurableArtifactCommitStage stage) {
+    if (stage == DurableArtifactCommitStage::DurabilityRevalidationStarted) {
+      revalidations.fetch_add(1U, std::memory_order_relaxed);
+    }
+    if (stage == DurableArtifactCommitStage::DirectoryBarriersCompleted &&
+        completion_failure_armed.exchange(false, std::memory_order_acq_rel)) {
+      throw std::runtime_error(
+          "injected completed-barrier acknowledgement failure");
+    }
+  };
+  DurableServerState store(root.path(), TenantId("tenant.test"), options);
+  const DurableArtifactCommitRequest request = make_test_commit_request(94U);
+  ImageBuffer image = make_test_image();
+
+  EXPECT_THROW(store.commit_artifact(request, image), std::runtime_error);
+  const std::shared_ptr<const ArtifactRecord> confirmed =
+      store.find_commit(request.output_commit_id);
+  ASSERT_NE(confirmed, nullptr);
+  EXPECT_EQ(confirmed->receipt.artifact_id, request.artifact_id);
+  EXPECT_EQ(revalidations.load(std::memory_order_relaxed), 0U);
+}
+
 TEST(DurableServerState, RollsBackBothAliasesWhenPrivateIndexPreparationFails) {
   constexpr std::array<DurableArtifactCommitStage, 2U> stages{
       DurableArtifactCommitStage::ArtifactIndexPrepared,
@@ -2160,6 +2269,251 @@ TEST(SingleTenantJobService,
   EXPECT_EQ(usage.active_attempts, 0U);
   EXPECT_EQ(usage.retention_bytes, 12U);
   EXPECT_EQ(usage.retained_artifacts, 1U);
+}
+
+TEST(SingleTenantJobService,
+     PendingBarrierReplayFailureFailStopsAndRestartReconcilesSuccess) {
+  ScopedTestStateRoot root;
+  std::atomic<std::size_t> worker_calls{0U};
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [&worker_calls](const JobAssignment& assignment,
+                      const std::function<bool()>& cancellation_requested) {
+        worker_calls.fetch_add(1U, std::memory_order_relaxed);
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+  std::atomic<bool> manifest_failure_armed{true};
+  std::atomic<std::size_t> replay_attempts{0U};
+  JobSubmission submission;
+  {
+    DurableServerStateOptions options;
+    options.artifact_commit_observer = [&manifest_failure_armed,
+                                        &replay_attempts](
+                                           DurableArtifactCommitStage stage) {
+      if (stage == DurableArtifactCommitStage::ManifestPublished &&
+          manifest_failure_armed.exchange(false, std::memory_order_acq_rel)) {
+        throw std::runtime_error(
+            "injected manifest-visible acknowledgement failure");
+      }
+      if (stage == DurableArtifactCommitStage::RootDirectoryBarrierReplay) {
+        replay_attempts.fetch_add(1U, std::memory_order_relaxed);
+        throw std::runtime_error("injected repeated durability replay failure");
+      }
+    };
+    SingleTenantJobService service(TenantId("tenant.test"), test_quota_limits(),
+                                   root.path(), factory, std::move(options));
+    submission = service.submit(JobSpec(GraphArtifactId("graph.test"), 7,
+                                        OutputSlotId("image.final"),
+                                        test_job_resources()));
+    ASSERT_TRUE(SingleTenantJobServiceTestAccess::
+                    wait_for_owned_worker_thread_count_at_most(
+                        service, 0U, std::chrono::seconds(2)));
+
+    const std::optional<JobSnapshot> pending = service.query(submission.job_id);
+    ASSERT_TRUE(pending.has_value());
+    EXPECT_EQ(pending->state, JobState::Running);
+    EXPECT_FALSE(pending->output_receipt.has_value());
+    EXPECT_TRUE(
+        SingleTenantJobServiceTestAccess::artifact_reconciliation_faulted(
+            service));
+    EXPECT_TRUE(
+        SingleTenantJobServiceTestAccess::durable_mutation_faulted(service));
+    EXPECT_FALSE(SingleTenantJobServiceTestAccess::journal_faulted(service));
+    EXPECT_GE(replay_attempts.load(std::memory_order_relaxed), 1U);
+    EXPECT_THROW(service.find_artifact(pending->output_artifact_id),
+                 std::runtime_error);
+
+    const TenantQuotaSnapshot usage = service.quota_snapshot();
+    EXPECT_EQ(usage.active_attempts, 1U);
+    EXPECT_EQ(usage.retention_bytes,
+              pending->spec->resource_request().retention_bytes);
+    EXPECT_EQ(usage.retained_artifacts, 0U);
+
+    JobAssignment assignment{pending->assignment, pending->spec, nullptr};
+    SingleTenantJobServiceTestAccess::inject_attempt_report(
+        service, pending->assignment, successful_report(assignment));
+    const std::optional<JobSnapshot> fenced = service.query(submission.job_id);
+    ASSERT_TRUE(fenced.has_value());
+    EXPECT_EQ(fenced->state, JobState::Running);
+    EXPECT_EQ(service.quota_snapshot().active_attempts, 1U);
+    EXPECT_THROW(service.submit(JobSpec(GraphArtifactId("graph.test"), 8,
+                                        OutputSlotId("image.final"),
+                                        test_job_resources())),
+                 DurableStateError);
+  }
+
+  SingleTenantJobService recovered(TenantId("tenant.test"), test_quota_limits(),
+                                   root.path(), factory);
+  const std::optional<JobSnapshot> succeeded =
+      recovered.query(submission.job_id);
+  ASSERT_TRUE(succeeded.has_value());
+  ASSERT_EQ(succeeded->state, JobState::Succeeded);
+  ASSERT_TRUE(succeeded->output_receipt.has_value());
+  EXPECT_FALSE(
+      SingleTenantJobServiceTestAccess::durable_mutation_faulted(recovered));
+  EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
+  EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 12U);
+  EXPECT_EQ(recovered.quota_snapshot().retained_artifacts, 1U);
+  EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 1U);
+}
+
+TEST(SingleTenantJobService,
+     QuotaConversionFailureKeepsReservationAndRestartReconcilesSuccess) {
+  ScopedTestStateRoot root;
+  std::atomic<std::size_t> worker_calls{0U};
+  std::atomic<std::size_t> conversion_attempts{0U};
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [&worker_calls](const JobAssignment& assignment,
+                      const std::function<bool()>& cancellation_requested) {
+        worker_calls.fetch_add(1U, std::memory_order_relaxed);
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+  JobSubmission submission;
+  {
+    TenantQuotaAuthorityOptions quota_options;
+    quota_options.retained_artifact_commit_observer = [&conversion_attempts] {
+      conversion_attempts.fetch_add(1U, std::memory_order_relaxed);
+      throw std::runtime_error("injected quota conversion failure");
+    };
+    SingleTenantJobService service(TenantId("tenant.test"), test_quota_limits(),
+                                   root.path(), factory, {},
+                                   std::move(quota_options));
+    submission = service.submit(JobSpec(GraphArtifactId("graph.test"), 7,
+                                        OutputSlotId("image.final"),
+                                        test_job_resources()));
+    ASSERT_TRUE(SingleTenantJobServiceTestAccess::
+                    wait_for_owned_worker_thread_count_at_most(
+                        service, 0U, std::chrono::seconds(2)));
+
+    const std::optional<JobSnapshot> pending = service.query(submission.job_id);
+    ASSERT_TRUE(pending.has_value());
+    EXPECT_EQ(pending->state, JobState::Running);
+    EXPECT_FALSE(pending->output_receipt.has_value());
+    EXPECT_EQ(conversion_attempts.load(std::memory_order_relaxed), 2U);
+    EXPECT_TRUE(
+        SingleTenantJobServiceTestAccess::artifact_reconciliation_faulted(
+            service));
+    EXPECT_FALSE(SingleTenantJobServiceTestAccess::journal_faulted(service));
+    EXPECT_NE(service.find_artifact(pending->output_artifact_id), nullptr);
+
+    const TenantQuotaSnapshot usage = service.quota_snapshot();
+    EXPECT_EQ(usage.active_attempts, 1U);
+    EXPECT_EQ(usage.retention_bytes,
+              pending->spec->resource_request().retention_bytes);
+    EXPECT_EQ(usage.retained_artifacts, 0U);
+
+    JobAssignment assignment{pending->assignment, pending->spec, nullptr};
+    SingleTenantJobServiceTestAccess::inject_attempt_report(
+        service, pending->assignment, successful_report(assignment));
+    EXPECT_EQ(conversion_attempts.load(std::memory_order_relaxed), 2U);
+    EXPECT_EQ(service.query(submission.job_id)->state, JobState::Running);
+    EXPECT_EQ(service.quota_snapshot().active_attempts, 1U);
+  }
+
+  SingleTenantJobService recovered(TenantId("tenant.test"), test_quota_limits(),
+                                   root.path(), factory);
+  const std::optional<JobSnapshot> succeeded =
+      recovered.query(submission.job_id);
+  ASSERT_TRUE(succeeded.has_value());
+  ASSERT_EQ(succeeded->state, JobState::Succeeded);
+  ASSERT_TRUE(succeeded->output_receipt.has_value());
+  EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
+  EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 12U);
+  EXPECT_EQ(recovered.quota_snapshot().retained_artifacts, 1U);
+  EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 1U);
+}
+
+TEST(SingleTenantJobService,
+     TwoSucceededJournalPrePublicationFailuresPreserveRetainedTruth) {
+  ScopedTestStateRoot root;
+  auto gate = std::make_shared<WorkerGate>();
+  std::atomic<std::size_t> worker_calls{0U};
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [gate, &worker_calls](
+          const JobAssignment& assignment,
+          const std::function<bool()>& cancellation_requested) {
+        worker_calls.fetch_add(1U, std::memory_order_relaxed);
+        gate->enter_and_wait();
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+  std::atomic<std::size_t> remaining_failures{0U};
+  std::atomic<std::size_t> observed_failures{0U};
+  JobSubmission submission;
+  {
+    DurableServerStateOptions options;
+    options.job_commit_observer =
+        [&remaining_failures, &observed_failures](DurableJobCommitStage stage) {
+          if (stage != DurableJobCommitStage::PrivateFileSynchronized) {
+            return;
+          }
+          std::size_t remaining =
+              remaining_failures.load(std::memory_order_acquire);
+          while (remaining != 0U &&
+                 !remaining_failures.compare_exchange_weak(
+                     remaining, remaining - 1U, std::memory_order_acq_rel,
+                     std::memory_order_acquire)) {
+          }
+          if (remaining != 0U) {
+            observed_failures.fetch_add(1U, std::memory_order_relaxed);
+            throw std::runtime_error(
+                "injected Succeeded journal pre-publication failure");
+          }
+        };
+    SingleTenantJobService service(TenantId("tenant.test"), test_quota_limits(),
+                                   root.path(), factory, std::move(options));
+    submission = service.submit(JobSpec(GraphArtifactId("graph.test"), 7,
+                                        OutputSlotId("image.final"),
+                                        test_job_resources()));
+    ASSERT_TRUE(gate->wait_until_entered());
+    remaining_failures.store(2U, std::memory_order_release);
+    gate->release();
+    ASSERT_TRUE(SingleTenantJobServiceTestAccess::
+                    wait_for_owned_worker_thread_count_at_most(
+                        service, 0U, std::chrono::seconds(2)));
+
+    EXPECT_EQ(observed_failures.load(std::memory_order_relaxed), 2U);
+    EXPECT_EQ(remaining_failures.load(std::memory_order_relaxed), 0U);
+    const std::optional<JobSnapshot> pending = service.query(submission.job_id);
+    ASSERT_TRUE(pending.has_value());
+    EXPECT_EQ(pending->state, JobState::Running);
+    EXPECT_FALSE(pending->output_receipt.has_value());
+    EXPECT_TRUE(
+        SingleTenantJobServiceTestAccess::artifact_reconciliation_faulted(
+            service));
+    EXPECT_FALSE(SingleTenantJobServiceTestAccess::journal_faulted(service));
+
+    const TenantQuotaSnapshot usage = service.quota_snapshot();
+    EXPECT_EQ(usage.active_attempts, 0U);
+    EXPECT_EQ(usage.retention_bytes, 12U);
+    EXPECT_EQ(usage.retained_artifacts, 1U);
+
+    JobAssignment assignment{pending->assignment, pending->spec, nullptr};
+    SingleTenantJobServiceTestAccess::inject_attempt_report(
+        service, pending->assignment, successful_report(assignment));
+    EXPECT_EQ(observed_failures.load(std::memory_order_relaxed), 2U);
+    EXPECT_EQ(service.query(submission.job_id)->state, JobState::Running);
+    EXPECT_EQ(service.quota_snapshot().retention_bytes, 12U);
+  }
+
+  auto unused_factory = std::make_shared<FunctionWorkerFactory>(
+      [](const JobAssignment& assignment,
+         const std::function<bool()>& cancellation_requested) {
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+  SingleTenantJobService recovered(TenantId("tenant.test"), test_quota_limits(),
+                                   root.path(), unused_factory);
+  const std::optional<JobSnapshot> succeeded =
+      recovered.query(submission.job_id);
+  ASSERT_TRUE(succeeded.has_value());
+  ASSERT_EQ(succeeded->state, JobState::Succeeded);
+  ASSERT_TRUE(succeeded->output_receipt.has_value());
+  EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
+  EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 12U);
+  EXPECT_EQ(recovered.quota_snapshot().retained_artifacts, 1U);
+  EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 1U);
 }
 
 TEST(SingleTenantJobService,

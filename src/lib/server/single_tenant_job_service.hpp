@@ -214,6 +214,11 @@ struct JobSnapshot final {
  * fully-cleaned truth: confirmed visibility removal releases exact retained
  * quota even when cleanup later fails, while every irreversible deletion
  * failure revokes lookup and fail-stops mutation until restart.
+ * Once an exact matching artifact is observed, or manifest-visible lookup is
+ * ambiguous, any later revalidation, quota conversion, or Succeeded-journal
+ * failure enters a separate monotonic reconciliation fail-stop. That state
+ * preserves the current active reservation or already-retained charge and
+ * forbids a compensating `Failed/ArtifactCommit` record until restart.
  *
  * @throws std::invalid_argument when construction receives an invalid tenant or
  * null factory.
@@ -233,6 +238,7 @@ class SingleTenantJobService final {
    * @param state_root Trusted durable control/artifact root.
    * @param worker_factory Non-null fresh-worker factory.
    * @param state_options Optional source-private durable commit observer.
+   * @param quota_options Optional source-private quota mutation observer.
    * @throws std::invalid_argument for invalid configuration.
    * @throws std::bad_alloc when service/reaper state allocation fails.
    * @throws DurableStateError and derived durability, corruption, or commit
@@ -244,7 +250,8 @@ class SingleTenantJobService final {
       TenantId tenant_id, TenantQuotaLimits quota_limits,
       std::filesystem::path state_root,
       std::shared_ptr<JobAttemptWorkerFactory> worker_factory,
-      DurableServerStateOptions state_options = {});
+      DurableServerStateOptions state_options = {},
+      TenantQuotaAuthorityOptions quota_options = {});
 
   /**
    * @brief Requests cancellation and joins all process-local workers.
@@ -524,7 +531,9 @@ class SingleTenantJobService final {
    * @param expected Exact assignment owned by the invoking worker thread.
    * @param report Immutable attempt facts and candidate image.
    * @return Nothing after terminal state derivation and observer notification.
-   * @throws Nothing; artifact exceptions become a typed failed Job.
+   * @throws Nothing; an unambiguous pre-manifest artifact exception becomes a
+   * typed failed Job. Manifest-visible ambiguity or any failure after an exact
+   * artifact match preserves quota and enters reconciliation fail-stop.
    * @note A prior attempt whose `expected` identity is no longer current is
    * fenced without mutating the replacement attempt. For the current attempt,
    * full report identity, enum, outcome/failure/settlement/image shape, and
@@ -542,13 +551,15 @@ class SingleTenantJobService final {
    * @brief Reconciles an already published stable artifact after an exception.
    * @param control Current exact Job/quota record under `mutex_`.
    * @return True after quota conversion and durable Succeeded publication;
-   * false when no identity-matching manifest is visible.
+   * false only when lookup proves no manifest is visible.
    * @throws Durable-state, quota, persistence, or allocation failures
    * unchanged.
    * @note The caller holds `mutex_`. This path revalidates and reapplies the
-   * artifact barrier chain before publishing success. It is used only after a
-   * primary terminal transition raised, so a manifest-last occurrence is not
-   * misclassified or left without its retained quota charge.
+   * artifact barrier chain before publishing success. Once lookup returns an
+   * occurrence, every mismatch or later quota/journal exception first enters
+   * reconciliation fail-stop. A lookup exception is treated as potentially
+   * manifest-visible and follows the same conservative rule; only a null
+   * lookup authorizes ordinary pre-manifest failure publication.
    */
   bool reconcile_published_artifact_locked(JobControlRecord& control);
 
@@ -575,15 +586,27 @@ class SingleTenantJobService final {
                                JobSnapshot candidate);
 
   /**
+   * @brief Enters monotonic artifact-reconciliation fail-stop.
+   * @return Nothing after workers and later durable mutation are fenced.
+   * @throws Nothing.
+   * @note The caller holds `mutex_`. This transition deliberately leaves the
+   * current Job snapshot and quota ownership unchanged: an active reservation
+   * remains active, while a completed conversion remains retained, so restart
+   * can reconstruct the strongest durable artifact truth.
+   */
+  void fail_stop_artifact_reconciliation_locked() noexcept;
+
+  /**
    * @brief Reports whether any irreversible durable mutation failure occurred.
-   * @return True after Job-journal publication ambiguity or artifact-deletion
-   * visibility ambiguity/cleanup failure.
+   * @return True after Job-journal publication ambiguity, artifact-deletion
+   * visibility ambiguity/cleanup failure, or artifact reconciliation failure.
    * @throws Nothing.
    * @note The caller holds `mutex_`. Reads remain available in this state;
    * workers and every subsequent durable mutation are fenced until restart.
    */
   bool durable_mutation_faulted_locked() const noexcept {
-    return journal_faulted_ || artifact_erase_faulted_;
+    return journal_faulted_ || artifact_erase_faulted_ ||
+           artifact_reconciliation_faulted_;
   }
 
   /**
@@ -646,6 +669,13 @@ class SingleTenantJobService final {
    * quota; unconfirmed visibility deliberately keeps it charged until restart.
    */
   bool artifact_erase_faulted_ = false;
+  /**
+   * @brief Monotonic fail-stop after manifest-visible reconciliation failed.
+   * @note The current Job snapshot is not rewritten to Failed. Active
+   * reservation or retained-charge truth stays at its strongest reached state
+   * until constructor recovery revalidates and reconciles the artifact.
+   */
+  bool artifact_reconciliation_faulted_ = false;
   /** @brief Sole bounded infrastructure thread that joins worker handles. */
   std::thread reaper_;
 };

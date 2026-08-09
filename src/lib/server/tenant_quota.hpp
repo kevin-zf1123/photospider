@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -124,6 +125,23 @@ struct TenantQuotaReservation final {
 };
 
 /**
+ * @brief Source-private deterministic quota-mutation test seams.
+ * @throws Nothing for default construction; callback copies may allocate.
+ * @note Production leaves every callback empty. These observers receive no
+ * reservation, artifact, path, or quota mutation authority.
+ */
+struct TenantQuotaAuthorityOptions final {
+  /**
+   * @brief Observes a fully prepared retained-artifact conversion.
+   * @note The callback runs under the quota mutex after all validation and
+   * private copies succeed but before live reservation/retention publication.
+   * An exception therefore preserves the complete active reservation and all
+   * prior accounting under the method's strong exception guarantee.
+   */
+  std::function<void()> retained_artifact_commit_observer;
+};
+
+/**
  * @brief Sole server-side quota authority for one configured tenant.
  *
  * Admission performs checked component-wise validation and changes all usage
@@ -144,10 +162,14 @@ class TenantQuotaAuthority final {
    * @brief Creates one empty authority for a validated tenant capacity.
    * @param tenant_id Valid configured tenant identity.
    * @param limits Positive complete capacity and concurrency limit.
+   * @param options Optional source-private deterministic mutation observers.
    * @throws std::invalid_argument for invalid tenant or limits.
    * @throws std::bad_alloc when storing configured device capacity fails.
+   * @note Construction owns copied configuration and callback state; no mutex
+   * or quota truth is externally observable until construction succeeds.
    */
-  TenantQuotaAuthority(TenantId tenant_id, TenantQuotaLimits limits);
+  TenantQuotaAuthority(TenantId tenant_id, TenantQuotaLimits limits,
+                       TenantQuotaAuthorityOptions options = {});
 
   /**
    * @brief Prevents duplicate ownership of one quota truth.
@@ -170,9 +192,11 @@ class TenantQuotaAuthority final {
    * @throws std::invalid_argument for invalid identity or zero charge.
    * @throws TenantQuotaExceeded when recovered retention exceeds configuration.
    * @throws std::logic_error when the same artifact has a different charge.
-   * @throws std::overflow_error for checked accounting overflow.
+   * @throws std::bad_alloc when the retained-charge map cannot grow.
+   * @throws std::system_error when mutex acquisition fails.
    * @note Call before accepting new attempts. Duplicate exact recovery is a
-   * no-op and never double charges.
+   * no-op and never double charges. The mutex protects both the charge map and
+   * aggregate snapshot; every exception leaves both unchanged.
    */
   void recover_retained_artifact(const ArtifactId& artifact_id,
                                  std::uint64_t payload_bytes);
@@ -185,8 +209,13 @@ class TenantQuotaAuthority final {
    * @throws std::invalid_argument for invalid inputs.
    * @throws TenantQuotaExceeded when any dimension lacks capacity.
    * @throws std::overflow_error for reservation identity/accounting overflow.
-   * @throws std::bad_alloc before publication if retained storage fails.
-   * @note Any exception leaves all usage and reservations unchanged.
+   * @throws std::bad_alloc before publication if private maps, identities, or
+   * the returned receipt cannot be prepared.
+   * @throws std::system_error when mutex acquisition fails.
+   * @note The mutex owns reservation identity, active usage, configured-device
+   * usage, and the reservation map as one transaction. Any exception leaves
+   * all live usage and reservations unchanged; the returned receipt is only
+   * observation and grants no mutation capability.
    */
   TenantQuotaReservation reserve(const JobId& job_id,
                                  const JobResourceRequest& request);
@@ -197,6 +226,10 @@ class TenantQuotaAuthority final {
    * @return Nothing after the complete active envelope is removed.
    * @throws std::invalid_argument for an invalid id.
    * @throws std::logic_error when the id is absent or already settled.
+   * @throws std::system_error when mutex acquisition fails.
+   * @note Under the mutex, all scalar and device invariants are checked before
+   * subtraction. Any exception leaves usage and reservation ownership
+   * unchanged; success removes the entire envelope exactly once.
    */
   void release_attempt(const QuotaReservationId& reservation_id);
 
@@ -211,8 +244,14 @@ class TenantQuotaAuthority final {
    * @throws std::logic_error for absent reservation, charge above its retained
    * bound, or same artifact with a conflicting charge.
    * @throws std::overflow_error for impossible accounting overflow.
-   * @note An artifact already recovered/charged with the exact size makes this
-   * an idempotent conversion rather than a second retention charge.
+   * @throws std::bad_alloc while preparing private usage/retention copies.
+   * @throws std::system_error when mutex acquisition fails.
+   * @throws Any source-private retained-artifact observer exception unchanged.
+   * @note A current active reservation is always required. When the artifact
+   * already has the exact charge, success releases that reservation without a
+   * second retention charge. All validation, allocation, checked arithmetic,
+   * and the observer precede live publication; any exception preserves the
+   * active reservation and all prior accounting exactly.
    */
   void commit_retained_artifact(const QuotaReservationId& reservation_id,
                                 const ArtifactId& artifact_id,
@@ -224,8 +263,11 @@ class TenantQuotaAuthority final {
    * @return Exact removed payload-byte charge, or zero when already absent.
    * @throws std::invalid_argument for an invalid identity.
    * @throws std::logic_error when retained accounting is inconsistent.
+   * @throws std::system_error when mutex acquisition fails.
    * @note Returning the exact authority-owned charge lets deletion reconcile an
    * already-absent artifact directory without guessing from stale store cache.
+   * Under the mutex, consistency is checked before mutation; any exception
+   * leaves the charge and aggregate usage unchanged.
    */
   std::uint64_t release_retained_artifact(const ArtifactId& artifact_id);
 
@@ -250,6 +292,8 @@ class TenantQuotaAuthority final {
   TenantId tenant_id_;
   /** @brief Immutable trusted total quota limits. */
   TenantQuotaLimits limits_;
+  /** @brief Source-private deterministic pre-publication observers. */
+  TenantQuotaAuthorityOptions options_;
   /** @brief Serializes reservations, usage, and retained charges. */
   mutable std::mutex mutex_;
   /** @brief Current complete accounting. */

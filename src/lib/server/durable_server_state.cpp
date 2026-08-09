@@ -755,12 +755,20 @@ int open_artifact_directory(int artifacts_descriptor,
  * @param tenant_id Exact configured tenant owner.
  * @param artifact_id Directory identity expected in the manifest.
  * @param root_descriptor Held durability root for final barrier.
+ * @param revalidation_observer Optional pending-durability replay observer.
  * @return Immutable verified artifact record.
  * @throws DurableCorruptionError/system/allocation failures unchanged.
+ * @throws Any `revalidation_observer` exception before the selected barrier.
+ * @note The observer is used only for source-private deterministic testing.
+ * A non-null observer sees exact validation followed by each barrier about to
+ * be replayed; final durability confirmation remains the caller's locked
+ * no-throw transition after this helper returns.
  */
 std::shared_ptr<const ArtifactRecord> load_artifact(
     int artifacts_descriptor, const TenantId& tenant_id,
-    const ArtifactId& artifact_id, int root_descriptor) {
+    const ArtifactId& artifact_id, int root_descriptor,
+    const std::function<void(DurableArtifactCommitStage)>*
+        revalidation_observer = nullptr) {
   ScopedDescriptor directory(
       open_artifact_directory(artifacts_descriptor, artifact_id));
   const std::vector<std::string> names = list_directory(directory.get());
@@ -808,8 +816,22 @@ std::shared_ptr<const ArtifactRecord> load_artifact(
       throw_errno("remove reconciled private artifact manifest");
     }
   }
+  if (revalidation_observer != nullptr && *revalidation_observer) {
+    (*revalidation_observer)(
+        DurableArtifactCommitStage::DurabilityRevalidationStarted);
+    (*revalidation_observer)(
+        DurableArtifactCommitStage::ArtifactDirectoryBarrierReplay);
+  }
   synchronize_descriptor(directory.get(), "artifact directory");
+  if (revalidation_observer != nullptr && *revalidation_observer) {
+    (*revalidation_observer)(
+        DurableArtifactCommitStage::ArtifactsDirectoryBarrierReplay);
+  }
   synchronize_descriptor(artifacts_descriptor, "artifacts directory");
+  if (revalidation_observer != nullptr && *revalidation_observer) {
+    (*revalidation_observer)(
+        DurableArtifactCommitStage::RootDirectoryBarrierReplay);
+  }
   synchronize_descriptor(root_descriptor, "durability root directory");
   auto record = std::make_shared<ArtifactRecord>();
   record->receipt = receipt;
@@ -915,9 +937,34 @@ void validate_idempotent_retry(const DurableArtifactCommitRequest& request,
 using ArtifactRecordPointer = std::shared_ptr<const ArtifactRecord>;
 /** @brief Exact in-memory index type shared by both artifact identities. */
 using ArtifactIndex = std::unordered_map<std::string, ArtifactRecordPointer>;
+/** @brief ArtifactId-keyed in-memory durability-confirmation truth. */
+using ArtifactDurabilityIndex = std::unordered_map<std::string, bool>;
 
 static_assert(std::is_nothrow_swappable_v<ArtifactIndex>,
               "artifact index publication must not throw");
+static_assert(std::is_nothrow_swappable_v<ArtifactDurabilityIndex>,
+              "artifact durability publication must not throw");
+
+/**
+ * @brief Validates one complete alias-to-durability status join.
+ * @param artifacts ArtifactId index whose keys define visible occurrences.
+ * @param durability ArtifactId-keyed confirmation truth.
+ * @return Nothing when every visible artifact has exactly one status row.
+ * @throws DurableCorruptionError for missing or stale status truth.
+ */
+void validate_artifact_durability_index(
+    const ArtifactIndex& artifacts, const ArtifactDurabilityIndex& durability) {
+  if (artifacts.size() != durability.size()) {
+    throw DurableCorruptionError(
+        "artifact durability index cardinality differs from aliases");
+  }
+  for (const auto& artifact : artifacts) {
+    if (durability.find(artifact.first) == durability.end()) {
+      throw DurableCorruptionError(
+          "artifact durability index is missing a visible alias");
+    }
+  }
+}
 
 /**
  * @brief Compares every retained identity, descriptor, durability, and byte.
@@ -940,24 +987,29 @@ bool same_artifact_record(const ArtifactRecord& left,
 }
 
 /**
- * @brief Prepares and atomically installs both artifact-identity indexes.
+ * @brief Prepares and atomically installs both aliases plus durability state.
  *
  * The constructor performs every allocation and conflict check against private
- * map copies. `install()` then exposes both copies through no-throw swaps
- * before filesystem mutation. Destruction rolls both indexes back unless
- * `make_authoritative()` records manifest publication.
+ * map copies. `install()` then exposes all three copies through no-throw swaps
+ * before filesystem mutation. Destruction rolls every map back unless
+ * `make_authoritative()` records manifest publication. Confirmation is a
+ * no-throw update of the already prepared row.
  *
  * @throws DurableConflictError for an identity mapped to different bytes.
  * @throws std::bad_alloc for private index preparation.
- * @note The caller serializes both maps for this object's complete lifetime.
+ * @note The caller serializes all three maps for this object's complete
+ * lifetime.
  */
 class StagedArtifactIndexPublication final {
  public:
   /**
-   * @brief Builds complete private ArtifactId and OutputCommitId indexes.
+   * @brief Builds complete private aliases and durability-confirmation truth.
    * @param artifacts Non-null live ArtifactId index.
    * @param commits Non-null live OutputCommitId index.
+   * @param durability Non-null live ArtifactId confirmation index.
    * @param record Non-null immutable occurrence to publish or reconcile.
+   * @param durability_confirmed Whether this occurrence already completed all
+   * required barriers.
    * @param observer Optional deterministic preparation observer.
    * @throws std::invalid_argument for null inputs.
    * @throws DurableConflictError for either conflicting stable identity.
@@ -966,17 +1018,24 @@ class StagedArtifactIndexPublication final {
    */
   StagedArtifactIndexPublication(
       ArtifactIndex* artifacts, ArtifactIndex* commits,
-      std::shared_ptr<const ArtifactRecord> record,
+      ArtifactDurabilityIndex* durability,
+      std::shared_ptr<const ArtifactRecord> record, bool durability_confirmed,
       const std::function<void(DurableArtifactCommitStage)>& observer)
       : artifacts_(artifacts),
         commits_(commits),
+        durability_(durability),
         prepared_artifacts_(artifacts == nullptr ? ArtifactIndex{}
                                                  : *artifacts),
         prepared_commits_(commits == nullptr ? ArtifactIndex{} : *commits),
+        prepared_durability_(durability == nullptr ? ArtifactDurabilityIndex{}
+                                                   : *durability),
         record_(std::move(record)) {
-    if (artifacts_ == nullptr || commits_ == nullptr || record_ == nullptr) {
+    if (artifacts_ == nullptr || commits_ == nullptr ||
+        durability_ == nullptr || record_ == nullptr) {
       throw std::invalid_argument("artifact index publication input is null");
     }
+    validate_artifact_durability_index(prepared_artifacts_,
+                                       prepared_durability_);
     prepare_entry(&prepared_artifacts_, record_->receipt.artifact_id.value(),
                   "artifact identity conflicts with retained index");
     if (observer) {
@@ -987,16 +1046,23 @@ class StagedArtifactIndexPublication final {
     if (observer) {
       observer(DurableArtifactCommitStage::CommitIndexPrepared);
     }
+    const auto inserted = prepared_durability_.emplace(
+        record_->receipt.artifact_id.value(), durability_confirmed);
+    if (!inserted.second && durability_confirmed) {
+      inserted.first->second = true;
+    }
+    prepared_confirmation_ = &inserted.first->second;
   }
 
   /**
-   * @brief Restores both original indexes after pre-manifest failure.
+   * @brief Restores both alias indexes and confirmation state after failure.
    * @throws Nothing.
    */
   ~StagedArtifactIndexPublication() noexcept {
     if (installed_ && !authoritative_) {
       artifacts_->swap(prepared_artifacts_);
       commits_->swap(prepared_commits_);
+      durability_->swap(prepared_durability_);
     }
   }
 
@@ -1008,7 +1074,7 @@ class StagedArtifactIndexPublication final {
       const StagedArtifactIndexPublication&) = delete;
 
   /**
-   * @brief Installs both fully prepared maps by no-throw swaps.
+   * @brief Installs all fully prepared maps by no-throw swaps.
    * @return Nothing.
    * @throws Nothing.
    * @note Until `make_authoritative()`, destruction restores the old maps.
@@ -1016,11 +1082,22 @@ class StagedArtifactIndexPublication final {
   void install() noexcept {
     artifacts_->swap(prepared_artifacts_);
     commits_->swap(prepared_commits_);
+    durability_->swap(prepared_durability_);
     installed_ = true;
   }
 
   /**
-   * @brief Makes the installed pair survive transaction destruction.
+   * @brief Records completed barrier truth without allocation or lookup.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The caller holds the durable mutex and invokes this only after the
+   * root barrier returns. The prepared Boolean address remains stable across
+   * map swap and becomes the sole confirmation truth for both aliases.
+   */
+  void confirm_durability() noexcept { *prepared_confirmation_ = true; }
+
+  /**
+   * @brief Makes the installed alias/confirmation transaction authoritative.
    * @return Nothing.
    * @throws Nothing.
    * @note The caller invokes this immediately after manifest publication or
@@ -1054,28 +1131,36 @@ class StagedArtifactIndexPublication final {
   ArtifactIndex* artifacts_ = nullptr;
   /** @brief Borrowed live OutputCommitId index serialized by caller. */
   ArtifactIndex* commits_ = nullptr;
+  /** @brief Borrowed live confirmation index serialized by caller. */
+  ArtifactDurabilityIndex* durability_ = nullptr;
   /** @brief Private ArtifactId map, later original rollback storage. */
   ArtifactIndex prepared_artifacts_;
   /** @brief Private OutputCommitId map, later original rollback storage. */
   ArtifactIndex prepared_commits_;
+  /** @brief Private confirmation map, later original rollback storage. */
+  ArtifactDurabilityIndex prepared_durability_;
   /** @brief Immutable occurrence shared by both prepared aliases. */
   std::shared_ptr<const ArtifactRecord> record_;
-  /** @brief True after both live maps were swapped together. */
+  /** @brief Stable prepared confirmation row updated after root barrier. */
+  bool* prepared_confirmation_ = nullptr;
+  /** @brief True after all three live maps were swapped together. */
   bool installed_ = false;
   /** @brief True after durable truth authorizes permanent installation. */
   bool authoritative_ = false;
 };
 
 /**
- * @brief Prepares a no-throw simultaneous revocation of both artifact aliases.
+ * @brief Prepares no-throw revocation of aliases and confirmation truth.
  *
- * Construction copies and validates both indexes without changing visibility.
+ * Construction copies and validates both alias indexes plus confirmation state
+ * without changing visibility.
  * `publish()` swaps the prepared maps into place immediately after manifest
  * absence becomes irreversible in-process.
  *
  * @throws DurableCorruptionError for conflicting cache/disk occurrences.
  * @throws std::bad_alloc for private map preparation.
- * @note The caller serializes both maps for this object's complete lifetime.
+ * @note The caller serializes all three maps for this object's complete
+ * lifetime.
  */
 class StagedArtifactIndexRemoval final {
  public:
@@ -1083,6 +1168,7 @@ class StagedArtifactIndexRemoval final {
    * @brief Builds private indexes without the target occurrence or its aliases.
    * @param artifacts Non-null live ArtifactId index.
    * @param commits Non-null live OutputCommitId index.
+   * @param durability Non-null live ArtifactId confirmation index.
    * @param artifact_id Exact target identity.
    * @param authoritative Optional record loaded from authoritative manifest.
    * @throws std::invalid_argument for null maps or invalid identity.
@@ -1091,17 +1177,23 @@ class StagedArtifactIndexRemoval final {
    */
   StagedArtifactIndexRemoval(
       ArtifactIndex* artifacts, ArtifactIndex* commits,
-      const ArtifactId& artifact_id,
+      ArtifactDurabilityIndex* durability, const ArtifactId& artifact_id,
       std::shared_ptr<const ArtifactRecord> authoritative)
       : artifacts_(artifacts),
         commits_(commits),
+        durability_(durability),
         prepared_artifacts_(artifacts == nullptr ? ArtifactIndex{}
                                                  : *artifacts),
         prepared_commits_(commits == nullptr ? ArtifactIndex{} : *commits),
+        prepared_durability_(durability == nullptr ? ArtifactDurabilityIndex{}
+                                                   : *durability),
         record_(std::move(authoritative)) {
-    if (artifacts_ == nullptr || commits_ == nullptr || !artifact_id.valid()) {
+    if (artifacts_ == nullptr || commits_ == nullptr ||
+        durability_ == nullptr || !artifact_id.valid()) {
       throw std::invalid_argument("artifact index removal input is invalid");
     }
+    validate_artifact_durability_index(prepared_artifacts_,
+                                       prepared_durability_);
     if (record_ != nullptr && record_->receipt.artifact_id != artifact_id) {
       throw DurableCorruptionError(
           "authoritative artifact identity differs during removal");
@@ -1131,6 +1223,7 @@ class StagedArtifactIndexRemoval final {
             "output commit index points at a different artifact");
       }
     }
+    prepared_durability_.erase(artifact_id.value());
   }
 
   /** @brief Uses ordinary private-map cleanup without live side effects. */
@@ -1142,13 +1235,14 @@ class StagedArtifactIndexRemoval final {
       delete;
 
   /**
-   * @brief Revokes ArtifactId and OutputCommitId visibility together.
+   * @brief Revokes both aliases and their confirmation truth together.
    * @return Nothing.
    * @throws Nothing.
    */
   void publish() noexcept {
     artifacts_->swap(prepared_artifacts_);
     commits_->swap(prepared_commits_);
+    durability_->swap(prepared_durability_);
   }
 
   /**
@@ -1189,10 +1283,14 @@ class StagedArtifactIndexRemoval final {
   ArtifactIndex* artifacts_ = nullptr;
   /** @brief Borrowed live OutputCommitId index serialized by caller. */
   ArtifactIndex* commits_ = nullptr;
+  /** @brief Borrowed live durability index serialized by caller. */
+  ArtifactDurabilityIndex* durability_ = nullptr;
   /** @brief Private ArtifactId map with target removed. */
   ArtifactIndex prepared_artifacts_;
   /** @brief Private OutputCommitId map with every target alias removed. */
   ArtifactIndex prepared_commits_;
+  /** @brief Private confirmation map with target row removed. */
+  ArtifactDurabilityIndex prepared_durability_;
   /** @brief Exact disk/cache occurrence used for quota reconciliation. */
   std::shared_ptr<const ArtifactRecord> record_;
 };
@@ -1744,9 +1842,11 @@ DurableServerState::DurableServerState(std::filesystem::path root,
                                   artifact_id, root_descriptor_);
       if (!artifacts_.emplace(artifact_id.value(), record).second ||
           !commits_.emplace(record->receipt.output_commit_id.value(), record)
+               .second ||
+          !artifact_durability_confirmed_.emplace(artifact_id.value(), true)
                .second) {
         throw DurableCorruptionError(
-            "durable artifact or commit identity is duplicated");
+            "durable artifact, commit, or confirmation identity is duplicated");
       }
     }
 
@@ -1819,9 +1919,43 @@ DurableServerState::recovered_artifacts() const {
   std::vector<std::shared_ptr<const ArtifactRecord>> result;
   result.reserve(artifacts_.size());
   for (const auto& entry : artifacts_) {
-    result.push_back(entry.second);
+    result.push_back(confirm_artifact_durability_locked(entry.second));
   }
   return result;
+}
+
+/** @copydoc
+ * ps::server::DurableServerState::confirm_artifact_durability_locked */
+std::shared_ptr<const ArtifactRecord>
+DurableServerState::confirm_artifact_durability_locked(
+    const std::shared_ptr<const ArtifactRecord>& record) const {
+  if (record == nullptr) {
+    throw std::invalid_argument(
+        "artifact durability confirmation record is null");
+  }
+  const std::string& artifact_key = record->receipt.artifact_id.value();
+  const auto confirmation = artifact_durability_confirmed_.find(artifact_key);
+  if (confirmation == artifact_durability_confirmed_.end()) {
+    throw DurableCorruptionError(
+        "visible artifact has no durability confirmation truth");
+  }
+  if (confirmation->second) {
+    return record;
+  }
+
+  const std::shared_ptr<const ArtifactRecord> revalidated = load_artifact(
+      artifacts_descriptor_, tenant_id_, record->receipt.artifact_id,
+      root_descriptor_, &options_.artifact_commit_observer);
+  if (!same_artifact_record(*record, *revalidated)) {
+    throw DurableCorruptionError(
+        "pending artifact differs from its authoritative manifest");
+  }
+  confirmation->second = true;
+  if (options_.artifact_commit_observer) {
+    options_.artifact_commit_observer(
+        DurableArtifactCommitStage::DirectoryBarriersCompleted);
+  }
+  return record;
 }
 
 /** @copydoc ps::server::DurableServerState::recovered_jobs */
@@ -1889,13 +2023,15 @@ OutputCommitReceipt DurableServerState::commit_artifact(
   verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
   const auto committed = commits_.find(request.output_commit_id.value());
   if (committed != commits_.end()) {
-    validate_idempotent_retry(request, *candidate_record, *committed->second);
-    StagedArtifactIndexPublication indexes(&artifacts_, &commits_,
-                                           committed->second,
-                                           options_.artifact_commit_observer);
+    const std::shared_ptr<const ArtifactRecord> confirmed =
+        confirm_artifact_durability_locked(committed->second);
+    validate_idempotent_retry(request, *candidate_record, *confirmed);
+    StagedArtifactIndexPublication indexes(
+        &artifacts_, &commits_, &artifact_durability_confirmed_, confirmed,
+        true, options_.artifact_commit_observer);
     indexes.install();
     indexes.make_authoritative();
-    return committed->second->receipt;
+    return confirmed->receipt;
   }
 
   if (child_exists(artifacts_descriptor_, request.artifact_id.value())) {
@@ -1910,20 +2046,26 @@ OutputCommitReceipt DurableServerState::commit_artifact(
       remove_incomplete_artifact(artifacts_descriptor_, request.artifact_id,
                                  root_descriptor_);
     } else {
-      auto recovered = load_artifact(artifacts_descriptor_, tenant_id_,
-                                     request.artifact_id, root_descriptor_);
+      auto recovered =
+          load_artifact(artifacts_descriptor_, tenant_id_, request.artifact_id,
+                        root_descriptor_, &options_.artifact_commit_observer);
       validate_idempotent_retry(request, *candidate_record, *recovered);
-      StagedArtifactIndexPublication indexes(&artifacts_, &commits_, recovered,
-                                             options_.artifact_commit_observer);
+      StagedArtifactIndexPublication indexes(
+          &artifacts_, &commits_, &artifact_durability_confirmed_, recovered,
+          true, options_.artifact_commit_observer);
       indexes.install();
       indexes.make_authoritative();
+      if (options_.artifact_commit_observer) {
+        options_.artifact_commit_observer(
+            DurableArtifactCommitStage::DirectoryBarriersCompleted);
+      }
       return recovered->receipt;
     }
   }
 
-  StagedArtifactIndexPublication indexes(&artifacts_, &commits_,
-                                         candidate_record,
-                                         options_.artifact_commit_observer);
+  StagedArtifactIndexPublication indexes(
+      &artifacts_, &commits_, &artifact_durability_confirmed_, candidate_record,
+      false, options_.artifact_commit_observer);
   indexes.install();
 
   if (::mkdirat(artifacts_descriptor_, request.artifact_id.value().c_str(),
@@ -1994,6 +2136,7 @@ OutputCommitReceipt DurableServerState::commit_artifact(
     synchronize_descriptor(directory.get(), "artifact directory");
     synchronize_descriptor(artifacts_descriptor_, "artifacts directory");
     synchronize_descriptor(root_descriptor_, "durability root directory");
+    indexes.confirm_durability();
     if (options_.artifact_commit_observer) {
       options_.artifact_commit_observer(
           DurableArtifactCommitStage::DirectoryBarriersCompleted);
@@ -2017,7 +2160,7 @@ std::shared_ptr<const ArtifactRecord> DurableServerState::find_artifact(
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = artifacts_.find(artifact_id.value());
   if (found != artifacts_.end()) {
-    return found->second;
+    return confirm_artifact_durability_locked(found->second);
   }
   if (!child_exists(artifacts_descriptor_, artifact_id.value())) {
     return nullptr;
@@ -2032,18 +2175,24 @@ std::shared_ptr<const ArtifactRecord> DurableServerState::find_artifact(
   if (!has_manifest) {
     return nullptr;
   }
-  auto record = load_artifact(artifacts_descriptor_, tenant_id_, artifact_id,
-                              root_descriptor_);
+  auto record =
+      load_artifact(artifacts_descriptor_, tenant_id_, artifact_id,
+                    root_descriptor_, &options_.artifact_commit_observer);
   const auto commit = commits_.find(record->receipt.output_commit_id.value());
   if (commit != commits_.end() &&
       !same_artifact_record(*commit->second, *record)) {
     throw DurableCorruptionError("durable commit identity is duplicated");
   }
   const std::function<void(DurableArtifactCommitStage)> no_observer;
-  StagedArtifactIndexPublication indexes(&artifacts_, &commits_, record,
-                                         no_observer);
+  StagedArtifactIndexPublication indexes(&artifacts_, &commits_,
+                                         &artifact_durability_confirmed_,
+                                         record, true, no_observer);
   indexes.install();
   indexes.make_authoritative();
+  if (options_.artifact_commit_observer) {
+    options_.artifact_commit_observer(
+        DurableArtifactCommitStage::DirectoryBarriersCompleted);
+  }
   return record;
 }
 
@@ -2055,7 +2204,9 @@ std::shared_ptr<const ArtifactRecord> DurableServerState::find_commit(
   }
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = commits_.find(output_commit_id.value());
-  return found == commits_.end() ? nullptr : found->second;
+  return found == commits_.end()
+             ? nullptr
+             : confirm_artifact_durability_locked(found->second);
 }
 
 /** @copydoc ps::server::DurableServerState::erase_artifact */
@@ -2084,8 +2235,9 @@ DurableArtifactEraseResult DurableServerState::erase_artifact(
       }
     }
 
-    StagedArtifactIndexRemoval indexes(&artifacts_, &commits_, artifact_id,
-                                       std::move(authoritative));
+    StagedArtifactIndexRemoval indexes(&artifacts_, &commits_,
+                                       &artifact_durability_confirmed_,
+                                       artifact_id, std::move(authoritative));
     result.payload_bytes = indexes.payload_bytes();
 
     if (manifest_exists) {

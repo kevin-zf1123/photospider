@@ -76,7 +76,8 @@ std::map<std::string, std::uint64_t> device_map(
  * @param usage Non-null current usage mutated after invariant checks.
  * @return Nothing.
  * @throws std::logic_error when internal accounting is inconsistent.
- * @note Caller holds the authority mutex.
+ * @note Caller holds the authority mutex. Every scalar and device invariant is
+ * checked before the first subtraction, so an exception preserves `usage`.
  */
 void subtract_request(const JobResourceRequest& request,
                       TenantQuotaSnapshot* usage) {
@@ -109,8 +110,11 @@ void subtract_request(const JobResourceRequest& request,
 
 /** @copydoc ps::server::TenantQuotaAuthority::TenantQuotaAuthority */
 TenantQuotaAuthority::TenantQuotaAuthority(TenantId tenant_id,
-                                           TenantQuotaLimits limits)
-    : tenant_id_(std::move(tenant_id)), limits_(std::move(limits)) {
+                                           TenantQuotaLimits limits,
+                                           TenantQuotaAuthorityOptions options)
+    : tenant_id_(std::move(tenant_id)),
+      limits_(std::move(limits)),
+      options_(std::move(options)) {
   if (!tenant_id_.valid() || limits_.maximum_active_attempts == 0U) {
     throw std::invalid_argument(
         "tenant quota identity or concurrency is invalid");
@@ -259,6 +263,9 @@ void TenantQuotaAuthority::commit_retained_artifact(
     settled_usage.retention_bytes = charged;
   }
   settled_usage.retained_artifacts = settled_retained.size();
+  if (options_.retained_artifact_commit_observer) {
+    options_.retained_artifact_commit_observer();
+  }
   reservations_.erase(reservation_id.value());
   retained_artifacts_ = std::move(settled_retained);
   usage_ = std::move(settled_usage);

@@ -244,10 +244,25 @@ class SingleTenantJobServiceTestAccess final {
   }
 
   /**
+   * @brief Reports whether artifact reconciliation fail-stopped mutation.
+   * @param service Live service whose private monotonic state is observed.
+   * @return True after manifest-visible lookup/revalidation, quota conversion,
+   * or Succeeded journal reconciliation could not complete safely.
+   * @throws std::system_error for mutex synchronization failure.
+   * @note This observation grants no recovery, quota, or mutation authority.
+   * The current active reservation or retained charge remains product truth.
+   */
+  static bool artifact_reconciliation_faulted(
+      const SingleTenantJobService& service) {
+    std::lock_guard<std::mutex> lock(service.mutex_);
+    return service.artifact_reconciliation_faulted_;
+  }
+
+  /**
    * @brief Reports the combined durable-mutation fail-stop state.
    * @param service Live service whose private monotonic state is observed.
-   * @return True for either published Job-journal failure or irreversible
-   * artifact-deletion failure.
+   * @return True for published Job-journal failure, irreversible artifact
+   * deletion failure, or manifest-visible artifact reconciliation failure.
    * @throws std::system_error for mutex synchronization failure.
    * @note Query, lookup, and quota observation remain available; mutation and
    * worker progress are fenced until restart.

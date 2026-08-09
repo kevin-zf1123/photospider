@@ -428,7 +428,8 @@ SingleTenantJobService::SingleTenantJobService(
     TenantId tenant_id, TenantQuotaLimits quota_limits,
     std::filesystem::path state_root,
     std::shared_ptr<JobAttemptWorkerFactory> worker_factory,
-    DurableServerStateOptions state_options)
+    DurableServerStateOptions state_options,
+    TenantQuotaAuthorityOptions quota_options)
     : tenant_id_(std::move(tenant_id)),
       worker_factory_(std::move(worker_factory)) {
   if (!tenant_id_.valid()) {
@@ -440,7 +441,7 @@ SingleTenantJobService::SingleTenantJobService(
   durable_state_ = std::make_unique<DurableServerState>(
       std::move(state_root), tenant_id_, std::move(state_options));
   quota_authority_ = std::make_unique<TenantQuotaAuthority>(
-      tenant_id_, std::move(quota_limits));
+      tenant_id_, std::move(quota_limits), std::move(quota_options));
   identity_namespace_ =
       make_service_namespace(tenant_id_, durable_state_->root());
 
@@ -1261,27 +1262,42 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
  * ps::server::SingleTenantJobService::reconcile_published_artifact_locked */
 bool SingleTenantJobService::reconcile_published_artifact_locked(
     JobControlRecord& control) {
-  const std::shared_ptr<const ArtifactRecord> artifact =
-      durable_state_->find_artifact(control.snapshot.output_artifact_id);
-  if (artifact == nullptr ||
-      !artifact_fulfills_job(durable_record(control.snapshot), *artifact)) {
+  std::shared_ptr<const ArtifactRecord> artifact;
+  try {
+    artifact =
+        durable_state_->find_artifact(control.snapshot.output_artifact_id);
+  } catch (...) {
+    fail_stop_artifact_reconciliation_locked();
+    throw;
+  }
+  if (artifact == nullptr) {
     return false;
   }
-  if (control.reservation.has_value()) {
-    quota_authority_->commit_retained_artifact(
-        control.reservation->id, artifact->receipt.artifact_id,
-        static_cast<std::uint64_t>(artifact->receipt.descriptor.payload_bytes));
-    control.reservation.reset();
+  try {
+    if (!artifact_fulfills_job(durable_record(control.snapshot), *artifact)) {
+      throw DurableCorruptionError(
+          "visible stable artifact conflicts during Job reconciliation");
+    }
+    if (control.reservation.has_value()) {
+      quota_authority_->commit_retained_artifact(
+          control.reservation->id, artifact->receipt.artifact_id,
+          static_cast<std::uint64_t>(
+              artifact->receipt.descriptor.payload_bytes));
+      control.reservation.reset();
+    }
+    JobSnapshot succeeded = control.snapshot;
+    succeeded.state = JobState::Succeeded;
+    succeeded.cancellation_requested = false;
+    succeeded.attempt_settled = true;
+    succeeded.attempt_outcome = JobAttemptOutcome::Succeeded;
+    succeeded.failure = JobAttemptFailure::None;
+    succeeded.message.clear();
+    succeeded.output_receipt = artifact->receipt;
+    publish_snapshot_locked(control, std::move(succeeded));
+  } catch (...) {
+    fail_stop_artifact_reconciliation_locked();
+    throw;
   }
-  JobSnapshot succeeded = control.snapshot;
-  succeeded.state = JobState::Succeeded;
-  succeeded.cancellation_requested = false;
-  succeeded.attempt_settled = true;
-  succeeded.attempt_outcome = JobAttemptOutcome::Succeeded;
-  succeeded.failure = JobAttemptFailure::None;
-  succeeded.message.clear();
-  succeeded.output_receipt = artifact->receipt;
-  publish_snapshot_locked(control, std::move(succeeded));
   return true;
 }
 
@@ -1343,6 +1359,15 @@ void SingleTenantJobService::publish_snapshot_locked(JobControlRecord& control,
   condition_.notify_all();
   throw DurableJobCommitError(control.snapshot.job_id, commit.state,
                               commit.failure);
+}
+
+/** @copydoc
+ * ps::server::SingleTenantJobService::fail_stop_artifact_reconciliation_locked
+ */
+void SingleTenantJobService::
+    fail_stop_artifact_reconciliation_locked() noexcept {
+  artifact_reconciliation_faulted_ = true;
+  condition_.notify_all();
 }
 
 /** @copydoc

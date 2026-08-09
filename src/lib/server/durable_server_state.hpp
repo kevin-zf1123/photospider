@@ -77,6 +77,14 @@ enum class DurableArtifactCommitStage : std::uint8_t {
   PayloadSynchronized,
   /** @brief Authoritative manifest link exists; parent barriers are pending. */
   ManifestPublished,
+  /** @brief Exact pending manifest/payload passed revalidation. */
+  DurabilityRevalidationStarted,
+  /** @brief Pending artifact-directory barrier is about to be replayed. */
+  ArtifactDirectoryBarrierReplay,
+  /** @brief Pending artifacts-directory barrier is about to be replayed. */
+  ArtifactsDirectoryBarrierReplay,
+  /** @brief Pending durability-root barrier is about to be replayed. */
+  RootDirectoryBarrierReplay,
   /** @brief Every leaf-to-root directory barrier completed. */
   DirectoryBarriersCompleted,
 };
@@ -399,8 +407,11 @@ struct DurableServerStateOptions final {
   /**
    * @brief Optional observer/fault injector invoked at exact commit stages.
    * @note An exception before manifest publication causes safe private cleanup.
-   * An exception after publication preserves the committed occurrence for
-   * retry/restart reconciliation.
+   * An exception after publication preserves manifest-visible aliases in a
+   * durability-pending state. Lookup/retry then performs exact revalidation
+   * and the complete barrier replay before returning a crash-durable receipt.
+   * Once the root barrier completes, confirmation is recorded before the
+   * final `DirectoryBarriersCompleted` observer acknowledgement.
    */
   std::function<void(DurableArtifactCommitStage)> artifact_commit_observer;
   /**
@@ -549,9 +560,11 @@ class DurableServerState final {
   const std::filesystem::path& root() const noexcept { return root_; }
 
   /**
-   * @brief Returns all strictly recovered immutable artifacts.
-   * @return Snapshot vector in unspecified identity order.
+   * @brief Returns all durability-confirmed immutable artifacts.
+   * @return Snapshot vector in unspecified identity order after any pending
+   * entries are exactly revalidated and their full barriers replayed.
    * @throws std::bad_alloc while copying retained shared owners.
+   * @throws DurableCorruptionError/system failures during pending revalidation.
    */
   std::vector<std::shared_ptr<const ArtifactRecord>> recovered_artifacts()
       const;
@@ -573,8 +586,10 @@ class DurableServerState final {
    * @throws DurableCapabilityError when a required primitive is unsupported.
    * @throws DurableCorruptionError for retained namespace/content drift.
    * @throws std::system_error for other I/O failures.
-   * @note An exception after manifest publication preserves that occurrence;
-   * retry/restart reconciles it instead of publishing a second artifact.
+   * @note An exception after manifest publication preserves both aliases as a
+   * manifest-visible, durability-pending occurrence. A same-commit retry must
+   * revalidate exact bytes and replay every directory barrier before this
+   * method can return a crash-durable receipt.
    */
   OutputCommitReceipt commit_artifact(
       const DurableArtifactCommitRequest& request, const ImageBuffer& image);
@@ -584,7 +599,10 @@ class DurableServerState final {
    * @param artifact_id Valid tenant-scoped immutable identity.
    * @return Shared immutable record, or null when no manifest is committed.
    * @throws std::invalid_argument for an invalid identity.
-   * @throws DurableCorruptionError/system/allocation failures during lazy load.
+   * @throws DurableCorruptionError/system/allocation failures during lazy load
+   * or durability-pending exact revalidation/barrier replay.
+   * @note A manifest-visible alias remains internally recognizable while
+   * pending, but this method returns it only after durability confirmation.
    */
   std::shared_ptr<const ArtifactRecord> find_artifact(
       const ArtifactId& artifact_id) const;
@@ -594,6 +612,10 @@ class DurableServerState final {
    * @param output_commit_id Valid stable transaction identity.
    * @return Shared immutable record, or null when absent.
    * @throws std::invalid_argument for an invalid identity.
+   * @throws DurableCorruptionError/system/allocation failures during
+   * durability-pending exact revalidation/barrier replay.
+   * @note A manifest-visible alias remains internally recognizable while
+   * pending, but this method returns it only after durability confirmation.
    */
   std::shared_ptr<const ArtifactRecord> find_commit(
       const OutputCommitId& output_commit_id) const;
@@ -636,6 +658,23 @@ class DurableServerState final {
   bool erase_job(const JobId& job_id);
 
  private:
+  /**
+   * @brief Confirms one internally visible artifact before external return.
+   * @param record Non-null exact record retained by both aliases.
+   * @return The same immutable record after exact disk validation and, when
+   * pending, complete leaf-to-root barrier replay.
+   * @throws std::invalid_argument for a null record.
+   * @throws DurableCorruptionError when cache, status, manifest, or payload
+   * truth diverges.
+   * @throws std::bad_alloc or std::system_error from validation/barrier I/O.
+   * @throws Any deterministic observer exception unchanged.
+   * @note The caller holds `mutex_`. Confirmation is a single no-throw Boolean
+   * transition under that mutex and is published before the final completion
+   * observer, so a lost acknowledgement cannot erase completed barrier truth.
+   */
+  std::shared_ptr<const ArtifactRecord> confirm_artifact_durability_locked(
+      const std::shared_ptr<const ArtifactRecord>& record) const;
+
   /** @brief Canonical trusted state-root path retained for binding checks. */
   std::filesystem::path root_;
   /** @brief Configured tenant bound into every record. */
@@ -662,6 +701,13 @@ class DurableServerState final {
   /** @brief Loaded artifact aliases keyed by OutputCommitId text. */
   mutable std::unordered_map<std::string, std::shared_ptr<const ArtifactRecord>>
       commits_;
+  /**
+   * @brief ArtifactId-keyed manifest-visible durability confirmation truth.
+   * @note This map is prepared, installed, rolled back, and revoked in the
+   * same mutex transaction as both alias indexes. Restart reconstructs only
+   * confirmed entries after exact validation and barrier replay.
+   */
+  mutable std::unordered_map<std::string, bool> artifact_durability_confirmed_;
   /** @brief Loaded durable Job records keyed by JobId text. */
   std::unordered_map<std::string, DurableJobRecord> jobs_;
   /** @brief Checked private Job-record filename sequence. */
