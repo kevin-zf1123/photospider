@@ -26,7 +26,10 @@ enum class WorkerManagerCompletionKind : std::uint8_t {
   Report,
   /** @brief One typed manager fault after process revocation and reaping. */
   Failure,
-  /** @brief Accepted cancellation required manager termination and reaping. */
+  /**
+   * @brief Accepted cancellation required actual owned signal escalation and
+   * exact reaping.
+   */
   ForcedCancellation,
 };
 

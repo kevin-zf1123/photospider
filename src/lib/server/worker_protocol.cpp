@@ -28,8 +28,6 @@ namespace {
 constexpr std::uint32_t kWorkerProtocolMagic = 0x50535731U;
 /** @brief Sole supported private worker protocol version. */
 constexpr std::uint16_t kWorkerProtocolVersion = 1U;
-/** @brief Fixed magic/version/kind/length header byte count. */
-constexpr std::size_t kWorkerFrameHeaderBytes = 12U;
 /** @brief Maximum transported path/configuration field length. */
 constexpr std::size_t kMaximumWorkerPathBytes = 16U << 10U;
 /** @brief Maximum worker or resolver diagnostic length. */
@@ -442,30 +440,35 @@ void write_all(int fd, const std::byte* bytes, std::size_t size,
 }
 
 /**
- * @brief Reads an exact byte range with explicit frame-boundary EOF meaning.
+ * @brief Advances an exact byte range while retaining its partial offset.
  * @param fd Connected private socket.
  * @param bytes Non-null output when `size` is nonzero.
  * @param size Number of bytes to receive.
+ * @param offset Non-null retained offset at or below `size`.
  * @param deadline Absolute monotonic deadline.
  * @param clean_eof_allowed Whether zero bytes at initial offset means clean
  * frame-boundary EOF.
+ * @throws std::invalid_argument for inconsistent buffer/offset state.
  * @throws WorkerProtocolEof for allowed initial EOF.
  * @throws WorkerProtocolError for truncated input.
  * @throws WorkerProtocolTimeout or WorkerChannelError on I/O failure.
  */
-void read_all(int fd, std::byte* bytes, std::size_t size,
-              std::chrono::steady_clock::time_point deadline,
-              bool clean_eof_allowed) {
-  std::size_t offset = 0U;
-  while (offset != size) {
+void read_incremental(int fd, std::byte* bytes, std::size_t size,
+                      std::size_t* offset,
+                      std::chrono::steady_clock::time_point deadline,
+                      bool clean_eof_allowed) {
+  if (offset == nullptr || *offset > size || (size != 0U && bytes == nullptr)) {
+    throw std::invalid_argument("worker incremental read state is invalid");
+  }
+  while (*offset != size) {
     wait_ready(fd, POLLIN, deadline);
-    const ssize_t received = ::recv(fd, bytes + offset, size - offset, 0);
+    const ssize_t received = ::recv(fd, bytes + *offset, size - *offset, 0);
     if (received > 0) {
-      offset += static_cast<std::size_t>(received);
+      *offset += static_cast<std::size_t>(received);
       continue;
     }
     if (received == 0) {
-      if (clean_eof_allowed && offset == 0U) {
+      if (clean_eof_allowed && *offset == 0U) {
         throw WorkerProtocolEof("worker protocol channel reached EOF");
       }
       throw WorkerProtocolError("worker protocol frame is truncated by EOF");
@@ -935,31 +938,57 @@ void write_worker_frame(int fd, WorkerMessageKind kind,
   write_all(fd, payload.data(), payload.size(), deadline);
 }
 
-/** @copydoc ps::server::read_worker_frame */
-WorkerProtocolFrame read_worker_frame(
+/** @copydoc ps::server::WorkerFrameDecoder::read_frame */
+WorkerProtocolFrame WorkerFrameDecoder::read_frame(
     int fd, std::chrono::steady_clock::time_point deadline) {
   if (fd < 0) {
     throw WorkerChannelError("worker frame input descriptor is invalid");
   }
-  std::vector<std::byte> header(kWorkerFrameHeaderBytes);
-  read_all(fd, header.data(), header.size(), deadline, true);
-  ByteReader header_reader(header);
-  if (header_reader.get_u32() != kWorkerProtocolMagic) {
-    throw WorkerProtocolError("worker frame magic is invalid");
+  if (!header_decoded_) {
+    read_incremental(fd, header_.data(), header_.size(), &header_offset_,
+                     deadline, true);
+    const std::vector<std::byte> header(header_.begin(), header_.end());
+    ByteReader header_reader(header);
+    if (header_reader.get_u32() != kWorkerProtocolMagic) {
+      throw WorkerProtocolError("worker frame magic is invalid");
+    }
+    if (header_reader.get_u16() != kWorkerProtocolVersion) {
+      throw WorkerProtocolError("worker frame version is unsupported");
+    }
+    kind_ = parse_message_kind(header_reader.get_u16());
+    const std::size_t payload_size = header_reader.get_u32();
+    header_reader.finish();
+    if (payload_size > kMaximumWorkerFramePayloadBytes) {
+      throw WorkerProtocolError(
+          "worker frame payload length exceeds its bound");
+    }
+    payload_.resize(payload_size);
+    header_decoded_ = true;
   }
-  if (header_reader.get_u16() != kWorkerProtocolVersion) {
-    throw WorkerProtocolError("worker frame version is unsupported");
-  }
+
+  read_incremental(fd, payload_.data(), payload_.size(), &payload_offset_,
+                   deadline, false);
   WorkerProtocolFrame frame;
-  frame.kind = parse_message_kind(header_reader.get_u16());
-  const std::size_t payload_size = header_reader.get_u32();
-  header_reader.finish();
-  if (payload_size > kMaximumWorkerFramePayloadBytes) {
-    throw WorkerProtocolError("worker frame payload length exceeds its bound");
-  }
-  frame.payload.resize(payload_size);
-  read_all(fd, frame.payload.data(), frame.payload.size(), deadline, false);
+  frame.kind = kind_;
+  frame.payload = std::move(payload_);
+  reset();
   return frame;
+}
+
+/** @copydoc ps::server::WorkerFrameDecoder::reset */
+void WorkerFrameDecoder::reset() noexcept {
+  header_offset_ = 0U;
+  header_decoded_ = false;
+  kind_ = WorkerMessageKind::Assignment;
+  payload_.clear();
+  payload_offset_ = 0U;
+}
+
+/** @copydoc ps::server::read_worker_frame */
+WorkerProtocolFrame read_worker_frame(
+    int fd, std::chrono::steady_clock::time_point deadline) {
+  WorkerFrameDecoder decoder;
+  return decoder.read_frame(fd, deadline);
 }
 
 /** @copydoc ps::server::send_worker_assignment */

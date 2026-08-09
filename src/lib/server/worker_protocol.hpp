@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,8 @@ namespace ps::server {
 
 /** @brief Maximum encoded payload accepted in one private worker frame. */
 inline constexpr std::size_t kMaximumWorkerFramePayloadBytes = 64U << 20U;
+/** @brief Fixed v1 private worker frame header width. */
+inline constexpr std::size_t kWorkerFrameHeaderBytes = 12U;
 
 /**
  * @brief Closed message kinds in the one-assignment worker protocol.
@@ -45,6 +48,62 @@ struct WorkerProtocolFrame final {
   WorkerMessageKind kind = WorkerMessageKind::Assignment;
   /** @brief Exact bounded payload bytes. */
   std::vector<std::byte> payload;
+};
+
+/**
+ * @brief Reassembles one private worker byte stream across bounded read calls.
+ *
+ * The decoder retains the exact header and payload offsets after
+ * `WorkerProtocolTimeout`, validates the complete header once, allocates only
+ * the advertised bounded payload, and resets only after returning a complete
+ * frame. One instance belongs to one socket byte stream and must not be shared
+ * concurrently.
+ *
+ * @throws Nothing for construction and destruction.
+ * @note After any exception other than `WorkerProtocolTimeout`, the channel is
+ * faulted and this decoder must be discarded with it. Clean EOF is recognized
+ * only when no byte of the next header has been consumed.
+ */
+class WorkerFrameDecoder final {
+ public:
+  /** @brief Creates one decoder positioned at a frame boundary. */
+  WorkerFrameDecoder() noexcept = default;
+
+  /** @brief Prevents duplicate ownership of one stream's partial frame. */
+  WorkerFrameDecoder(const WorkerFrameDecoder& other) = delete;
+  /** @brief Prevents duplicate assignment of one stream's partial frame. */
+  WorkerFrameDecoder& operator=(const WorkerFrameDecoder& other) = delete;
+
+  /**
+   * @brief Advances and returns one complete frame before an absolute deadline.
+   * @param fd Connected private Unix socket owned by this decoder's stream.
+   * @param deadline Absolute monotonic deadline for this advance call.
+   * @return Closed kind and exact bounded payload after full reassembly.
+   * @throws WorkerProtocolTimeout when this call's deadline expires; retained
+   * bytes remain available to a later call on the same descriptor.
+   * @throws WorkerProtocolEof for EOF at a fresh frame boundary.
+   * @throws WorkerProtocolError for malformed or truncated input.
+   * @throws WorkerChannelError for an invalid descriptor or socket failure.
+   */
+  WorkerProtocolFrame read_frame(
+      int fd, std::chrono::steady_clock::time_point deadline);
+
+ private:
+  /** @brief Returns to a fresh frame boundary after successful delivery. */
+  void reset() noexcept;
+
+  /** @brief Fixed header bytes retained across timeout slices. */
+  std::array<std::byte, kWorkerFrameHeaderBytes> header_{};
+  /** @brief Number of complete bytes currently retained in `header_`. */
+  std::size_t header_offset_ = 0U;
+  /** @brief Whether the complete retained header has been validated. */
+  bool header_decoded_ = false;
+  /** @brief Validated kind retained while its payload is incomplete. */
+  WorkerMessageKind kind_ = WorkerMessageKind::Assignment;
+  /** @brief Advertised bounded payload retained across timeout slices. */
+  std::vector<std::byte> payload_;
+  /** @brief Number of complete bytes currently retained in `payload_`. */
+  std::size_t payload_offset_ = 0U;
 };
 
 /**
@@ -141,7 +200,7 @@ void write_worker_frame(int fd, WorkerMessageKind kind,
                         std::chrono::steady_clock::time_point deadline);
 
 /**
- * @brief Reads and validates one complete private worker frame.
+ * @brief Reads and validates one complete frame with a one-shot decoder.
  * @param fd Connected private Unix socket.
  * @param deadline Absolute monotonic I/O deadline.
  * @return Closed kind and exact bounded payload.
@@ -149,6 +208,9 @@ void write_worker_frame(int fd, WorkerMessageKind kind,
  * @throws WorkerProtocolEof for EOF before the next frame begins.
  * @throws WorkerProtocolError for a malformed/truncated header or payload.
  * @throws WorkerChannelError for a socket-system failure.
+ * @note Callers that intentionally retry short read deadlines on one stream
+ * must retain `WorkerFrameDecoder`; this convenience function cannot preserve
+ * a partial frame after it throws `WorkerProtocolTimeout`.
  */
 WorkerProtocolFrame read_worker_frame(
     int fd, std::chrono::steady_clock::time_point deadline);

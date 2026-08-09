@@ -133,6 +133,8 @@ void send_identity_locked(int fd, WorkerMessageKind kind,
  * @param write_mutex Non-null sole socket-write serializer.
  * @return Nothing when `done` becomes true or control fails.
  * @throws Nothing; all failures set `control_failed` and request cancellation.
+ * @note One decoder retains partial Cancel header/payload bytes across short
+ * poll deadlines while heartbeat and completion observation stay responsive.
  */
 void run_control_loop(int fd, const AttemptIdentity& identity,
                       std::chrono::milliseconds heartbeat_interval,
@@ -142,6 +144,7 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
                       std::mutex* write_mutex) noexcept {
   try {
     auto next_heartbeat = std::chrono::steady_clock::now() + heartbeat_interval;
+    WorkerFrameDecoder frame_decoder;
     while (!done->load(std::memory_order_acquire)) {
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_heartbeat) {
@@ -150,7 +153,7 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
         next_heartbeat = std::chrono::steady_clock::now() + heartbeat_interval;
       }
       try {
-        WorkerProtocolFrame frame = read_worker_frame(
+        WorkerProtocolFrame frame = frame_decoder.read_frame(
             fd, std::min(next_heartbeat, std::chrono::steady_clock::now() +
                                              kControlPollInterval));
         if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=

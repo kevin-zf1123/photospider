@@ -15,9 +15,12 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -158,6 +161,71 @@ struct ChildProcess final {
   /** @brief Exact wait status when `reaped` is true. */
   int status = 0;
 };
+
+/**
+ * @brief Closed outcome of signaling one exactly retained child PID.
+ * @throws Nothing for value operations.
+ */
+enum class OwnedSignalResult : std::uint8_t {
+  /** @brief The kernel accepted signal delivery for the exact owned PID. */
+  Delivered,
+  /** @brief The exact owned PID no longer names a process. */
+  AlreadyExited,
+  /** @brief Ownership changed or the kernel rejected signal delivery. */
+  Rejected,
+};
+
+/**
+ * @brief Terminates the authority process after its final reap deadline.
+ * @return Never returns.
+ * @throws Nothing.
+ * @note POSIX provides no bounded blocking reap primitive. Retaining authority
+ * while returning without exact `waitpid` would permit zombies, PID reuse, or
+ * double reaping, so deadline exhaustion deliberately fail-stops the sole
+ * authority process instead.
+ */
+[[noreturn]] void fail_stop_unreaped_worker() noexcept {
+  static constexpr char kMessage[] =
+      "photospider WorkerManager fail-stop: exact worker was not reaped "
+      "before the SIGKILL deadline\n";
+  std::size_t offset = 0U;
+  while (offset != sizeof(kMessage) - 1U) {
+    const ssize_t written = ::write(STDERR_FILENO, kMessage + offset,
+                                    sizeof(kMessage) - 1U - offset);
+    if (written > 0) {
+      offset += static_cast<std::size_t>(written);
+      continue;
+    }
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
+    break;
+  }
+  std::abort();
+}
+
+/**
+ * @brief Decides whether owned signal escalation remains terminal authority.
+ * @param process Exactly reaped child status.
+ * @param term_delivered Whether the kernel accepted owned `SIGTERM` delivery.
+ * @param kill_delivered Whether the kernel accepted owned `SIGKILL` delivery.
+ * @return True for matching signal death or clean exit after an accepted
+ * escalation; false for a pre-existing nonzero or unrelated signal failure.
+ * @throws Nothing.
+ */
+bool escalation_matches_wait_status(const ChildProcess& process,
+                                    bool term_delivered,
+                                    bool kill_delivered) noexcept {
+  if (!process.reaped || (!term_delivered && !kill_delivered)) {
+    return false;
+  }
+  if (WIFSIGNALED(process.status)) {
+    const int signal_number = WTERMSIG(process.status);
+    return (term_delivered && signal_number == SIGTERM) ||
+           (kill_delivered && signal_number == SIGKILL);
+  }
+  return WIFEXITED(process.status) && WEXITSTATUS(process.status) == 0;
+}
 
 /**
  * @brief Sets close-on-exec and nonblocking flags on one parent-created fd.
@@ -366,7 +434,7 @@ WorkerManagerCompletion failure_completion(const AttemptIdentity& identity,
 }
 
 /**
- * @brief Builds one trusted forced-cancellation completion after exact reaping.
+ * @brief Builds forced cancellation after owned signal delivery and reaping.
  * @param identity Exact retained assignment identity.
  * @param message Trusted escalation diagnostic.
  * @return Complete forced-cancellation fact.
@@ -781,7 +849,7 @@ class WorkerManager::Impl final {
                                                   options_.startup_timeout);
       status_read.reset();
       if (child_error.has_value()) {
-        reap_blocking(record, &process);
+        static_cast<void>(terminate_and_reap(record, &process));
         throw ManagerFailure(JobAttemptFailure::WorkerStartup,
                              std::string("worker setup/exec failed: ") +
                                  std::strerror(*child_error));
@@ -900,6 +968,10 @@ class WorkerManager::Impl final {
    * @return One completion only after `process` is reaped.
    * @throws Worker protocol/channel exceptions for the outer classifier.
    * @throws std::invalid_argument when `process` is null.
+   * @note Short read slices share one stateful frame decoder. Cancellation-send
+   * failure starts the same cooperative deadline and keeps draining worker
+   * report/EOF/exit truth; only delivered TERM/KILL escalation yields
+   * `ForcedCancellation`.
    */
   WorkerManagerCompletion monitor_process(const std::shared_ptr<Record>& record,
                                           ChildProcess* process) {
@@ -913,34 +985,41 @@ class WorkerManager::Impl final {
     std::optional<std::chrono::steady_clock::time_point> report_deadline;
     std::optional<std::chrono::steady_clock::time_point> eof_deadline;
     std::optional<JobAttemptReport> candidate_report;
-    bool cancel_sent = false;
+    bool cancel_attempted = false;
+    bool cancel_delivery_failed = false;
     bool channel_eof = false;
+    WorkerFrameDecoder frame_decoder;
 
     for (;;) {
       observe_exit(record, process);
       const auto now = std::chrono::steady_clock::now();
       const bool cancel = cancellation_requested(record);
-      if (cancel && !cancel_sent && !process->reaped) {
+      if (cancel && !cancel_attempted && !process->reaped) {
+        cancel_attempted = true;
+        cancel_deadline = now + options_.cooperative_cancel_timeout;
         try {
-          send_worker_identity(process->control.get(),
-                               WorkerMessageKind::Cancel, record->identity,
-                               now + options_.io_timeout);
-          cancel_sent = true;
-          cancel_deadline = std::chrono::steady_clock::now() +
-                            options_.cooperative_cancel_timeout;
-        } catch (...) {
-          terminate_and_reap(record, process);
-          return forced_cancellation_completion(
+          send_worker_identity(
+              process->control.get(), WorkerMessageKind::Cancel,
               record->identity,
-              "cooperative cancellation channel failed; worker was reaped");
+              std::min(now + options_.io_timeout, *cancel_deadline));
+        } catch (...) {
+          cancel_delivery_failed = true;
         }
       }
       if (cancel_deadline.has_value() && !process->reaped &&
-          now >= *cancel_deadline) {
-        terminate_and_reap(record, process);
-        return forced_cancellation_completion(
-            record->identity,
-            "worker exceeded cooperative cancellation grace and was reaped");
+          std::chrono::steady_clock::now() >= *cancel_deadline) {
+        const bool signal_delivered = terminate_and_reap(record, process);
+        if (signal_delivered) {
+          return forced_cancellation_completion(
+              record->identity,
+              cancel_delivery_failed
+                  ? "cancellation channel failed and manager signal "
+                    "escalation reaped the worker"
+                  : "worker exceeded cooperative cancellation grace; "
+                    "manager signal escalation reaped it");
+        }
+        channel_eof = true;
+        continue;
       }
       if (!cancel && !process->reaped && now >= runtime_deadline) {
         terminate_and_reap(record, process);
@@ -1021,7 +1100,7 @@ class WorkerManager::Impl final {
       }
       try {
         WorkerProtocolFrame frame =
-            read_worker_frame(process->control.get(), read_deadline);
+            frame_decoder.read_frame(process->control.get(), read_deadline);
         if (candidate_report.has_value()) {
           throw WorkerProtocolError(
               "worker sent an extra frame after its terminal report");
@@ -1121,21 +1200,23 @@ class WorkerManager::Impl final {
    * @param record Exact retained record.
    * @param pid Candidate child PID, which must equal retained ownership.
    * @param signal_number `SIGTERM` or `SIGKILL`.
-   * @return True after signal delivery or when the process already vanished.
+   * @return Whether delivery occurred, the process vanished, or signaling was
+   * rejected.
    * @throws Nothing.
    */
-  bool signal_owned(const std::shared_ptr<Record>& record, pid_t pid,
-                    int signal_number) noexcept {
+  OwnedSignalResult signal_owned(const std::shared_ptr<Record>& record,
+                                 pid_t pid, int signal_number) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = records_.find(record->identity.attempt_id.value());
     if (pid <= 0 || found == records_.end() || found->second != record ||
         record->pid != pid || found->second->identity != record->identity) {
-      return false;
+      return OwnedSignalResult::Rejected;
     }
-    if (::kill(pid, signal_number) == 0 || errno == ESRCH) {
-      return true;
+    if (::kill(pid, signal_number) == 0) {
+      return OwnedSignalResult::Delivered;
     }
-    return false;
+    return errno == ESRCH ? OwnedSignalResult::AlreadyExited
+                          : OwnedSignalResult::Rejected;
   }
 
   /**
@@ -1143,7 +1224,10 @@ class WorkerManager::Impl final {
    * @param record Exact retained record.
    * @param process Non-null child state.
    * @return True when this call or an earlier call has reaped the child.
+   * @throws std::invalid_argument when `process` is null.
    * @throws ManagerFailure for waitpid errors other than interruption.
+   * @note The source-private test gate may suppress the syscall to exercise
+   * final deadline handling; product configuration leaves that gate null.
    */
   bool observe_exit(const std::shared_ptr<Record>& record,
                     ChildProcess* process) {
@@ -1152,6 +1236,11 @@ class WorkerManager::Impl final {
     }
     if (process->reaped) {
       return true;
+    }
+    if (options_.defer_reap_observation_for_test != nullptr &&
+        options_.defer_reap_observation_for_test->load(
+            std::memory_order_acquire)) {
+      return false;
     }
     for (;;) {
       int status = 0;
@@ -1175,84 +1264,71 @@ class WorkerManager::Impl final {
   }
 
   /**
-   * @brief Blocks until exact waitpid succeeds for a child known to be exiting.
-   * @param record Exact retained record.
-   * @param process Non-null child state.
-   * @return Nothing after `reaped=true` and PID clearing.
-   * @throws ManagerFailure on unrecoverable waitpid failure.
-   */
-  void reap_blocking(const std::shared_ptr<Record>& record,
-                     ChildProcess* process) {
-    if (process == nullptr) {
-      throw std::invalid_argument("worker blocking reap process is null");
-    }
-    if (process->reaped) {
-      return;
-    }
-    for (;;) {
-      int status = 0;
-      const pid_t waited = ::waitpid(process->pid, &status, 0);
-      if (waited == process->pid) {
-        process->reaped = true;
-        process->status = status;
-        clear_reaped_pid(record, process->pid);
-        return;
-      }
-      if (waited < 0 && errno == EINTR) {
-        continue;
-      }
-      throw ManagerFailure(JobAttemptFailure::WorkerExit,
-                           std::string("worker blocking waitpid failed: ") +
-                               std::strerror(errno));
-    }
-  }
-
-  /**
    * @brief Waits nonblocking for one exact child until a local deadline.
    * @param record Exact retained record.
    * @param process Non-null child state.
    * @param deadline Absolute monotonic deadline.
    * @return True when reaped before deadline.
+   * @throws std::invalid_argument when `process` is null.
    * @throws ManagerFailure from waitpid unchanged.
    */
   bool wait_for_exit_until(const std::shared_ptr<Record>& record,
                            ChildProcess* process,
                            std::chrono::steady_clock::time_point deadline) {
-    while (std::chrono::steady_clock::now() < deadline) {
+    for (;;) {
       if (observe_exit(record, process)) {
         return true;
       }
-      std::this_thread::sleep_for(kSupervisorPollInterval);
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) {
+        return observe_exit(record, process);
+      }
+      std::this_thread::sleep_until(
+          std::min(deadline, now + kSupervisorPollInterval));
     }
-    return observe_exit(record, process);
   }
 
   /**
    * @brief Revokes channel, escalates TERM/KILL, and exactly reaps one child.
    * @param record Exact retained assignment record.
    * @param process Non-null process owner.
-   * @return Nothing after `waitpid` and immediate retained-PID clearing.
+   * @return True only when authority-owned signal escalation was delivered and
+   * remains consistent with the exact wait status; false when channel closure
+   * or a pre-existing worker failure allowed exact reaping.
    * @throws ManagerFailure for unrecoverable waitpid failure.
+   * @throws std::invalid_argument when `process` is null.
    * @note Every signal revalidates complete record/PID ownership under mutex.
+   * Missing the final reap deadline fail-stops the authority process; this
+   * function never falls back to an unbounded `waitpid`.
    */
-  void terminate_and_reap(const std::shared_ptr<Record>& record,
+  bool terminate_and_reap(const std::shared_ptr<Record>& record,
                           ChildProcess* process) {
-    if (process == nullptr || process->reaped) {
-      return;
+    if (process == nullptr) {
+      throw std::invalid_argument("worker termination process is null");
+    }
+    if (process->reaped) {
+      return false;
     }
     process->control.reset();
-    static_cast<void>(signal_owned(record, process->pid, SIGTERM));
+    if (observe_exit(record, process)) {
+      return false;
+    }
+    const bool term_delivered = signal_owned(record, process->pid, SIGTERM) ==
+                                OwnedSignalResult::Delivered;
     if (wait_for_exit_until(
             record, process,
             std::chrono::steady_clock::now() + options_.terminate_timeout)) {
-      return;
+      return escalation_matches_wait_status(*process, term_delivered, false);
     }
-    static_cast<void>(signal_owned(record, process->pid, SIGKILL));
+    const bool kill_delivered = signal_owned(record, process->pid, SIGKILL) ==
+                                OwnedSignalResult::Delivered;
     if (!wait_for_exit_until(
             record, process,
             std::chrono::steady_clock::now() + options_.kill_reap_timeout)) {
-      reap_blocking(record, process);
+      fail_stop_unreaped_worker();
     }
+    return escalation_matches_wait_status(*process, term_delivered,
+                                          kill_delivered);
   }
 
   /**

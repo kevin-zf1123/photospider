@@ -108,20 +108,38 @@ std::chrono::steady_clock::time_point protocol_deadline() noexcept {
 /**
  * @brief Writes one exact raw byte range to a small local test socket.
  * @param fd Connected descriptor.
- * @param bytes Exact nonempty bytes.
+ * @param bytes Non-null exact bytes when `size` is nonzero.
+ * @param size Exact byte count.
  * @return Nothing after all bytes are written.
+ * @throws std::invalid_argument for null nonempty input.
  * @throws std::runtime_error for an unexpected write failure.
  */
-void write_raw(int fd, const std::array<std::byte, 12U>& bytes) {
+void write_raw_range(int fd, const std::byte* bytes, std::size_t size) {
+  if (size != 0U && bytes == nullptr) {
+    throw std::invalid_argument("worker protocol test raw input is null");
+  }
   std::size_t offset = 0U;
-  while (offset != bytes.size()) {
-    const ssize_t written =
-        ::write(fd, bytes.data() + offset, bytes.size() - offset);
+  while (offset != size) {
+    const ssize_t written = ::write(fd, bytes + offset, size - offset);
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
     if (written <= 0) {
       throw std::runtime_error("worker protocol test raw write failed");
     }
     offset += static_cast<std::size_t>(written);
   }
+}
+
+/**
+ * @brief Writes one complete fixed raw test header.
+ * @param fd Connected descriptor.
+ * @param bytes Exact twelve-byte header.
+ * @return Nothing after all bytes are written.
+ * @throws std::runtime_error for an unexpected write failure.
+ */
+void write_raw(int fd, const std::array<std::byte, 12U>& bytes) {
+  write_raw_range(fd, bytes.data(), bytes.size());
 }
 
 /**
@@ -171,6 +189,37 @@ TEST(WorkerProtocol, RoundTripsCompleteAssignmentAndExactLease) {
   EXPECT_EQ(received.assignment.spec->digest(), spec->digest());
   EXPECT_EQ(received.graph.yaml_path, sent.graph.yaml_path);
   EXPECT_EQ(received.heartbeat_interval, sent.heartbeat_interval);
+}
+
+TEST(WorkerProtocol, StatefulDecoderPreservesHeaderAndPayloadAcrossTimeouts) {
+  ScopedSocketPair sockets;
+  const std::array<std::byte, 18U> frame_bytes{
+      std::byte{0x50}, std::byte{0x53}, std::byte{0x57}, std::byte{0x31},
+      std::byte{0x00}, std::byte{0x01}, std::byte{0x00}, std::byte{0x03},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x06},
+      std::byte{0x10}, std::byte{0x20}, std::byte{0x30}, std::byte{0x40},
+      std::byte{0x50}, std::byte{0x60}};
+  WorkerFrameDecoder decoder;
+
+  write_raw_range(sockets.at(0U), frame_bytes.data(), 5U);
+  EXPECT_THROW(
+      decoder.read_frame(sockets.at(1U), std::chrono::steady_clock::now() +
+                                             std::chrono::milliseconds(10)),
+      WorkerProtocolTimeout);
+
+  write_raw_range(sockets.at(0U), frame_bytes.data() + 5U, 9U);
+  EXPECT_THROW(
+      decoder.read_frame(sockets.at(1U), std::chrono::steady_clock::now() +
+                                             std::chrono::milliseconds(10)),
+      WorkerProtocolTimeout);
+
+  write_raw_range(sockets.at(0U), frame_bytes.data() + 14U, 4U);
+  const WorkerProtocolFrame frame =
+      decoder.read_frame(sockets.at(1U), protocol_deadline());
+  EXPECT_EQ(frame.kind, WorkerMessageKind::Heartbeat);
+  const std::vector<std::byte> expected(frame_bytes.begin() + 12,
+                                        frame_bytes.end());
+  EXPECT_EQ(frame.payload, expected);
 }
 
 TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {

@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -211,6 +212,13 @@ struct WorkerManagerOptions final {
   std::chrono::milliseconds kill_reap_timeout{2000};
   /** @brief Per-frame read/write deadline bound. */
   std::chrono::milliseconds io_timeout{2000};
+  /**
+   * @brief Optional source-private gate suppressing `waitpid` observations.
+   * @note Null in product construction. Tests may hold this flag true to
+   * deterministically exercise the post-`SIGKILL` fail-stop deadline without
+   * transferring PID ownership or enabling an unbounded wait.
+   */
+  std::shared_ptr<std::atomic<bool>> defer_reap_observation_for_test;
 };
 
 /**

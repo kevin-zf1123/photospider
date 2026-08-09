@@ -5,6 +5,7 @@
  */
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -334,6 +335,41 @@ TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
             JobState::Succeeded);
 }
 
+TEST(WorkerSupervisor, ReassemblesReportAcrossMultiplePollSlices) {
+  ScopedSupervisorRoot root;
+  auto service = make_service(root.path(), supervisor_options());
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.fragmented.report"));
+
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.state, JobState::Succeeded) << terminal.message;
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Succeeded);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::None);
+}
+
+TEST(WorkerSupervisor, ReassemblesCancelAcrossMultiplePollSlices) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.cooperative_cancel_timeout = 300ms;
+  auto service = make_service(root.path(), std::move(options));
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.fragmented.cancel"));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto snapshot = service->query(submitted.job_id);
+        return snapshot.has_value() && snapshot->state == JobState::Running;
+      },
+      2s));
+
+  ASSERT_TRUE(service->cancel(submitted.job_id));
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.state, JobState::Cancelled) << terminal.message;
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Cancelled);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::CancellationObserved);
+}
+
 TEST(WorkerSupervisor, RuntimeTimeoutTerminatesHeartbeatingWorker) {
   ScopedSupervisorRoot root;
   WorkerManagerOptions options = supervisor_options();
@@ -348,6 +384,35 @@ TEST(WorkerSupervisor, RuntimeTimeoutTerminatesHeartbeatingWorker) {
   EXPECT_EQ(
       SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
       0U);
+}
+
+TEST(WorkerSupervisor, ReapDeadlineFailStopsWithoutBlockingFallback) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.cooperative_cancel_timeout = 50ms;
+  options.terminate_timeout = 50ms;
+  options.kill_reap_timeout = 50ms;
+  options.io_timeout = 50ms;
+  options.defer_reap_observation_for_test =
+      std::make_shared<std::atomic<bool>>(true);
+
+  EXPECT_DEATH(
+      {
+        auto service = make_service(root.path(), options);
+        const JobSubmission submitted =
+            service->submit(fixture_spec("fixture.ignore"));
+        static_cast<void>(submitted);
+        if (!wait_until(
+                [&] {
+                  return SingleTenantJobServiceTestAccess::
+                             live_worker_process_count(*service) == 1U;
+                },
+                2s)) {
+          throw std::runtime_error("death-test worker did not become live");
+        }
+        service.reset();
+      },
+      "exact worker was not reaped before the SIGKILL deadline");
 }
 
 TEST(WorkerSupervisor, CooperativeAndForcedCancellationRemainDistinct) {
@@ -383,6 +448,46 @@ TEST(WorkerSupervisor, CooperativeAndForcedCancellationRemainDistinct) {
   EXPECT_EQ(ignored_terminal.failure,
             JobAttemptFailure::WorkerCancellationForced);
   EXPECT_LT(elapsed, 2s);
+}
+
+TEST(WorkerSupervisor, CancelSendFailurePreservesWorkerFailureAndExit) {
+  /**
+   * @brief Maps one fixture cancel-channel fault to its exact terminal truth.
+   * @throws Nothing for aggregate initialization and value operations.
+   */
+  struct CancelRaceCase final {
+    /** @brief Fixture behavior selected after closing its cancel read side. */
+    const char* mode;
+    /** @brief Exact expected worker-owned or wait-status failure. */
+    JobAttemptFailure failure;
+  };
+  const std::array<CancelRaceCase, 4U> cases{{
+      {"fixture.cancel-race.failed-report", JobAttemptFailure::Compute},
+      {"fixture.cancel-race.nonzero", JobAttemptFailure::WorkerExit},
+      {"fixture.cancel-race.signal", JobAttemptFailure::WorkerSignal},
+      {"fixture.cancel-race.channel-close", JobAttemptFailure::WorkerChannel},
+  }};
+
+  ScopedSupervisorRoot root;
+  auto service = make_service(root.path(), supervisor_options());
+  for (std::size_t repetition = 0U; repetition < 3U; ++repetition) {
+    for (const CancelRaceCase& test_case : cases) {
+      const JobSubmission submitted =
+          service->submit(fixture_spec(test_case.mode));
+      ASSERT_TRUE(service->cancel(submitted.job_id))
+          << test_case.mode << " repetition " << repetition;
+      const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+      EXPECT_EQ(terminal.state, JobState::Failed)
+          << test_case.mode << " repetition " << repetition << ": "
+          << terminal.message;
+      EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed)
+          << test_case.mode << " repetition " << repetition;
+      EXPECT_EQ(terminal.failure, test_case.failure)
+          << test_case.mode << " repetition " << repetition << ": "
+          << terminal.message;
+      EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
+    }
+  }
 }
 
 TEST(WorkerSupervisor, StaleLeaseCannotCancelFreshRetryProcess) {
