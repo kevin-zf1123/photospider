@@ -1,6 +1,10 @@
 /**
  * @file single_tenant_job_service_test_access.hpp
- * @brief Exposes source-private Job submission and worker-ownership test seams.
+ * @brief Exposes source-private identity, accepted-Job, and worker test seams.
+ *
+ * Identity access reserves from caller-owned local atomic sequences. Job-state
+ * access observes retained accepted records, and worker access observes
+ * service-owned thread counts without exposing handles.
  */
 #pragma once
 
@@ -128,14 +132,20 @@ struct WorkerThreadOwnershipSnapshot final {
 };
 
 /**
- * @brief Read-only test access to private worker-thread ownership state.
+ * @brief Provides local identity reservation and read-only Job/worker seams.
  *
- * The seam observes only how many joinable worker handles remain owned by a
- * live service. It cannot mutate Job truth, start or stop work, publish a
- * report, or expose a worker handle.
+ * Identity methods reserve from and therefore may modify only the
+ * caller-supplied local atomic sequence. They do not read, reset, or otherwise
+ * mutate production process-wide counters. Accepted-state methods observe
+ * retained Job-record truth, while worker methods observe handle ownership.
+ * The observation methods do not expose handles, mutate Job truth, start or
+ * stop work, or publish reports.
  *
- * @throws Nothing except documented standard synchronization or arithmetic
- * failures.
+ * @throws Exceptions are method-specific and documented below. They include
+ * `std::invalid_argument` for invalid seam inputs, `std::overflow_error` for
+ * identity saturation or checked arithmetic, `std::system_error` from
+ * synchronization operations, and any exception raised by an identity
+ * observer callback.
  * @note This source-private interface exists only to support maintained tests.
  * Its definitions are compiled through the non-installed internal target and
  * do not alter the installed ABI.
@@ -212,6 +222,7 @@ class SingleTenantJobServiceTestAccess final {
    * @param service Live service whose private ownership is observed.
    * @return Exact retained worker-handle count at one mutex-protected instant.
    * @throws std::system_error for mutex synchronization failure.
+   * @throws std::overflow_error if the checked ownership total overflows.
    * @note A completed but unjoined `std::thread` remains included.
    */
   static std::size_t owned_worker_thread_count(
