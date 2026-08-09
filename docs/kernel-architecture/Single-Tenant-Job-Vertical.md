@@ -290,6 +290,9 @@ quota reservation, artifact-commit capability, credential, network listener,
 native handle, or second assignment. Worker-controlled image dimensions are
 checked against arithmetic, frame, output, staging, and retention bounds before
 the control plane allocates exact tight CPU storage.
+Manager and worker short-poll loops each retain one decoder for their channel:
+deadline expiry preserves partial header/payload bytes and exact offsets, while
+clean EOF remains valid only at a fresh frame boundary.
 
 WorkerManager alone owns spawn, the private channel, the PID, signal delivery,
 `waitpid`, and supervision-thread reaping. No API accepts or exposes a PID.
@@ -312,11 +315,17 @@ not published, the prior intent remains authoritative; if its record becomes
 visible but a later durability barrier or completion observer fails, the
 service keeps `Cancelling`, fences the worker, and enters the same journal
 fail-stop. After accepted intent, WorkerManager first sends exact cooperative
-cancellation, then closes/revokes the channel and escalates through `SIGTERM`
-and `SIGKILL` under configured bounds before exact reaping. Cooperative and
-forced cancellation remain distinguishable durable facts. Destruction records
-cancellation without waiting under the Job mutex, then drains all attempts
-concurrently through the same escalation path.
+cancellation. A send failure continues bounded report/EOF/wait-status drainage
+and preserves an actual Failed report, nonzero exit, signal death, or channel
+close; it does not itself mint forced cancellation. A worker still alive at the
+cooperative deadline has its channel closed/revoked and receives owned
+`SIGTERM`/`SIGKILL` escalation under configured bounds before exact reaping.
+Only actual signal escalation yields a forced-cancellation fact. Destruction
+records cancellation without waiting under the Job mutex, then drains all
+attempts concurrently through the same escalation path. Reap observation is
+nonblocking through the final kill/reap deadline; if exact reaping remains
+unobservable, the authority process fails stop rather than block indefinitely
+or return live ownership.
 
 One private reaper joins completed supervision handles outside both manager and
 Job mutexes. The explicit source-private test marker may execute deterministic

@@ -1156,20 +1156,26 @@ owners listed above are unchanged.
 [ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
 adds a higher-level target without changing these Kernel execution owners. The
 current [single-tenant Job vertical](Single-Tenant-Job-Vertical.md) implements
-the Issue #99 identity, durable Job truth, complete-envelope tenant quota,
-explicit retry/checkpoint binding, cancellation ordering, Embedded Host, and
-crash-durable image artifact slice in one process. Its quota is service
-admission/accounting, not OS enforcement. It still has no WorkerManager,
-separate worker process, OS isolation, heartbeat/forced termination, network
-endpoint, or untrusted-plugin profile. In the future full server profile, one
-fresh constrained `photospider-worker` owns exactly one Job attempt and one
-attempt-local instance of the process execution domain described here. Server
-tenant/Job quota bounds that process; its existing `ResourceLedger` subdivides
-only the current Host/device execution envelope. The control plane owns durable
-Job truth,
-WorkerManager owns process lifecycle, the artifact service owns durable bytes
-and receipts, and isolated tenant CPU plugins receive no Run, Graph,
-ledger-token, or artifact authority.
+the Issue #99 durable Job/quota/artifact/retry authority and the Issue #100
+source-private WorkerManager in the same authority process. Every product
+attempt runs in one fresh, never-reused `photospider-worker` process that owns
+one attempt-local instance of the process execution domain described here.
+WorkerManager owns its private bounded protocol, heartbeat/runtime deadlines,
+exact lease/PID fencing, cooperative cancellation, TERM/KILL escalation, and
+exact nonblocking `waitpid` reaping. Partial protocol headers and payloads are
+retained across short poll deadlines; cancellation-send failure is drained to
+the worker report/EOF/exit deadline rather than treated as forced cancellation.
+If exact reaping remains unobservable after the final kill/reap deadline, the
+authority process fails stop instead of entering an unbounded wait or returning
+with live ownership.
+
+The accepted CPU and host-memory envelope bounds Embedded Host parallelism and
+the supported POSIX address space; configured-device bytes remain server
+admission accounting rather than an OS/device sandbox. The control plane still
+owns durable Job truth, the artifact service owns durable bytes and receipts,
+and this slice does not add a network endpoint, multi-tenant authorization,
+standalone artifact data plane, syscall/device sandbox, or untrusted-plugin
+profile planned by Issues #101-#106.
 
 ## Boundary Rationale
 

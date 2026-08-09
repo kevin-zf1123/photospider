@@ -239,6 +239,8 @@ AssignmentAccepted/Heartbeat/Cancel identity message，以及至多一个 Report
 root、quota reservation、artifact-commit capability、credential、network listener、native
 handle 或第二个 assignment。Worker 控制的 image dimension 会先经过 arithmetic、frame、
 output、staging 与 retention bound 校验，control plane 才分配精确紧密的 CPU storage。
+Manager 与 worker 的短 poll loop 都会为自己的 channel 保留一个 decoder：deadline 到期会保留
+partial header/payload byte 与精确 offset，而 clean EOF 只在 fresh frame boundary 上有效。
 
 WorkerManager 独占 spawn、private channel、PID、signal delivery、`waitpid` 与 supervision-
 thread reaping。任何 API 都不接受或暴露 PID。每条 cancellation 或 signal 路径都会重新校验
@@ -256,10 +258,14 @@ monotonic intent。先于 commit 获胜的 cancellation 会在 settlement 后丢
 如果 cancellation intent 未发布，先前 intent 仍是 authority；如果其 record 已可见、但后续
 durability barrier 或 completion observer 失败，service 会保留 `Cancelling`、fence worker，
 并进入相同 journal fail-stop。Intent 被接受后，WorkerManager 先发送精确 cooperative
-cancellation，再关闭/撤销 channel，并在配置 bound 下依次升级为 `SIGTERM` 与 `SIGKILL`，
-最后精确 reap。Cooperative 与 forced cancellation 仍是可区分的 durable fact。Destruction
-会记录 cancellation，且不在 Job mutex 下等待，随后通过相同 escalation path 并发排空所有
-attempt。
+cancellation。发送失败会继续有界排空 report/EOF/wait status，并保留真实 Failed report、
+nonzero exit、signal death 或 channel close；发送失败本身不会 mint forced cancellation。
+Cooperative deadline 时仍存活的 worker 会先被关闭/撤销 channel，再在 configured bound 下接收
+owner-validated `SIGTERM`/`SIGKILL` escalation，最后精确 reap。只有实际 signal escalation 才会
+产生 forced-cancellation fact。Destruction 会记录 cancellation，且不在 Job mutex 下等待，随后
+通过相同 escalation path 并发排空所有 attempt。Reap observation 在最终 kill/reap deadline 前
+保持非阻塞；如果仍无法观察到精确 reaping，authority process 会 fail-stop，而不是无限阻塞或
+带着 live ownership 返回。
 
 一个 private reaper 会在 manager 与 Job mutex 之外 join 已完成的 supervision handle。显式
 源码私有 test marker 可以在 supervision thread 内执行 deterministic unit-test worker；它不

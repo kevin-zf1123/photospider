@@ -886,17 +886,22 @@ cache administration/load 与上文其他 persistence owner 保持不变。
 
 [ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
 在不改变上述 Kernel execution owner 的前提下增加了更高层目标。当前
-[单租户 Job 纵向路径](Single-Tenant-Job-Vertical.zh.md)在一个进程内实现 Issue #99 的
-identity、durable Job truth、complete-envelope tenant quota、显式 retry/checkpoint binding、
-cancellation ordering、Embedded Host 与 crash-durable image artifact 切片。它的 quota 是
-service admission/accounting，而不是 OS enforcement。它仍不具备 WorkerManager、独立 worker
-process、OS isolation、heartbeat/forced termination、network endpoint 或 untrusted plugin
-profile。未来完整 server profile 中，每个全新受限的 `photospider-worker`
-恰好拥有一个 Job attempt，以及本文所述 process execution domain 的一个 attempt-local
-instance。Server tenant/Job quota 约束该进程；现有 `ResourceLedger` 只细分当前 Host/device
-execution envelope。Control plane 拥有 durable Job truth，WorkerManager 拥有 process
-lifecycle，artifact service 拥有 durable byte 与 receipt，而隔离的 tenant CPU plugin 不获得
-Run、Graph、ledger-token 或 artifact authority。
+[单租户 Job 纵向路径](Single-Tenant-Job-Vertical.zh.md)已在同一个 authority process 中实现
+Issue #99 的 durable Job/quota/artifact/retry authority，以及 Issue #100 的源码私有
+WorkerManager。每个产品 attempt 都在一个全新、绝不复用的 `photospider-worker` 进程中运行；
+该进程拥有本文所述 process execution domain 的一个 attempt-local instance。WorkerManager
+拥有其私有有界协议、heartbeat/runtime deadline、精确 lease/PID fencing、cooperative
+cancellation、TERM/KILL escalation 与精确非阻塞 `waitpid` reaping。短 poll deadline 之间会
+保留部分 protocol header 与 payload；cancellation 发送失败会继续有界排空 worker
+report/EOF/exit truth，而不会直接视为 forced cancellation。若最终 kill/reap deadline 后仍无法
+观察到精确回收，authority process 会 fail-stop，而不是进入无界等待或带着 live ownership
+返回。
+
+已接受的 CPU 与 host-memory envelope 会约束 Embedded Host parallelism 和受支持的 POSIX
+address space；configured-device bytes 仍只是 server admission accounting，而不是 OS/device
+sandbox。Control plane 继续拥有 durable Job truth，artifact service 继续拥有 durable byte 与
+receipt；本切片不增加 Issues #101-#106 规划的 network endpoint、multi-tenant authorization、
+standalone artifact data plane、syscall/device sandbox 或 untrusted-plugin profile。
 
 ## 边界原理
 
