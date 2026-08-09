@@ -1,6 +1,7 @@
 /**
  * @file embedded_job_worker.hpp
- * @brief Declares the real Embedded Host adapter for one Issue #99 attempt.
+ * @brief Declares the real Embedded Host adapter for one Issue #99/#100
+ * attempt.
  */
 #pragma once
 
@@ -10,27 +11,6 @@
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
-
-/**
- * @brief Trusted filesystem/configuration material resolved outside JobSpec.
- * @throws Nothing for default construction; string copies may allocate.
- * @note These fields are local adapter configuration, never canonical JobSpec
- * bytes, server identities, artifact authority, or worker-returned data.
- */
-struct ResolvedGraphArtifact final {
-  /** @brief True only when the resolver found authorized immutable material. */
-  bool ok = false;
-  /** @brief Trusted graph-session root supplied to the local Host adapter. */
-  std::string root_dir;
-  /** @brief Trusted explicit YAML path for this immutable graph artifact. */
-  std::string yaml_path;
-  /** @brief Optional trusted Host configuration path. */
-  std::string config_path;
-  /** @brief Optional trusted cache root for this attempt. */
-  std::string cache_root_dir;
-  /** @brief Resolver-owned diagnostic when `ok` is false. */
-  std::string message;
-};
 
 /**
  * @brief Trusted adapter that resolves GraphArtifactId outside immutable
@@ -61,7 +41,7 @@ class GraphArtifactResolver {
 };
 
 /**
- * @brief Fresh in-process worker that executes one assignment through Host.
+ * @brief Fresh single-use worker object that executes one assignment via Host.
  *
  * Execution revalidates the complete immutable assignment and optional durable
  * checkpoint binding before resolution, creates a fresh Embedded Host, seeds
@@ -72,8 +52,9 @@ class GraphArtifactResolver {
  * @throws Constructor validation errors only; `execute` converts ordinary
  * resolver/Host failures into typed reports while allocation/system failures
  * may propagate according to the worker interface.
- * @note This class is not an OS worker process, supervisor, sandbox, or network
- * endpoint. Issue #100 owns those boundaries.
+ * @note Product composition creates this object inside `photospider-worker`.
+ * The object itself owns no OS lifecycle, supervisor, sandbox, or network
+ * endpoint; WorkerManager owns its process boundary.
  */
 class EmbeddedHostJobWorker final : public JobAttemptWorker {
  public:
@@ -136,6 +117,23 @@ class EmbeddedHostJobWorkerFactory final : public JobAttemptWorkerFactory {
    */
   std::unique_ptr<JobAttemptWorker> create(
       const JobAssignment& assignment) override;
+
+  /**
+   * @brief Advertises trusted graph resolution for external process transport.
+   * @return Always true for this real Embedded Host factory.
+   * @throws Nothing.
+   */
+  bool supports_external_assignment() const noexcept override { return true; }
+
+  /**
+   * @brief Resolves immutable graph material before worker process assignment.
+   * @param assignment Exact current assignment whose graph id is resolved.
+   * @return Trusted local graph paths and resolver diagnostic.
+   * @throws Resolver-specific allocation or trusted-I/O failures unchanged.
+   * @note Resolution grants no Job, artifact, quota, or state-root authority.
+   */
+  ResolvedGraphArtifact prepare_external_graph(
+      const JobAssignment& assignment) const override;
 
  private:
   /** @brief Trusted resolver shared by otherwise independent workers. */

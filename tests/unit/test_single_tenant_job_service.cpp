@@ -447,7 +447,8 @@ class FunctionWorker final : public JobAttemptWorker {
  * @brief Factory that gives every submitted Job one fresh FunctionWorker.
  * @throws Constructor rejects an empty callback; create may allocate.
  */
-class FunctionWorkerFactory final : public JobAttemptWorkerFactory {
+class FunctionWorkerFactory final
+    : public InProcessJobAttemptWorkerFactoryForTest {
  public:
   /**
    * @brief Retains one callback copied into every fresh worker.
@@ -1115,7 +1116,8 @@ class ThrowingWorker final : public JobAttemptWorker {
  * @brief Factory that raises directly or returns one exceptional worker.
  * @throws Construction only retains values; create raises when configured.
  */
-class ThrowingWorkerFactory final : public JobAttemptWorkerFactory {
+class ThrowingWorkerFactory final
+    : public InProcessJobAttemptWorkerFactoryForTest {
  public:
   /**
    * @brief Configures the exact exception location, family, and optional gate.
@@ -1156,7 +1158,7 @@ class ThrowingWorkerFactory final : public JobAttemptWorkerFactory {
  * @brief Contract-violating factory that returns no worker and no proof.
  * @throws Nothing.
  */
-class NullWorkerFactory final : public JobAttemptWorkerFactory {
+class NullWorkerFactory final : public InProcessJobAttemptWorkerFactoryForTest {
  public:
   /**
    * @brief Returns null instead of one fresh assignment worker.

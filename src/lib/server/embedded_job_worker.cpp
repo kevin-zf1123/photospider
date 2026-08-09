@@ -1,6 +1,6 @@
 /**
  * @file embedded_job_worker.cpp
- * @brief Implements one real Issue #99 Embedded Host Job attempt adapter.
+ * @brief Implements one real Issue #99/#100 Embedded Host Job attempt adapter.
  */
 #include "server/embedded_job_worker.hpp"
 
@@ -322,6 +322,22 @@ std::unique_ptr<JobAttemptWorker> EmbeddedHostJobWorkerFactory::create(
     const JobAssignment& assignment) {
   validate_attempt_identity(assignment.identity);
   return std::make_unique<EmbeddedHostJobWorker>(resolver_);
+}
+
+/** @copydoc ps::server::EmbeddedHostJobWorkerFactory::prepare_external_graph */
+ResolvedGraphArtifact EmbeddedHostJobWorkerFactory::prepare_external_graph(
+    const JobAssignment& assignment) const {
+  validate_attempt_identity(assignment.identity);
+  if (assignment.spec == nullptr) {
+    throw std::invalid_argument(
+        "external Embedded Host assignment has no immutable JobSpec");
+  }
+  validate_job_spec(*assignment.spec);
+  if (assignment.spec->digest() != assignment.identity.job_spec_digest) {
+    throw std::invalid_argument(
+        "external Embedded Host assignment digest does not match JobSpec");
+  }
+  return resolver_->resolve(assignment.spec->graph_artifact_id());
 }
 
 }  // namespace ps::server

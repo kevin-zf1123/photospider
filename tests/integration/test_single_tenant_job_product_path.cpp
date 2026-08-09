@@ -22,6 +22,10 @@
 
 #include "server/embedded_job_worker.hpp"  // NOLINT(build/include_subdir)
 
+#ifndef PS_PHOTOSPIDER_WORKER_PATH
+#error "PS_PHOTOSPIDER_WORKER_PATH must name photospider-worker"
+#endif
+
 namespace ps::server {
 namespace {
 
@@ -48,7 +52,7 @@ constexpr std::size_t kAfterComputeCancellationObservation = 5U;
 JobResourceRequest product_job_resources(std::uint32_t cpu_slots = 2U) {
   JobResourceRequest request;
   request.cpu_slots = cpu_slots;
-  request.host_memory_bytes = 8U << 20U;
+  request.host_memory_bytes = 512ULL << 30U;
   request.output_bytes = 8U << 20U;
   request.staging_bytes = 8U << 20U;
   request.retention_bytes = 8U << 20U;
@@ -64,11 +68,31 @@ TenantQuotaLimits product_quota_limits() {
   TenantQuotaLimits limits;
   limits.maximum_active_attempts = 8U;
   limits.capacity.cpu_slots = 16U;
-  limits.capacity.host_memory_bytes = 64U << 20U;
+  limits.capacity.host_memory_bytes = 4ULL << 40U;
   limits.capacity.output_bytes = 64U << 20U;
   limits.capacity.staging_bytes = 64U << 20U;
   limits.capacity.retention_bytes = 64U << 20U;
   return limits;
+}
+
+/**
+ * @brief Builds production-mode process supervision bounds for Embedded Host.
+ * @return Valid configuration using the built non-installed worker executable.
+ * @throws Path allocation failures unchanged.
+ */
+WorkerManagerOptions product_worker_options() {
+  WorkerManagerOptions options;
+  options.worker_executable = PS_PHOTOSPIDER_WORKER_PATH;
+  options.startup_timeout = std::chrono::seconds(10);
+  options.heartbeat_interval = std::chrono::milliseconds(250);
+  options.heartbeat_timeout = std::chrono::seconds(5);
+  options.attempt_runtime_timeout = std::chrono::seconds(30);
+  options.post_report_timeout = std::chrono::seconds(5);
+  options.cooperative_cancel_timeout = std::chrono::seconds(2);
+  options.terminate_timeout = std::chrono::seconds(1);
+  options.kill_reap_timeout = std::chrono::seconds(2);
+  options.io_timeout = std::chrono::seconds(5);
+  return options;
 }
 
 /**
@@ -179,8 +203,8 @@ JobAssignment make_worker_assignment(const GraphArtifactId& graph_id,
  *
  * @throws std::invalid_argument when the selected observation is zero.
  * @throws std::system_error from mutex or condition-variable operations.
- * @note One worker thread calls `observe()` while one test thread waits and
- * accepts cancellation. The gate must outlive both threads.
+ * @note One manager supervision thread calls `observe()` while one test thread
+ * waits and accepts cancellation. The gate must outlive both threads.
  */
 class CancellationObservationGate final {
  public:
@@ -491,7 +515,8 @@ TEST(SingleTenantJobProductPath,
   OutputCommitReceipt receipt;
   {
     SingleTenantJobService service(TenantId("tenant.issue99"),
-                                   product_quota_limits(), state_root, factory);
+                                   product_quota_limits(), state_root, factory,
+                                   {}, {}, product_worker_options());
     const JobSubmission submission = service.submit(JobSpec(
         graph_id, 0, OutputSlotId("image.final"), product_job_resources()));
     producer_job_id = submission.job_id;
@@ -537,7 +562,8 @@ TEST(SingleTenantJobProductPath,
 
   const std::uint64_t resolve_calls_before_restart = resolver->resolve_calls();
   SingleTenantJobService recovered(TenantId("tenant.issue99"),
-                                   product_quota_limits(), state_root, factory);
+                                   product_quota_limits(), state_root, factory,
+                                   {}, {}, product_worker_options());
   const std::optional<JobSnapshot> producer = recovered.query(producer_job_id);
   const std::optional<JobSnapshot> consumer = recovered.query(consumer_job_id);
   ASSERT_TRUE(producer.has_value());
@@ -560,9 +586,9 @@ TEST(SingleTenantJobProductPath, MissingGraphArtifactFailsBeforeHostExecution) {
       GraphArtifactId("graph.present"), product_root.root() / "sessions", yaml,
       product_root.root() / "cache");
   auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(resolver);
-  SingleTenantJobService service(TenantId("tenant.issue99"),
-                                 product_quota_limits(),
-                                 product_root.root() / "state", factory);
+  SingleTenantJobService service(
+      TenantId("tenant.issue99"), product_quota_limits(),
+      product_root.root() / "state", factory, {}, {}, product_worker_options());
   const JobSubmission submission = service.submit(
       JobSpec(GraphArtifactId("graph.absent"), 0, OutputSlotId("image.final"),
               product_job_resources(1U)));
@@ -577,13 +603,13 @@ TEST(SingleTenantJobProductPath, MissingGraphArtifactFailsBeforeHostExecution) {
 }
 
 TEST(SingleTenantJobProductPath,
-     ResolverFailureAfterAcceptedCancellationRemainsFailed) {
+     ResolverPreparationFailureAfterAcceptedCancellationRemainsFailed) {
   ScopedJobProductRoot product_root;
   auto resolver = std::make_shared<BlockingFailingGraphArtifactResolver>();
   auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(resolver);
-  SingleTenantJobService service(TenantId("tenant.issue99"),
-                                 product_quota_limits(),
-                                 product_root.root() / "state", factory);
+  SingleTenantJobService service(
+      TenantId("tenant.issue99"), product_quota_limits(),
+      product_root.root() / "state", factory, {}, {}, product_worker_options());
   const JobSubmission submission = service.submit(
       JobSpec(GraphArtifactId("graph.race"), 0, OutputSlotId("image.final"),
               product_job_resources(1U)));
@@ -605,8 +631,10 @@ TEST(SingleTenantJobProductPath,
   ASSERT_TRUE(terminal->attempt_outcome.has_value());
   EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
   EXPECT_TRUE(terminal->attempt_settled);
-  EXPECT_EQ(terminal->failure, JobAttemptFailure::GraphResolution);
-  EXPECT_EQ(terminal->message, "resolver failed after cancellation");
+  EXPECT_EQ(terminal->failure, JobAttemptFailure::WorkerStartup);
+  EXPECT_EQ(terminal->message,
+            "external assignment preparation failed: resolver failed after "
+            "cancellation");
   EXPECT_FALSE(terminal->output_receipt.has_value());
 }
 

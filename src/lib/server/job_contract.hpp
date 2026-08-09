@@ -144,7 +144,7 @@ using JobAttemptId = OpaqueTextId<JobAttemptIdDomain>;
 
 /** @brief Tag for one attempt worker identity domain. */
 struct WorkerInstanceIdDomain final {};
-/** @brief One fresh in-process Issue #99 worker instance identity. */
+/** @brief One fresh, never-reused Issue #100 worker process identity. */
 using WorkerInstanceId = OpaqueTextId<WorkerInstanceIdDomain>;
 
 /** @brief Tag for immutable graph artifact identity values. */
@@ -337,6 +337,22 @@ enum class JobAttemptFailure : std::uint8_t {
   ArtifactCommit,
   /** @brief Restart found an interrupted process-local attempt. */
   RecoveryInterrupted,
+  /** @brief External assignment preparation, process setup, or exec failed. */
+  WorkerStartup,
+  /** @brief Worker exited nonzero without a trustworthy terminal report. */
+  WorkerExit,
+  /** @brief Worker died by signal, including OOM-compatible SIGKILL. */
+  WorkerSignal,
+  /** @brief Private worker channel closed or failed unexpectedly. */
+  WorkerChannel,
+  /** @brief Worker violated the closed versioned transport contract. */
+  WorkerProtocol,
+  /** @brief Worker stopped producing heartbeats before its attempt settled. */
+  WorkerHeartbeatTimeout,
+  /** @brief Worker exceeded the configured total attempt runtime. */
+  WorkerRuntimeTimeout,
+  /** @brief Exact cancelled worker required terminate/kill escalation. */
+  WorkerCancellationForced,
 };
 
 /**
@@ -366,8 +382,9 @@ struct DeviceResourceRequest final {
  * @brief Complete immutable server quota demand for one Job attempt.
  * @throws Nothing for default/value operations; vector copies may allocate.
  * @note CPU slots are also the current Embedded Host maximum-parallelism cap.
- * Host/device values are admission declarations until Issue #100 supplies OS
- * enforcement; they never mint worker-local `ResourceLedger` authority.
+ * Issue #100 additionally applies host memory as the POSIX worker address-
+ * space ceiling. Configured device values remain admission declarations and
+ * never mint worker-local `ResourceLedger` authority or a device sandbox.
  */
 struct JobResourceRequest final {
   /** @brief Positive server CPU-slot reservation and Host callback cap. */

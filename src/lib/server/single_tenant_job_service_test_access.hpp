@@ -23,8 +23,26 @@
 #include <utility>
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_manager.hpp"             // NOLINT(build/include_subdir)
 
 namespace ps::server {
+
+/**
+ * @brief Explicit non-installed marker for deterministic in-process workers.
+ *
+ * A marked factory may execute through WorkerManager's supervision thread in
+ * maintained unit tests. Ordinary product factories must instead externalize
+ * their assignment and execute inside `photospider-worker`.
+ *
+ * @throws Derived construction behavior only.
+ * @note This type lives solely in the source-private test-access header and
+ * makes no OS isolation, crash containment, or bounded termination claim.
+ */
+class InProcessJobAttemptWorkerFactoryForTest : public JobAttemptWorkerFactory {
+ public:
+  /** @brief Destroys one marked test factory after manager drainage. */
+  ~InProcessJobAttemptWorkerFactoryForTest() override = default;
+};
 
 /**
  * @brief Arms one scoped deterministic assignment-thread start failure.
@@ -108,8 +126,8 @@ class ScopedWorkerThreadStartFailure final {
 /**
  * @brief One mutex-consistent snapshot of private worker-thread ownership.
  * @throws Nothing for value operations.
- * @note Active records are still executing, completed records await reaper
- * transfer, and joining records have been moved to the reaper's unlocked join.
+ * @note Active records are still supervised, completed records await manager
+ * reaper transfer, and joining records are in the manager's unlocked join.
  */
 struct WorkerThreadOwnershipSnapshot final {
   /** @brief Worker records that have not reached their completion tail. */
@@ -120,7 +138,7 @@ struct WorkerThreadOwnershipSnapshot final {
   std::size_t joining = 0U;
 
   /**
-   * @brief Returns all worker handles still owned by the service/reaper.
+   * @brief Returns all worker handles still owned by the manager/reaper.
    * @return Checked sum of active, completed, and joining counts.
    * @throws std::overflow_error if an impossible size_t sum overflows.
    */
@@ -344,16 +362,12 @@ class SingleTenantJobServiceTestAccess final {
    */
   static WorkerThreadOwnershipSnapshot worker_thread_ownership(
       const SingleTenantJobService& service) {
-    std::lock_guard<std::mutex> lock(service.mutex_);
+    const WorkerManagerOwnershipSnapshot manager =
+        service.worker_manager_->ownership_snapshot();
     WorkerThreadOwnershipSnapshot snapshot;
-    for (const auto& entry : service.workers_) {
-      if (entry.second.completed) {
-        ++snapshot.completed;
-      } else {
-        ++snapshot.active;
-      }
-    }
-    snapshot.joining = service.workers_joining_;
+    snapshot.active = manager.active;
+    snapshot.completed = manager.completed;
+    snapshot.joining = manager.joining;
     return snapshot;
   }
 
@@ -368,6 +382,34 @@ class SingleTenantJobServiceTestAccess final {
   static std::size_t owned_worker_thread_count(
       const SingleTenantJobService& service) {
     return worker_thread_ownership(service).total();
+  }
+
+  /**
+   * @brief Returns exact live child-process ownership without exposing PIDs.
+   * @param service Live service whose manager ownership is observed.
+   * @return Number of exact retained positive child PIDs.
+   * @throws Nothing.
+   * @note The observation grants no signal, wait, cancellation, or lease
+   * authority.
+   */
+  static std::size_t live_worker_process_count(
+      const SingleTenantJobService& service) noexcept {
+    return service.worker_manager_->ownership_snapshot().live_processes;
+  }
+
+  /**
+   * @brief Requests cancellation directly against one exact manager record.
+   * @param service Live service whose manager performs exact tuple fencing.
+   * @param identity Complete candidate attempt/worker/lease tuple.
+   * @return True only when the exact retained active record exists.
+   * @throws Nothing.
+   * @note This seam proves stale-lease rejection without exposing or accepting
+   * a PID. It does not record control-plane Job cancellation intent.
+   */
+  static bool request_exact_worker_cancel(
+      SingleTenantJobService& service,
+      const AttemptIdentity& identity) noexcept {
+    return service.worker_manager_->request_cancel(identity);
   }
 
   /**
@@ -386,11 +428,8 @@ class SingleTenantJobServiceTestAccess final {
     if (timeout.count() < 0) {
       throw std::invalid_argument("worker ownership wait timeout is negative");
     }
-    std::unique_lock<std::mutex> lock(service.mutex_);
-    return service.condition_.wait_for(lock, timeout, [&] {
-      return service.workers_.size() + service.workers_joining_ <=
-             maximum_count;
-    });
+    return service.worker_manager_->wait_for_owned_count_at_most(maximum_count,
+                                                                 timeout);
   }
 };
 

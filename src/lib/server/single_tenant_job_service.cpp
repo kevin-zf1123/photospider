@@ -20,6 +20,7 @@
 #include <utility>
 
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_manager.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {
@@ -254,16 +255,6 @@ OutputCommitId mint_commit_id(std::string_view suffix) {
 }
 
 /**
- * @brief Returns a bounded diagnostic copied from one exception.
- * @param error Caught standard exception.
- * @return Human-readable message with a stable prefix.
- * @throws std::bad_alloc when message construction exhausts memory.
- */
-std::string unexpected_message(const std::exception& error) {
-  return std::string("worker execution raised: ") + error.what();
-}
-
-/**
  * @brief Reports whether a failure category may originate from a worker.
  * @param failure Candidate closed or invalid representation.
  * @return True only for one worker-owned failed-report category.
@@ -284,6 +275,14 @@ bool is_worker_owned_failure(JobAttemptFailure failure) noexcept {
     case JobAttemptFailure::ReportRejected:
     case JobAttemptFailure::ArtifactCommit:
     case JobAttemptFailure::RecoveryInterrupted:
+    case JobAttemptFailure::WorkerStartup:
+    case JobAttemptFailure::WorkerExit:
+    case JobAttemptFailure::WorkerSignal:
+    case JobAttemptFailure::WorkerChannel:
+    case JobAttemptFailure::WorkerProtocol:
+    case JobAttemptFailure::WorkerHeartbeatTimeout:
+    case JobAttemptFailure::WorkerRuntimeTimeout:
+    case JobAttemptFailure::WorkerCancellationForced:
       return false;
   }
   return false;
@@ -423,13 +422,22 @@ bool is_terminal_job_state(JobState state) {
   throw std::invalid_argument("Job state is invalid");
 }
 
+/** @copydoc ps::server::JobAttemptWorkerFactory::prepare_external_graph */
+ResolvedGraphArtifact JobAttemptWorkerFactory::prepare_external_graph(
+    const JobAssignment& assignment) const {
+  static_cast<void>(assignment);
+  throw std::logic_error(
+      "worker factory does not support external assignment preparation");
+}
+
 /** @copydoc ps::server::SingleTenantJobService::SingleTenantJobService */
 SingleTenantJobService::SingleTenantJobService(
     TenantId tenant_id, TenantQuotaLimits quota_limits,
     std::filesystem::path state_root,
     std::shared_ptr<JobAttemptWorkerFactory> worker_factory,
     DurableServerStateOptions state_options,
-    TenantQuotaAuthorityOptions quota_options)
+    TenantQuotaAuthorityOptions quota_options,
+    WorkerManagerOptions worker_options)
     : tenant_id_(std::move(tenant_id)),
       worker_factory_(std::move(worker_factory)) {
   if (!tenant_id_.valid()) {
@@ -438,6 +446,22 @@ SingleTenantJobService::SingleTenantJobService(
   if (worker_factory_ == nullptr) {
     throw std::invalid_argument("single-tenant worker factory is null");
   }
+  const bool in_process_test_mode =
+      dynamic_cast<InProcessJobAttemptWorkerFactoryForTest*>(
+          worker_factory_.get()) != nullptr;
+  WorkerManagerCallbacks callbacks;
+  callbacks.begin_assignment = [this](const AttemptIdentity& identity) {
+    return begin_managed_assignment(identity);
+  };
+  callbacks.cancellation_requested = [this](const AttemptIdentity& identity) {
+    return cancellation_requested_for(identity);
+  };
+  callbacks.complete_assignment = [this](WorkerManagerCompletion completion) {
+    apply_worker_completion(std::move(completion));
+  };
+  worker_manager_ = std::make_unique<WorkerManager>(
+      worker_factory_, std::move(callbacks), std::move(worker_options),
+      in_process_test_mode);
   durable_state_ = std::make_unique<DurableServerState>(
       std::move(state_root), tenant_id_, std::move(state_options));
   quota_authority_ = std::make_unique<TenantQuotaAuthority>(
@@ -509,17 +533,6 @@ SingleTenantJobService::SingleTenantJobService(
           "recovered durable Job identity is duplicated");
     }
   }
-  reaper_ = std::thread(&SingleTenantJobService::reap_workers, this);
-}
-
-/** @copydoc
- * ps::server::SingleTenantJobService::WorkerThreadRecord::start_assignment_thread
- */
-std::thread SingleTenantJobService::WorkerThreadRecord::start_assignment_thread(
-    SingleTenantJobService* service, JobAssignment assignment) {
-  throw_assignment_thread_start_failure_if_armed(assignment.identity.job_id);
-  return std::thread(&SingleTenantJobService::run_assignment, service,
-                     std::move(assignment));
 }
 
 /** @copydoc ps::server::SingleTenantJobService::~SingleTenantJobService */
@@ -544,8 +557,8 @@ SingleTenantJobService::~SingleTenantJobService() noexcept {
     }
   }
   condition_.notify_all();
-  if (reaper_.joinable()) {
-    reaper_.join();
+  if (worker_manager_ != nullptr) {
+    worker_manager_->shutdown();
   }
 }
 
@@ -601,14 +614,11 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
                            assignment.identity};
   const DurableJobRecord durable_candidate = durable_record(snapshot);
   const std::string job_key = snapshot.job_id.value();
-  const std::string worker_key = assignment.identity.attempt_id.value();
   std::optional<TenantQuotaReservation> rollback_reservation(
       quota_authority_->reserve(snapshot.job_id,
                                 immutable_spec->resource_request()));
   bool job_inserted = false;
-  bool worker_inserted = false;
   decltype(jobs_)::iterator job_record = jobs_.end();
-  decltype(workers_)::iterator worker_record = workers_.end();
   try {
     const auto job = jobs_.emplace(
         job_key, JobControlRecord{snapshot, rollback_reservation});
@@ -618,19 +628,10 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
       throw std::logic_error("fresh durable JobId collided in service state");
     }
     rollback_reservation.reset();
-    const auto worker = workers_.try_emplace(worker_key);
-    worker_record = worker.first;
-    worker_inserted = worker.second;
-    if (!worker_inserted) {
-      throw std::logic_error("fresh attempt collided in worker ownership");
-    }
-    worker_record->second.thread = WorkerThreadRecord::start_assignment_thread(
-        this, std::move(assignment));
+    throw_assignment_thread_start_failure_if_armed(assignment.identity.job_id);
+    worker_manager_->start(std::move(assignment));
   } catch (...) {
     std::exception_ptr failure = std::current_exception();
-    if (worker_inserted) {
-      workers_.erase(worker_key);
-    }
     std::optional<TenantQuotaReservation>& reservation =
         job_inserted ? job_record->second.reservation : rollback_reservation;
     if (!try_release_attempt_locked(reservation)) {
@@ -647,7 +648,6 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
       durable_state_->persist_job(durable_candidate);
   if (!commit.succeeded()) {
     if (!commit.published()) {
-      worker_record->second.completed = true;
       if (!try_release_attempt_locked(job_record->second.reservation)) {
         retain_stranded_reservation_locked(job_record->second.reservation);
       }
@@ -677,8 +677,7 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
       found->second.snapshot.state != JobState::Failed ||
       !found->second.snapshot.attempt_settled ||
       found->second.reservation.has_value() ||
-      workers_.find(found->second.snapshot.assignment.attempt_id.value()) !=
-          workers_.end()) {
+      worker_manager_->owns_attempt(found->second.snapshot.assignment)) {
     return std::nullopt;
   }
   const JobSnapshot previous = found->second.snapshot;
@@ -723,29 +722,16 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
   JobSubmission submission{job_id, previous.spec->digest(),
                            assignment.identity};
   const DurableJobRecord durable_candidate = durable_record(replacement);
-  const std::string worker_key = assignment.identity.attempt_id.value();
   TenantQuotaReservation reservation =
       quota_authority_->reserve(job_id, previous.spec->resource_request());
   JobControlRecord replacement_control{
       std::move(replacement),
       std::optional<TenantQuotaReservation>(std::move(reservation))};
-  bool worker_inserted = false;
-  decltype(workers_)::iterator worker_record = workers_.end();
   try {
-    const auto worker = workers_.try_emplace(worker_key);
-    worker_record = worker.first;
-    worker_inserted = worker.second;
-    if (!worker_inserted) {
-      throw std::logic_error(
-          "fresh retry attempt collided in worker ownership");
-    }
-    worker_record->second.thread = WorkerThreadRecord::start_assignment_thread(
-        this, std::move(assignment));
+    throw_assignment_thread_start_failure_if_armed(assignment.identity.job_id);
+    worker_manager_->start(std::move(assignment));
   } catch (...) {
     std::exception_ptr failure = std::current_exception();
-    if (worker_inserted) {
-      workers_.erase(worker_key);
-    }
     if (replacement_control.reservation.has_value()) {
       if (!try_release_attempt_locked(replacement_control.reservation)) {
         retain_stranded_reservation_locked(replacement_control.reservation);
@@ -758,7 +744,6 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
   const DurableJobCommitResult commit =
       durable_state_->persist_job(durable_candidate);
   if (!commit.published() && !commit.succeeded()) {
-    worker_record->second.completed = true;
     if (!try_release_attempt_locked(replacement_control.reservation)) {
       retain_stranded_reservation_locked(replacement_control.reservation);
     }
@@ -821,7 +806,7 @@ bool SingleTenantJobService::cancel(const JobId& job_id) {
   if (!job_id.valid()) {
     return false;
   }
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   require_durable_mutation_available_locked();
   const auto found = jobs_.find(job_id.value());
   if (found == jobs_.end() ||
@@ -829,11 +814,14 @@ bool SingleTenantJobService::cancel(const JobId& job_id) {
       found->second.snapshot.cancellation_requested) {
     return false;
   }
+  const AttemptIdentity assignment = found->second.snapshot.assignment;
   JobSnapshot replacement = found->second.snapshot;
   replacement.cancellation_requested = true;
   replacement.state = JobState::Cancelling;
   publish_snapshot_locked(found->second, std::move(replacement));
+  lock.unlock();
   condition_.notify_all();
+  static_cast<void>(worker_manager_->request_cancel(assignment));
   return true;
 }
 
@@ -901,120 +889,105 @@ TenantQuotaSnapshot SingleTenantJobService::quota_snapshot() const {
   return quota_authority_->snapshot();
 }
 
-/** @copydoc ps::server::SingleTenantJobService::run_assignment */
-void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
-  try {
-    bool assignment_present = false;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      const auto found = jobs_.find(assignment.identity.job_id.value());
-      if (!durable_mutation_faulted_locked() && found != jobs_.end() &&
-          found->second.snapshot.assignment == assignment.identity &&
-          !is_terminal_job_state(found->second.snapshot.state)) {
-        assignment_present = true;
-        if (!found->second.snapshot.cancellation_requested) {
-          JobSnapshot running = found->second.snapshot;
-          running.state = JobState::Running;
-          publish_snapshot_locked(found->second, std::move(running));
-        }
-      }
-    }
-    condition_.notify_all();
-    if (!assignment_present) {
-      mark_worker_completed(assignment.identity.attempt_id);
-      return;
-    }
-
-    std::unique_ptr<JobAttemptWorker> worker =
-        worker_factory_->create(assignment);
-    JobAttemptReport report;
-    if (worker == nullptr) {
-      report.identity = assignment.identity;
-      report.outcome = JobAttemptOutcome::Failed;
-      report.settled = false;
-      report.failure = JobAttemptFailure::HostSetup;
-      report.message = "worker factory returned null";
-    } else {
-      report =
-          worker->execute(assignment, [this, expected = assignment.identity] {
-            return cancellation_requested_for(expected);
-          });
-    }
-    apply_report(assignment.identity, std::move(report));
-  } catch (const std::exception& error) {
-    JobAttemptReport report;
-    report.identity = assignment.identity;
-    report.outcome = JobAttemptOutcome::Failed;
-    report.settled = false;
-    report.failure = JobAttemptFailure::Unexpected;
-    try {
-      report.message = unexpected_message(error);
-      apply_report(assignment.identity, std::move(report));
-    } catch (...) {
-      std::terminate();
-    }
-  } catch (...) {
-    JobAttemptReport report;
-    report.identity = assignment.identity;
-    report.outcome = JobAttemptOutcome::Failed;
-    report.settled = false;
-    report.failure = JobAttemptFailure::Unexpected;
-    try {
-      report.message = "worker execution raised a non-standard exception";
-      apply_report(assignment.identity, std::move(report));
-    } catch (...) {
-      std::terminate();
-    }
-  }
-  mark_worker_completed(assignment.identity.attempt_id);
-}
-
-/** @copydoc ps::server::SingleTenantJobService::mark_worker_completed */
-void SingleTenantJobService::mark_worker_completed(
-    const JobAttemptId& attempt_id) noexcept {
+/** @copydoc ps::server::SingleTenantJobService::begin_managed_assignment */
+bool SingleTenantJobService::begin_managed_assignment(
+    const AttemptIdentity& expected) {
+  bool accepted = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = workers_.find(attempt_id.value());
-    if (found != workers_.end()) {
-      found->second.completed = true;
+    const auto found = jobs_.find(expected.job_id.value());
+    if (!durable_mutation_faulted_locked() && found != jobs_.end() &&
+        found->second.snapshot.assignment == expected &&
+        !is_terminal_job_state(found->second.snapshot.state)) {
+      accepted = true;
+      if (!found->second.snapshot.cancellation_requested) {
+        JobSnapshot running = found->second.snapshot;
+        running.state = JobState::Running;
+        publish_snapshot_locked(found->second, std::move(running));
+      }
     }
   }
   condition_.notify_all();
+  return accepted;
 }
 
-/** @copydoc ps::server::SingleTenantJobService::reap_workers */
-void SingleTenantJobService::reap_workers() noexcept {
-  for (;;) {
-    std::thread completed_worker;
-    {
-      std::unique_lock<std::mutex> lock(mutex_);
-      condition_.wait(lock, [this] {
-        return has_completed_worker_locked() ||
-               (shutting_down_ && workers_.empty());
-      });
-      const auto completed = std::find_if(
-          workers_.begin(), workers_.end(),
-          [](const auto& entry) { return entry.second.completed; });
-      if (completed == workers_.end()) {
-        return;
-      }
-      completed_worker = std::move(completed->second.thread);
-      workers_.erase(completed);
-      ++workers_joining_;
-    }
-    completed_worker.join();
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      --workers_joining_;
-    }
-    condition_.notify_all();
+/** @copydoc ps::server::SingleTenantJobService::apply_worker_completion */
+void SingleTenantJobService::apply_worker_completion(
+    WorkerManagerCompletion completion) noexcept {
+  if (completion.kind == WorkerManagerCompletionKind::Report &&
+      completion.report.has_value()) {
+    apply_report(completion.identity, std::move(*completion.report));
+    return;
   }
-}
-
-/** @copydoc ps::server::SingleTenantJobService::has_completed_worker_locked */
-bool SingleTenantJobService::has_completed_worker_locked() const noexcept {
-  return std::any_of(workers_.begin(), workers_.end(),
-                     [](const auto& entry) { return entry.second.completed; });
+  try {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(completion.identity.job_id.value());
+    if (durable_mutation_faulted_locked() || found == jobs_.end() ||
+        found->second.snapshot.assignment != completion.identity ||
+        is_terminal_job_state(found->second.snapshot.state)) {
+      return;
+    }
+    JobControlRecord& control = found->second;
+    JobSnapshot candidate = control.snapshot;
+    candidate.attempt_settled = true;
+    candidate.output_receipt.reset();
+    if (completion.kind == WorkerManagerCompletionKind::ForcedCancellation &&
+        candidate.cancellation_requested &&
+        completion.failure == JobAttemptFailure::WorkerCancellationForced &&
+        !completion.report.has_value()) {
+      candidate.state = JobState::Cancelled;
+      candidate.attempt_outcome = JobAttemptOutcome::Cancelled;
+      candidate.failure = JobAttemptFailure::WorkerCancellationForced;
+      candidate.message = std::move(completion.message);
+      if (candidate.message.empty()) {
+        candidate.message = "worker was forcibly cancelled after exact reaping";
+      }
+    } else {
+      candidate.state = JobState::Failed;
+      candidate.attempt_outcome = JobAttemptOutcome::Failed;
+      candidate.failure = completion.failure;
+      candidate.message = std::move(completion.message);
+      if (completion.kind == WorkerManagerCompletionKind::Report ||
+          completion.report.has_value() ||
+          candidate.failure < JobAttemptFailure::WorkerStartup ||
+          candidate.failure > JobAttemptFailure::WorkerRuntimeTimeout) {
+        candidate.failure = JobAttemptFailure::WorkerProtocol;
+        candidate.message =
+            "WorkerManager delivered an invalid completion shape";
+      } else if (candidate.message.empty()) {
+        candidate.message = "worker process failed without a diagnostic";
+      }
+    }
+    publish_snapshot_locked(control, std::move(candidate));
+    static_cast<void>(try_release_attempt_locked(control.reservation));
+    condition_.notify_all();
+  } catch (...) {
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto found = jobs_.find(completion.identity.job_id.value());
+      if (!durable_mutation_faulted_locked() && found != jobs_.end() &&
+          found->second.snapshot.assignment == completion.identity &&
+          !is_terminal_job_state(found->second.snapshot.state)) {
+        JobSnapshot failure = found->second.snapshot;
+        failure.state = JobState::Failed;
+        failure.attempt_settled = true;
+        failure.attempt_outcome = JobAttemptOutcome::Failed;
+        failure.failure = JobAttemptFailure::ArtifactCommit;
+        failure.message = "durable manager-completion publication failed";
+        failure.output_receipt.reset();
+        try {
+          publish_snapshot_locked(found->second, std::move(failure));
+          static_cast<void>(
+              try_release_attempt_locked(found->second.reservation));
+        } catch (...) {
+          journal_faulted_ = true;
+        }
+        condition_.notify_all();
+      }
+    } catch (...) {
+      std::terminate();
+    }
+  }
 }
 
 /** @copydoc ps::server::SingleTenantJobService::cancellation_requested_for */

@@ -592,6 +592,14 @@ JobAttemptFailure parse_attempt_failure(std::uint8_t value) {
     case JobAttemptFailure::ReportRejected:
     case JobAttemptFailure::ArtifactCommit:
     case JobAttemptFailure::RecoveryInterrupted:
+    case JobAttemptFailure::WorkerStartup:
+    case JobAttemptFailure::WorkerExit:
+    case JobAttemptFailure::WorkerSignal:
+    case JobAttemptFailure::WorkerChannel:
+    case JobAttemptFailure::WorkerProtocol:
+    case JobAttemptFailure::WorkerHeartbeatTimeout:
+    case JobAttemptFailure::WorkerRuntimeTimeout:
+    case JobAttemptFailure::WorkerCancellationForced:
       return static_cast<JobAttemptFailure>(value);
   }
   throw DurableCorruptionError("durable attempt failure is invalid");
@@ -1404,6 +1412,49 @@ bool is_persistable_worker_failure(JobAttemptFailure failure) noexcept {
     case JobAttemptFailure::ReportRejected:
     case JobAttemptFailure::ArtifactCommit:
     case JobAttemptFailure::RecoveryInterrupted:
+    case JobAttemptFailure::WorkerStartup:
+    case JobAttemptFailure::WorkerExit:
+    case JobAttemptFailure::WorkerSignal:
+    case JobAttemptFailure::WorkerChannel:
+    case JobAttemptFailure::WorkerProtocol:
+    case JobAttemptFailure::WorkerHeartbeatTimeout:
+    case JobAttemptFailure::WorkerRuntimeTimeout:
+    case JobAttemptFailure::WorkerCancellationForced:
+      return false;
+  }
+  return false;
+}
+
+/**
+ * @brief Reports whether one failure is trusted post-reap manager failure.
+ * @param failure Candidate closed failure representation.
+ * @return True for startup, exit, signal, channel, protocol, heartbeat, or
+ * runtime manager failures; forced cancellation is validated separately.
+ * @throws Nothing.
+ */
+bool is_persistable_manager_failure(JobAttemptFailure failure) noexcept {
+  switch (failure) {
+    case JobAttemptFailure::WorkerStartup:
+    case JobAttemptFailure::WorkerExit:
+    case JobAttemptFailure::WorkerSignal:
+    case JobAttemptFailure::WorkerChannel:
+    case JobAttemptFailure::WorkerProtocol:
+    case JobAttemptFailure::WorkerHeartbeatTimeout:
+    case JobAttemptFailure::WorkerRuntimeTimeout:
+      return true;
+    case JobAttemptFailure::None:
+    case JobAttemptFailure::InvalidAssignment:
+    case JobAttemptFailure::GraphResolution:
+    case JobAttemptFailure::HostSetup:
+    case JobAttemptFailure::GraphLoad:
+    case JobAttemptFailure::Compute:
+    case JobAttemptFailure::Settlement:
+    case JobAttemptFailure::CancellationObserved:
+    case JobAttemptFailure::Unexpected:
+    case JobAttemptFailure::ReportRejected:
+    case JobAttemptFailure::ArtifactCommit:
+    case JobAttemptFailure::RecoveryInterrupted:
+    case JobAttemptFailure::WorkerCancellationForced:
       return false;
   }
   return false;
@@ -1491,14 +1542,21 @@ void validate_durable_job_semantics(const DurableJobRecord& record) {
       return;
     case JobState::Cancelled:
       if (!record.cancellation_requested || !record.attempt_settled ||
-          (record.attempt_outcome != JobAttemptOutcome::Succeeded &&
-           record.attempt_outcome != JobAttemptOutcome::Cancelled) ||
-          record.failure != JobAttemptFailure::CancellationObserved ||
           record.output_receipt.has_value()) {
         throw std::invalid_argument(
             "durable cancelled Job record is inconsistent");
       }
-      return;
+      if (record.failure == JobAttemptFailure::CancellationObserved &&
+          (record.attempt_outcome == JobAttemptOutcome::Succeeded ||
+           record.attempt_outcome == JobAttemptOutcome::Cancelled)) {
+        return;
+      }
+      if (record.failure == JobAttemptFailure::WorkerCancellationForced &&
+          record.attempt_outcome == JobAttemptOutcome::Cancelled) {
+        return;
+      }
+      throw std::invalid_argument(
+          "durable cancelled Job settlement category is inconsistent");
     case JobState::Failed:
       break;
   }
@@ -1511,6 +1569,14 @@ void validate_durable_job_semantics(const DurableJobRecord& record) {
     if (record.attempt_outcome != JobAttemptOutcome::Failed) {
       throw std::invalid_argument(
           "durable worker failure has no failed attempt outcome");
+    }
+    return;
+  }
+  if (is_persistable_manager_failure(record.failure)) {
+    if (!record.attempt_settled ||
+        record.attempt_outcome != JobAttemptOutcome::Failed) {
+      throw std::invalid_argument(
+          "durable manager failure lacks exact process settlement");
     }
     return;
   }

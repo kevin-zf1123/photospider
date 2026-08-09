@@ -24,6 +24,8 @@
 namespace ps::server {
 
 class SingleTenantJobServiceTestAccess;
+class WorkerManager;
+struct WorkerManagerCompletion;
 
 /**
  * @brief Reports whether a Job state is terminal.
@@ -34,7 +36,7 @@ class SingleTenantJobServiceTestAccess;
 bool is_terminal_job_state(JobState state);
 
 /**
- * @brief Complete immutable assignment delegated to one Issue #99 worker.
+ * @brief Complete immutable assignment delegated to one Issue #100 worker.
  * @throws Nothing for default construction; copies may allocate.
  * @note `spec` is shared read-only and its digest must equal
  * `identity.job_spec_digest` before any graph resolution.
@@ -50,6 +52,29 @@ struct JobAssignment final {
    * mutable path, quota reservation, or publication capability.
    */
   std::shared_ptr<const ArtifactRecord> checkpoint;
+};
+
+/**
+ * @brief Trusted graph material prepared for one external worker assignment.
+ * @throws Nothing for default construction; string values may allocate.
+ * @note Paths are trusted source-private adapter configuration. They are
+ * transported to one exact worker but grant no Job, quota, artifact, network,
+ * or durable-state authority.
+ */
+struct ResolvedGraphArtifact final {
+  /** @brief True only when trusted resolution found immutable graph material.
+   */
+  bool ok = false;
+  /** @brief Trusted graph-session root used by the Embedded Host adapter. */
+  std::string root_dir;
+  /** @brief Trusted explicit YAML path for this immutable graph artifact. */
+  std::string yaml_path;
+  /** @brief Optional trusted Host configuration path. */
+  std::string config_path;
+  /** @brief Optional trusted cache root private to this attempt. */
+  std::string cache_root_dir;
+  /** @brief Resolver-owned diagnostic when `ok` is false. */
+  std::string message;
 };
 
 /**
@@ -78,22 +103,21 @@ struct JobAttemptReport final {
 };
 
 /**
- * @brief One attempt worker owned by a single assignment thread.
+ * @brief One attempt worker used inside a fresh worker process or test seam.
  * @throws Implementations document execution failures through their report;
  * allocation and system failures may still propagate to the control plane.
- * @note The object receives exactly one assignment and is then destroyed. It
- * is not an OS-process or security-isolation claim. Implementations receive no
- * owning service handle and must return from `execute()` before any external
- * owner destroys that service; reentrant self-destruction is not a supported
- * worker action.
+ * @note The object receives exactly one assignment and is then destroyed.
+ * Product construction invokes it only inside `photospider-worker`; direct
+ * control-plane invocation exists solely behind the non-installed deterministic
+ * test marker. Implementations receive no owning service handle.
  */
 class JobAttemptWorker {
  public:
   /**
    * @brief Destroys worker-private resources after its attempt.
    * @throws Nothing.
-   * @note The control plane destroys the object only after `execute()`
-   * returns or unwinds.
+   * @note Its owning worker process or explicit test seam destroys the object
+   * only after `execute()` returns or unwinds.
    */
   virtual ~JobAttemptWorker() = default;
 
@@ -137,6 +161,56 @@ class JobAttemptWorkerFactory {
    */
   virtual std::unique_ptr<JobAttemptWorker> create(
       const JobAssignment& assignment) = 0;
+
+  /**
+   * @brief Reports whether this factory can prepare a product process payload.
+   * @return True only when `prepare_external_graph()` is implemented.
+   * @throws Nothing.
+   * @note Returning false is rejected by ordinary product service
+   * construction. The non-installed test marker is the only in-process
+   * exception.
+   */
+  virtual bool supports_external_assignment() const noexcept { return false; }
+
+  /**
+   * @brief Resolves trusted graph material for one external worker process.
+   * @param assignment Exact immutable current assignment.
+   * @return Bounded trusted graph material for transport to that worker.
+   * @throws std::logic_error when external preparation is unsupported.
+   * @throws Resolver-specific allocation or trusted-I/O failures unchanged.
+   * @note The default implementation fails closed and creates no worker.
+   */
+  virtual ResolvedGraphArtifact prepare_external_graph(
+      const JobAssignment& assignment) const;
+};
+
+/**
+ * @brief Bounded source-private WorkerManager process-lifecycle configuration.
+ * @throws Nothing for default construction; path copies may allocate.
+ * @note Ordinary product construction requires an executable path. Durations
+ * govern local process supervision only and mint no Job or quota authority.
+ */
+struct WorkerManagerOptions final {
+  /** @brief Exact non-installed `photospider-worker` executable path. */
+  std::filesystem::path worker_executable;
+  /** @brief Maximum assignment/acceptance handshake duration. */
+  std::chrono::milliseconds startup_timeout{5000};
+  /** @brief Heartbeat cadence requested from the worker. */
+  std::chrono::milliseconds heartbeat_interval{250};
+  /** @brief Maximum silence after assignment acceptance. */
+  std::chrono::milliseconds heartbeat_timeout{3000};
+  /** @brief Maximum total runtime before manager-owned termination. */
+  std::chrono::milliseconds attempt_runtime_timeout{std::chrono::minutes(30)};
+  /** @brief Maximum wait for clean exit after one report. */
+  std::chrono::milliseconds post_report_timeout{2000};
+  /** @brief Cooperative cancellation grace before `SIGTERM`. */
+  std::chrono::milliseconds cooperative_cancel_timeout{1000};
+  /** @brief `SIGTERM` grace before `SIGKILL`. */
+  std::chrono::milliseconds terminate_timeout{1000};
+  /** @brief Maximum `SIGKILL` reap observation interval. */
+  std::chrono::milliseconds kill_reap_timeout{2000};
+  /** @brief Per-frame read/write deadline bound. */
+  std::chrono::milliseconds io_timeout{2000};
 };
 
 /**
@@ -181,7 +255,7 @@ struct JobSnapshot final {
   JobState state = JobState::Queued;
   /** @brief Whether cancellation intent was accepted monotonically. */
   bool cancellation_requested = false;
-  /** @brief Whether the current worker reported completed settlement. */
+  /** @brief Whether worker settlement or exact process reaping completed. */
   bool attempt_settled = false;
   /** @brief Accepted worker-local outcome, never rewritten by control-plane
    * cancellation adjudication. */
@@ -198,15 +272,15 @@ struct JobSnapshot final {
 };
 
 /**
- * @brief Source-private single-tenant Issue #99 Job control-plane owner.
+ * @brief Source-private single-tenant Issue #99/#100 Job control-plane owner.
  *
  * The service validates and freezes JobSpec values, authorizes optional
  * checkpoints, atomically reserves a complete tenant quota envelope, persists
- * accepted/current/terminal truth, starts one fresh in-process worker per
- * explicit attempt, validates the complete returned tuple, linearizes
- * cancellation versus crash-durable artifact commit, settles quota, and alone
- * publishes Job/retry truth. One private infrastructure reaper joins completed
- * assignment threads throughout the service lifetime. A Job-journal failure
+ * accepted/current/terminal truth, delegates every product attempt to one
+ * WorkerManager-owned freshly execed process, validates the complete returned
+ * tuple or trusted post-reap failure, linearizes cancellation versus crash-
+ * durable artifact commit, settles quota, and alone publishes Job/retry truth.
+ * A Job-journal failure
  * after atomic record publication aligns in-memory truth with that record,
  * retains active quota, stops every later durable mutation, and requires a
  * service restart for conservative recovery. Artifact deletion likewise
@@ -226,14 +300,13 @@ struct JobSnapshot final {
  * process release retry is attempted, and restart reconstructs only durable
  * Job/artifact truth with no process-local active reservation.
  *
- * @throws std::invalid_argument when construction receives an invalid tenant or
- * null factory.
- * @note Methods are thread-safe. Destruction requests cancellation for active
- * Jobs, wakes the reaper, and joins it only after it has joined every worker.
- * No worker joins itself and no join occurs while `mutex_` is held. Destruction
- * still cannot bound a provider that ignores current cooperative observations.
- * Callers must not race object destruction with a new public method call or
- * trigger reentrant destruction from a worker callback.
+ * @throws std::invalid_argument when construction receives an invalid tenant,
+ * null/non-externalizable product factory, invalid manager bounds, or unusable
+ * worker executable.
+ * @note Methods are thread-safe. Destruction records cancellation intent,
+ * releases `mutex_`, then asks WorkerManager to concurrently drain, terminate,
+ * and reap every exact child. Callers must not race object destruction with a
+ * new public method call or trigger reentrant destruction from a worker.
  */
 class SingleTenantJobService final {
  public:
@@ -245,25 +318,28 @@ class SingleTenantJobService final {
    * @param worker_factory Non-null fresh-worker factory.
    * @param state_options Optional source-private durable commit observer.
    * @param quota_options Optional source-private quota mutation observer.
+   * @param worker_options Bounded process-supervision configuration.
    * @throws std::invalid_argument for invalid configuration.
-   * @throws std::bad_alloc when service/reaper state allocation fails.
+   * @throws std::bad_alloc when service/manager state allocation fails.
    * @throws DurableStateError and derived durability, corruption, or commit
    * errors while recovering the durable root or publishing a repaired Job.
-   * @throws std::system_error for filesystem or private reaper creation
+   * @throws std::system_error for filesystem or manager-thread creation
    * failures.
+   * @note Product worker configuration is validated before the durable root is
+   * opened or repaired. No manager record exists until recovery completes.
    */
   SingleTenantJobService(
       TenantId tenant_id, TenantQuotaLimits quota_limits,
       std::filesystem::path state_root,
       std::shared_ptr<JobAttemptWorkerFactory> worker_factory,
       DurableServerStateOptions state_options = {},
-      TenantQuotaAuthorityOptions quota_options = {});
+      TenantQuotaAuthorityOptions quota_options = {},
+      WorkerManagerOptions worker_options = {});
 
   /**
-   * @brief Requests cancellation and joins all process-local workers.
-   * @throws Nothing; the reaper joins only valid worker handles owned by other
-   * threads, and this destructor joins only its valid reaper handle.
-   * @note No service mutex is held while either worker or reaper join waits.
+   * @brief Requests cancellation and drains all process-local workers.
+   * @throws Nothing; WorkerManager contains escalation and reaping failures.
+   * @note No service mutex is held during any process or thread wait.
    */
   ~SingleTenantJobService() noexcept;
 
@@ -287,17 +363,17 @@ class SingleTenantJobService final {
    * @return Accepted Job/digest/current assignment receipt.
    * @throws std::invalid_argument for invalid JobSpec or service shutdown.
    * @throws std::bad_alloc when Job state or worker setup exhausts memory.
-   * @throws std::system_error when process-local worker-thread creation fails.
+   * @throws std::system_error when manager supervision-thread creation fails.
    * @note Checkpoint validation and complete quota reservation precede durable
-   * accepted-state publication. Thread construction occurs while `mutex_`
-   * prevents worker entry and before journal publication. A pre-publication
-   * journal failure removes process-local acceptance, releases quota, and lets
-   * the reaper join the fenced worker. If rollback release itself fails, the
-   * service retains the reservation in its stranded-owner slot, fail-stops all
-   * later mutation, and rethrows the triggering submit failure. A post-
-   * publication failure throws `DurableJobCommitError`, retains aligned truth/
-   * quota, and fail-stops writes. The remaining successful return path is a
-   * non-throwing move.
+   * accepted-state publication. Supervision-handle construction occurs while
+   * `mutex_` prevents assignment entry and before journal publication. A
+   * pre-publication journal failure removes process-local acceptance, releases
+   * quota, and lets WorkerManager retire the fenced record. If rollback release
+   * itself fails, the service retains the reservation in its stranded-owner
+   * slot, fail-stops all later mutation, and rethrows the triggering submit
+   * failure. A post- publication failure throws `DurableJobCommitError`,
+   * retains aligned truth/ quota, and fail-stops writes. The remaining
+   * successful return path is a non-throwing move.
    */
   JobSubmission submit(JobSpec spec);
 
@@ -390,82 +466,6 @@ class SingleTenantJobService final {
   friend class SingleTenantJobServiceTestAccess;
 
   /**
-   * @brief Owns one joinable assignment thread until the reaper joins it.
-   *
-   * The map key supplies the exact attempt identity. An empty record is first
-   * published while the service mutex is held, then receives the newly started
-   * thread through no-throw move assignment. `completed` becomes true only
-   * after the worker has published or rejected its terminal attempt report.
-   * The dedicated reaper then moves `thread` out while holding the service
-   * mutex and joins it only after releasing that mutex.
-   *
-   * @throws Nothing for empty construction and moves. Thread creation is a
-   * separate operation documented by `start_assignment_thread`.
-   * @note Empty records exist only while the service mutex excludes the reaper;
-   * a start failure erases the record before that mutex is released. Records
-   * are move-only and never expose their thread outside the service/reaper
-   * boundary.
-   */
-  struct WorkerThreadRecord final {
-    /**
-     * @brief Creates one temporarily empty ownership record.
-     * @throws Nothing.
-     * @note The caller holds the service mutex until a joinable thread is moved
-     * into `thread` or the record is erased.
-     */
-    WorkerThreadRecord() noexcept = default;
-
-    /**
-     * @brief Starts one assignment thread through the source-private seam.
-     * @param service Non-null service that owns the new worker record.
-     * @param assignment Complete assignment moved into the worker callback.
-     * @return Sole joinable thread owner for publication in `workers_`.
-     * @throws std::bad_alloc when thread callback storage allocation fails.
-     * @throws std::system_error when the source-private test seam injects a
-     * start failure or native thread creation fails.
-     * @note The deterministic test seam is checked on the submitter thread
-     * before any `std::thread` is constructed. It is not installed or exposed
-     * as a product contract. Normal production calls leave the seam disarmed.
-     */
-    static std::thread start_assignment_thread(SingleTenantJobService* service,
-                                               JobAssignment assignment);
-
-    /**
-     * @brief Transfers unique joinable-thread ownership without throwing.
-     * @param other Record whose thread handle is transferred.
-     * @throws Nothing.
-     */
-    WorkerThreadRecord(WorkerThreadRecord&& other) noexcept = default;
-
-    /**
-     * @brief Transfers unique joinable-thread assignment without throwing.
-     * @param other Record whose thread handle is transferred.
-     * @return This uniquely owning record.
-     * @throws Nothing.
-     */
-    WorkerThreadRecord& operator=(WorkerThreadRecord&& other) noexcept =
-        default;
-
-    /**
-     * @brief Prevents duplicate joinable-thread ownership.
-     * @param other Record that cannot be copied.
-     */
-    WorkerThreadRecord(const WorkerThreadRecord& other) = delete;
-
-    /**
-     * @brief Prevents duplicate joinable-thread assignment.
-     * @param other Record that cannot be copied.
-     * @return No assignment result because the operation is deleted.
-     */
-    WorkerThreadRecord& operator=(const WorkerThreadRecord& other) = delete;
-
-    /** @brief Joinable assignment thread until moved to the reaper. */
-    std::thread thread;
-    /** @brief Whether assignment/report processing reached its final tail. */
-    bool completed = false;
-  };
-
-  /**
    * @brief Private union of observable Job truth and active quota ownership.
    * @throws Nothing for default construction; copies may allocate.
    * @note `reservation` exists while the current attempt is active, or after a
@@ -493,44 +493,24 @@ class SingleTenantJobService final {
   static_assert(std::is_nothrow_swappable_v<JobControlRecord>);
 
   /**
-   * @brief Executes one worker and applies its report under control authority.
-   * @param assignment Immutable accepted current assignment.
-   * @return Nothing after terminal Job publication.
-   * @throws Nothing; a null factory result and all worker/factory/report
-   * exceptions become unsettled failed facts because this boundary has no
-   * graph/Host settlement proof.
-   * @note Every non-terminating path marks the exact worker record complete so
-   * the reaper can join it; the worker never touches its own thread handle.
+   * @brief Fences and durably begins one manager-owned exact assignment.
+   * @param expected Exact assignment retained by WorkerManager.
+   * @return True when the assignment remains current and may execute.
+   * @throws Durable-state failures from Running publication unchanged.
+   * @note WorkerManager invokes this without its mutex. A false result spawns
+   * no process and publishes no completion fact.
    */
-  void run_assignment(JobAssignment assignment) noexcept;
+  bool begin_managed_assignment(const AttemptIdentity& expected);
 
   /**
-   * @brief Marks one assignment thread complete and wakes the reaper.
-   * @param attempt_id Exact map key retained by the completing worker.
-   * @return Nothing.
-   * @throws Nothing.
-   * @note The worker never moves or joins its own thread handle. The record is
-   * marked under `mutex_`, then the reaper performs the join outside that lock.
+   * @brief Applies one report or trusted post-reap manager terminal fact.
+   * @param completion Exact manager completion moved into service authority.
+   * @return Nothing after current-attempt fencing and durable reconciliation.
+   * @throws Nothing; durable/report exceptions are contained by existing
+   * fail-stop rules.
+   * @note WorkerManager has already closed capabilities and reaped any process.
    */
-  void mark_worker_completed(const JobAttemptId& attempt_id) noexcept;
-
-  /**
-   * @brief Continuously joins completed assignment threads outside the mutex.
-   * @return Nothing after shutdown and complete worker drainage.
-   * @throws Nothing; every moved handle is joinable and belongs to a different
-   * thread, so its checked `join()` cannot violate standard preconditions.
-   * @note This is the sole ongoing worker-handle reaper. It never owns Job
-   * execution policy and remains one bounded service-infrastructure thread.
-   */
-  void reap_workers() noexcept;
-
-  /**
-   * @brief Reports whether a completed worker record exists under `mutex_`.
-   * @return True when the reaper can move one completed handle immediately.
-   * @throws Nothing.
-   * @note The caller must hold `mutex_` for the full scan.
-   */
-  bool has_completed_worker_locked() const noexcept;
+  void apply_worker_completion(WorkerManagerCompletion completion) noexcept;
 
   /**
    * @brief Reads monotonic cancellation state for a worker observer.
@@ -544,7 +524,7 @@ class SingleTenantJobService final {
 
   /**
    * @brief Validates and applies one worker report under the Job mutex.
-   * @param expected Exact assignment owned by the invoking worker thread.
+   * @param expected Exact assignment owned by the invoking manager callback.
    * @param report Immutable attempt facts and candidate image.
    * @return Nothing after terminal state derivation and observer notification.
    * @throws Nothing; an unambiguous pre-manifest artifact exception becomes a
@@ -671,9 +651,9 @@ class SingleTenantJobService final {
    * @return Nothing after crash-durability barriers complete.
    * @throws The captured pre-publication failure or
    * `DurableJobCommitError` after an ambiguous/lost acknowledgement.
-   * @note Called either during single-threaded construction before the reaper
-   * and public access begin, or while the caller holds `mutex_`. Synchronous
-   * metadata I/O is the current single-tenant linearization policy.
+   * @note Called either during single-threaded construction before any manager
+   * record or public access exists, or while the caller holds `mutex_`.
+   * Synchronous metadata I/O is the current single-tenant linearization policy.
    */
   void persist_snapshot_locked(const JobSnapshot& snapshot);
 
@@ -681,6 +661,8 @@ class SingleTenantJobService final {
   TenantId tenant_id_;
   /** @brief Shared factory retained until every worker joins. */
   std::shared_ptr<JobAttemptWorkerFactory> worker_factory_;
+  /** @brief Sole assignment/process/thread lifecycle owner. */
+  std::unique_ptr<WorkerManager> worker_manager_;
   /** @brief Sole crash-durable Job/artifact state-root authority. */
   std::unique_ptr<DurableServerState> durable_state_;
   /** @brief Sole complete-envelope tenant quota authority. */
@@ -690,25 +672,20 @@ class SingleTenantJobService final {
   std::string identity_namespace_;
   /** @brief Next checked Job identity sequence in this service namespace. */
   std::uint64_t next_job_sequence_ = 1U;
-  /** @brief Serializes all Job truth and worker-ownership mutations. */
+  /** @brief Serializes all durable Job and quota-authority mutations. */
   mutable std::mutex mutex_;
-  /**
-   * @brief Wakes Job observers, the worker reaper, and ownership test waits.
-   */
+  /** @brief Wakes Job observers and source-private test waits. */
   mutable std::condition_variable condition_;
   /** @brief JobId text to authoritative copied current record. */
   std::map<std::string, JobControlRecord> jobs_;
   /**
    * @brief Sole active reservation whose rollback has no durable Job owner.
-   * @note Present only after release failed during submit/retry thread-start or
-   * NotPublished rollback. The monotonic release fail-stop prevents a second
-   * candidate. Destruction/restart drops this process-local charge authority.
+   * @note Present only after release failed during submit/retry supervision-
+   * thread start or NotPublished rollback. The monotonic release fail-stop
+   * prevents a second candidate. Destruction/restart drops this process-local
+   * charge authority.
    */
   std::optional<TenantQuotaReservation> stranded_reservation_;
-  /** @brief JobAttemptId text to joinable record pending reaper ownership. */
-  std::map<std::string, WorkerThreadRecord> workers_;
-  /** @brief Completed handles currently moved out for an unlocked join. */
-  std::size_t workers_joining_ = 0U;
   /** @brief Monotonic service destruction/cancellation intent. */
   bool shutting_down_ = false;
   /**
@@ -737,8 +714,6 @@ class SingleTenantJobService final {
    * rewrite proceeds; restart clears active quota and reloads durable truth.
    */
   bool quota_release_faulted_ = false;
-  /** @brief Sole bounded infrastructure thread that joins worker handles. */
-  std::thread reaper_;
 };
 
 }  // namespace ps::server

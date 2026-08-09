@@ -965,16 +965,18 @@ add_library(photospider STATIC
 configure_photospider_product_archive(photospider)
 
 if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
-    # Source-private Issue #99 delivery slice. Its crash-durable filesystem
-    # backend requires the closed Darwin/Linux POSIX capability profile above.
-    # It remains outside the installed Embedded Host ABI and protocol-v2
-    # sidecar composition and makes no Issue #100 OS-worker claim.
+    # Source-private Issue #99/#100 delivery slice. Its durable filesystem and
+    # freshly execed worker lifecycle require the closed Darwin/Linux POSIX
+    # capability profile above. It remains outside the installed Embedded Host
+    # ABI and protocol-v2 sidecar composition.
     add_library(photospider_single_tenant_job_internal STATIC
         src/lib/server/job_contract.cpp
         src/lib/server/tenant_quota.cpp
         src/lib/server/durable_server_state.cpp
         src/lib/server/single_tenant_job_service.cpp
-        src/lib/server/embedded_job_worker.cpp)
+        src/lib/server/embedded_job_worker.cpp
+        src/lib/server/worker_protocol.cpp
+        src/lib/server/worker_manager.cpp)
     target_compile_features(photospider_single_tenant_job_internal PRIVATE
         cxx_std_17)
     target_include_directories(photospider_single_tenant_job_internal PRIVATE
@@ -982,6 +984,18 @@ if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
         "${PROJECT_SOURCE_DIR}/src/lib")
     target_link_libraries(photospider_single_tenant_job_internal PRIVATE
         photospider
+        Threads::Threads)
+
+    add_executable(photospider-worker
+        apps/photospider_worker/main.cpp)
+    set_target_properties(photospider-worker PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    target_compile_features(photospider-worker PRIVATE cxx_std_17)
+    target_include_directories(photospider-worker PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib")
+    target_link_libraries(photospider-worker PRIVATE
+        photospider_single_tenant_job_internal
         Threads::Threads)
 endif()
 
@@ -1845,10 +1859,40 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         gtest_discover_tests(test_single_tenant_job_service
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
+        add_ps_test(test_worker_protocol
+            tests/unit/test_worker_protocol.cpp
+            photospider_single_tenant_job_internal)
+        gtest_discover_tests(test_worker_protocol
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 20)
     endif()
 endif()
 
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+    if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+        add_executable(test_worker_process_fixture
+            tests/support/photospider_worker_fixture.cpp)
+        set_target_properties(test_worker_process_fixture PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
+        target_compile_features(test_worker_process_fixture PRIVATE cxx_std_17)
+        target_include_directories(test_worker_process_fixture PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib")
+        target_link_libraries(test_worker_process_fixture PRIVATE
+            photospider_single_tenant_job_internal
+            Threads::Threads)
+
+        add_ps_test(test_worker_supervisor
+            tests/integration/test_worker_supervisor.cpp
+            photospider_single_tenant_job_internal)
+        target_compile_definitions(test_worker_supervisor PRIVATE
+            PS_TEST_WORKER_FIXTURE_PATH="$<TARGET_FILE:test_worker_process_fixture>")
+        add_dependencies(test_worker_supervisor test_worker_process_fixture)
+        gtest_discover_tests(test_worker_supervisor
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 30)
+    endif()
+
     if(PHOTOSPIDER_BUILD_IPC)
         add_executable(test_ipc_protocol tests/unit/test_ipc_protocol.cpp)
         set_target_properties(test_ipc_protocol PROPERTIES
@@ -2074,6 +2118,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             add_ps_test(test_single_tenant_job_product_path
                 tests/integration/test_single_tenant_job_product_path.cpp
                 photospider_single_tenant_job_internal)
+            target_compile_definitions(test_single_tenant_job_product_path PRIVATE
+                PS_PHOTOSPIDER_WORKER_PATH="$<TARGET_FILE:photospider-worker>")
+            add_dependencies(test_single_tenant_job_product_path
+                photospider-worker)
         endif()
         add_ps_test(test_m1_product_path
             tests/integration/test_m1_product_path.cpp
@@ -2759,10 +2807,15 @@ if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
         message(FATAL_ERROR
             "Enabled single-tenant Job profile is missing its internal target")
     endif()
-    if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS AND
-       NOT TARGET test_single_tenant_job_service)
+    if(NOT TARGET photospider-worker)
         message(FATAL_ERROR
-            "Enabled single-tenant Job profile is missing its unit target")
+            "Enabled single-tenant Job profile is missing its worker executable")
+    endif()
+    if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS AND
+       (NOT TARGET test_single_tenant_job_service OR
+        NOT TARGET test_worker_protocol))
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing its unit targets")
     endif()
     if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE AND
        PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER AND
@@ -2770,10 +2823,20 @@ if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
         message(FATAL_ERROR
             "Enabled single-tenant Job profile is missing its product-path target")
     endif()
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE AND
+       (NOT TARGET test_worker_process_fixture OR
+        NOT TARGET test_worker_supervisor))
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing process supervision tests")
+    endif()
 else()
     foreach(PHOTOSPIDER_DISABLED_SINGLE_TENANT_JOB_TARGET
             photospider_single_tenant_job_internal
+            photospider-worker
             test_single_tenant_job_service
+            test_worker_protocol
+            test_worker_process_fixture
+            test_worker_supervisor
             test_single_tenant_job_product_path)
         if(TARGET ${PHOTOSPIDER_DISABLED_SINGLE_TENANT_JOB_TARGET})
             message(FATAL_ERROR
