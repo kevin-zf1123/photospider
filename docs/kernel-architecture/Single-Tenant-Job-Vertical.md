@@ -75,8 +75,11 @@ mint, enlarge, or release this server reservation.
 Failed and cancelled attempts release the complete envelope exactly once.
 Successful artifact commit converts reserved retention to the exact tight
 payload charge and releases every active-attempt dimension. Durable artifact
-deletion releases the retained charge only after manifest removal and
-durability barriers. Startup reconstructs retained charges from validated
+deletion releases the quota authority's exact retained charge only after the
+artifact-directory, artifacts-directory, and root barriers confirm manifest
+visibility removal. A visibility-unconfirmed failure keeps the charge; a
+confirmed visibility removal releases it even when private payload/directory
+cleanup later fails. Startup reconstructs retained charges from validated
 artifacts and fails closed if configured retention is below recovered data;
 active attempt reservations are never reconstructed.
 
@@ -120,27 +123,44 @@ nonterminal attempt to `RecoveryInterrupted` unless its stable artifact proves
 success.
 
 Artifact commit validates the server-owned request and CPU image, copies active
-rows into a tight payload, and verifies output/staging/retention bounds. It then:
+rows into a tight payload, verifies output/staging/retention bounds, and
+reconciles any pre-existing durable occurrence or safe residue. A fresh
+publication then:
 
-1. creates the fixed opaque artifact directory;
-2. writes, synchronizes, reopens, and hashes `payload.bin`;
-3. writes a private canonical manifest;
-4. atomically publishes the fixed `manifest` name without replacement;
-5. removes the private manifest; and
-6. synchronizes the artifact directory, artifacts directory, and root.
+1. prepares complete private `ArtifactId` and `OutputCommitId` index copies and
+   installs both with rollback authority;
+2. creates the fixed opaque artifact directory;
+3. writes, synchronizes, reopens, and hashes `payload.bin`;
+4. writes a private canonical manifest;
+5. atomically publishes the fixed `manifest` name without replacement and
+   immediately makes both installed indexes authoritative;
+6. removes the private manifest; and
+7. synchronizes the artifact directory, artifacts directory, and root.
 
 Manifest presence is the visibility point. Pre-manifest unambiguous residue is
-removed; a post-publication exception preserves the occurrence. Recovery and
-lazy lookup verify descriptor, payload length/digest, tenant/Job/spec/slot/
-artifact/commit joins, clean only safe residue, and reapply the barrier chain.
-A retry with the same stable commit returns the original receipt only when all
-stable identity, descriptor, digest, and payload facts match. The reporting
-attempt may differ because the original acknowledgement can be lost. Any other
-collision fails closed.
+removed and both index copies are restored; after publication both direct
+`ArtifactId` and `OutputCommitId` lookup are already available before any later
+throwing cleanup, revalidation, observer, or barrier. Recovery and lazy lookup
+verify descriptor, payload length/digest, tenant/Job/spec/slot/artifact/commit
+joins, atomically repair both exact aliases, clean only safe residue, and
+reapply the barrier chain. A retry with the same stable commit returns the
+original receipt only when all stable identity, descriptor, digest, and payload
+facts match. The reporting attempt may differ because the original
+acknowledgement can be lost. Any other collision fails closed.
 
-Deletion removes and synchronizes the authoritative manifest before payload
-cleanup and retention release. A successful Job keeps its historical receipt,
-but deleted bytes no longer resolve for lookup or checkpoint admission.
+Deletion pre-stages both indexes without the target, then reports one of four
+irreversible states: `NotRemoved`,
+`ManifestRemovedDurabilityUnconfirmed`,
+`VisibilityRemovalConfirmedCleanupPending`, or `FullyCleaned`. Before manifest
+removal, failure keeps both aliases and mutation remains available. Once the
+manifest is absent, both aliases are revoked together, so lookup and same-
+process checkpoint admission cannot expose stale bytes. The service retains
+quota while visibility durability is unconfirmed; after the full visibility
+barrier chain it releases the quota authority's exact charge even if payload or
+directory cleanup remains restart-recoverable. Any failure after visibility
+became irreversible fail-stops workers and later durable mutation until
+restart. A successful Job keeps its historical receipt, but deleted bytes no
+longer resolve for lookup or checkpoint admission.
 
 ## Job State, Recovery, and Explicit Retry
 
@@ -255,8 +275,11 @@ Maintained tests cover canonical digest/validation, the shared 128-device
 admission/recovery maximum and 129-device rejection, every quota dimension and
 multi-device accounting, exact settlement, all Job-record publication/barrier
 fault stages with in-memory and restart truth, manifest-before/after failure,
-root locking/no-follow/identity drift, safe cleanup, corruption and exact
-Job/artifact recovery joins, idempotent reconciliation, retention deletion,
+pre-manifest dual-index preparation rollback, immediate post-manifest
+OutputCommitId lookup, root locking/no-follow/identity drift, safe cleanup,
+corruption and exact Job/artifact recovery joins, idempotent reconciliation,
+all artifact-deletion fault stages with dual-alias revocation, exact quota,
+fail-stop and restart cleanup, same-process deleted-checkpoint rejection,
 checkpoint authorization/re-authorization, explicit retry and fresh fencing,
 submit/retry thread-start rollback, submit/retry/cancel journal fail-stop,
 interrupted/successful restart, cancellation ordering, stale/malformed reports,

@@ -67,9 +67,12 @@ reservation 并完成全部 charge，要么什么都不改变。Worker、plugin�
 
 失败和取消的 attempt 恰好一次释放完整 envelope。成功 artifact commit 把已预留的
 retention 转换为紧密 payload 的精确 charge，并释放所有 active-attempt dimension。Durable
-artifact deletion 只有在 manifest removal 与 durability barrier 之后才释放 retained
-charge。启动时会从已校验 artifact 重建 retained charge；如果 configured retention 低于
-recovered data，则 fail closed。Active attempt reservation 永不重建。
+artifact deletion 只有在 artifact directory、artifacts directory 与 root barrier 确认
+manifest visibility removal 后，才释放 quota authority 所记录的精确 retained charge。
+Visibility 尚未确认的失败会保留 charge；visibility 已确认时，即使之后的 private
+payload/directory cleanup 失败也会释放 charge。启动时会从已校验 artifact 重建 retained
+charge；如果 configured retention 低于 recovered data，则 fail closed。Active attempt
+reservation 永不重建。
 
 CPU slot 同时限制 Embedded Host `maximum_parallelism`。Host-memory 与 device 值是保守的
 进程内 admission declaration，不是 OS memory/device enforcement，也不替代 worker-local
@@ -104,24 +107,35 @@ durable mutation，并要求重启。重启会重新校验 record；除非 stabl
 仍存活的 nonterminal attempt 会被转换为 `RecoveryInterrupted`。
 
 Artifact commit 会校验 server-owned request 与 CPU image，把 active row 复制成紧密
-payload，并校验 output/staging/retention bound。随后它：
+payload，校验 output/staging/retention bound，并 reconcile 已存在的 durable occurrence 或
+安全 residue。新的 publication 随后会：
 
-1. 创建固定 opaque artifact directory；
-2. 写入、同步、重新打开并 hash `payload.bin`；
-3. 写入 private canonical manifest；
-4. 以 no-replace 原子发布固定 `manifest` 名称；
-5. 删除 private manifest；
-6. 同步 artifact directory、artifacts directory 与 root。
+1. 准备完整的 private `ArtifactId` 与 `OutputCommitId` index 副本，并以可回滚方式同时安装；
+2. 创建固定 opaque artifact directory；
+3. 写入、同步、重新打开并 hash `payload.bin`；
+4. 写入 private canonical manifest；
+5. 以 no-replace 原子发布固定 `manifest` 名称，并立即令两个已安装 index 成为 authority；
+6. 删除 private manifest；
+7. 同步 artifact directory、artifacts directory 与 root。
 
-Manifest presence 是 visibility point。Manifest 前的明确 residue 会被删除；publication
-后的异常会保留该 occurrence。Recovery 与 lazy lookup 会校验 descriptor、payload
-length/digest、tenant/Job/spec/slot/artifact/commit join，只清理安全 residue，并重新执行
-barrier chain。使用相同 stable commit 的 retry，只有在全部 stable identity、descriptor、
-digest 与 payload fact 匹配时才返回原 receipt。Reporting attempt 可以不同，因为原始
-acknowledgement 可能丢失。任何其他 collision 都会 fail closed。
+Manifest presence 是 visibility point。Manifest 前的明确 residue 会被删除，两个 index
+副本也会恢复；manifest 发布后，在后续任何可能抛异常的 cleanup、revalidation、observer 或
+barrier 之前，按 `ArtifactId` 与 `OutputCommitId` 的直接查询都已经可用。Recovery 与 lazy
+lookup 会校验 descriptor、payload length/digest、tenant/Job/spec/slot/artifact/commit join，
+原子修复两个精确 alias，只清理安全 residue，并重新执行 barrier chain。使用相同 stable
+commit 的 retry，只有在全部 stable identity、descriptor、digest 与 payload fact 匹配时才
+返回原 receipt。Reporting attempt 可以不同，因为原始 acknowledgement 可能丢失。任何其他
+collision 都会 fail closed。
 
-Deletion 会先删除并同步 authoritative manifest，再清理 payload 并释放 retention。成功 Job
-会保留历史 receipt，但删除后的字节不再能用于 lookup 或 checkpoint admission。
+Deletion 会先准备已移除目标的两个 index，然后报告四个不可逆状态之一：`NotRemoved`、
+`ManifestRemovedDurabilityUnconfirmed`、
+`VisibilityRemovalConfirmedCleanupPending` 或 `FullyCleaned`。Manifest 删除前失败会保留
+两个 alias，mutation 仍可继续；manifest 一旦不存在，两个 alias 会同时撤销，因此 lookup 与
+同进程 checkpoint admission 都不能暴露陈旧字节。Visibility durability 尚未确认时，service
+保留 quota；完整 visibility barrier chain 完成后，即使 payload 或 directory cleanup 仍是可由
+restart 清理的 residue，也会释放 quota authority 的精确 charge。Visibility 已变为不可逆后的
+任何失败都会 fence worker 和后续 durable mutation，直至 restart。成功 Job 会保留历史
+receipt，但删除后的字节不再能用于 lookup 或 checkpoint admission。
 
 ## Job State、Recovery 与显式 Retry
 
@@ -217,13 +231,15 @@ isolation、forced termination 或 bounded shutdown。这些属性仍属于 Issu
 
 持续维护测试覆盖 canonical digest/validation、共享的 128-device admission/recovery 上限与
 129-device rejection、每个 quota dimension 与多设备核算、精确 settlement、所有 Job-record
-publication/barrier fault stage 的内存与重启 truth、manifest 前后 failure、root
+publication/barrier fault stage 的内存与重启 truth、manifest 前后 failure、manifest
+前双 index preparation rollback、manifest 发布后立即按 OutputCommitId 查询、root
 lock/no-follow/identity drift、safe cleanup、corruption 与精确 Job/artifact recovery join、
-idempotent reconciliation、retention deletion、checkpoint authorization/re-authorization、
-显式 retry 与 fresh fencing、submit/retry thread-start rollback、submit/retry/cancel journal
-fail-stop、interrupted/successful restart、cancellation ordering、stale/malformed report、持续
-thread reaping、target-inventory platform gating，以及真实 Embedded Host
-output/checkpoint/restart 行为。
+idempotent reconciliation、所有 artifact-deletion fault stage 的双 alias 撤销、精确 quota、
+fail-stop 与 restart cleanup、同进程 deleted-checkpoint rejection、checkpoint
+authorization/re-authorization、显式 retry 与 fresh fencing、submit/retry thread-start
+rollback、submit/retry/cancel journal fail-stop、interrupted/successful restart、cancellation
+ordering、stale/malformed report、持续 thread reaping、target-inventory platform gating，以及
+真实 Embedded Host output/checkpoint/restart 行为。
 
 目标 multi-process model 仍由
 [ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
