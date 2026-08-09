@@ -221,10 +221,13 @@ class TenantQuotaAuthority final {
   /**
    * @brief Releases one durably deleted artifact's retention charge.
    * @param artifact_id Exact artifact whose authoritative manifest is gone.
-   * @return True when one charge was removed; false when already absent.
+   * @return Exact removed payload-byte charge, or zero when already absent.
    * @throws std::invalid_argument for an invalid identity.
+   * @throws std::logic_error when retained accounting is inconsistent.
+   * @note Returning the exact authority-owned charge lets deletion reconcile an
+   * already-absent artifact directory without guessing from stale store cache.
    */
-  bool release_retained_artifact(const ArtifactId& artifact_id);
+  std::uint64_t release_retained_artifact(const ArtifactId& artifact_id);
 
   /**
    * @brief Captures one mutex-consistent usage view.

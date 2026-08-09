@@ -231,6 +231,33 @@ class SingleTenantJobServiceTestAccess final {
   }
 
   /**
+   * @brief Reports whether artifact deletion fail-stopped durable mutation.
+   * @param service Live service whose private monotonic state is observed.
+   * @return True after manifest visibility became irreversible but deletion
+   * durability, cleanup, acknowledgement, or quota coordination failed.
+   * @throws std::system_error for mutex synchronization failure.
+   * @note This observation grants no recovery, cleanup, or quota authority.
+   */
+  static bool artifact_erase_faulted(const SingleTenantJobService& service) {
+    std::lock_guard<std::mutex> lock(service.mutex_);
+    return service.artifact_erase_faulted_;
+  }
+
+  /**
+   * @brief Reports the combined durable-mutation fail-stop state.
+   * @param service Live service whose private monotonic state is observed.
+   * @return True for either published Job-journal failure or irreversible
+   * artifact-deletion failure.
+   * @throws std::system_error for mutex synchronization failure.
+   * @note Query, lookup, and quota observation remain available; mutation and
+   * worker progress are fenced until restart.
+   */
+  static bool durable_mutation_faulted(const SingleTenantJobService& service) {
+    std::lock_guard<std::mutex> lock(service.mutex_);
+    return service.durable_mutation_faulted_locked();
+  }
+
+  /**
    * @brief Captures active, completed, and joining worker ownership.
    * @param service Live service whose private ownership is observed.
    * @return Exact mutex-consistent ownership snapshot.

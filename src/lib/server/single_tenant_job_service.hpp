@@ -209,7 +209,11 @@ struct JobSnapshot final {
  * assignment threads throughout the service lifetime. A Job-journal failure
  * after atomic record publication aligns in-memory truth with that record,
  * retains active quota, stops every later durable mutation, and requires a
- * service restart for conservative recovery.
+ * service restart for conservative recovery. Artifact deletion likewise
+ * distinguishes not-removed, visibility-unconfirmed, cleanup-pending, and
+ * fully-cleaned truth: confirmed visibility removal releases exact retained
+ * quota even when cleanup later fails, while every irreversible deletion
+ * failure revokes lookup and fail-stops mutation until restart.
  *
  * @throws std::invalid_argument when construction receives an invalid tenant or
  * null factory.
@@ -342,9 +346,17 @@ class SingleTenantJobService final {
    * @brief Durably deletes one tenant artifact and releases retained quota.
    * @param artifact_id Exact durable artifact identity.
    * @return True when one committed artifact was removed; false when absent.
-   * @throws DurableStateError/system failures from manifest removal/barriers.
+   * @throws The original pre-manifest failure while retaining visibility and
+   * mutation availability.
+   * @throws DurableArtifactEraseError after visibility was removed but its
+   * durability/cleanup/acknowledgement did not complete cleanly; the service
+   * has already coordinated quota according to the reported state and entered
+   * durable-mutation fail-stop.
    * @note A receipt retained by an existing successful Job remains historical
    * truth but lookup/checkpoint admission no longer resolves the deleted bytes.
+   * Visibility-confirmed deletion releases the quota authority's exact charge,
+   * including an already-absent retry; unconfirmed visibility preserves it for
+   * restart reconciliation.
    */
   bool delete_artifact(const ArtifactId& artifact_id);
 
@@ -563,12 +575,24 @@ class SingleTenantJobService final {
                                JobSnapshot candidate);
 
   /**
-   * @brief Rejects a new durable mutation after journal commit ambiguity.
+   * @brief Reports whether any irreversible durable mutation failure occurred.
+   * @return True after Job-journal publication ambiguity or artifact-deletion
+   * visibility ambiguity/cleanup failure.
+   * @throws Nothing.
+   * @note The caller holds `mutex_`. Reads remain available in this state;
+   * workers and every subsequent durable mutation are fenced until restart.
+   */
+  bool durable_mutation_faulted_locked() const noexcept {
+    return journal_faulted_ || artifact_erase_faulted_;
+  }
+
+  /**
+   * @brief Rejects a new mutation after any irreversible durability failure.
    * @return Nothing when durable mutation remains available.
    * @throws DurableStateError when restart reconciliation is required.
    * @note The caller holds `mutex_`.
    */
-  void require_journal_available_locked() const;
+  void require_durable_mutation_available_locked() const;
 
   /**
    * @brief Persists one recovery or current snapshot in serialized service
@@ -616,6 +640,12 @@ class SingleTenantJobService final {
    * remains reserved, and only destruction/restart may advance lifecycle.
    */
   bool journal_faulted_ = false;
+  /**
+   * @brief Monotonic fail-stop after artifact visibility became irreversible.
+   * @note Confirmed visibility removal has already released exact retained
+   * quota; unconfirmed visibility deliberately keeps it charged until restart.
+   */
+  bool artifact_erase_faulted_ = false;
   /** @brief Sole bounded infrastructure thread that joins worker handles. */
   std::thread reaper_;
 };

@@ -69,12 +69,186 @@ class DurableCorruptionError final : public DurableStateError {
  * mutation authority. Production leaves the hook empty.
  */
 enum class DurableArtifactCommitStage : std::uint8_t {
+  /** @brief ArtifactId cache node is prepared in private index storage. */
+  ArtifactIndexPrepared,
+  /** @brief OutputCommitId cache node is prepared in private index storage. */
+  CommitIndexPrepared,
   /** @brief Payload is synchronized and revalidated; manifest is absent. */
   PayloadSynchronized,
   /** @brief Authoritative manifest link exists; parent barriers are pending. */
   ManifestPublished,
   /** @brief Every leaf-to-root directory barrier completed. */
   DirectoryBarriersCompleted,
+};
+
+/**
+ * @brief Observable state of one authoritative artifact-visibility removal.
+ * @throws Nothing for value operations.
+ * @note The states form an irreversible transaction order. Once visibility is
+ * removed in-process, both ArtifactId and OutputCommitId indexes are already
+ * revoked. Only the last two states authorize retained-quota release.
+ */
+enum class DurableArtifactEraseState : std::uint8_t {
+  /** @brief Manifest visibility was not removed; prior truth remains valid. */
+  NotRemoved,
+  /** @brief Manifest is absent in-process, but durability is unconfirmed. */
+  ManifestRemovedDurabilityUnconfirmed,
+  /** @brief Visibility removal is durable; private cleanup remains pending. */
+  VisibilityRemovalConfirmedCleanupPending,
+  /** @brief Visibility, payload/directory cleanup, and barriers completed. */
+  FullyCleaned,
+};
+
+/**
+ * @brief Deterministic artifact-deletion observation stages for maintained
+ * tests.
+ * @throws Nothing for value operations.
+ * @note The observer runs while the durable-state mutex excludes readers. Its
+ * exception is captured in `DurableArtifactEraseResult`; production leaves
+ * the observer empty.
+ */
+enum class DurableArtifactEraseStage : std::uint8_t {
+  /** @brief All throwing cache preparation precedes manifest mutation. */
+  BeforeManifestRemoval,
+  /** @brief Manifest is absent and both in-memory indexes are revoked. */
+  ManifestRemoved,
+  /** @brief The artifact-directory visibility barrier completed. */
+  ArtifactDirectorySynchronized,
+  /** @brief The artifacts-directory visibility barrier completed. */
+  ArtifactsDirectorySynchronized,
+  /** @brief Root barrier confirmed durable visibility removal. */
+  VisibilityRemovalConfirmed,
+  /** @brief The payload leaf is absent. */
+  PayloadRemoved,
+  /** @brief Any private-manifest residue is absent. */
+  PrivateManifestRemoved,
+  /** @brief The cleaned artifact directory itself is synchronized. */
+  ArtifactDirectoryCleanupSynchronized,
+  /** @brief The artifact-directory descriptor was closed. */
+  ArtifactDirectoryClosed,
+  /** @brief The now-empty artifact directory was removed. */
+  ArtifactDirectoryRemoved,
+  /** @brief The artifacts-directory cleanup barrier completed. */
+  ArtifactsDirectoryCleanupSynchronized,
+  /** @brief Every cleanup barrier through the durability root completed. */
+  CleanupBarriersCompleted,
+};
+
+/**
+ * @brief Allocation-free outcome of one durable artifact-deletion transaction.
+ * @throws Nothing for construction, copying, and observation.
+ * @note `payload_bytes` is the exact known retained charge for this occurrence,
+ * or zero on an already-absent retry whose quota authority remains the exact
+ * charge source. A non-null `failure` describes an operation/observer failure
+ * at the reported irreversible state.
+ */
+struct DurableArtifactEraseResult final {
+  /** @brief Furthest irreversible visibility/cleanup state reached. */
+  DurableArtifactEraseState state = DurableArtifactEraseState::NotRemoved;
+  /** @brief Exact known tight payload charge, or zero when not recoverable. */
+  std::uint64_t payload_bytes = 0U;
+  /** @brief Captured original deletion failure, or null after clean success. */
+  std::exception_ptr failure;
+
+  /**
+   * @brief Reports whether authoritative visibility is absent in-process.
+   * @return False only for `NotRemoved`.
+   * @throws Nothing.
+   */
+  bool visibility_removed() const noexcept {
+    return state != DurableArtifactEraseState::NotRemoved;
+  }
+
+  /**
+   * @brief Reports whether parent barriers confirmed visibility removal.
+   * @return True for cleanup-pending or fully-cleaned states.
+   * @throws Nothing.
+   */
+  bool visibility_removal_confirmed() const noexcept {
+    return state == DurableArtifactEraseState::
+                        VisibilityRemovalConfirmedCleanupPending ||
+           state == DurableArtifactEraseState::FullyCleaned;
+  }
+
+  /**
+   * @brief Reports whether all cleanup and directory barriers completed.
+   * @return True only for `FullyCleaned`, including lost final acknowledgement.
+   * @throws Nothing.
+   */
+  bool cleanup_completed() const noexcept {
+    return state == DurableArtifactEraseState::FullyCleaned;
+  }
+
+  /**
+   * @brief Reports a clean fully durable deletion outcome.
+   * @return True only for fully cleaned state without a captured failure.
+   * @throws Nothing.
+   */
+  bool succeeded() const noexcept {
+    return cleanup_completed() && failure == nullptr;
+  }
+
+  /**
+   * @brief Rethrows the captured original failure when present.
+   * @return Nothing.
+   * @throws The exact exception captured by `erase_artifact`.
+   */
+  void rethrow_failure() const {
+    if (failure != nullptr) {
+      std::rethrow_exception(failure);
+    }
+  }
+};
+
+/**
+ * @brief Typed service report for commit-unknown or cleanup-pending deletion.
+ * @throws std::bad_alloc only while constructing base diagnostic storage.
+ * @note The service has already revoked lookup visibility and either retained
+ * quota for unconfirmed visibility or released its exact charge for confirmed
+ * visibility. It then enters monotonic durable-mutation fail-stop.
+ */
+class DurableArtifactEraseError final : public DurableStateError {
+ public:
+  /**
+   * @brief Captures the affected artifact and irreversible deletion state.
+   * @param artifact_id Exact deleted artifact identity.
+   * @param state Visibility-removed deletion state.
+   * @param payload_bytes Exact known retained charge, or zero on absent retry.
+   * @param cause Original filesystem/observer/quota failure.
+   * @throws std::invalid_argument for invalid identity, `NotRemoved`, or null
+   * cause.
+   * @throws std::bad_alloc while constructing diagnostic storage.
+   */
+  DurableArtifactEraseError(ArtifactId artifact_id,
+                            DurableArtifactEraseState state,
+                            std::uint64_t payload_bytes,
+                            std::exception_ptr cause);
+
+  /** @brief Returns the exact affected artifact identity. */
+  const ArtifactId& artifact_id() const noexcept { return artifact_id_; }
+
+  /** @brief Returns the furthest irreversible deletion state. */
+  DurableArtifactEraseState state() const noexcept { return state_; }
+
+  /** @brief Returns the exact known retained charge, or zero when unknown. */
+  std::uint64_t payload_bytes() const noexcept { return payload_bytes_; }
+
+  /**
+   * @brief Rethrows the original deletion/quota failure.
+   * @return Nothing.
+   * @throws The exact captured cause.
+   */
+  void rethrow_cause() const { std::rethrow_exception(cause_); }
+
+ private:
+  /** @brief Exact artifact whose visibility transition became irreversible. */
+  ArtifactId artifact_id_;
+  /** @brief Furthest irreversible visibility/cleanup state. */
+  DurableArtifactEraseState state_;
+  /** @brief Exact known retained payload charge, or zero on absent retry. */
+  std::uint64_t payload_bytes_ = 0U;
+  /** @brief Original filesystem, observer, or quota-coordination failure. */
+  std::exception_ptr cause_;
 };
 
 /**
@@ -229,6 +403,13 @@ struct DurableServerStateOptions final {
    * retry/restart reconciliation.
    */
   std::function<void(DurableArtifactCommitStage)> artifact_commit_observer;
+  /**
+   * @brief Optional observer/fault injector for artifact deletion transitions.
+   * @note Exceptions are captured in `DurableArtifactEraseResult`. A failure
+   * before manifest removal preserves both indexes; every later failure keeps
+   * them revoked and reports the exact irreversible deletion state.
+   */
+  std::function<void(DurableArtifactEraseStage)> artifact_erase_observer;
   /**
    * @brief Optional observer/fault injector for Job-journal transitions.
    * @note Exceptions are captured in `DurableJobCommitResult`. An exception
@@ -420,14 +601,17 @@ class DurableServerState final {
   /**
    * @brief Durably removes one committed artifact's authoritative visibility.
    * @param artifact_id Valid exact artifact identity.
-   * @return Exact payload bytes removed, or zero when already absent.
-   * @throws std::invalid_argument for an invalid identity.
-   * @throws DurableCorruptionError/system failures for ambiguous retained
-   * state.
-   * @note Manifest removal and parent barriers complete before the charge may
-   * be released by `TenantQuotaAuthority`.
+   * @return Explicit visibility/cleanup state, exact known payload charge, and
+   * any captured failure.
+   * @throws Nothing; validation, allocation, observer, and filesystem failures
+   * are captured in the returned result.
+   * @note Both indexes are pre-staged before filesystem mutation. Once manifest
+   * visibility is absent, they are revoked together by no-throw swaps. Quota
+   * may be released only when `visibility_removal_confirmed()` is true; a
+   * remaining cleanup failure is restart-recoverable residue.
    */
-  std::uint64_t erase_artifact(const ArtifactId& artifact_id);
+  DurableArtifactEraseResult erase_artifact(
+      const ArtifactId& artifact_id) noexcept;
 
   /**
    * @brief Atomically persists one complete accepted Job truth record.

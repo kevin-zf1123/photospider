@@ -265,7 +265,7 @@ void TenantQuotaAuthority::commit_retained_artifact(
 }
 
 /** @copydoc ps::server::TenantQuotaAuthority::release_retained_artifact */
-bool TenantQuotaAuthority::release_retained_artifact(
+std::uint64_t TenantQuotaAuthority::release_retained_artifact(
     const ArtifactId& artifact_id) {
   if (!artifact_id.valid()) {
     throw std::invalid_argument("retained artifact identity is invalid");
@@ -273,15 +273,16 @@ bool TenantQuotaAuthority::release_retained_artifact(
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = retained_artifacts_.find(artifact_id.value());
   if (found == retained_artifacts_.end()) {
-    return false;
+    return 0U;
   }
   if (usage_.retention_bytes < found->second) {
     throw std::logic_error("tenant retained quota accounting is inconsistent");
   }
-  usage_.retention_bytes -= found->second;
+  const std::uint64_t released = found->second;
+  usage_.retention_bytes -= released;
   retained_artifacts_.erase(found);
   usage_.retained_artifacts = retained_artifacts_.size();
-  return true;
+  return released;
 }
 
 /** @copydoc ps::server::TenantQuotaAuthority::snapshot */

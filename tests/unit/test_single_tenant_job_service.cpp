@@ -665,6 +665,66 @@ DurableServerStateOptions job_failure_options(
 }
 
 /**
+ * @brief Thread-safe one-shot artifact-deletion fault controller.
+ * @throws Nothing for construction; `observe` throws only when armed.
+ */
+class OneShotArtifactEraseFailure final {
+ public:
+  /**
+   * @brief Selects the exact deletion stage that may fail once.
+   * @param stage Immutable target transition.
+   * @throws Nothing.
+   */
+  explicit OneShotArtifactEraseFailure(DurableArtifactEraseStage stage) noexcept
+      : stage_(stage) {}
+
+  /**
+   * @brief Arms the next observation of the selected stage.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void arm() noexcept { armed_.store(true, std::memory_order_release); }
+
+  /**
+   * @brief Observes a deletion transition and consumes an armed fault.
+   * @param stage Current product transition.
+   * @return Nothing when disarmed or at another stage.
+   * @throws std::runtime_error exactly once after each `arm()`.
+   */
+  void observe(DurableArtifactEraseStage stage) {
+    if (stage == stage_ && armed_.exchange(false, std::memory_order_acq_rel)) {
+      throw std::runtime_error("injected one-shot artifact erase failure");
+    }
+  }
+
+ private:
+  /** @brief Immutable exact deletion transition selected for injection. */
+  DurableArtifactEraseStage stage_;
+  /** @brief Whether the next selected transition must throw. */
+  std::atomic<bool> armed_{false};
+};
+
+/**
+ * @brief Builds durable-state options wired to one erase fault controller.
+ * @param failure Non-null controller retained by the observer.
+ * @return Options whose artifact erase observer delegates to `failure`.
+ * @throws std::invalid_argument when `failure` is null.
+ * @throws std::bad_alloc when callback storage allocation fails.
+ */
+DurableServerStateOptions artifact_erase_failure_options(
+    std::shared_ptr<OneShotArtifactEraseFailure> failure) {
+  if (failure == nullptr) {
+    throw std::invalid_argument("artifact erase failure controller is null");
+  }
+  DurableServerStateOptions options;
+  options.artifact_erase_observer =
+      [failure = std::move(failure)](DurableArtifactEraseStage stage) {
+        failure->observe(stage);
+      };
+  return options;
+}
+
+/**
  * @brief Coordinates one deliberately blocked worker with its test thread.
  * @throws Synchronization failures from standard primitives.
  */
@@ -1161,8 +1221,8 @@ TEST(TenantQuotaAuthority,
       authority.commit_retained_artifact(succeeded.id, artifact_id, 12U),
       std::logic_error);
 
-  EXPECT_TRUE(authority.release_retained_artifact(artifact_id));
-  EXPECT_FALSE(authority.release_retained_artifact(artifact_id));
+  EXPECT_EQ(authority.release_retained_artifact(artifact_id), 12U);
+  EXPECT_EQ(authority.release_retained_artifact(artifact_id), 0U);
   EXPECT_EQ(authority.snapshot().retention_bytes, 0U);
 
   TenantQuotaLimits recovery_limits = test_quota_limits();
@@ -1361,9 +1421,10 @@ TEST(DurableServerState,
     DurableServerState store(root.path(), TenantId("tenant.test"), options);
     EXPECT_THROW(store.commit_artifact(request, image), std::runtime_error);
     const std::shared_ptr<const ArtifactRecord> published =
-        store.find_artifact(request.artifact_id);
+        store.find_commit(request.output_commit_id);
     ASSERT_NE(published, nullptr);
     original = published->receipt;
+    EXPECT_EQ(store.find_artifact(request.artifact_id), published);
 
     DurableArtifactCommitRequest retry = request;
     retry.attempt.attempt_id = JobAttemptId("attempt.test.retry");
@@ -1385,6 +1446,115 @@ TEST(DurableServerState,
   ASSERT_NE(record, nullptr);
   EXPECT_EQ(record->receipt.artifact_id, original.artifact_id);
   EXPECT_EQ(record->receipt.content_digest, original.content_digest);
+}
+
+TEST(DurableServerState, RollsBackBothAliasesWhenPrivateIndexPreparationFails) {
+  constexpr std::array<DurableArtifactCommitStage, 2U> stages{
+      DurableArtifactCommitStage::ArtifactIndexPrepared,
+      DurableArtifactCommitStage::CommitIndexPrepared};
+  for (std::size_t index = 0U; index < stages.size(); ++index) {
+    SCOPED_TRACE(index);
+    ScopedTestStateRoot root;
+    std::atomic<bool> armed{true};
+    DurableServerStateOptions options;
+    options.artifact_commit_observer = [target = stages[index], &armed](
+                                           DurableArtifactCommitStage stage) {
+      if (stage == target && armed.exchange(false, std::memory_order_acq_rel)) {
+        throw std::runtime_error(
+            "injected private artifact index preparation failure");
+      }
+    };
+    DurableServerState store(root.path(), TenantId("tenant.test"), options);
+    const DurableArtifactCommitRequest request =
+        make_test_commit_request(30U + index);
+    ImageBuffer image = make_test_image();
+
+    EXPECT_THROW(store.commit_artifact(request, image), std::runtime_error);
+    EXPECT_EQ(store.find_artifact(request.artifact_id), nullptr);
+    EXPECT_EQ(store.find_commit(request.output_commit_id), nullptr);
+    EXPECT_TRUE(store.recovered_artifacts().empty());
+
+    const OutputCommitReceipt receipt = store.commit_artifact(request, image);
+    const std::shared_ptr<const ArtifactRecord> by_artifact =
+        store.find_artifact(request.artifact_id);
+    const std::shared_ptr<const ArtifactRecord> by_commit =
+        store.find_commit(request.output_commit_id);
+    ASSERT_NE(by_artifact, nullptr);
+    EXPECT_EQ(by_commit, by_artifact);
+    EXPECT_EQ(receipt.artifact_id, request.artifact_id);
+    EXPECT_EQ(receipt.output_commit_id, request.output_commit_id);
+  }
+}
+
+TEST(DurableServerState,
+     EraseFaultMatrixRevokesBothAliasesAndLeavesRetryableResidue) {
+  constexpr std::array<DurableArtifactEraseStage, 12U> stages{
+      DurableArtifactEraseStage::BeforeManifestRemoval,
+      DurableArtifactEraseStage::ManifestRemoved,
+      DurableArtifactEraseStage::ArtifactDirectorySynchronized,
+      DurableArtifactEraseStage::ArtifactsDirectorySynchronized,
+      DurableArtifactEraseStage::VisibilityRemovalConfirmed,
+      DurableArtifactEraseStage::PayloadRemoved,
+      DurableArtifactEraseStage::PrivateManifestRemoved,
+      DurableArtifactEraseStage::ArtifactDirectoryCleanupSynchronized,
+      DurableArtifactEraseStage::ArtifactDirectoryClosed,
+      DurableArtifactEraseStage::ArtifactDirectoryRemoved,
+      DurableArtifactEraseStage::ArtifactsDirectoryCleanupSynchronized,
+      DurableArtifactEraseStage::CleanupBarriersCompleted};
+  constexpr std::array<DurableArtifactEraseState, 12U> expected_states{
+      DurableArtifactEraseState::NotRemoved,
+      DurableArtifactEraseState::ManifestRemovedDurabilityUnconfirmed,
+      DurableArtifactEraseState::ManifestRemovedDurabilityUnconfirmed,
+      DurableArtifactEraseState::ManifestRemovedDurabilityUnconfirmed,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::FullyCleaned};
+
+  for (std::size_t index = 0U; index < stages.size(); ++index) {
+    SCOPED_TRACE(index);
+    ScopedTestStateRoot root;
+    const auto failure =
+        std::make_shared<OneShotArtifactEraseFailure>(stages[index]);
+    const DurableArtifactCommitRequest request =
+        make_test_commit_request(50U + index);
+    {
+      DurableServerState store(root.path(), TenantId("tenant.test"),
+                               artifact_erase_failure_options(failure));
+      ImageBuffer image = make_test_image();
+      static_cast<void>(store.commit_artifact(request, image));
+      failure->arm();
+
+      const DurableArtifactEraseResult erased =
+          store.erase_artifact(request.artifact_id);
+      EXPECT_EQ(erased.state, expected_states[index]);
+      EXPECT_EQ(erased.payload_bytes, 12U);
+      EXPECT_NE(erased.failure, nullptr);
+      EXPECT_THROW(erased.rethrow_failure(), std::runtime_error);
+      if (stages[index] == DurableArtifactEraseStage::BeforeManifestRemoval) {
+        EXPECT_NE(store.find_artifact(request.artifact_id), nullptr);
+        EXPECT_NE(store.find_commit(request.output_commit_id), nullptr);
+      } else {
+        EXPECT_EQ(store.find_artifact(request.artifact_id), nullptr);
+        EXPECT_EQ(store.find_commit(request.output_commit_id), nullptr);
+      }
+
+      const DurableArtifactEraseResult retried =
+          store.erase_artifact(request.artifact_id);
+      EXPECT_TRUE(retried.succeeded());
+      EXPECT_EQ(store.find_artifact(request.artifact_id), nullptr);
+      EXPECT_EQ(store.find_commit(request.output_commit_id), nullptr);
+      EXPECT_TRUE(store.recovered_artifacts().empty());
+    }
+    DurableServerState recovered(root.path(), TenantId("tenant.test"));
+    EXPECT_TRUE(recovered.recovered_artifacts().empty());
+    EXPECT_EQ(recovered.find_artifact(request.artifact_id), nullptr);
+    EXPECT_EQ(recovered.find_commit(request.output_commit_id), nullptr);
+  }
 }
 
 TEST(DurableServerState,
@@ -1782,6 +1952,15 @@ TEST(SingleTenantJobService,
   EXPECT_TRUE(service.delete_artifact(succeeded->output_receipt->artifact_id));
   EXPECT_FALSE(service.delete_artifact(succeeded->output_receipt->artifact_id));
   EXPECT_EQ(service.quota_snapshot().retention_bytes, 0U);
+  const std::size_t accepted_before_checkpoint =
+      SingleTenantJobServiceTestAccess::accepted_job_count(service);
+  EXPECT_THROW(
+      service.submit(JobSpec(GraphArtifactId("graph.test"), 9,
+                             OutputSlotId("image.final"), test_job_resources(),
+                             succeeded->output_receipt->artifact_id)),
+      std::invalid_argument);
+  EXPECT_EQ(SingleTenantJobServiceTestAccess::accepted_job_count(service),
+            accepted_before_checkpoint);
   const std::optional<JobSnapshot> historical = service.query(first.job_id);
   ASSERT_TRUE(historical.has_value());
   EXPECT_EQ(historical->state, JobState::Succeeded);
@@ -2094,6 +2273,126 @@ TEST(SingleTenantJobService,
     EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 0U);
   }
   EXPECT_EQ(recovered_worker_calls.load(), 0U);
+}
+
+TEST(SingleTenantJobService,
+     EraseFaultMatrixCoordinatesQuotaAliasesFailStopAndRestart) {
+  constexpr std::array<DurableArtifactEraseStage, 12U> stages{
+      DurableArtifactEraseStage::BeforeManifestRemoval,
+      DurableArtifactEraseStage::ManifestRemoved,
+      DurableArtifactEraseStage::ArtifactDirectorySynchronized,
+      DurableArtifactEraseStage::ArtifactsDirectorySynchronized,
+      DurableArtifactEraseStage::VisibilityRemovalConfirmed,
+      DurableArtifactEraseStage::PayloadRemoved,
+      DurableArtifactEraseStage::PrivateManifestRemoved,
+      DurableArtifactEraseStage::ArtifactDirectoryCleanupSynchronized,
+      DurableArtifactEraseStage::ArtifactDirectoryClosed,
+      DurableArtifactEraseStage::ArtifactDirectoryRemoved,
+      DurableArtifactEraseStage::ArtifactsDirectoryCleanupSynchronized,
+      DurableArtifactEraseStage::CleanupBarriersCompleted};
+  constexpr std::array<DurableArtifactEraseState, 12U> expected_states{
+      DurableArtifactEraseState::NotRemoved,
+      DurableArtifactEraseState::ManifestRemovedDurabilityUnconfirmed,
+      DurableArtifactEraseState::ManifestRemovedDurabilityUnconfirmed,
+      DurableArtifactEraseState::ManifestRemovedDurabilityUnconfirmed,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::VisibilityRemovalConfirmedCleanupPending,
+      DurableArtifactEraseState::FullyCleaned};
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [](const JobAssignment& assignment,
+         const std::function<bool()>& cancellation_requested) {
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+
+  for (std::size_t index = 0U; index < stages.size(); ++index) {
+    SCOPED_TRACE(index);
+    ScopedTestStateRoot root;
+    const auto failure =
+        std::make_shared<OneShotArtifactEraseFailure>(stages[index]);
+    JobId job_id;
+    OutputCommitReceipt receipt;
+    {
+      SingleTenantJobService service(TenantId("tenant.test"),
+                                     test_quota_limits(), root.path(), factory,
+                                     artifact_erase_failure_options(failure));
+      const JobSubmission submission = service.submit(
+          JobSpec(GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"),
+                  test_job_resources()));
+      job_id = submission.job_id;
+      const std::optional<JobSnapshot> terminal =
+          service.wait_for(job_id, std::chrono::seconds(2));
+      ASSERT_TRUE(terminal.has_value());
+      ASSERT_EQ(terminal->state, JobState::Succeeded);
+      ASSERT_TRUE(terminal->output_receipt.has_value());
+      receipt = *terminal->output_receipt;
+      ASSERT_EQ(service.quota_snapshot().retention_bytes, 12U);
+      failure->arm();
+
+      if (stages[index] == DurableArtifactEraseStage::BeforeManifestRemoval) {
+        EXPECT_THROW(service.delete_artifact(receipt.artifact_id),
+                     std::runtime_error);
+        EXPECT_FALSE(
+            SingleTenantJobServiceTestAccess::artifact_erase_faulted(service));
+        EXPECT_FALSE(SingleTenantJobServiceTestAccess::durable_mutation_faulted(
+            service));
+        EXPECT_EQ(service.quota_snapshot().retention_bytes, 12U);
+        EXPECT_NE(service.find_artifact(receipt.artifact_id), nullptr);
+        EXPECT_TRUE(service.delete_artifact(receipt.artifact_id));
+        EXPECT_EQ(service.quota_snapshot().retention_bytes, 0U);
+      } else {
+        bool caught = false;
+        try {
+          static_cast<void>(service.delete_artifact(receipt.artifact_id));
+        } catch (const DurableArtifactEraseError& error) {
+          caught = true;
+          EXPECT_EQ(error.artifact_id(), receipt.artifact_id);
+          EXPECT_EQ(error.state(), expected_states[index]);
+          EXPECT_EQ(error.payload_bytes(), 12U);
+          EXPECT_THROW(error.rethrow_cause(), std::runtime_error);
+        }
+        EXPECT_TRUE(caught);
+        EXPECT_TRUE(
+            SingleTenantJobServiceTestAccess::artifact_erase_faulted(service));
+        EXPECT_TRUE(SingleTenantJobServiceTestAccess::durable_mutation_faulted(
+            service));
+        EXPECT_FALSE(
+            SingleTenantJobServiceTestAccess::journal_faulted(service));
+        EXPECT_EQ(service.find_artifact(receipt.artifact_id), nullptr);
+        const std::uint64_t expected_retention = index <= 3U ? 12U : 0U;
+        EXPECT_EQ(service.quota_snapshot().retention_bytes, expected_retention);
+        EXPECT_THROW(service.submit(JobSpec(GraphArtifactId("graph.test"), 8,
+                                            OutputSlotId("image.final"),
+                                            test_job_resources())),
+                     DurableStateError);
+        EXPECT_THROW(service.delete_artifact(receipt.artifact_id),
+                     DurableStateError);
+      }
+
+      const std::optional<JobSnapshot> historical = service.query(job_id);
+      ASSERT_TRUE(historical.has_value());
+      EXPECT_EQ(historical->state, JobState::Succeeded);
+      ASSERT_TRUE(historical->output_receipt.has_value());
+      EXPECT_EQ(historical->output_receipt->artifact_id, receipt.artifact_id);
+    }
+
+    SingleTenantJobService recovered(TenantId("tenant.test"),
+                                     test_quota_limits(), root.path(), factory);
+    const std::optional<JobSnapshot> historical = recovered.query(job_id);
+    ASSERT_TRUE(historical.has_value());
+    EXPECT_EQ(historical->state, JobState::Succeeded);
+    ASSERT_TRUE(historical->output_receipt.has_value());
+    EXPECT_EQ(historical->output_receipt->artifact_id, receipt.artifact_id);
+    EXPECT_EQ(recovered.find_artifact(receipt.artifact_id), nullptr);
+    EXPECT_EQ(recovered.quota_snapshot().retention_bytes, 0U);
+    EXPECT_FALSE(
+        SingleTenantJobServiceTestAccess::durable_mutation_faulted(recovered));
+  }
 }
 
 TEST(SingleTenantJobService,

@@ -527,7 +527,7 @@ SingleTenantJobService::~SingleTenantJobService() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     shutting_down_ = true;
     for (auto& entry : jobs_) {
-      if (!journal_faulted_ &&
+      if (!durable_mutation_faulted_locked() &&
           !is_terminal_job_state(entry.second.snapshot.state)) {
         JobSnapshot candidate = entry.second.snapshot;
         candidate.cancellation_requested = true;
@@ -556,7 +556,7 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
   if (shutting_down_) {
     throw std::invalid_argument("single-tenant service is shutting down");
   }
-  require_journal_available_locked();
+  require_durable_mutation_available_locked();
   std::shared_ptr<const ArtifactRecord> checkpoint;
   if (immutable_spec->checkpoint_artifact_id().has_value()) {
     checkpoint = durable_state_->find_artifact(
@@ -664,7 +664,7 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
     return std::nullopt;
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  require_journal_available_locked();
+  require_durable_mutation_available_locked();
   const auto found = jobs_.find(job_id.value());
   if (found == jobs_.end() || shutting_down_ ||
       found->second.snapshot.state != JobState::Failed ||
@@ -816,7 +816,7 @@ bool SingleTenantJobService::cancel(const JobId& job_id) {
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  require_journal_available_locked();
+  require_durable_mutation_available_locked();
   const auto found = jobs_.find(job_id.value());
   if (found == jobs_.end() ||
       is_terminal_job_state(found->second.snapshot.state) ||
@@ -843,7 +843,7 @@ bool SingleTenantJobService::delete_artifact(const ArtifactId& artifact_id) {
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  require_journal_available_locked();
+  require_durable_mutation_available_locked();
   for (const auto& entry : jobs_) {
     const JobSnapshot& snapshot = entry.second.snapshot;
     if (!is_terminal_job_state(snapshot.state) &&
@@ -852,15 +852,42 @@ bool SingleTenantJobService::delete_artifact(const ArtifactId& artifact_id) {
       return false;
     }
   }
-  const std::uint64_t removed = durable_state_->erase_artifact(artifact_id);
-  if (removed == 0U) {
+  const DurableArtifactEraseResult erased =
+      durable_state_->erase_artifact(artifact_id);
+  if (!erased.visibility_removed()) {
+    erased.rethrow_failure();
     return false;
   }
-  if (!quota_authority_->release_retained_artifact(artifact_id)) {
-    throw std::logic_error(
-        "durable artifact removal had no retained quota charge");
+
+  std::uint64_t released_bytes = 0U;
+  std::exception_ptr failure = erased.failure;
+  if (erased.visibility_removal_confirmed()) {
+    try {
+      released_bytes = quota_authority_->release_retained_artifact(artifact_id);
+      if (erased.payload_bytes != 0U &&
+          released_bytes != erased.payload_bytes) {
+        throw std::logic_error(
+            "durable artifact removal disagrees with retained quota charge");
+      }
+    } catch (...) {
+      failure = std::current_exception();
+    }
   }
-  return true;
+  if (failure == nullptr && !erased.succeeded()) {
+    try {
+      throw std::logic_error(
+          "durable artifact removal stopped without a captured failure");
+    } catch (...) {
+      failure = std::current_exception();
+    }
+  }
+  if (failure != nullptr) {
+    artifact_erase_faulted_ = true;
+    condition_.notify_all();
+    throw DurableArtifactEraseError(artifact_id, erased.state,
+                                    erased.payload_bytes, failure);
+  }
+  return erased.payload_bytes != 0U || released_bytes != 0U;
 }
 
 /** @copydoc ps::server::SingleTenantJobService::quota_snapshot */
@@ -875,7 +902,7 @@ void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = jobs_.find(assignment.identity.job_id.value());
-      if (!journal_faulted_ && found != jobs_.end() &&
+      if (!durable_mutation_faulted_locked() && found != jobs_.end() &&
           found->second.snapshot.assignment == assignment.identity &&
           !is_terminal_job_state(found->second.snapshot.state)) {
         assignment_present = true;
@@ -989,7 +1016,8 @@ bool SingleTenantJobService::cancellation_requested_for(
     const AttemptIdentity& expected) const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = jobs_.find(expected.job_id.value());
-  return shutting_down_ || journal_faulted_ || found == jobs_.end() ||
+  return shutting_down_ || durable_mutation_faulted_locked() ||
+         found == jobs_.end() ||
          found->second.snapshot.assignment != expected ||
          found->second.snapshot.cancellation_requested;
 }
@@ -1003,7 +1031,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
   try {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = jobs_.find(expected.job_id.value());
-    if (journal_faulted_ || found == jobs_.end() ||
+    if (durable_mutation_faulted_locked() || found == jobs_.end() ||
         is_terminal_job_state(found->second.snapshot.state)) {
       return;
     }
@@ -1126,7 +1154,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
     try {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = jobs_.find(expected.job_id.value());
-      if (journal_faulted_ || found == jobs_.end() ||
+      if (durable_mutation_faulted_locked() || found == jobs_.end() ||
           found->second.snapshot.assignment != expected ||
           is_terminal_job_state(found->second.snapshot.state)) {
         return;
@@ -1138,7 +1166,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
           return;
         }
       } catch (...) {
-        if (journal_faulted_) {
+        if (durable_mutation_faulted_locked()) {
           condition_.notify_all();
           return;
         }
@@ -1179,7 +1207,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
     try {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = jobs_.find(expected.job_id.value());
-      if (!journal_faulted_ && found != jobs_.end() &&
+      if (!durable_mutation_faulted_locked() && found != jobs_.end() &&
           found->second.snapshot.assignment == expected &&
           !is_terminal_job_state(found->second.snapshot.state)) {
         try {
@@ -1188,7 +1216,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
             return;
           }
         } catch (...) {
-          if (journal_faulted_) {
+          if (durable_mutation_faulted_locked()) {
             condition_.notify_all();
             return;
           }
@@ -1318,11 +1346,12 @@ void SingleTenantJobService::publish_snapshot_locked(JobControlRecord& control,
 }
 
 /** @copydoc
- * ps::server::SingleTenantJobService::require_journal_available_locked */
-void SingleTenantJobService::require_journal_available_locked() const {
-  if (journal_faulted_) {
+ * ps::server::SingleTenantJobService::require_durable_mutation_available_locked
+ */
+void SingleTenantJobService::require_durable_mutation_available_locked() const {
+  if (durable_mutation_faulted_locked()) {
     throw DurableStateError(
-        "durable Job journal is fail-stopped; restart required");
+        "durable server mutation is fail-stopped; restart required");
   }
 }
 
