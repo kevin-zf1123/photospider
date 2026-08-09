@@ -15,9 +15,15 @@ vertical with complete-envelope tenant quota accounting, durable Job/image
 artifact recovery, explicit retry/checkpoint identity, and one in-process
 Embedded Host worker per attempt. That slice preserves this decision's identity
 and authority ordering and provides real quota admission plus crash durability,
-but it is not evidence of multi-tenant authorization, OS resource enforcement,
-separate worker processes, bounded termination, network transport, or
-untrusted-plugin isolation. Current behavior is defined by
+including one shared 128-configured-device admission/recovery maximum and an
+explicit Job-journal distinction between not published, published with
+durability unconfirmed, and confirmed committed. A published barrier failure
+retains visible truth and enters a monotonic control-plane fail-stop instead of
+attempting rollback. The source-private profile defaults on only for Darwin and
+Linux and has no Job target inventory on unsupported systems. This slice is not
+evidence of multi-tenant authorization, OS resource enforcement, separate
+worker processes, bounded termination, network transport, or untrusted-plugin
+isolation. Current behavior is defined by
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
 
 ## Context

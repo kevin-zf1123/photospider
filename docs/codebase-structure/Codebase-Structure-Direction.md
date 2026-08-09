@@ -54,7 +54,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter. | It discovers and links only OpenCV `core`. |
 | `photospider_policy_sdk` | Installable dependency-neutral pure-C policy ABI v1 SDK. | It carries one C11/C++17-compatible header and no execution/runtime dependency. |
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Matches the desired static product and public Host shape while folding role-owned backend sources into one archive. |
-| `photospider_single_tenant_job_internal` | Non-installed Issue #99 canonical JobSpec, tenant-quota, durable Job/artifact, explicit retry/checkpoint, and in-process attempt-worker authority. | It links the Embedded Host product but exports no package/API and is absent from `photospiderd`; its quota/durability are real, while WorkerManager processes, OS enforcement/isolation, and bounded termination remain absent. |
+| `photospider_single_tenant_job_internal` | Non-installed Issue #99 canonical JobSpec, tenant-quota, durable Job/artifact, explicit retry/checkpoint, and in-process attempt-worker authority. | Its independent gate defaults on only for Darwin/Linux, and its internal/unit/integration target inventory is absent elsewhere; when present it links Embedded Host but exports no package/API and remains outside `photospiderd`. |
 | `photospider_cli_common` | Static CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary under `apps/graph_cli/` and two role-owned benchmark service translation units. | The benchmark sources belong only to this non-installable helper and the complete CLI closure; they are absent from the installable `photospider` static product. |
 | `graph_cli` | Process-policy-only entry point at `apps/graph_cli/main.cpp`. | Disables OpenCL, owns allocation-independent fatal exit policy, creates the embedded `Host` adapter, and has no daemon-client mode yet. |
 | `photospider_ipc_client` | Installable static typed Unix IPC client and complete Host adapter. | Implements typed owned calls for all 60 version 2 methods plus `create_ipc_host` for all 58 current non-destructor Host virtuals; it does not link the backend or expose JSON/POSIX types. |
@@ -389,6 +389,11 @@ graph TD
 CMake rules:
 
 - Internal targets may use `src/lib/` as a `PRIVATE` include root.
+- `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` independently gates the POSIX-backed
+  Job internal target and its maintained unit/integration targets. It defaults
+  on only for Darwin/Linux, defaults off on every other system, and rejects an
+  explicit unsupported enable. Configure-time inventory assertions require all
+  profile-appropriate Job targets when enabled and forbid them when disabled.
 - Installable targets expose only `include/photospider`.
 - The installation boundary copies headers only from
   `include/photospider/**`. Implementation headers under `src/lib/` are

@@ -11,7 +11,11 @@ server、worker-manager、独立 artifact data plane、sandbox 或 isolated-plug
 现在实现了源码私有的单进程 JobSpec 纵向路径，其中包含 complete-envelope tenant quota
 accounting、durable Job/image artifact recovery、显式 retry/checkpoint identity，以及每个
 attempt 一个进程内 Embedded Host worker。该切片保留本决策的身份与权威顺序，并提供真实的
-quota admission 与 crash durability，但不能证明 multi-tenant authorization、OS resource
+quota admission 与 crash durability，包括共享的 128-configured-device admission/recovery
+上限，以及 Job journal 对 not published、published but durability unconfirmed 与 confirmed
+committed 的显式区分。Published barrier failure 会保留 visible truth 并进入单调 control-plane
+fail-stop，而不尝试回滚。Source-private profile 只在 Darwin 与 Linux 默认启用；unsupported
+system 不存在 Job target inventory。该切片不能证明 multi-tenant authorization、OS resource
 enforcement、独立 worker process、bounded termination、network transport 或
 untrusted-plugin isolation。当前行为由
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)定义。

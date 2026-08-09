@@ -42,7 +42,8 @@ persisted identities and uses a new namespace only for newly submitted Jobs.
 - one nonnegative target node;
 - one bounded required `OutputSlotId`;
 - a complete positive `JobResourceRequest` containing CPU slots, host-memory,
-  output, staging, retention, and a sorted unique configured-device vector;
+  output, staging, retention, and a sorted unique configured-device vector of
+  at most 128 rows;
 - an optional durable checkpoint `ArtifactId`;
 - the closed `embedded-cpu-v1` execution profile; and
 - the closed `crash-durable` durability request.
@@ -99,6 +100,25 @@ it over the authoritative record, then synchronizes jobs, control, and root
 directories. Recovery strictly parses every record; ambiguous entries or
 identity/content drift fail closed.
 
+Job-record replacement has three explicit outcomes:
+
+- `NotPublished`: atomic rename did not occur, the prior durable/cache truth
+  remains authoritative, and ordinary caller rollback is safe;
+- `RecordPublishedDurabilityUnconfirmed`: rename made the replacement visible,
+  but a required jobs/control/root directory barrier failed; and
+- `ConfirmedCommitted`: every required directory barrier completed.
+
+Serialization, filenames, and replacement-cache storage are prepared before
+rename. The cache is swapped into its replacement under the durable-state
+mutex before filesystem mutation and is restored on `NotPublished`; after
+rename, cache truth is already aligned and no allocation or throwing cache
+publication remains. A failure at either published state is never translated
+into rollback. `SingleTenantJobService` keeps the published snapshot and its
+active quota, fences workers, rejects later durable mutations, and requires
+restart. Restart then revalidates the record and converts a surviving
+nonterminal attempt to `RecoveryInterrupted` unless its stable artifact proves
+success.
+
 Artifact commit validates the server-owned request and CPU image, copies active
 rows into a tight payload, and verifies output/staging/retention bounds. It then:
 
@@ -136,20 +156,23 @@ restart(any non-cancelled state, matching stable artifact) -> Succeeded
 ```
 
 `submit()` validates/finalizes JobSpec and checkpoint, reserves the complete
-quota envelope, persists accepted truth, inserts the Job, and starts one owned
-assignment thread. The service inserts an empty ownership record under its
-mutex before starting the native thread, then installs the sole handle by
-no-throw move; a start failure exposes neither a Job nor a handle. Failure
-cleanup independently attempts durable-record rollback and quota release, so
-one cleanup error cannot suppress the other. `query()` copies current truth;
-`wait_for()` bounds only observer waiting.
+quota envelope, inserts the in-memory Job and ownership record, starts its sole
+assignment thread while the service mutex still blocks worker progress, and
+then publishes accepted truth. A native-thread start failure therefore occurs
+before durable publication and exposes neither a Job nor a handle. A
+`NotPublished` journal failure removes the candidate and releases its quota. A
+published failure keeps the Job, worker authority, and quota aligned with the
+visible record and enters the monotonic journal fail-stop.
+`query()` copies current truth; `wait_for()` bounds only observer waiting, and
+both remain available while fail-stopped.
 
 `retry(JobId)` accepts only a settled `Failed` Job with no current worker or
 reservation. It preserves stable Job/spec/checkpoint/output truth, increments
-the lease generation, creates fresh attempt/worker/quota authority, persists
-the replacement, and starts a fresh worker. In-memory replacement uses a
-no-throw swap; failure swaps back the prior failed truth, independently attempts
-to restore its durable record, and releases the new reservation. Reports must
+the lease generation, creates fresh attempt/worker/quota authority, installs
+the replacement and blocked worker, and then publishes the replacement.
+`NotPublished` restores the prior failed truth and releases the new
+reservation; either published outcome retains the new attempt and reservation,
+fences worker progress, and fail-stops later durable mutation. Reports must
 match the complete current tenant/Job/spec/attempt/worker/lease tuple, so a
 stale attempt is fenced without settling, failing, cancelling, or committing
 the replacement.
@@ -186,9 +209,13 @@ invocation is ignored without mutating the current retry; a malformed report
 from the current attempt becomes `ReportRejected`. `cancel()` persists
 monotonic intent. Cancellation that wins before commit discards a successful
 candidate after settlement; durable commit and successful Job publication that
-win first cannot be rewritten by later cancellation. The current public Host
-has no forced compute cancellation, so a provider that ignores cooperative
-observation can still delay shutdown indefinitely.
+win first cannot be rewritten by later cancellation. If cancellation intent is
+not published, the prior intent remains authoritative; if its record becomes
+visible but a later durability barrier or completion observer fails, the
+service keeps `Cancelling`, fences the worker, and enters the same journal
+fail-stop. The current public Host has no forced compute cancellation, so a
+provider that ignores cooperative observation can still delay shutdown
+indefinitely.
 
 One private reaper joins completed assignment threads outside the Job mutex.
 Destruction marks active Jobs cancelling and waits for worker/reaper drainage.
@@ -198,8 +225,12 @@ forced termination, or bounded shutdown. Those properties remain Issue #100.
 
 ## Product Boundaries and Maintained Evidence
 
-- The module is built only as `photospider_single_tenant_job_internal`; it is
-  not installed or exported.
+- The non-installed, non-exported
+  `photospider_single_tenant_job_internal` target and both maintained Job test
+  targets exist by default only on Darwin and Linux. The independent
+  `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate defaults off elsewhere, rejects an
+  explicit enable on unsupported systems, and CMake asserts the target
+  inventory in both enabled and disabled profiles.
 - `photospiderd` and protocol v2 are unchanged and do not serialize these Job,
   quota, checkpoint, or durable-artifact contracts.
 - The configured `TenantId` is trusted configuration, not authentication.
@@ -220,13 +251,16 @@ Long-lived entry points are:
 - real Embedded Host durable product path:
   `tests/integration/test_single_tenant_job_product_path.cpp`.
 
-Maintained tests cover canonical digest/validation, every quota dimension and
-multi-device accounting, exact settlement, manifest-before/after failure, root
-locking/no-follow/identity drift, safe cleanup, corruption and exact Job/artifact
-recovery joins, idempotent reconciliation, retention deletion, checkpoint
-authorization/re-authorization, explicit retry and fresh fencing, submit/retry
-thread-start rollback, interrupted/successful restart, cancellation ordering,
-stale/malformed reports, ongoing thread reaping, and real Embedded Host
+Maintained tests cover canonical digest/validation, the shared 128-device
+admission/recovery maximum and 129-device rejection, every quota dimension and
+multi-device accounting, exact settlement, all Job-record publication/barrier
+fault stages with in-memory and restart truth, manifest-before/after failure,
+root locking/no-follow/identity drift, safe cleanup, corruption and exact
+Job/artifact recovery joins, idempotent reconciliation, retention deletion,
+checkpoint authorization/re-authorization, explicit retry and fresh fencing,
+submit/retry thread-start rollback, submit/retry/cancel journal fail-stop,
+interrupted/successful restart, cancellation ordering, stale/malformed reports,
+ongoing thread reaping, target-inventory platform gating, and real Embedded Host
 output/checkpoint/restart behavior.
 
 The target multi-process model remains governed by

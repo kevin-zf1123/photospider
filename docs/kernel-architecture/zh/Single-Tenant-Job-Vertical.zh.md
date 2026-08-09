@@ -39,7 +39,7 @@ reservation。重启会恢复持久化身份，只为新提交的 Job 使用新�
 - 一个非负 target node；
 - 一个有界且必需的 `OutputSlotId`；
 - 完整且全为正值的 `JobResourceRequest`，包含 CPU slot、host memory、output、
-  staging、retention，以及按 configured-device 排序且唯一的 vector；
+  staging、retention，以及按 configured-device 排序且唯一、最多 128 行的 vector；
 - 可选的 durable checkpoint `ArtifactId`；
 - 封闭的 `embedded-cpu-v1` execution profile；以及
 - 封闭的 `crash-durable` durability request。
@@ -87,6 +87,22 @@ cancellation 与 terminal fact，以及成功时的 receipt。每次更新都会
 以 atomic rename 覆盖 authoritative record，再同步 jobs、control 与 root directory。
 Recovery 会严格解析每条 record；含糊 entry 或 identity/content drift 会 fail closed。
 
+Job-record replacement 有三种显式结果：
+
+- `NotPublished`：atomic rename 尚未发生，先前 durable/cache truth 仍是 authority，caller
+  可以执行普通回滚；
+- `RecordPublishedDurabilityUnconfirmed`：rename 已令 replacement 可见，但所需
+  jobs/control/root directory barrier 中至少一个失败；以及
+- `ConfirmedCommitted`：全部所需 directory barrier 均已完成。
+
+Serialization、filename 与 replacement-cache storage 都在 rename 前准备。Cache 会先在
+durable-state mutex 下 swap 到 replacement，再执行 filesystem mutation；若结果为
+`NotPublished`，则恢复旧 cache。Rename 之后 cache truth 已经对齐，不再留下 allocation 或
+可能抛异常的 cache publication。任一 published state 的失败都不得转换为 rollback。
+`SingleTenantJobService` 会保留已发布 snapshot 与 active quota、fence worker、拒绝后续
+durable mutation，并要求重启。重启会重新校验 record；除非 stable artifact 证明成功，否则
+仍存活的 nonterminal attempt 会被转换为 `RecoveryInterrupted`。
+
 Artifact commit 会校验 server-owned request 与 CPU image，把 active row 复制成紧密
 payload，并校验 output/staging/retention bound。随后它：
 
@@ -120,18 +136,21 @@ restart(active, no matching artifact) -> Failed(RecoveryInterrupted)
 restart(any non-cancelled state, matching stable artifact) -> Succeeded
 ```
 
-`submit()` 会校验并冻结 JobSpec/checkpoint，预留完整 quota envelope，持久化 accepted truth，
-插入 Job，再启动一个 owned assignment thread。Service 会先在 mutex 下插入空 ownership
-record，再启动 native thread，并通过不抛异常的 move 安装唯一 handle；启动失败不会暴露 Job
-或 handle。失败清理会分别尝试 durable-record 回滚与 quota 释放，前一项出错不会阻止后一项。
-`query()` 复制当前 truth；`wait_for()` 只限制 observer wait。
+`submit()` 会校验并冻结 JobSpec/checkpoint，预留完整 quota envelope，插入内存 Job 与
+ownership record，在 service mutex 仍阻塞 worker progress 时启动唯一 assignment thread，
+然后发布 accepted truth。因此 native-thread 启动失败发生在 durable publication 之前，不会
+暴露 Job 或 handle。`NotPublished` journal failure 会移除 candidate 并释放其 quota；任一
+published failure 会保留与 visible record 对齐的 Job、worker authority 与 quota，并进入单调
+journal fail-stop。`query()` 复制当前 truth；`wait_for()` 只限制
+observer wait，二者在 fail-stop 后仍可用。
 
 `retry(JobId)` 只接受已经 settled、且没有 current worker/reservation 的 `Failed` Job。它
 保留稳定 Job/spec/checkpoint/output truth，递增 lease generation，创建全新的
-attempt/worker/quota authority，持久化 replacement，再启动全新 worker。内存 replacement
-使用不抛异常的 swap；失败时会 swap 回先前 failed truth，分别尝试恢复其 durable record，
-并释放新 reservation。Report 必须匹配完整 current tenant/Job/spec/attempt/worker/lease
-tuple，因此 stale attempt 会被 fence，不能 settle、fail、cancel 或 commit replacement。
+attempt/worker/quota authority，安装 replacement 与被阻塞的 worker，然后发布
+replacement。`NotPublished` 会恢复先前 failed truth 并释放新 reservation；任一 published
+outcome 都会保留新 attempt 与 reservation、fence worker progress，并 fail-stop 后续 durable
+mutation。Report 必须匹配完整 current tenant/Job/spec/attempt/worker/lease tuple，因此 stale
+attempt 会被 fence，不能 settle、fail、cancel 或 commit replacement。
 
 Worker report 一旦通过 identity 与 semantic-shape fence，后续 control-plane durability
 failure 就不会抹除其 outcome 或 settlement evidence。Manifest 发布前失败会成为已 settled
@@ -160,8 +179,10 @@ cancellation relabelling。来自旧 attempt 的 stale 调用会被忽略，不�
 来自 current attempt 的 malformed report 会变为 `ReportRejected`。`cancel()` 持久化
 monotonic intent。先于 commit 获胜的 cancellation 会在 settlement 后丢弃成功 candidate；
 先获胜的 durable commit 与 successful Job publication 不会被之后的 cancellation 改写。
-当前 public Host 没有 forced compute cancellation，因此忽略 cooperative observation 的
-provider 仍可能无限期延迟 shutdown。
+如果 cancellation intent 未发布，先前 intent 仍是 authority；如果其 record 已可见、但后续
+durability barrier 或 completion observer 失败，service 会保留 `Cancelling`、fence worker，
+并进入相同 journal fail-stop。当前 public Host 没有 forced compute cancellation，因此忽略
+cooperative observation 的 provider 仍可能无限期延迟 shutdown。
 
 一个 private reaper 在 Job mutex 外 join 已完成 assignment thread。Destruction 会把 active
 Job 标为 cancelling，并等待 worker/reaper drain。这只是有序的进程内 ownership：当前没有
@@ -170,7 +191,10 @@ isolation、forced termination 或 bounded shutdown。这些属性仍属于 Issu
 
 ## 产品边界与持续维护证据
 
-- 模块只构建为 `photospider_single_tenant_job_internal`，不安装、不导出。
+- 不安装、不导出的 `photospider_single_tenant_job_internal` target 与两个持续维护 Job test
+  target 默认只存在于 Darwin 与 Linux。独立的
+  `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate 在其他系统默认关闭，拒绝在不支持的系统显式
+  启用；CMake 会同时断言 enabled 与 disabled profile 的 target inventory。
 - `photospiderd` 与 protocol v2 保持不变，不序列化这些 Job、quota、checkpoint 或 durable
   artifact contract。
 - 配置的 `TenantId` 是可信配置，不是 authentication。
@@ -191,12 +215,15 @@ isolation、forced termination 或 bounded shutdown。这些属性仍属于 Issu
 - 真实 Embedded Host durable product path：
   `tests/integration/test_single_tenant_job_product_path.cpp`。
 
-持续维护测试覆盖 canonical digest/validation、每个 quota dimension 与多设备核算、精确
-settlement、manifest 前后 failure、root lock/no-follow/identity drift、safe cleanup、
-corruption 与精确 Job/artifact recovery join、idempotent reconciliation、retention deletion、
-checkpoint authorization/re-authorization、显式 retry 与 fresh fencing、submit/retry
-thread-start rollback、interrupted/successful restart、cancellation ordering、stale/malformed
-report、持续 thread reaping，以及真实 Embedded Host output/checkpoint/restart 行为。
+持续维护测试覆盖 canonical digest/validation、共享的 128-device admission/recovery 上限与
+129-device rejection、每个 quota dimension 与多设备核算、精确 settlement、所有 Job-record
+publication/barrier fault stage 的内存与重启 truth、manifest 前后 failure、root
+lock/no-follow/identity drift、safe cleanup、corruption 与精确 Job/artifact recovery join、
+idempotent reconciliation、retention deletion、checkpoint authorization/re-authorization、
+显式 retry 与 fresh fencing、submit/retry thread-start rollback、submit/retry/cancel journal
+fail-stop、interrupted/successful restart、cancellation ordering、stale/malformed report、持续
+thread reaping、target-inventory platform gating，以及真实 Embedded Host
+output/checkpoint/restart 行为。
 
 目标 multi-process model 仍由
 [ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
