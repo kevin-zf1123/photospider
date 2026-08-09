@@ -1510,12 +1510,16 @@ ownership, sizes, readiness, identities, and declared bounds before Run use.
 Pure C improves record compatibility; it does not make hostile native code
 safe in-process.
 
-The current Issue #98 baseline is the source-private
+The current Issue #99 baseline is the source-private
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
-It freezes `jobspec-v1`, uses distinct Job/attempt/worker-lease/artifact
-identities, runs one fresh in-process Embedded Host per attempt, orders
-cancellation against a process-lifetime artifact commit, and gates Job success
-on settlement plus one complete receipt. A valid typed worker failure remains
+It freezes `jobspec-v2`, atomically accounts complete tenant resource envelopes,
+persists Job records and manifest-last image artifacts under one locked root,
+supports authorized checkpoint identity plus explicit stable-Job/fresh-attempt
+retry, and reconciles interrupted or already-committed work after restart. It
+still runs one fresh in-process Embedded Host per attempt, enforces reserved CPU
+parallelism, orders cancellation against crash-durable artifact commit, and
+gates Job success on settlement, retained-quota conversion, and one complete
+receipt. A valid typed worker failure remains
 `Failed` with its exact settlement and failure facts even when cancellation was
 accepted concurrently. After graph load, the worker gives graph settlement
 failure first priority, then preserves an already recorded compute/output
@@ -1526,10 +1530,11 @@ compute diagnostic. One private service reaper also joins completed in-process
 assignment threads outside the control mutex throughout service lifetime while
 retaining concurrent active workers; destruction drains the same owner. This
 is local thread-resource ownership, not WorkerManager process reaping or
-bounded termination. This slice does not implement any target row above as a
-separate process, persistent service, quota authority, network endpoint, or
-untrusted-plugin boundary. Issues #99 through #106 must not infer their
-properties from that first executable slice.
+bounded termination. The service quota is in-process admission/accounting, not
+OS enforcement. This slice does not implement any target row above as a
+separate process, network endpoint, or untrusted-plugin boundary. Issues #100
+through #106 must not infer their process/security properties from this
+executable slice.
 
 Delivery remains allocated rather than absorbed by Issue #97:
 

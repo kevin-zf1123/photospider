@@ -1,300 +1,234 @@
 # Single-Tenant Job Vertical
 
-This document defines the current source-private Issue #98 Job behavior. It is
-the authority for what exists under `src/lib/server/`; ADR 0011 explains the
-long-term security-domain decision, and the server roadmap describes later
-delivery slices. The current module is an executable single-process vertical,
-not a network or multi-tenant server.
+This document defines the current source-private Issue #99 Job behavior under
+`src/lib/server/`. ADR 0011 remains the target security-domain decision and the
+server roadmap allocates later delivery slices. The current module is a real
+single-process vertical for one configured tenant; it is not a network server,
+multi-tenant authorization boundary, or OS-isolated worker manager.
 
-## Terms and Current Profile
+## Current Profile and Identity
 
-The current profile is `jobspec-v1` plus `embedded-cpu-v1` execution and
-`process-lifetime` artifact durability. It supports one configured `TenantId`,
-any number of process-lifetime Jobs, one attempt per Job, one fresh in-process
-worker object and Embedded Host per attempt, one target node, and one required
-CPU image output slot.
+The supported profile is canonical `jobspec-v2`, `embedded-cpu-v1` execution,
+and `crash-durable` image artifacts. A `SingleTenantJobService` owns one
+configured `TenantId`, one trusted durable state root, one finite quota
+configuration, any number of retained Jobs, and one fresh in-process worker
+object and Embedded Host for each explicitly accepted attempt.
 
-These identity domains are distinct strong C++ value types:
+The identity domains remain distinct strong C++ types:
 
 | Identity | Current meaning | Explicit non-meaning |
 | --- | --- | --- |
-| `TenantId` | The sole tenant configured on one `SingleTenantJobService` | Authenticated principal or multi-tenant authorization |
-| `JobId` | One accepted immutable Job during the process lifetime | Local IPC compute request or Graph session |
-| `JobSpecDigest` | SHA-256 of exact canonical `jobspec-v1` bytes | Job authority by itself |
-| `JobAttemptId` | The sole current attempt in this slice | Retry generation; retry is absent |
-| `WorkerInstanceId` + `WorkerLeaseGeneration` | Exact fresh worker object and its one assignment | OS process identity, PID, or supervisor lease |
-| `GraphArtifactId` | Immutable graph material key interpreted by a trusted resolver | Host path or local Graph session |
-| `OutputSlotId` | Required image output declaration | Runtime node/output pointer |
-| `ArtifactId` | One immutable artifact record in the process-lifetime store | Content digest, path, `OutputArtifactId`, or buffer handle |
-| `OutputCommitId` | One exact artifact commit event | Idempotency key or durable transaction id |
+| `TenantId` | Sole tenant configured on one service/root | Authenticated principal or multi-tenant authorization |
+| `JobId` | Stable identity of one accepted durable Job | IPC compute id or Graph session |
+| `JobSpecDigest` | SHA-256 of exact canonical `jobspec-v2` bytes | Authorization by itself |
+| `JobAttemptId` | One non-reused attempt in a Job's retry history | Job identity or local Run identity |
+| `WorkerInstanceId` + `WorkerLeaseGeneration` | Exact fresh in-process worker assignment | PID, OS process, heartbeat, or supervisor lease |
+| `GraphArtifactId` | Graph material key resolved by trusted configuration | Host path or local `GraphSessionId` |
+| `ArtifactId` | Stable immutable durable image identity | Content digest, path, or IPC `OutputArtifactId` |
+| `OutputCommitId` | Stable idempotent transaction identity for one Job output | Attempt identity or delivery lease |
 | `ArtifactContentDigest` | SHA-256 of exact tight payload bytes | Artifact or commit identity |
 
-All generated Job, attempt, worker, artifact, and commit ids are non-reused
-within the current process. They are not persisted, globally allocated, or
-recoverable after restart.
+Initial Job, artifact, and commit ids contain a collision-resistant service
+namespace plus a checked local sequence. Retry preserves `JobId`, JobSpec
+digest, checkpoint, `ArtifactId`, and `OutputCommitId`; it mints a fresh
+attempt, worker, lease generation, and quota reservation. Restart restores
+persisted identities and uses a new namespace only for newly submitted Jobs.
 
-## Immutable JobSpec
+## Immutable JobSpec and Checkpoints
 
-`JobSpec` is a validated class with getters and no mutation surface. Its
-constructor accepts only:
+`JobSpec` has getters and no mutation surface. Its constructor accepts:
 
 - one bounded opaque `GraphArtifactId`;
-- one nonnegative target node integer;
-- one bounded opaque required `OutputSlotId`;
-- one positive maximum-parallelism bound;
-- the closed `embedded-cpu-v1` profile; and
-- requested `process-lifetime` durability.
+- one nonnegative target node;
+- one bounded required `OutputSlotId`;
+- a complete positive `JobResourceRequest` containing CPU slots, host-memory,
+  output, staging, retention, and a sorted unique configured-device vector;
+- an optional durable checkpoint `ArtifactId`;
+- the closed `embedded-cpu-v1` execution profile; and
+- the closed `crash-durable` durability request.
 
-Canonical bytes begin with `jobspec-v1` and encode all six fields using decimal
-length frames. The target-node and maximum-parallelism integers first use their
-canonical decimal text and are then framed exactly like the other four fields.
-The constructor records SHA-256 of those exact bytes. The control plane
-revalidates the value before acceptance, retains it through
-`shared_ptr<const JobSpec>`, and records the digest in both Job and assignment
-state. The worker repeats field/canonical/digest validation before graph
-resolution.
+Canonical bytes begin with `jobspec-v2`. Decimal-length framing covers every
+field, each resource scalar, each ordered device label/byte pair, and explicit
+checkpoint presence/value. Integers use canonical decimal text before
+framing. The constructor stores SHA-256 of the exact bytes. The control plane
+revalidates before acceptance, retains `shared_ptr<const JobSpec>`, and binds
+the digest into every assignment and durable record.
 
-There is no JobSpec field for a Host path, `GraphLoadRequest`, local
-`GraphSessionId`, file descriptor, pointer, native/runtime handle, mutable store
-location, bearer credential, local IPC id, plugin DSO, checkpoint, retry, quota,
-or retention policy. A trusted `GraphArtifactResolver` outside JobSpec maps the
-graph identity to local `GraphLoadRequest` path fields for the current adapter.
-Those paths never enter canonical Job bytes, attempt reports, or artifact
-receipts.
+JobSpec contains no Host path, descriptor, pointer, runtime handle, credential,
+IPC id, plugin DSO, mutable store location, quota token, or artifact mutation
+capability. Before quota admission, the control plane resolves an optional
+checkpoint only through the same tenant's validated durable artifact index.
+The worker receives a read-only `ArtifactRecord`, never a root/path or commit
+authority. The current Embedded CPU adapter validates this provenance but does
+not claim algorithm-specific runtime-state restore.
 
-## Observable Job Behavior
+## Tenant Quota Authority
 
-`SingleTenantJobService` is the only owner of accepted Job truth. `submit()`
-validates and freezes JobSpec, mints `JobId`, `JobAttemptId`,
-`WorkerInstanceId`, and lease generation one, and constructs the complete
-`JobSubmission` before acceptance. It then records the complete assignment and
-starts one joinable worker thread. If thread start fails, state insertion is
-rolled back. Once the thread starts, returning the already-built submission is
-either copy elision or a compile-time-asserted non-throwing move; receipt-string
-allocation cannot make the caller observe failure after the Job was accepted.
-`query()` returns a copied snapshot; `wait_for()` bounds only observer waiting
-and does not impose an execution deadline.
+`TenantQuotaAuthority` is the sole server-side capacity authority for the
+configured tenant. Under one quota mutex, admission checks concurrency, CPU,
+host memory, every configured device, output, staging, and retention as one
+complete envelope. It either publishes one opaque reservation and all charges,
+or changes nothing. A worker, plugin, JobSpec, or `ResourceLedger` token cannot
+mint, enlarge, or release this server reservation.
 
-Each service also owns one private reaper infrastructure thread. A successful
-submission publishes its joinable assignment-thread handle together with the
-retained Job record under the control mutex. After report processing reaches
-its final tail, the assignment thread marks only its own record complete and
-wakes the reaper. The reaper moves that handle out under the mutex, releases
-the mutex, and only then joins it. It never joins itself, and active assignment
-threads remain independently owned and runnable. Consequently, completed
-thread handles and their OS resources are recovered while the service remains
-alive instead of accumulating until destruction. The reaper is process-local
-infrastructure, not a worker pool, scheduler, quota, or OS-worker supervisor.
+Failed and cancelled attempts release the complete envelope exactly once.
+Successful artifact commit converts reserved retention to the exact tight
+payload charge and releases every active-attempt dimension. Durable artifact
+deletion releases the retained charge only after manifest removal and
+durability barriers. Startup reconstructs retained charges from validated
+artifacts and fails closed if configured retention is below recovered data;
+active attempt reservations are never reconstructed.
+
+CPU slots also cap Embedded Host `maximum_parallelism`. Host-memory and device
+values are conservative in-process admission declarations. They are not OS
+memory/device enforcement and do not replace the worker-local
+`ResourceLedger`; Issue #100 owns that process and OS-resource boundary.
+
+## Durable Root, Jobs, and Artifacts
+
+`DurableServerState` canonicalizes one trusted root, opens it without following
+links, takes an exclusive nonblocking process lock, retains root/control/jobs/
+artifacts directory descriptors, and revalidates the root device/inode binding.
+No JobSpec, report, checkpoint, or plugin chooses a path. One live authority
+owns one root.
+
+Job records contain canonical JobSpec, current assignment and lease, stable
+artifact/commit ids, cancellation and terminal facts, and any successful
+receipt. Each update writes and synchronizes a private file, atomically renames
+it over the authoritative record, then synchronizes jobs, control, and root
+directories. Recovery strictly parses every record; ambiguous entries or
+identity/content drift fail closed.
+
+Artifact commit validates the server-owned request and CPU image, copies active
+rows into a tight payload, and verifies output/staging/retention bounds. It then:
+
+1. creates the fixed opaque artifact directory;
+2. writes, synchronizes, reopens, and hashes `payload.bin`;
+3. writes a private canonical manifest;
+4. atomically publishes the fixed `manifest` name without replacement;
+5. removes the private manifest; and
+6. synchronizes the artifact directory, artifacts directory, and root.
+
+Manifest presence is the visibility point. Pre-manifest unambiguous residue is
+removed; a post-publication exception preserves the occurrence. Recovery and
+lazy lookup verify descriptor, payload length/digest, tenant/Job/spec/slot/
+artifact/commit joins, clean only safe residue, and reapply the barrier chain.
+A retry with the same stable commit returns the original receipt only when all
+stable identity, descriptor, digest, and payload facts match. The reporting
+attempt may differ because the original acknowledgement can be lost. Any other
+collision fails closed.
+
+Deletion removes and synchronizes the authoritative manifest before payload
+cleanup and retention release. A successful Job keeps its historical receipt,
+but deleted bytes no longer resolve for lookup or checkpoint admission.
+
+## Job State, Recovery, and Explicit Retry
 
 The current state machine is:
 
 ```text
-Queued -> Running ---------------------> Succeeded
-   |         |                              ^
-   +---------+-> Cancelling -> Cancelled    |
-             |                              |
-             +---------------------------> Failed
+submit -> Queued -> Running ---------------------> Succeeded
+                    |                                 ^
+                    +-> Cancelling -> Cancelled       |
+                    +---------------> Failed --retry--+
+restart(active, no matching artifact) -> Failed(RecoveryInterrupted)
+restart(any non-cancelled state, matching stable artifact) -> Succeeded
 ```
 
-`Succeeded`, `Failed`, and `Cancelled` are terminal. There is no retry or
-attempt replacement. A worker returns only an immutable `JobAttemptReport`:
-the complete assignment tuple, worker-local outcome, settlement fact, typed
-failure, diagnostic, and optional candidate `ImageBuffer`. It cannot mutate a
-Job snapshot or commit an artifact.
+`submit()` validates/finalizes JobSpec and checkpoint, reserves the complete
+quota envelope, persists accepted truth, inserts the Job, and starts one owned
+assignment thread. The service inserts an empty ownership record under its
+mutex before starting the native thread, then installs the sole handle by
+no-throw move; a start failure exposes neither a Job nor a handle. Failure
+cleanup independently attempts durable-record rollback and quota release, so
+one cleanup error cannot suppress the other. `query()` copies current truth;
+`wait_for()` bounds only observer waiting.
 
-The worker report vocabulary is closed:
+`retry(JobId)` accepts only a settled `Failed` Job with no current worker or
+reservation. It preserves stable Job/spec/checkpoint/output truth, increments
+the lease generation, creates fresh attempt/worker/quota authority, persists
+the replacement, and starts a fresh worker. In-memory replacement uses a
+no-throw swap; failure swaps back the prior failed truth, independently attempts
+to restore its durable record, and releases the new reservation. Reports must
+match the complete current tenant/Job/spec/attempt/worker/lease tuple, so a
+stale attempt is fenced without settling, failing, cancelling, or committing
+the replacement.
 
-- `Succeeded` requires `settled=true`, `failure=None`, and exactly one
-  candidate image;
-- `Cancelled` requires `settled=true`,
-  `failure=CancellationObserved`, and no image; and
-- `Failed` requires no image and one of `InvalidAssignment`,
-  `GraphResolution`, `HostSetup`, `GraphLoad`, `Compute`, `Settlement`, or
-  `Unexpected`. Its `settled` value remains the worker's exact cleanup fact.
+Once a worker report passes the identity and semantic-shape fence, a later
+control-plane durability failure does not erase its outcome or settlement
+evidence. A failure before manifest publication becomes settled `Failed` with
+`ArtifactCommit`, releases the active reservation, and remains explicitly
+retryable. A failure after manifest publication first revalidates and
+reconciles that stable occurrence to `Succeeded` and charges retention exactly
+once.
 
-`ReportRejected` and `ArtifactCommit` are control-plane failures and are never
-accepted from a worker. `None` belongs only to success, and
-`CancellationObserved` belongs only to cancellation. Invalid underlying enum
-representations are not extensions to this vocabulary.
+Restart never resumes process-local Graph/Run/Host/thread or ledger objects. A
+nonterminal durable record with no matching committed artifact becomes settled
+`Failed` with `RecoveryInterrupted` and is explicitly retryable. A matching
+stable artifact is revalidated, charged once, and reconciled to `Succeeded`,
+including a commit whose manifest became visible before its acknowledgement or
+Job-state update. Terminal receipts are embedded in Job records, so historical
+success survives later artifact deletion. If a stable artifact exists under a
+Job's reserved output identity but any tenant/Job/spec/slot/commit join differs,
+recovery reports durable corruption instead of adopting or overwriting it.
 
-A shape-valid `Failed` report is applied before cancellation adjudication.
-Even when cancellation intent was accepted while resolution, Host setup,
-graph loading, compute, or settlement was active, the Job becomes `Failed`,
-`attempt_outcome` remains `Failed`, and the report's exact `settled`, failure,
-and diagnostic facts remain visible. The monotonic cancellation intent remains
-recorded, but it cannot relabel a real worker failure as cancellation.
+## Worker, Cancellation, and Completion Ordering
 
-The control plane finds the Job through the assignment retained by the exact
-worker thread, then validates the report's full tenant/Job/spec-digest/attempt/
-worker/lease tuple. It then validates the complete enum and outcome/settlement/
-failure/image shape before copying any report outcome, settlement, failure, or
-diagnostic and before cancellation adjudication. A mismatched, empty, stale,
-malformed, context-invalid cancellation, or invalid-enum report uniformly
-publishes `Failed` + `ReportRejected`, `attempt_settled=false`, and no receipt.
-Cancellation intent cannot convert such a report into `Cancelled`. Equality in
-one identity domain or equal content cannot repair another mismatch. Because
-the rejected report is not trusted, none of its fields can establish retained
-current-attempt truth.
+The Embedded worker validates the assignment, JobSpec digest, and optional
+checkpoint, resolves graph material outside JobSpec, creates and seeds a fresh
+Embedded Host, loads an attempt-local Graph, computes within reserved CPU
+parallelism, validates one nonempty CPU image, closes the Graph, destroys Host
+ownership, and returns only typed attempt facts plus a candidate image.
 
-Job success requires all of the following under the current control mutex:
+Worker report shapes and full-tuple fencing remain closed. Worker-owned failure
+facts take precedence over cancellation relabelling. A stale prior-attempt
+invocation is ignored without mutating the current retry; a malformed report
+from the current attempt becomes `ReportRejected`. `cancel()` persists
+monotonic intent. Cancellation that wins before commit discards a successful
+candidate after settlement; durable commit and successful Job publication that
+win first cannot be rewritten by later cancellation. The current public Host
+has no forced compute cancellation, so a provider that ignores cooperative
+observation can still delay shutdown indefinitely.
 
-1. the report matches the exact current assignment;
-2. the attempt reports `Succeeded` and `settled=true`;
-3. the report carries one valid nonempty CPU image and no failure fact;
-4. the separate artifact authority commits that image for the declared slot;
-5. the returned receipt matches the complete assignment, slot, and requested
-   process-lifetime durability.
+One private reaper joins completed assignment threads outside the Job mutex.
+Destruction marks active Jobs cancelling and waits for worker/reaper drainage.
+This is orderly in-process ownership only: there is no WorkerManager process,
+heartbeat, crash/hang/OOM classification, address-space or syscall isolation,
+forced termination, or bounded shutdown. Those properties remain Issue #100.
 
-Host/Run success alone therefore does not imply Job success. Artifact commit,
-Job terminal publication, cancellation intent, and caller observation remain
-separate facts.
+## Product Boundaries and Maintained Evidence
 
-## Cancellation and Completion Ordering
+- The module is built only as `photospider_single_tenant_job_internal`; it is
+  not installed or exported.
+- `photospiderd` and protocol v2 are unchanged and do not serialize these Job,
+  quota, checkpoint, or durable-artifact contracts.
+- The configured `TenantId` is trusted configuration, not authentication.
+- Trusted repository CPU operations run in the caller process. Tenant plugin
+  ABI/network security and isolated plugin runtime remain absent.
+- The current artifact format is one required tight CPU `ImageBuffer`, not a
+  general runtime Value/checkpoint format or bulk data plane.
 
-`cancel()` records one monotonic control-plane intent. An absent Job, terminal
-Job, or repeated request returns false. An accepted active request changes the
-observable state to `Cancelling`; it does not detach the worker or claim an
-execution deadline.
+Long-lived entry points are:
 
-The public Host currently exposes no active compute-cancellation operation.
-The Embedded Host worker observes cancellation before graph resolution, before
-Host construction/load/compute, and after compute. Once Host compute has
-entered a provider, cancellation may wait indefinitely for that call to return.
-The worker then closes the loaded graph and destroys its Host before reporting.
-After a graph has loaded, report selection preserves facts in this order:
-graph-close/settlement failure, an already recorded compute or output-
-validation failure, observed cancellation, and only then a synthesized missing-
-output failure. Thus cancellation cannot erase a real compute failure, while a
-pre-compute cancellation that intentionally produced no candidate image cannot
-be relabelled as `Compute`.
-
-Cancellation and artifact commit linearize under the Job mutex:
-
-- if cancellation wins first and the worker later returns a valid non-failed
-  settled report, a candidate image is discarded, no artifact is committed,
-  and the Job becomes `Cancelled`;
-- if the worker instead returns a valid `Failed` report, the Job remains
-  `Failed` with its exact outcome, settlement, failure, and diagnostic facts;
-- if successful commit and terminal publication win first, later cancel returns
-  false and cannot rewrite the receipt or `Succeeded` state.
-
-Service destruction marks active Jobs cancelling, wakes the reaper, and waits
-for it to join every remaining worker before the service-owned state is
-destroyed. Neither the reaper nor the destructor holds the control mutex while
-waiting in `join()`. This remains orderly ownership cleanup, not bounded forced
-termination. WorkerManager, heartbeat, OS-process kill/reap, crash/hang/OOM
-containment, and retry belong to Issue #100 and later work.
-
-## Embedded Host Worker Path
-
-`EmbeddedHostJobWorker` performs these stages for one assignment:
-
-1. validate the full assignment, immutable JobSpec, and exact digest;
-2. observe cancellation;
-3. ask the trusted resolver for graph material outside JobSpec;
-4. create a fresh Embedded Host and seed repository built-in operations;
-5. load an attempt-local Graph session whose name never becomes server
-   authority;
-6. compute the declared node with `fp32`, force-recache, disk-cache disabled,
-   no cache save, quiet output, and the JobSpec maximum-parallelism bound;
-7. validate a nonempty CPU `ImageBuffer` candidate;
-8. observe cancellation again, close the exact Graph, destroy Host ownership,
-   and only then report settlement.
-
-Resolution, Host setup, load, compute, output validation, and settlement have
-separate `JobAttemptFailure` values. Graph resolution failure constructs no
-Host. A graph close failure reports `settled=false` and cannot succeed. The
-worker first preserves that settlement failure, then any compute/output failure
-already recorded before the post-compute cancellation observation. Cancellation
-otherwise wins over the absence of a candidate when compute was skipped. The
-worker never receives artifact-store mutation authority. A null factory result
-or a standard/non-standard exception that escapes worker creation or execution
-gives the control plane no settlement proof; it publishes a failed current
-attempt with `settled=false` and no receipt. Even accepted cancellation cannot
-turn that unsettled failure into `Cancelled`.
-
-## Process-Lifetime Artifact Authority
-
-`ProcessLifetimeArtifactStore` is a separate object from Job state, the local
-IPC `OutputStore`, and benchmark `B1OutputStore`. Commit validates the complete
-assignment and output slot, calls the public `ImageBuffer` validator, requires a
-nonempty CPU payload, copies active bytes row by row into tight immutable
-storage, and hashes the copied payload. Source padding is omitted, and later
-source mutation or release cannot change the record.
-
-Every commit mints a new `ArtifactId` and `OutputCommitId`, including when
-content is byte-identical. `OutputCommitReceipt` binds:
-
-- TenantId, JobId, JobSpecDigest, JobAttemptId;
-- WorkerInstanceId and WorkerLeaseGeneration;
-- OutputSlotId, ArtifactId, and OutputCommitId;
-- width, height, channels, scalar type, tight row bytes, and payload bytes;
-- ArtifactContentDigest; and
-- achieved `process-lifetime` durability.
-
-Lookup by ArtifactId returns `shared_ptr<const ArtifactRecord>` containing the
-same receipt and tight payload. There is no mutable record API or exposed path,
-runtime handle, IPC delivery id, or store root.
-
-This store does not implement filesystem publication, idempotency, quotas,
-retention, TTL delivery, restart persistence, recovery, atomic-visible or
-crash-durable commit. Those properties and stable tenant-scoped identity
-allocation belong to Issue #99.
-
-## Boundaries and Limitations
-
-- The module is source-private and built as
-  `photospider_single_tenant_job_internal`; it is not installed or exported.
-- `photospiderd` and protocol v2 are unchanged. Their session, compute request,
-  `OutputArtifactId`, and delivery ids remain local process/transport values.
-- The configured single TenantId is not authentication or authorization.
-- Worker threads and Embedded Hosts share the caller process; there is no
-  security, address-space, syscall, plugin, or crash isolation.
-- Only trusted repository CPU operations are in scope. Tenant plugin ABI and
-  isolation remain absent.
-- One Job has one attempt and one required image slot. There is no retry,
-  checkpoint, resource quota, durable retention, or network API.
-- A positive JobSpec maximum parallelism bounds the Host Run but does not resize
-  process execution workers or create server quota.
-
-The target multi-process security model remains governed by
-[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
-and the [server roadmap](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation).
-
-## Source and Long-Lived Test Entry Points
-
-- Contracts and canonical digest: `src/lib/server/job_contract.hpp` and
-  `src/lib/server/job_contract.cpp`.
-- Job truth and artifact authority:
-  `src/lib/server/single_tenant_job_service.hpp` and
-  `src/lib/server/single_tenant_job_service.cpp`.
-- Real worker adapter: `src/lib/server/embedded_job_worker.hpp` and
-  `src/lib/server/embedded_job_worker.cpp`.
-- Focused authority/lifecycle tests:
-  `tests/unit/test_single_tenant_job_service.cpp`.
-- Real Embedded Host vertical:
+- contracts: `src/lib/server/job_contract.{hpp,cpp}`;
+- quota: `src/lib/server/tenant_quota.{hpp,cpp}`;
+- durable state: `src/lib/server/durable_server_state.{hpp,cpp}`;
+- control plane: `src/lib/server/single_tenant_job_service.{hpp,cpp}`;
+- Embedded adapter: `src/lib/server/embedded_job_worker.{hpp,cpp}`;
+- focused authority/lifecycle tests:
+  `tests/unit/test_single_tenant_job_service.cpp`; and
+- real Embedded Host durable product path:
   `tests/integration/test_single_tenant_job_product_path.cpp`.
 
-The focused tests cover exact six-field canonical bytes and SHA-256, rejection
-of path-shaped identity, tight-row deep copy, equal-content identity
-separation, receipt-gated success, missing output, mismatched lease fencing,
-closed malformed report shapes and invalid enums, all worker-owned typed
-failure/settlement combinations, null/exceptional factory and worker
-settlement, cancellation after malformed reporting, cancellation racing with
-settled or unsettled graph-resolution/Host-setup/graph-load failures, and
-cancel-before-commit ordering. They also prove that many sequential completed
-workers are joined while the service remains alive, completed workers are
-reaped while unrelated assignment workers remain actively blocked, and
-destruction waits for active worker completion plus reaper drainage. The
-compiled contract independently
-static-asserts the no-throw submission move. Gate cleanup guards release
-blocked workers before service destruction even when a fatal test assertion
-exits early. Product-path tests resolve an immutable graph identity to a tiny
-YAML graph, execute it through a fresh Embedded Host, close and commit the
-result, and deterministically prove that a resolver exception after accepted
-cancellation remains `Failed` without an artifact. They also gate the worker's
-real pre- and post-compute cancellation observations: a missing-node Host
-failure remains settled `Failed` + `Compute` with its exact diagnostic when
-cancellation is accepted after compute, while cancellation accepted immediately
-before compute remains settled `Cancelled` rather than becoming a synthesized
-missing-output failure.
+Maintained tests cover canonical digest/validation, every quota dimension and
+multi-device accounting, exact settlement, manifest-before/after failure, root
+locking/no-follow/identity drift, safe cleanup, corruption and exact Job/artifact
+recovery joins, idempotent reconciliation, retention deletion, checkpoint
+authorization/re-authorization, explicit retry and fresh fencing, submit/retry
+thread-start rollback, interrupted/successful restart, cancellation ordering,
+stale/malformed reports, ongoing thread reaping, and real Embedded Host
+output/checkpoint/restart behavior.
+
+The target multi-process model remains governed by
+[ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
+and the [server roadmap](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation).

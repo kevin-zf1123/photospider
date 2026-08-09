@@ -1059,23 +1059,24 @@ particular:
 - an image daemon job becomes terminal after Host compute and protected
   artifact publication, but that artifact is process-scoped and lease/TTL
   retained rather than crash durable; and
-- the source-private Issue #98 Job becomes `Succeeded` only after its fresh
-  Embedded Host closes and a separate memory authority returns a fully bound
-  process-lifetime receipt; this receipt is neither daemon delivery nor durable
-  output; and
+- the source-private Issue #99 Job becomes `Succeeded` only after its fresh
+  Embedded Host closes, the separate artifact authority returns a fully bound
+  crash-durable receipt, retained quota is settled, and durable Job truth is
+  published; this receipt is neither daemon delivery nor cache persistence; and
 - Graph-document save is a different graph-state operation and never a Run
   phase.
 
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
 accepts a target in which optional cache persistence and durable output commit
-have independent outcomes after Run publication. Stable restart-persistent
-output commit receipts and durable commit remain future work. The Issue #98
-Job vertical now has a distinct process-lifetime artifact identity and receipt,
-but it deliberately implements no filesystem publication, recovery, retention,
-or crash-durability property. The bounded executor, its first staged HP
-cache-save vertical, and that source-private Job slice are current code;
-synchronous cache administration/load and the other persistence owners listed
-above are unchanged.
+have independent outcomes after Run publication. The source-private Issue #99
+Job vertical now implements one narrow restart-persistent image-output path:
+stable artifact/commit identity, manifest-last filesystem publication,
+idempotent reconciliation, retained quota, durable Job records, and restart
+recovery. This does not turn cache save, daemon delivery, Graph-document save,
+or arbitrary runtime Values into that artifact authority. The bounded executor,
+its first staged HP cache-save vertical, and the source-private Job vertical are
+current code; synchronous cache administration/load and the other persistence
+owners listed above are unchanged.
 
 ## Failure and Lifetime Semantics
 
@@ -1155,14 +1156,17 @@ above are unchanged.
 [ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
 adds a higher-level target without changing these Kernel execution owners. The
 current [single-tenant Job vertical](Single-Tenant-Job-Vertical.md) implements
-only its Issue #98 identity, Job-truth, cancellation-ordering, Embedded Host,
-and process-lifetime receipt slice in one process. It has no server quota,
-WorkerManager, OS isolation, durable artifact, network endpoint, or untrusted
-plugin profile. In the future full server profile, one fresh constrained
-`photospider-worker` owns exactly one Job attempt and one attempt-local instance
-of the process execution domain described here. Server tenant/Job quota bounds
-that process; its existing `ResourceLedger` subdivides only the current
-Host/device execution envelope. The control plane owns durable Job truth,
+the Issue #99 identity, durable Job truth, complete-envelope tenant quota,
+explicit retry/checkpoint binding, cancellation ordering, Embedded Host, and
+crash-durable image artifact slice in one process. Its quota is service
+admission/accounting, not OS enforcement. It still has no WorkerManager,
+separate worker process, OS isolation, heartbeat/forced termination, network
+endpoint, or untrusted-plugin profile. In the future full server profile, one
+fresh constrained `photospider-worker` owns exactly one Job attempt and one
+attempt-local instance of the process execution domain described here. Server
+tenant/Job quota bounds that process; its existing `ResourceLedger` subdivides
+only the current Host/device execution envelope. The control plane owns durable
+Job truth,
 WorkerManager owns process lifecycle, the artifact service owns durable bytes
 and receipts, and isolated tenant CPU plugins receive no Run, Graph,
 ledger-token, or artifact authority.

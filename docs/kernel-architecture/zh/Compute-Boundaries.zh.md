@@ -815,18 +815,19 @@ daemon job terminal state、result delivery、cache save、Graph 文档保存与
 - 协议 v2 `compute.submit` 只报告已接受 queued work；
 - image daemon job 在 Host compute 与受保护 artifact publication 后终态，但该 artifact
   由进程级 lease/TTL 保留，而不是 crash durable；以及
-- 源码私有 Issue #98 Job 只有在新的 Embedded Host 关闭，且独立 memory authority 返回
-  完整绑定的 process-lifetime receipt 后才成为 `Succeeded`；该 receipt 既不是 daemon
-  delivery，也不是 durable output；以及
+- 源码私有 Issue #99 Job 只有在新的 Embedded Host 关闭、独立 artifact authority 返回
+  完整绑定的 crash-durable receipt、retained quota 完成结算且 durable Job truth 已发布后，
+  才成为 `Succeeded`；该 receipt 既不是 daemon delivery，也不是 cache persistence；以及
 - Graph 文档保存是不同的 graph-state operation，绝不是 Run phase。
 
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 接受一个目标：可选 cache 持久化与 durable output commit 在 Run publication 后拥有独立
-结果。稳定且可跨重启的 output commit receipt 与 durable commit 仍是未来工作。Issue #98
-Job 纵向路径现在具有不同的 process-lifetime artifact identity 与 receipt，但刻意不实现
-filesystem publication、recovery、retention 或 crash-durability 性质。有界 executor、其首条
-staged HP cache-save 垂直路径和该源码私有 Job 切片已是当前代码；同步 cache
-administration/load 与上文其他 persistence owner 保持不变。
+结果。源码私有 Issue #99 Job 纵向路径现在实现了一条窄的跨重启 image-output 路径：稳定
+artifact/commit identity、manifest-last filesystem publication、idempotent reconciliation、
+retained quota、durable Job record 与 restart recovery。这不会把 cache save、daemon
+delivery、Graph-document save 或任意 runtime Value 变成该 artifact authority。有界
+executor、其首条 staged HP cache-save 垂直路径和源码私有 Job 纵向路径已是当前代码；同步
+cache administration/load 与上文其他 persistence owner 保持不变。
 
 ## 故障与生命周期语义
 
@@ -885,10 +886,12 @@ administration/load 与上文其他 persistence owner 保持不变。
 
 [ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
 在不改变上述 Kernel execution owner 的前提下增加了更高层目标。当前
-[单租户 Job 纵向路径](Single-Tenant-Job-Vertical.zh.md)只在一个进程内实现其 Issue #98 的
-identity、Job-truth、cancellation-ordering、Embedded Host 与 process-lifetime receipt 切片。
-它不具备 server quota、WorkerManager、OS isolation、durable artifact、network endpoint 或
-untrusted plugin profile。未来完整 server profile 中，每个全新受限的 `photospider-worker`
+[单租户 Job 纵向路径](Single-Tenant-Job-Vertical.zh.md)在一个进程内实现 Issue #99 的
+identity、durable Job truth、complete-envelope tenant quota、显式 retry/checkpoint binding、
+cancellation ordering、Embedded Host 与 crash-durable image artifact 切片。它的 quota 是
+service admission/accounting，而不是 OS enforcement。它仍不具备 WorkerManager、独立 worker
+process、OS isolation、heartbeat/forced termination、network endpoint 或 untrusted plugin
+profile。未来完整 server profile 中，每个全新受限的 `photospider-worker`
 恰好拥有一个 Job attempt，以及本文所述 process execution domain 的一个 attempt-local
 instance。Server tenant/Job quota 约束该进程；现有 `ResourceLedger` 只细分当前 Host/device
 execution envelope。Control plane 拥有 durable Job truth，WorkerManager 拥有 process

@@ -1,245 +1,203 @@
 # 单租户 Job 纵向路径
 
-本文定义当前源码私有的 Issue #98 Job 行为，是 `src/lib/server/` 当前事实的权威来源。
-ADR 0011 说明长期安全域决策，服务端 roadmap 说明后续交付切片。当前模块是一条可执行的
-单进程纵向路径，不是网络或多租户服务端。
+本文定义 `src/lib/server/` 下当前源码私有的 Issue #99 Job 行为。ADR 0011
+仍是目标安全域决策，server roadmap 负责分配后续交付切片。当前模块是面向一个已配置
+tenant 的真实单进程纵向路径；它不是 network server、multi-tenant authorization
+boundary 或 OS-isolated worker manager。
 
-## 术语与当前剖面
+## 当前剖面与身份
 
-当前剖面由 `jobspec-v1`、`embedded-cpu-v1` 执行和 `process-lifetime` 工件
-durability 组成。它支持一个配置的 `TenantId`、任意数量的进程生命周期 Job、每个 Job
-一个 attempt、每个 attempt 一个新的进程内 worker 对象与 Embedded Host、一个目标节点和
-一个必需 CPU 图像输出槽。
+受支持的剖面是规范 `jobspec-v2`、`embedded-cpu-v1` execution 与
+`crash-durable` image artifact。一个 `SingleTenantJobService` 拥有一个已配置
+`TenantId`、一个可信 durable state root、一套有限 quota 配置、任意数量的 retained Job，
+并为每个显式接受的 attempt 创建一个全新的进程内 worker object 与 Embedded Host。
 
-下列身份域是相互不同的强 C++ 值类型：
+身份域仍是彼此不同的强 C++ 类型：
 
 | 身份 | 当前含义 | 明确不表示 |
 | --- | --- | --- |
-| `TenantId` | 一个 `SingleTenantJobService` 配置的唯一 tenant | 已认证 principal 或多租户授权 |
-| `JobId` | 进程生命周期内一个已接受 immutable Job | 本地 IPC compute request 或 Graph session |
-| `JobSpecDigest` | 精确规范 `jobspec-v1` 字节的 SHA-256 | 单独构成 Job 权威 |
-| `JobAttemptId` | 本切片唯一的 current attempt | retry generation；当前没有 retry |
-| `WorkerInstanceId` + `WorkerLeaseGeneration` | 精确的新 worker 对象及其唯一 assignment | OS process identity、PID 或 supervisor lease |
-| `GraphArtifactId` | 由可信 resolver 解释的 immutable graph material key | Host path 或本地 Graph session |
-| `OutputSlotId` | 必需图像输出声明 | runtime node/output pointer |
-| `ArtifactId` | 进程生命周期 store 中一条 immutable artifact record | content digest、path、`OutputArtifactId` 或 buffer handle |
-| `OutputCommitId` | 一次精确 artifact commit event | idempotency key 或 durable transaction id |
-| `ArtifactContentDigest` | 精确 tight payload 字节的 SHA-256 | Artifact 或 commit identity |
+| `TenantId` | 一个 service/root 上唯一配置的 tenant | 已认证 principal 或 multi-tenant authorization |
+| `JobId` | 一个已接受 durable Job 的稳定身份 | IPC compute id 或 Graph session |
+| `JobSpecDigest` | 精确规范 `jobspec-v2` 字节的 SHA-256 | 单独构成 authorization |
+| `JobAttemptId` | Job retry history 中一个不复用的 attempt | Job identity 或本地 Run identity |
+| `WorkerInstanceId` + `WorkerLeaseGeneration` | 精确的全新进程内 worker assignment | PID、OS process、heartbeat 或 supervisor lease |
+| `GraphArtifactId` | 由可信配置解析的 graph material key | Host path 或本地 `GraphSessionId` |
+| `ArtifactId` | 稳定、不可变的 durable image identity | Content digest、path 或 IPC `OutputArtifactId` |
+| `OutputCommitId` | 一个 Job output 的稳定幂等 transaction identity | Attempt identity 或 delivery lease |
+| `ArtifactContentDigest` | 精确紧密 payload 字节的 SHA-256 | Artifact 或 commit identity |
 
-所有生成的 Job、attempt、worker、artifact 和 commit id 在当前进程内不复用。它们不持久化、
-不全局分配，重启后也不能恢复。
+初始 Job、artifact 与 commit id 包含抗碰撞 service namespace 和 checked local
+sequence。Retry 保留 `JobId`、JobSpec digest、checkpoint、`ArtifactId` 与
+`OutputCommitId`；它会生成全新的 attempt、worker、lease generation 与 quota
+reservation。重启会恢复持久化身份，只为新提交的 Job 使用新的 namespace。
 
-## Immutable JobSpec
+## 不可变 JobSpec 与 Checkpoint
 
-`JobSpec` 是经过校验、只提供 getter 且没有 mutation surface 的类。构造器只接受：
+`JobSpec` 只有 getter，没有 mutation surface。其构造函数接受：
 
 - 一个有界 opaque `GraphArtifactId`；
-- 一个非负目标节点整数；
-- 一个有界 opaque 必需 `OutputSlotId`；
-- 一个正数 maximum-parallelism 上限；
-- 封闭的 `embedded-cpu-v1` profile；
-- 请求的 `process-lifetime` durability。
+- 一个非负 target node；
+- 一个有界且必需的 `OutputSlotId`；
+- 完整且全为正值的 `JobResourceRequest`，包含 CPU slot、host memory、output、
+  staging、retention，以及按 configured-device 排序且唯一的 vector；
+- 可选的 durable checkpoint `ArtifactId`；
+- 封闭的 `embedded-cpu-v1` execution profile；以及
+- 封闭的 `crash-durable` durability request。
 
-规范字节以 `jobspec-v1` 开头，以十进制长度 frame 编码全部六个字段。target-node 与
-maximum-parallelism 两个整数先采用规范十进制文本，再与其余四个字段完全相同地进行
-framing。构造器记录这些精确字节的 SHA-256。控制面在接受前重新校验该值，以
-`shared_ptr<const JobSpec>` 保留它，并在 Job 与 assignment state 中记录摘要。worker 在解析图
-之前再次进行字段、规范字节和摘要校验。
+规范字节以 `jobspec-v2` 开头。十进制长度 framing 覆盖每个字段、每个 resource
+scalar、每对有序 device label/byte，以及显式的 checkpoint presence/value。整数先转换为
+规范十进制文本再 framing。构造函数保存精确字节的 SHA-256。Control plane 在接受前重新
+校验，通过 `shared_ptr<const JobSpec>` 保留，并把 digest 绑定到每个 assignment 与
+durable record。
 
-JobSpec 不包含 Host path、`GraphLoadRequest`、本地 `GraphSessionId`、文件描述符、指针、
-native/runtime handle、mutable store location、bearer credential、本地 IPC id、plugin DSO、
-checkpoint、retry、quota 或 retention policy 字段。JobSpec 外的可信
-`GraphArtifactResolver` 把图身份映射为当前 adapter 使用的本地 `GraphLoadRequest` path
-字段。这些路径绝不进入规范 Job 字节、attempt report 或 artifact receipt。
+JobSpec 不包含 Host path、descriptor、pointer、runtime handle、credential、IPC id、
+plugin DSO、mutable store location、quota token 或 artifact mutation capability。Quota
+admission 之前，control plane 只能通过同 tenant 已校验的 durable artifact index 解析可选
+checkpoint。Worker 只获得只读 `ArtifactRecord`，永远不会获得 root/path 或 commit
+authority。当前 Embedded CPU adapter 会校验该 provenance，但不声明恢复算法特定的
+runtime state。
 
-## 可观察 Job 行为
+## Tenant Quota Authority
 
-`SingleTenantJobService` 是已接受 Job 真相的唯一 owner。`submit()` 校验并冻结 JobSpec，
-生成 `JobId`、`JobAttemptId`、`WorkerInstanceId` 和 generation 为一的 lease，并在接受前
-构造完整 `JobSubmission`。随后记录完整 assignment，并启动一个可 join 的 worker thread。
-若线程启动失败，则回滚 state insertion。线程一旦启动，返回已构造 submission 时只会发生
-copy elision 或经编译期断言保证的不抛异常 move；回执字符串分配不能让 caller 在 Job 已接受后
-观察到失败。`query()` 返回复制的 snapshot；`wait_for()` 只限制 observer 等待，不设置执行
-deadline。
+`TenantQuotaAuthority` 是该已配置 tenant 唯一的 server-side capacity authority。在一个
+quota mutex 下，admission 把 concurrency、CPU、host memory、每个 configured device、
+output、staging 与 retention 作为完整 envelope 检查。它要么发布一个 opaque
+reservation 并完成全部 charge，要么什么都不改变。Worker、plugin、JobSpec 或
+`ResourceLedger` token 都不能生成、放大或释放该 server reservation。
 
-每个 service 还拥有一个私有 reaper infrastructure thread。成功 submission 会在 control mutex
-下，把可 join 的 assignment-thread handle 与保留的 Job record 一起发布。Report processing
-到达最终尾部后，assignment thread 只把自己的 record 标记为 completed，并唤醒 reaper。
-Reaper 在 mutex 下移出该 handle，释放 mutex 后才执行 join。它绝不会 join 自身，active
-assignment thread 仍保持独立 ownership 并可继续运行。因此，completed thread handle 及其 OS
-resource 会在 service 仍存活时回收，而不会持续累积到析构。该 reaper 只是 process-local
-infrastructure，不是 worker pool、scheduler、quota 或 OS-worker supervisor。
+失败和取消的 attempt 恰好一次释放完整 envelope。成功 artifact commit 把已预留的
+retention 转换为紧密 payload 的精确 charge，并释放所有 active-attempt dimension。Durable
+artifact deletion 只有在 manifest removal 与 durability barrier 之后才释放 retained
+charge。启动时会从已校验 artifact 重建 retained charge；如果 configured retention 低于
+recovered data，则 fail closed。Active attempt reservation 永不重建。
 
-当前状态机是：
+CPU slot 同时限制 Embedded Host `maximum_parallelism`。Host-memory 与 device 值是保守的
+进程内 admission declaration，不是 OS memory/device enforcement，也不替代 worker-local
+`ResourceLedger`；Issue #100 拥有该 process 与 OS-resource boundary。
+
+## Durable Root、Job 与 Artifact
+
+`DurableServerState` 会规范化一个可信 root，以 no-follow 方式打开，获取 exclusive
+nonblocking process lock，保留 root/control/jobs/artifacts directory descriptor，并重新
+校验 root device/inode binding。任何 JobSpec、report、checkpoint 或 plugin 都不能选择
+path。一个 live authority 独占一个 root。
+
+Job record 包含规范 JobSpec、current assignment 与 lease、稳定 artifact/commit id、
+cancellation 与 terminal fact，以及成功时的 receipt。每次更新都会写入并同步 private file，
+以 atomic rename 覆盖 authoritative record，再同步 jobs、control 与 root directory。
+Recovery 会严格解析每条 record；含糊 entry 或 identity/content drift 会 fail closed。
+
+Artifact commit 会校验 server-owned request 与 CPU image，把 active row 复制成紧密
+payload，并校验 output/staging/retention bound。随后它：
+
+1. 创建固定 opaque artifact directory；
+2. 写入、同步、重新打开并 hash `payload.bin`；
+3. 写入 private canonical manifest；
+4. 以 no-replace 原子发布固定 `manifest` 名称；
+5. 删除 private manifest；
+6. 同步 artifact directory、artifacts directory 与 root。
+
+Manifest presence 是 visibility point。Manifest 前的明确 residue 会被删除；publication
+后的异常会保留该 occurrence。Recovery 与 lazy lookup 会校验 descriptor、payload
+length/digest、tenant/Job/spec/slot/artifact/commit join，只清理安全 residue，并重新执行
+barrier chain。使用相同 stable commit 的 retry，只有在全部 stable identity、descriptor、
+digest 与 payload fact 匹配时才返回原 receipt。Reporting attempt 可以不同，因为原始
+acknowledgement 可能丢失。任何其他 collision 都会 fail closed。
+
+Deletion 会先删除并同步 authoritative manifest，再清理 payload 并释放 retention。成功 Job
+会保留历史 receipt，但删除后的字节不再能用于 lookup 或 checkpoint admission。
+
+## Job State、Recovery 与显式 Retry
+
+当前状态机为：
 
 ```text
-Queued -> Running ---------------------> Succeeded
-   |         |                              ^
-   +---------+-> Cancelling -> Cancelled    |
-             |                              |
-             +---------------------------> Failed
+submit -> Queued -> Running ---------------------> Succeeded
+                    |                                 ^
+                    +-> Cancelling -> Cancelled       |
+                    +---------------> Failed --retry--+
+restart(active, no matching artifact) -> Failed(RecoveryInterrupted)
+restart(any non-cancelled state, matching stable artifact) -> Succeeded
 ```
 
-`Succeeded`、`Failed` 和 `Cancelled` 是终态。没有 retry 或 attempt replacement。worker
-只返回 immutable `JobAttemptReport`：完整 assignment tuple、worker-local outcome、
-settlement fact、typed failure、diagnostic 和可选 candidate `ImageBuffer`。它不能修改 Job
-snapshot 或提交 artifact。
+`submit()` 会校验并冻结 JobSpec/checkpoint，预留完整 quota envelope，持久化 accepted truth，
+插入 Job，再启动一个 owned assignment thread。Service 会先在 mutex 下插入空 ownership
+record，再启动 native thread，并通过不抛异常的 move 安装唯一 handle；启动失败不会暴露 Job
+或 handle。失败清理会分别尝试 durable-record 回滚与 quota 释放，前一项出错不会阻止后一项。
+`query()` 复制当前 truth；`wait_for()` 只限制 observer wait。
 
-worker report 词汇是闭合的：
+`retry(JobId)` 只接受已经 settled、且没有 current worker/reservation 的 `Failed` Job。它
+保留稳定 Job/spec/checkpoint/output truth，递增 lease generation，创建全新的
+attempt/worker/quota authority，持久化 replacement，再启动全新 worker。内存 replacement
+使用不抛异常的 swap；失败时会 swap 回先前 failed truth，分别尝试恢复其 durable record，
+并释放新 reservation。Report 必须匹配完整 current tenant/Job/spec/attempt/worker/lease
+tuple，因此 stale attempt 会被 fence，不能 settle、fail、cancel 或 commit replacement。
 
-- `Succeeded` 要求 `settled=true`、`failure=None`，且恰有一个 candidate image；
-- `Cancelled` 要求 `settled=true`、`failure=CancellationObserved`，且没有 image；
-- `Failed` 要求没有 image，且 failure 为 `InvalidAssignment`、`GraphResolution`、
-  `HostSetup`、`GraphLoad`、`Compute`、`Settlement` 或 `Unexpected` 之一；其
-  `settled` 值继续表示 worker 的精确清理事实。
+Worker report 一旦通过 identity 与 semantic-shape fence，后续 control-plane durability
+failure 就不会抹除其 outcome 或 settlement evidence。Manifest 发布前失败会成为已 settled
+的 `Failed(ArtifactCommit)`，释放 active reservation，并保持可显式 retry。Manifest 发布后
+失败则先重新校验 stable occurrence，将其 reconcile 为 `Succeeded`，且 retention 恰好 charge
+一次。
 
-`ReportRejected` 和 `ArtifactCommit` 是 control-plane failure，绝不接受为 worker 上报值。
-`None` 只属于成功，`CancellationObserved` 只属于取消。非法底层 enum 表示不会扩展该词汇。
+重启绝不会恢复进程内 Graph/Run/Host/thread 或 ledger object。没有 matching committed
+artifact 的 nonterminal durable record 会变为已 settled 的
+`Failed(RecoveryInterrupted)`，并可显式 retry。Matching stable artifact 会被重新校验、
+只 charge 一次并 reconcile 为 `Succeeded`，包括 manifest 已可见但 acknowledgement 或
+Job-state update 丢失的 commit。Terminal receipt 内嵌于 Job record，因此 artifact 后续删除
+后，历史 success 仍然存在。如果某个 stable artifact 位于 Job 预留的 output identity 下，
+但 tenant/Job/spec/slot/commit join 中任一项不一致，recovery 会报告 durable corruption，
+而不会采用或覆盖它。
 
-shape 合法的 `Failed` 报告先于取消裁定处理。即使 graph resolution、Host setup、graph load、
-compute 或 settlement 进行时已经接受取消意图，Job 仍成为 `Failed`，`attempt_outcome` 仍为
-`Failed`，并保留报告中精确的 `settled`、failure 与 diagnostic 事实。单调取消意图继续记录，
-但不能把真实 worker failure 重新标记为 cancellation。
+## Worker、Cancellation 与 Completion Ordering
 
-控制面通过精确 worker thread 保留的 assignment 查找 Job，随后校验报告完整的 tenant/Job/
-spec-digest/attempt/worker/lease tuple。随后在复制任何 report outcome、settlement、failure、
-diagnostic 以及执行取消裁定之前，校验完整 enum 与 outcome/settlement/failure/image shape。
-不匹配、空、过期、malformed、取消上下文非法或 enum 非法的报告，统一发布 `Failed` +
-`ReportRejected`、`attempt_settled=false` 且没有回执。取消意图不能把这类报告变成
-`Cancelled`。某个身份域相等或内容相等不能修复另一处不匹配。由于被拒绝的报告不受信任，
-其任何字段都不能建立 retained current-attempt 真相。
+Embedded worker 会校验 assignment、JobSpec digest 与 optional checkpoint，在 JobSpec 外解析
+graph material，创建并 seed 一个全新的 Embedded Host，加载 attempt-local Graph，在已预留
+CPU parallelism 内 compute，校验一个非空 CPU image，关闭 Graph，销毁 Host ownership，
+最后只返回 typed attempt fact 与 candidate image。
 
-Job 成功要求在当前 control mutex 下同时满足：
+Worker report shape 与 full-tuple fencing 仍是封闭集合。Worker-owned failure fact 优先于
+cancellation relabelling。来自旧 attempt 的 stale 调用会被忽略，不会改变 current retry；
+来自 current attempt 的 malformed report 会变为 `ReportRejected`。`cancel()` 持久化
+monotonic intent。先于 commit 获胜的 cancellation 会在 settlement 后丢弃成功 candidate；
+先获胜的 durable commit 与 successful Job publication 不会被之后的 cancellation 改写。
+当前 public Host 没有 forced compute cancellation，因此忽略 cooperative observation 的
+provider 仍可能无限期延迟 shutdown。
 
-1. 报告匹配精确 current assignment；
-2. attempt 报告 `Succeeded` 且 `settled=true`；
-3. 报告携带一个有效非空 CPU image 且没有 failure fact；
-4. 独立工件权威为声明槽提交该 image；
-5. 返回回执匹配完整 assignment、slot 和请求的 process-lifetime durability。
+一个 private reaper 在 Job mutex 外 join 已完成 assignment thread。Destruction 会把 active
+Job 标为 cancelling，并等待 worker/reaper drain。这只是有序的进程内 ownership：当前没有
+WorkerManager process、heartbeat、crash/hang/OOM classification、address-space/syscall
+isolation、forced termination 或 bounded shutdown。这些属性仍属于 Issue #100。
 
-因此 Host/Run 成功本身不表示 Job 成功。Artifact commit、Job terminal publication、
-cancellation intent 和 caller observation 仍是不同事实。
+## 产品边界与持续维护证据
 
-## 取消与完成顺序
+- 模块只构建为 `photospider_single_tenant_job_internal`，不安装、不导出。
+- `photospiderd` 与 protocol v2 保持不变，不序列化这些 Job、quota、checkpoint 或 durable
+  artifact contract。
+- 配置的 `TenantId` 是可信配置，不是 authentication。
+- 可信仓库 CPU operation 在 caller process 内运行。Tenant plugin ABI/network security 与
+  isolated plugin runtime 仍不存在。
+- 当前 artifact format 只是一个必需的紧密 CPU `ImageBuffer`，不是通用 runtime
+  Value/checkpoint format 或 bulk data plane。
 
-`cancel()` 记录一次单调 control-plane intent。Job 不存在、已终态或重复请求时返回 false。
-接受活跃请求会把可观察状态改为 `Cancelling`；它不会 detach worker，也不声称 execution
-deadline。
+长期维护入口包括：
 
-public Host 当前没有主动 compute-cancellation 操作。Embedded Host worker 在 graph
-resolution 前、Host construction/load/compute 前以及 compute 后观察取消。Host compute
-一旦进入 provider，取消可能无限期等待该调用返回。随后 worker 关闭已加载图并销毁 Host，
-之后才报告。
-图加载完成后，worker 按以下顺序保留事实并选择报告：graph close/settlement failure、已经记录的
-compute 或 output-validation failure、已观察到的 cancellation，最后才是合成的 missing-output
-failure。因此 cancellation 不能抹掉真实 compute failure；而在 compute 前取消、因而有意不生成
-candidate image 时，也不能被重新标记为 `Compute`。
-
-取消与 artifact commit 在 Job mutex 下线性化：
-
-- 若取消先发生，而 worker 随后返回合法的非失败 settled 报告，则丢弃 candidate image、
-  不提交 artifact，Job 成为 `Cancelled`；
-- 若 worker 转而返回合法 `Failed` 报告，则 Job 保持 `Failed`，并保留精确 outcome、
-  settlement、failure 与 diagnostic 事实；
-- 若成功 commit 与 terminal publication 先发生，之后 cancel 返回 false，不能改写回执或
-  `Succeeded` 状态。
-
-service 析构会把活跃 Job 标为 cancelling、唤醒 reaper，并等待 reaper join 全部剩余 worker，
-之后才销毁 service-owned state。Reaper 与析构函数在等待 `join()` 时都不持有 control mutex。
-这仍是有序 ownership cleanup，不是有界强制终止。WorkerManager、heartbeat、OS-process
-kill/reap、crash/hang/OOM containment 和 retry 属于 Issue #100 及后续工作。
-
-## Embedded Host worker 路径
-
-`EmbeddedHostJobWorker` 对一个 assignment 执行下列阶段：
-
-1. 校验完整 assignment、immutable JobSpec 和精确摘要；
-2. 观察取消；
-3. 让可信 resolver 在 JobSpec 外解析图材料；
-4. 创建新的 Embedded Host 并 seed 仓库 built-in operation；
-5. 加载 attempt-local Graph session，其名称绝不成为服务端权威；
-6. 用 `fp32`、force-recache、禁用 disk-cache、不保存 cache、quiet output 和 JobSpec
-   maximum-parallelism 上限计算声明节点；
-7. 校验非空 CPU `ImageBuffer` candidate；
-8. 再次观察取消、关闭精确 Graph、销毁 Host ownership，随后才报告 settlement。
-
-resolution、Host setup、load、compute、output validation 和 settlement 各有不同的
-`JobAttemptFailure` 值。Graph resolution 失败不构造 Host。Graph close 失败报告
-`settled=false`，不能成功。worker 首先保留该 settlement failure，随后保留在 compute 后取消
-观察之前已经记录的任何 compute/output failure。若因取消而跳过 compute，则 cancellation 仍先于
-candidate 缺失。worker 从不获得 artifact-store mutation authority。若 factory 返回 null，或
-标准/非标准异常逃逸出 worker 创建或执行，control plane 没有 settlement 证据；它发布
-`settled=false` 且没有回执的 current failed attempt。即便已经接受取消，也不能把该未 settle
-失败改写为 `Cancelled`。
-
-## 进程生命周期工件权威
-
-`ProcessLifetimeArtifactStore` 是独立于 Job state、本地 IPC `OutputStore` 和 benchmark
-`B1OutputStore` 的对象。Commit 校验完整 assignment 与 output slot，调用 public
-`ImageBuffer` validator，要求非空 CPU payload，把 active byte 逐行复制到 tight immutable
-storage，并对复制后的 payload 求 hash。源 padding 被省略，之后修改或释放源对象不能改变记录。
-
-每次 commit 都生成新的 `ArtifactId` 与 `OutputCommitId`，即使内容逐字节相同。
-`OutputCommitReceipt` 绑定：
-
-- TenantId、JobId、JobSpecDigest、JobAttemptId；
-- WorkerInstanceId 与 WorkerLeaseGeneration；
-- OutputSlotId、ArtifactId 与 OutputCommitId；
-- width、height、channels、scalar type、tight row bytes 与 payload bytes；
-- ArtifactContentDigest；
-- achieved `process-lifetime` durability。
-
-按 ArtifactId 查询返回包含相同回执与 tight payload 的
-`shared_ptr<const ArtifactRecord>`。没有 mutable record API，也不暴露 path、runtime
-handle、IPC delivery id 或 store root。
-
-该 store 不实现 filesystem publication、idempotency、quota、retention、TTL delivery、
-restart persistence、recovery、atomic-visible 或 crash-durable commit。这些性质和稳定的
-tenant-scoped identity allocation 属于 Issue #99。
-
-## 边界与限制
-
-- 模块是源码私有的，构建为 `photospider_single_tenant_job_internal`；不安装、不导出。
-- `photospiderd` 与 protocol v2 不变；其 session、compute request、`OutputArtifactId` 和
-  delivery id 仍是本地进程/传输值。
-- 配置的单个 TenantId 不表示 authentication 或 authorization。
-- Worker thread 与 Embedded Host 共享 caller 进程；没有 security、address-space、syscall、
-  plugin 或 crash isolation。
-- 只包含可信仓库 CPU operation；tenant plugin ABI 与隔离仍不存在。
-- 一个 Job 只有一个 attempt 和一个必需 image slot；没有 retry、checkpoint、resource quota、
-  durable retention 或 network API。
-- 正数 JobSpec maximum parallelism 限制 Host Run，但不会 resize process execution worker，
-  也不创建 server quota。
-
-目标多进程安全模型仍由
-[ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
-和[服务端 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md#服务器与插件隔离)
-治理。
-
-## 源码与长期测试入口
-
-- 契约与规范摘要：`src/lib/server/job_contract.hpp` 和
-  `src/lib/server/job_contract.cpp`。
-- Job 真相与工件权威：`src/lib/server/single_tenant_job_service.hpp` 和
-  `src/lib/server/single_tenant_job_service.cpp`。
-- 真实 worker adapter：`src/lib/server/embedded_job_worker.hpp` 和
-  `src/lib/server/embedded_job_worker.cpp`。
-- 聚焦权威/生命周期测试：`tests/unit/test_single_tenant_job_service.cpp`。
-- 真实 Embedded Host 纵向路径：
+- contract：`src/lib/server/job_contract.{hpp,cpp}`；
+- quota：`src/lib/server/tenant_quota.{hpp,cpp}`；
+- durable state：`src/lib/server/durable_server_state.{hpp,cpp}`；
+- control plane：`src/lib/server/single_tenant_job_service.{hpp,cpp}`；
+- Embedded adapter：`src/lib/server/embedded_job_worker.{hpp,cpp}`；
+- focused authority/lifecycle test：
+  `tests/unit/test_single_tenant_job_service.cpp`；以及
+- 真实 Embedded Host durable product path：
   `tests/integration/test_single_tenant_job_product_path.cpp`。
 
-聚焦测试覆盖精确六字段规范字节与 SHA-256、path-shaped identity 拒绝、tight-row deep copy、
-相同内容的身份分离、receipt-gated success、缺失 output、不匹配 lease fencing、闭合
-malformed report shape 与非法 enum、全部 worker-owned typed failure/settlement 组合、返回 null/
-异常的 factory 与 worker settlement、malformed report 后取消、取消与已 settle 或未 settle 的
-graph-resolution/Host-setup/graph-load failure 竞态，以及 cancel-before-commit 顺序。编译后的
-契约还证明：大量 sequential worker 完成后会在 service 仍存活时被 join；无关 assignment worker
-保持 active blocking 时，completed worker 仍会持续回收；析构会等待 active worker completion 与
-reaper drainage。编译后的契约另行通过 static assertion 固定 submission move 不抛异常。Gate
-cleanup guard 保证即使 fatal
-测试断言提前退出，也会在 service 析构前释放阻塞 worker。产品路径测试把 immutable graph
-identity 解析为微型 YAML 图，经新的 Embedded Host 执行、关闭、提交结果，并确定性证明接受
-取消后的 resolver 异常仍保持 `Failed` 且没有工件。测试还在 worker 真实的 compute 前后取消
-观察点设置 gate：若在 compute 后接受取消，missing-node Host failure 仍保持已 settle 的
-`Failed` + `Compute` 并保留精确 diagnostic；若恰在 compute 前接受取消，则仍为已 settle 的
-`Cancelled`，而不会成为合成的 missing-output failure。
+持续维护测试覆盖 canonical digest/validation、每个 quota dimension 与多设备核算、精确
+settlement、manifest 前后 failure、root lock/no-follow/identity drift、safe cleanup、
+corruption 与精确 Job/artifact recovery join、idempotent reconciliation、retention deletion、
+checkpoint authorization/re-authorization、显式 retry 与 fresh fencing、submit/retry
+thread-start rollback、interrupted/successful restart、cancellation ordering、stale/malformed
+report、持续 thread reaping，以及真实 Embedded Host output/checkpoint/restart 行为。
+
+目标 multi-process model 仍由
+[ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
+和 [server roadmap](../../roadmap/zh/Kernel-Evolution.zh.md#服务器与插件隔离)治理。

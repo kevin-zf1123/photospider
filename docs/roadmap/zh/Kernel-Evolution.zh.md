@@ -1218,20 +1218,24 @@ credential、artifact capability 或 resource token。可信 Host 代码会在 R
 descriptor、offset、ownership、size、readiness、identity 与 declared bound。纯 C 能改善 record
 compatibility；它不能让恶意 native code 在进程内安全执行。
 
-当前 Issue #98 基线是源码私有的
+当前 Issue #99 基线是源码私有的
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结
-`jobspec-v1`，使用不同的 Job/attempt/worker-lease/artifact 身份，每个 attempt 运行一个新的
-进程内 Embedded Host，在 process-lifetime artifact commit 与取消之间建立顺序，并要求
-settlement 加一份完整回执后 Job 才能成功。即使并发接受取消，合法 typed worker failure 仍保持
+`jobspec-v2`，原子核算完整 tenant resource envelope，在一个 locked root 下持久化 Job record 与
+manifest-last image artifact，支持经过授权的 checkpoint identity 以及 stable-Job/fresh-attempt
+显式 retry，并在重启后 reconcile interrupted 或 already-committed work。每个 attempt 仍运行一个
+新的进程内 Embedded Host，强制 reserved CPU parallelism，在 crash-durable artifact commit 与
+取消之间建立顺序，并要求 settlement、retained-quota conversion 和一份完整回执后 Job 才能成功。
+即使并发接受取消，合法 typed worker failure 仍保持
 `Failed`，并保留精确 settlement 与 failure 事实。Graph load 后，worker 先处理 graph
 settlement failure，再在取消裁定前保留已经记录的 compute/output failure；若因取消而跳过
 compute，则 cancellation 仍先于合成的 missing-output failure。真实 Embedded Host 的确定性测试
 覆盖该边界两侧，并保留精确 compute diagnostic。一个私有 service reaper 还会在 service
 lifetime 内持续于 control mutex 外 join 已完成的进程内 assignment thread，同时保留并发 active
 worker；析构会排空同一 owner。这是本地 thread-resource ownership，不是 WorkerManager process
-reaping 或 bounded termination。该切片没有把上表任何目标行实现为独立进程、持久服务、quota
-authority、network endpoint 或 untrusted-plugin boundary。Issues #99 至 #106 不得从这条首个
-可执行切片推导各自性质。
+reaping 或 bounded termination。Service quota 是进程内 admission/accounting，而不是 OS
+enforcement。该切片没有把上表任何目标行实现为独立进程、network endpoint 或
+untrusted-plugin boundary。Issues #100 至 #106 不得从这条可执行切片推导各自的 process/security
+性质。
 
 Issue #97 只做分配，不吸收后续交付：
 

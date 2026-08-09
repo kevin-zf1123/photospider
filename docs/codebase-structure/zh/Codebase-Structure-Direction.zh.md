@@ -46,7 +46,7 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter。 | 只发现并链接 OpenCV `core`。 |
 | `photospider_policy_sdk` | 可安装、dependency-neutral 的纯 C policy ABI v1 SDK。 | 只携带一个兼容 C11/C++17 的 header，不带 execution/runtime dependency。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 已符合目标静态产品和 public Host 形态，同时把按角色归属的后端源码折叠进单一归档。 |
-| `photospider_single_tenant_job_internal` | 不安装的 Issue #98 immutable JobSpec、Job truth、进程内 attempt worker 与 process-lifetime artifact authority。 | 链接 Embedded Host 产品但不导出 package/API，不进入 `photospiderd`，也不声明 durable storage 或 OS isolation。 |
+| `photospider_single_tenant_job_internal` | 不安装的 Issue #99 canonical JobSpec、tenant quota、durable Job/artifact、显式 retry/checkpoint 与进程内 attempt-worker authority。 | 链接 Embedded Host 产品但不导出 package/API，也不进入 `photospiderd`；quota/durability 是真实能力，而 WorkerManager process、OS enforcement/isolation 与 bounded termination 仍不存在。 |
 | `photospider_cli_common` | `apps/graph_cli/` 下的静态 CLI 命令、TUI、自动补全代码、可复用 `run_graph_cli` 边界，以及两个按角色归属的 benchmark service 翻译单元。 | Benchmark 源只属于这个不可安装的 helper 与完整 CLI closure，不会进入可安装的 `photospider` 静态产品。 |
 | `graph_cli` | 位于 `apps/graph_cli/main.cpp`、只负责 process policy 的入口。 | 禁用 OpenCL，拥有不依赖分配的 fatal exit policy，创建 embedded `Host` adapter，尚无 daemon-client 模式。 |
 | `photospider_ipc_client` | 可安装 static typed Unix IPC client 与完整 Host adapter。 | 为 version 2 全部 60 个方法实现 typed owned call，并通过 `create_ipc_host` 实现当前全部 58 个非析构 Host virtual；不链接 backend，也不暴露 JSON/POSIX type。 |
