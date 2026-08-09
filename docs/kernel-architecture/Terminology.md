@@ -93,7 +93,7 @@ The process-local job-registry state reached after queued/running work either
 fails or completes Host compute and, for image results, `OutputStore`
 publication. It is not a durable acknowledgement and is lost with the process.
 
-**Source-private single-tenant durable image output (current Issue #99 subset)**
+**Source-private single-tenant durable image Job vertical (current Issue #99/#100 subset)**
 The current `src/lib/server/` vertical binds one tight CPU image to stable
 `ArtifactId` and `OutputCommitId` identities, publishes a canonical manifest
 last, and returns a crash-durable receipt only after exact payload/manifest
@@ -102,15 +102,19 @@ publication makes both aliases internally recognizable, but an alias whose
 barriers are not yet confirmed cannot return an artifact or crash-durable
 receipt: `ArtifactId` lookup, `OutputCommitId` lookup, same-commit retry, and
 Job reconciliation must revalidate the exact occurrence and replay the full
-barrier chain first. See the
+barrier chain first. One source-private WorkerManager also owns one freshly
+execed worker process, exact assignment lease, bounded private protocol,
+heartbeat/runtime deadlines, cancellation escalation, and exact reaping per
+attempt. See the
 [Single-Tenant Job Vertical](Single-Tenant-Job-Vertical.md).
 
-This is a narrow source-private, single-process, single-tenant image-output
-subset. It is not the daemon `OutputStore`, a general `Value`/checkpoint
-`OutputStore` or bulk data plane, multi-tenant authorization, an independent
-worker/security domain, or Issue #100 process/OS enforcement.
+This is a narrow source-private local single-tenant image-output and trusted-
+worker-process subset. It is not the daemon `OutputStore`, a general `Value`/
+checkpoint `OutputStore` or bulk data plane, multi-tenant authorization, a
+separately deployed WorkerManager, syscall/device isolation, or an untrusted-
+plugin security domain.
 
-**General durable output commit (accepted target beyond the Issue #99 subset)**
+**General durable output commit (accepted target beyond the Issue #99/#100 subset)**
 The broader future user-output transaction is identified by a stable
 `OutputCommitId` and completed only after full payload/metadata validation and
 file synchronization, canonical manifest staging/validation/file
@@ -540,8 +544,9 @@ planning, cache, policy, or physical-execution semantics.
 - Run success is not cache persistence, Graph-document save, durable output
   commit, daemon terminal state, or result delivery.
 - Current `OutputStore` publication is not crash-durable output commit.
-- The current Issue #99 durable-image subset is not the future general
-  `OutputStore`/bulk data plane or an independent worker/security domain.
+- The current Issue #99/#100 durable-image subset is not the future general
+  `OutputStore`/bulk data plane, network control plane, or untrusted-plugin
+  security domain.
 - Daemon job terminal state or acknowledgement is not a durable receipt.
 - `RegionSet` is not `PixelRect`; the latter is a checked image-edge
   projection and never TensorSlice authority.

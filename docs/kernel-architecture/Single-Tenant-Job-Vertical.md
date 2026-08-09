@@ -1,18 +1,21 @@
 # Single-Tenant Job Vertical
 
-This document defines the current source-private Issue #99 Job behavior under
-`src/lib/server/`. ADR 0011 remains the target security-domain decision and the
-server roadmap allocates later delivery slices. The current module is a real
-single-process vertical for one configured tenant; it is not a network server,
-multi-tenant authorization boundary, or OS-isolated worker manager.
+This document defines the current source-private Issue #99/#100 Job behavior
+under `src/lib/server/`. ADR 0011 remains the broader target security-domain
+decision and the server roadmap allocates later delivery slices. The current
+module is a real local vertical for one configured tenant with freshly execed
+attempt processes; it is not a network server, multi-tenant authorization
+boundary, separate WorkerManager service, or untrusted-plugin sandbox.
 
 ## Current Profile and Identity
 
 The supported profile is canonical `jobspec-v2`, `embedded-cpu-v1` execution,
 and `crash-durable` image artifacts. A `SingleTenantJobService` owns one
 configured `TenantId`, one trusted durable state root, one finite quota
-configuration, any number of retained Jobs, and one fresh in-process worker
-object and Embedded Host for each explicitly accepted attempt.
+configuration, any number of retained Jobs, and one fresh worker process and
+Embedded Host for each explicitly accepted attempt. One source-private
+`WorkerManager` inside the service authority owns every process and supervision
+handle.
 
 The identity domains remain distinct strong C++ types:
 
@@ -22,7 +25,7 @@ The identity domains remain distinct strong C++ types:
 | `JobId` | Stable identity of one accepted durable Job | IPC compute id or Graph session |
 | `JobSpecDigest` | SHA-256 of exact canonical `jobspec-v2` bytes | Authorization by itself |
 | `JobAttemptId` | One non-reused attempt in a Job's retry history | Job identity or local Run identity |
-| `WorkerInstanceId` + `WorkerLeaseGeneration` | Exact fresh in-process worker assignment | PID, OS process, heartbeat, or supervisor lease |
+| `WorkerInstanceId` + `WorkerLeaseGeneration` | Exact fresh process assignment and manager-fenced lease | Raw PID capability, Job identity, or authorization by itself |
 | `GraphArtifactId` | Graph material key resolved by trusted configuration | Host path or local `GraphSessionId` |
 | `ArtifactId` | Stable immutable durable image identity | Content digest, path, or IPC `OutputArtifactId` |
 | `OutputCommitId` | Stable idempotent transaction identity for one Job output | Attempt identity or delivery lease |
@@ -94,10 +97,14 @@ not retry release or publish a compensating terminal record in the same
 process. Restart drops process-local active reservations, reconstructs durable
 Job/artifact truth, and clears this fail-stop.
 
-CPU slots also cap Embedded Host `maximum_parallelism`. Host-memory and device
-values are conservative in-process admission declarations. They are not OS
-memory/device enforcement and do not replace the worker-local
-`ResourceLedger`; Issue #100 owns that process and OS-resource boundary.
+CPU slots also cap Embedded Host `maximum_parallelism`. WorkerManager applies
+accepted host memory as the worker's POSIX `RLIMIT_AS` soft bound before
+`exec`; this constrains total virtual address space rather than measured RSS,
+so the executable and its runtime mappings must fit the requested envelope.
+Configured device values remain admission declarations, not device isolation.
+Neither dimension replaces the worker-local `ResourceLedger`; there is no
+current syscall filter, cgroup/container, GPU-memory enforcement, or hostile-
+plugin sandbox.
 
 ## Durable Root, Jobs, and Artifacts
 
@@ -198,14 +205,15 @@ restart(any non-cancelled state, matching stable artifact) -> Succeeded
 ```
 
 `submit()` validates/finalizes JobSpec and checkpoint, reserves the complete
-quota envelope, inserts the in-memory Job and ownership record, starts its sole
-assignment thread while the service mutex still blocks worker progress, and
-then publishes accepted truth. A native-thread start failure therefore occurs
-before durable publication and exposes neither a Job nor a handle. A
+quota envelope, inserts the in-memory Job, and asks WorkerManager to retain its
+sole supervision handle while the service mutex still blocks assignment
+progress, then publishes accepted truth. A supervision-thread start failure
+therefore occurs before durable publication and exposes neither a Job nor a
+handle. A
 `NotPublished` journal failure removes the candidate and releases its quota. A
 published failure keeps the Job, worker authority, and quota aligned with the
 visible record and enters the monotonic journal fail-stop.
-If native-thread-start or `NotPublished` rollback cannot release quota, the
+If supervision-thread-start or `NotPublished` rollback cannot release quota, the
 candidate Job remains unpublished, the exact reservation owner moves to the
 service's stranded slot, the original submit error is rethrown, and all later
 mutation is fail-stopped until restart.
@@ -214,15 +222,16 @@ both remain available while fail-stopped.
 
 `retry(JobId)` accepts only a settled `Failed` Job with no current worker or
 reservation. It preserves stable Job/spec/checkpoint/output truth, increments
-the lease generation, creates fresh attempt/worker/quota authority, installs
-the replacement and blocked worker, and then publishes the replacement.
+the lease generation, creates fresh attempt/worker/quota authority, retains the
+blocked manager record, and then publishes the replacement.
 `NotPublished` restores the prior failed truth and releases the new
 reservation; either published outcome retains the new attempt and reservation,
-fences worker progress, and fail-stops later durable mutation. Reports must
-match the complete current tenant/Job/spec/attempt/worker/lease tuple, so a
+fences worker progress, and fail-stops later durable mutation. Reports and
+manager actions must match the complete current tenant/Job/spec/attempt/worker/
+lease tuple, so a
 stale attempt is fenced without settling, failing, cancelling, or committing
 the replacement.
-If thread-start or `NotPublished` retry rollback cannot release the fresh
+If supervision-thread-start or `NotPublished` retry rollback cannot release the fresh
 reservation, the prior failed Job truth remains authoritative, the fresh owner
 moves to the stranded slot, the triggering retry error is rethrown, and the
 same fail-stop applies without a same-process retry.
@@ -250,7 +259,7 @@ settlement raised; the reservation remains owned, all mutation and later
 reports are fenced, and restart recovers the recorded terminal state with zero
 active reservations.
 
-Restart never resumes process-local Graph/Run/Host/thread or ledger objects. A
+Restart never resumes process-local Graph/Run/Host/process or ledger objects. A
 nonterminal durable record with no matching committed artifact becomes settled
 `Failed` with `RecoveryInterrupted` and is explicitly retryable. A matching
 stable artifact is revalidated, charged once, and reconciled to `Succeeded`,
@@ -262,11 +271,35 @@ recovery reports durable corruption instead of adopting or overwriting it.
 
 ## Worker, Cancellation, and Completion Ordering
 
-The Embedded worker validates the assignment, JobSpec digest, and optional
-checkpoint, resolves graph material outside JobSpec, creates and seeds a fresh
-Embedded Host, loads an attempt-local Graph, computes within reserved CPU
-parallelism, validates one nonempty CPU image, closes the Graph, destroys Host
-ownership, and returns only typed attempt facts plus a candidate image.
+The control plane resolves trusted graph material outside JobSpec, then
+WorkerManager creates a private socket pair and forks/execs one non-installed
+`photospider-worker` for exactly one immutable assignment. The fork child
+performs only descriptor setup, `RLIMIT_AS`, descriptor closure, and `exec`;
+the freshly execed worker validates the assignment, JobSpec digest, and
+optional checkpoint, creates and seeds a fresh Embedded Host, loads an
+attempt-local Graph, computes within reserved CPU parallelism, validates one
+nonempty CPU image, closes the Graph, destroys Host ownership, and returns only
+typed attempt facts plus a candidate image.
+
+The private bounded protocol has fixed magic, one supported version, closed
+message kinds, a 64-MiB frame-payload maximum, deadline-aware partial I/O, and
+strict trailing-byte, enum, identity, digest, image-shape, and Job-resource
+validation. It carries one Assignment, exact AssignmentAccepted/Heartbeat/
+Cancel identity messages, and at most one Report. It carries no state root,
+quota reservation, artifact-commit capability, credential, network listener,
+native handle, or second assignment. Worker-controlled image dimensions are
+checked against arithmetic, frame, output, staging, and retention bounds before
+the control plane allocates exact tight CPU storage.
+
+WorkerManager alone owns spawn, the private channel, the PID, signal delivery,
+`waitpid`, and supervision-thread reaping. No API accepts or exposes a PID.
+Every cancellation or signal path revalidates the complete tenant/Job/spec/
+attempt/worker/lease record and its retained PID. A candidate report becomes
+eligible for control-plane adjudication only after one clean worker exit,
+channel closure, and exact reap. Startup/exec, nonzero exit, signal death,
+channel loss, protocol violation, heartbeat timeout, runtime timeout, and
+forced-cancellation facts use separate durable failure categories and affect
+only the owning attempt.
 
 Worker report shapes and full-tuple fencing remain closed. Worker-owned failure
 facts take precedence over cancellation relabelling. A stale prior-attempt
@@ -278,29 +311,35 @@ win first cannot be rewritten by later cancellation. If cancellation intent is
 not published, the prior intent remains authoritative; if its record becomes
 visible but a later durability barrier or completion observer fails, the
 service keeps `Cancelling`, fences the worker, and enters the same journal
-fail-stop. The current public Host has no forced compute cancellation, so a
-provider that ignores cooperative observation can still delay shutdown
-indefinitely.
+fail-stop. After accepted intent, WorkerManager first sends exact cooperative
+cancellation, then closes/revokes the channel and escalates through `SIGTERM`
+and `SIGKILL` under configured bounds before exact reaping. Cooperative and
+forced cancellation remain distinguishable durable facts. Destruction records
+cancellation without waiting under the Job mutex, then drains all attempts
+concurrently through the same escalation path.
 
-One private reaper joins completed assignment threads outside the Job mutex.
-Destruction marks active Jobs cancelling and waits for worker/reaper drainage.
-This is orderly in-process ownership only: there is no WorkerManager process,
-heartbeat, crash/hang/OOM classification, address-space or syscall isolation,
-forced termination, or bounded shutdown. Those properties remain Issue #100.
+One private reaper joins completed supervision handles outside both manager and
+Job mutexes. The explicit source-private test marker may execute deterministic
+unit-test workers in the supervision thread; it is non-installed and makes no
+process-isolation or bounded-termination claim. Ordinary construction rejects
+an unmarked in-process factory or an absent/non-executable worker path.
 
 ## Product Boundaries and Maintained Evidence
 
 - The non-installed, non-exported
-  `photospider_single_tenant_job_internal` target and both maintained Job test
-  targets exist by default only on Darwin and Linux. The independent
+  `photospider_single_tenant_job_internal` and `photospider-worker` targets,
+  protocol/manager unit coverage, process fixture/supervision integration
+  coverage, and Embedded product-path coverage exist by default only on Darwin
+  and Linux. The independent
   `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate defaults off elsewhere, rejects an
   explicit enable on unsupported systems, and CMake asserts the target
   inventory in both enabled and disabled profiles.
 - `photospiderd` and protocol v2 are unchanged and do not serialize these Job,
   quota, checkpoint, or durable-artifact contracts.
 - The configured `TenantId` is trusted configuration, not authentication.
-- Trusted repository CPU operations run in the caller process. Tenant plugin
-  ABI/network security and isolated plugin runtime remain absent.
+- Trusted repository CPU operations for this vertical run in the attempt
+  process. Tenant plugin ABI/network security, syscall isolation, and isolated
+  hostile-plugin runtime remain absent.
 - The current artifact format is one required tight CPU `ImageBuffer`, not a
   general runtime Value/checkpoint format or bulk data plane.
 
@@ -311,8 +350,16 @@ Long-lived entry points are:
 - durable state: `src/lib/server/durable_server_state.{hpp,cpp}`;
 - control plane: `src/lib/server/single_tenant_job_service.{hpp,cpp}`;
 - Embedded adapter: `src/lib/server/embedded_job_worker.{hpp,cpp}`;
+- private worker transport and lifecycle:
+  `src/lib/server/worker_protocol.{hpp,cpp}` and
+  `src/lib/server/worker_manager.{hpp,cpp}`;
+- one-assignment composition root: `apps/photospider_worker/main.cpp`;
 - focused authority/lifecycle tests:
-  `tests/unit/test_single_tenant_job_service.cpp`; and
+  `tests/unit/test_single_tenant_job_service.cpp` and
+  `tests/unit/test_worker_protocol.cpp`;
+- real-process lifecycle fixture and integration coverage:
+  `tests/support/photospider_worker_fixture.cpp` and
+  `tests/integration/test_worker_supervisor.cpp`; and
 - real Embedded Host durable product path:
   `tests/integration/test_single_tenant_job_product_path.cpp`.
 
@@ -335,9 +382,15 @@ interrupted/successful restart, cancellation ordering, stale/malformed reports,
 release-failure ownership for submit/retry thread-start and `NotPublished`
 rollback, Failed/Cancelled/rejected/malformed/pre-manifest terminal truth,
 read-only availability, report/mutation fencing, and restart convergence,
-ongoing thread reaping, target-inventory platform gating, and real Embedded Host
-output/checkpoint/restart behavior.
+ongoing handle/process reaping, target-inventory platform gating, bounded
+protocol reconstruction, fresh process identity, crash/protocol/heartbeat/
+runtime isolation, stale-lease rejection, cooperative/forced cancellation,
+concurrent shutdown drainage, and real Embedded Host output/checkpoint/restart
+behavior.
 
-The target multi-process model remains governed by
+This local Issue #100 executable subset does not add the network/multi-tenant
+control plane, a separately deployed WorkerManager, artifact data plane,
+untrusted plugin sandbox, or the work assigned to Issues #101-#106. Those
+broader boundaries remain governed by
 [ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
 and the [server roadmap](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation).

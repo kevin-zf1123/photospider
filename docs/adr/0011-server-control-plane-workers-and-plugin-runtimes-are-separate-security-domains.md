@@ -9,21 +9,30 @@ worker-manager, standalone artifact data plane, sandbox, or isolated-plugin
 target is current software behavior. Live delivery status remains in the linked
 Issue and Project.
 
-The current `photospiderd`, process execution domain, and plugin loaders remain
-unchanged. Issue #99 now implements a source-private single-process JobSpec
-vertical with complete-envelope tenant quota accounting, durable Job/image
-artifact recovery, explicit retry/checkpoint identity, and one in-process
-Embedded Host worker per attempt. That slice preserves this decision's identity
-and authority ordering and provides real quota admission plus crash durability,
-including one shared 128-configured-device admission/recovery maximum and an
-explicit Job-journal distinction between not published, published with
-durability unconfirmed, and confirmed committed. A published barrier failure
-retains visible truth and enters a monotonic control-plane fail-stop instead of
-attempting rollback. The source-private profile defaults on only for Darwin and
-Linux and has no Job target inventory on unsupported systems. This slice is not
-evidence of multi-tenant authorization, OS resource enforcement, separate
-worker processes, bounded termination, network transport, or untrusted-plugin
-isolation. Current behavior is defined by
+The current `photospiderd` and plugin loaders remain unchanged. Issues #99 and
+#100 now implement a source-private local JobSpec vertical with complete-
+envelope tenant quota accounting, durable Job/image artifact recovery,
+explicit retry/checkpoint identity, and one freshly execed Embedded Host worker
+process per attempt. One same-process `WorkerManager` object owns the private
+socket, PID, heartbeat, cancellation escalation, exact reaping, and supervision
+handle; the control-plane Job service remains the sole durable/quota/artifact/
+retry authority. Host memory is enforced as POSIX `RLIMIT_AS`; configured device
+capacity remains admission-only. The private closed protocol and exact lease
+fencing isolate startup, exit, signal, channel, protocol, heartbeat, runtime,
+and forced-cancellation failures to the owning attempt.
+
+That local slice preserves this decision's identity and authority ordering and
+provides real quota admission, crash durability, process-crash containment, and
+bounded cancellation/shutdown. It retains the shared 128-configured-device
+admission/recovery maximum and the explicit Job-journal distinction between not
+published, published with durability unconfirmed, and confirmed committed. A
+published barrier failure retains visible truth and enters a monotonic control-
+plane fail-stop instead of attempting rollback. The profile defaults on only
+for Darwin and Linux and has no Job/worker target inventory on unsupported
+systems. It is not evidence of multi-tenant authorization, a separately
+deployed WorkerManager, authenticated network transport, standalone artifact
+data plane, syscall/device isolation, or untrusted-plugin isolation. Current
+behavior is defined by
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
 
 ## Context
@@ -242,6 +251,15 @@ capability closure, and process exit. Crash, hang, OOM, signal death, malformed
 protocol, or channel loss fails only the current JobAttempt. WorkerManager
 revokes and reconciles its assignment without trusting a final worker report;
 the control plane alone applies retry policy.
+
+The current Issue #100 subset instantiates this lifecycle inside the local
+single-tenant authority rather than as the target separate WorkerManager
+process. It uses one private socket pair, a fixed bounded protocol, fresh
+`fork`/`exec`, `RLIMIT_AS`, cooperative cancel followed by `SIGTERM`/`SIGKILL`,
+and exact `waitpid`. A report is eligible only after clean exit and reap. This
+is process crash isolation for the trusted Embedded worker composition; it is
+not network peer authentication, a syscall sandbox, device isolation, or the
+isolated tenant-plugin runtime assigned to Issues #101-#104.
 
 ### Artifact store and data plane
 

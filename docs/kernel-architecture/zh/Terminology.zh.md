@@ -75,21 +75,24 @@ synchronization 后通过 no-replace rename 发布。其 index 位于内存，re
 进程内 job registry 在 queued/running work 失败，或完成 Host compute 以及 image result 的
 `OutputStore` publication 后到达的状态。它不是 durable acknowledgement，并会随进程丢失。
 
-**源码私有单租户耐久图像输出（当前 Issue #99 子集）**
+**源码私有单租户耐久图像 Job 纵向路径（当前 Issue #99/#100 子集）**
 当前 `src/lib/server/` 纵切把一个紧密 CPU 图像绑定到稳定的 `ArtifactId` 与
 `OutputCommitId` identity，以 manifest-last 方式发布 canonical manifest，并且只有在精确
 校验 payload/manifest 且完成从 artifact directory 到 root 的完整屏障链后，才返回
 crash-durable receipt。Manifest publication 会让两个 alias 都可在内部识别；但 barrier
 尚未确认的 alias 不能返回 artifact 或 crash-durable receipt：`ArtifactId` lookup、
 `OutputCommitId` lookup、same-commit retry 与 Job reconciliation 都必须先重新校验精确
-occurrence 并重放完整 barrier chain。参见
+occurrence 并重放完整 barrier chain。一个源码私有 WorkerManager 还会为每个 attempt 独占一个
+全新 exec 的 worker process、精确 assignment lease、bounded private protocol、heartbeat/
+runtime deadline、cancellation escalation 与精确 reaping。参见
 [单租户 Job 纵切](Single-Tenant-Job-Vertical.zh.md)。
 
-这是一个狭窄的源码私有、单进程、单租户图像输出子集。它不是 daemon `OutputStore`，不是
-通用 `Value`/checkpoint `OutputStore` 或 bulk data plane，不是多租户授权，也不是独立
-worker/security domain 或 Issue #100 的进程/OS enforcement。
+这是一个狭窄的源码私有、本地单租户图像输出与 trusted-worker-process 子集。它不是 daemon
+`OutputStore`，不是通用 `Value`/checkpoint `OutputStore` 或 bulk data plane，不是多租户
+授权，也不是独立部署的 WorkerManager、syscall/device isolation 或 untrusted-plugin
+security domain。
 
-**通用耐久输出提交（超出 Issue #99 子集的已接受目标）**
+**通用耐久输出提交（超出 Issue #99/#100 子集的已接受目标）**
 更广泛的未来 user-output transaction 由稳定 `OutputCommitId` 标识，只有在完整
 payload/metadata 校验与文件同步、canonical manifest 暂存/校验/文件同步、原子
 no-replace manifest-last publication，以及请求的从叶目录到 durability root 的目录屏障
@@ -425,8 +428,8 @@ cache、policy 或物理 execution 语义的所有者。
 - Run success 不是 cache persistence、Graph 文档保存、durable output commit、daemon terminal
   state 或 result delivery。
 - 当前 `OutputStore` publication 不是 crash-durable output commit。
-- 当前 Issue #99 耐久图像子集不是未来通用 `OutputStore`/bulk data plane，也不是独立
-  worker/security domain。
+- 当前 Issue #99/#100 耐久图像子集不是未来通用 `OutputStore`/bulk data plane、network
+  control plane 或 untrusted-plugin security domain。
 - Daemon job terminal state 或 acknowledgement 不是 durable receipt。
 - `RegionSet` 不是 `PixelRect`；后者是 checked image-edge projection，绝不是 TensorSlice
   authority。

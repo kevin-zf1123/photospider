@@ -7,17 +7,24 @@ tenant、Job、authentication、quota、artifact、worker 与 plugin 边界。�
 server、worker-manager、独立 artifact data plane、sandbox 或 isolated-plugin 目标已是当前软件行为。
 实时交付状态仍由所链接的 Issue 与 Project 维护。
 
-当前 `photospiderd`、process execution domain 与 plugin loader 均保持不变。Issue #99
-现在实现了源码私有的单进程 JobSpec 纵向路径，其中包含 complete-envelope tenant quota
-accounting、durable Job/image artifact recovery、显式 retry/checkpoint identity，以及每个
-attempt 一个进程内 Embedded Host worker。该切片保留本决策的身份与权威顺序，并提供真实的
-quota admission 与 crash durability，包括共享的 128-configured-device admission/recovery
-上限，以及 Job journal 对 not published、published but durability unconfirmed 与 confirmed
-committed 的显式区分。Published barrier failure 会保留 visible truth 并进入单调 control-plane
-fail-stop，而不尝试回滚。Source-private profile 只在 Darwin 与 Linux 默认启用；unsupported
-system 不存在 Job target inventory。该切片不能证明 multi-tenant authorization、OS resource
-enforcement、独立 worker process、bounded termination、network transport 或
-untrusted-plugin isolation。当前行为由
+当前 `photospiderd` 与 plugin loader 均保持不变。Issues #99 和 #100 现在实现了源码私有的
+本地 JobSpec 纵向路径，其中包含 complete-envelope tenant quota accounting、durable
+Job/image artifact recovery、显式 retry/checkpoint identity，以及每个 attempt 一个全新 exec
+的 Embedded Host worker process。一个同进程 `WorkerManager` object 拥有 private socket、
+PID、heartbeat、cancellation escalation、精确 reaping 与 supervision handle；control-plane
+Job service 仍是唯一 durable/quota/artifact/retry authority。Host memory 以 POSIX
+`RLIMIT_AS` 执行；configured device capacity 仍仅用于 admission。Private closed protocol 与
+精确 lease fencing 会把 startup、exit、signal、channel、protocol、heartbeat、runtime 与
+forced-cancellation failure 隔离到拥有它的 attempt。
+
+该本地切片保留本决策的身份与权威顺序，并提供真实的 quota admission、crash durability、
+process-crash containment 与 bounded cancellation/shutdown。它保留共享的
+128-configured-device admission/recovery 上限，以及 Job journal 对 not published、published
+but durability unconfirmed 与 confirmed committed 的显式区分。Published barrier failure 会
+保留 visible truth 并进入单调 control-plane fail-stop，而不尝试回滚。该 profile 只在 Darwin
+与 Linux 默认启用；unsupported system 不存在 Job/worker target inventory。该切片不能证明
+multi-tenant authorization、独立部署的 WorkerManager、authenticated network transport、
+standalone artifact data plane、syscall/device isolation 或 untrusted-plugin isolation。当前行为由
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)定义。
 
 ## 背景
@@ -206,6 +213,13 @@ receipt、authenticated report acceptance、capability closure 与 process exit�
 OOM、signal death、malformed protocol 或 channel loss 只使 current JobAttempt 失败。
 WorkerManager 不依赖最终 worker report 便可 revoke 并 reconcile assignment；只有 control
 plane 应用 retry policy。
+
+当前 Issue #100 子集在本地 single-tenant authority 内实例化这一 lifecycle，而不是目标中的
+独立 WorkerManager process。它使用一个 private socket pair、固定 bounded protocol、全新
+`fork`/`exec`、`RLIMIT_AS`、cooperative cancel 后的 `SIGTERM`/`SIGKILL`，以及精确
+`waitpid`。Report 只有在 clean exit 与 reap 后才具备资格。这为可信 Embedded worker
+composition 提供 process crash isolation；它不是 network peer authentication、syscall
+sandbox、device isolation，也不是 Issues #101-#104 分配的 isolated tenant-plugin runtime。
 
 ### Artifact Store 与 Data Plane
 

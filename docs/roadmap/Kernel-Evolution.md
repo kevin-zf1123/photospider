@@ -1510,31 +1510,36 @@ ownership, sizes, readiness, identities, and declared bounds before Run use.
 Pure C improves record compatibility; it does not make hostile native code
 safe in-process.
 
-The current Issue #99 baseline is the source-private
+The current Issue #99/#100 baseline is the source-private
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
 It freezes `jobspec-v2`, atomically accounts complete tenant resource envelopes,
 persists Job records and manifest-last image artifacts under one locked root,
 supports authorized checkpoint identity plus explicit stable-Job/fresh-attempt
 retry, and reconciles interrupted or already-committed work after restart. It
-still runs one fresh in-process Embedded Host per attempt, enforces reserved CPU
-parallelism, orders cancellation against crash-durable artifact commit, and
-gates Job success on settlement, retained-quota conversion, and one complete
-receipt. A valid typed worker failure remains
+now runs one freshly execed Embedded Host worker process per attempt, enforces
+reserved CPU parallelism and POSIX `RLIMIT_AS`, and uses a same-process
+WorkerManager with one bounded private protocol, exact assignment/lease/PID
+fencing, heartbeat/runtime deadlines, cancellation escalation, exact reaping,
+and ongoing supervision-handle drainage. A report becomes eligible only after
+clean process exit and reap; startup, exit, signal, channel, protocol,
+heartbeat, runtime, and forced-cancellation failures affect only the owning
+attempt. The control plane still orders cancellation against crash-durable
+artifact commit and gates Job success on settlement, retained-quota conversion,
+and one complete receipt. A valid typed worker failure remains
 `Failed` with its exact settlement and failure facts even when cancellation was
 accepted concurrently. After graph load, the worker gives graph settlement
 failure first priority, then preserves an already recorded compute/output
 failure before adjudicating cancellation; cancellation still outranks a
 synthesized missing-output failure when compute was skipped. Deterministic real
 Embedded Host tests cover both sides of that boundary and preserve the exact
-compute diagnostic. One private service reaper also joins completed in-process
-assignment threads outside the control mutex throughout service lifetime while
-retaining concurrent active workers; destruction drains the same owner. This
-is local thread-resource ownership, not WorkerManager process reaping or
-bounded termination. The service quota is in-process admission/accounting, not
-OS enforcement. This slice does not implement any target row above as a
-separate process, network endpoint, or untrusted-plugin boundary. Issues #100
-through #106 must not infer their process/security properties from this
-executable slice.
+compute diagnostic. Destruction persists cancellation without waiting under the
+Job mutex, then drains concurrent workers through cooperative cancel,
+`SIGTERM`, `SIGKILL`, and reap. Configured device capacity remains admission-
+only, and `RLIMIT_AS` is not RSS, syscall, device, or hostile-plugin isolation.
+The local WorkerManager is not the target separate manager process. This slice
+does not implement network authentication/multi-tenancy, a standalone artifact
+data plane, or an untrusted-plugin boundary. Issues #101 through #106 must not
+infer their process/security properties from this executable slice.
 
 Delivery remains allocated rather than absorbed by Issue #97:
 
