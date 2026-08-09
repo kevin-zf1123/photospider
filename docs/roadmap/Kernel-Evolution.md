@@ -1522,7 +1522,11 @@ failure first priority, then preserves an already recorded compute/output
 failure before adjudicating cancellation; cancellation still outranks a
 synthesized missing-output failure when compute was skipped. Deterministic real
 Embedded Host tests cover both sides of that boundary and preserve the exact
-compute diagnostic. This slice does not implement any target row above as a
+compute diagnostic. One private service reaper also joins completed in-process
+assignment threads outside the control mutex throughout service lifetime while
+retaining concurrent active workers; destruction drains the same owner. This
+is local thread-resource ownership, not WorkerManager process reaping or
+bounded termination. This slice does not implement any target row above as a
 separate process, persistent service, quota authority, network endpoint, or
 untrusted-plugin boundary. Issues #99 through #106 must not infer their
 properties from that first executable slice.

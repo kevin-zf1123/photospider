@@ -75,6 +75,17 @@ allocation cannot make the caller observe failure after the Job was accepted.
 `query()` returns a copied snapshot; `wait_for()` bounds only observer waiting
 and does not impose an execution deadline.
 
+Each service also owns one private reaper infrastructure thread. A successful
+submission publishes its joinable assignment-thread handle together with the
+retained Job record under the control mutex. After report processing reaches
+its final tail, the assignment thread marks only its own record complete and
+wakes the reaper. The reaper moves that handle out under the mutex, releases
+the mutex, and only then joins it. It never joins itself, and active assignment
+threads remain independently owned and runnable. Consequently, completed
+thread handles and their OS resources are recovered while the service remains
+alive instead of accumulating until destruction. The reaper is process-local
+infrastructure, not a worker pool, scheduler, quota, or OS-worker supervisor.
+
 The current state machine is:
 
 ```text
@@ -167,10 +178,12 @@ Cancellation and artifact commit linearize under the Job mutex:
 - if successful commit and terminal publication win first, later cancel returns
   false and cannot rewrite the receipt or `Succeeded` state.
 
-Service destruction marks active Jobs cancelling and joins every worker. It is
-orderly ownership cleanup, not bounded forced termination. WorkerManager,
-heartbeat, OS-process kill/reap, crash/hang/OOM containment, and retry belong to
-Issue #100 and later work.
+Service destruction marks active Jobs cancelling, wakes the reaper, and waits
+for it to join every remaining worker before the service-owned state is
+destroyed. Neither the reaper nor the destructor holds the control mutex while
+waiting in `join()`. This remains orderly ownership cleanup, not bounded forced
+termination. WorkerManager, heartbeat, OS-process kill/reap, crash/hang/OOM
+containment, and retry belong to Issue #100 and later work.
 
 ## Embedded Host Worker Path
 
@@ -269,7 +282,11 @@ closed malformed report shapes and invalid enums, all worker-owned typed
 failure/settlement combinations, null/exceptional factory and worker
 settlement, cancellation after malformed reporting, cancellation racing with
 settled or unsettled graph-resolution/Host-setup/graph-load failures, and
-cancel-before-commit ordering. The compiled contract independently
+cancel-before-commit ordering. They also prove that many sequential completed
+workers are joined while the service remains alive, completed workers are
+reaped while unrelated assignment workers remain actively blocked, and
+destruction waits for active worker completion plus reaper drainage. The
+compiled contract independently
 static-asserts the no-throw submission move. Gate cleanup guards release
 blocked workers before service destruction even when a fatal test assertion
 exits early. Product-path tests resolve an immutable graph identity to a tiny

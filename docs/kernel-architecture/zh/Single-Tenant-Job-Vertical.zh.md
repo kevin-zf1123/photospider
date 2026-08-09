@@ -62,6 +62,14 @@ copy elision 或经编译期断言保证的不抛异常 move；回执字符串�
 观察到失败。`query()` 返回复制的 snapshot；`wait_for()` 只限制 observer 等待，不设置执行
 deadline。
 
+每个 service 还拥有一个私有 reaper infrastructure thread。成功 submission 会在 control mutex
+下，把可 join 的 assignment-thread handle 与保留的 Job record 一起发布。Report processing
+到达最终尾部后，assignment thread 只把自己的 record 标记为 completed，并唤醒 reaper。
+Reaper 在 mutex 下移出该 handle，释放 mutex 后才执行 join。它绝不会 join 自身，active
+assignment thread 仍保持独立 ownership 并可继续运行。因此，completed thread handle 及其 OS
+resource 会在 service 仍存活时回收，而不会持续累积到析构。该 reaper 只是 process-local
+infrastructure，不是 worker pool、scheduler、quota 或 OS-worker supervisor。
+
 当前状态机是：
 
 ```text
@@ -136,9 +144,10 @@ candidate image 时，也不能被重新标记为 `Compute`。
 - 若成功 commit 与 terminal publication 先发生，之后 cancel 返回 false，不能改写回执或
   `Succeeded` 状态。
 
-service 析构会把活跃 Job 标为 cancelling 并 join 每个 worker。这是有序 ownership cleanup，
-不是有界强制终止。WorkerManager、heartbeat、OS-process kill/reap、crash/hang/OOM containment
-和 retry 属于 Issue #100 及后续工作。
+service 析构会把活跃 Job 标为 cancelling、唤醒 reaper，并等待 reaper join 全部剩余 worker，
+之后才销毁 service-owned state。Reaper 与析构函数在等待 `join()` 时都不持有 control mutex。
+这仍是有序 ownership cleanup，不是有界强制终止。WorkerManager、heartbeat、OS-process
+kill/reap、crash/hang/OOM containment 和 retry 属于 Issue #100 及后续工作。
 
 ## Embedded Host worker 路径
 
@@ -224,7 +233,10 @@ tenant-scoped identity allocation 属于 Issue #99。
 malformed report shape 与非法 enum、全部 worker-owned typed failure/settlement 组合、返回 null/
 异常的 factory 与 worker settlement、malformed report 后取消、取消与已 settle 或未 settle 的
 graph-resolution/Host-setup/graph-load failure 竞态，以及 cancel-before-commit 顺序。编译后的
-契约另行通过 static assertion 固定 submission move 不抛异常。Gate cleanup guard 保证即使 fatal
+契约还证明：大量 sequential worker 完成后会在 service 仍存活时被 join；无关 assignment worker
+保持 active blocking 时，completed worker 仍会持续回收；析构会等待 active worker completion 与
+reaper drainage。编译后的契约另行通过 static assertion 固定 submission move 不抛异常。Gate
+cleanup guard 保证即使 fatal
 测试断言提前退出，也会在 service 析构前释放阻塞 worker。产品路径测试把 immutable graph
 identity 解析为微型 YAML 图，经新的 Embedded Host 执行、关闭、提交结果，并确定性证明接受
 取消后的 resolver 异常仍保持 `Failed` 且没有工件。测试还在 worker 真实的 compute 前后取消

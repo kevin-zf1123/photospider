@@ -6,18 +6,22 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
+#include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {
@@ -299,6 +303,60 @@ class WorkerGate final {
 };
 
 /**
+ * @brief Coordinates a counted group of concurrently blocked test workers.
+ * @throws Synchronization failures from standard primitives.
+ */
+class WorkerGroupGate final {
+ public:
+  /**
+   * @brief Records one worker entry and waits for the shared release.
+   * @return Nothing after release.
+   * @throws std::system_error on synchronization failure.
+   */
+  void enter_and_wait() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++entered_;
+    condition_.notify_all();
+    condition_.wait(lock, [&] { return released_; });
+  }
+
+  /**
+   * @brief Waits for at least the requested number of worker entries.
+   * @param expected Minimum counted entries required for success.
+   * @return True when the count is reached within the fixed test bound.
+   * @throws std::system_error on synchronization failure.
+   */
+  bool wait_until_entered(std::size_t expected) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, std::chrono::seconds(2),
+                               [&] { return entered_ >= expected; });
+  }
+
+  /**
+   * @brief Releases every current or future waiter monotonically.
+   * @return Nothing.
+   * @throws std::system_error on synchronization failure.
+   */
+  void release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    condition_.notify_all();
+  }
+
+ private:
+  /** @brief Serializes counted gate state. */
+  std::mutex mutex_;
+  /** @brief Signals entry-count and release transitions. */
+  std::condition_variable condition_;
+  /** @brief Number of workers that have entered the gate. */
+  std::size_t entered_ = 0U;
+  /** @brief Whether all current and future workers may leave. */
+  bool released_ = false;
+};
+
+/**
  * @brief Releases one worker gate before later-declared service destruction.
  *
  * Tests construct this guard after `SingleTenantJobService`, so fatal Google
@@ -351,6 +409,55 @@ class WorkerGateReleaseGuard final {
  private:
   /** @brief Armed gate owner, or null after successful explicit release. */
   std::shared_ptr<WorkerGate> gate_;
+};
+
+/**
+ * @brief Releases one counted worker gate before service destruction.
+ * @throws Nothing; cleanup synchronization failure terminates the test process.
+ */
+class WorkerGroupGateReleaseGuard final {
+ public:
+  /**
+   * @brief Retains one counted gate for monotonic scope-exit release.
+   * @param gate Gate shared with blocked workers; null disarms the guard.
+   * @throws Nothing.
+   */
+  explicit WorkerGroupGateReleaseGuard(
+      std::shared_ptr<WorkerGroupGate> gate) noexcept
+      : gate_(std::move(gate)) {}
+
+  /**
+   * @brief Releases an armed gate before a service can join its workers.
+   * @throws Nothing; delegates to the guarded no-throw cleanup path.
+   */
+  ~WorkerGroupGateReleaseGuard() noexcept { release(); }
+
+  /** @brief Prevents duplicate ownership of one cleanup obligation. */
+  WorkerGroupGateReleaseGuard(const WorkerGroupGateReleaseGuard&) = delete;
+  /** @brief Prevents duplicate assignment of one cleanup obligation. */
+  WorkerGroupGateReleaseGuard& operator=(const WorkerGroupGateReleaseGuard&) =
+      delete;
+
+  /**
+   * @brief Releases the gate and disarms scope-exit cleanup.
+   * @return Nothing.
+   * @throws Nothing; terminates on an unexpected synchronization failure.
+   */
+  void release() noexcept {
+    if (gate_ == nullptr) {
+      return;
+    }
+    try {
+      gate_->release();
+      gate_.reset();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  /** @brief Armed counted gate owner, or null after release. */
+  std::shared_ptr<WorkerGroupGate> gate_;
 };
 
 /** @brief Stage at which a test double raises its configured exception. */
@@ -562,6 +669,160 @@ TEST(SingleTenantJobService, SuccessRequiresReceiptAndSupportsArtifactLookup) {
   EXPECT_NE(service.find_artifact(terminal->output_receipt->artifact_id),
             nullptr);
   EXPECT_FALSE(service.cancel(submission.job_id));
+}
+
+TEST(SingleTenantJobService,
+     ReapsSequentialWorkerThreadsWhileServiceRemainsAlive) {
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [](const JobAssignment& assignment,
+         const std::function<bool()>& cancellation_requested) {
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+  SingleTenantJobService service(TenantId("tenant.test"), factory);
+
+  constexpr std::size_t kSubmissionCount = 128U;
+  std::vector<JobSubmission> submissions;
+  submissions.reserve(kSubmissionCount);
+  for (std::size_t index = 0U; index < kSubmissionCount; ++index) {
+    submissions.push_back(service.submit(JobSpec(
+        GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U)));
+    const std::optional<JobSnapshot> terminal =
+        service.wait_for(submissions.back().job_id, std::chrono::seconds(2));
+    ASSERT_TRUE(terminal.has_value());
+    ASSERT_EQ(terminal->state, JobState::Succeeded);
+  }
+
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(
+                      service, 0U, std::chrono::seconds(2)));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::owned_worker_thread_count(service), 0U);
+  const std::optional<JobSnapshot> first =
+      service.query(submissions.front().job_id);
+  const std::optional<JobSnapshot> last =
+      service.query(submissions.back().job_id);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(last.has_value());
+  EXPECT_EQ(first->state, JobState::Succeeded);
+  EXPECT_EQ(last->state, JobState::Succeeded);
+}
+
+TEST(SingleTenantJobService,
+     ReapsCompletedWorkersWhileConcurrentWorkersRemainActive) {
+  constexpr std::size_t kBlockedWorkerCount = 6U;
+  constexpr std::size_t kCompletedWorkerCount = 96U;
+  auto gate = std::make_shared<WorkerGroupGate>();
+  std::atomic<std::size_t> worker_ordinal{0U};
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [gate, &worker_ordinal](
+          const JobAssignment& assignment,
+          const std::function<bool()>& cancellation_requested) {
+        const std::size_t ordinal = worker_ordinal.fetch_add(1U);
+        if (ordinal < kBlockedWorkerCount) {
+          gate->enter_and_wait();
+        }
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+  SingleTenantJobService service(TenantId("tenant.test"), factory);
+  WorkerGroupGateReleaseGuard gate_release(gate);
+
+  std::vector<JobSubmission> blocked_submissions;
+  blocked_submissions.reserve(kBlockedWorkerCount);
+  for (std::size_t index = 0U; index < kBlockedWorkerCount; ++index) {
+    blocked_submissions.push_back(service.submit(JobSpec(
+        GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U)));
+  }
+  ASSERT_TRUE(gate->wait_until_entered(kBlockedWorkerCount));
+
+  for (std::size_t index = 0U; index < kCompletedWorkerCount; ++index) {
+    const JobSubmission submission = service.submit(JobSpec(
+        GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U));
+    const std::optional<JobSnapshot> terminal =
+        service.wait_for(submission.job_id, std::chrono::seconds(2));
+    ASSERT_TRUE(terminal.has_value());
+    ASSERT_EQ(terminal->state, JobState::Succeeded);
+  }
+
+  ASSERT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(
+                      service, kBlockedWorkerCount, std::chrono::seconds(2)));
+  const WorkerThreadOwnershipSnapshot ownership =
+      SingleTenantJobServiceTestAccess::worker_thread_ownership(service);
+  EXPECT_EQ(ownership.active, kBlockedWorkerCount);
+  EXPECT_EQ(ownership.completed, 0U);
+  EXPECT_EQ(ownership.joining, 0U);
+  EXPECT_EQ(ownership.total(), kBlockedWorkerCount);
+
+  gate_release.release();
+  for (const JobSubmission& submission : blocked_submissions) {
+    const std::optional<JobSnapshot> terminal =
+        service.wait_for(submission.job_id, std::chrono::seconds(2));
+    ASSERT_TRUE(terminal.has_value());
+    EXPECT_EQ(terminal->state, JobState::Succeeded);
+  }
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(
+                      service, 0U, std::chrono::seconds(2)));
+}
+
+TEST(SingleTenantJobService, DestructorWaitsForActiveWorkerAndReaperDrain) {
+  auto gate = std::make_shared<WorkerGate>();
+  std::atomic<bool> cancellation_observed{false};
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [gate, &cancellation_observed](
+          const JobAssignment& assignment,
+          const std::function<bool()>& cancellation_requested) {
+        gate->enter_and_wait();
+        cancellation_observed.store(cancellation_requested());
+        return successful_report(assignment);
+      });
+  auto service = std::make_unique<SingleTenantJobService>(
+      TenantId("tenant.test"), factory);
+  service->submit(JobSpec(GraphArtifactId("graph.test"), 7,
+                          OutputSlotId("image.final"), 2U));
+
+  std::mutex destruction_mutex;
+  std::condition_variable destruction_condition;
+  bool destruction_started = false;
+  bool destruction_finished = false;
+  std::future<void> destruction;
+  WorkerGateReleaseGuard gate_release(gate);
+  ASSERT_TRUE(gate->wait_until_entered());
+  destruction =
+      std::async(std::launch::async,
+                 [owned_service = std::move(service), &destruction_mutex,
+                  &destruction_condition, &destruction_started,
+                  &destruction_finished]() mutable {
+                   {
+                     std::lock_guard<std::mutex> lock(destruction_mutex);
+                     destruction_started = true;
+                   }
+                   destruction_condition.notify_all();
+                   owned_service.reset();
+                   {
+                     std::lock_guard<std::mutex> lock(destruction_mutex);
+                     destruction_finished = true;
+                   }
+                   destruction_condition.notify_all();
+                 });
+
+  {
+    std::unique_lock<std::mutex> lock(destruction_mutex);
+    EXPECT_TRUE(destruction_condition.wait_for(
+        lock, std::chrono::seconds(2), [&] { return destruction_started; }));
+    EXPECT_FALSE(destruction_finished);
+  }
+  gate_release.release();
+  EXPECT_EQ(destruction.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  destruction.get();
+  EXPECT_TRUE(cancellation_observed.load());
+  {
+    std::lock_guard<std::mutex> lock(destruction_mutex);
+    EXPECT_TRUE(destruction_finished);
+  }
 }
 
 TEST(SingleTenantJobService, MissingRequiredImageFailsClosed) {

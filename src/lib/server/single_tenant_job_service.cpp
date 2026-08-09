@@ -4,6 +4,7 @@
  */
 #include "server/single_tenant_job_service.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <exception>
@@ -282,7 +283,17 @@ SingleTenantJobService::SingleTenantJobService(
   if (worker_factory_ == nullptr) {
     throw std::invalid_argument("single-tenant worker factory is null");
   }
+  reaper_ = std::thread(&SingleTenantJobService::reap_workers, this);
 }
+
+/**
+ * @copydoc
+ * ps::server::SingleTenantJobService::WorkerThreadRecord::WorkerThreadRecord
+ */
+SingleTenantJobService::WorkerThreadRecord::WorkerThreadRecord(
+    SingleTenantJobService* service, JobAssignment assignment)
+    : thread(&SingleTenantJobService::run_assignment, service,
+             std::move(assignment)) {}
 
 /** @copydoc ps::server::SingleTenantJobService::~SingleTenantJobService */
 SingleTenantJobService::~SingleTenantJobService() noexcept {
@@ -298,10 +309,8 @@ SingleTenantJobService::~SingleTenantJobService() noexcept {
     }
   }
   condition_.notify_all();
-  for (std::thread& worker : workers_) {
-    if (worker.joinable()) {
-      worker.join();
-    }
+  if (reaper_.joinable()) {
+    reaper_.join();
   }
 }
 
@@ -341,8 +350,11 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
     throw std::logic_error("fresh JobId collided in service state");
   }
   try {
-    workers_.emplace_back(&SingleTenantJobService::run_assignment, this,
-                          assignment);
+    const bool worker_inserted =
+        workers_.try_emplace(job_key, this, assignment).second;
+    if (!worker_inserted) {
+      throw std::logic_error("fresh JobId collided in worker ownership");
+    }
   } catch (...) {
     jobs_.erase(job_key);
     throw;
@@ -418,17 +430,22 @@ std::shared_ptr<const ArtifactRecord> SingleTenantJobService::find_artifact(
 /** @copydoc ps::server::SingleTenantJobService::run_assignment */
 void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
   try {
+    bool assignment_present = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = jobs_.find(assignment.identity.job_id.value());
-      if (found == jobs_.end()) {
-        return;
-      }
-      if (!found->second.cancellation_requested) {
-        found->second.state = JobState::Running;
+      if (found != jobs_.end()) {
+        assignment_present = true;
+        if (!found->second.cancellation_requested) {
+          found->second.state = JobState::Running;
+        }
       }
     }
     condition_.notify_all();
+    if (!assignment_present) {
+      mark_worker_completed(assignment.identity.job_id);
+      return;
+    }
 
     std::unique_ptr<JobAttemptWorker> worker =
         worker_factory_->create(assignment);
@@ -471,6 +488,58 @@ void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
       std::terminate();
     }
   }
+  mark_worker_completed(assignment.identity.job_id);
+}
+
+/** @copydoc ps::server::SingleTenantJobService::mark_worker_completed */
+void SingleTenantJobService::mark_worker_completed(
+    const JobId& job_id) noexcept {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = workers_.find(job_id.value());
+    if (found != workers_.end()) {
+      found->second.completed = true;
+    }
+  }
+  condition_.notify_all();
+}
+
+/** @copydoc ps::server::SingleTenantJobService::reap_workers */
+void SingleTenantJobService::reap_workers() noexcept {
+  for (;;) {
+    std::thread completed_worker;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      condition_.wait(lock, [this] {
+        return has_completed_worker_locked() ||
+               (shutting_down_ && workers_.empty());
+      });
+
+      const auto completed = std::find_if(
+          workers_.begin(), workers_.end(),
+          [](const auto& entry) { return entry.second.completed; });
+      if (completed == workers_.end()) {
+        return;
+      }
+      completed_worker = std::move(completed->second.thread);
+      workers_.erase(completed);
+      ++workers_joining_;
+    }
+
+    completed_worker.join();
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      --workers_joining_;
+    }
+    condition_.notify_all();
+  }
+}
+
+/** @copydoc ps::server::SingleTenantJobService::has_completed_worker_locked */
+bool SingleTenantJobService::has_completed_worker_locked() const noexcept {
+  return std::any_of(workers_.begin(), workers_.end(),
+                     [](const auto& entry) { return entry.second.completed; });
 }
 
 /** @copydoc ps::server::SingleTenantJobService::cancellation_requested_for */

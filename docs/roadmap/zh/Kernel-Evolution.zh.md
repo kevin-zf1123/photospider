@@ -1226,9 +1226,12 @@ settlement 加一份完整回执后 Job 才能成功。即使并发接受取消�
 `Failed`，并保留精确 settlement 与 failure 事实。Graph load 后，worker 先处理 graph
 settlement failure，再在取消裁定前保留已经记录的 compute/output failure；若因取消而跳过
 compute，则 cancellation 仍先于合成的 missing-output failure。真实 Embedded Host 的确定性测试
-覆盖该边界两侧，并保留精确 compute diagnostic。该切片没有把上表任何目标行实现为独立进程、
-持久服务、quota authority、network endpoint 或 untrusted-plugin boundary。Issues #99 至
-#106 不得从这条首个可执行切片推导各自性质。
+覆盖该边界两侧，并保留精确 compute diagnostic。一个私有 service reaper 还会在 service
+lifetime 内持续于 control mutex 外 join 已完成的进程内 assignment thread，同时保留并发 active
+worker；析构会排空同一 owner。这是本地 thread-resource ownership，不是 WorkerManager process
+reaping 或 bounded termination。该切片没有把上表任何目标行实现为独立进程、持久服务、quota
+authority、network endpoint 或 untrusted-plugin boundary。Issues #99 至 #106 不得从这条首个
+可执行切片推导各自性质。
 
 Issue #97 只做分配，不吸收后续交付：
 
