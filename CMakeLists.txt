@@ -94,6 +94,22 @@ if(PHOTOSPIDER_BUILD_IPC AND NOT PHOTOSPIDER_IPC_PLATFORM_SUPPORTED)
     message(FATAL_ERROR
         "PHOTOSPIDER_BUILD_IPC requires CMAKE_SYSTEM_NAME Darwin or Linux")
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
+   CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PHOTOSPIDER_SINGLE_TENANT_JOB_PLATFORM_SUPPORTED ON)
+    set(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB_DEFAULT ON)
+else()
+    set(PHOTOSPIDER_SINGLE_TENANT_JOB_PLATFORM_SUPPORTED OFF)
+    set(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB_DEFAULT OFF)
+endif()
+option(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB
+    "Build the POSIX durable single-tenant Job authority and maintained tests"
+    ${PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB_DEFAULT})
+if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB AND
+   NOT PHOTOSPIDER_SINGLE_TENANT_JOB_PLATFORM_SUPPORTED)
+    message(FATAL_ERROR
+        "PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB requires CMAKE_SYSTEM_NAME Darwin or Linux")
+endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(GNUInstallDirs)
@@ -948,24 +964,26 @@ add_library(photospider STATIC
     $<TARGET_OBJECTS:photospider_product_seam_objects>)
 configure_photospider_product_archive(photospider)
 
-# Source-private Issue #99 delivery slice. This target preserves independent
-# durable Job/attempt/quota/artifact authority while deliberately remaining
-# outside the installed Embedded Host ABI and local protocol-v2 sidecar
-# composition. It remains in-process and makes no Issue #100 OS-worker claim.
-add_library(photospider_single_tenant_job_internal STATIC
-    src/lib/server/job_contract.cpp
-    src/lib/server/tenant_quota.cpp
-    src/lib/server/durable_server_state.cpp
-    src/lib/server/single_tenant_job_service.cpp
-    src/lib/server/embedded_job_worker.cpp)
-target_compile_features(photospider_single_tenant_job_internal PRIVATE
-    cxx_std_17)
-target_include_directories(photospider_single_tenant_job_internal PRIVATE
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src/lib")
-target_link_libraries(photospider_single_tenant_job_internal PRIVATE
-    photospider
-    Threads::Threads)
+if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+    # Source-private Issue #99 delivery slice. Its crash-durable filesystem
+    # backend requires the closed Darwin/Linux POSIX capability profile above.
+    # It remains outside the installed Embedded Host ABI and protocol-v2
+    # sidecar composition and makes no Issue #100 OS-worker claim.
+    add_library(photospider_single_tenant_job_internal STATIC
+        src/lib/server/job_contract.cpp
+        src/lib/server/tenant_quota.cpp
+        src/lib/server/durable_server_state.cpp
+        src/lib/server/single_tenant_job_service.cpp
+        src/lib/server/embedded_job_worker.cpp)
+    target_compile_features(photospider_single_tenant_job_internal PRIVATE
+        cxx_std_17)
+    target_include_directories(photospider_single_tenant_job_internal PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib")
+    target_link_libraries(photospider_single_tenant_job_internal PRIVATE
+        photospider
+        Threads::Threads)
+endif()
 
 set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
     PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING
@@ -1820,12 +1838,14 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
 
-    add_ps_test(test_single_tenant_job_service
-        tests/unit/test_single_tenant_job_service.cpp
-        photospider_single_tenant_job_internal)
-    gtest_discover_tests(test_single_tenant_job_service
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        PROPERTIES TIMEOUT 30)
+    if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+        add_ps_test(test_single_tenant_job_service
+            tests/unit/test_single_tenant_job_service.cpp
+            photospider_single_tenant_job_internal)
+        gtest_discover_tests(test_single_tenant_job_service
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 30)
+    endif()
 endif()
 
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
@@ -2050,9 +2070,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             photospider_internal_test_product)
         target_link_libraries(test_b1_product_path PRIVATE
             PkgConfig::UTF8PROC)
-        add_ps_test(test_single_tenant_job_product_path
-            tests/integration/test_single_tenant_job_product_path.cpp
-            photospider_single_tenant_job_internal)
+        if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+            add_ps_test(test_single_tenant_job_product_path
+                tests/integration/test_single_tenant_job_product_path.cpp
+                photospider_single_tenant_job_internal)
+        endif()
         add_ps_test(test_m1_product_path
             tests/integration/test_m1_product_path.cpp
             photospider_internal_test_product)
@@ -2624,9 +2646,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             PROPERTIES
                 LABELS kernel-concurrency
                 TIMEOUT 30)
-        gtest_discover_tests(test_single_tenant_job_product_path
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-            PROPERTIES TIMEOUT 30)
+        if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+            gtest_discover_tests(test_single_tenant_job_product_path
+                WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                PROPERTIES TIMEOUT 30)
+        endif()
         gtest_discover_tests(test_m1_product_path
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
@@ -2726,6 +2750,38 @@ if(BUILD_TESTING)
         PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
 endif()
 
+# The POSIX durable Job vertical has an independent closed target inventory.
+# This configure-time invariant prevents unsupported/default-off platforms from
+# compiling its POSIX sources indirectly and keeps its maintained tests aligned
+# with the product capability gate.
+if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
+    if(NOT TARGET photospider_single_tenant_job_internal)
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing its internal target")
+    endif()
+    if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS AND
+       NOT TARGET test_single_tenant_job_service)
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing its unit target")
+    endif()
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE AND
+       PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER AND
+       NOT TARGET test_single_tenant_job_product_path)
+        message(FATAL_ERROR
+            "Enabled single-tenant Job profile is missing its product-path target")
+    endif()
+else()
+    foreach(PHOTOSPIDER_DISABLED_SINGLE_TENANT_JOB_TARGET
+            photospider_single_tenant_job_internal
+            test_single_tenant_job_service
+            test_single_tenant_job_product_path)
+        if(TARGET ${PHOTOSPIDER_DISABLED_SINGLE_TENANT_JOB_TARGET})
+            message(FATAL_ERROR
+                "Disabled single-tenant Job profile unexpectedly defines ${PHOTOSPIDER_DISABLED_SINGLE_TENANT_JOB_TARGET}")
+        endif()
+    endforeach()
+endif()
+
 # The test-only product must have a closed direct-consumer set, and no target
 # may combine it with the installable archive. This assertion runs after all
 # root targets have been declared so later CMake edits cannot silently widen
@@ -2789,6 +2845,7 @@ message(STATUS "  Output Lib        : ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Plugins    : ${PLUGIN_OUTPUT_DIR}")
 message(STATUS "  Policy Plugins    : ${POLICY_PLUGIN_DIR}")
 message(STATUS "  OpenCV Op Provider: ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER}")
+message(STATUS "  Single-Tenant Job: ${PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB}")
 message(STATUS "  Focused Tests     : ${PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS}")
 message(STATUS "  Full Test Suite   : ${PHOTOSPIDER_BUILD_FULL_TEST_SUITE}")
 if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)

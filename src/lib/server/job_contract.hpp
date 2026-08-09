@@ -23,6 +23,14 @@ namespace ps::server {
 inline constexpr std::size_t kMaximumOpaqueIdentityBytes = 128U;
 
 /**
+ * @brief Maximum configured device-capacity rows in one Job envelope.
+ * @note This semantic admission/recovery bound is independent of opaque
+ * identity byte length. It applies equally to tenant quota configuration,
+ * JobSpec construction/validation, canonical serialization, and recovery.
+ */
+inline constexpr std::size_t kMaximumConfiguredDevicesPerJob = 128U;
+
+/**
  * @brief Strong source-private textual identity with one compile-time domain.
  *
  * @tparam Domain Empty tag that makes otherwise equal text a different type.
@@ -372,7 +380,10 @@ struct JobResourceRequest final {
   std::uint64_t staging_bytes = 0U;
   /** @brief Positive maximum durable retained payload bytes. */
   std::uint64_t retention_bytes = 0U;
-  /** @brief Strictly device-id-sorted unique positive device requests. */
+  /**
+   * @brief Strictly device-id-sorted unique positive device requests.
+   * @note The vector contains at most `kMaximumConfiguredDevicesPerJob` rows.
+   */
   std::vector<DeviceResourceRequest> devices;
 
   /**
@@ -676,9 +687,9 @@ void validate_job_spec(const JobSpec& spec);
  * @brief Validates a complete canonical Job resource request.
  * @param request Candidate immutable demand.
  * @return Nothing after scalar, token, order, and uniqueness validation.
- * @throws std::invalid_argument when a required scalar is zero, a device label
- * is not a bounded opaque token, device bytes are zero, or device labels are
- * not in strict ascending order.
+ * @throws std::invalid_argument when a required scalar is zero, device count
+ * exceeds `kMaximumConfiguredDevicesPerJob`, a device label is not a bounded
+ * opaque token, device bytes are zero, or labels are not strictly ascending.
  * @note This validates declared shape only; `TenantQuotaAuthority` owns
  * capacity admission.
  */

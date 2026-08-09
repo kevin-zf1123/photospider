@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -77,6 +78,146 @@ enum class DurableArtifactCommitStage : std::uint8_t {
 };
 
 /**
+ * @brief Observable durability state of one Job-record replacement attempt.
+ * @throws Nothing for value operations.
+ * @note `RecordPublishedDurabilityUnconfirmed` is commit-unknown to the
+ * caller: the atomic replacement is visible, but one or more required parent
+ * directory barriers did not complete. The published record must never be
+ * treated as rolled back or deleted by the caller.
+ */
+enum class DurableJobCommitState : std::uint8_t {
+  /** @brief Atomic replacement did not occur; the prior record remains truth.
+   */
+  NotPublished,
+  /** @brief Replacement occurred, but crash durability is not confirmed. */
+  RecordPublishedDurabilityUnconfirmed,
+  /** @brief Replacement and every required directory barrier completed. */
+  ConfirmedCommitted,
+};
+
+/**
+ * @brief Deterministic Job-journal observation stages for maintained tests.
+ * @throws Nothing for value operations.
+ * @note The observer runs while the durable-state mutex excludes readers. Its
+ * exception is converted into `DurableJobCommitResult`; it grants no path or
+ * mutation authority. Production leaves the observer empty.
+ */
+enum class DurableJobCommitStage : std::uint8_t {
+  /** @brief Replacement cache storage is prepared before filesystem mutation.
+   */
+  CachePrepared,
+  /** @brief The private replacement file is synchronized. */
+  PrivateFileSynchronized,
+  /** @brief Atomic rename made the replacement record visible. */
+  RecordPublished,
+  /** @brief The Job-record directory barrier completed. */
+  JobsDirectorySynchronized,
+  /** @brief The control-directory barrier completed. */
+  ControlDirectorySynchronized,
+  /** @brief The durability-root barrier completed. */
+  DirectoryBarriersCompleted,
+};
+
+/**
+ * @brief Allocation-free outcome of one durable Job-record transaction.
+ * @throws Nothing for construction, copying, and observation.
+ * @note A non-null `failure` describes an operation or deterministic observer
+ * failure at the reported state. A clean success is exactly
+ * `ConfirmedCommitted` with no failure.
+ */
+struct DurableJobCommitResult final {
+  /** @brief Furthest irreversible publication/durability state reached. */
+  DurableJobCommitState state = DurableJobCommitState::NotPublished;
+  /** @brief Captured original failure, or null after clean confirmed commit. */
+  std::exception_ptr failure;
+
+  /**
+   * @brief Reports whether publication and every barrier completed cleanly.
+   * @return True only for confirmed commit without a captured failure.
+   * @throws Nothing.
+   */
+  bool succeeded() const noexcept {
+    return state == DurableJobCommitState::ConfirmedCommitted &&
+           failure == nullptr;
+  }
+
+  /**
+   * @brief Reports whether atomic record publication occurred.
+   * @return False only for `NotPublished`.
+   * @throws Nothing.
+   */
+  bool published() const noexcept {
+    return state != DurableJobCommitState::NotPublished;
+  }
+
+  /**
+   * @brief Rethrows the captured original failure when present.
+   * @return Nothing.
+   * @throws The exact exception captured by `persist_job`.
+   */
+  void rethrow_failure() const {
+    if (failure != nullptr) {
+      std::rethrow_exception(failure);
+    }
+  }
+};
+
+/**
+ * @brief Typed service-level report of an ambiguous or lost Job-journal ack.
+ * @throws std::bad_alloc only while constructing base diagnostic storage.
+ * @note The service has already aligned process-local Job truth with the
+ * published record and entered fail-stop before throwing this value. Restart
+ * is required before another durable mutation.
+ */
+class DurableJobCommitError final : public DurableStateError {
+ public:
+  /**
+   * @brief Captures the exact Job and furthest journal commit state.
+   * @param job_id Durable Job whose replacement was published.
+   * @param state Published or confirmed commit state.
+   * @param cause Original filesystem/observer failure.
+   * @throws std::invalid_argument when `job_id` is invalid or `state` says the
+   * record was not published.
+   * @throws std::bad_alloc while constructing diagnostic storage.
+   */
+  DurableJobCommitError(JobId job_id, DurableJobCommitState state,
+                        std::exception_ptr cause);
+
+  /**
+   * @brief Returns the exact affected durable Job identity.
+   * @return Borrowed immutable Job identity.
+   * @throws Nothing.
+   */
+  const JobId& job_id() const noexcept { return job_id_; }
+
+  /**
+   * @brief Returns the furthest irreversible commit state.
+   * @return Published-unconfirmed or confirmed-committed state.
+   * @throws Nothing.
+   */
+  DurableJobCommitState state() const noexcept { return state_; }
+
+  /**
+   * @brief Rethrows the original persistence/observer failure when present.
+   * @return Nothing.
+   * @throws The exact captured cause.
+   */
+  void rethrow_cause() const {
+    if (cause_ != nullptr) {
+      std::rethrow_exception(cause_);
+    }
+  }
+
+ private:
+  /** @brief Exact Job whose replacement crossed atomic publication. */
+  JobId job_id_;
+  /** @brief Furthest irreversible commit state. */
+  DurableJobCommitState state_;
+  /** @brief Original persistence or deterministic observer failure. */
+  std::exception_ptr cause_;
+};
+
+/**
  * @brief Source-private durable-state configuration and deterministic seam.
  * @throws Nothing for default construction; function copies may allocate.
  */
@@ -88,6 +229,14 @@ struct DurableServerStateOptions final {
    * retry/restart reconciliation.
    */
   std::function<void(DurableArtifactCommitStage)> artifact_commit_observer;
+  /**
+   * @brief Optional observer/fault injector for Job-journal transitions.
+   * @note Exceptions are captured in `DurableJobCommitResult`. An exception
+   * before `RecordPublished` restores the prior cache and permits ordinary
+   * caller rollback; an exception at or after publication preserves the new
+   * cache truth and requires reconciliation/fail-stop.
+   */
+  std::function<void(DurableJobCommitStage)> job_commit_observer;
 };
 
 /**
@@ -283,12 +432,15 @@ class DurableServerState final {
   /**
    * @brief Atomically persists one complete accepted Job truth record.
    * @param record Fully joined current control-plane truth.
-   * @return Nothing after file and leaf-to-root directory barriers complete.
-   * @throws std::invalid_argument for malformed identity/spec/state semantics.
-   * @throws DurableCapabilityError/system/allocation failures from persistence.
-   * @note The prior record remains authoritative until atomic replacement.
+   * @return Explicit publication/durability state plus any captured failure.
+   * @throws Nothing; validation, allocation, observer, and filesystem failures
+   * are captured in the returned result.
+   * @note All serialization and cache allocation occur before atomic rename.
+   * `NotPublished` leaves the prior record/cache authoritative. Any published
+   * state keeps the replacement in the no-throw cache even when a later
+   * directory barrier or response-stage observer fails.
    */
-  void persist_job(const DurableJobRecord& record);
+  DurableJobCommitResult persist_job(const DurableJobRecord& record) noexcept;
 
   /**
    * @brief Durably removes one rolled-back pre-acceptance Job record.

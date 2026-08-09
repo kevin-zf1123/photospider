@@ -219,6 +219,18 @@ class SingleTenantJobServiceTestAccess final {
   }
 
   /**
+   * @brief Reports whether journal commit ambiguity fail-stopped mutations.
+   * @param service Live service whose private monotonic state is observed.
+   * @return True after a published journal operation lost confirmation/ack.
+   * @throws std::system_error for mutex synchronization failure.
+   * @note This observation grants no recovery or mutation authority.
+   */
+  static bool journal_faulted(const SingleTenantJobService& service) {
+    std::lock_guard<std::mutex> lock(service.mutex_);
+    return service.journal_faulted_;
+  }
+
+  /**
    * @brief Captures active, completed, and joining worker ownership.
    * @param service Live service whose private ownership is observed.
    * @return Exact mutex-consistent ownership snapshot.

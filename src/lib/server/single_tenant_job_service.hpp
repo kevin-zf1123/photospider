@@ -206,7 +206,10 @@ struct JobSnapshot final {
  * explicit attempt, validates the complete returned tuple, linearizes
  * cancellation versus crash-durable artifact commit, settles quota, and alone
  * publishes Job/retry truth. One private infrastructure reaper joins completed
- * assignment threads throughout the service lifetime.
+ * assignment threads throughout the service lifetime. A Job-journal failure
+ * after atomic record publication aligns in-memory truth with that record,
+ * retains active quota, stops every later durable mutation, and requires a
+ * service restart for conservative recovery.
  *
  * @throws std::invalid_argument when construction receives an invalid tenant or
  * null factory.
@@ -228,7 +231,10 @@ class SingleTenantJobService final {
    * @param state_options Optional source-private durable commit observer.
    * @throws std::invalid_argument for invalid configuration.
    * @throws std::bad_alloc when service/reaper state allocation fails.
-   * @throws std::system_error when the private reaper thread cannot start.
+   * @throws DurableStateError and derived durability, corruption, or commit
+   * errors while recovering the durable root or publishing a repaired Job.
+   * @throws std::system_error for filesystem or private reaper creation
+   * failures.
    */
   SingleTenantJobService(
       TenantId tenant_id, TenantQuotaLimits quota_limits,
@@ -266,9 +272,12 @@ class SingleTenantJobService final {
    * @throws std::bad_alloc when Job state or worker setup exhausts memory.
    * @throws std::system_error when process-local worker-thread creation fails.
    * @note Checkpoint validation and complete quota reservation precede durable
-   * accepted-state publication. Failed persistence/thread construction durably
-   * rolls back Job state, releases quota, notifies observers, and leaves no
-   * unowned joinable handle. The remaining return path is a non-throwing move.
+   * accepted-state publication. Thread construction occurs while `mutex_`
+   * prevents worker entry and before journal publication. A pre-publication
+   * journal failure removes process-local acceptance, releases quota, and lets
+   * the reaper join the fenced worker. A post-publication failure throws
+   * `DurableJobCommitError`, retains aligned truth/quota, and fail-stops
+   * writes. The remaining successful return path is a non-throwing move.
    */
   JobSubmission submit(JobSpec spec);
 
@@ -279,7 +288,9 @@ class SingleTenantJobService final {
    * the Job is absent, not failed, unsettled, or service shutdown has begun.
    * @throws TenantQuotaExceeded when the unchanged envelope cannot be reserved.
    * @throws DurableStateError/system/allocation failures during durable
-   * replacement or worker start; prior failed truth is restored on failure.
+   * replacement or worker start. A pre-publication failure preserves prior
+   * failed truth; a post-publication `DurableJobCommitError` preserves the new
+   * attempt truth/quota and fail-stops writes until restart.
    * @note JobId, JobSpecDigest, checkpoint, stable artifact, and stable commit
    * identity are preserved. Attempt/worker/lease/quota identities are fresh.
    */
@@ -309,11 +320,14 @@ class SingleTenantJobService final {
    * @brief Records monotonic cancellation intent for one active Job.
    * @param job_id Exact Job identity.
    * @return True only when this call newly accepted cancellation intent.
-   * @throws Nothing.
+   * @throws DurableStateError/system/allocation failures from journal
+   * publication, including `DurableJobCommitError` after atomic publication.
    * @note Terminal Jobs, absent Jobs, and repeated requests return false.
-   * Active Host compute is not promised bounded preemption.
+   * Active Host compute is not promised bounded preemption. A post-publication
+   * failure leaves cancellation accepted in memory and on disk, retains quota,
+   * and fail-stops later mutations until restart.
    */
-  bool cancel(const JobId& job_id) noexcept;
+  bool cancel(const JobId& job_id);
 
   /**
    * @brief Looks up an immutable committed artifact by authoritative id.
@@ -436,6 +450,8 @@ class SingleTenantJobService final {
 
   /** @brief Guards allocation-free retry publication and rollback. */
   static_assert(std::is_nothrow_move_constructible_v<JobSnapshot>);
+  /** @brief Guards allocation-free published-snapshot cache alignment. */
+  static_assert(std::is_nothrow_swappable_v<JobSnapshot>);
   /** @brief Guards allocation-free transfer of accepted quota ownership. */
   static_assert(std::is_nothrow_move_constructible_v<TenantQuotaReservation>);
   /** @brief Guards allocation-free atomic in-memory retry replacement. */
@@ -533,12 +549,37 @@ class SingleTenantJobService final {
   DurableJobRecord durable_record(const JobSnapshot& snapshot) const;
 
   /**
-   * @brief Persists one current snapshot while caller holds `mutex_`.
+   * @brief Publishes one replacement to journal and matching memory truth.
+   * @param control Current process-local Job/quota record under `mutex_`.
+   * @param candidate Fully prepared replacement snapshot.
+   * @return Nothing after a clean confirmed commit and no-throw memory swap.
+   * @throws The original pre-publication failure while leaving `control`
+   * unchanged. Throws `DurableJobCommitError` after publication, after first
+   * swapping `candidate` into `control` and entering service fail-stop.
+   * @note The caller holds `mutex_`. Active quota is deliberately untouched;
+   * callers settle it only after this method returns successfully.
+   */
+  void publish_snapshot_locked(JobControlRecord& control,
+                               JobSnapshot candidate);
+
+  /**
+   * @brief Rejects a new durable mutation after journal commit ambiguity.
+   * @return Nothing when durable mutation remains available.
+   * @throws DurableStateError when restart reconciliation is required.
+   * @note The caller holds `mutex_`.
+   */
+  void require_journal_available_locked() const;
+
+  /**
+   * @brief Persists one recovery or current snapshot in serialized service
+   * context.
    * @param snapshot Fully joined current truth.
    * @return Nothing after crash-durability barriers complete.
-   * @throws As `DurableServerState::persist_job`.
-   * @note Synchronous metadata I/O under the control mutex is the current
-   * single-tenant linearization policy.
+   * @throws The captured pre-publication failure or
+   * `DurableJobCommitError` after an ambiguous/lost acknowledgement.
+   * @note Called either during single-threaded construction before the reaper
+   * and public access begin, or while the caller holds `mutex_`. Synchronous
+   * metadata I/O is the current single-tenant linearization policy.
    */
   void persist_snapshot_locked(const JobSnapshot& snapshot);
 
@@ -569,6 +610,12 @@ class SingleTenantJobService final {
   std::size_t workers_joining_ = 0U;
   /** @brief Monotonic service destruction/cancellation intent. */
   bool shutting_down_ = false;
+  /**
+   * @brief Monotonic fail-stop after an atomically published journal error.
+   * @note While true, reads remain available, workers are fenced, active quota
+   * remains reserved, and only destruction/restart may advance lifecycle.
+   */
+  bool journal_faulted_ = false;
   /** @brief Sole bounded infrastructure thread that joins worker handles. */
   std::thread reaper_;
 };

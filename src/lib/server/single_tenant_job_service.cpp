@@ -483,7 +483,7 @@ SingleTenantJobService::SingleTenantJobService(
       snapshot.failure = JobAttemptFailure::None;
       snapshot.message.clear();
       snapshot.output_receipt = artifact->receipt;
-      durable_state_->persist_job(durable_record(snapshot));
+      persist_snapshot_locked(snapshot);
     } else if (!is_terminal_job_state(recovered.state)) {
       snapshot.state = JobState::Failed;
       snapshot.attempt_settled = true;
@@ -492,7 +492,7 @@ SingleTenantJobService::SingleTenantJobService(
       snapshot.message =
           "service restart interrupted the process-local current attempt";
       snapshot.output_receipt.reset();
-      durable_state_->persist_job(durable_record(snapshot));
+      persist_snapshot_locked(snapshot);
     } else if (recovered.state == JobState::Cancelled && artifact_matches) {
       throw DurableCorruptionError(
           "cancelled durable Job conflicts with a committed stable artifact");
@@ -527,15 +527,17 @@ SingleTenantJobService::~SingleTenantJobService() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     shutting_down_ = true;
     for (auto& entry : jobs_) {
-      JobSnapshot& snapshot = entry.second.snapshot;
-      if (!is_terminal_job_state(snapshot.state)) {
-        snapshot.cancellation_requested = true;
-        snapshot.state = JobState::Cancelling;
+      if (!journal_faulted_ &&
+          !is_terminal_job_state(entry.second.snapshot.state)) {
+        JobSnapshot candidate = entry.second.snapshot;
+        candidate.cancellation_requested = true;
+        candidate.state = JobState::Cancelling;
         try {
-          persist_snapshot_locked(snapshot);
+          publish_snapshot_locked(entry.second, std::move(candidate));
         } catch (...) {
-          // Abrupt restart recovery will classify any unpersisted active
-          // record.
+          // A pre-publication failure leaves prior truth; a post-publication
+          // failure already aligned memory and entered fail-stop. Restart
+          // classifies either surviving nonterminal record conservatively.
         }
       }
     }
@@ -554,6 +556,7 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
   if (shutting_down_) {
     throw std::invalid_argument("single-tenant service is shutting down");
   }
+  require_journal_available_locked();
   std::shared_ptr<const ArtifactRecord> checkpoint;
   if (immutable_spec->checkpoint_artifact_id().has_value()) {
     checkpoint = durable_state_->find_artifact(
@@ -595,16 +598,15 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
 
   JobSubmission submission{snapshot.job_id, immutable_spec->digest(),
                            assignment.identity};
+  const DurableJobRecord durable_candidate = durable_record(snapshot);
   const std::string job_key = snapshot.job_id.value();
   const std::string worker_key = assignment.identity.attempt_id.value();
   TenantQuotaReservation reservation = quota_authority_->reserve(
       snapshot.job_id, immutable_spec->resource_request());
-  bool durable_published = false;
   bool job_inserted = false;
   bool worker_inserted = false;
+  decltype(workers_)::iterator worker_record = workers_.end();
   try {
-    persist_snapshot_locked(snapshot);
-    durable_published = true;
     const bool inserted =
         jobs_.emplace(job_key, JobControlRecord{snapshot, reservation}).second;
     if (!inserted) {
@@ -612,11 +614,12 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
     }
     job_inserted = true;
     const auto worker = workers_.try_emplace(worker_key);
+    worker_record = worker.first;
     worker_inserted = worker.second;
     if (!worker_inserted) {
       throw std::logic_error("fresh attempt collided in worker ownership");
     }
-    worker.first->second.thread = WorkerThreadRecord::start_assignment_thread(
+    worker_record->second.thread = WorkerThreadRecord::start_assignment_thread(
         this, std::move(assignment));
   } catch (...) {
     std::exception_ptr failure = std::current_exception();
@@ -626,13 +629,6 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
     if (job_inserted) {
       jobs_.erase(job_key);
     }
-    if (durable_published) {
-      try {
-        static_cast<void>(durable_state_->erase_job(snapshot.job_id));
-      } catch (...) {
-        failure = std::current_exception();
-      }
-    }
     try {
       quota_authority_->release_attempt(reservation.id);
     } catch (...) {
@@ -640,6 +636,23 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
     }
     condition_.notify_all();
     std::rethrow_exception(failure);
+  }
+
+  const DurableJobCommitResult commit =
+      durable_state_->persist_job(durable_candidate);
+  if (!commit.succeeded()) {
+    if (!commit.published()) {
+      jobs_.erase(job_key);
+      worker_record->second.completed = true;
+      quota_authority_->release_attempt(reservation.id);
+      condition_.notify_all();
+      commit.rethrow_failure();
+      throw std::logic_error(
+          "unpublished Job journal failure omitted its exception");
+    }
+    journal_faulted_ = true;
+    condition_.notify_all();
+    throw DurableJobCommitError(snapshot.job_id, commit.state, commit.failure);
   }
   return submission;
 }
@@ -651,6 +664,7 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
     return std::nullopt;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  require_journal_available_locked();
   const auto found = jobs_.find(job_id.value());
   if (found == jobs_.end() || shutting_down_ ||
       found->second.snapshot.state != JobState::Failed ||
@@ -701,42 +715,29 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
   replacement.output_receipt.reset();
   JobSubmission submission{job_id, previous.spec->digest(),
                            assignment.identity};
+  const DurableJobRecord durable_candidate = durable_record(replacement);
   const std::string worker_key = assignment.identity.attempt_id.value();
   TenantQuotaReservation reservation =
       quota_authority_->reserve(job_id, previous.spec->resource_request());
   JobControlRecord replacement_control{
       std::move(replacement),
       std::optional<TenantQuotaReservation>(std::move(reservation))};
-  bool durable_replaced = false;
   bool worker_inserted = false;
-  bool control_published = false;
+  decltype(workers_)::iterator worker_record = workers_.end();
   try {
-    persist_snapshot_locked(replacement_control.snapshot);
-    durable_replaced = true;
     const auto worker = workers_.try_emplace(worker_key);
+    worker_record = worker.first;
     worker_inserted = worker.second;
     if (!worker_inserted) {
       throw std::logic_error(
           "fresh retry attempt collided in worker ownership");
     }
-    std::swap(found->second, replacement_control);
-    control_published = true;
-    worker.first->second.thread = WorkerThreadRecord::start_assignment_thread(
+    worker_record->second.thread = WorkerThreadRecord::start_assignment_thread(
         this, std::move(assignment));
   } catch (...) {
     std::exception_ptr failure = std::current_exception();
     if (worker_inserted) {
       workers_.erase(worker_key);
-    }
-    if (control_published) {
-      std::swap(found->second, replacement_control);
-    }
-    if (durable_replaced) {
-      try {
-        persist_snapshot_locked(found->second.snapshot);
-      } catch (...) {
-        failure = std::current_exception();
-      }
     }
     if (replacement_control.reservation.has_value()) {
       try {
@@ -747,6 +748,24 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
     }
     condition_.notify_all();
     std::rethrow_exception(failure);
+  }
+
+  const DurableJobCommitResult commit =
+      durable_state_->persist_job(durable_candidate);
+  if (!commit.published() && !commit.succeeded()) {
+    worker_record->second.completed = true;
+    quota_authority_->release_attempt(replacement_control.reservation->id);
+    replacement_control.reservation.reset();
+    condition_.notify_all();
+    commit.rethrow_failure();
+    throw std::logic_error(
+        "unpublished retry journal failure omitted its exception");
+  }
+  std::swap(found->second, replacement_control);
+  if (!commit.succeeded()) {
+    journal_faulted_ = true;
+    condition_.notify_all();
+    throw DurableJobCommitError(job_id, commit.state, commit.failure);
   }
   return submission;
 }
@@ -792,28 +811,24 @@ std::optional<JobSnapshot> SingleTenantJobService::wait_for(
 }
 
 /** @copydoc ps::server::SingleTenantJobService::cancel */
-bool SingleTenantJobService::cancel(const JobId& job_id) noexcept {
+bool SingleTenantJobService::cancel(const JobId& job_id) {
   if (!job_id.valid()) {
     return false;
   }
-  try {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = jobs_.find(job_id.value());
-    if (found == jobs_.end() ||
-        is_terminal_job_state(found->second.snapshot.state) ||
-        found->second.snapshot.cancellation_requested) {
-      return false;
-    }
-    JobSnapshot replacement = found->second.snapshot;
-    replacement.cancellation_requested = true;
-    replacement.state = JobState::Cancelling;
-    persist_snapshot_locked(replacement);
-    found->second.snapshot = std::move(replacement);
-    condition_.notify_all();
-    return true;
-  } catch (...) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  require_journal_available_locked();
+  const auto found = jobs_.find(job_id.value());
+  if (found == jobs_.end() ||
+      is_terminal_job_state(found->second.snapshot.state) ||
+      found->second.snapshot.cancellation_requested) {
     return false;
   }
+  JobSnapshot replacement = found->second.snapshot;
+  replacement.cancellation_requested = true;
+  replacement.state = JobState::Cancelling;
+  publish_snapshot_locked(found->second, std::move(replacement));
+  condition_.notify_all();
+  return true;
 }
 
 /** @copydoc ps::server::SingleTenantJobService::find_artifact */
@@ -828,6 +843,7 @@ bool SingleTenantJobService::delete_artifact(const ArtifactId& artifact_id) {
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  require_journal_available_locked();
   for (const auto& entry : jobs_) {
     const JobSnapshot& snapshot = entry.second.snapshot;
     if (!is_terminal_job_state(snapshot.state) &&
@@ -859,15 +875,14 @@ void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = jobs_.find(assignment.identity.job_id.value());
-      if (found != jobs_.end() &&
+      if (!journal_faulted_ && found != jobs_.end() &&
           found->second.snapshot.assignment == assignment.identity &&
           !is_terminal_job_state(found->second.snapshot.state)) {
         assignment_present = true;
         if (!found->second.snapshot.cancellation_requested) {
           JobSnapshot running = found->second.snapshot;
           running.state = JobState::Running;
-          persist_snapshot_locked(running);
-          found->second.snapshot = std::move(running);
+          publish_snapshot_locked(found->second, std::move(running));
         }
       }
     }
@@ -974,7 +989,7 @@ bool SingleTenantJobService::cancellation_requested_for(
     const AttemptIdentity& expected) const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = jobs_.find(expected.job_id.value());
-  return shutting_down_ || found == jobs_.end() ||
+  return shutting_down_ || journal_faulted_ || found == jobs_.end() ||
          found->second.snapshot.assignment != expected ||
          found->second.snapshot.cancellation_requested;
 }
@@ -988,7 +1003,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
   try {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = jobs_.find(expected.job_id.value());
-    if (found == jobs_.end() ||
+    if (journal_faulted_ || found == jobs_.end() ||
         is_terminal_job_state(found->second.snapshot.state)) {
       return;
     }
@@ -1008,23 +1023,21 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
     if (!identity_valid) {
       reject_report(candidate,
                     "worker report identity does not match current assignment");
-      persist_snapshot_locked(candidate);
+      publish_snapshot_locked(control, candidate);
       if (control.reservation.has_value()) {
         quota_authority_->release_attempt(control.reservation->id);
         control.reservation.reset();
       }
-      control.snapshot = std::move(candidate);
       condition_.notify_all();
       return;
     }
     if (!has_valid_worker_report_shape(report)) {
       reject_report(candidate, "worker report has an invalid semantic shape");
-      persist_snapshot_locked(candidate);
+      publish_snapshot_locked(control, candidate);
       if (control.reservation.has_value()) {
         quota_authority_->release_attempt(control.reservation->id);
         control.reservation.reset();
       }
-      control.snapshot = std::move(candidate);
       condition_.notify_all();
       return;
     }
@@ -1033,12 +1046,11 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
       reject_report(
           candidate,
           "worker reported cancellation without control-plane intent");
-      persist_snapshot_locked(candidate);
+      publish_snapshot_locked(control, candidate);
       if (control.reservation.has_value()) {
         quota_authority_->release_attempt(control.reservation->id);
         control.reservation.reset();
       }
-      control.snapshot = std::move(candidate);
       condition_.notify_all();
       return;
     }
@@ -1056,12 +1068,11 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
       if (candidate.message.empty()) {
         candidate.message = "worker attempt failed without a diagnostic";
       }
-      persist_snapshot_locked(candidate);
+      publish_snapshot_locked(control, candidate);
       if (control.reservation.has_value()) {
         quota_authority_->release_attempt(control.reservation->id);
         control.reservation.reset();
       }
-      control.snapshot = std::move(candidate);
       condition_.notify_all();
       return;
     }
@@ -1072,12 +1083,11 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
       if (candidate.message.empty()) {
         candidate.message = "cancellation observed before artifact commit";
       }
-      persist_snapshot_locked(candidate);
+      publish_snapshot_locked(control, candidate);
       if (control.reservation.has_value()) {
         quota_authority_->release_attempt(control.reservation->id);
         control.reservation.reset();
       }
-      control.snapshot = std::move(candidate);
       condition_.notify_all();
       return;
     }
@@ -1110,14 +1120,13 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
     candidate.state = JobState::Succeeded;
     candidate.failure = JobAttemptFailure::None;
     candidate.message.clear();
-    persist_snapshot_locked(candidate);
-    control.snapshot = std::move(candidate);
+    publish_snapshot_locked(control, candidate);
     condition_.notify_all();
   } catch (const std::exception& error) {
     try {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = jobs_.find(expected.job_id.value());
-      if (found == jobs_.end() ||
+      if (journal_faulted_ || found == jobs_.end() ||
           found->second.snapshot.assignment != expected ||
           is_terminal_job_state(found->second.snapshot.state)) {
         return;
@@ -1129,6 +1138,10 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
           return;
         }
       } catch (...) {
+        if (journal_faulted_) {
+          condition_.notify_all();
+          return;
+        }
         // The durable occurrence remains restart-reconcilable; publish the
         // strongest process-local failure state possible below.
       }
@@ -1144,9 +1157,11 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
       failure.message =
           std::string("durable terminal publication failed: ") + error.what();
       try {
-        persist_snapshot_locked(failure);
+        publish_snapshot_locked(control, failure);
       } catch (...) {
-        failure.message.append("; failed to persist terminal diagnostic");
+        journal_faulted_ = true;
+        condition_.notify_all();
+        return;
       }
       if (control.reservation.has_value()) {
         try {
@@ -1156,7 +1171,6 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
           failure.message.append("; failed to release active quota");
         }
       }
-      control.snapshot = std::move(failure);
       condition_.notify_all();
     } catch (...) {
       std::terminate();
@@ -1165,7 +1179,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
     try {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = jobs_.find(expected.job_id.value());
-      if (found != jobs_.end() &&
+      if (!journal_faulted_ && found != jobs_.end() &&
           found->second.snapshot.assignment == expected &&
           !is_terminal_job_state(found->second.snapshot.state)) {
         try {
@@ -1174,6 +1188,10 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
             return;
           }
         } catch (...) {
+          if (journal_faulted_) {
+            condition_.notify_all();
+            return;
+          }
           // The durable occurrence remains restart-reconcilable; publish the
           // strongest process-local failure state possible below.
         }
@@ -1189,9 +1207,11 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
         failure.message =
             "durable terminal publication raised a non-standard exception";
         try {
-          persist_snapshot_locked(failure);
+          publish_snapshot_locked(found->second, failure);
         } catch (...) {
-          failure.message.append("; failed to persist terminal diagnostic");
+          journal_faulted_ = true;
+          condition_.notify_all();
+          return;
         }
         if (found->second.reservation.has_value()) {
           try {
@@ -1201,7 +1221,6 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
             failure.message.append("; failed to release active quota");
           }
         }
-        found->second.snapshot = std::move(failure);
         condition_.notify_all();
       }
     } catch (...) {
@@ -1234,8 +1253,7 @@ bool SingleTenantJobService::reconcile_published_artifact_locked(
   succeeded.failure = JobAttemptFailure::None;
   succeeded.message.clear();
   succeeded.output_receipt = artifact->receipt;
-  persist_snapshot_locked(succeeded);
-  control.snapshot = std::move(succeeded);
+  publish_snapshot_locked(control, std::move(succeeded));
   return true;
 }
 
@@ -1263,7 +1281,49 @@ DurableJobRecord SingleTenantJobService::durable_record(
 /** @copydoc ps::server::SingleTenantJobService::persist_snapshot_locked */
 void SingleTenantJobService::persist_snapshot_locked(
     const JobSnapshot& snapshot) {
-  durable_state_->persist_job(durable_record(snapshot));
+  const DurableJobCommitResult commit =
+      durable_state_->persist_job(durable_record(snapshot));
+  if (commit.succeeded()) {
+    return;
+  }
+  if (!commit.published()) {
+    commit.rethrow_failure();
+    throw std::logic_error(
+        "unpublished Job journal failure omitted its exception");
+  }
+  journal_faulted_ = true;
+  throw DurableJobCommitError(snapshot.job_id, commit.state, commit.failure);
+}
+
+/** @copydoc ps::server::SingleTenantJobService::publish_snapshot_locked */
+void SingleTenantJobService::publish_snapshot_locked(JobControlRecord& control,
+                                                     JobSnapshot candidate) {
+  const DurableJobCommitResult commit =
+      durable_state_->persist_job(durable_record(candidate));
+  if (commit.published()) {
+    std::swap(control.snapshot, candidate);
+  }
+  if (commit.succeeded()) {
+    return;
+  }
+  if (!commit.published()) {
+    commit.rethrow_failure();
+    throw std::logic_error(
+        "unpublished Job journal failure omitted its exception");
+  }
+  journal_faulted_ = true;
+  condition_.notify_all();
+  throw DurableJobCommitError(control.snapshot.job_id, commit.state,
+                              commit.failure);
+}
+
+/** @copydoc
+ * ps::server::SingleTenantJobService::require_journal_available_locked */
+void SingleTenantJobService::require_journal_available_locked() const {
+  if (journal_faulted_) {
+    throw DurableStateError(
+        "durable Job journal is fail-stopped; restart required");
+  }
 }
 
 }  // namespace ps::server

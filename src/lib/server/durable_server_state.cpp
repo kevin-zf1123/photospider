@@ -968,7 +968,7 @@ std::shared_ptr<const JobSpec> read_job_spec(FrameReader* reader) {
   request.staging_bytes = parse_unsigned<std::uint64_t>(reader->next());
   request.retention_bytes = parse_unsigned<std::uint64_t>(reader->next());
   const std::size_t devices = parse_unsigned<std::size_t>(reader->next());
-  if (devices > kMaximumOpaqueIdentityBytes) {
+  if (devices > kMaximumConfiguredDevicesPerJob) {
     throw DurableCorruptionError("durable JobSpec device count is excessive");
   }
   request.devices.reserve(devices);
@@ -1353,6 +1353,21 @@ bool remove_regular_leaf_if_present(int parent, const std::string& name) {
 }
 
 }  // namespace
+
+/** @copydoc ps::server::DurableJobCommitError::DurableJobCommitError */
+DurableJobCommitError::DurableJobCommitError(JobId job_id,
+                                             DurableJobCommitState state,
+                                             std::exception_ptr cause)
+    : DurableStateError(
+          "durable Job journal acknowledgement failed; restart required"),
+      job_id_(std::move(job_id)),
+      state_(state),
+      cause_(std::move(cause)) {
+  if (!job_id_.valid() || state_ == DurableJobCommitState::NotPublished) {
+    throw std::invalid_argument(
+        "durable Job commit error requires a published Job record");
+  }
+}
 
 /** @copydoc ps::server::DurableServerState::DurableServerState */
 DurableServerState::DurableServerState(std::filesystem::path root,
@@ -1763,39 +1778,103 @@ std::uint64_t DurableServerState::erase_artifact(
 }
 
 /** @copydoc ps::server::DurableServerState::persist_job */
-void DurableServerState::persist_job(const DurableJobRecord& record) {
-  validate_durable_job_record(record, tenant_id_);
-  const std::string bytes = serialize_job_record(record);
-  std::lock_guard<std::mutex> lock(mutex_);
-  verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
-  if (next_private_record_sequence_ == 0U) {
-    throw std::overflow_error("private durable Job record sequence exhausted");
-  }
-  const std::string private_name =
-      ".job-" + record.job_id.value() + "-" +
-      std::to_string(next_private_record_sequence_) + ".tmp";
-  ++next_private_record_sequence_;
-  bool private_exists = false;
+DurableJobCommitResult DurableServerState::persist_job(
+    const DurableJobRecord& record) noexcept {
+  static_assert(std::is_nothrow_swappable_v<DurableJobRecord>,
+                "Job journal cache publication must not throw");
   try {
-    write_private_file(jobs_descriptor_, private_name, bytes);
-    private_exists = true;
+    validate_durable_job_record(record, tenant_id_);
+    const std::string bytes = serialize_job_record(record);
+    DurableJobRecord cache_candidate = record;
+    const std::string job_key = record.job_id.value();
     const std::string final_name = job_record_name(record.job_id);
-    if (::renameat(jobs_descriptor_, private_name.c_str(), jobs_descriptor_,
-                   final_name.c_str()) != 0) {
-      throw_errno("publish durable Job record");
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    verify_root_binding(root_, root_descriptor_, root_device_, root_inode_);
+    if (next_private_record_sequence_ == 0U) {
+      throw std::overflow_error(
+          "private durable Job record sequence exhausted");
     }
-    private_exists = false;
-    synchronize_descriptor(jobs_descriptor_, "jobs directory");
-    synchronize_descriptor(control_descriptor_, "control directory");
-    synchronize_descriptor(root_descriptor_, "durability root directory");
+    const std::string private_name =
+        ".job-" + job_key + "-" +
+        std::to_string(next_private_record_sequence_) + ".tmp";
+    ++next_private_record_sequence_;
+
+    auto cached = jobs_.find(job_key);
+    bool cache_inserted = false;
+    if (cached == jobs_.end()) {
+      const auto inserted = jobs_.emplace(job_key, std::move(cache_candidate));
+      if (!inserted.second) {
+        throw std::logic_error("durable Job cache insertion conflicted");
+      }
+      cached = inserted.first;
+      cache_inserted = true;
+    } else {
+      std::swap(cached->second, cache_candidate);
+    }
+
+    DurableJobCommitState state = DurableJobCommitState::NotPublished;
+    bool private_may_exist = false;
+    try {
+      if (options_.job_commit_observer) {
+        options_.job_commit_observer(DurableJobCommitStage::CachePrepared);
+      }
+      private_may_exist = true;
+      write_private_file(jobs_descriptor_, private_name, bytes);
+      if (options_.job_commit_observer) {
+        options_.job_commit_observer(
+            DurableJobCommitStage::PrivateFileSynchronized);
+      }
+      if (::renameat(jobs_descriptor_, private_name.c_str(), jobs_descriptor_,
+                     final_name.c_str()) != 0) {
+        throw_errno("publish durable Job record");
+      }
+      private_may_exist = false;
+      state = DurableJobCommitState::RecordPublishedDurabilityUnconfirmed;
+      if (options_.job_commit_observer) {
+        options_.job_commit_observer(DurableJobCommitStage::RecordPublished);
+      }
+      synchronize_descriptor(jobs_descriptor_, "jobs directory");
+      if (options_.job_commit_observer) {
+        options_.job_commit_observer(
+            DurableJobCommitStage::JobsDirectorySynchronized);
+      }
+      synchronize_descriptor(control_descriptor_, "control directory");
+      if (options_.job_commit_observer) {
+        options_.job_commit_observer(
+            DurableJobCommitStage::ControlDirectorySynchronized);
+      }
+      synchronize_descriptor(root_descriptor_, "durability root directory");
+      state = DurableJobCommitState::ConfirmedCommitted;
+      if (options_.job_commit_observer) {
+        options_.job_commit_observer(
+            DurableJobCommitStage::DirectoryBarriersCompleted);
+      }
+      return DurableJobCommitResult{state, nullptr};
+    } catch (...) {
+      const std::exception_ptr failure = std::current_exception();
+      if (state == DurableJobCommitState::NotPublished) {
+        if (private_may_exist) {
+          try {
+            static_cast<void>(
+                remove_regular_leaf_if_present(jobs_descriptor_, private_name));
+          } catch (...) {
+            // The original pre-publication failure remains authoritative. A
+            // private `.tmp` leaf is unambiguous constructor-time residue.
+          }
+        }
+        if (cache_inserted) {
+          static_cast<void>(jobs_.extract(cached));
+        } else {
+          std::swap(cached->second, cache_candidate);
+        }
+      }
+      return DurableJobCommitResult{state, failure};
+    }
   } catch (...) {
-    if (private_exists) {
-      static_cast<void>(
-          remove_regular_leaf_if_present(jobs_descriptor_, private_name));
-    }
-    throw;
+    return DurableJobCommitResult{DurableJobCommitState::NotPublished,
+                                  std::current_exception()};
   }
-  jobs_[record.job_id.value()] = record;
 }
 
 /** @copydoc ps::server::DurableServerState::erase_job */

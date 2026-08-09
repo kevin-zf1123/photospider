@@ -439,6 +439,10 @@ void validate_job_resource_request(const JobResourceRequest& request) {
     throw std::invalid_argument(
         "Job resource request contains a zero required bound");
   }
+  if (request.devices.size() > kMaximumConfiguredDevicesPerJob) {
+    throw std::invalid_argument(
+        "Job configured-device request count exceeds the supported maximum");
+  }
   std::string_view previous;
   for (const DeviceResourceRequest& device : request.devices) {
     if (!valid_device_id(device.device_id) || device.bytes == 0U ||

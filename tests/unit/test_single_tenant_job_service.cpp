@@ -48,6 +48,29 @@ JobResourceRequest test_job_resources(std::uint32_t cpu_slots = 2U) {
 }
 
 /**
+ * @brief Builds a strictly sorted configured-device vector of exact size.
+ * @param count Number of semantic device rows to create, at most 999.
+ * @param bytes Positive byte capacity/request for every row.
+ * @return Canonical zero-padded `device.NNN` rows in ascending order.
+ * @throws std::invalid_argument when `count` or `bytes` is invalid.
+ * @throws std::bad_alloc when result construction exhausts memory.
+ */
+std::vector<DeviceResourceRequest> configured_devices(std::size_t count,
+                                                      std::uint64_t bytes) {
+  if (count > 999U || bytes == 0U) {
+    throw std::invalid_argument("configured-device test input is invalid");
+  }
+  std::vector<DeviceResourceRequest> result;
+  result.reserve(count);
+  for (std::size_t index = 0U; index < count; ++index) {
+    const std::string digits = std::to_string(index);
+    result.push_back(DeviceResourceRequest{
+        "device." + std::string(3U - digits.size(), '0') + digits, bytes});
+  }
+  return result;
+}
+
+/**
  * @brief Builds permissive but finite tenant capacity for service unit tests.
  * @return Capacity covering the maintained concurrency/reaping stress cases.
  * @throws std::bad_alloc when configured-device storage allocation fails.
@@ -241,9 +264,9 @@ class TestJobService final {
    * @brief Forwards one monotonic cancellation request.
    * @param id Exact Job identity.
    * @return True only when cancellation was newly accepted.
-   * @throws Nothing.
+   * @throws Product journal failures unchanged.
    */
-  bool cancel(const JobId& id) noexcept { return service_.cancel(id); }
+  bool cancel(const JobId& id) { return service_.cancel(id); }
   /**
    * @brief Forwards one explicit failed-Job retry request.
    * @param id Exact durable Job identity.
@@ -318,6 +341,34 @@ AttemptIdentity make_test_identity(std::uint64_t ordinal) {
       WorkerInstanceId("worker.test." + std::to_string(ordinal));
   identity.worker_lease_generation = WorkerLeaseGeneration{ordinal + 1U};
   return identity;
+}
+
+/**
+ * @brief Builds one valid queued durable Job record for journal tests.
+ * @param ordinal Positive suffix for every stable identity.
+ * @param resources Complete canonical Job resource envelope.
+ * @return Identity-joined queued durable record.
+ * @throws Validation or allocation failures unchanged.
+ */
+DurableJobRecord make_test_durable_job_record(
+    std::uint64_t ordinal,
+    JobResourceRequest resources = test_job_resources()) {
+  auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.test"), 7,
+                                              OutputSlotId("image.final"),
+                                              std::move(resources));
+  AttemptIdentity identity = make_test_identity(ordinal);
+  identity.job_spec_digest = spec->digest();
+  DurableJobRecord record;
+  record.tenant_id = identity.tenant_id;
+  record.job_id = identity.job_id;
+  record.spec = std::move(spec);
+  record.assignment = identity;
+  record.output_artifact_id =
+      ArtifactId("artifact.test.job." + std::to_string(ordinal));
+  record.output_commit_id =
+      OutputCommitId("commit.test.job." + std::to_string(ordinal));
+  record.state = JobState::Queued;
+  return record;
 }
 
 /**
@@ -551,6 +602,66 @@ JobAttemptReport malformed_report(const JobAssignment& assignment,
       return report;
   }
   throw std::invalid_argument("malformed report shape is invalid");
+}
+
+/**
+ * @brief Thread-safe one-shot Job-journal fault controller for service tests.
+ * @throws Nothing for construction; `observe` throws only when armed.
+ */
+class OneShotJobCommitFailure final {
+ public:
+  /**
+   * @brief Selects the exact journal stage that may fail once.
+   * @param stage Immutable target transition.
+   * @throws Nothing.
+   */
+  explicit OneShotJobCommitFailure(DurableJobCommitStage stage) noexcept
+      : stage_(stage) {}
+
+  /**
+   * @brief Arms the next observation of the selected stage.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void arm() noexcept { armed_.store(true, std::memory_order_release); }
+
+  /**
+   * @brief Observes a real journal stage and consumes an armed fault.
+   * @param stage Current product transition.
+   * @return Nothing when disarmed or at another stage.
+   * @throws std::runtime_error exactly once after each `arm()`.
+   */
+  void observe(DurableJobCommitStage stage) {
+    if (stage == stage_ && armed_.exchange(false, std::memory_order_acq_rel)) {
+      throw std::runtime_error("injected one-shot Job journal failure");
+    }
+  }
+
+ private:
+  /** @brief Immutable exact transition selected for injection. */
+  DurableJobCommitStage stage_;
+  /** @brief Whether the next selected transition must throw. */
+  std::atomic<bool> armed_{false};
+};
+
+/**
+ * @brief Builds durable-state options wired to one test fault controller.
+ * @param failure Non-null controller retained by the observer.
+ * @return Options whose Job observer delegates to `failure`.
+ * @throws std::invalid_argument when `failure` is null.
+ * @throws std::bad_alloc when callback storage allocation fails.
+ */
+DurableServerStateOptions job_failure_options(
+    std::shared_ptr<OneShotJobCommitFailure> failure) {
+  if (failure == nullptr) {
+    throw std::invalid_argument("Job journal failure controller is null");
+  }
+  DurableServerStateOptions options;
+  options.job_commit_observer =
+      [failure = std::move(failure)](DurableJobCommitStage stage) {
+        failure->observe(stage);
+      };
+  return options;
 }
 
 /**
@@ -1120,6 +1231,53 @@ TEST(TenantQuotaAuthority, AccountsMultipleConfiguredDevicesExactly) {
   EXPECT_EQ(usage.device_bytes.at("gpu.test.2"), 0U);
 }
 
+TEST(SingleTenantJobContract,
+     EnforcesConfiguredDeviceCountAt128AcrossAdmissionQuotaAndRestart) {
+  JobResourceRequest maximum = test_job_resources();
+  maximum.devices = configured_devices(kMaximumConfiguredDevicesPerJob, 1U);
+  EXPECT_NO_THROW(JobSpec(GraphArtifactId("graph.test.devices"), 7,
+                          OutputSlotId("image.final"), maximum));
+
+  JobResourceRequest excessive = maximum;
+  excessive.devices =
+      configured_devices(kMaximumConfiguredDevicesPerJob + 1U, 1U);
+  EXPECT_THROW(JobSpec(GraphArtifactId("graph.test.devices"), 7,
+                       OutputSlotId("image.final"), excessive),
+               std::invalid_argument);
+
+  TenantQuotaLimits limits = test_quota_limits();
+  limits.capacity.devices =
+      configured_devices(kMaximumConfiguredDevicesPerJob, 2U);
+  TenantQuotaAuthority authority(TenantId("tenant.test"), limits);
+  const TenantQuotaReservation reservation =
+      authority.reserve(JobId("job.test.128-devices"), maximum);
+  EXPECT_EQ(authority.snapshot().device_bytes.size(),
+            kMaximumConfiguredDevicesPerJob);
+  authority.release_attempt(reservation.id);
+
+  TenantQuotaLimits excessive_limits = limits;
+  excessive_limits.capacity.devices =
+      configured_devices(kMaximumConfiguredDevicesPerJob + 1U, 2U);
+  EXPECT_THROW(TenantQuotaAuthority(TenantId("tenant.test"),
+                                    std::move(excessive_limits)),
+               std::invalid_argument);
+
+  ScopedTestStateRoot root;
+  const DurableJobRecord record = make_test_durable_job_record(81U, maximum);
+  {
+    DurableServerState store(root.path(), TenantId("tenant.test"));
+    EXPECT_TRUE(store.persist_job(record).succeeded());
+  }
+  {
+    DurableServerState recovered(root.path(), TenantId("tenant.test"));
+    const std::vector<DurableJobRecord> jobs = recovered.recovered_jobs();
+    ASSERT_EQ(jobs.size(), 1U);
+    ASSERT_NE(jobs.front().spec, nullptr);
+    EXPECT_EQ(jobs.front().spec->resource_request().devices.size(),
+              kMaximumConfiguredDevicesPerJob);
+  }
+}
+
 TEST(DurableServerState,
      CopiesActiveRowsKeepsIdentitySeparateAndRecoversAfterRestart) {
   ScopedTestStateRoot root;
@@ -1316,18 +1474,76 @@ TEST(DurableServerState, RejectsIncoherentJobLifecycleBeforePersistence) {
   record.assignment = identity;
   record.output_artifact_id = ArtifactId("artifact.test.job-record");
   record.output_commit_id = OutputCommitId("commit.test.job-record");
-  EXPECT_NO_THROW(store.persist_job(record));
+  const DurableJobCommitResult accepted = store.persist_job(record);
+  EXPECT_TRUE(accepted.succeeded());
 
   record.state = JobState::Succeeded;
   record.attempt_settled = true;
   record.attempt_outcome = JobAttemptOutcome::Succeeded;
-  EXPECT_THROW(store.persist_job(record), std::invalid_argument);
+  const DurableJobCommitResult invalid_success = store.persist_job(record);
+  EXPECT_EQ(invalid_success.state, DurableJobCommitState::NotPublished);
+  EXPECT_THROW(invalid_success.rethrow_failure(), std::invalid_argument);
 
   record.state = JobState::Failed;
   record.attempt_settled = false;
   record.attempt_outcome = JobAttemptOutcome::None;
   record.failure = JobAttemptFailure::Compute;
-  EXPECT_THROW(store.persist_job(record), std::invalid_argument);
+  const DurableJobCommitResult invalid_failure = store.persist_job(record);
+  EXPECT_EQ(invalid_failure.state, DurableJobCommitState::NotPublished);
+  EXPECT_THROW(invalid_failure.rethrow_failure(), std::invalid_argument);
+}
+
+TEST(DurableServerState,
+     JobJournalReportsPublicationStateAndKeepsCacheRestartAligned) {
+  const std::array<DurableJobCommitStage, 6U> stages{
+      DurableJobCommitStage::CachePrepared,
+      DurableJobCommitStage::PrivateFileSynchronized,
+      DurableJobCommitStage::RecordPublished,
+      DurableJobCommitStage::JobsDirectorySynchronized,
+      DurableJobCommitStage::ControlDirectorySynchronized,
+      DurableJobCommitStage::DirectoryBarriersCompleted};
+  for (std::size_t index = 0U; index < stages.size(); ++index) {
+    SCOPED_TRACE(static_cast<int>(stages[index]));
+    ScopedTestStateRoot root;
+    DurableServerStateOptions options;
+    options.job_commit_observer =
+        [target = stages[index]](DurableJobCommitStage stage) {
+          if (stage == target) {
+            throw std::runtime_error("injected Job journal stage failure");
+          }
+        };
+    const DurableJobRecord record = make_test_durable_job_record(90U + index);
+    DurableJobCommitResult commit;
+    {
+      DurableServerState store(root.path(), TenantId("tenant.test"), options);
+      commit = store.persist_job(record);
+      EXPECT_FALSE(commit.succeeded());
+      ASSERT_NE(commit.failure, nullptr);
+      EXPECT_THROW(commit.rethrow_failure(), std::runtime_error);
+      const bool expected_published =
+          stages[index] >= DurableJobCommitStage::RecordPublished;
+      EXPECT_EQ(commit.published(), expected_published);
+      if (stages[index] == DurableJobCommitStage::DirectoryBarriersCompleted) {
+        EXPECT_EQ(commit.state, DurableJobCommitState::ConfirmedCommitted);
+      } else if (expected_published) {
+        EXPECT_EQ(commit.state,
+                  DurableJobCommitState::RecordPublishedDurabilityUnconfirmed);
+      } else {
+        EXPECT_EQ(commit.state, DurableJobCommitState::NotPublished);
+      }
+      EXPECT_EQ(store.recovered_jobs().size(), expected_published ? 1U : 0U);
+    }
+    {
+      DurableServerState recovered(root.path(), TenantId("tenant.test"));
+      const std::vector<DurableJobRecord> jobs = recovered.recovered_jobs();
+      EXPECT_EQ(jobs.size(), commit.published() ? 1U : 0U);
+      if (commit.published()) {
+        ASSERT_EQ(jobs.size(), 1U);
+        EXPECT_EQ(jobs.front().job_id, record.job_id);
+        EXPECT_EQ(jobs.front().assignment, record.assignment);
+      }
+    }
+  }
 }
 
 /**
@@ -1898,7 +2114,7 @@ TEST(SingleTenantJobService,
   interrupted.state = JobState::Running;
   {
     DurableServerState store(root.path(), TenantId("tenant.test"));
-    store.persist_job(interrupted);
+    EXPECT_TRUE(store.persist_job(interrupted).succeeded());
   }
 
   auto factory = std::make_shared<FunctionWorkerFactory>(
@@ -1957,7 +2173,7 @@ TEST(SingleTenantJobService,
     running.output_artifact_id = stable_artifact;
     running.output_commit_id = stable_commit;
     running.state = JobState::Running;
-    store.persist_job(running);
+    EXPECT_TRUE(store.persist_job(running).succeeded());
   }
 
   auto factory = std::make_shared<FunctionWorkerFactory>(
@@ -1970,6 +2186,269 @@ TEST(SingleTenantJobService,
       SingleTenantJobService(TenantId("tenant.test"), test_quota_limits(),
                              root.path(), factory),
       DurableCorruptionError);
+}
+
+TEST(SingleTenantJobService,
+     SubmitJournalFailureRollsBackBeforePublishAndFailStopsAfterPublish) {
+  const std::array<DurableJobCommitStage, 3U> stages{
+      DurableJobCommitStage::PrivateFileSynchronized,
+      DurableJobCommitStage::RecordPublished,
+      DurableJobCommitStage::DirectoryBarriersCompleted};
+  for (const DurableJobCommitStage stage : stages) {
+    SCOPED_TRACE(static_cast<int>(stage));
+    ScopedTestStateRoot root;
+    auto failure = std::make_shared<OneShotJobCommitFailure>(stage);
+    std::atomic<std::size_t> worker_calls{0U};
+    auto factory = std::make_shared<FunctionWorkerFactory>(
+        [&worker_calls](const JobAssignment& assignment,
+                        const std::function<bool()>& cancellation_requested) {
+          worker_calls.fetch_add(1U, std::memory_order_relaxed);
+          EXPECT_FALSE(cancellation_requested());
+          return successful_report(assignment);
+        });
+    JobId published_job;
+    {
+      SingleTenantJobService service(TenantId("tenant.test"),
+                                     test_quota_limits(), root.path(), factory,
+                                     job_failure_options(failure));
+      failure->arm();
+      try {
+        static_cast<void>(service.submit(JobSpec(GraphArtifactId("graph.test"),
+                                                 7, OutputSlotId("image.final"),
+                                                 test_job_resources())));
+        ADD_FAILURE() << "injected Job journal failure was not reported";
+      } catch (const DurableJobCommitError& error) {
+        EXPECT_NE(stage, DurableJobCommitStage::PrivateFileSynchronized);
+        EXPECT_EQ(
+            error.state(),
+            stage == DurableJobCommitStage::DirectoryBarriersCompleted
+                ? DurableJobCommitState::ConfirmedCommitted
+                : DurableJobCommitState::RecordPublishedDurabilityUnconfirmed);
+        published_job = error.job_id();
+      } catch (const std::runtime_error&) {
+        EXPECT_EQ(stage, DurableJobCommitStage::PrivateFileSynchronized);
+      }
+
+      EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                      wait_for_owned_worker_thread_count_at_most(
+                          service, 0U, std::chrono::seconds(2)));
+      EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 0U);
+      const bool expected_published =
+          stage != DurableJobCommitStage::PrivateFileSynchronized;
+      EXPECT_EQ(SingleTenantJobServiceTestAccess::accepted_job_count(service),
+                expected_published ? 1U : 0U);
+      EXPECT_EQ(SingleTenantJobServiceTestAccess::journal_faulted(service),
+                expected_published);
+      EXPECT_EQ(service.quota_snapshot().active_attempts,
+                expected_published ? 1U : 0U);
+      if (expected_published) {
+        const std::optional<JobSnapshot> snapshot =
+            service.query(published_job);
+        ASSERT_TRUE(snapshot.has_value());
+        EXPECT_EQ(snapshot->state, JobState::Queued);
+        EXPECT_THROW(service.submit(JobSpec(GraphArtifactId("graph.test"), 7,
+                                            OutputSlotId("image.final"),
+                                            test_job_resources())),
+                     DurableStateError);
+      }
+    }
+
+    SingleTenantJobService recovered(TenantId("tenant.test"),
+                                     test_quota_limits(), root.path(), factory);
+    if (stage != DurableJobCommitStage::PrivateFileSynchronized) {
+      const std::optional<JobSnapshot> snapshot =
+          recovered.query(published_job);
+      ASSERT_TRUE(snapshot.has_value());
+      EXPECT_EQ(snapshot->state, JobState::Failed);
+      EXPECT_EQ(snapshot->failure, JobAttemptFailure::RecoveryInterrupted);
+    } else {
+      EXPECT_EQ(SingleTenantJobServiceTestAccess::accepted_job_count(recovered),
+                0U);
+    }
+    EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
+  }
+}
+
+TEST(SingleTenantJobService,
+     RetryJournalFailurePreservesOldOrPublishesNewAttemptAcrossRestart) {
+  const std::array<DurableJobCommitStage, 3U> stages{
+      DurableJobCommitStage::PrivateFileSynchronized,
+      DurableJobCommitStage::RecordPublished,
+      DurableJobCommitStage::DirectoryBarriersCompleted};
+  for (const DurableJobCommitStage stage : stages) {
+    SCOPED_TRACE(static_cast<int>(stage));
+    ScopedTestStateRoot root;
+    auto failure = std::make_shared<OneShotJobCommitFailure>(stage);
+    std::atomic<std::size_t> worker_calls{0U};
+    auto factory = std::make_shared<FunctionWorkerFactory>(
+        [&worker_calls](const JobAssignment& assignment,
+                        const std::function<bool()>& cancellation_requested) {
+          EXPECT_FALSE(cancellation_requested());
+          if (worker_calls.fetch_add(1U, std::memory_order_relaxed) == 0U) {
+            return settled_failed_report(assignment);
+          }
+          return successful_report(assignment);
+        });
+    JobSubmission submission;
+    AttemptIdentity original_assignment;
+    AttemptIdentity observed_assignment;
+    {
+      SingleTenantJobService service(TenantId("tenant.test"),
+                                     test_quota_limits(), root.path(), factory,
+                                     job_failure_options(failure));
+      submission = service.submit(JobSpec(GraphArtifactId("graph.test"), 7,
+                                          OutputSlotId("image.final"),
+                                          test_job_resources()));
+      const std::optional<JobSnapshot> initial =
+          service.wait_for(submission.job_id, std::chrono::seconds(2));
+      ASSERT_TRUE(initial.has_value());
+      ASSERT_EQ(initial->state, JobState::Failed);
+      original_assignment = initial->assignment;
+      ASSERT_TRUE(SingleTenantJobServiceTestAccess::
+                      wait_for_owned_worker_thread_count_at_most(
+                          service, 0U, std::chrono::seconds(2)));
+
+      failure->arm();
+      try {
+        static_cast<void>(service.retry(submission.job_id));
+        ADD_FAILURE() << "injected retry journal failure was not reported";
+      } catch (const DurableJobCommitError& error) {
+        EXPECT_NE(stage, DurableJobCommitStage::PrivateFileSynchronized);
+        EXPECT_EQ(error.job_id(), submission.job_id);
+      } catch (const std::runtime_error&) {
+        EXPECT_EQ(stage, DurableJobCommitStage::PrivateFileSynchronized);
+      }
+      ASSERT_TRUE(SingleTenantJobServiceTestAccess::
+                      wait_for_owned_worker_thread_count_at_most(
+                          service, 0U, std::chrono::seconds(2)));
+      EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 1U);
+      const std::optional<JobSnapshot> current =
+          service.query(submission.job_id);
+      ASSERT_TRUE(current.has_value());
+      observed_assignment = current->assignment;
+      const bool expected_published =
+          stage != DurableJobCommitStage::PrivateFileSynchronized;
+      EXPECT_EQ(current->assignment == original_assignment,
+                !expected_published);
+      EXPECT_EQ(current->state,
+                expected_published ? JobState::Queued : JobState::Failed);
+      EXPECT_EQ(service.quota_snapshot().active_attempts,
+                expected_published ? 1U : 0U);
+      EXPECT_EQ(SingleTenantJobServiceTestAccess::journal_faulted(service),
+                expected_published);
+    }
+
+    auto unused_factory = std::make_shared<FunctionWorkerFactory>(
+        [](const JobAssignment& assignment,
+           const std::function<bool()>& cancellation_requested) {
+          EXPECT_FALSE(cancellation_requested());
+          return successful_report(assignment);
+        });
+    SingleTenantJobService recovered(TenantId("tenant.test"),
+                                     test_quota_limits(), root.path(),
+                                     unused_factory);
+    const std::optional<JobSnapshot> snapshot =
+        recovered.query(submission.job_id);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->state, JobState::Failed);
+    if (stage != DurableJobCommitStage::PrivateFileSynchronized) {
+      EXPECT_EQ(snapshot->assignment, observed_assignment);
+      EXPECT_EQ(snapshot->failure, JobAttemptFailure::RecoveryInterrupted);
+    } else {
+      EXPECT_EQ(snapshot->assignment, original_assignment);
+      EXPECT_EQ(snapshot->failure, JobAttemptFailure::Compute);
+    }
+    EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
+  }
+}
+
+TEST(SingleTenantJobService,
+     CancelJournalFailurePreservesIntentBoundaryAndRestartTruth) {
+  const std::array<DurableJobCommitStage, 3U> stages{
+      DurableJobCommitStage::PrivateFileSynchronized,
+      DurableJobCommitStage::RecordPublished,
+      DurableJobCommitStage::DirectoryBarriersCompleted};
+  for (const DurableJobCommitStage stage : stages) {
+    SCOPED_TRACE(static_cast<int>(stage));
+    ScopedTestStateRoot root;
+    auto failure = std::make_shared<OneShotJobCommitFailure>(stage);
+    auto gate = std::make_shared<WorkerGate>();
+    auto factory = std::make_shared<FunctionWorkerFactory>(
+        [gate](const JobAssignment& assignment,
+               const std::function<bool()>& cancellation_requested) {
+          gate->enter_and_wait();
+          if (cancellation_requested()) {
+            JobAttemptReport report;
+            report.identity = assignment.identity;
+            report.outcome = JobAttemptOutcome::Cancelled;
+            report.settled = true;
+            report.failure = JobAttemptFailure::CancellationObserved;
+            return report;
+          }
+          return successful_report(assignment);
+        });
+    JobId job_id;
+    {
+      SingleTenantJobService service(TenantId("tenant.test"),
+                                     test_quota_limits(), root.path(), factory,
+                                     job_failure_options(failure));
+      WorkerGateReleaseGuard gate_release(gate);
+      const JobSubmission submission = service.submit(
+          JobSpec(GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"),
+                  test_job_resources()));
+      job_id = submission.job_id;
+      ASSERT_TRUE(gate->wait_until_entered());
+      failure->arm();
+      try {
+        static_cast<void>(service.cancel(job_id));
+        ADD_FAILURE() << "injected cancel journal failure was not reported";
+      } catch (const DurableJobCommitError& error) {
+        EXPECT_NE(stage, DurableJobCommitStage::PrivateFileSynchronized);
+        EXPECT_EQ(error.job_id(), job_id);
+      } catch (const std::runtime_error&) {
+        EXPECT_EQ(stage, DurableJobCommitStage::PrivateFileSynchronized);
+      }
+      const std::optional<JobSnapshot> current = service.query(job_id);
+      ASSERT_TRUE(current.has_value());
+      const bool expected_published =
+          stage != DurableJobCommitStage::PrivateFileSynchronized;
+      EXPECT_EQ(current->cancellation_requested, expected_published);
+      EXPECT_EQ(current->state,
+                expected_published ? JobState::Cancelling : JobState::Running);
+      EXPECT_EQ(SingleTenantJobServiceTestAccess::journal_faulted(service),
+                expected_published);
+      EXPECT_EQ(service.quota_snapshot().active_attempts, 1U);
+      gate_release.release();
+      EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                      wait_for_owned_worker_thread_count_at_most(
+                          service, 0U, std::chrono::seconds(2)));
+      if (!expected_published) {
+        const std::optional<JobSnapshot> terminal =
+            service.wait_for(job_id, std::chrono::seconds(2));
+        ASSERT_TRUE(terminal.has_value());
+        EXPECT_EQ(terminal->state, JobState::Succeeded);
+      }
+    }
+
+    auto unused_factory = std::make_shared<FunctionWorkerFactory>(
+        [](const JobAssignment& assignment,
+           const std::function<bool()>& cancellation_requested) {
+          EXPECT_FALSE(cancellation_requested());
+          return successful_report(assignment);
+        });
+    SingleTenantJobService recovered(TenantId("tenant.test"),
+                                     test_quota_limits(), root.path(),
+                                     unused_factory);
+    const std::optional<JobSnapshot> snapshot = recovered.query(job_id);
+    ASSERT_TRUE(snapshot.has_value());
+    if (stage != DurableJobCommitStage::PrivateFileSynchronized) {
+      EXPECT_EQ(snapshot->state, JobState::Failed);
+      EXPECT_EQ(snapshot->failure, JobAttemptFailure::RecoveryInterrupted);
+    } else {
+      EXPECT_EQ(snapshot->state, JobState::Succeeded);
+    }
+    EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
+  }
 }
 
 TEST(SingleTenantJobService,
