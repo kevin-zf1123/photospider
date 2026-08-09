@@ -14,8 +14,10 @@
 #include <exception>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -646,6 +648,120 @@ TEST(ProcessLifetimeArtifactStore,
   EXPECT_NE(first.artifact_id, second.artifact_id);
   EXPECT_NE(first.output_commit_id, second.output_commit_id);
   EXPECT_EQ(store.size(), 2U);
+}
+
+/**
+ * @brief Proves concurrent contenders reserve the final value exactly once.
+ *
+ * Starts 32 callers from one barrier against a local sequence initialized to
+ * `UINT64_MAX - 1`, then verifies one successful final reservation, fail-closed
+ * overflow for every loser, and stable overflow across repeated retries.
+ */
+TEST(SingleTenantIdentitySequence,
+     ConcurrentFinalReservationSaturatesWithoutReuse) {
+  constexpr std::size_t kCallerCount = 32U;
+  constexpr std::size_t kSaturatedRetryCount = 128U;
+  constexpr std::uint64_t kMaximum = std::numeric_limits<std::uint64_t>::max();
+  std::atomic<std::uint64_t> sequence{kMaximum - 1U};
+  auto gate = std::make_shared<WorkerGroupGate>();
+  std::vector<std::future<std::optional<std::uint64_t>>> attempts;
+  attempts.reserve(kCallerCount);
+  WorkerGroupGateReleaseGuard gate_release(gate);
+
+  for (std::size_t index = 0U; index < kCallerCount; ++index) {
+    attempts.push_back(std::async(std::launch::async, [gate, &sequence] {
+      gate->enter_and_wait();
+      try {
+        return std::optional<std::uint64_t>(
+            SingleTenantJobServiceTestAccess::reserve_identity_sequence_value(
+                &sequence));
+      } catch (const std::overflow_error&) {
+        return std::optional<std::uint64_t>();
+      }
+    }));
+  }
+
+  const bool all_callers_ready = gate->wait_until_entered(kCallerCount);
+  gate_release.release();
+
+  std::size_t reserved_count = 0U;
+  std::size_t overflow_count = 0U;
+  for (auto& attempt : attempts) {
+    try {
+      const std::optional<std::uint64_t> result = attempt.get();
+      if (result.has_value()) {
+        ++reserved_count;
+        EXPECT_EQ(*result, kMaximum);
+      } else {
+        ++overflow_count;
+      }
+    } catch (const std::exception& error) {
+      ADD_FAILURE() << "identity reservation raised unexpectedly: "
+                    << error.what();
+    } catch (...) {
+      ADD_FAILURE() << "identity reservation raised a non-standard exception";
+    }
+  }
+
+  EXPECT_TRUE(all_callers_ready);
+  EXPECT_EQ(reserved_count, 1U);
+  EXPECT_EQ(overflow_count, kCallerCount - 1U);
+  EXPECT_EQ(sequence.load(std::memory_order_relaxed), kMaximum);
+
+  for (std::size_t index = 0U; index < kSaturatedRetryCount; ++index) {
+    EXPECT_THROW(
+        SingleTenantJobServiceTestAccess::reserve_identity_sequence_value(
+            &sequence),
+        std::overflow_error);
+    EXPECT_EQ(sequence.load(std::memory_order_relaxed), kMaximum);
+  }
+}
+
+/**
+ * @brief Proves a saturated reservation never exposes a wrapped value.
+ *
+ * Pauses the exact production reservation helper after its initial load so a
+ * second caller can inspect and contend with the saturated sequence before the
+ * first caller completes.
+ */
+TEST(SingleTenantIdentitySequence,
+     SaturatedReservationNeverPublishesWrappedState) {
+  constexpr std::uint64_t kMaximum = std::numeric_limits<std::uint64_t>::max();
+  std::atomic<std::uint64_t> sequence{kMaximum};
+  auto observation_gate = std::make_shared<WorkerGate>();
+  std::future<std::optional<std::uint64_t>> observed_attempt =
+      std::async(std::launch::async, [observation_gate, &sequence] {
+        try {
+          return std::optional<std::uint64_t>(
+              SingleTenantJobServiceTestAccess::reserve_identity_with_observer(
+                  &sequence,
+                  [observation_gate] { observation_gate->enter_and_wait(); }));
+        } catch (const std::overflow_error&) {
+          return std::optional<std::uint64_t>();
+        }
+      });
+  WorkerGateReleaseGuard gate_release(observation_gate);
+
+  const bool observation_reached = observation_gate->wait_until_entered();
+  EXPECT_TRUE(observation_reached);
+  EXPECT_EQ(sequence.load(std::memory_order_relaxed), kMaximum);
+  EXPECT_THROW(
+      SingleTenantJobServiceTestAccess::reserve_identity_sequence_value(
+          &sequence),
+      std::overflow_error);
+  EXPECT_EQ(sequence.load(std::memory_order_relaxed), kMaximum);
+
+  gate_release.release();
+  try {
+    EXPECT_FALSE(observed_attempt.get().has_value());
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << "observed identity reservation raised unexpectedly: "
+                  << error.what();
+  } catch (...) {
+    ADD_FAILURE()
+        << "observed identity reservation raised a non-standard exception";
+  }
+  EXPECT_EQ(sequence.load(std::memory_order_relaxed), kMaximum);
 }
 
 TEST(SingleTenantJobService, SuccessRequiresReceiptAndSupportsArtifactLookup) {

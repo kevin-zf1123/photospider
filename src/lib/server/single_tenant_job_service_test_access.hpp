@@ -4,8 +4,11 @@
  */
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -139,6 +142,38 @@ struct WorkerThreadOwnershipSnapshot final {
  */
 class SingleTenantJobServiceTestAccess final {
  public:
+  /**
+   * @brief Reserves one production identity sequence value for a local test.
+   * @param sequence Non-null caller-owned sequence, normally a local atomic.
+   * @return Fresh nonzero value, including `UINT64_MAX` for the final
+   * reservation.
+   * @throws std::invalid_argument when `sequence` is null.
+   * @throws std::overflow_error when the sequence is already saturated.
+   * @note This source-private seam delegates to the exact helper used by
+   * production identity minting. It never reads or mutates the real
+   * process-wide identity counters and adds no product test state.
+   */
+  static std::uint64_t reserve_identity_sequence_value(
+      std::atomic<std::uint64_t>* sequence);
+
+  /**
+   * @brief Pauses one local reservation after its initial atomic observation.
+   * @param sequence Non-null caller-owned sequence, normally a local atomic.
+   * @param after_initial_observation Nonempty callback invoked after the first
+   * observation and before saturation checking or reservation linearization.
+   * @return Fresh nonzero value when the sequence was not saturated.
+   * @throws std::invalid_argument when either argument is invalid.
+   * @throws std::overflow_error when the observed sequence is saturated.
+   * @throws Any callback exception unchanged before this reservation attempt
+   * mutates the sequence.
+   * @note Production uses the same reservation implementation with a
+   * stateless inline no-op. This deterministic source-private test seam adds
+   * no global or product-owned mutable test state.
+   */
+  static std::uint64_t reserve_identity_with_observer(
+      std::atomic<std::uint64_t>* sequence,
+      const std::function<void()>& after_initial_observation);
+
   /**
    * @brief Returns the number of accepted Job records retained by a service.
    * @param service Live service whose private accepted state is observed.

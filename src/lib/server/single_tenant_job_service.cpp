@@ -117,6 +117,62 @@ void throw_assignment_thread_start_failure_if_armed(JobId& attempted_job_id) {
 }
 
 /**
+ * @brief Reserves the next nonzero value from one identity sequence.
+ * @tparam AfterInitialObservation Callable invoked after the first atomic
+ * observation and before the saturation decision.
+ * @param sequence Non-null caller-owned monotonic sequence.
+ * @param after_initial_observation Test observation callback; production uses
+ * an inline no-op.
+ * @return Fresh sequence value, including `UINT64_MAX` for the final
+ * reservation.
+ * @throws std::invalid_argument when `sequence` is null.
+ * @throws std::overflow_error when the sequence is already saturated.
+ * @throws Any exception raised by `after_initial_observation` unchanged.
+ * @note The caller owns the sequence lifetime. Production passes process-wide
+ * counters, while maintained tests pass isolated local counters through the
+ * source-private access seam.
+ * @note The successful relaxed compare/exchange is the reservation
+ * linearization point. Relaxed ordering is sufficient because this counter
+ * conveys only uniqueness and does not publish or consume associated data.
+ * A saturated observation performs no write, so the sequence never decreases
+ * or exposes a wrapped value.
+ */
+template <typename AfterInitialObservation>
+std::uint64_t reserve_next_identity_sequence_value_impl(
+    std::atomic<std::uint64_t>* sequence,
+    AfterInitialObservation&& after_initial_observation) {
+  if (sequence == nullptr) {
+    throw std::invalid_argument("identity sequence is null");
+  }
+  std::uint64_t observed = sequence->load(std::memory_order_relaxed);
+  std::forward<AfterInitialObservation>(after_initial_observation)();
+  for (;;) {
+    if (observed == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("process identity sequence exhausted");
+    }
+    const std::uint64_t reserved = observed + 1U;
+    if (sequence->compare_exchange_weak(observed, reserved,
+                                        std::memory_order_relaxed,
+                                        std::memory_order_relaxed)) {
+      return reserved;
+    }
+  }
+}
+
+/**
+ * @brief Reserves one production identity value without test observation.
+ * @param sequence Non-null caller-owned monotonic sequence.
+ * @return Fresh sequence value.
+ * @throws std::invalid_argument when `sequence` is null.
+ * @throws std::overflow_error when the sequence is already saturated.
+ * @note The inline observer is stateless and cannot throw.
+ */
+std::uint64_t reserve_next_identity_sequence_value(
+    std::atomic<std::uint64_t>* sequence) {
+  return reserve_next_identity_sequence_value_impl(sequence, []() noexcept {});
+}
+
+/**
  * @brief Mints one process-lifetime identity in an exact strong domain.
  * @tparam Domain Opaque identity domain tag.
  * @param prefix Stable domain-specific textual prefix.
@@ -126,20 +182,15 @@ void throw_assignment_thread_start_failure_if_armed(JobId& attempted_job_id) {
  * @throws std::bad_alloc when constructing identity text exhausts memory.
  * @note Counters intentionally do not persist across restart; Issue #99 owns
  * durable/global allocation.
+ * @note Reservation linearizes before identity-text construction. A later
+ * allocation failure may leave a gap, but the reserved value is never rolled
+ * back or reused by another caller.
  */
 template <typename Domain>
 OpaqueTextId<Domain> mint_identity(std::string_view prefix,
                                    std::atomic<std::uint64_t>* sequence) {
-  if (sequence == nullptr) {
-    throw std::invalid_argument("identity sequence is null");
-  }
-  const std::uint64_t previous = sequence->fetch_add(1U);
-  if (previous == std::numeric_limits<std::uint64_t>::max()) {
-    sequence->fetch_sub(1U);
-    throw std::overflow_error("process identity sequence exhausted");
-  }
-  return OpaqueTextId<Domain>(std::string(prefix) +
-                              std::to_string(previous + 1U));
+  const std::uint64_t reserved = reserve_next_identity_sequence_value(sequence);
+  return OpaqueTextId<Domain>(std::string(prefix) + std::to_string(reserved));
 }
 
 /**
@@ -282,6 +333,29 @@ ScopedWorkerThreadStartFailure::ScopedWorkerThreadStartFailure() {
  */
 ScopedWorkerThreadStartFailure::~ScopedWorkerThreadStartFailure() noexcept {
   disarm_assignment_thread_start_failure(&attempted_job_id_);
+}
+
+/**
+ * @copydoc
+ * ps::server::SingleTenantJobServiceTestAccess::reserve_identity_sequence_value
+ */
+std::uint64_t SingleTenantJobServiceTestAccess::reserve_identity_sequence_value(
+    std::atomic<std::uint64_t>* sequence) {
+  return reserve_next_identity_sequence_value(sequence);
+}
+
+/**
+ * @copydoc ps::server::SingleTenantJobServiceTestAccess::
+ * reserve_identity_with_observer
+ */
+std::uint64_t SingleTenantJobServiceTestAccess::reserve_identity_with_observer(
+    std::atomic<std::uint64_t>* sequence,
+    const std::function<void()>& after_initial_observation) {
+  if (!after_initial_observation) {
+    throw std::invalid_argument("identity observation callback is empty");
+  }
+  return reserve_next_identity_sequence_value_impl(sequence,
+                                                   after_initial_observation);
 }
 
 /** @copydoc ps::server::is_terminal_job_state */
