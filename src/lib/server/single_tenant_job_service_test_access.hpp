@@ -1,6 +1,6 @@
 /**
  * @file single_tenant_job_service_test_access.hpp
- * @brief Exposes read-only source-private Job worker ownership test seams.
+ * @brief Exposes source-private Job submission and worker-ownership test seams.
  */
 #pragma once
 
@@ -8,12 +8,92 @@
 #include <cstddef>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <system_error>
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
+
+/**
+ * @brief Arms one scoped deterministic assignment-thread start failure.
+ *
+ * Construction arms the next `WorkerThreadRecord` start attempted by the
+ * current thread. The injected path records that attempt's `JobId`, consumes
+ * the arm, and raises `std::system_error` before any `std::thread` owns a
+ * native handle. Destruction disarms an unused injection.
+ *
+ * @throws std::logic_error when another injection guard is already alive on
+ * the current thread.
+ * @note This source-private test seam is not installed and is not a product
+ * contract. A guard must be used and destroyed on its constructing thread.
+ * Different threads have independent arms, and one guard affects at most one
+ * worker-start attempt.
+ */
+class ScopedWorkerThreadStartFailure final {
+ public:
+  /**
+   * @brief Arms the next assignment-thread start on the current thread.
+   * @throws std::logic_error when that thread already owns an active guard.
+   */
+  ScopedWorkerThreadStartFailure();
+
+  /**
+   * @brief Disarms any unconsumed failure injection on the current thread.
+   * @throws Nothing.
+   * @note The guard must be destroyed on the thread that constructed it.
+   */
+  ~ScopedWorkerThreadStartFailure() noexcept;
+
+  /**
+   * @brief Prevents duplicate ownership of one thread-local injection.
+   * @param other Guard whose unique arm would otherwise be duplicated.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedWorkerThreadStartFailure(const ScopedWorkerThreadStartFailure& other) =
+      delete;
+
+  /**
+   * @brief Prevents duplicate assignment of one thread-local injection.
+   * @param other Guard whose unique arm would otherwise be duplicated.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedWorkerThreadStartFailure& operator=(
+      const ScopedWorkerThreadStartFailure& other) = delete;
+
+  /**
+   * @brief Keeps the thread-local capture address stable for guard lifetime.
+   * @param other Guard whose capture address cannot be transferred.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedWorkerThreadStartFailure(ScopedWorkerThreadStartFailure&& other) =
+      delete;
+
+  /**
+   * @brief Keeps the thread-local capture address stable during assignment.
+   * @param other Guard whose capture address cannot be transferred.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedWorkerThreadStartFailure& operator=(
+      ScopedWorkerThreadStartFailure&& other) = delete;
+
+  /**
+   * @brief Returns the Job identity whose worker start consumed the arm.
+   * @return Empty before consumption, otherwise the exact rolled-back JobId.
+   * @throws Nothing.
+   * @note The returned reference remains valid only for this guard's lifetime.
+   */
+  const std::optional<JobId>& attempted_job_id() const noexcept {
+    return attempted_job_id_;
+  }
+
+ private:
+  /** @brief Rolled-back Job identity captured before the injected exception. */
+  std::optional<JobId> attempted_job_id_;
+};
 
 /**
  * @brief One mutex-consistent snapshot of private worker-thread ownership.
@@ -53,11 +133,24 @@ struct WorkerThreadOwnershipSnapshot final {
  *
  * @throws Nothing except documented standard synchronization or arithmetic
  * failures.
- * @note This source-private header is consumed only by maintained tests and
- * does not alter the installed ABI.
+ * @note This source-private interface exists only to support maintained tests.
+ * Its definitions are compiled through the non-installed internal target and
+ * do not alter the installed ABI.
  */
 class SingleTenantJobServiceTestAccess final {
  public:
+  /**
+   * @brief Returns the number of accepted Job records retained by a service.
+   * @param service Live service whose private accepted state is observed.
+   * @return Exact mutex-consistent Job-record count.
+   * @throws std::system_error for mutex synchronization failure.
+   * @note Failed pre-acceptance submission must not increase this count.
+   */
+  static std::size_t accepted_job_count(const SingleTenantJobService& service) {
+    std::lock_guard<std::mutex> lock(service.mutex_);
+    return service.jobs_.size();
+  }
+
   /**
    * @brief Captures active, completed, and joining worker ownership.
    * @param service Live service whose private ownership is observed.

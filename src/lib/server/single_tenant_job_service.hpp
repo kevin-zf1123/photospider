@@ -365,9 +365,9 @@ class SingleTenantJobService final {
    * @note The complete return value is allocated before acceptance. Acceptance
    * linearizes only after Job-state insertion and atomic publication of the
    * successfully started worker handle; failed construction rolls Job state
-   * back without an unowned joinable handle. The remaining return path is a
-   * non-throwing move. Acceptance creates no retry policy or server quota
-   * authority.
+   * back, notifies state/ownership observers, and leaves no unowned joinable
+   * handle. The remaining return path is a non-throwing move. Acceptance
+   * creates no retry policy or server quota authority.
    */
   JobSubmission submit(JobSpec spec);
 
@@ -437,6 +437,21 @@ class SingleTenantJobService final {
      */
     WorkerThreadRecord(SingleTenantJobService* service,
                        JobAssignment assignment);
+
+    /**
+     * @brief Starts one assignment thread through the source-private seam.
+     * @param service Non-null service that owns the new worker record.
+     * @param assignment Complete assignment moved into the worker callback.
+     * @return Sole joinable thread owner for publication in `workers_`.
+     * @throws std::bad_alloc when thread callback storage allocation fails.
+     * @throws std::system_error when the source-private test seam injects a
+     * start failure or native thread creation fails.
+     * @note The deterministic test seam is checked on the submitter thread
+     * before any `std::thread` is constructed. It is not installed or exposed
+     * as a product contract. Normal production calls leave the seam disarmed.
+     */
+    static std::thread start_assignment_thread(SingleTenantJobService* service,
+                                               JobAssignment assignment);
 
     /** @brief Transfers unique joinable-thread ownership without throwing. */
     WorkerThreadRecord(WorkerThreadRecord&&) noexcept = default;

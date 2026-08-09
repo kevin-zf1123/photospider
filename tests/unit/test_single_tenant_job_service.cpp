@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -669,6 +670,62 @@ TEST(SingleTenantJobService, SuccessRequiresReceiptAndSupportsArtifactLookup) {
   EXPECT_NE(service.find_artifact(terminal->output_receipt->artifact_id),
             nullptr);
   EXPECT_FALSE(service.cancel(submission.job_id));
+}
+
+TEST(SingleTenantJobService,
+     AssignmentThreadStartFailureRollsBackStateAndOwnership) {
+  std::atomic<std::size_t> worker_calls{0U};
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [&worker_calls](const JobAssignment& assignment,
+                      const std::function<bool()>& cancellation_requested) {
+        worker_calls.fetch_add(1U, std::memory_order_relaxed);
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+  SingleTenantJobService service(TenantId("tenant.test"), factory);
+
+  ScopedWorkerThreadStartFailure failure_injection;
+  std::optional<std::error_code> start_error;
+  try {
+    static_cast<void>(service.submit(JobSpec(GraphArtifactId("graph.test"), 7,
+                                             OutputSlotId("image.final"), 2U)));
+    ADD_FAILURE() << "injected worker-thread start did not fail";
+  } catch (const std::system_error& error) {
+    start_error = error.code();
+  } catch (...) {
+    FAIL() << "injected worker-thread start raised a non-system exception";
+  }
+  ASSERT_TRUE(start_error.has_value());
+  EXPECT_EQ(*start_error,
+            std::make_error_code(std::errc::resource_unavailable_try_again));
+  ASSERT_TRUE(failure_injection.attempted_job_id().has_value());
+  const JobId failed_job_id = *failure_injection.attempted_job_id();
+
+  EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 0U);
+  EXPECT_EQ(SingleTenantJobServiceTestAccess::accepted_job_count(service), 0U);
+  EXPECT_FALSE(service.query(failed_job_id).has_value());
+  const WorkerThreadOwnershipSnapshot failed_ownership =
+      SingleTenantJobServiceTestAccess::worker_thread_ownership(service);
+  EXPECT_EQ(failed_ownership.active, 0U);
+  EXPECT_EQ(failed_ownership.completed, 0U);
+  EXPECT_EQ(failed_ownership.joining, 0U);
+  EXPECT_EQ(failed_ownership.total(), 0U);
+
+  const JobSubmission recovery = service.submit(JobSpec(
+      GraphArtifactId("graph.test"), 7, OutputSlotId("image.final"), 2U));
+  EXPECT_NE(recovery.job_id, failed_job_id);
+  const std::optional<JobSnapshot> terminal =
+      service.wait_for(recovery.job_id, std::chrono::seconds(2));
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_EQ(terminal->state, JobState::Succeeded);
+  EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 1U);
+  EXPECT_FALSE(service.query(failed_job_id).has_value());
+  EXPECT_EQ(SingleTenantJobServiceTestAccess::accepted_job_count(service), 1U);
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(
+                      service, 0U, std::chrono::seconds(2)));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::owned_worker_thread_count(service), 0U);
 }
 
 TEST(SingleTenantJobService,
