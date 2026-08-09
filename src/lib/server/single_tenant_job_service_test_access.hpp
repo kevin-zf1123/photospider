@@ -1,6 +1,7 @@
 /**
  * @file single_tenant_job_service_test_access.hpp
- * @brief Exposes source-private identity, report-fencing, and observer seams.
+ * @brief Exposes source-private identity, report, ownership, and observer
+ * seams.
  *
  * Identity access reserves from caller-owned local atomic sequences. Job-state
  * access observes retained accepted records, worker access observes
@@ -134,15 +135,43 @@ struct WorkerThreadOwnershipSnapshot final {
 };
 
 /**
- * @brief Provides local identity, deterministic report, and observer seams.
+ * @brief Mutex-consistent audit view of active reservation receipt ownership.
+ * @throws Nothing for value operations.
+ * @note Job-control owners cover active attempts and terminal release failures.
+ * The stranded owner covers one rollback candidate with no durable Job owner.
+ * This observation does not expose reservation identities or mutation access.
+ */
+struct QuotaReservationOwnershipSnapshot final {
+  /** @brief Reservation owners retained by authoritative Job controls. */
+  std::size_t job_controls = 0U;
+  /** @brief Rollback-only owners retained by the service stranded slot. */
+  std::size_t stranded = 0U;
+
+  /**
+   * @brief Returns all reservation receipts retained by the service.
+   * @return Checked sum of Job-control and stranded owners.
+   * @throws std::overflow_error if an impossible size_t sum overflows.
+   */
+  std::size_t total() const {
+    if (job_controls > std::numeric_limits<std::size_t>::max() - stranded) {
+      throw std::overflow_error("quota ownership snapshot overflowed");
+    }
+    return job_controls + stranded;
+  }
+};
+
+/**
+ * @brief Provides local identity, deterministic report, ownership, and
+ * observer seams.
  *
  * Identity methods reserve from and therefore may modify only the
  * caller-supplied local atomic sequence. They do not read, reset, or otherwise
  * mutate production process-wide counters. Accepted-state methods observe
- * retained Job-record truth, while worker methods observe handle ownership.
- * The observation methods do not expose handles or mutate product state. The
- * explicit report method is the sole mutation seam and delegates to the exact
- * production fencing boundary without constructing alternate authority.
+ * retained Job-record truth, worker methods observe handle ownership, and
+ * quota methods observe reservation-receipt ownership. The observation methods
+ * expose no handles or identities and do not mutate product state. The explicit
+ * report method is the sole mutation seam and delegates to the exact production
+ * fencing boundary without constructing alternate authority.
  *
  * @throws Exceptions are method-specific and documented below. They include
  * `std::invalid_argument` for invalid seam inputs, `std::overflow_error` for
@@ -196,9 +225,9 @@ class SingleTenantJobServiceTestAccess final {
    * @param report Complete candidate report moved into production validation.
    * @return Nothing after production processing or stale-attempt fencing.
    * @throws Nothing; `SingleTenantJobService::apply_report` is fail-closed.
-   * @note This deterministic source-private seam exists only to prove that a
-   * prior attempt cannot mutate a replacement retry. It does not bypass any
-   * identity, shape, cancellation, artifact, persistence, or quota validation.
+   * @note This deterministic source-private seam proves stale-attempt and
+   * durable-mutation fail-stop fencing. It does not bypass any identity,
+   * shape, cancellation, artifact, persistence, or quota validation.
    */
   static void inject_attempt_report(SingleTenantJobService& service,
                                     const AttemptIdentity& expected,
@@ -259,10 +288,24 @@ class SingleTenantJobServiceTestAccess final {
   }
 
   /**
+   * @brief Reports whether active-attempt release fail-stopped mutation.
+   * @param service Live service whose private monotonic state is observed.
+   * @return True after quota release raised before settlement mutation.
+   * @throws std::system_error for mutex synchronization failure.
+   * @note The exact owner remains on a terminal Job control or in the
+   * rollback-only stranded slot until service destruction/restart.
+   */
+  static bool quota_release_faulted(const SingleTenantJobService& service) {
+    std::lock_guard<std::mutex> lock(service.mutex_);
+    return service.quota_release_faulted_;
+  }
+
+  /**
    * @brief Reports the combined durable-mutation fail-stop state.
    * @param service Live service whose private monotonic state is observed.
    * @return True for published Job-journal failure, irreversible artifact
-   * deletion failure, or manifest-visible artifact reconciliation failure.
+   * deletion failure, manifest-visible artifact reconciliation failure, or
+   * active-attempt release failure.
    * @throws std::system_error for mutex synchronization failure.
    * @note Query, lookup, and quota observation remain available; mutation and
    * worker progress are fenced until restart.
@@ -270,6 +313,27 @@ class SingleTenantJobServiceTestAccess final {
   static bool durable_mutation_faulted(const SingleTenantJobService& service) {
     std::lock_guard<std::mutex> lock(service.mutex_);
     return service.durable_mutation_faulted_locked();
+  }
+
+  /**
+   * @brief Captures every retained active-reservation receipt owner.
+   * @param service Live service whose private ownership is observed.
+   * @return Counts split between Job controls and rollback stranded storage.
+   * @throws std::system_error for mutex synchronization failure.
+   * @note The snapshot exposes no reservation id and grants no settlement
+   * authority. Under release fail-stop its total matches active quota usage.
+   */
+  static QuotaReservationOwnershipSnapshot quota_reservation_ownership(
+      const SingleTenantJobService& service) {
+    std::lock_guard<std::mutex> lock(service.mutex_);
+    QuotaReservationOwnershipSnapshot snapshot;
+    for (const auto& entry : service.jobs_) {
+      if (entry.second.reservation.has_value()) {
+        ++snapshot.job_controls;
+      }
+    }
+    snapshot.stranded = service.stranded_reservation_.has_value() ? 1U : 0U;
+    return snapshot;
   }
 
   /**

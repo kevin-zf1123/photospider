@@ -71,7 +71,32 @@ std::map<std::string, std::uint64_t> device_map(
 }
 
 /**
- * @brief Subtracts one complete active request from trusted current usage.
+ * @brief Validates that one complete active request can be subtracted.
+ * @param request Exact retained reservation request.
+ * @param usage Current usage inspected without mutation.
+ * @return Nothing.
+ * @throws std::logic_error when internal accounting is inconsistent.
+ * @note Caller holds the authority mutex. This helper never mutates `usage`.
+ */
+void validate_request_subtraction(const JobResourceRequest& request,
+                                  const TenantQuotaSnapshot& usage) {
+  if (usage.active_attempts == 0U || usage.cpu_slots < request.cpu_slots ||
+      usage.host_memory_bytes < request.host_memory_bytes ||
+      usage.output_bytes < request.output_bytes ||
+      usage.staging_bytes < request.staging_bytes ||
+      usage.retention_bytes < request.retention_bytes) {
+    throw std::logic_error("tenant quota active accounting is inconsistent");
+  }
+  for (const DeviceResourceRequest& device : request.devices) {
+    const auto found = usage.device_bytes.find(device.device_id);
+    if (found == usage.device_bytes.end() || found->second < device.bytes) {
+      throw std::logic_error("tenant device quota accounting is inconsistent");
+    }
+  }
+}
+
+/**
+ * @brief Subtracts one validated complete active request from current usage.
  * @param request Exact retained reservation request.
  * @param usage Non-null current usage mutated after invariant checks.
  * @return Nothing.
@@ -81,20 +106,10 @@ std::map<std::string, std::uint64_t> device_map(
  */
 void subtract_request(const JobResourceRequest& request,
                       TenantQuotaSnapshot* usage) {
-  if (usage == nullptr || usage->active_attempts == 0U ||
-      usage->cpu_slots < request.cpu_slots ||
-      usage->host_memory_bytes < request.host_memory_bytes ||
-      usage->output_bytes < request.output_bytes ||
-      usage->staging_bytes < request.staging_bytes ||
-      usage->retention_bytes < request.retention_bytes) {
-    throw std::logic_error("tenant quota active accounting is inconsistent");
+  if (usage == nullptr) {
+    throw std::logic_error("tenant quota usage owner is null");
   }
-  for (const DeviceResourceRequest& device : request.devices) {
-    const auto found = usage->device_bytes.find(device.device_id);
-    if (found == usage->device_bytes.end() || found->second < device.bytes) {
-      throw std::logic_error("tenant device quota accounting is inconsistent");
-    }
-  }
+  validate_request_subtraction(request, *usage);
   --usage->active_attempts;
   usage->cpu_slots -= request.cpu_slots;
   usage->host_memory_bytes -= request.host_memory_bytes;
@@ -221,6 +236,10 @@ void TenantQuotaAuthority::release_attempt(
   const auto found = reservations_.find(reservation_id.value());
   if (found == reservations_.end()) {
     throw std::logic_error("tenant quota reservation is absent or settled");
+  }
+  validate_request_subtraction(found->second.request, usage_);
+  if (options_.release_attempt_observer) {
+    options_.release_attempt_observer();
   }
   subtract_request(found->second.request, &usage_);
   reservations_.erase(found);

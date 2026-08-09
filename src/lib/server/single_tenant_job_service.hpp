@@ -219,6 +219,12 @@ struct JobSnapshot final {
  * failure enters a separate monotonic reconciliation fail-stop. That state
  * preserves the current active reservation or already-retained charge and
  * forbids a compensating `Failed/ArtifactCommit` record until restart.
+ * Active-attempt release failure is another monotonic fail-stop boundary.
+ * A terminal Job keeps its reservation owner in the control record; a
+ * pre-publication rollback with no durable Job transfers its owner into one
+ * service-owned stranded slot. No compensating terminal rewrite or same-
+ * process release retry is attempted, and restart reconstructs only durable
+ * Job/artifact truth with no process-local active reservation.
  *
  * @throws std::invalid_argument when construction receives an invalid tenant or
  * null factory.
@@ -286,9 +292,12 @@ class SingleTenantJobService final {
    * accepted-state publication. Thread construction occurs while `mutex_`
    * prevents worker entry and before journal publication. A pre-publication
    * journal failure removes process-local acceptance, releases quota, and lets
-   * the reaper join the fenced worker. A post-publication failure throws
-   * `DurableJobCommitError`, retains aligned truth/quota, and fail-stops
-   * writes. The remaining successful return path is a non-throwing move.
+   * the reaper join the fenced worker. If rollback release itself fails, the
+   * service retains the reservation in its stranded-owner slot, fail-stops all
+   * later mutation, and rethrows the triggering submit failure. A post-
+   * publication failure throws `DurableJobCommitError`, retains aligned truth/
+   * quota, and fail-stops writes. The remaining successful return path is a
+   * non-throwing move.
    */
   JobSubmission submit(JobSpec spec);
 
@@ -304,6 +313,9 @@ class SingleTenantJobService final {
    * attempt truth/quota and fail-stops writes until restart.
    * @note JobId, JobSpecDigest, checkpoint, stable artifact, and stable commit
    * identity are preserved. Attempt/worker/lease/quota identities are fresh.
+   * If rollback release fails, the service retains the fresh reservation in
+   * its stranded-owner slot, fail-stops mutation, and rethrows the triggering
+   * retry failure without changing prior durable Job truth.
    */
   std::optional<JobSubmission> retry(const JobId& job_id);
 
@@ -456,8 +468,9 @@ class SingleTenantJobService final {
   /**
    * @brief Private union of observable Job truth and active quota ownership.
    * @throws Nothing for default construction; copies may allocate.
-   * @note `reservation` exists exactly while the current attempt is active.
-   * Workers and query callers never receive this mutation authority.
+   * @note `reservation` exists while the current attempt is active, or after a
+   * terminal release failure until service destruction/restart. Workers and
+   * query callers never receive this mutation authority.
    */
   struct JobControlRecord final {
     /** @brief Observable/persisted current control-plane truth. */
@@ -473,6 +486,9 @@ class SingleTenantJobService final {
   static_assert(std::is_nothrow_swappable_v<JobSnapshot>);
   /** @brief Guards allocation-free transfer of accepted quota ownership. */
   static_assert(std::is_nothrow_move_constructible_v<TenantQuotaReservation>);
+  /** @brief Guards allocation-free transfer to the stranded-owner slot. */
+  static_assert(
+      std::is_nothrow_move_assignable_v<std::optional<TenantQuotaReservation>>);
   /** @brief Guards allocation-free atomic in-memory retry replacement. */
   static_assert(std::is_nothrow_swappable_v<JobControlRecord>);
 
@@ -519,8 +535,8 @@ class SingleTenantJobService final {
   /**
    * @brief Reads monotonic cancellation state for a worker observer.
    * @param expected Exact assignment identity observed by its worker.
-   * @return True when service shutdown, replacement, or current cancellation
-   * is active.
+   * @return True when service shutdown, durable-mutation fail-stop,
+   * replacement, or current cancellation is active.
    * @throws Nothing.
    */
   bool cancellation_requested_for(
@@ -533,7 +549,9 @@ class SingleTenantJobService final {
    * @return Nothing after terminal state derivation and observer notification.
    * @throws Nothing; an unambiguous pre-manifest artifact exception becomes a
    * typed failed Job. Manifest-visible ambiguity or any failure after an exact
-   * artifact match preserves quota and enters reconciliation fail-stop.
+   * artifact match preserves quota and enters reconciliation fail-stop. Any
+   * terminal active-release exception preserves its exact reservation owner
+   * and enters quota-release fail-stop without rewriting terminal truth.
    * @note A prior attempt whose `expected` identity is no longer current is
    * fenced without mutating the replacement attempt. For the current attempt,
    * full report identity, enum, outcome/failure/settlement/image shape, and
@@ -597,22 +615,51 @@ class SingleTenantJobService final {
   void fail_stop_artifact_reconciliation_locked() noexcept;
 
   /**
+   * @brief Attempts one exact active-reservation release under service lock.
+   * @param reservation Service-owned reservation optional to settle in place.
+   * @return True when absent or released; false when release failed.
+   * @throws Nothing; every quota exception is converted to monotonic release
+   * fail-stop while the exact owner remains in `reservation`.
+   * @note The caller holds `mutex_`. Success resets the optional exactly once.
+   * Failure changes no Job snapshot and performs no compensating durable
+   * rewrite or same-process retry. Workers and later mutation are fenced.
+   */
+  bool try_release_attempt_locked(
+      std::optional<TenantQuotaReservation>& reservation) noexcept;
+
+  /**
+   * @brief Transfers a rollback-only reservation into service ownership.
+   * @param reservation Present candidate owner whose Job will not remain in
+   * `jobs_` and whose quota release has already failed.
+   * @return Nothing after allocation-free unique-owner transfer.
+   * @throws Nothing; impossible invariant violations terminate rather than
+   * silently discard either quota owner.
+   * @note The caller holds `mutex_`. The first release failure has already
+   * fail-stopped all mutation, so at most one rollback-only stranded owner can
+   * exist. Terminal Job owners remain in their `JobControlRecord` instead.
+   */
+  void retain_stranded_reservation_locked(
+      std::optional<TenantQuotaReservation>& reservation) noexcept;
+
+  /**
    * @brief Reports whether any irreversible durable mutation failure occurred.
    * @return True after Job-journal publication ambiguity, artifact-deletion
-   * visibility ambiguity/cleanup failure, or artifact reconciliation failure.
+   * visibility ambiguity/cleanup failure, artifact reconciliation failure, or
+   * active-attempt quota release failure.
    * @throws Nothing.
    * @note The caller holds `mutex_`. Reads remain available in this state;
    * workers and every subsequent durable mutation are fenced until restart.
    */
   bool durable_mutation_faulted_locked() const noexcept {
     return journal_faulted_ || artifact_erase_faulted_ ||
-           artifact_reconciliation_faulted_;
+           artifact_reconciliation_faulted_ || quota_release_faulted_;
   }
 
   /**
-   * @brief Rejects a new mutation after any irreversible durability failure.
+   * @brief Rejects mutation after any durability or quota-release fail-stop.
    * @return Nothing when durable mutation remains available.
-   * @throws DurableStateError when restart reconciliation is required.
+   * @throws DurableStateError when restart reconciliation or active-release
+   * recovery is required.
    * @note The caller holds `mutex_`.
    */
   void require_durable_mutation_available_locked() const;
@@ -651,6 +698,13 @@ class SingleTenantJobService final {
   mutable std::condition_variable condition_;
   /** @brief JobId text to authoritative copied current record. */
   std::map<std::string, JobControlRecord> jobs_;
+  /**
+   * @brief Sole active reservation whose rollback has no durable Job owner.
+   * @note Present only after release failed during submit/retry thread-start or
+   * NotPublished rollback. The monotonic release fail-stop prevents a second
+   * candidate. Destruction/restart drops this process-local charge authority.
+   */
+  std::optional<TenantQuotaReservation> stranded_reservation_;
   /** @brief JobAttemptId text to joinable record pending reaper ownership. */
   std::map<std::string, WorkerThreadRecord> workers_;
   /** @brief Completed handles currently moved out for an unlocked join. */
@@ -676,6 +730,13 @@ class SingleTenantJobService final {
    * until constructor recovery revalidates and reconciles the artifact.
    */
   bool artifact_reconciliation_faulted_ = false;
+  /**
+   * @brief Monotonic fail-stop after active-attempt release raised.
+   * @note The exact owner remains either on its terminal Job control or in
+   * `stranded_reservation_`. No same-process mutation or compensating durable
+   * rewrite proceeds; restart clears active quota and reloads durable truth.
+   */
+  bool quota_release_faulted_ = false;
   /** @brief Sole bounded infrastructure thread that joins worker handles. */
   std::thread reaper_;
 };

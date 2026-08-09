@@ -602,18 +602,22 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
   const DurableJobRecord durable_candidate = durable_record(snapshot);
   const std::string job_key = snapshot.job_id.value();
   const std::string worker_key = assignment.identity.attempt_id.value();
-  TenantQuotaReservation reservation = quota_authority_->reserve(
-      snapshot.job_id, immutable_spec->resource_request());
+  std::optional<TenantQuotaReservation> rollback_reservation(
+      quota_authority_->reserve(snapshot.job_id,
+                                immutable_spec->resource_request()));
   bool job_inserted = false;
   bool worker_inserted = false;
+  decltype(jobs_)::iterator job_record = jobs_.end();
   decltype(workers_)::iterator worker_record = workers_.end();
   try {
-    const bool inserted =
-        jobs_.emplace(job_key, JobControlRecord{snapshot, reservation}).second;
-    if (!inserted) {
+    const auto job = jobs_.emplace(
+        job_key, JobControlRecord{snapshot, rollback_reservation});
+    job_record = job.first;
+    job_inserted = job.second;
+    if (!job_inserted) {
       throw std::logic_error("fresh durable JobId collided in service state");
     }
-    job_inserted = true;
+    rollback_reservation.reset();
     const auto worker = workers_.try_emplace(worker_key);
     worker_record = worker.first;
     worker_inserted = worker.second;
@@ -627,13 +631,13 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
     if (worker_inserted) {
       workers_.erase(worker_key);
     }
-    if (job_inserted) {
-      jobs_.erase(job_key);
+    std::optional<TenantQuotaReservation>& reservation =
+        job_inserted ? job_record->second.reservation : rollback_reservation;
+    if (!try_release_attempt_locked(reservation)) {
+      retain_stranded_reservation_locked(reservation);
     }
-    try {
-      quota_authority_->release_attempt(reservation.id);
-    } catch (...) {
-      failure = std::current_exception();
+    if (job_inserted) {
+      jobs_.erase(job_record);
     }
     condition_.notify_all();
     std::rethrow_exception(failure);
@@ -643,9 +647,11 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
       durable_state_->persist_job(durable_candidate);
   if (!commit.succeeded()) {
     if (!commit.published()) {
-      jobs_.erase(job_key);
       worker_record->second.completed = true;
-      quota_authority_->release_attempt(reservation.id);
+      if (!try_release_attempt_locked(job_record->second.reservation)) {
+        retain_stranded_reservation_locked(job_record->second.reservation);
+      }
+      jobs_.erase(job_record);
       condition_.notify_all();
       commit.rethrow_failure();
       throw std::logic_error(
@@ -741,10 +747,8 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
       workers_.erase(worker_key);
     }
     if (replacement_control.reservation.has_value()) {
-      try {
-        quota_authority_->release_attempt(replacement_control.reservation->id);
-      } catch (...) {
-        failure = std::current_exception();
+      if (!try_release_attempt_locked(replacement_control.reservation)) {
+        retain_stranded_reservation_locked(replacement_control.reservation);
       }
     }
     condition_.notify_all();
@@ -755,8 +759,9 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
       durable_state_->persist_job(durable_candidate);
   if (!commit.published() && !commit.succeeded()) {
     worker_record->second.completed = true;
-    quota_authority_->release_attempt(replacement_control.reservation->id);
-    replacement_control.reservation.reset();
+    if (!try_release_attempt_locked(replacement_control.reservation)) {
+      retain_stranded_reservation_locked(replacement_control.reservation);
+    }
     condition_.notify_all();
     commit.rethrow_failure();
     throw std::logic_error(
@@ -1053,20 +1058,14 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
       reject_report(candidate,
                     "worker report identity does not match current assignment");
       publish_snapshot_locked(control, candidate);
-      if (control.reservation.has_value()) {
-        quota_authority_->release_attempt(control.reservation->id);
-        control.reservation.reset();
-      }
+      static_cast<void>(try_release_attempt_locked(control.reservation));
       condition_.notify_all();
       return;
     }
     if (!has_valid_worker_report_shape(report)) {
       reject_report(candidate, "worker report has an invalid semantic shape");
       publish_snapshot_locked(control, candidate);
-      if (control.reservation.has_value()) {
-        quota_authority_->release_attempt(control.reservation->id);
-        control.reservation.reset();
-      }
+      static_cast<void>(try_release_attempt_locked(control.reservation));
       condition_.notify_all();
       return;
     }
@@ -1076,10 +1075,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
           candidate,
           "worker reported cancellation without control-plane intent");
       publish_snapshot_locked(control, candidate);
-      if (control.reservation.has_value()) {
-        quota_authority_->release_attempt(control.reservation->id);
-        control.reservation.reset();
-      }
+      static_cast<void>(try_release_attempt_locked(control.reservation));
       condition_.notify_all();
       return;
     }
@@ -1098,10 +1094,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
         candidate.message = "worker attempt failed without a diagnostic";
       }
       publish_snapshot_locked(control, candidate);
-      if (control.reservation.has_value()) {
-        quota_authority_->release_attempt(control.reservation->id);
-        control.reservation.reset();
-      }
+      static_cast<void>(try_release_attempt_locked(control.reservation));
       condition_.notify_all();
       return;
     }
@@ -1113,10 +1106,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
         candidate.message = "cancellation observed before artifact commit";
       }
       publish_snapshot_locked(control, candidate);
-      if (control.reservation.has_value()) {
-        quota_authority_->release_attempt(control.reservation->id);
-        control.reservation.reset();
-      }
+      static_cast<void>(try_release_attempt_locked(control.reservation));
       condition_.notify_all();
       return;
     }
@@ -1192,14 +1182,7 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
         condition_.notify_all();
         return;
       }
-      if (control.reservation.has_value()) {
-        try {
-          quota_authority_->release_attempt(control.reservation->id);
-          control.reservation.reset();
-        } catch (...) {
-          failure.message.append("; failed to release active quota");
-        }
-      }
+      static_cast<void>(try_release_attempt_locked(control.reservation));
       condition_.notify_all();
     } catch (...) {
       std::terminate();
@@ -1242,14 +1225,8 @@ void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
           condition_.notify_all();
           return;
         }
-        if (found->second.reservation.has_value()) {
-          try {
-            quota_authority_->release_attempt(found->second.reservation->id);
-            found->second.reservation.reset();
-          } catch (...) {
-            failure.message.append("; failed to release active quota");
-          }
-        }
+        static_cast<void>(
+            try_release_attempt_locked(found->second.reservation));
         condition_.notify_all();
       }
     } catch (...) {
@@ -1370,11 +1347,45 @@ void SingleTenantJobService::
   condition_.notify_all();
 }
 
+/** @copydoc ps::server::SingleTenantJobService::try_release_attempt_locked */
+bool SingleTenantJobService::try_release_attempt_locked(
+    std::optional<TenantQuotaReservation>& reservation) noexcept {
+  if (!reservation.has_value()) {
+    return true;
+  }
+  try {
+    quota_authority_->release_attempt(reservation->id);
+    reservation.reset();
+    return true;
+  } catch (...) {
+    quota_release_faulted_ = true;
+    condition_.notify_all();
+    return false;
+  }
+}
+
+/** @copydoc
+ * ps::server::SingleTenantJobService::retain_stranded_reservation_locked
+ */
+void SingleTenantJobService::retain_stranded_reservation_locked(
+    std::optional<TenantQuotaReservation>& reservation) noexcept {
+  if (!quota_release_faulted_ || !reservation.has_value() ||
+      stranded_reservation_.has_value()) {
+    std::terminate();
+  }
+  stranded_reservation_ = std::move(reservation);
+  reservation.reset();
+}
+
 /** @copydoc
  * ps::server::SingleTenantJobService::require_durable_mutation_available_locked
  */
 void SingleTenantJobService::require_durable_mutation_available_locked() const {
   if (durable_mutation_faulted_locked()) {
+    if (quota_release_faulted_) {
+      throw DurableStateError(
+          "tenant quota release is fail-stopped; restart required");
+    }
     throw DurableStateError(
         "durable server mutation is fail-stopped; restart required");
   }

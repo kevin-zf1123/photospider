@@ -132,6 +132,15 @@ struct TenantQuotaReservation final {
  */
 struct TenantQuotaAuthorityOptions final {
   /**
+   * @brief Observes one validated active-attempt release before mutation.
+   * @note The callback runs under the quota mutex after reservation lookup and
+   * complete accounting validation but before the first usage subtraction or
+   * reservation-map erase. An exception therefore preserves the reservation
+   * and all accounting exactly. The callback must not reenter this authority.
+   */
+  std::function<void()> release_attempt_observer;
+
+  /**
    * @brief Observes a fully prepared retained-artifact conversion.
    * @note The callback runs under the quota mutex after all validation and
    * private copies succeed but before live reservation/retention publication.
@@ -146,9 +155,10 @@ struct TenantQuotaAuthorityOptions final {
  *
  * Admission performs checked component-wise validation and changes all usage
  * plus the reservation map under one mutex, or changes nothing. Attempt
- * settlement releases the complete reservation exactly once. Successful
- * artifact commit converts reserved retention to exact durable payload usage;
- * restart imports only validated retained artifacts, never active attempts.
+ * settlement releases the complete reservation exactly once with a strong
+ * exception guarantee. Successful artifact commit converts reserved retention
+ * to exact durable payload usage; restart imports only validated retained
+ * artifacts, never active attempts.
  *
  * @throws Constructor rejects invalid limits. Public mutation methods throw
  * `std::invalid_argument`, `std::logic_error`, `std::overflow_error`,
@@ -227,9 +237,11 @@ class TenantQuotaAuthority final {
    * @throws std::invalid_argument for an invalid id.
    * @throws std::logic_error when the id is absent or already settled.
    * @throws std::system_error when mutex acquisition fails.
+   * @throws Any source-private release observer exception unchanged.
    * @note Under the mutex, all scalar and device invariants are checked before
-   * subtraction. Any exception leaves usage and reservation ownership
-   * unchanged; success removes the entire envelope exactly once.
+   * the source-private observer and subtraction. Any exception leaves usage
+   * and reservation ownership unchanged; success removes the entire envelope
+   * exactly once. The observer must not reenter this authority.
    */
   void release_attempt(const QuotaReservationId& reservation_id);
 
