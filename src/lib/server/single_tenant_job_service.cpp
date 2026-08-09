@@ -1,12 +1,14 @@
 /**
  * @file single_tenant_job_service.cpp
- * @brief Implements Issue #98 Job truth and artifact commit authority.
+ * @brief Implements Issue #99 durable Job, quota, retry, and artifact truth.
  */
 #include "server/single_tenant_job_service.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
-#include <cstring>
+#include <chrono>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -16,23 +18,14 @@
 #include <system_error>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {
 
-/** @brief Process-wide non-reused Job sequence. */
-std::atomic<std::uint64_t> g_job_sequence{0U};
-/** @brief Process-wide non-reused attempt sequence. */
-std::atomic<std::uint64_t> g_attempt_sequence{0U};
-/** @brief Process-wide non-reused worker sequence. */
-std::atomic<std::uint64_t> g_worker_sequence{0U};
-/** @brief Process-wide non-reused artifact sequence. */
-std::atomic<std::uint64_t> g_artifact_sequence{0U};
-/** @brief Process-wide non-reused output commit sequence. */
-std::atomic<std::uint64_t> g_commit_sequence{0U};
+/** @brief Process-wide uniqueness input for service identity namespaces. */
+std::atomic<std::uint64_t> g_service_namespace_sequence{0U};
 
 /**
  * @brief Current-thread state for one source-private worker-start injection.
@@ -128,14 +121,8 @@ void throw_assignment_thread_start_failure_if_armed(JobId& attempted_job_id) {
  * @throws std::invalid_argument when `sequence` is null.
  * @throws std::overflow_error when the sequence is already saturated.
  * @throws Any exception raised by `after_initial_observation` unchanged.
- * @note The caller owns the sequence lifetime. Production passes process-wide
- * counters, while maintained tests pass isolated local counters through the
- * source-private access seam.
- * @note The successful relaxed compare/exchange is the reservation
- * linearization point. Relaxed ordering is sufficient because this counter
- * conveys only uniqueness and does not publish or consume associated data.
- * A saturated observation performs no write, so the sequence never decreases
- * or exposes a wrapped value.
+ * @note The successful relaxed compare/exchange is the uniqueness
+ * linearization point. A saturated observation performs no write.
  */
 template <typename AfterInitialObservation>
 std::uint64_t reserve_next_identity_sequence_value_impl(
@@ -165,7 +152,6 @@ std::uint64_t reserve_next_identity_sequence_value_impl(
  * @return Fresh sequence value.
  * @throws std::invalid_argument when `sequence` is null.
  * @throws std::overflow_error when the sequence is already saturated.
- * @note The inline observer is stateless and cannot throw.
  */
 std::uint64_t reserve_next_identity_sequence_value(
     std::atomic<std::uint64_t>* sequence) {
@@ -173,70 +159,98 @@ std::uint64_t reserve_next_identity_sequence_value(
 }
 
 /**
- * @brief Mints one process-lifetime identity in an exact strong domain.
- * @tparam Domain Opaque identity domain tag.
- * @param prefix Stable domain-specific textual prefix.
- * @param sequence Non-null process-wide monotonically increasing counter.
- * @return Fresh strong opaque identity.
- * @throws std::overflow_error if the process exhausts the uint64 sequence.
- * @throws std::bad_alloc when constructing identity text exhausts memory.
- * @note Counters intentionally do not persist across restart; Issue #99 owns
- * durable/global allocation.
- * @note Reservation linearizes before identity-text construction. A later
- * allocation failure may leave a gap, but the reserved value is never rolled
- * back or reused by another caller.
+ * @brief Creates a collision-resistant opaque namespace for one service run.
+ * @param tenant_id Configured tenant identity.
+ * @param root Canonical locked state root.
+ * @return Twenty-four lowercase hexadecimal characters.
+ * @throws Hashing/allocation/sequence failures unchanged.
+ * @note Durable identities retain this namespace in records. Restart creates a
+ * different namespace and therefore cannot reuse a prior Job token even though
+ * active identity counters are process-local.
  */
-template <typename Domain>
-OpaqueTextId<Domain> mint_identity(std::string_view prefix,
-                                   std::atomic<std::uint64_t>* sequence) {
-  const std::uint64_t reserved = reserve_next_identity_sequence_value(sequence);
-  return OpaqueTextId<Domain>(std::string(prefix) + std::to_string(reserved));
+std::string make_service_namespace(const TenantId& tenant_id,
+                                   const std::filesystem::path& root) {
+  const auto system_ticks =
+      std::chrono::system_clock::now().time_since_epoch().count();
+  const auto steady_ticks =
+      std::chrono::steady_clock::now().time_since_epoch().count();
+  const std::uint64_t sequence =
+      reserve_next_identity_sequence_value(&g_service_namespace_sequence);
+  const std::string seed =
+      tenant_id.value() + "|" + root.string() + "|" +
+      std::to_string(static_cast<std::int64_t>(system_ticks)) + "|" +
+      std::to_string(static_cast<std::int64_t>(steady_ticks)) + "|" +
+      std::to_string(static_cast<std::int64_t>(::getpid())) + "|" +
+      std::to_string(sequence);
+  const JobSpecDigest digest = hash_job_spec_bytes(
+      reinterpret_cast<const std::byte*>(seed.data()), seed.size());
+  return digest.hex().substr(0U, 24U);
 }
 
 /**
- * @brief Mints one fresh accepted Job identity.
- * @return Process-lifetime unique JobId.
- * @throws As `mint_identity`.
+ * @brief Builds one stable initial Job-scoped identity suffix.
+ * @param service_namespace Collision-resistant current service namespace.
+ * @param job_sequence Checked nonzero service-local Job sequence.
+ * @return `<namespace>-<sequence>` opaque suffix.
+ * @throws std::bad_alloc when construction fails.
  */
-JobId mint_job_id() {
-  return mint_identity<JobIdDomain>("job-v1-", &g_job_sequence);
+std::string job_suffix(std::string_view service_namespace,
+                       std::uint64_t job_sequence) {
+  return std::string(service_namespace) + "-" + std::to_string(job_sequence);
 }
 
 /**
- * @brief Mints one fresh Job attempt identity.
- * @return Process-lifetime unique JobAttemptId.
- * @throws As `mint_identity`.
+ * @brief Mints one Job identity from a durable non-reused namespace/suffix.
+ * @param suffix Exact current service Job suffix.
+ * @return Fresh JobId.
+ * @throws Identity/allocation failures unchanged.
  */
-JobAttemptId mint_attempt_id() {
-  return mint_identity<JobAttemptIdDomain>("attempt-v1-", &g_attempt_sequence);
+JobId mint_job_id(std::string_view suffix) {
+  return JobId("job-v2-" + std::string(suffix));
 }
 
 /**
- * @brief Mints one fresh worker instance identity.
- * @return Process-lifetime unique WorkerInstanceId.
- * @throws As `mint_identity`.
+ * @brief Mints one attempt identity for an exact Job lease generation.
+ * @param job_id Durable Job owner.
+ * @param generation Positive current lease generation.
+ * @return Fresh generation-qualified JobAttemptId.
+ * @throws Identity/allocation failures unchanged.
  */
-WorkerInstanceId mint_worker_id() {
-  return mint_identity<WorkerInstanceIdDomain>("worker-v1-",
-                                               &g_worker_sequence);
+JobAttemptId mint_attempt_id(const JobId& job_id, std::uint64_t generation) {
+  return JobAttemptId("attempt-v2-" + job_id.value() + "-" +
+                      std::to_string(generation));
 }
 
 /**
- * @brief Mints one fresh immutable artifact identity.
- * @return Process-lifetime unique ArtifactId.
- * @throws As `mint_identity`.
+ * @brief Mints one worker identity for an exact Job lease generation.
+ * @param job_id Durable Job owner.
+ * @param generation Positive current lease generation.
+ * @return Fresh generation-qualified WorkerInstanceId.
+ * @throws Identity/allocation failures unchanged.
  */
-ArtifactId mint_artifact_id() {
-  return mint_identity<ArtifactIdDomain>("artifact-v1-", &g_artifact_sequence);
+WorkerInstanceId mint_worker_id(const JobId& job_id, std::uint64_t generation) {
+  return WorkerInstanceId("worker-v2-" + job_id.value() + "-" +
+                          std::to_string(generation));
 }
 
 /**
- * @brief Mints one fresh output commit identity.
- * @return Process-lifetime unique OutputCommitId.
- * @throws As `mint_identity`.
+ * @brief Mints one stable artifact identity at initial Job acceptance.
+ * @param suffix Exact current service Job suffix.
+ * @return Stable retry-preserved ArtifactId.
+ * @throws Identity/allocation failures unchanged.
  */
-OutputCommitId mint_commit_id() {
-  return mint_identity<OutputCommitIdDomain>("commit-v1-", &g_commit_sequence);
+ArtifactId mint_artifact_id(std::string_view suffix) {
+  return ArtifactId("artifact-v2-" + std::string(suffix));
+}
+
+/**
+ * @brief Mints one stable idempotent output transaction at Job acceptance.
+ * @param suffix Exact current service Job suffix.
+ * @return Stable retry-preserved OutputCommitId.
+ * @throws Identity/allocation failures unchanged.
+ */
+OutputCommitId mint_commit_id(std::string_view suffix) {
+  return OutputCommitId("commit-v2-" + std::string(suffix));
 }
 
 /**
@@ -250,14 +264,10 @@ std::string unexpected_message(const std::exception& error) {
 }
 
 /**
- * @brief Reports whether a failure category may originate from a failed
- * worker report.
- * @param failure Candidate failure enum, including potentially invalid
- * underlying representations.
- * @return True only for a worker-owned failure accepted with `Failed`.
+ * @brief Reports whether a failure category may originate from a worker.
+ * @param failure Candidate closed or invalid representation.
+ * @return True only for one worker-owned failed-report category.
  * @throws Nothing.
- * @note `None`, `CancellationObserved`, `ReportRejected`, and
- * `ArtifactCommit` belong to other outcome or control-plane domains.
  */
 bool is_worker_owned_failure(JobAttemptFailure failure) noexcept {
   switch (failure) {
@@ -273,6 +283,7 @@ bool is_worker_owned_failure(JobAttemptFailure failure) noexcept {
     case JobAttemptFailure::CancellationObserved:
     case JobAttemptFailure::ReportRejected:
     case JobAttemptFailure::ArtifactCommit:
+    case JobAttemptFailure::RecoveryInterrupted:
       return false;
   }
   return false;
@@ -283,8 +294,6 @@ bool is_worker_owned_failure(JobAttemptFailure failure) noexcept {
  * @param report Identity-fenced candidate report.
  * @return True only for one complete supported worker report shape.
  * @throws Nothing.
- * @note Diagnostics are intentionally unconstrained. Failed reports preserve
- * either settlement value because it records the worker's actual cleanup.
  */
 bool has_valid_worker_report_shape(const JobAttemptReport& report) noexcept {
   switch (report.outcome) {
@@ -298,18 +307,18 @@ bool has_valid_worker_report_shape(const JobAttemptReport& report) noexcept {
       return report.settled &&
              report.failure == JobAttemptFailure::CancellationObserved &&
              !report.image.has_value();
+    case JobAttemptOutcome::None:
+      return false;
   }
   return false;
 }
 
 /**
  * @brief Publishes one fail-closed report rejection without trusting facts.
- * @param job Mutable current Job record held under the service mutex.
+ * @param job Mutable current Job snapshot held under the service mutex.
  * @param message Stable control-plane diagnostic.
  * @return Nothing.
  * @throws std::bad_alloc when storing the diagnostic exhausts memory.
- * @note `Failed` is a control-plane state, not a worker outcome. The rejected
- * report leaves no retained outcome, settlement, or receipt fact.
  */
 void reject_report(JobSnapshot& job, std::string_view message) {
   job.state = JobState::Failed;
@@ -320,6 +329,50 @@ void reject_report(JobSnapshot& job, std::string_view message) {
   job.output_receipt.reset();
 }
 
+/**
+ * @brief Checks whether a recovered artifact fulfills one stable Job output.
+ * @param job Durable Job record.
+ * @param artifact Candidate recovered immutable artifact.
+ * @return True only when every stable identity and durability field matches.
+ * @throws Nothing.
+ */
+bool artifact_fulfills_job(const DurableJobRecord& job,
+                           const ArtifactRecord& artifact) noexcept {
+  const OutputCommitReceipt& receipt = artifact.receipt;
+  return receipt.attempt.tenant_id == job.tenant_id &&
+         receipt.attempt.job_id == job.job_id && job.spec != nullptr &&
+         receipt.attempt.job_spec_digest == job.spec->digest() &&
+         receipt.output_slot_id == job.spec->output_slot_id() &&
+         receipt.artifact_id == job.output_artifact_id &&
+         receipt.output_commit_id == job.output_commit_id &&
+         receipt.achieved_durability == ArtifactDurability::CrashDurable;
+}
+
+/**
+ * @brief Revalidates one checkpoint record against exact admission authority.
+ * @param tenant_id Configured tenant accepting the checkpoint.
+ * @param artifact_id Exact checkpoint identity declared by the frozen JobSpec.
+ * @param artifact Immutable durable record returned by the rooted store.
+ * @return True only when tenant, identity, durability, size, and content digest
+ * all agree.
+ * @throws std::overflow_error when content hashing cannot represent its input.
+ * @note Durable lookup already validates these facts during recovery. This
+ * defensive join keeps submit and retry authorization identical even if a
+ * future store implementation changes its in-memory indexing strategy.
+ */
+bool checkpoint_is_authorized(const TenantId& tenant_id,
+                              const ArtifactId& artifact_id,
+                              const ArtifactRecord& artifact) {
+  const OutputCommitReceipt& receipt = artifact.receipt;
+  return receipt.attempt.tenant_id == tenant_id &&
+         receipt.artifact_id == artifact_id &&
+         receipt.achieved_durability == ArtifactDurability::CrashDurable &&
+         receipt.descriptor.payload_bytes == artifact.payload.size() &&
+         receipt.content_digest ==
+             hash_artifact_content(artifact.payload.data(),
+                                   artifact.payload.size());
+}
+
 }  // namespace
 
 /** @copydoc ps::server::ScopedWorkerThreadStartFailure */
@@ -327,16 +380,14 @@ ScopedWorkerThreadStartFailure::ScopedWorkerThreadStartFailure() {
   arm_assignment_thread_start_failure(&attempted_job_id_);
 }
 
-/**
- * @copydoc
+/** @copydoc
  * ps::server::ScopedWorkerThreadStartFailure::~ScopedWorkerThreadStartFailure
  */
 ScopedWorkerThreadStartFailure::~ScopedWorkerThreadStartFailure() noexcept {
   disarm_assignment_thread_start_failure(&attempted_job_id_);
 }
 
-/**
- * @copydoc
+/** @copydoc
  * ps::server::SingleTenantJobServiceTestAccess::reserve_identity_sequence_value
  */
 std::uint64_t SingleTenantJobServiceTestAccess::reserve_identity_sequence_value(
@@ -344,9 +395,8 @@ std::uint64_t SingleTenantJobServiceTestAccess::reserve_identity_sequence_value(
   return reserve_next_identity_sequence_value(sequence);
 }
 
-/**
- * @copydoc ps::server::SingleTenantJobServiceTestAccess::
- * reserve_identity_with_observer
+/** @copydoc
+ * ps::server::SingleTenantJobServiceTestAccess::reserve_identity_with_observer
  */
 std::uint64_t SingleTenantJobServiceTestAccess::reserve_identity_with_observer(
     std::atomic<std::uint64_t>* sequence,
@@ -373,81 +423,12 @@ bool is_terminal_job_state(JobState state) {
   throw std::invalid_argument("Job state is invalid");
 }
 
-/** @copydoc ps::server::ProcessLifetimeArtifactStore::commit */
-OutputCommitReceipt ProcessLifetimeArtifactStore::commit(
-    const ArtifactCommitRequest& request) {
-  validate_attempt_identity(request.attempt);
-  if (!request.output_slot_id.valid()) {
-    throw std::invalid_argument("artifact output slot is invalid");
-  }
-  validate_image_buffer(request.image);
-  if (request.image.width <= 0 || request.image.height <= 0 ||
-      request.image.channels <= 0 || request.image.data == nullptr) {
-    throw std::invalid_argument("artifact image is empty");
-  }
-  if (request.image.device != Device::CPU) {
-    throw std::invalid_argument("artifact image is not CPU-resident");
-  }
-
-  const std::size_t row_bytes = image_buffer_row_bytes(request.image);
-  const std::size_t height = static_cast<std::size_t>(request.image.height);
-  if (row_bytes > std::numeric_limits<std::size_t>::max() / height) {
-    throw std::overflow_error("artifact payload size overflowed");
-  }
-  const std::size_t payload_bytes = row_bytes * height;
-  std::vector<std::byte> payload(payload_bytes);
-  for (int row = 0; row < request.image.height; ++row) {
-    const std::byte* source = image_buffer_row_data(request.image, row);
-    std::memcpy(payload.data() + static_cast<std::size_t>(row) * row_bytes,
-                source, row_bytes);
-  }
-
-  OutputCommitReceipt receipt;
-  receipt.attempt = request.attempt;
-  receipt.output_slot_id = request.output_slot_id;
-  receipt.artifact_id = mint_artifact_id();
-  receipt.output_commit_id = mint_commit_id();
-  receipt.descriptor = ArtifactImageDescriptor{request.image.width,
-                                               request.image.height,
-                                               request.image.channels,
-                                               request.image.type,
-                                               row_bytes,
-                                               payload_bytes};
-  receipt.content_digest =
-      hash_artifact_content(payload.data(), payload.size());
-  receipt.achieved_durability = ArtifactDurability::ProcessLifetime;
-
-  auto record = std::make_shared<const ArtifactRecord>(
-      ArtifactRecord{receipt, std::move(payload)});
-  std::lock_guard<std::mutex> lock(mutex_);
-  const bool inserted =
-      records_.emplace(receipt.artifact_id.value(), std::move(record)).second;
-  if (!inserted) {
-    throw std::logic_error("fresh ArtifactId collided in process store");
-  }
-  return receipt;
-}
-
-/** @copydoc ps::server::ProcessLifetimeArtifactStore::find */
-std::shared_ptr<const ArtifactRecord> ProcessLifetimeArtifactStore::find(
-    const ArtifactId& artifact_id) const {
-  if (!artifact_id.valid()) {
-    return nullptr;
-  }
-  std::lock_guard<std::mutex> lock(mutex_);
-  const auto found = records_.find(artifact_id.value());
-  return found == records_.end() ? nullptr : found->second;
-}
-
-/** @copydoc ps::server::ProcessLifetimeArtifactStore::size */
-std::size_t ProcessLifetimeArtifactStore::size() const noexcept {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return records_.size();
-}
-
 /** @copydoc ps::server::SingleTenantJobService::SingleTenantJobService */
 SingleTenantJobService::SingleTenantJobService(
-    TenantId tenant_id, std::shared_ptr<JobAttemptWorkerFactory> worker_factory)
+    TenantId tenant_id, TenantQuotaLimits quota_limits,
+    std::filesystem::path state_root,
+    std::shared_ptr<JobAttemptWorkerFactory> worker_factory,
+    DurableServerStateOptions state_options)
     : tenant_id_(std::move(tenant_id)),
       worker_factory_(std::move(worker_factory)) {
   if (!tenant_id_.valid()) {
@@ -456,19 +437,81 @@ SingleTenantJobService::SingleTenantJobService(
   if (worker_factory_ == nullptr) {
     throw std::invalid_argument("single-tenant worker factory is null");
   }
+  durable_state_ = std::make_unique<DurableServerState>(
+      std::move(state_root), tenant_id_, std::move(state_options));
+  quota_authority_ = std::make_unique<TenantQuotaAuthority>(
+      tenant_id_, std::move(quota_limits));
+  identity_namespace_ =
+      make_service_namespace(tenant_id_, durable_state_->root());
+
+  for (const auto& artifact : durable_state_->recovered_artifacts()) {
+    quota_authority_->recover_retained_artifact(
+        artifact->receipt.artifact_id,
+        static_cast<std::uint64_t>(artifact->receipt.descriptor.payload_bytes));
+  }
+  for (DurableJobRecord recovered : durable_state_->recovered_jobs()) {
+    JobSnapshot snapshot;
+    snapshot.tenant_id = recovered.tenant_id;
+    snapshot.job_id = recovered.job_id;
+    snapshot.spec = recovered.spec;
+    snapshot.assignment = recovered.assignment;
+    snapshot.output_artifact_id = recovered.output_artifact_id;
+    snapshot.output_commit_id = recovered.output_commit_id;
+    snapshot.state = recovered.state;
+    snapshot.cancellation_requested = recovered.cancellation_requested;
+    snapshot.attempt_settled = recovered.attempt_settled;
+    if (recovered.attempt_outcome != JobAttemptOutcome::None) {
+      snapshot.attempt_outcome = recovered.attempt_outcome;
+    }
+    snapshot.failure = recovered.failure;
+    snapshot.message = recovered.message;
+    snapshot.output_receipt = recovered.output_receipt;
+
+    const auto artifact =
+        durable_state_->find_artifact(recovered.output_artifact_id);
+    const bool artifact_matches =
+        artifact != nullptr && artifact_fulfills_job(recovered, *artifact);
+    if (artifact != nullptr && !artifact_matches) {
+      throw DurableCorruptionError(
+          "durable Job output identity conflicts with its stable artifact");
+    }
+    if (artifact_matches && recovered.state != JobState::Cancelled) {
+      snapshot.state = JobState::Succeeded;
+      snapshot.cancellation_requested = false;
+      snapshot.attempt_settled = true;
+      snapshot.attempt_outcome = JobAttemptOutcome::Succeeded;
+      snapshot.failure = JobAttemptFailure::None;
+      snapshot.message.clear();
+      snapshot.output_receipt = artifact->receipt;
+      durable_state_->persist_job(durable_record(snapshot));
+    } else if (!is_terminal_job_state(recovered.state)) {
+      snapshot.state = JobState::Failed;
+      snapshot.attempt_settled = true;
+      snapshot.attempt_outcome = JobAttemptOutcome::Failed;
+      snapshot.failure = JobAttemptFailure::RecoveryInterrupted;
+      snapshot.message =
+          "service restart interrupted the process-local current attempt";
+      snapshot.output_receipt.reset();
+      durable_state_->persist_job(durable_record(snapshot));
+    } else if (recovered.state == JobState::Cancelled && artifact_matches) {
+      throw DurableCorruptionError(
+          "cancelled durable Job conflicts with a committed stable artifact");
+    }
+    const std::string job_key = snapshot.job_id.value();
+    const bool inserted =
+        jobs_
+            .emplace(job_key,
+                     JobControlRecord{std::move(snapshot), std::nullopt})
+            .second;
+    if (!inserted) {
+      throw DurableCorruptionError(
+          "recovered durable Job identity is duplicated");
+    }
+  }
   reaper_ = std::thread(&SingleTenantJobService::reap_workers, this);
 }
 
-/**
- * @copydoc
- * ps::server::SingleTenantJobService::WorkerThreadRecord::WorkerThreadRecord
- */
-SingleTenantJobService::WorkerThreadRecord::WorkerThreadRecord(
-    SingleTenantJobService* service, JobAssignment assignment)
-    : thread(start_assignment_thread(service, std::move(assignment))) {}
-
-/**
- * @copydoc
+/** @copydoc
  * ps::server::SingleTenantJobService::WorkerThreadRecord::start_assignment_thread
  */
 std::thread SingleTenantJobService::WorkerThreadRecord::start_assignment_thread(
@@ -484,10 +527,16 @@ SingleTenantJobService::~SingleTenantJobService() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     shutting_down_ = true;
     for (auto& entry : jobs_) {
-      JobSnapshot& job = entry.second;
-      if (!is_terminal_job_state(job.state)) {
-        job.cancellation_requested = true;
-        job.state = JobState::Cancelling;
+      JobSnapshot& snapshot = entry.second.snapshot;
+      if (!is_terminal_job_state(snapshot.state)) {
+        snapshot.cancellation_requested = true;
+        snapshot.state = JobState::Cancelling;
+        try {
+          persist_snapshot_locked(snapshot);
+        } catch (...) {
+          // Abrupt restart recovery will classify any unpersisted active
+          // record.
+        }
       }
     }
   }
@@ -501,49 +550,204 @@ SingleTenantJobService::~SingleTenantJobService() noexcept {
 JobSubmission SingleTenantJobService::submit(JobSpec spec) {
   validate_job_spec(spec);
   auto immutable_spec = std::make_shared<const JobSpec>(std::move(spec));
-
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (shutting_down_) {
+    throw std::invalid_argument("single-tenant service is shutting down");
+  }
+  std::shared_ptr<const ArtifactRecord> checkpoint;
+  if (immutable_spec->checkpoint_artifact_id().has_value()) {
+    checkpoint = durable_state_->find_artifact(
+        *immutable_spec->checkpoint_artifact_id());
+    if (checkpoint == nullptr ||
+        !checkpoint_is_authorized(tenant_id_,
+                                  *immutable_spec->checkpoint_artifact_id(),
+                                  *checkpoint)) {
+      throw std::invalid_argument(
+          "Job checkpoint does not resolve to this tenant's durable artifact");
+    }
+  }
+  if (next_job_sequence_ == 0U) {
+    throw std::overflow_error("service Job identity sequence exhausted");
+  }
+  const std::uint64_t sequence = next_job_sequence_++;
+  const std::string suffix = job_suffix(identity_namespace_, sequence);
   JobAssignment assignment;
   assignment.identity.tenant_id = tenant_id_;
-  assignment.identity.job_id = mint_job_id();
+  assignment.identity.job_id = mint_job_id(suffix);
   assignment.identity.job_spec_digest = immutable_spec->digest();
-  assignment.identity.attempt_id = mint_attempt_id();
-  assignment.identity.worker_instance_id = mint_worker_id();
   assignment.identity.worker_lease_generation = WorkerLeaseGeneration{1U};
+  assignment.identity.attempt_id =
+      mint_attempt_id(assignment.identity.job_id, 1U);
+  assignment.identity.worker_instance_id =
+      mint_worker_id(assignment.identity.job_id, 1U);
   assignment.spec = immutable_spec;
+  assignment.checkpoint = std::move(checkpoint);
   validate_attempt_identity(assignment.identity);
-
-  JobSubmission submission{assignment.identity.job_id,
-                           assignment.identity.job_spec_digest,
-                           assignment.identity};
 
   JobSnapshot snapshot;
   snapshot.tenant_id = tenant_id_;
   snapshot.job_id = assignment.identity.job_id;
   snapshot.spec = immutable_spec;
   snapshot.assignment = assignment.identity;
+  snapshot.output_artifact_id = mint_artifact_id(suffix);
+  snapshot.output_commit_id = mint_commit_id(suffix);
   snapshot.state = JobState::Queued;
 
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (shutting_down_) {
-    throw std::invalid_argument("single-tenant service is shutting down");
-  }
-  const std::string job_key = assignment.identity.job_id.value();
-  const bool inserted = jobs_.emplace(job_key, std::move(snapshot)).second;
-  if (!inserted) {
-    throw std::logic_error("fresh JobId collided in service state");
-  }
+  JobSubmission submission{snapshot.job_id, immutable_spec->digest(),
+                           assignment.identity};
+  const std::string job_key = snapshot.job_id.value();
+  const std::string worker_key = assignment.identity.attempt_id.value();
+  TenantQuotaReservation reservation = quota_authority_->reserve(
+      snapshot.job_id, immutable_spec->resource_request());
+  bool durable_published = false;
+  bool job_inserted = false;
+  bool worker_inserted = false;
   try {
-    const bool worker_inserted =
-        workers_.try_emplace(job_key, this, assignment).second;
-    if (!worker_inserted) {
-      throw std::logic_error("fresh JobId collided in worker ownership");
+    persist_snapshot_locked(snapshot);
+    durable_published = true;
+    const bool inserted =
+        jobs_.emplace(job_key, JobControlRecord{snapshot, reservation}).second;
+    if (!inserted) {
+      throw std::logic_error("fresh durable JobId collided in service state");
     }
+    job_inserted = true;
+    const auto worker = workers_.try_emplace(worker_key);
+    worker_inserted = worker.second;
+    if (!worker_inserted) {
+      throw std::logic_error("fresh attempt collided in worker ownership");
+    }
+    worker.first->second.thread = WorkerThreadRecord::start_assignment_thread(
+        this, std::move(assignment));
   } catch (...) {
-    jobs_.erase(job_key);
+    std::exception_ptr failure = std::current_exception();
+    if (worker_inserted) {
+      workers_.erase(worker_key);
+    }
+    if (job_inserted) {
+      jobs_.erase(job_key);
+    }
+    if (durable_published) {
+      try {
+        static_cast<void>(durable_state_->erase_job(snapshot.job_id));
+      } catch (...) {
+        failure = std::current_exception();
+      }
+    }
+    try {
+      quota_authority_->release_attempt(reservation.id);
+    } catch (...) {
+      failure = std::current_exception();
+    }
     condition_.notify_all();
-    throw;
+    std::rethrow_exception(failure);
   }
+  return submission;
+}
 
+/** @copydoc ps::server::SingleTenantJobService::retry */
+std::optional<JobSubmission> SingleTenantJobService::retry(
+    const JobId& job_id) {
+  if (!job_id.valid()) {
+    return std::nullopt;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto found = jobs_.find(job_id.value());
+  if (found == jobs_.end() || shutting_down_ ||
+      found->second.snapshot.state != JobState::Failed ||
+      !found->second.snapshot.attempt_settled ||
+      found->second.reservation.has_value() ||
+      workers_.find(found->second.snapshot.assignment.attempt_id.value()) !=
+          workers_.end()) {
+    return std::nullopt;
+  }
+  const JobSnapshot previous = found->second.snapshot;
+  if (previous.assignment.worker_lease_generation.value ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("Job retry lease generation exhausted");
+  }
+  std::shared_ptr<const ArtifactRecord> checkpoint;
+  if (previous.spec->checkpoint_artifact_id().has_value()) {
+    checkpoint =
+        durable_state_->find_artifact(*previous.spec->checkpoint_artifact_id());
+    if (checkpoint == nullptr ||
+        !checkpoint_is_authorized(tenant_id_,
+                                  *previous.spec->checkpoint_artifact_id(),
+                                  *checkpoint)) {
+      throw std::invalid_argument(
+          "Job retry checkpoint is no longer a durable tenant artifact");
+    }
+  }
+  const std::uint64_t generation =
+      previous.assignment.worker_lease_generation.value + 1U;
+  JobAssignment assignment;
+  assignment.identity.tenant_id = tenant_id_;
+  assignment.identity.job_id = job_id;
+  assignment.identity.job_spec_digest = previous.spec->digest();
+  assignment.identity.attempt_id = mint_attempt_id(job_id, generation);
+  assignment.identity.worker_instance_id = mint_worker_id(job_id, generation);
+  assignment.identity.worker_lease_generation =
+      WorkerLeaseGeneration{generation};
+  assignment.spec = previous.spec;
+  assignment.checkpoint = std::move(checkpoint);
+
+  JobSnapshot replacement = previous;
+  replacement.assignment = assignment.identity;
+  replacement.state = JobState::Queued;
+  replacement.cancellation_requested = false;
+  replacement.attempt_settled = false;
+  replacement.attempt_outcome.reset();
+  replacement.failure = JobAttemptFailure::None;
+  replacement.message.clear();
+  replacement.output_receipt.reset();
+  JobSubmission submission{job_id, previous.spec->digest(),
+                           assignment.identity};
+  const std::string worker_key = assignment.identity.attempt_id.value();
+  TenantQuotaReservation reservation =
+      quota_authority_->reserve(job_id, previous.spec->resource_request());
+  JobControlRecord replacement_control{
+      std::move(replacement),
+      std::optional<TenantQuotaReservation>(std::move(reservation))};
+  bool durable_replaced = false;
+  bool worker_inserted = false;
+  bool control_published = false;
+  try {
+    persist_snapshot_locked(replacement_control.snapshot);
+    durable_replaced = true;
+    const auto worker = workers_.try_emplace(worker_key);
+    worker_inserted = worker.second;
+    if (!worker_inserted) {
+      throw std::logic_error(
+          "fresh retry attempt collided in worker ownership");
+    }
+    std::swap(found->second, replacement_control);
+    control_published = true;
+    worker.first->second.thread = WorkerThreadRecord::start_assignment_thread(
+        this, std::move(assignment));
+  } catch (...) {
+    std::exception_ptr failure = std::current_exception();
+    if (worker_inserted) {
+      workers_.erase(worker_key);
+    }
+    if (control_published) {
+      std::swap(found->second, replacement_control);
+    }
+    if (durable_replaced) {
+      try {
+        persist_snapshot_locked(found->second.snapshot);
+      } catch (...) {
+        failure = std::current_exception();
+      }
+    }
+    if (replacement_control.reservation.has_value()) {
+      try {
+        quota_authority_->release_attempt(replacement_control.reservation->id);
+      } catch (...) {
+        failure = std::current_exception();
+      }
+    }
+    condition_.notify_all();
+    std::rethrow_exception(failure);
+  }
   return submission;
 }
 
@@ -555,10 +759,9 @@ std::optional<JobSnapshot> SingleTenantJobService::query(
   }
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = jobs_.find(job_id.value());
-  if (found == jobs_.end()) {
-    return std::nullopt;
-  }
-  return found->second;
+  return found == jobs_.end()
+             ? std::nullopt
+             : std::optional<JobSnapshot>(found->second.snapshot);
 }
 
 /** @copydoc ps::server::SingleTenantJobService::wait_for */
@@ -576,14 +779,16 @@ std::optional<JobSnapshot> SingleTenantJobService::wait_for(
   }
   const bool completed = condition_.wait_for(lock, timeout, [&] {
     const auto found = jobs_.find(job_id.value());
-    return found == jobs_.end() || is_terminal_job_state(found->second.state);
+    return found == jobs_.end() ||
+           is_terminal_job_state(found->second.snapshot.state);
   });
   if (!completed) {
     return std::nullopt;
   }
   const auto found = jobs_.find(job_id.value());
-  return found == jobs_.end() ? std::nullopt
-                              : std::optional<JobSnapshot>(found->second);
+  return found == jobs_.end()
+             ? std::nullopt
+             : std::optional<JobSnapshot>(found->second.snapshot);
 }
 
 /** @copydoc ps::server::SingleTenantJobService::cancel */
@@ -591,24 +796,60 @@ bool SingleTenantJobService::cancel(const JobId& job_id) noexcept {
   if (!job_id.valid()) {
     return false;
   }
-  {
+  try {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = jobs_.find(job_id.value());
-    if (found == jobs_.end() || is_terminal_job_state(found->second.state) ||
-        found->second.cancellation_requested) {
+    if (found == jobs_.end() ||
+        is_terminal_job_state(found->second.snapshot.state) ||
+        found->second.snapshot.cancellation_requested) {
       return false;
     }
-    found->second.cancellation_requested = true;
-    found->second.state = JobState::Cancelling;
+    JobSnapshot replacement = found->second.snapshot;
+    replacement.cancellation_requested = true;
+    replacement.state = JobState::Cancelling;
+    persist_snapshot_locked(replacement);
+    found->second.snapshot = std::move(replacement);
+    condition_.notify_all();
+    return true;
+  } catch (...) {
+    return false;
   }
-  condition_.notify_all();
-  return true;
 }
 
 /** @copydoc ps::server::SingleTenantJobService::find_artifact */
 std::shared_ptr<const ArtifactRecord> SingleTenantJobService::find_artifact(
     const ArtifactId& artifact_id) const {
-  return artifact_store_.find(artifact_id);
+  return durable_state_->find_artifact(artifact_id);
+}
+
+/** @copydoc ps::server::SingleTenantJobService::delete_artifact */
+bool SingleTenantJobService::delete_artifact(const ArtifactId& artifact_id) {
+  if (!artifact_id.valid()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto& entry : jobs_) {
+    const JobSnapshot& snapshot = entry.second.snapshot;
+    if (!is_terminal_job_state(snapshot.state) &&
+        snapshot.spec->checkpoint_artifact_id().has_value() &&
+        *snapshot.spec->checkpoint_artifact_id() == artifact_id) {
+      return false;
+    }
+  }
+  const std::uint64_t removed = durable_state_->erase_artifact(artifact_id);
+  if (removed == 0U) {
+    return false;
+  }
+  if (!quota_authority_->release_retained_artifact(artifact_id)) {
+    throw std::logic_error(
+        "durable artifact removal had no retained quota charge");
+  }
+  return true;
+}
+
+/** @copydoc ps::server::SingleTenantJobService::quota_snapshot */
+TenantQuotaSnapshot SingleTenantJobService::quota_snapshot() const {
+  return quota_authority_->snapshot();
 }
 
 /** @copydoc ps::server::SingleTenantJobService::run_assignment */
@@ -618,16 +859,21 @@ void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto found = jobs_.find(assignment.identity.job_id.value());
-      if (found != jobs_.end()) {
+      if (found != jobs_.end() &&
+          found->second.snapshot.assignment == assignment.identity &&
+          !is_terminal_job_state(found->second.snapshot.state)) {
         assignment_present = true;
-        if (!found->second.cancellation_requested) {
-          found->second.state = JobState::Running;
+        if (!found->second.snapshot.cancellation_requested) {
+          JobSnapshot running = found->second.snapshot;
+          running.state = JobState::Running;
+          persist_snapshot_locked(running);
+          found->second.snapshot = std::move(running);
         }
       }
     }
     condition_.notify_all();
     if (!assignment_present) {
-      mark_worker_completed(assignment.identity.job_id);
+      mark_worker_completed(assignment.identity.attempt_id);
       return;
     }
 
@@ -642,8 +888,8 @@ void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
       report.message = "worker factory returned null";
     } else {
       report =
-          worker->execute(assignment, [this, job = assignment.identity.job_id] {
-            return cancellation_requested_for(job);
+          worker->execute(assignment, [this, expected = assignment.identity] {
+            return cancellation_requested_for(expected);
           });
     }
     apply_report(assignment.identity, std::move(report));
@@ -672,15 +918,15 @@ void SingleTenantJobService::run_assignment(JobAssignment assignment) noexcept {
       std::terminate();
     }
   }
-  mark_worker_completed(assignment.identity.job_id);
+  mark_worker_completed(assignment.identity.attempt_id);
 }
 
 /** @copydoc ps::server::SingleTenantJobService::mark_worker_completed */
 void SingleTenantJobService::mark_worker_completed(
-    const JobId& job_id) noexcept {
+    const JobAttemptId& attempt_id) noexcept {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = workers_.find(job_id.value());
+    const auto found = workers_.find(attempt_id.value());
     if (found != workers_.end()) {
       found->second.completed = true;
     }
@@ -698,7 +944,6 @@ void SingleTenantJobService::reap_workers() noexcept {
         return has_completed_worker_locked() ||
                (shutting_down_ && workers_.empty());
       });
-
       const auto completed = std::find_if(
           workers_.begin(), workers_.end(),
           [](const auto& entry) { return entry.second.completed; });
@@ -709,9 +954,7 @@ void SingleTenantJobService::reap_workers() noexcept {
       workers_.erase(completed);
       ++workers_joining_;
     }
-
     completed_worker.join();
-
     {
       std::lock_guard<std::mutex> lock(mutex_);
       --workers_joining_;
@@ -728,100 +971,299 @@ bool SingleTenantJobService::has_completed_worker_locked() const noexcept {
 
 /** @copydoc ps::server::SingleTenantJobService::cancellation_requested_for */
 bool SingleTenantJobService::cancellation_requested_for(
-    const JobId& job_id) const noexcept {
+    const AttemptIdentity& expected) const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
-  const auto found = jobs_.find(job_id.value());
+  const auto found = jobs_.find(expected.job_id.value());
   return shutting_down_ || found == jobs_.end() ||
-         found->second.cancellation_requested;
+         found->second.snapshot.assignment != expected ||
+         found->second.snapshot.cancellation_requested;
 }
 
 /** @copydoc ps::server::SingleTenantJobService::apply_report */
 void SingleTenantJobService::apply_report(const AttemptIdentity& expected,
                                           JobAttemptReport report) noexcept {
-  std::lock_guard<std::mutex> lock(mutex_);
-  const auto found = jobs_.find(expected.job_id.value());
-  if (found == jobs_.end()) {
-    return;
-  }
-  JobSnapshot& job = found->second;
-  if (is_terminal_job_state(job.state)) {
-    return;
-  }
-
-  const bool identity_valid = [&] {
-    try {
-      validate_attempt_identity(report.identity);
-      return expected == job.assignment && report.identity == expected;
-    } catch (...) {
-      return false;
-    }
-  }();
-  if (!identity_valid) {
-    reject_report(job,
-                  "worker report identity does not match current assignment");
-    condition_.notify_all();
-    return;
-  }
-  if (!has_valid_worker_report_shape(report)) {
-    reject_report(job, "worker report has an invalid semantic shape");
-    condition_.notify_all();
-    return;
-  }
-  if (report.outcome == JobAttemptOutcome::Cancelled &&
-      !job.cancellation_requested) {
-    reject_report(job,
-                  "worker reported cancellation without control-plane intent");
-    condition_.notify_all();
-    return;
-  }
-
-  job.attempt_settled = report.settled;
-  job.attempt_outcome = report.outcome;
-  job.failure = report.failure;
-  job.message = std::move(report.message);
-
-  if (report.outcome == JobAttemptOutcome::Failed) {
-    job.output_receipt.reset();
-    job.state = JobState::Failed;
-    if (job.message.empty()) {
-      job.message = "worker attempt failed without a diagnostic";
-    }
-    condition_.notify_all();
-    return;
-  }
-
-  if (job.cancellation_requested) {
-    job.output_receipt.reset();
-    job.state = JobState::Cancelled;
-    job.failure = JobAttemptFailure::CancellationObserved;
-    if (job.message.empty()) {
-      job.message = "cancellation observed before artifact commit";
-    }
-    condition_.notify_all();
-    return;
-  }
-
+  bool report_facts_accepted = false;
+  JobAttemptOutcome accepted_outcome = JobAttemptOutcome::None;
+  bool accepted_settled = false;
   try {
-    const OutputCommitReceipt receipt =
-        artifact_store_.commit(ArtifactCommitRequest{
-            job.assignment, job.spec->output_slot_id(), *report.image});
-    if (receipt.attempt != job.assignment ||
-        receipt.output_slot_id != job.spec->output_slot_id() ||
-        !receipt.artifact_id.valid() || !receipt.output_commit_id.valid() ||
-        receipt.achieved_durability != job.spec->requested_durability()) {
-      throw std::logic_error("artifact receipt failed identity validation");
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(expected.job_id.value());
+    if (found == jobs_.end() ||
+        is_terminal_job_state(found->second.snapshot.state)) {
+      return;
     }
-    job.output_receipt = receipt;
-    job.state = JobState::Succeeded;
-    job.failure = JobAttemptFailure::None;
-    job.message.clear();
+    JobControlRecord& control = found->second;
+    if (expected != control.snapshot.assignment) {
+      return;
+    }
+    JobSnapshot candidate = control.snapshot;
+    const bool identity_valid = [&] {
+      try {
+        validate_attempt_identity(report.identity);
+        return report.identity == expected;
+      } catch (...) {
+        return false;
+      }
+    }();
+    if (!identity_valid) {
+      reject_report(candidate,
+                    "worker report identity does not match current assignment");
+      persist_snapshot_locked(candidate);
+      if (control.reservation.has_value()) {
+        quota_authority_->release_attempt(control.reservation->id);
+        control.reservation.reset();
+      }
+      control.snapshot = std::move(candidate);
+      condition_.notify_all();
+      return;
+    }
+    if (!has_valid_worker_report_shape(report)) {
+      reject_report(candidate, "worker report has an invalid semantic shape");
+      persist_snapshot_locked(candidate);
+      if (control.reservation.has_value()) {
+        quota_authority_->release_attempt(control.reservation->id);
+        control.reservation.reset();
+      }
+      control.snapshot = std::move(candidate);
+      condition_.notify_all();
+      return;
+    }
+    if (report.outcome == JobAttemptOutcome::Cancelled &&
+        !candidate.cancellation_requested) {
+      reject_report(
+          candidate,
+          "worker reported cancellation without control-plane intent");
+      persist_snapshot_locked(candidate);
+      if (control.reservation.has_value()) {
+        quota_authority_->release_attempt(control.reservation->id);
+        control.reservation.reset();
+      }
+      control.snapshot = std::move(candidate);
+      condition_.notify_all();
+      return;
+    }
+
+    report_facts_accepted = true;
+    accepted_outcome = report.outcome;
+    accepted_settled = report.settled;
+    candidate.attempt_settled = report.settled;
+    candidate.attempt_outcome = report.outcome;
+    candidate.failure = report.failure;
+    candidate.message = std::move(report.message);
+    if (report.outcome == JobAttemptOutcome::Failed) {
+      candidate.output_receipt.reset();
+      candidate.state = JobState::Failed;
+      if (candidate.message.empty()) {
+        candidate.message = "worker attempt failed without a diagnostic";
+      }
+      persist_snapshot_locked(candidate);
+      if (control.reservation.has_value()) {
+        quota_authority_->release_attempt(control.reservation->id);
+        control.reservation.reset();
+      }
+      control.snapshot = std::move(candidate);
+      condition_.notify_all();
+      return;
+    }
+    if (candidate.cancellation_requested) {
+      candidate.output_receipt.reset();
+      candidate.state = JobState::Cancelled;
+      candidate.failure = JobAttemptFailure::CancellationObserved;
+      if (candidate.message.empty()) {
+        candidate.message = "cancellation observed before artifact commit";
+      }
+      persist_snapshot_locked(candidate);
+      if (control.reservation.has_value()) {
+        quota_authority_->release_attempt(control.reservation->id);
+        control.reservation.reset();
+      }
+      control.snapshot = std::move(candidate);
+      condition_.notify_all();
+      return;
+    }
+    if (!control.reservation.has_value()) {
+      throw std::logic_error(
+          "successful current attempt has no quota reservation");
+    }
+
+    const OutputCommitReceipt receipt = durable_state_->commit_artifact(
+        DurableArtifactCommitRequest{
+            candidate.assignment, candidate.spec->output_slot_id(),
+            candidate.output_artifact_id, candidate.output_commit_id,
+            candidate.spec->resource_request()},
+        *report.image);
+    if (receipt.attempt.tenant_id != candidate.tenant_id ||
+        receipt.attempt.job_id != candidate.job_id ||
+        receipt.attempt.job_spec_digest != candidate.spec->digest() ||
+        receipt.output_slot_id != candidate.spec->output_slot_id() ||
+        receipt.artifact_id != candidate.output_artifact_id ||
+        receipt.output_commit_id != candidate.output_commit_id ||
+        receipt.achieved_durability != ArtifactDurability::CrashDurable) {
+      throw std::logic_error(
+          "durable artifact receipt failed stable identity join");
+    }
+    quota_authority_->commit_retained_artifact(
+        control.reservation->id, receipt.artifact_id,
+        static_cast<std::uint64_t>(receipt.descriptor.payload_bytes));
+    control.reservation.reset();
+    candidate.output_receipt = receipt;
+    candidate.state = JobState::Succeeded;
+    candidate.failure = JobAttemptFailure::None;
+    candidate.message.clear();
+    persist_snapshot_locked(candidate);
+    control.snapshot = std::move(candidate);
+    condition_.notify_all();
   } catch (const std::exception& error) {
-    job.output_receipt.reset();
-    job.state = JobState::Failed;
-    job.failure = JobAttemptFailure::ArtifactCommit;
-    job.message = std::string("artifact commit failed: ") + error.what();
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto found = jobs_.find(expected.job_id.value());
+      if (found == jobs_.end() ||
+          found->second.snapshot.assignment != expected ||
+          is_terminal_job_state(found->second.snapshot.state)) {
+        return;
+      }
+      JobControlRecord& control = found->second;
+      try {
+        if (reconcile_published_artifact_locked(control)) {
+          condition_.notify_all();
+          return;
+        }
+      } catch (...) {
+        // The durable occurrence remains restart-reconcilable; publish the
+        // strongest process-local failure state possible below.
+      }
+      JobSnapshot failure = control.snapshot;
+      failure.state = JobState::Failed;
+      failure.attempt_outcome =
+          report_facts_accepted
+              ? std::optional<JobAttemptOutcome>(accepted_outcome)
+              : std::nullopt;
+      failure.attempt_settled = report_facts_accepted && accepted_settled;
+      failure.failure = JobAttemptFailure::ArtifactCommit;
+      failure.output_receipt.reset();
+      failure.message =
+          std::string("durable terminal publication failed: ") + error.what();
+      try {
+        persist_snapshot_locked(failure);
+      } catch (...) {
+        failure.message.append("; failed to persist terminal diagnostic");
+      }
+      if (control.reservation.has_value()) {
+        try {
+          quota_authority_->release_attempt(control.reservation->id);
+          control.reservation.reset();
+        } catch (...) {
+          failure.message.append("; failed to release active quota");
+        }
+      }
+      control.snapshot = std::move(failure);
+      condition_.notify_all();
+    } catch (...) {
+      std::terminate();
+    }
+  } catch (...) {
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto found = jobs_.find(expected.job_id.value());
+      if (found != jobs_.end() &&
+          found->second.snapshot.assignment == expected &&
+          !is_terminal_job_state(found->second.snapshot.state)) {
+        try {
+          if (reconcile_published_artifact_locked(found->second)) {
+            condition_.notify_all();
+            return;
+          }
+        } catch (...) {
+          // The durable occurrence remains restart-reconcilable; publish the
+          // strongest process-local failure state possible below.
+        }
+        JobSnapshot failure = found->second.snapshot;
+        failure.state = JobState::Failed;
+        failure.attempt_outcome =
+            report_facts_accepted
+                ? std::optional<JobAttemptOutcome>(accepted_outcome)
+                : std::nullopt;
+        failure.attempt_settled = report_facts_accepted && accepted_settled;
+        failure.failure = JobAttemptFailure::ArtifactCommit;
+        failure.output_receipt.reset();
+        failure.message =
+            "durable terminal publication raised a non-standard exception";
+        try {
+          persist_snapshot_locked(failure);
+        } catch (...) {
+          failure.message.append("; failed to persist terminal diagnostic");
+        }
+        if (found->second.reservation.has_value()) {
+          try {
+            quota_authority_->release_attempt(found->second.reservation->id);
+            found->second.reservation.reset();
+          } catch (...) {
+            failure.message.append("; failed to release active quota");
+          }
+        }
+        found->second.snapshot = std::move(failure);
+        condition_.notify_all();
+      }
+    } catch (...) {
+      std::terminate();
+    }
   }
-  condition_.notify_all();
+}
+
+/** @copydoc
+ * ps::server::SingleTenantJobService::reconcile_published_artifact_locked */
+bool SingleTenantJobService::reconcile_published_artifact_locked(
+    JobControlRecord& control) {
+  const std::shared_ptr<const ArtifactRecord> artifact =
+      durable_state_->find_artifact(control.snapshot.output_artifact_id);
+  if (artifact == nullptr ||
+      !artifact_fulfills_job(durable_record(control.snapshot), *artifact)) {
+    return false;
+  }
+  if (control.reservation.has_value()) {
+    quota_authority_->commit_retained_artifact(
+        control.reservation->id, artifact->receipt.artifact_id,
+        static_cast<std::uint64_t>(artifact->receipt.descriptor.payload_bytes));
+    control.reservation.reset();
+  }
+  JobSnapshot succeeded = control.snapshot;
+  succeeded.state = JobState::Succeeded;
+  succeeded.cancellation_requested = false;
+  succeeded.attempt_settled = true;
+  succeeded.attempt_outcome = JobAttemptOutcome::Succeeded;
+  succeeded.failure = JobAttemptFailure::None;
+  succeeded.message.clear();
+  succeeded.output_receipt = artifact->receipt;
+  persist_snapshot_locked(succeeded);
+  control.snapshot = std::move(succeeded);
+  return true;
+}
+
+/** @copydoc ps::server::SingleTenantJobService::durable_record */
+DurableJobRecord SingleTenantJobService::durable_record(
+    const JobSnapshot& snapshot) const {
+  DurableJobRecord record;
+  record.tenant_id = snapshot.tenant_id;
+  record.job_id = snapshot.job_id;
+  record.spec = snapshot.spec;
+  record.assignment = snapshot.assignment;
+  record.output_artifact_id = snapshot.output_artifact_id;
+  record.output_commit_id = snapshot.output_commit_id;
+  record.state = snapshot.state;
+  record.cancellation_requested = snapshot.cancellation_requested;
+  record.attempt_settled = snapshot.attempt_settled;
+  record.attempt_outcome =
+      snapshot.attempt_outcome.value_or(JobAttemptOutcome::None);
+  record.failure = snapshot.failure;
+  record.message = snapshot.message;
+  record.output_receipt = snapshot.output_receipt;
+  return record;
+}
+
+/** @copydoc ps::server::SingleTenantJobService::persist_snapshot_locked */
+void SingleTenantJobService::persist_snapshot_locked(
+    const JobSnapshot& snapshot) {
+  durable_state_->persist_job(durable_record(snapshot));
 }
 
 }  // namespace ps::server

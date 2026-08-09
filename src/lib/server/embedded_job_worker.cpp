@@ -1,6 +1,6 @@
 /**
  * @file embedded_job_worker.cpp
- * @brief Implements one real Embedded Host Job attempt adapter.
+ * @brief Implements one real Issue #99 Embedded Host Job attempt adapter.
  */
 #include "server/embedded_job_worker.hpp"
 
@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "photospider/host/host.hpp"
@@ -60,7 +61,7 @@ JobAttemptReport cancelled_report(const AttemptIdentity& identity,
  * @note This label never enters JobSpec or an artifact receipt.
  */
 GraphSessionId attempt_graph_session(const AttemptIdentity& identity) {
-  return GraphSessionId{"issue98-" + identity.job_id.value() + "-" +
+  return GraphSessionId{"issue99-" + identity.job_id.value() + "-" +
                         identity.attempt_id.value()};
 }
 
@@ -114,6 +115,31 @@ JobAttemptReport EmbeddedHostJobWorker::execute(
       return make_report(assignment.identity, JobAttemptOutcome::Failed, true,
                          JobAttemptFailure::InvalidAssignment,
                          "assignment digest differs from immutable JobSpec");
+    }
+    const bool checkpoint_declared =
+        assignment.spec->checkpoint_artifact_id().has_value();
+    if (checkpoint_declared != (assignment.checkpoint != nullptr)) {
+      return make_report(assignment.identity, JobAttemptOutcome::Failed, true,
+                         JobAttemptFailure::InvalidAssignment,
+                         "assignment checkpoint binding is incomplete");
+    }
+    if (assignment.checkpoint != nullptr) {
+      const ArtifactRecord& checkpoint = *assignment.checkpoint;
+      if (checkpoint.receipt.attempt.tenant_id !=
+              assignment.identity.tenant_id ||
+          checkpoint.receipt.artifact_id !=
+              *assignment.spec->checkpoint_artifact_id() ||
+          checkpoint.receipt.achieved_durability !=
+              ArtifactDurability::CrashDurable ||
+          checkpoint.payload.size() !=
+              checkpoint.receipt.descriptor.payload_bytes ||
+          hash_artifact_content(checkpoint.payload.data(),
+                                checkpoint.payload.size()) !=
+              checkpoint.receipt.content_digest) {
+        return make_report(assignment.identity, JobAttemptOutcome::Failed, true,
+                           JobAttemptFailure::InvalidAssignment,
+                           "assignment checkpoint binding failed validation");
+      }
     }
     if (!cancellation_requested) {
       return make_report(assignment.identity, JobAttemptOutcome::Failed, true,
@@ -212,10 +238,11 @@ JobAttemptReport EmbeddedHostJobWorker::execute(
       request.cache.force_recache = true;
       request.cache.disable_disk_cache = true;
       request.cache.nosave = true;
-      request.execution.parallel = assignment.spec->maximum_parallelism() > 1U;
+      request.execution.parallel =
+          assignment.spec->resource_request().cpu_slots > 1U;
       request.execution.quiet = true;
       request.execution.maximum_parallelism =
-          assignment.spec->maximum_parallelism();
+          assignment.spec->resource_request().cpu_slots;
 
       Result<ImageBuffer> computed = host->compute_and_get_image(request);
       if (!computed.status.ok) {

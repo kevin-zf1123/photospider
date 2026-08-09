@@ -948,11 +948,14 @@ add_library(photospider STATIC
     $<TARGET_OBJECTS:photospider_product_seam_objects>)
 configure_photospider_product_archive(photospider)
 
-# Source-private Issue #98 delivery slice. This target preserves independent
-# Job/attempt/artifact authority while deliberately remaining outside the
-# installed Embedded Host ABI and local protocol-v2 sidecar composition.
+# Source-private Issue #99 delivery slice. This target preserves independent
+# durable Job/attempt/quota/artifact authority while deliberately remaining
+# outside the installed Embedded Host ABI and local protocol-v2 sidecar
+# composition. It remains in-process and makes no Issue #100 OS-worker claim.
 add_library(photospider_single_tenant_job_internal STATIC
     src/lib/server/job_contract.cpp
+    src/lib/server/tenant_quota.cpp
+    src/lib/server/durable_server_state.cpp
     src/lib/server/single_tenant_job_service.cpp
     src/lib/server/embedded_job_worker.cpp)
 target_compile_features(photospider_single_tenant_job_internal PRIVATE

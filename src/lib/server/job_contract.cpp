@@ -1,6 +1,6 @@
 /**
  * @file job_contract.cpp
- * @brief Implements canonical Issue #98 Job values and dependency-free SHA-256.
+ * @brief Implements canonical Issue #99 Job values and dependency-free SHA-256.
  */
 #include "server/job_contract.hpp"
 
@@ -15,7 +15,7 @@ namespace ps::server {
 namespace {
 
 /** @brief Exact version token that begins every supported canonical JobSpec. */
-constexpr char kJobSpecVersion[] = "jobspec-v1";
+constexpr char kJobSpecVersion[] = "jobspec-v2";
 
 /**
  * @brief Rotates one 32-bit SHA-256 word right.
@@ -38,7 +38,11 @@ constexpr std::uint32_t rotate_right(std::uint32_t value,
  */
 class Sha256 final {
  public:
-  /** @brief Creates the standard SHA-256 initial state. @throws Nothing. */
+  /**
+   * @brief Creates the standard SHA-256 initial state with no input bytes.
+   * @throws Nothing.
+   * @note The new instance accepts `update()` calls until one `finish()`.
+   */
   Sha256() noexcept
       : state_{0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
                0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U} {}
@@ -215,7 +219,7 @@ class Sha256 final {
 /**
  * @brief Returns the exact canonical execution-profile token.
  * @param profile Candidate closed enum.
- * @return Process-lifetime literal.
+ * @return Closed execution-profile literal.
  * @throws std::invalid_argument for an invalid enum representation.
  */
 std::string_view execution_profile_token(JobExecutionProfile profile) {
@@ -229,13 +233,13 @@ std::string_view execution_profile_token(JobExecutionProfile profile) {
 /**
  * @brief Returns the exact canonical durability token.
  * @param durability Candidate closed enum.
- * @return Process-lifetime literal.
+ * @return Crash-durable literal.
  * @throws std::invalid_argument for an invalid enum representation.
  */
 std::string_view durability_token(ArtifactDurability durability) {
   switch (durability) {
-    case ArtifactDurability::ProcessLifetime:
-      return "process-lifetime";
+    case ArtifactDurability::CrashDurable:
+      return "crash-durable";
   }
   throw std::invalid_argument("artifact durability is invalid");
 }
@@ -262,31 +266,73 @@ void append_frame(std::string_view field, std::string* output) {
  * @param graph Immutable graph artifact identity.
  * @param target_node Nonnegative node selector.
  * @param output_slot Required image output slot.
- * @param maximum_parallelism Positive Host Run cap.
+ * @param resources Complete canonical quota demand.
+ * @param checkpoint Optional durable checkpoint identity.
  * @param execution_profile Closed execution profile.
  * @param requested_durability Closed requested durability.
- * @return Version token followed by six decimal-length-framed textual fields;
- * integer values use canonical decimal spellings before framing.
+ * @return Version token followed by all scalar, device, and checkpoint fields
+ * using decimal-length framing and canonical integer spellings.
  * @throws std::invalid_argument for any invalid contract field.
  * @throws std::bad_alloc when output construction exhausts memory.
  */
 std::string canonical_job_spec(const GraphArtifactId& graph, int target_node,
                                const OutputSlotId& output_slot,
-                               std::uint32_t maximum_parallelism,
+                               const JobResourceRequest& resources,
+                               const std::optional<ArtifactId>& checkpoint,
                                JobExecutionProfile execution_profile,
                                ArtifactDurability requested_durability) {
-  if (!graph.valid() || !output_slot.valid() || target_node < 0 ||
-      maximum_parallelism == 0U) {
+  if (!graph.valid() || !output_slot.valid() || target_node < 0) {
     throw std::invalid_argument("JobSpec contains an invalid field");
+  }
+  validate_job_resource_request(resources);
+  if (checkpoint.has_value() && !checkpoint->valid()) {
+    throw std::invalid_argument("JobSpec checkpoint identity is invalid");
   }
   std::string result{kJobSpecVersion};
   append_frame(graph.value(), &result);
   append_frame(std::to_string(target_node), &result);
   append_frame(output_slot.value(), &result);
-  append_frame(std::to_string(maximum_parallelism), &result);
   append_frame(execution_profile_token(execution_profile), &result);
   append_frame(durability_token(requested_durability), &result);
+  append_frame(std::to_string(resources.cpu_slots), &result);
+  append_frame(std::to_string(resources.host_memory_bytes), &result);
+  append_frame(std::to_string(resources.output_bytes), &result);
+  append_frame(std::to_string(resources.staging_bytes), &result);
+  append_frame(std::to_string(resources.retention_bytes), &result);
+  append_frame(std::to_string(resources.devices.size()), &result);
+  for (const DeviceResourceRequest& device : resources.devices) {
+    append_frame(device.device_id, &result);
+    append_frame(std::to_string(device.bytes), &result);
+  }
+  append_frame(checkpoint.has_value() ? "1" : "0", &result);
+  append_frame(
+      checkpoint.has_value() ? checkpoint->value() : std::string_view{},
+      &result);
   return result;
+}
+
+/**
+ * @brief Validates one configured device label without allocating.
+ * @param text Candidate bounded opaque ASCII token.
+ * @return True only when the token uses the Job identity alphabet and is not a
+ * dot path component.
+ * @throws Nothing.
+ */
+bool valid_device_id(std::string_view text) noexcept {
+  if (text.empty() || text == "." || text == ".." ||
+      text.size() > kMaximumOpaqueIdentityBytes) {
+    return false;
+  }
+  for (const unsigned char character : text) {
+    const bool alpha_numeric = (character >= 'a' && character <= 'z') ||
+                               (character >= 'A' && character <= 'Z') ||
+                               (character >= '0' && character <= '9');
+    if (!alpha_numeric && character != '-' && character != '_' &&
+        character != '.' && character != ':') {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -317,18 +363,21 @@ bool AttemptIdentity::operator==(const AttemptIdentity& other) const noexcept {
 
 /** @copydoc ps::server::JobSpec::JobSpec */
 JobSpec::JobSpec(GraphArtifactId graph_artifact_id, int target_node,
-                 OutputSlotId output_slot_id, std::uint32_t maximum_parallelism,
+                 OutputSlotId output_slot_id,
+                 JobResourceRequest resource_request,
+                 std::optional<ArtifactId> checkpoint_artifact_id,
                  JobExecutionProfile execution_profile,
                  ArtifactDurability requested_durability)
     : graph_artifact_id_(std::move(graph_artifact_id)),
       target_node_(target_node),
       output_slot_id_(std::move(output_slot_id)),
-      maximum_parallelism_(maximum_parallelism),
+      resource_request_(std::move(resource_request)),
+      checkpoint_artifact_id_(std::move(checkpoint_artifact_id)),
       execution_profile_(execution_profile),
       requested_durability_(requested_durability),
       canonical_bytes_(canonical_job_spec(
-          graph_artifact_id_, target_node_, output_slot_id_,
-          maximum_parallelism_, execution_profile_, requested_durability_)),
+          graph_artifact_id_, target_node_, output_slot_id_, resource_request_,
+          checkpoint_artifact_id_, execution_profile_, requested_durability_)),
       digest_(hash_job_spec_bytes(
           reinterpret_cast<const std::byte*>(canonical_bytes_.data()),
           canonical_bytes_.size())) {}
@@ -367,10 +416,10 @@ void validate_attempt_identity(const AttemptIdentity& identity) {
 
 /** @copydoc ps::server::validate_job_spec */
 void validate_job_spec(const JobSpec& spec) {
-  const std::string canonical =
-      canonical_job_spec(spec.graph_artifact_id(), spec.target_node(),
-                         spec.output_slot_id(), spec.maximum_parallelism(),
-                         spec.execution_profile(), spec.requested_durability());
+  const std::string canonical = canonical_job_spec(
+      spec.graph_artifact_id(), spec.target_node(), spec.output_slot_id(),
+      spec.resource_request(), spec.checkpoint_artifact_id(),
+      spec.execution_profile(), spec.requested_durability());
   if (canonical != spec.canonical_bytes()) {
     throw std::invalid_argument("JobSpec canonical bytes do not match fields");
   }
@@ -379,6 +428,25 @@ void validate_job_spec(const JobSpec& spec) {
   if (digest != spec.digest()) {
     throw std::invalid_argument(
         "JobSpec digest does not match canonical bytes");
+  }
+}
+
+/** @copydoc ps::server::validate_job_resource_request */
+void validate_job_resource_request(const JobResourceRequest& request) {
+  if (request.cpu_slots == 0U || request.host_memory_bytes == 0U ||
+      request.output_bytes == 0U || request.staging_bytes == 0U ||
+      request.retention_bytes == 0U) {
+    throw std::invalid_argument(
+        "Job resource request contains a zero required bound");
+  }
+  std::string_view previous;
+  for (const DeviceResourceRequest& device : request.devices) {
+    if (!valid_device_id(device.device_id) || device.bytes == 0U ||
+        (!previous.empty() && previous >= device.device_id)) {
+      throw std::invalid_argument(
+          "Job configured-device requests are invalid or not canonical");
+    }
+    previous = device.device_id;
   }
 }
 

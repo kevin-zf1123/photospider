@@ -1,6 +1,6 @@
 /**
  * @file test_single_tenant_job_product_path.cpp
- * @brief Verifies Issue #98 through the real Embedded Host product path.
+ * @brief Verifies Issue #99 through the real Embedded Host product path.
  */
 #include <gtest/gtest.h>
 
@@ -38,6 +38,38 @@ constexpr std::size_t kBeforeComputeCancellationObservation = 4U;
  * before the test concurrently accepts cancellation.
  */
 constexpr std::size_t kAfterComputeCancellationObservation = 5U;
+
+/**
+ * @brief Builds one complete resource envelope for real Embedded Host tests.
+ * @param cpu_slots Positive maximum Embedded Host callback parallelism.
+ * @return Valid bounded CPU-only server quota request.
+ * @throws Nothing.
+ */
+JobResourceRequest product_job_resources(std::uint32_t cpu_slots = 2U) {
+  JobResourceRequest request;
+  request.cpu_slots = cpu_slots;
+  request.host_memory_bytes = 8U << 20U;
+  request.output_bytes = 8U << 20U;
+  request.staging_bytes = 8U << 20U;
+  request.retention_bytes = 8U << 20U;
+  return request;
+}
+
+/**
+ * @brief Builds permissive finite tenant capacity for the product tests.
+ * @return Capacity for concurrent real Host attempts and retained fixtures.
+ * @throws Nothing.
+ */
+TenantQuotaLimits product_quota_limits() {
+  TenantQuotaLimits limits;
+  limits.maximum_active_attempts = 8U;
+  limits.capacity.cpu_slots = 16U;
+  limits.capacity.host_memory_bytes = 64U << 20U;
+  limits.capacity.output_bytes = 64U << 20U;
+  limits.capacity.staging_bytes = 64U << 20U;
+  limits.capacity.retention_bytes = 64U << 20U;
+  return limits;
+}
 
 /**
  * @brief Owns one isolated filesystem tree for the real Job product-path test.
@@ -94,7 +126,7 @@ void write_job_graph(const std::filesystem::path& path) {
     throw std::runtime_error("failed to open Job graph YAML");
   }
   output << "- id: 0\n"
-         << "  name: issue98_coordinate_pattern\n"
+         << "  name: issue99_coordinate_pattern\n"
          << "  type: image_generator\n"
          << "  subtype: coordinate_pattern\n"
          << "  parameters:\n"
@@ -121,9 +153,10 @@ JobAssignment make_worker_assignment(const GraphArtifactId& graph_id,
                                      int target_node,
                                      std::string identity_suffix) {
   auto spec = std::make_shared<const JobSpec>(graph_id, target_node,
-                                              OutputSlotId("image.final"), 1U);
+                                              OutputSlotId("image.final"),
+                                              product_job_resources(1U));
   JobAssignment assignment;
-  assignment.identity.tenant_id = TenantId("tenant.issue98");
+  assignment.identity.tenant_id = TenantId("tenant.issue99");
   assignment.identity.job_id = JobId("job.product." + identity_suffix);
   assignment.identity.job_spec_digest = spec->digest();
   assignment.identity.attempt_id =
@@ -442,47 +475,80 @@ class ResolverReleaseGuard final {
 };
 
 TEST(SingleTenantJobProductPath,
-     RealEmbeddedHostCompletesWithIdentityBoundArtifact) {
+     RealEmbeddedHostCompletesCheckpointAndRestartDurableArtifactPath) {
   ScopedJobProductRoot product_root;
   const std::filesystem::path yaml = product_root.root() / "graph.yaml";
   write_job_graph(yaml);
 
-  const GraphArtifactId graph_id("graph.issue98.fixture");
+  const GraphArtifactId graph_id("graph.issue99.fixture");
   auto resolver = std::make_shared<TestGraphArtifactResolver>(
       graph_id, product_root.root() / "sessions", yaml,
       product_root.root() / "cache");
   auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(resolver);
-  SingleTenantJobService service(TenantId("tenant.issue98"), factory);
+  const std::filesystem::path state_root = product_root.root() / "state";
+  JobId producer_job_id;
+  JobId consumer_job_id;
+  OutputCommitReceipt receipt;
+  {
+    SingleTenantJobService service(TenantId("tenant.issue99"),
+                                   product_quota_limits(), state_root, factory);
+    const JobSubmission submission = service.submit(JobSpec(
+        graph_id, 0, OutputSlotId("image.final"), product_job_resources()));
+    producer_job_id = submission.job_id;
+    const std::optional<JobSnapshot> terminal =
+        service.wait_for(submission.job_id, std::chrono::seconds(10));
+    ASSERT_TRUE(terminal.has_value());
+    ASSERT_EQ(terminal->state, JobState::Succeeded) << terminal->message;
+    EXPECT_TRUE(terminal->attempt_settled);
+    EXPECT_EQ(terminal->attempt_outcome, JobAttemptOutcome::Succeeded);
+    EXPECT_EQ(terminal->assignment, submission.assignment);
+    EXPECT_EQ(terminal->spec->digest(), submission.job_spec_digest);
+    ASSERT_TRUE(terminal->output_receipt.has_value());
 
-  const JobSubmission submission =
-      service.submit(JobSpec(graph_id, 0, OutputSlotId("image.final"), 2U));
-  const std::optional<JobSnapshot> terminal =
-      service.wait_for(submission.job_id, std::chrono::seconds(10));
-  ASSERT_TRUE(terminal.has_value());
-  ASSERT_EQ(terminal->state, JobState::Succeeded) << terminal->message;
-  EXPECT_TRUE(terminal->attempt_settled);
-  EXPECT_EQ(terminal->attempt_outcome, JobAttemptOutcome::Succeeded);
-  EXPECT_EQ(terminal->assignment, submission.assignment);
-  EXPECT_EQ(terminal->spec->digest(), submission.job_spec_digest);
-  ASSERT_TRUE(terminal->output_receipt.has_value());
+    receipt = *terminal->output_receipt;
+    EXPECT_EQ(receipt.attempt, submission.assignment);
+    EXPECT_EQ(receipt.output_slot_id, OutputSlotId("image.final"));
+    EXPECT_EQ(receipt.achieved_durability, ArtifactDurability::CrashDurable);
+    EXPECT_EQ(receipt.descriptor.width, 8);
+    EXPECT_EQ(receipt.descriptor.height, 6);
+    EXPECT_EQ(receipt.descriptor.channels, 4);
+    EXPECT_EQ(receipt.descriptor.type, DataType::FLOAT32);
+    EXPECT_EQ(receipt.descriptor.row_bytes, 8U * 4U * sizeof(float));
+    EXPECT_EQ(receipt.descriptor.payload_bytes, 8U * 6U * 4U * sizeof(float));
 
-  const OutputCommitReceipt& receipt = *terminal->output_receipt;
-  EXPECT_EQ(receipt.attempt, submission.assignment);
-  EXPECT_EQ(receipt.output_slot_id, OutputSlotId("image.final"));
-  EXPECT_EQ(receipt.achieved_durability, ArtifactDurability::ProcessLifetime);
-  EXPECT_EQ(receipt.descriptor.width, 8);
-  EXPECT_EQ(receipt.descriptor.height, 6);
-  EXPECT_EQ(receipt.descriptor.channels, 4);
-  EXPECT_EQ(receipt.descriptor.type, DataType::FLOAT32);
-  EXPECT_EQ(receipt.descriptor.row_bytes, 8U * 4U * sizeof(float));
-  EXPECT_EQ(receipt.descriptor.payload_bytes, 8U * 6U * 4U * sizeof(float));
+    const std::shared_ptr<const ArtifactRecord> artifact =
+        service.find_artifact(receipt.artifact_id);
+    ASSERT_NE(artifact, nullptr);
+    EXPECT_EQ(artifact->receipt.artifact_id, receipt.artifact_id);
+    EXPECT_EQ(artifact->receipt.content_digest, receipt.content_digest);
+    EXPECT_EQ(artifact->payload.size(), receipt.descriptor.payload_bytes);
 
-  const std::shared_ptr<const ArtifactRecord> artifact =
-      service.find_artifact(receipt.artifact_id);
-  ASSERT_NE(artifact, nullptr);
-  EXPECT_EQ(artifact->receipt.artifact_id, receipt.artifact_id);
-  EXPECT_EQ(artifact->receipt.content_digest, receipt.content_digest);
-  EXPECT_EQ(artifact->payload.size(), receipt.descriptor.payload_bytes);
+    const JobSubmission consumer =
+        service.submit(JobSpec(graph_id, 0, OutputSlotId("image.final"),
+                               product_job_resources(1U), receipt.artifact_id));
+    consumer_job_id = consumer.job_id;
+    const std::optional<JobSnapshot> consumed =
+        service.wait_for(consumer.job_id, std::chrono::seconds(10));
+    ASSERT_TRUE(consumed.has_value());
+    ASSERT_EQ(consumed->state, JobState::Succeeded) << consumed->message;
+    ASSERT_TRUE(consumed->spec->checkpoint_artifact_id().has_value());
+    EXPECT_EQ(*consumed->spec->checkpoint_artifact_id(), receipt.artifact_id);
+  }
+
+  const std::uint64_t resolve_calls_before_restart = resolver->resolve_calls();
+  SingleTenantJobService recovered(TenantId("tenant.issue99"),
+                                   product_quota_limits(), state_root, factory);
+  const std::optional<JobSnapshot> producer = recovered.query(producer_job_id);
+  const std::optional<JobSnapshot> consumer = recovered.query(consumer_job_id);
+  ASSERT_TRUE(producer.has_value());
+  ASSERT_TRUE(consumer.has_value());
+  EXPECT_EQ(producer->state, JobState::Succeeded);
+  EXPECT_EQ(consumer->state, JobState::Succeeded);
+  ASSERT_TRUE(producer->output_receipt.has_value());
+  EXPECT_EQ(producer->output_receipt->artifact_id, receipt.artifact_id);
+  EXPECT_NE(recovered.find_artifact(receipt.artifact_id), nullptr);
+  EXPECT_EQ(resolver->resolve_calls(), resolve_calls_before_restart);
+  EXPECT_EQ(recovered.quota_snapshot().retained_artifacts, 2U);
 }
 
 TEST(SingleTenantJobProductPath, MissingGraphArtifactFailsBeforeHostExecution) {
@@ -494,9 +560,12 @@ TEST(SingleTenantJobProductPath, MissingGraphArtifactFailsBeforeHostExecution) {
       GraphArtifactId("graph.present"), product_root.root() / "sessions", yaml,
       product_root.root() / "cache");
   auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(resolver);
-  SingleTenantJobService service(TenantId("tenant.issue98"), factory);
-  const JobSubmission submission = service.submit(JobSpec(
-      GraphArtifactId("graph.absent"), 0, OutputSlotId("image.final"), 1U));
+  SingleTenantJobService service(TenantId("tenant.issue99"),
+                                 product_quota_limits(),
+                                 product_root.root() / "state", factory);
+  const JobSubmission submission = service.submit(
+      JobSpec(GraphArtifactId("graph.absent"), 0, OutputSlotId("image.final"),
+              product_job_resources(1U)));
 
   const std::optional<JobSnapshot> terminal =
       service.wait_for(submission.job_id, std::chrono::seconds(5));
@@ -509,11 +578,15 @@ TEST(SingleTenantJobProductPath, MissingGraphArtifactFailsBeforeHostExecution) {
 
 TEST(SingleTenantJobProductPath,
      ResolverFailureAfterAcceptedCancellationRemainsFailed) {
+  ScopedJobProductRoot product_root;
   auto resolver = std::make_shared<BlockingFailingGraphArtifactResolver>();
   auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(resolver);
-  SingleTenantJobService service(TenantId("tenant.issue98"), factory);
-  const JobSubmission submission = service.submit(JobSpec(
-      GraphArtifactId("graph.race"), 0, OutputSlotId("image.final"), 1U));
+  SingleTenantJobService service(TenantId("tenant.issue99"),
+                                 product_quota_limits(),
+                                 product_root.root() / "state", factory);
+  const JobSubmission submission = service.submit(
+      JobSpec(GraphArtifactId("graph.race"), 0, OutputSlotId("image.final"),
+              product_job_resources(1U)));
   ResolverReleaseGuard resolver_release(resolver);
 
   ASSERT_TRUE(resolver->wait_until_entered());
@@ -618,10 +691,11 @@ TEST(SingleTenantJobProductPath, MutatedAssignmentDigestFailsBeforeResolution) {
   auto resolver = std::make_shared<TestGraphArtifactResolver>(
       GraphArtifactId("graph.present"), product_root.root() / "sessions", yaml,
       product_root.root() / "cache");
-  auto spec = std::make_shared<const JobSpec>(
-      GraphArtifactId("graph.present"), 0, OutputSlotId("image.final"), 1U);
+  auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.present"),
+                                              0, OutputSlotId("image.final"),
+                                              product_job_resources(1U));
   JobAssignment assignment;
-  assignment.identity.tenant_id = TenantId("tenant.issue98");
+  assignment.identity.tenant_id = TenantId("tenant.issue99");
   assignment.identity.job_id = JobId("job.digest.test");
   assignment.identity.job_spec_digest = spec->digest();
   assignment.identity.job_spec_digest.bytes[0] ^= std::byte{0x01};

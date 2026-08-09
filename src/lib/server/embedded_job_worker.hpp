@@ -1,6 +1,6 @@
 /**
  * @file embedded_job_worker.hpp
- * @brief Declares the real Embedded Host adapter for one Issue #98 attempt.
+ * @brief Declares the real Embedded Host adapter for one Issue #99 attempt.
  */
 #pragma once
 
@@ -42,7 +42,11 @@ struct ResolvedGraphArtifact final {
  */
 class GraphArtifactResolver {
  public:
-  /** @brief Destroys resolver-owned trusted configuration. */
+  /**
+   * @brief Destroys resolver-owned trusted configuration.
+   * @throws Nothing.
+   * @note Destruction occurs only after all shared resolver owners release it.
+   */
   virtual ~GraphArtifactResolver() = default;
 
   /**
@@ -59,10 +63,11 @@ class GraphArtifactResolver {
 /**
  * @brief Fresh in-process worker that executes one assignment through Host.
  *
- * Execution revalidates the complete immutable assignment before resolution,
- * creates a fresh Embedded Host, seeds repository built-ins, loads one
- * attempt-local graph session, computes the declared node, closes the graph,
- * destroys the Host, and returns only attempt facts plus a candidate image.
+ * Execution revalidates the complete immutable assignment and optional durable
+ * checkpoint binding before resolution, creates a fresh Embedded Host, seeds
+ * repository built-ins, loads one attempt-local graph session, computes the
+ * declared node within reserved CPU slots, closes the graph, destroys the Host,
+ * and returns only attempt facts plus a candidate image.
  *
  * @throws Constructor validation errors only; `execute` converts ordinary
  * resolver/Host failures into typed reports while allocation/system failures
@@ -89,7 +94,9 @@ class EmbeddedHostJobWorker final : public JobAttemptWorker {
    * @throws std::bad_alloc or std::system_error only when safe report
    * construction or synchronization cannot continue.
    * @note Cancellation is observed before resolution, before compute, and after
-   * compute. After a graph is loaded, settlement failure takes precedence over
+   * compute. A checkpoint is validated immutable provenance only; the current
+   * Host API does not claim algorithm-specific state restore. After a graph is
+   * loaded, settlement failure takes precedence over
    * every other terminal fact; an already recorded compute/output-validation
    * failure then takes precedence over later cancellation, while cancellation
    * still takes precedence over synthesizing a missing-output failure when

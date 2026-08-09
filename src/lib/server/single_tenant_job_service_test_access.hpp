@@ -1,10 +1,11 @@
 /**
  * @file single_tenant_job_service_test_access.hpp
- * @brief Exposes source-private identity, accepted-Job, and worker test seams.
+ * @brief Exposes source-private identity, report-fencing, and observer seams.
  *
  * Identity access reserves from caller-owned local atomic sequences. Job-state
- * access observes retained accepted records, and worker access observes
- * service-owned thread counts without exposing handles.
+ * access observes retained accepted records, worker access observes
+ * service-owned thread counts without exposing handles, and one explicit
+ * report seam drives deterministic stale-attempt fencing coverage.
  */
 #pragma once
 
@@ -18,6 +19,7 @@
 #include <optional>
 #include <stdexcept>
 #include <system_error>
+#include <utility>
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 
@@ -132,14 +134,15 @@ struct WorkerThreadOwnershipSnapshot final {
 };
 
 /**
- * @brief Provides local identity reservation and read-only Job/worker seams.
+ * @brief Provides local identity, deterministic report, and observer seams.
  *
  * Identity methods reserve from and therefore may modify only the
  * caller-supplied local atomic sequence. They do not read, reset, or otherwise
  * mutate production process-wide counters. Accepted-state methods observe
  * retained Job-record truth, while worker methods observe handle ownership.
- * The observation methods do not expose handles, mutate Job truth, start or
- * stop work, or publish reports.
+ * The observation methods do not expose handles or mutate product state. The
+ * explicit report method is the sole mutation seam and delegates to the exact
+ * production fencing boundary without constructing alternate authority.
  *
  * @throws Exceptions are method-specific and documented below. They include
  * `std::invalid_argument` for invalid seam inputs, `std::overflow_error` for
@@ -183,6 +186,25 @@ class SingleTenantJobServiceTestAccess final {
   static std::uint64_t reserve_identity_with_observer(
       std::atomic<std::uint64_t>* sequence,
       const std::function<void()>& after_initial_observation);
+
+  /**
+   * @brief Injects one report at the exact private production fencing boundary.
+   * @param service Live service whose current assignment may accept or fence
+   * it.
+   * @param expected Assignment identity owned by the simulated reporting
+   * worker.
+   * @param report Complete candidate report moved into production validation.
+   * @return Nothing after production processing or stale-attempt fencing.
+   * @throws Nothing; `SingleTenantJobService::apply_report` is fail-closed.
+   * @note This deterministic source-private seam exists only to prove that a
+   * prior attempt cannot mutate a replacement retry. It does not bypass any
+   * identity, shape, cancellation, artifact, persistence, or quota validation.
+   */
+  static void inject_attempt_report(SingleTenantJobService& service,
+                                    const AttemptIdentity& expected,
+                                    JobAttemptReport report) noexcept {
+    service.apply_report(expected, std::move(report));
+  }
 
   /**
    * @brief Returns the number of accepted Job records retained by a service.
