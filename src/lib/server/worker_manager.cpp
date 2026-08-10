@@ -1413,11 +1413,13 @@ class WorkerManager::Impl final {
    * @note Short read slices share one stateful frame decoder. Cancellation-send
    * failure starts the same cooperative deadline and keeps draining worker
    * report/EOF/exit truth. A subsequent socket-system read failure disables
-   * decoding inside this monitor so exact wait status can still outrank channel
-   * loss. If the deadline-side exact observation reaps a natural exit before
-   * channel revocation, the monitor keeps that descriptor open and drains the
-   * stateful decoder through one bounded post-reap window; only matching
-   * delivered TERM/KILL escalation yields `ForcedCancellation`.
+   * decoding inside this monitor, but its EOF/post-report bound cannot preempt
+   * the still-active cooperative deadline, so exact wait status can still
+   * outrank channel loss. If the deadline-side exact observation reaps a
+   * natural exit before channel revocation, the monitor keeps that descriptor
+   * open and drains the stateful decoder through one bounded post-reap window;
+   * only matching delivered TERM/KILL escalation yields
+   * `ForcedCancellation`.
    * Every first `Report`, `Failure`, or `ForcedCancellation` construction is
    * locally fail-stop protected after exact reaping and cannot be reclassified
    * by the outer catch boundary.
@@ -1547,7 +1549,14 @@ class WorkerManager::Impl final {
 
       if (channel_eof) {
         if (!candidate_report.has_value()) {
-          if (eof_deadline.has_value() && now >= *eof_deadline) {
+          auto terminal_channel_deadline = eof_deadline;
+          if (terminal_channel_deadline.has_value() &&
+              cancel_deadline.has_value()) {
+            terminal_channel_deadline =
+                std::max(*terminal_channel_deadline, *cancel_deadline);
+          }
+          if (terminal_channel_deadline.has_value() &&
+              now >= *terminal_channel_deadline) {
             terminate_and_reap(record, process);
             return failure_completion(
                 record->identity, JobAttemptFailure::WorkerChannel,

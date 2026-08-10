@@ -314,7 +314,12 @@ struct WorkerManagerOptions final {
   std::chrono::milliseconds heartbeat_timeout{3000};
   /** @brief Maximum total runtime before manager-owned termination. */
   std::chrono::milliseconds attempt_runtime_timeout{std::chrono::minutes(30)};
-  /** @brief Maximum wait for clean exit after one report. */
+  /**
+   * @brief Maximum ordinary wait for clean exit or EOF settlement.
+   * @note After accepted cancellation this bound cannot preempt the still-
+   * active cooperative deadline; exact exit status and owned escalation remain
+   * under the cancellation state machine.
+   */
   std::chrono::milliseconds post_report_timeout{2000};
   /** @brief Cooperative cancellation grace before `SIGTERM`. */
   std::chrono::milliseconds cooperative_cancel_timeout{1000};

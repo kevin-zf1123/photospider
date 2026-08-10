@@ -114,9 +114,11 @@ struct WorkerManagerOwnershipSnapshot final {
  * records prepare one assignment, fork/exec one fresh process, join every
  * message to the complete identity, escalate cancellation, preserve bounded
  * buffered report/EOF drainage when natural exit wins the deadline-side reap,
- * classify exit, and clear/reap the PID before delivering one completion. The
- * explicit test mode executes a marked factory in its supervision thread and
- * makes no process-isolation or bounded-termination claim.
+ * and prevent an ordinary EOF deadline from preempting an active cooperative
+ * cancellation deadline. It classifies exit and clears/reaps the PID before
+ * delivering one completion. The explicit test mode executes a marked factory
+ * in its supervision thread and makes no process-isolation or bounded-
+ * termination claim.
  *
  * @throws Construction validates factory, callbacks, bounds, product
  * executable access, a waitable product `SIGCHLD` disposition, and creates one

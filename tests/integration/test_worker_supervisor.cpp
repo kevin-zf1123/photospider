@@ -1332,6 +1332,29 @@ TEST(WorkerSupervisor,
   EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
 }
 
+TEST(
+    WorkerSupervisor,
+    CancelChannelFailureSignalBeforeCooperativeDeadlineOutranksShortPostReportTimeout) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.post_report_timeout = 10ms;
+  options.cooperative_cancel_timeout = 1s;
+  options.inject_cancel_channel_failure_for_test = true;
+  auto service = make_service(root.path(), std::move(options));
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.cancel-race.delayed-signal"));
+
+  ASSERT_TRUE(service->cancel(submitted.job_id));
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::WorkerSignal)
+      << terminal.message;
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerChannel);
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
+}
+
 TEST(WorkerSupervisor, StaleLeaseCannotCancelFreshRetryProcess) {
   ScopedSupervisorRoot root;
   const std::filesystem::path fifo = root.path() / "worker-retry.fifo";

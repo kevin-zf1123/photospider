@@ -53,6 +53,13 @@ constexpr std::chrono::milliseconds kExpectedLaunchIoTimeout{3500};
 constexpr std::string_view kFilesystemBlockMode = "fixture.fs.block";
 /** @brief Retry mode whose fresh generation blocks on trusted FIFO input. */
 constexpr std::string_view kRetryFilesystemHoldMode = "fixture.retry.hold";
+/**
+ * @brief Natural signal delay that remains inside the long cancellation grace.
+ * @note The gap is deliberately much larger than one supervisor poll slice so
+ * a shorter post-report deadline deterministically exercises deadline
+ * precedence without exposing process or signal authority to the test.
+ */
+constexpr std::chrono::milliseconds kDelayedCancelSignalExit{300};
 
 /**
  * @brief Parses an optional descriptor non-inheritance fixture mode.
@@ -676,6 +683,13 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     static_cast<void>(::kill(::getpid(), SIGKILL));
     return 30;
+  }
+  if (mode == "fixture.cancel-race.delayed-signal") {
+    static_cast<void>(wait_for_cancel(launch.control_fd, assignment, false,
+                                      launch.io_timeout));
+    std::this_thread::sleep_for(kDelayedCancelSignalExit);
+    static_cast<void>(::kill(::getpid(), SIGKILL));
+    return 36;
   }
   if (mode == "fixture.cancel-race.channel-close") {
     close_fixture_fd(launch.control_fd);
