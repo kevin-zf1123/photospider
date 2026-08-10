@@ -1170,7 +1170,13 @@ durable root is opened, and WorkerManager revalidates that waitable policy
 immediately before every `fork`. A later process-global policy mutation, a
 competing reaper, or any non-`EINTR` exact-`waitpid` error including `ECHILD`
 fail-stops the authority before a completion callback, completed-record mark,
-or record deletion. Successful `kill()` delivery alone does not prove that a
+or record deletion. After exact reaping, the manager still retains its record
+until one typed terminal fact is constructed and its control-plane callback
+returns. A `std::bad_alloc` or any other exception during construction or
+callback delivery takes a fixed allocation-free fail-stop path before record
+completion/deletion; construction failure invokes no callback, callback
+failure is not retried, and neither path fabricates an ordinary completion or
+releases ownership. Successful `kill()` delivery alone does not prove that a
 zombie died from that signal: forced cancellation requires an exact
 `WIFSIGNALED` status matching the delivered `SIGTERM` or `SIGKILL`, while a
 normal zero exit remains report/channel/exit truth.

@@ -98,6 +98,13 @@ security domain。
 record 前 fail-stop。Forced cancellation 表示精确 `WIFSIGNALED` 状态匹配 owner 已成功发送的
 `SIGTERM`/`SIGKILL`；对零退出 zombie 成功调用 `kill()` 并不是 signal-death 证据。
 
+精确回收也不是 manager ownership 的终点：必需的 typed terminal fact 还必须到达控制面
+callback。如果构造该 fact 时抛出异常（包括 `std::bad_alloc`），或 callback 抛出异常而没有
+接受 handoff，WorkerManager 会写出固定的 allocation-free fail-stop 诊断并 abort，且发生在
+completed-record 标记或普通 record 删除之前。构造失败不会调用 callback；callback 失败既不
+重试，也不会被替换成伪造的普通 completion。因此，这次 fail-stop 之后的 durable Job 与
+quota truth 只能通过重启 reconciliation 收敛。
+
 **通用耐久输出提交（超出 Issue #99/#100 子集的已接受目标）**
 更广泛的未来 user-output transaction 由稳定 `OutputCommitId` 标识，只有在完整
 payload/metadata 校验与文件同步、canonical manifest 暂存/校验/文件同步、原子

@@ -266,6 +266,16 @@ timeout、runtime timeout 与 forced-cancellation fact 使用彼此分离的 dur
 会在任何 completion callback、completed-record 标记或 record 删除前 fail-stop。仍保留 live
 PID 的 record 绝不能被标记为 complete 或删除。
 
+仅仅完成精确 reaping 同样不能退役 manager record。Assignment begin 一旦成功或抛出异常，
+WorkerManager 就必须构造一个 typed terminal fact，并且控制面 callback 必须在
+`mark_completed` 前返回。如果 fact 构造抛出异常（包括 `std::bad_alloc`），就不会调用
+callback；如果 callback 抛出异常，则不会重试，因为它可能已经部分应用 durable truth。
+两种情况都会通过 allocation-free fail-stop 路径写出固定诊断，且发生在 completed-record
+标记或普通 record 删除之前。它们绝不伪造 replacement completion，也不释放 service-owned
+quota reservation。这次 fail-stop 后，重启仍是 durable Job 与 quota owner 唯一的
+reconciliation 边界。Begin callback 返回 false 是唯一合法的不带 completion 退役路径，
+因为它在 worker 执行前就 fence 了未发布或已被替换的 assignment。
+
 Worker report shape 与 full-tuple fencing 仍是封闭集合。Worker-owned failure fact 优先于
 cancellation relabelling。来自旧 attempt 的 stale 调用会被忽略，不会改变 current retry；
 来自 current attempt 的 malformed report 会变为 `ReportRejected`。`cancel()` 持久化
@@ -343,8 +353,8 @@ release-failure ownership、Failed/Cancelled/rejected/malformed/pre-manifest ter
 read-only availability、report/mutation fencing 与 restart convergence、持续 handle/process
 reaping、target-inventory platform gating、bounded protocol reconstruction、fresh process
 identity、crash/protocol/heartbeat/runtime isolation、stale-lease rejection、cooperative/forced
-cancellation、concurrent shutdown drainage，以及真实 Embedded Host output/checkpoint/restart
-行为。
+cancellation、concurrent shutdown drainage、completion 重建 allocation fail-stop、
+completion callback 异常 fail-stop，以及真实 Embedded Host output/checkpoint/restart 行为。
 
 这一本地 Issue #100 可执行子集不新增 network/multi-tenant control plane、独立部署的
 WorkerManager、artifact data plane、untrusted plugin sandbox，或 Issues #101-#106 分配的

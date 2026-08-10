@@ -326,6 +326,19 @@ authority and fail-stops before any completion callback, completed-record
 mark, or record deletion. A record retaining a live PID can never be marked
 complete or erased.
 
+Exact reaping alone also cannot retire the manager record. Once assignment
+begin succeeds or raises, WorkerManager must construct one typed terminal fact
+and its control-plane callback must return before `mark_completed`. If fact
+construction raises, including `std::bad_alloc`, the callback is not invoked;
+if the callback raises, it is not retried because it may have partially applied
+durable truth. Both cases write a fixed diagnostic through an allocation-free
+fail-stop path before completed-record marking or ordinary record deletion.
+They never fabricate a replacement completion or release the service-owned
+quota reservation. Restart remains the only reconciliation boundary for the
+durable Job and quota owner after this fail-stop. A begin callback that returns
+false remains the sole legitimate no-completion retirement path because it
+fences an unpublished or replaced assignment before worker execution.
+
 Worker report shapes and full-tuple fencing remain closed. Worker-owned failure
 facts take precedence over cancellation relabelling. A stale prior-attempt
 invocation is ignored without mutating the current retry; a malformed report
@@ -419,8 +432,9 @@ read-only availability, report/mutation fencing, and restart convergence,
 ongoing handle/process reaping, target-inventory platform gating, bounded
 protocol reconstruction, fresh process identity, crash/protocol/heartbeat/
 runtime isolation, stale-lease rejection, cooperative/forced cancellation,
-concurrent shutdown drainage, and real Embedded Host output/checkpoint/restart
-behavior.
+concurrent shutdown drainage, completion-reconstruction allocation fail-stop,
+completion-callback exception fail-stop, and real Embedded Host output/
+checkpoint/restart behavior.
 
 This local Issue #100 executable subset does not add the network/multi-tenant
 control plane, a separately deployed WorkerManager, artifact data plane,

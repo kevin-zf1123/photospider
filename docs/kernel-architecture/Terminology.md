@@ -122,6 +122,15 @@ publication or ownership-record deletion. Forced cancellation means an exact
 `WIFSIGNALED` status matching an owned delivered `SIGTERM`/`SIGKILL`; successful
 `kill()` delivery to a zero-exit zombie is not signal-death evidence.
 
+Exact reaping is not the end of manager ownership: the required typed terminal
+fact must also reach the control-plane callback. If constructing that fact
+raises, including `std::bad_alloc`, or the callback raises instead of accepting
+the handoff, WorkerManager writes a fixed allocation-free fail-stop diagnostic
+and aborts before completed-record marking or ordinary record deletion. A
+construction failure invokes no callback; a callback failure is never retried
+or replaced with a fabricated ordinary completion. Durable Job and quota truth
+therefore converge only through restart reconciliation after this fail-stop.
+
 **General durable output commit (accepted target beyond the Issue #99/#100 subset)**
 The broader future user-output transaction is identified by a stable
 `OutputCommitId` and completed only after full payload/metadata validation and
