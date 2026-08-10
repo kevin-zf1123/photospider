@@ -43,7 +43,8 @@
 
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_protocol.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {
@@ -1005,7 +1006,7 @@ class WorkerManager::Impl final {
       return;
     }
     validate_sigchld_reaping_configuration();
-    if (!factory_->supports_external_assignment() ||
+    if (!factory_->has_prepared_external_graphs() ||
         options_.worker_executable.empty()) {
       throw std::invalid_argument(
           "product worker factory or executable is not externalizable");
@@ -1171,9 +1172,15 @@ class WorkerManager::Impl final {
     const rlimit address_space = worker_address_space_limit(
         record->assignment.spec->resource_request().host_memory_bytes);
     const std::string executable = options_.worker_executable.string();
-    const std::string control_argument = "--control-fd=3";
+    const WorkerProcessLaunchArguments launch_arguments =
+        make_worker_process_launch_arguments(WorkerProcessLaunchOptions{
+            kWorkerControlDescriptor, options_.startup_timeout,
+            options_.io_timeout});
     const char* const executable_pointer = executable.c_str();
-    const char* const control_pointer = control_argument.c_str();
+    const char* const control_pointer = launch_arguments.control_fd.c_str();
+    const char* const startup_pointer =
+        launch_arguments.startup_timeout.c_str();
+    const char* const io_pointer = launch_arguments.io_timeout.c_str();
 
     require_sigchld_reaping_authority_before_fork();
     const pid_t pid = ::fork();
@@ -1209,7 +1216,9 @@ class WorkerManager::Impl final {
         child_setup_failed(kWorkerExecStatusDescriptor, close_error);
       }
       char* const arguments[] = {const_cast<char*>(executable_pointer),
-                                 const_cast<char*>(control_pointer), nullptr};
+                                 const_cast<char*>(control_pointer),
+                                 const_cast<char*>(startup_pointer),
+                                 const_cast<char*>(io_pointer), nullptr};
       ::execv(executable_pointer, arguments);
       child_setup_failed(kWorkerExecStatusDescriptor, errno);
     }
@@ -1245,26 +1254,22 @@ class WorkerManager::Impl final {
    * @brief Runs the complete assignment/heartbeat/report/exit state machine.
    * @param record Exact immutable attempt record.
    * @return One report, failure, or forced-cancellation completion after reap.
-   * @throws ManagerFailure for preparation or spawn failures before a process
-   * state machine can classify locally. First completion construction never
-   * propagates and instead allocation-free fail-stops.
+   * @throws ManagerFailure for spawn failures before a process state machine
+   * can classify locally. First completion construction never propagates and
+   * instead allocation-free fail-stops.
+   * @note The exact child PID is registered before prepared graph material is
+   * copied. The non-virtual catalog lookup performs no trusted I/O; every later
+   * failure therefore has one signalable and reapable process owner.
    */
   WorkerManagerCompletion run_external_process(
       const std::shared_ptr<Record>& record) {
-    ResolvedGraphArtifact graph;
-    try {
-      graph = factory_->prepare_external_graph(record->assignment);
-    } catch (const std::exception& error) {
-      throw ManagerFailure(
-          JobAttemptFailure::WorkerStartup,
-          std::string("external assignment preparation failed: ") +
-              error.what());
-    }
-    PreparedWorkerAssignment prepared{record->assignment, std::move(graph),
-                                      options_.heartbeat_interval};
     ChildProcess process = spawn_process(record);
     bool accepted = false;
     try {
+      PreparedWorkerAssignment prepared{
+          record->assignment,
+          factory_->prepared_external_graph(record->assignment),
+          options_.heartbeat_interval};
       const auto startup_deadline =
           std::chrono::steady_clock::now() + options_.startup_timeout;
       send_worker_assignment(

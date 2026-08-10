@@ -14,9 +14,12 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "server/durable_server_state.hpp"  // NOLINT(build/include_subdir)
 #include "server/job_contract.hpp"          // NOLINT(build/include_subdir)
@@ -76,6 +79,66 @@ struct ResolvedGraphArtifact final {
   std::string cache_root_dir;
   /** @brief Resolver-owned diagnostic when `ok` is false. */
   std::string message;
+};
+
+/**
+ * @brief One immutable graph-id-to-material binding prepared before service
+ * ownership begins.
+ * @throws Nothing for default construction; value copies may allocate.
+ * @note Construction performs no resolution. Callers finish every potentially
+ * blocking identity-to-material resolver or configuration lookup before
+ * creating this value; opening the retained paths remains worker-process work.
+ */
+struct PreparedExternalGraphEntry final {
+  /** @brief Exact immutable graph identity authorized by this binding. */
+  GraphArtifactId graph_artifact_id;
+  /** @brief Complete already-resolved local material or failure diagnostic. */
+  ResolvedGraphArtifact graph;
+};
+
+/**
+ * @brief Immutable in-memory graph material authority for external workers.
+ *
+ * Construction indexes caller-prepared values before WorkerManager can accept
+ * a Job. Runtime lookup performs only validation, bounded map lookup, and
+ * value copying; it invokes no resolver and performs no filesystem I/O.
+ *
+ * @throws std::invalid_argument for an invalid or duplicate graph identity.
+ * @throws std::bad_alloc when indexing or copying material exhausts memory.
+ * @note An empty catalog remains externally usable and produces a closed
+ * GraphResolution failure for every identity. This supports deterministic
+ * process fixtures that ignore real graph material without adding a callback.
+ * After construction the map never mutates, so concurrent const lookups share
+ * no resolver, cache, or filesystem lifecycle.
+ */
+class PreparedExternalGraphCatalog final {
+ public:
+  /**
+   * @brief Indexes all prepared exact graph bindings once.
+   * @param entries Complete caller-owned bindings; ownership is consumed.
+   * @throws std::invalid_argument for an invalid or duplicate identity.
+   * @throws std::bad_alloc when retaining the bounded entries exhausts memory.
+   * @note Trusted identity-to-material resolution must already be complete;
+   * the catalog itself never opens the retained paths.
+   */
+  explicit PreparedExternalGraphCatalog(
+      std::vector<PreparedExternalGraphEntry> entries);
+
+  /**
+   * @brief Copies one already-prepared exact graph result from memory.
+   * @param graph_artifact_id Valid immutable JobSpec graph identity.
+   * @return Exact prepared result, or a closed `ok=false` diagnostic when the
+   * identity has no binding.
+   * @throws std::invalid_argument when the identity is invalid.
+   * @throws std::bad_alloc when copying result strings exhausts memory.
+   * @note This operation invokes no polymorphic code and performs no I/O.
+   * Concurrent calls read only immutable catalog state.
+   */
+  ResolvedGraphArtifact find(const GraphArtifactId& graph_artifact_id) const;
+
+ private:
+  /** @brief Exact identity text to immutable prepared material. */
+  std::map<std::string, ResolvedGraphArtifact> entries_;
 };
 
 /**
@@ -164,25 +227,56 @@ class JobAttemptWorkerFactory {
       const JobAssignment& assignment) = 0;
 
   /**
-   * @brief Reports whether this factory can prepare a product process payload.
-   * @return True only when `prepare_external_graph()` is implemented.
+   * @brief Reports whether this factory owns prepared external graph material.
+   * @return True only when construction supplied a non-null immutable catalog.
    * @throws Nothing.
-   * @note Returning false is rejected by ordinary product service
-   * construction. The non-installed test marker is the only in-process
-   * exception.
+   * @note This non-virtual boundary cannot be replaced with blocking resolver
+   * or filesystem work. Product construction rejects false; the non-installed
+   * in-process test marker is the only exception.
    */
-  virtual bool supports_external_assignment() const noexcept { return false; }
+  bool has_prepared_external_graphs() const noexcept {
+    return external_graphs_ != nullptr;
+  }
 
   /**
-   * @brief Resolves trusted graph material for one external worker process.
+   * @brief Copies prepared graph material for one owned external process.
    * @param assignment Exact immutable current assignment.
-   * @return Bounded trusted graph material for transport to that worker.
-   * @throws std::logic_error when external preparation is unsupported.
-   * @throws Resolver-specific allocation or trusted-I/O failures unchanged.
-   * @note The default implementation fails closed and creates no worker.
+   * @return Bounded already-resolved material for transport to that worker.
+   * @throws std::logic_error when no external catalog was supplied.
+   * @throws std::invalid_argument for a malformed assignment or digest join.
+   * @throws std::bad_alloc when copying retained material exhausts memory.
+   * @note WorkerManager calls this only after it owns the exact child PID. The
+   * method is non-virtual and performs no resolver callback or filesystem I/O.
    */
-  virtual ResolvedGraphArtifact prepare_external_graph(
+  ResolvedGraphArtifact prepared_external_graph(
       const JobAssignment& assignment) const;
+
+ protected:
+  /**
+   * @brief Creates an in-process-only factory with no external catalog.
+   * @throws Nothing.
+   * @note Ordinary product service construction rejects this state.
+   */
+  JobAttemptWorkerFactory() noexcept = default;
+
+  /**
+   * @brief Creates one externalizable factory around pre-resolved material.
+   * @param external_graphs Non-null immutable catalog for product mode.
+   * @throws std::invalid_argument when `external_graphs` is null.
+   * @note The shared catalog remains read-only across concurrent supervisor
+   * threads and outlives every copy used for process handoff.
+   */
+  explicit JobAttemptWorkerFactory(
+      std::shared_ptr<const PreparedExternalGraphCatalog> external_graphs)
+      : external_graphs_(std::move(external_graphs)) {
+    if (external_graphs_ == nullptr) {
+      throw std::invalid_argument("prepared external graph catalog is null");
+    }
+  }
+
+ private:
+  /** @brief Immutable prepared catalog, or null only for in-process tests. */
+  std::shared_ptr<const PreparedExternalGraphCatalog> external_graphs_;
 };
 
 /**

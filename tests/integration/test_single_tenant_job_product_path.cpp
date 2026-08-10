@@ -19,6 +19,7 @@
 #include <string>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include "server/embedded_job_worker.hpp"  // NOLINT(build/include_subdir)
 
@@ -391,112 +392,29 @@ class TestGraphArtifactResolver final : public GraphArtifactResolver {
 };
 
 /**
- * @brief Blocks graph resolution until cancellation wins, then raises.
- * @throws Synchronization errors from standard primitives; resolve raises the
- * configured deterministic resolver failure after release.
- * @note The gate makes the product cancellation/failure ordering independent
- * of scheduler timing.
+ * @brief Builds one immutable pre-resolved external graph catalog.
+ * @param graph_id Exact authorized graph identity.
+ * @param root Trusted graph-session root.
+ * @param yaml Trusted explicit YAML path, which need not be open yet.
+ * @param cache Trusted worker-private cache root.
+ * @return Non-null one-entry catalog safe for manager-side memory lookup.
+ * @throws Contract, path conversion, or allocation failures unchanged.
+ * @note Filesystem opening remains worker-process work after exec.
  */
-class BlockingFailingGraphArtifactResolver final
-    : public GraphArtifactResolver {
- public:
-  /**
-   * @brief Marks resolver entry, waits for test release, and raises.
-   * @param graph_artifact_id Candidate identity, unused by this failing seam.
-   * @return Never returns.
-   * @throws std::runtime_error after the gate is released.
-   * @throws std::system_error on synchronization failure.
-   */
-  ResolvedGraphArtifact resolve(
-      const GraphArtifactId& graph_artifact_id) const override {
-    (void)graph_artifact_id;
-    std::unique_lock<std::mutex> lock(mutex_);
-    entered_ = true;
-    condition_.notify_all();
-    condition_.wait(lock, [&] { return released_; });
-    throw std::runtime_error("resolver failed after cancellation");
-  }
-
-  /**
-   * @brief Waits a fixed bound for the worker to enter resolution.
-   * @return True when resolver entry was observed.
-   * @throws std::system_error on synchronization failure.
-   */
-  bool wait_until_entered() const {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return condition_.wait_for(lock, std::chrono::seconds(2),
-                               [&] { return entered_; });
-  }
-
-  /**
-   * @brief Releases the resolver gate monotonically.
-   * @return Nothing.
-   * @throws std::system_error on synchronization failure.
-   */
-  void release() {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      released_ = true;
-    }
-    condition_.notify_all();
-  }
-
- private:
-  /** @brief Serializes deterministic resolver-gate state. */
-  mutable std::mutex mutex_;
-  /** @brief Signals resolver entry and test release. */
-  mutable std::condition_variable condition_;
-  /** @brief Whether the worker entered graph resolution. */
-  mutable bool entered_ = false;
-  /** @brief Whether the test released graph resolution. */
-  mutable bool released_ = false;
-};
-
-/**
- * @brief Releases a blocked product resolver before service destruction.
- * @throws Nothing; an unexpected synchronization failure terminates because a
- * blocked worker would otherwise make the service join nonrecoverable.
- */
-class ResolverReleaseGuard final {
- public:
-  /**
-   * @brief Retains one resolver cleanup obligation.
-   * @param resolver Resolver to release, or null for a disarmed guard.
-   * @throws Nothing.
-   */
-  explicit ResolverReleaseGuard(
-      std::shared_ptr<BlockingFailingGraphArtifactResolver> resolver) noexcept
-      : resolver_(std::move(resolver)) {}
-
-  /** @brief Releases an armed resolver gate before service destruction. */
-  ~ResolverReleaseGuard() noexcept { release(); }
-
-  /** @brief Prevents duplicate gate cleanup ownership. */
-  ResolverReleaseGuard(const ResolverReleaseGuard&) = delete;
-  /** @brief Prevents duplicate gate cleanup assignment. */
-  ResolverReleaseGuard& operator=(const ResolverReleaseGuard&) = delete;
-
-  /**
-   * @brief Releases the resolver immediately and disarms cleanup.
-   * @return Nothing.
-   * @throws Nothing; terminates on an unexpected synchronization failure.
-   */
-  void release() noexcept {
-    if (resolver_ == nullptr) {
-      return;
-    }
-    try {
-      resolver_->release();
-      resolver_.reset();
-    } catch (...) {
-      std::terminate();
-    }
-  }
-
- private:
-  /** @brief Armed resolver owner, or null after release. */
-  std::shared_ptr<BlockingFailingGraphArtifactResolver> resolver_;
-};
+std::shared_ptr<const PreparedExternalGraphCatalog> prepared_graph_catalog(
+    GraphArtifactId graph_id, const std::filesystem::path& root,
+    const std::filesystem::path& yaml, const std::filesystem::path& cache) {
+  ResolvedGraphArtifact graph;
+  graph.ok = true;
+  graph.root_dir = root.string();
+  graph.yaml_path = yaml.string();
+  graph.cache_root_dir = cache.string();
+  std::vector<PreparedExternalGraphEntry> entries;
+  entries.push_back(
+      PreparedExternalGraphEntry{std::move(graph_id), std::move(graph)});
+  return std::make_shared<const PreparedExternalGraphCatalog>(
+      std::move(entries));
+}
 
 TEST(SingleTenantJobProductPath,
      RealEmbeddedHostCompletesCheckpointAndRestartDurableArtifactPath) {
@@ -505,10 +423,10 @@ TEST(SingleTenantJobProductPath,
   write_job_graph(yaml);
 
   const GraphArtifactId graph_id("graph.issue99.fixture");
-  auto resolver = std::make_shared<TestGraphArtifactResolver>(
-      graph_id, product_root.root() / "sessions", yaml,
-      product_root.root() / "cache");
-  auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(resolver);
+  auto catalog =
+      prepared_graph_catalog(graph_id, product_root.root() / "sessions", yaml,
+                             product_root.root() / "cache");
+  auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(catalog);
   const std::filesystem::path state_root = product_root.root() / "state";
   JobId producer_job_id;
   JobId consumer_job_id;
@@ -560,7 +478,6 @@ TEST(SingleTenantJobProductPath,
     EXPECT_EQ(*consumed->spec->checkpoint_artifact_id(), receipt.artifact_id);
   }
 
-  const std::uint64_t resolve_calls_before_restart = resolver->resolve_calls();
   SingleTenantJobService recovered(TenantId("tenant.issue99"),
                                    product_quota_limits(), state_root, factory,
                                    {}, {}, product_worker_options());
@@ -573,7 +490,6 @@ TEST(SingleTenantJobProductPath,
   ASSERT_TRUE(producer->output_receipt.has_value());
   EXPECT_EQ(producer->output_receipt->artifact_id, receipt.artifact_id);
   EXPECT_NE(recovered.find_artifact(receipt.artifact_id), nullptr);
-  EXPECT_EQ(resolver->resolve_calls(), resolve_calls_before_restart);
   EXPECT_EQ(recovered.quota_snapshot().retained_artifacts, 2U);
 }
 
@@ -582,10 +498,10 @@ TEST(SingleTenantJobProductPath, MissingGraphArtifactFailsBeforeHostExecution) {
   const std::filesystem::path yaml = product_root.root() / "graph.yaml";
   write_job_graph(yaml);
 
-  auto resolver = std::make_shared<TestGraphArtifactResolver>(
-      GraphArtifactId("graph.present"), product_root.root() / "sessions", yaml,
-      product_root.root() / "cache");
-  auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(resolver);
+  auto catalog = prepared_graph_catalog(GraphArtifactId("graph.present"),
+                                        product_root.root() / "sessions", yaml,
+                                        product_root.root() / "cache");
+  auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(catalog);
   SingleTenantJobService service(
       TenantId("tenant.issue99"), product_quota_limits(),
       product_root.root() / "state", factory, {}, {}, product_worker_options());
@@ -599,42 +515,6 @@ TEST(SingleTenantJobProductPath, MissingGraphArtifactFailsBeforeHostExecution) {
   EXPECT_EQ(terminal->state, JobState::Failed);
   EXPECT_TRUE(terminal->attempt_settled);
   EXPECT_EQ(terminal->failure, JobAttemptFailure::GraphResolution);
-  EXPECT_FALSE(terminal->output_receipt.has_value());
-}
-
-TEST(SingleTenantJobProductPath,
-     ResolverPreparationFailureAfterAcceptedCancellationRemainsFailed) {
-  ScopedJobProductRoot product_root;
-  auto resolver = std::make_shared<BlockingFailingGraphArtifactResolver>();
-  auto factory = std::make_shared<EmbeddedHostJobWorkerFactory>(resolver);
-  SingleTenantJobService service(
-      TenantId("tenant.issue99"), product_quota_limits(),
-      product_root.root() / "state", factory, {}, {}, product_worker_options());
-  const JobSubmission submission = service.submit(
-      JobSpec(GraphArtifactId("graph.race"), 0, OutputSlotId("image.final"),
-              product_job_resources(1U)));
-  ResolverReleaseGuard resolver_release(resolver);
-
-  ASSERT_TRUE(resolver->wait_until_entered());
-  EXPECT_TRUE(service.cancel(submission.job_id));
-  const std::optional<JobSnapshot> cancelling =
-      service.query(submission.job_id);
-  ASSERT_TRUE(cancelling.has_value());
-  EXPECT_EQ(cancelling->state, JobState::Cancelling);
-  resolver_release.release();
-
-  const std::optional<JobSnapshot> terminal =
-      service.wait_for(submission.job_id, std::chrono::seconds(5));
-  ASSERT_TRUE(terminal.has_value());
-  EXPECT_EQ(terminal->state, JobState::Failed);
-  EXPECT_TRUE(terminal->cancellation_requested);
-  ASSERT_TRUE(terminal->attempt_outcome.has_value());
-  EXPECT_EQ(*terminal->attempt_outcome, JobAttemptOutcome::Failed);
-  EXPECT_TRUE(terminal->attempt_settled);
-  EXPECT_EQ(terminal->failure, JobAttemptFailure::WorkerStartup);
-  EXPECT_EQ(terminal->message,
-            "external assignment preparation failed: resolver failed after "
-            "cancellation");
   EXPECT_FALSE(terminal->output_receipt.has_value());
 }
 

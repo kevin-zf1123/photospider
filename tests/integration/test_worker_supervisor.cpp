@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 #include <signal.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -18,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -189,10 +191,30 @@ class ScopedSigchldDisposition final {
 
 /**
  * @brief Externalizable fixture factory that cannot execute in control plane.
- * @throws Nothing for construction.
+ * @throws std::bad_alloc when allocating its empty prepared catalog fails.
  */
 class FixtureWorkerFactory final : public JobAttemptWorkerFactory {
  public:
+  /**
+   * @brief Supplies an empty immutable external graph catalog.
+   * @throws std::bad_alloc when catalog allocation fails.
+   * @note The process fixture keys only off JobSpec and intentionally ignores
+   * the catalog's closed missing-graph diagnostic.
+   */
+  FixtureWorkerFactory()
+      : FixtureWorkerFactory(
+            std::make_shared<const PreparedExternalGraphCatalog>(
+                std::vector<PreparedExternalGraphEntry>{})) {}
+
+  /**
+   * @brief Supplies one caller-prepared immutable external graph catalog.
+   * @param external_graphs Non-null catalog transported to the fixture.
+   * @throws std::invalid_argument when `external_graphs` is null.
+   */
+  explicit FixtureWorkerFactory(
+      std::shared_ptr<const PreparedExternalGraphCatalog> external_graphs)
+      : JobAttemptWorkerFactory(std::move(external_graphs)) {}
+
   /**
    * @brief Fails if the product path ever invokes an in-process worker.
    * @param assignment Exact assignment, intentionally unused.
@@ -204,32 +226,6 @@ class FixtureWorkerFactory final : public JobAttemptWorkerFactory {
     static_cast<void>(assignment);
     throw std::logic_error(
         "fixture factory must not execute in the control-plane process");
-  }
-
-  /**
-   * @brief Advertises exact external assignment support.
-   * @return True.
-   * @throws Nothing.
-   */
-  bool supports_external_assignment() const noexcept override { return true; }
-
-  /**
-   * @brief Prepares deterministic graph-id-selected fixture material.
-   * @param assignment Exact current assignment.
-   * @return Bounded trusted placeholder paths; the fixture keys off JobSpec.
-   * @throws std::invalid_argument when the assignment has no JobSpec.
-   */
-  ResolvedGraphArtifact prepare_external_graph(
-      const JobAssignment& assignment) const override {
-    if (assignment.spec == nullptr) {
-      throw std::invalid_argument("fixture assignment has no JobSpec");
-    }
-    ResolvedGraphArtifact graph;
-    graph.ok = true;
-    graph.root_dir = "/fixture";
-    graph.yaml_path =
-        "/fixture/" + assignment.spec->graph_artifact_id().value() + ".yaml";
-    return graph;
   }
 };
 
@@ -249,50 +245,6 @@ class UnmarkedWorkerFactory final : public JobAttemptWorkerFactory {
       const JobAssignment& assignment) override {
     static_cast<void>(assignment);
     return nullptr;
-  }
-};
-
-/**
- * @brief Externalizable factory that raises one deterministic primary
- * supervision failure before process spawn.
- * @throws Nothing for construction.
- * @note The manager wraps this primary failure as `ManagerFailure` and attempts
- * to reconstruct one typed completion; the separate options seam faults that
- * reconstruction with the actual `std::bad_alloc` under test.
- */
-class CompletionConstructionFailureFactory final
-    : public JobAttemptWorkerFactory {
- public:
-  /**
-   * @brief Rejects accidental in-process execution.
-   * @param assignment Exact assignment, intentionally unused.
-   * @return Never returns.
-   * @throws std::logic_error unconditionally.
-   */
-  std::unique_ptr<JobAttemptWorker> create(
-      const JobAssignment& assignment) override {
-    static_cast<void>(assignment);
-    throw std::logic_error(
-        "completion allocation-fault factory must not execute in process");
-  }
-
-  /**
-   * @brief Advertises product-shaped external assignment support.
-   * @return True.
-   * @throws Nothing.
-   */
-  bool supports_external_assignment() const noexcept override { return true; }
-
-  /**
-   * @brief Raises the primary supervision failure before any child is spawned.
-   * @param assignment Exact assignment, intentionally unused.
-   * @return Never returns.
-   * @throws std::runtime_error unconditionally.
-   */
-  ResolvedGraphArtifact prepare_external_graph(
-      const JobAssignment& assignment) const override {
-    static_cast<void>(assignment);
-    throw std::runtime_error("injected external assignment preparation fault");
   }
 };
 
@@ -411,6 +363,121 @@ void close_probe_descriptor(int fd) noexcept {
 }
 
 /**
+ * @brief Owns one exact supervisor-test descriptor until reset/destruction.
+ * @throws Nothing for construction and destruction.
+ */
+class ScopedProbeDescriptor final {
+ public:
+  /**
+   * @brief Takes ownership of one descriptor or negative sentinel.
+   * @param descriptor Descriptor to close exactly once.
+   * @throws Nothing.
+   */
+  explicit ScopedProbeDescriptor(int descriptor) noexcept
+      : descriptor_(descriptor) {}
+
+  /** @brief Closes the exact descriptor if ownership remains armed. */
+  ~ScopedProbeDescriptor() noexcept { reset(); }
+
+  /** @brief Prevents duplicate descriptor ownership. */
+  ScopedProbeDescriptor(const ScopedProbeDescriptor&) = delete;
+  /** @brief Prevents duplicate descriptor assignment. */
+  ScopedProbeDescriptor& operator=(const ScopedProbeDescriptor&) = delete;
+
+  /**
+   * @brief Closes and clears the exact owned descriptor.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void reset() noexcept {
+    close_probe_descriptor(descriptor_);
+    descriptor_ = -1;
+  }
+
+ private:
+  /** @brief Exact owned descriptor, or negative after reset. */
+  int descriptor_ = -1;
+};
+
+/**
+ * @brief Builds one exact prepared binding for the filesystem-block fixture.
+ * @param graph_id Exact fixture mode identity.
+ * @param path Test-owned FIFO or regular-file path.
+ * @return Non-null immutable one-entry external graph catalog.
+ * @throws Path conversion, contract, or allocation failures unchanged.
+ */
+std::shared_ptr<const PreparedExternalGraphCatalog> filesystem_fixture_catalog(
+    GraphArtifactId graph_id, const std::filesystem::path& path) {
+  ResolvedGraphArtifact graph;
+  graph.ok = true;
+  graph.yaml_path = path.string();
+  std::vector<PreparedExternalGraphEntry> entries;
+  entries.push_back(
+      PreparedExternalGraphEntry{std::move(graph_id), std::move(graph)});
+  return std::make_shared<const PreparedExternalGraphCatalog>(
+      std::move(entries));
+}
+
+/**
+ * @brief Creates one named pipe used by the worker-side filesystem probe.
+ * @param path Fresh exact path.
+ * @return Nothing after successful creation.
+ * @throws std::system_error when `mkfifo` fails.
+ */
+void create_worker_filesystem_fifo(const std::filesystem::path& path) {
+  if (::mkfifo(path.c_str(), 0600) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "create worker filesystem FIFO");
+  }
+}
+
+/**
+ * @brief Opens a FIFO writer after the execed fixture waits on its read side.
+ * @param path Existing exact FIFO.
+ * @param timeout Maximum deterministic observer duration.
+ * @return Writer descriptor that must remain open without data.
+ * @throws std::runtime_error when no reader appears by the deadline.
+ * @throws std::system_error for an unexpected `open` failure.
+ */
+int wait_for_worker_filesystem_reader(const std::filesystem::path& path,
+                                      std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    const int descriptor = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+    if (descriptor >= 0) {
+      return descriptor;
+    }
+    if (errno != ENXIO && errno != EINTR) {
+      throw std::system_error(errno, std::generic_category(),
+                              "open worker filesystem FIFO writer");
+    }
+    std::this_thread::sleep_for(10ms);
+  }
+  throw std::runtime_error("worker did not enter filesystem FIFO read");
+}
+
+/**
+ * @brief Replaces a drained FIFO with one regular one-byte recovery input.
+ * @param path Exact test-owned path.
+ * @return Nothing after a complete close.
+ * @throws std::runtime_error for remove, open, write, or close failure.
+ */
+void replace_fifo_with_recovery_input(const std::filesystem::path& path) {
+  if (!std::filesystem::remove(path)) {
+    throw std::runtime_error("worker filesystem FIFO was not removed");
+  }
+  std::ofstream output(path, std::ios::binary);
+  if (!output) {
+    throw std::runtime_error("worker recovery input open failed");
+  }
+  output.put('x');
+  output.close();
+  if (!output) {
+    throw std::runtime_error("worker recovery input write failed");
+  }
+}
+
+/**
  * @brief Builds one fixture-selected immutable JobSpec.
  * @param mode Exact graph id interpreted only by the process fixture.
  * @param checkpoint Optional durable checkpoint identity.
@@ -448,14 +515,20 @@ JobAssignment completion_failure_assignment(
  * @brief Creates one real product-mode service using the fixture executable.
  * @param root Existing durable root.
  * @param options Valid manager options.
+ * @param factory Optional externalizable factory; null selects the default
+ * process fixture catalog.
  * @return Unique service owner.
  * @throws Service construction failures unchanged.
  */
 std::unique_ptr<SingleTenantJobService> make_service(
-    const std::filesystem::path& root, WorkerManagerOptions options) {
+    const std::filesystem::path& root, WorkerManagerOptions options,
+    std::shared_ptr<JobAttemptWorkerFactory> factory = nullptr) {
+  if (factory == nullptr) {
+    factory = std::make_shared<FixtureWorkerFactory>();
+  }
   return std::make_unique<SingleTenantJobService>(
       TenantId("tenant.supervisor"), supervisor_quota(), root,
-      std::make_shared<FixtureWorkerFactory>(), DurableServerStateOptions{},
+      std::move(factory), DurableServerStateOptions{},
       TenantQuotaAuthorityOptions{}, std::move(options));
 }
 
@@ -753,6 +826,83 @@ TEST(WorkerSupervisor, ConcurrentAttemptsUseFreshProcessesAndReapCompletely) {
 }
 
 TEST(WorkerSupervisor,
+     LaunchDeadlinesExactlyMatchManagerPolicyAboveLegacyCaps) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.startup_timeout = 12s;
+  options.io_timeout = 3500ms;
+  auto service = make_service(root.path(), std::move(options));
+
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.launch.deadlines.12000.3500"));
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.state, JobState::Succeeded) << terminal.message;
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::None);
+}
+
+TEST(WorkerSupervisor,
+     BlockingTrustedFilesystemIoCanBeCancelledReapedAndRecovered) {
+  ScopedSupervisorRoot root;
+  const std::filesystem::path fifo = root.path() / "worker-filesystem.fifo";
+  create_worker_filesystem_fifo(fifo);
+  const GraphArtifactId graph_id("fixture.fs.block");
+  auto factory = std::make_shared<FixtureWorkerFactory>(
+      filesystem_fixture_catalog(graph_id, fifo));
+  WorkerManagerOptions options = supervisor_options();
+  options.startup_timeout = 12s;
+  options.io_timeout = 3500ms;
+  auto service =
+      make_service(root.path(), std::move(options), std::move(factory));
+  const JobSubmission submitted =
+      service->submit(fixture_spec(graph_id.value()));
+  ScopedProbeDescriptor writer(wait_for_worker_filesystem_reader(fifo, 2s));
+
+  const auto cancel_started = std::chrono::steady_clock::now();
+  ASSERT_TRUE(service->cancel(submitted.job_id));
+  const JobSnapshot cancelled = wait_terminal(*service, submitted.job_id);
+  const auto cancel_elapsed = std::chrono::steady_clock::now() - cancel_started;
+
+  EXPECT_EQ(cancelled.state, JobState::Cancelled) << cancelled.message;
+  EXPECT_TRUE(cancelled.attempt_settled);
+  EXPECT_EQ(cancelled.failure, JobAttemptFailure::WorkerCancellationForced);
+  EXPECT_LT(cancel_elapsed, 2s);
+
+  writer.reset();
+  replace_fifo_with_recovery_input(fifo);
+  const JobSubmission recovery =
+      service->submit(fixture_spec(graph_id.value()));
+  const JobSnapshot recovered = wait_terminal(*service, recovery.job_id);
+  EXPECT_EQ(recovered.state, JobState::Succeeded) << recovered.message;
+  EXPECT_TRUE(recovered.attempt_settled);
+  EXPECT_EQ(recovered.failure, JobAttemptFailure::None);
+  EXPECT_TRUE(recovered.output_receipt.has_value());
+  EXPECT_NE(recovered.assignment.worker_instance_id,
+            cancelled.assignment.worker_instance_id);
+}
+
+TEST(WorkerSupervisor,
+     BlockingTrustedFilesystemIoCannotMakeServiceDestructionUnbounded) {
+  ScopedSupervisorRoot root;
+  const std::filesystem::path fifo = root.path() / "worker-shutdown.fifo";
+  create_worker_filesystem_fifo(fifo);
+  const GraphArtifactId graph_id("fixture.fs.block");
+  auto factory = std::make_shared<FixtureWorkerFactory>(
+      filesystem_fixture_catalog(graph_id, fifo));
+  auto service =
+      make_service(root.path(), supervisor_options(), std::move(factory));
+  static_cast<void>(service->submit(fixture_spec(graph_id.value())));
+  ScopedProbeDescriptor writer(wait_for_worker_filesystem_reader(fifo, 2s));
+
+  const auto shutdown_started = std::chrono::steady_clock::now();
+  service.reset();
+  const auto shutdown_elapsed =
+      std::chrono::steady_clock::now() - shutdown_started;
+
+  EXPECT_LT(shutdown_elapsed, 2s);
+}
+
+TEST(WorkerSupervisor,
      UnlimitedNoFileLimitClosesHighDescriptorAndExecsPromptly) {
   rlimit descriptor_limit{};
   ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &descriptor_limit), 0);
@@ -903,8 +1053,9 @@ TEST(WorkerSupervisor,
       {
         try {
           WorkerManagerCallbacks callbacks;
-          callbacks.begin_assignment = [](const AttemptIdentity&) {
-            return true;
+          callbacks.begin_assignment = [](const AttemptIdentity&) -> bool {
+            throw std::runtime_error(
+                "injected primary supervision callback failure");
           };
           callbacks.cancellation_requested = [](const AttemptIdentity&) {
             return false;
@@ -912,9 +1063,8 @@ TEST(WorkerSupervisor,
           callbacks.complete_assignment = [](WorkerManagerCompletion) {
             ::_exit(kCompletionCallbackInvoked);
           };
-          WorkerManager manager(
-              std::make_shared<CompletionConstructionFailureFactory>(),
-              std::move(callbacks), options, false);
+          WorkerManager manager(std::make_shared<FixtureWorkerFactory>(),
+                                std::move(callbacks), options, false);
           manager.start(completion_failure_assignment());
           manager.shutdown();
           ::_exit(kCompletionRecordDeleted);
@@ -991,10 +1141,9 @@ TEST(WorkerSupervisor,
           callbacks.complete_assignment = [](WorkerManagerCompletion) {
             throw std::runtime_error("injected completion callback fault");
           };
-          WorkerManager manager(
-              std::make_shared<CompletionConstructionFailureFactory>(),
-              std::move(callbacks), options, false);
-          manager.start(completion_failure_assignment());
+          WorkerManager manager(std::make_shared<FixtureWorkerFactory>(),
+                                std::move(callbacks), options, false);
+          manager.start(completion_failure_assignment("fixture.nonzero"));
           manager.shutdown();
           ::_exit(kCompletionRecordDeleted);
         } catch (...) {

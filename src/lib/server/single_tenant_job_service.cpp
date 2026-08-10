@@ -17,6 +17,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_manager.hpp"  // NOLINT(build/include_subdir)
@@ -327,12 +328,57 @@ bool is_terminal_job_state(JobState state) {
   throw std::invalid_argument("Job state is invalid");
 }
 
-/** @copydoc ps::server::JobAttemptWorkerFactory::prepare_external_graph */
-ResolvedGraphArtifact JobAttemptWorkerFactory::prepare_external_graph(
+/** @copydoc
+ * ps::server::PreparedExternalGraphCatalog::PreparedExternalGraphCatalog */
+PreparedExternalGraphCatalog::PreparedExternalGraphCatalog(
+    std::vector<PreparedExternalGraphEntry> entries) {
+  for (PreparedExternalGraphEntry& entry : entries) {
+    if (!entry.graph_artifact_id.valid()) {
+      throw std::invalid_argument(
+          "prepared external graph identity is invalid");
+    }
+    const auto inserted = entries_.emplace(entry.graph_artifact_id.value(),
+                                           std::move(entry.graph));
+    if (!inserted.second) {
+      throw std::invalid_argument(
+          "prepared external graph identity is duplicated");
+    }
+  }
+}
+
+/** @copydoc ps::server::PreparedExternalGraphCatalog::find */
+ResolvedGraphArtifact PreparedExternalGraphCatalog::find(
+    const GraphArtifactId& graph_artifact_id) const {
+  if (!graph_artifact_id.valid()) {
+    throw std::invalid_argument("prepared external graph lookup is invalid");
+  }
+  const auto found = entries_.find(graph_artifact_id.value());
+  if (found != entries_.end()) {
+    return found->second;
+  }
+  ResolvedGraphArtifact missing;
+  missing.message =
+      "graph artifact is not present in prepared external catalog";
+  return missing;
+}
+
+/** @copydoc ps::server::JobAttemptWorkerFactory::prepared_external_graph */
+ResolvedGraphArtifact JobAttemptWorkerFactory::prepared_external_graph(
     const JobAssignment& assignment) const {
-  static_cast<void>(assignment);
-  throw std::logic_error(
-      "worker factory does not support external assignment preparation");
+  if (external_graphs_ == nullptr) {
+    throw std::logic_error("worker factory has no prepared external catalog");
+  }
+  validate_attempt_identity(assignment.identity);
+  if (assignment.spec == nullptr) {
+    throw std::invalid_argument(
+        "prepared external assignment has no immutable JobSpec");
+  }
+  validate_job_spec(*assignment.spec);
+  if (assignment.spec->digest() != assignment.identity.job_spec_digest) {
+    throw std::invalid_argument(
+        "prepared external assignment digest does not match JobSpec");
+  }
+  return external_graphs_->find(assignment.spec->graph_artifact_id());
 }
 
 /** @copydoc ps::server::SingleTenantJobService::SingleTenantJobService */

@@ -27,15 +27,12 @@
 #include <thread>
 #include <utility>
 
-#include "server/worker_protocol.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {
 
-/** @brief Maximum deterministic fixture assignment wait. */
-constexpr std::chrono::seconds kFixtureAssignmentTimeout{5};
-/** @brief Per-frame deterministic fixture I/O bound. */
-constexpr std::chrono::seconds kFixtureIoTimeout{1};
 /** @brief Fast heartbeat cadence used by active fixture modes. */
 constexpr std::chrono::milliseconds kFixtureHeartbeatCadence{25};
 /** @brief Cancel relay gap crossing one slice but fitting three times in 100ms.
@@ -45,32 +42,15 @@ constexpr std::chrono::milliseconds kFixtureCancelFragmentGap{27};
 constexpr std::size_t kFixtureFrameHeaderBytes = 12U;
 /** @brief Graph-artifact mode prefix carrying one forbidden inherited fd. */
 constexpr std::string_view kClosedDescriptorPrefix = "fixture.fd.closed.";
-
-/**
- * @brief Parses the exact private control descriptor argument.
- * @param argc Process argument count.
- * @param argv Process argument vector.
- * @return Descriptor at or above three.
- * @throws std::invalid_argument for malformed input.
+/** @brief Mode proving manager deadlines cross exec without legacy caps. */
+constexpr auto kLaunchDeadlineMode = "fixture.launch.deadlines.12000.3500";
+/** @brief Startup bound encoded by the launch-deadline fixture mode. */
+constexpr std::chrono::milliseconds kExpectedLaunchStartupTimeout{12000};
+/** @brief I/O bound encoded by the launch-deadline fixture mode. */
+constexpr std::chrono::milliseconds kExpectedLaunchIoTimeout{3500};
+/** @brief Mode that blocks in trusted filesystem I/O after assignment accept.
  */
-int parse_control_descriptor(int argc, char* argv[]) {
-  constexpr std::string_view kPrefix = "--control-fd=";
-  if (argc != 2 || argv == nullptr || argv[1] == nullptr) {
-    throw std::invalid_argument("worker fixture requires --control-fd");
-  }
-  const std::string argument(argv[1]);
-  if (argument.compare(0U, kPrefix.size(), kPrefix) != 0) {
-    throw std::invalid_argument("worker fixture control argument is invalid");
-  }
-  std::size_t parsed = 0U;
-  const std::int64_t value =
-      std::stoll(argument.substr(kPrefix.size()), &parsed, 10);
-  if (parsed != argument.size() - kPrefix.size() || value < 3 ||
-      value > 1024 * 1024) {
-    throw std::invalid_argument("worker fixture descriptor is out of range");
-  }
-  return static_cast<int>(value);
-}
+constexpr std::string_view kFilesystemBlockMode = "fixture.fs.block";
 
 /**
  * @brief Parses an optional descriptor non-inheritance fixture mode.
@@ -329,13 +309,15 @@ void forward_remaining_bytes(int source, int destination) {
  * @param fd Connected manager socket.
  * @param report Complete exact report.
  * @param spec Immutable JobSpec that bounds the report.
+ * @param io_timeout Positive manager-selected write bound.
  * @return Nothing after the captured frame is forwarded in four pieces.
  * @throws Protocol, socket, allocation, or forwarding failures unchanged.
  * @note The 35-ms gaps exceed the manager's 20-ms read slice while the total
  * stays below the fixture heartbeat timeout.
  */
 void send_fragmented_report(int fd, const JobAttemptReport& report,
-                            const JobSpec& spec) {
+                            const JobSpec& spec,
+                            std::chrono::milliseconds io_timeout) {
   int capture[2] = {-1, -1};
   if (::socketpair(AF_UNIX, SOCK_STREAM, 0, capture) != 0) {
     throw std::system_error(errno, std::generic_category(),
@@ -343,7 +325,7 @@ void send_fragmented_report(int fd, const JobAttemptReport& report,
   }
   try {
     send_worker_report(capture[0], report, spec,
-                       std::chrono::steady_clock::now() + kFixtureIoTimeout);
+                       std::chrono::steady_clock::now() + io_timeout);
     static_cast<void>(::shutdown(capture[0], SHUT_WR));
     forward_exact_bytes(capture[1], fd, 5U);
     std::this_thread::sleep_for(std::chrono::milliseconds(35));
@@ -365,11 +347,13 @@ void send_fragmented_report(int fd, const JobAttemptReport& report,
  * @brief Sends one fixture heartbeat for the exact current lease.
  * @param fd Connected manager socket.
  * @param identity Exact current attempt identity.
+ * @param io_timeout Positive manager-selected write bound.
  * @throws Protocol I/O failures unchanged.
  */
-void send_heartbeat(int fd, const AttemptIdentity& identity) {
+void send_heartbeat(int fd, const AttemptIdentity& identity,
+                    std::chrono::milliseconds io_timeout) {
   send_worker_identity(fd, WorkerMessageKind::Heartbeat, identity,
-                       std::chrono::steady_clock::now() + kFixtureIoTimeout);
+                       std::chrono::steady_clock::now() + io_timeout);
 }
 
 /**
@@ -377,20 +361,22 @@ void send_heartbeat(int fd, const AttemptIdentity& identity) {
  * @param fd Connected manager socket.
  * @param assignment Exact current assignment.
  * @param ignore_cancel Whether to ignore valid cancel indefinitely.
+ * @param io_timeout Positive manager-selected write bound.
  * @return Cooperative cancelled report when not ignoring; never returns in
  * ignore mode unless the manager closes or signals the process.
  * @throws Protocol failures unchanged.
  * @note One decoder retains partial Cancel bytes across heartbeat poll slices.
  */
 JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
-                                 bool ignore_cancel) {
+                                 bool ignore_cancel,
+                                 std::chrono::milliseconds io_timeout) {
   auto next_heartbeat =
       std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
   WorkerFrameDecoder frame_decoder;
   for (;;) {
     const auto now = std::chrono::steady_clock::now();
     if (now >= next_heartbeat) {
-      send_heartbeat(fd, assignment.identity);
+      send_heartbeat(fd, assignment.identity, io_timeout);
       next_heartbeat =
           std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
     }
@@ -415,14 +401,15 @@ JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
  * @brief Waits for one exact cancel and then exits only after manager closure.
  * @param fd Connected manager socket.
  * @param assignment Exact current assignment.
+ * @param io_timeout Positive manager-selected write bound.
  * @return Nothing after the cancel was validated and clean channel EOF arrived.
  * @throws Protocol/channel failures other than the expected final EOF.
  * @note Heartbeats continue only until cancellation is observed. The final
  * return lets the fixture process reach normal `exit(0)` after channel
  * revocation, which the manager test seam can retain as a zombie.
  */
-void wait_for_cancel_then_channel_close(int fd,
-                                        const JobAssignment& assignment) {
+void wait_for_cancel_then_channel_close(int fd, const JobAssignment& assignment,
+                                        std::chrono::milliseconds io_timeout) {
   auto next_heartbeat =
       std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
   bool cancel_observed = false;
@@ -430,7 +417,7 @@ void wait_for_cancel_then_channel_close(int fd,
   for (;;) {
     const auto now = std::chrono::steady_clock::now();
     if (!cancel_observed && now >= next_heartbeat) {
-      send_heartbeat(fd, assignment.identity);
+      send_heartbeat(fd, assignment.identity, io_timeout);
       next_heartbeat =
           std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
     }
@@ -458,13 +445,15 @@ void wait_for_cancel_then_channel_close(int fd,
  * @brief Receives one manager Cancel through a fragmenting local relay.
  * @param fd Connected manager socket supplying the valid Cancel frame.
  * @param assignment Exact current assignment expected by the receiver.
+ * @param io_timeout Positive manager-selected write bound.
  * @return Cooperative cancellation report after all fragments reassemble.
  * @throws Relay, protocol, socket, thread, or allocation failures unchanged.
  * @note The relay owns only the manager-to-worker byte direction; the report
  * remains sent on `fd` so the supervisor exercises its normal receive path.
  */
-JobAttemptReport receive_fragmented_cancel(int fd,
-                                           const JobAssignment& assignment) {
+JobAttemptReport receive_fragmented_cancel(
+    int fd, const JobAssignment& assignment,
+    std::chrono::milliseconds io_timeout) {
   int relay_pair[2] = {-1, -1};
   if (::socketpair(AF_UNIX, SOCK_STREAM, 0, relay_pair) != 0) {
     throw std::system_error(errno, std::generic_category(),
@@ -491,7 +480,7 @@ JobAttemptReport receive_fragmented_cancel(int fd,
   std::optional<JobAttemptReport> report;
   std::exception_ptr receive_error;
   try {
-    report = wait_for_cancel(relay_pair[1], assignment, false);
+    report = wait_for_cancel(relay_pair[1], assignment, false, io_timeout);
   } catch (...) {
     receive_error = std::current_exception();
   }
@@ -515,14 +504,16 @@ JobAttemptReport receive_fragmented_cancel(int fd,
  * @param fd Connected manager socket.
  * @param identity Exact current attempt identity.
  * @param duration Total active duration.
+ * @param io_timeout Positive manager-selected write bound.
  * @return Nothing after duration expiry.
  * @throws Protocol I/O failures unchanged.
  */
 void heartbeat_for(int fd, const AttemptIdentity& identity,
-                   std::chrono::milliseconds duration) {
+                   std::chrono::milliseconds duration,
+                   std::chrono::milliseconds io_timeout) {
   const auto deadline = std::chrono::steady_clock::now() + duration;
   while (std::chrono::steady_clock::now() < deadline) {
-    send_heartbeat(fd, identity);
+    send_heartbeat(fd, identity, io_timeout);
     std::this_thread::sleep_for(kFixtureHeartbeatCadence);
   }
 }
@@ -550,22 +541,66 @@ void send_malformed_frame(int fd) {
 }
 
 /**
+ * @brief Reads one byte from manager-prepared trusted filesystem material.
+ * @param path Nonempty prepared FIFO or regular-file path.
+ * @return Zero after exactly one byte; a stable nonzero fixture status on
+ * open, read, or empty-file failure.
+ * @throws Nothing.
+ * @note A FIFO with a connected writer that sends no data blocks this function
+ * after exec and acceptance, allowing the manager to prove bounded signalling
+ * and exact reaping around trusted I/O.
+ */
+int run_filesystem_block_probe(const std::string& path) noexcept {
+  if (path.empty()) {
+    return 33;
+  }
+  int descriptor = -1;
+  do {
+    descriptor = ::open(path.c_str(), O_RDONLY);
+  } while (descriptor < 0 && errno == EINTR);
+  if (descriptor < 0) {
+    return 34;
+  }
+  char byte = 0;
+  ssize_t received = -1;
+  do {
+    received = ::read(descriptor, &byte, sizeof(byte));
+  } while (received < 0 && errno == EINTR);
+  close_fixture_fd(descriptor);
+  return received == 1 ? 0 : 35;
+}
+
+/**
  * @brief Executes one graph-id-selected deterministic process behavior.
- * @param fd Connected manager socket.
+ * @param launch Exact validated manager-selected bootstrap policy.
  * @return Exact intended process exit code.
  * @throws Protocol/assignment failures unchanged.
  */
-int run_fixture(int fd) {
+int run_fixture(const WorkerProcessLaunchOptions& launch) {
   PreparedWorkerAssignment prepared = receive_worker_assignment(
-      fd, std::chrono::steady_clock::now() + kFixtureAssignmentTimeout);
+      launch.control_fd,
+      std::chrono::steady_clock::now() + launch.startup_timeout);
   const JobAssignment& assignment = prepared.assignment;
   const std::string& mode = assignment.spec->graph_artifact_id().value();
+  if (mode == kLaunchDeadlineMode &&
+      (launch.startup_timeout != kExpectedLaunchStartupTimeout ||
+       launch.io_timeout != kExpectedLaunchIoTimeout)) {
+    return 32;
+  }
   if (mode == "fixture.preaccept.nonzero") {
     return 22;
   }
-  send_worker_identity(fd, WorkerMessageKind::AssignmentAccepted,
+  send_worker_identity(launch.control_fd, WorkerMessageKind::AssignmentAccepted,
                        assignment.identity,
-                       std::chrono::steady_clock::now() + kFixtureIoTimeout);
+                       std::chrono::steady_clock::now() + launch.io_timeout);
+
+  if (mode == kFilesystemBlockMode) {
+    const int filesystem_result =
+        run_filesystem_block_probe(prepared.graph.yaml_path);
+    if (filesystem_result != 0) {
+      return filesystem_result;
+    }
+  }
 
   const std::optional<int> forbidden_descriptor =
       parse_closed_descriptor_mode(mode);
@@ -586,11 +621,11 @@ int run_fixture(int fd) {
     return 24;
   }
   if (mode == "fixture.channel") {
-    static_cast<void>(::close(fd));
+    static_cast<void>(::close(launch.control_fd));
     return 0;
   }
   if (mode == "fixture.malformed") {
-    send_malformed_frame(fd);
+    send_malformed_frame(launch.control_fd);
     return 0;
   }
   if (mode == "fixture.stall") {
@@ -599,79 +634,85 @@ int run_fixture(int fd) {
   }
   if (mode == "fixture.runtime") {
     for (;;) {
-      send_heartbeat(fd, assignment.identity);
+      send_heartbeat(launch.control_fd, assignment.identity, launch.io_timeout);
       std::this_thread::sleep_for(kFixtureHeartbeatCadence);
     }
   }
   if (mode == "fixture.cooperative") {
-    const JobAttemptReport report = wait_for_cancel(fd, assignment, false);
-    send_worker_report(fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + kFixtureIoTimeout);
+    const JobAttemptReport report = wait_for_cancel(
+        launch.control_fd, assignment, false, launch.io_timeout);
+    send_worker_report(launch.control_fd, report, *assignment.spec,
+                       std::chrono::steady_clock::now() + launch.io_timeout);
     return 0;
   }
   if (mode == "fixture.fragmented.cancel") {
-    const JobAttemptReport report = receive_fragmented_cancel(fd, assignment);
-    send_worker_report(fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + kFixtureIoTimeout);
-    static_cast<void>(::shutdown(fd, SHUT_WR));
+    const JobAttemptReport report = receive_fragmented_cancel(
+        launch.control_fd, assignment, launch.io_timeout);
+    send_worker_report(launch.control_fd, report, *assignment.spec,
+                       std::chrono::steady_clock::now() + launch.io_timeout);
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
   if (mode == "fixture.cancel-race.failed-report") {
-    static_cast<void>(::shutdown(fd, SHUT_RD));
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_RD));
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     const JobAttemptReport report = failed_report(assignment);
-    send_worker_report(fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + kFixtureIoTimeout);
-    static_cast<void>(::shutdown(fd, SHUT_WR));
+    send_worker_report(launch.control_fd, report, *assignment.spec,
+                       std::chrono::steady_clock::now() + launch.io_timeout);
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
   if (mode == "fixture.cancel-race.nonzero") {
-    static_cast<void>(::shutdown(fd, SHUT_RD));
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_RD));
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     return 29;
   }
   if (mode == "fixture.cancel-race.signal") {
-    static_cast<void>(::shutdown(fd, SHUT_RD));
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_RD));
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     static_cast<void>(::kill(::getpid(), SIGKILL));
     return 30;
   }
   if (mode == "fixture.cancel-race.channel-close") {
-    close_fixture_fd(fd);
+    close_fixture_fd(launch.control_fd);
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     return 0;
   }
   if (mode == "fixture.cancel-race.zero-exit-zombie") {
-    wait_for_cancel_then_channel_close(fd, assignment);
+    wait_for_cancel_then_channel_close(launch.control_fd, assignment,
+                                       launch.io_timeout);
     return 0;
   }
   if (mode == "fixture.ignore") {
-    static_cast<void>(wait_for_cancel(fd, assignment, true));
+    static_cast<void>(wait_for_cancel(launch.control_fd, assignment, true,
+                                      launch.io_timeout));
     return 26;
   }
   if (mode == "fixture.report.hang") {
     const JobAttemptReport report = success_report(assignment);
-    send_worker_report(fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + kFixtureIoTimeout);
+    send_worker_report(launch.control_fd, report, *assignment.spec,
+                       std::chrono::steady_clock::now() + launch.io_timeout);
     std::this_thread::sleep_for(std::chrono::seconds(10));
     return 27;
   }
   if (mode == "fixture.fragmented.report") {
     const JobAttemptReport report = success_report(assignment);
-    send_fragmented_report(fd, report, *assignment.spec);
-    static_cast<void>(::shutdown(fd, SHUT_WR));
+    send_fragmented_report(launch.control_fd, report, *assignment.spec,
+                           launch.io_timeout);
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
   if (mode == "fixture.slow.success") {
-    heartbeat_for(fd, assignment.identity, std::chrono::milliseconds(300));
+    heartbeat_for(launch.control_fd, assignment.identity,
+                  std::chrono::milliseconds(300), launch.io_timeout);
   }
   if (mode == "fixture.checkpoint" && assignment.checkpoint == nullptr) {
     return 28;
   }
   const JobAttemptReport report = success_report(assignment);
-  send_worker_report(fd, report, *assignment.spec,
-                     std::chrono::steady_clock::now() + kFixtureIoTimeout);
-  static_cast<void>(::shutdown(fd, SHUT_WR));
+  send_worker_report(launch.control_fd, report, *assignment.spec,
+                     std::chrono::steady_clock::now() + launch.io_timeout);
+  static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
   return 0;
 }
 
@@ -690,8 +731,10 @@ int run_fixture(int fd) {
 int main(int argc, char* argv[]) {
   int descriptor = -1;
   try {
-    descriptor = ps::server::parse_control_descriptor(argc, argv);
-    const int result = ps::server::run_fixture(descriptor);
+    const ps::server::WorkerProcessLaunchOptions launch =
+        ps::server::parse_worker_process_launch_options(argc, argv);
+    descriptor = launch.control_fd;
+    const int result = ps::server::run_fixture(launch);
     if (descriptor >= 0) {
       static_cast<void>(::close(descriptor));
     }

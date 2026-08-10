@@ -21,47 +21,15 @@
 #include <thread>
 #include <utility>
 
-#include "server/embedded_job_worker.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_protocol.hpp"      // NOLINT(build/include_subdir)
+#include "server/embedded_job_worker.hpp"    // NOLINT(build/include_subdir)
+#include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {
 
-/** @brief Maximum initial assignment wait in the single-use worker. */
-constexpr std::chrono::seconds kAssignmentTimeout{10};
-/** @brief Per-message worker-side write bound. */
-constexpr std::chrono::seconds kWorkerWriteTimeout{2};
 /** @brief Short control-read slice used to revisit heartbeat state. */
 constexpr std::chrono::milliseconds kControlPollInterval{20};
-
-/**
- * @brief Parses the sole `--control-fd=<number>` worker argument.
- * @param argc Process argument count.
- * @param argv Process argument vector.
- * @return Nonnegative private control descriptor.
- * @throws std::invalid_argument for any extra, missing, malformed, or standard
- * descriptor value.
- */
-int parse_control_descriptor(int argc, char* argv[]) {
-  constexpr std::string_view kPrefix = "--control-fd=";
-  if (argc != 2 || argv == nullptr || argv[1] == nullptr) {
-    throw std::invalid_argument(
-        "photospider-worker requires one --control-fd argument");
-  }
-  const std::string argument(argv[1]);
-  if (argument.compare(0U, kPrefix.size(), kPrefix) != 0) {
-    throw std::invalid_argument(
-        "photospider-worker control argument is invalid");
-  }
-  const std::string number = argument.substr(kPrefix.size());
-  std::size_t parsed = 0U;
-  const std::int64_t value = std::stoll(number, &parsed, 10);
-  if (parsed != number.size() || value < 3 || value > 1024 * 1024) {
-    throw std::invalid_argument(
-        "photospider-worker control descriptor is out of range");
-  }
-  return static_cast<int>(value);
-}
 
 /**
  * @brief Resolver that exposes only one manager-prepared graph occurrence.
@@ -108,18 +76,20 @@ class PreparedGraphResolver final : public GraphArtifactResolver {
  * @param fd Connected private manager socket.
  * @param kind AssignmentAccepted or Heartbeat.
  * @param identity Exact process assignment identity.
+ * @param io_timeout Positive manager-selected write bound.
  * @param write_mutex Non-null sole write serializer.
  * @throws Protocol timeout/channel failures unchanged.
  */
 void send_identity_locked(int fd, WorkerMessageKind kind,
                           const AttemptIdentity& identity,
+                          std::chrono::milliseconds io_timeout,
                           std::mutex* write_mutex) {
   if (write_mutex == nullptr) {
     throw std::invalid_argument("worker write mutex is null");
   }
   std::lock_guard<std::mutex> lock(*write_mutex);
   send_worker_identity(fd, kind, identity,
-                       std::chrono::steady_clock::now() + kWorkerWriteTimeout);
+                       std::chrono::steady_clock::now() + io_timeout);
 }
 
 /**
@@ -127,6 +97,7 @@ void send_identity_locked(int fd, WorkerMessageKind kind,
  * @param fd Connected private manager socket.
  * @param identity Exact process assignment identity.
  * @param heartbeat_interval Positive manager-requested cadence.
+ * @param io_timeout Positive manager-selected write bound.
  * @param done Non-null main-thread completion flag.
  * @param cancellation_requested Non-null monotonic cancellation output.
  * @param control_failed Non-null monotonic protocol/channel failure output.
@@ -138,6 +109,7 @@ void send_identity_locked(int fd, WorkerMessageKind kind,
  */
 void run_control_loop(int fd, const AttemptIdentity& identity,
                       std::chrono::milliseconds heartbeat_interval,
+                      std::chrono::milliseconds io_timeout,
                       const std::atomic<bool>* done,
                       std::atomic<bool>* cancellation_requested,
                       std::atomic<bool>* control_failed,
@@ -149,7 +121,7 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_heartbeat) {
         send_identity_locked(fd, WorkerMessageKind::Heartbeat, identity,
-                             write_mutex);
+                             io_timeout, write_mutex);
         next_heartbeat = std::chrono::steady_clock::now() + heartbeat_interval;
       }
       try {
@@ -174,13 +146,14 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
 
 /**
  * @brief Executes one received assignment and emits at most one report.
- * @param fd Connected private manager socket.
+ * @param launch Exact validated manager-selected bootstrap policy.
  * @return Process exit code: zero only after one report was sent cleanly.
  * @throws Assignment receive/validation and thread creation failures unchanged.
  */
-int run_one_assignment(int fd) {
+int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   PreparedWorkerAssignment prepared = receive_worker_assignment(
-      fd, std::chrono::steady_clock::now() + kAssignmentTimeout);
+      launch.control_fd,
+      std::chrono::steady_clock::now() + launch.startup_timeout);
   validate_attempt_identity(prepared.assignment.identity);
   if (prepared.assignment.spec == nullptr ||
       prepared.assignment.spec->digest() !=
@@ -189,14 +162,16 @@ int run_one_assignment(int fd) {
   }
 
   std::mutex write_mutex;
-  send_identity_locked(fd, WorkerMessageKind::AssignmentAccepted,
-                       prepared.assignment.identity, &write_mutex);
+  send_identity_locked(launch.control_fd, WorkerMessageKind::AssignmentAccepted,
+                       prepared.assignment.identity, launch.io_timeout,
+                       &write_mutex);
   std::atomic<bool> done{false};
   std::atomic<bool> cancellation_requested{false};
   std::atomic<bool> control_failed{false};
-  std::thread control(run_control_loop, fd, prepared.assignment.identity,
-                      prepared.heartbeat_interval, &done,
-                      &cancellation_requested, &control_failed, &write_mutex);
+  std::thread control(run_control_loop, launch.control_fd,
+                      prepared.assignment.identity, prepared.heartbeat_interval,
+                      launch.io_timeout, &done, &cancellation_requested,
+                      &control_failed, &write_mutex);
 
   JobAttemptReport report;
   try {
@@ -219,10 +194,10 @@ int run_one_assignment(int fd) {
   }
   {
     std::lock_guard<std::mutex> lock(write_mutex);
-    send_worker_report(fd, report, *prepared.assignment.spec,
-                       std::chrono::steady_clock::now() + kWorkerWriteTimeout);
+    send_worker_report(launch.control_fd, report, *prepared.assignment.spec,
+                       std::chrono::steady_clock::now() + launch.io_timeout);
   }
-  static_cast<void>(::shutdown(fd, SHUT_WR));
+  static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
   return 0;
 }
 
@@ -239,8 +214,10 @@ int run_one_assignment(int fd) {
 int main(int argc, char* argv[]) {
   int control_fd = -1;
   try {
-    control_fd = ps::server::parse_control_descriptor(argc, argv);
-    const int result = ps::server::run_one_assignment(control_fd);
+    const ps::server::WorkerProcessLaunchOptions launch =
+        ps::server::parse_worker_process_launch_options(argc, argv);
+    control_fd = launch.control_fd;
+    const int result = ps::server::run_one_assignment(launch);
     while (::close(control_fd) < 0 && errno == EINTR) {
     }
     return result;

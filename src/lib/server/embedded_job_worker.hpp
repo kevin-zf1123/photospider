@@ -96,48 +96,38 @@ class EmbeddedHostJobWorker final : public JobAttemptWorker {
 
 /**
  * @brief Factory that gives every assignment a fresh EmbeddedHostJobWorker.
- * @throws Constructor rejects null resolver; create may throw std::bad_alloc.
+ * @throws Constructor rejects a null prepared catalog; create may throw
+ * std::bad_alloc.
  * @note Factory reuse does not reuse Host, graph session, or worker state.
+ * External graph identity-to-path resolution is immutable before service
+ * construction; opening those paths remains isolated worker-process work.
  */
 class EmbeddedHostJobWorkerFactory final : public JobAttemptWorkerFactory {
  public:
   /**
-   * @brief Creates a factory around trusted graph resolution.
-   * @param resolver Non-null shared resolver.
-   * @throws std::invalid_argument when resolver is null.
+   * @brief Creates a factory around immutable pre-resolved graph material.
+   * @param external_graphs Non-null shared prepared graph catalog.
+   * @throws std::invalid_argument when `external_graphs` is null.
+   * @note The factory retains immutable configuration only and never opens a
+   * graph path during construction.
    */
   explicit EmbeddedHostJobWorkerFactory(
-      std::shared_ptr<const GraphArtifactResolver> resolver);
+      std::shared_ptr<const PreparedExternalGraphCatalog> external_graphs);
 
   /**
    * @brief Allocates one fresh single-use Embedded Host worker object.
    * @param assignment Valid assignment used only to satisfy factory contract.
    * @return Non-null fresh worker.
    * @throws std::bad_alloc when allocation exhausts memory.
+   * @note Product WorkerManager uses the catalog handoff directly; this method
+   * preserves the explicit in-process adapter seam and performs no path I/O.
    */
   std::unique_ptr<JobAttemptWorker> create(
       const JobAssignment& assignment) override;
 
-  /**
-   * @brief Advertises trusted graph resolution for external process transport.
-   * @return Always true for this real Embedded Host factory.
-   * @throws Nothing.
-   */
-  bool supports_external_assignment() const noexcept override { return true; }
-
-  /**
-   * @brief Resolves immutable graph material before worker process assignment.
-   * @param assignment Exact current assignment whose graph id is resolved.
-   * @return Trusted local graph paths and resolver diagnostic.
-   * @throws Resolver-specific allocation or trusted-I/O failures unchanged.
-   * @note Resolution grants no Job, artifact, quota, or state-root authority.
-   */
-  ResolvedGraphArtifact prepare_external_graph(
-      const JobAssignment& assignment) const override;
-
  private:
-  /** @brief Trusted resolver shared by otherwise independent workers. */
-  std::shared_ptr<const GraphArtifactResolver> resolver_;
+  /** @brief Immutable catalog shared by otherwise independent workers. */
+  std::shared_ptr<const PreparedExternalGraphCatalog> external_graphs_;
 };
 
 }  // namespace ps::server

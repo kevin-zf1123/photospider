@@ -16,12 +16,59 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
-#include "server/worker_protocol.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {
+
+TEST(WorkerProcessLaunch, RoundTripsManagerDeadlinesWithoutLegacyCaps) {
+  const WorkerProcessLaunchOptions expected{3, std::chrono::milliseconds(12345),
+                                            std::chrono::milliseconds(4321)};
+  WorkerProcessLaunchArguments arguments =
+      make_worker_process_launch_arguments(expected);
+  std::string executable = "photospider-worker";
+  std::array<char*, 4U> argv{executable.data(), arguments.control_fd.data(),
+                             arguments.startup_timeout.data(),
+                             arguments.io_timeout.data()};
+
+  const WorkerProcessLaunchOptions parsed = parse_worker_process_launch_options(
+      static_cast<int>(argv.size()), argv.data());
+
+  EXPECT_EQ(parsed.control_fd, expected.control_fd);
+  EXPECT_EQ(parsed.startup_timeout, expected.startup_timeout);
+  EXPECT_EQ(parsed.io_timeout, expected.io_timeout);
+}
+
+TEST(WorkerProcessLaunch,
+     RejectsMissingReorderedMalformedOrNonPositiveArguments) {
+  std::string executable = "photospider-worker";
+  std::string control = "--control-fd=3";
+  std::string startup = "--startup-timeout-ms=12000";
+  std::string io = "--io-timeout-ms=3500";
+  std::array<char*, 4U> complete{executable.data(), control.data(),
+                                 startup.data(), io.data()};
+
+  EXPECT_THROW(parse_worker_process_launch_options(2, complete.data()),
+               std::invalid_argument);
+  std::swap(complete[2], complete[3]);
+  EXPECT_THROW(parse_worker_process_launch_options(
+                   static_cast<int>(complete.size()), complete.data()),
+               std::invalid_argument);
+  std::swap(complete[2], complete[3]);
+  startup = "--startup-timeout-ms=0";
+  EXPECT_THROW(parse_worker_process_launch_options(
+                   static_cast<int>(complete.size()), complete.data()),
+               std::invalid_argument);
+  startup = "--startup-timeout-ms=12000";
+  io = "--io-timeout-ms=3500ms";
+  EXPECT_THROW(parse_worker_process_launch_options(
+                   static_cast<int>(complete.size()), complete.data()),
+               std::invalid_argument);
+}
 
 /**
  * @brief Owns one connected local socket pair for protocol unit tests.

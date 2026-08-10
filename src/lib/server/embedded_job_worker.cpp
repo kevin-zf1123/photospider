@@ -88,6 +88,47 @@ std::string host_failure_message(std::string_view stage,
   return message;
 }
 
+/**
+ * @brief Adapts one immutable prepared catalog to the worker-local resolver
+ * interface.
+ * @throws Constructor rejects a null catalog; lookup may propagate allocation
+ * failures while copying retained strings.
+ * @note Resolution is a bounded in-memory operation and performs no filesystem
+ * access or caller-supplied callback invocation.
+ */
+class PreparedExternalGraphResolver final : public GraphArtifactResolver {
+ public:
+  /**
+   * @brief Retains one immutable prepared graph catalog.
+   * @param external_graphs Non-null shared catalog.
+   * @throws std::invalid_argument when `external_graphs` is null.
+   * @note Retention creates no cache and opens no graph path.
+   */
+  explicit PreparedExternalGraphResolver(
+      std::shared_ptr<const PreparedExternalGraphCatalog> external_graphs)
+      : external_graphs_(std::move(external_graphs)) {
+    if (external_graphs_ == nullptr) {
+      throw std::invalid_argument("prepared graph catalog is null");
+    }
+  }
+
+  /**
+   * @brief Copies one exact prepared graph binding from memory.
+   * @param graph_artifact_id Valid immutable graph identity.
+   * @return Prepared result or closed missing-identity diagnostic.
+   * @throws Catalog validation or allocation failures unchanged.
+   * @note Concurrent resolution reads immutable catalog state only.
+   */
+  ResolvedGraphArtifact resolve(
+      const GraphArtifactId& graph_artifact_id) const override {
+    return external_graphs_->find(graph_artifact_id);
+  }
+
+ private:
+  /** @brief Immutable prepared graph material owner. */
+  std::shared_ptr<const PreparedExternalGraphCatalog> external_graphs_;
+};
+
 }  // namespace
 
 /** @copydoc ps::server::EmbeddedHostJobWorker::EmbeddedHostJobWorker */
@@ -310,34 +351,17 @@ JobAttemptReport EmbeddedHostJobWorker::execute(
 
 /** @copydoc EmbeddedHostJobWorkerFactory::EmbeddedHostJobWorkerFactory */
 EmbeddedHostJobWorkerFactory::EmbeddedHostJobWorkerFactory(
-    std::shared_ptr<const GraphArtifactResolver> resolver)
-    : resolver_(std::move(resolver)) {
-  if (resolver_ == nullptr) {
-    throw std::invalid_argument("Embedded Host Job worker resolver is null");
-  }
+    std::shared_ptr<const PreparedExternalGraphCatalog> external_graphs)
+    : JobAttemptWorkerFactory(external_graphs) {
+  external_graphs_ = std::move(external_graphs);
 }
 
 /** @copydoc ps::server::EmbeddedHostJobWorkerFactory::create */
 std::unique_ptr<JobAttemptWorker> EmbeddedHostJobWorkerFactory::create(
     const JobAssignment& assignment) {
   validate_attempt_identity(assignment.identity);
-  return std::make_unique<EmbeddedHostJobWorker>(resolver_);
-}
-
-/** @copydoc ps::server::EmbeddedHostJobWorkerFactory::prepare_external_graph */
-ResolvedGraphArtifact EmbeddedHostJobWorkerFactory::prepare_external_graph(
-    const JobAssignment& assignment) const {
-  validate_attempt_identity(assignment.identity);
-  if (assignment.spec == nullptr) {
-    throw std::invalid_argument(
-        "external Embedded Host assignment has no immutable JobSpec");
-  }
-  validate_job_spec(*assignment.spec);
-  if (assignment.spec->digest() != assignment.identity.job_spec_digest) {
-    throw std::invalid_argument(
-        "external Embedded Host assignment digest does not match JobSpec");
-  }
-  return resolver_->resolve(assignment.spec->graph_artifact_id());
+  return std::make_unique<EmbeddedHostJobWorker>(
+      std::make_shared<const PreparedExternalGraphResolver>(external_graphs_));
 }
 
 }  // namespace ps::server
