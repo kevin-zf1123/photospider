@@ -308,7 +308,11 @@ class UniqueFd final {
 struct ChildProcess final {
   /** @brief Exact child PID until successful `waitpid`, then -1. */
   pid_t pid = -1;
-  /** @brief Parent side of the one-assignment private socket. */
+  /**
+   * @brief Parent side of the one-assignment private socket.
+   * @note May outlive exact natural reaping only through the monitor's bounded
+   * buffered report/EOF drain; revocation clears it before escalation.
+   */
   UniqueFd control;
   /** @brief Whether exact `waitpid` already completed. */
   bool reaped = false;
@@ -327,6 +331,23 @@ enum class OwnedSignalResult : std::uint8_t {
   AlreadyExited,
   /** @brief Ownership changed or the kernel rejected signal delivery. */
   Rejected,
+};
+
+/**
+ * @brief Closed result of one exact terminate-and-reap transaction.
+ * @throws Nothing for value operations.
+ * @note `ExitedBeforeChannelRevocation` leaves the manager-owned control
+ * descriptor open so its caller can drain report/EOF bytes that the worker
+ * committed before normal exit. Every other result follows channel revocation
+ * and therefore has no remaining ordinary report-delivery path.
+ */
+enum class TerminateAndReapResult : std::uint8_t {
+  /** @brief Exact natural exit was reaped before channel revocation. */
+  ExitedBeforeChannelRevocation,
+  /** @brief Exact exit was reaped after the channel had been revoked. */
+  ReapedAfterChannelRevocation,
+  /** @brief Exact signal death matched one delivered owned escalation. */
+  EscalationMatched,
 };
 
 /**
@@ -1351,10 +1372,13 @@ class WorkerManager::Impl final {
    * @throws std::invalid_argument when `process` is null.
    * @note Short read slices share one stateful frame decoder. Cancellation-send
    * failure starts the same cooperative deadline and keeps draining worker
-   * report/EOF/exit truth; only delivered TERM/KILL escalation yields
-   * `ForcedCancellation`. Every first `Report`, `Failure`, or
-   * `ForcedCancellation` construction is locally fail-stop protected after
-   * exact reaping and cannot be reclassified by the outer catch boundary.
+   * report/EOF/exit truth. If the deadline-side exact observation reaps a
+   * natural exit before channel revocation, the monitor keeps that descriptor
+   * open and drains the stateful decoder through one bounded post-reap window;
+   * only matching delivered TERM/KILL escalation yields `ForcedCancellation`.
+   * Every first `Report`, `Failure`, or `ForcedCancellation` construction is
+   * locally fail-stop protected after exact reaping and cannot be reclassified
+   * by the outer catch boundary.
    */
   WorkerManagerCompletion monitor_process(const std::shared_ptr<Record>& record,
                                           ChildProcess* process) {
@@ -1367,6 +1391,8 @@ class WorkerManager::Impl final {
     std::optional<std::chrono::steady_clock::time_point> cancel_deadline;
     std::optional<std::chrono::steady_clock::time_point> report_deadline;
     std::optional<std::chrono::steady_clock::time_point> eof_deadline;
+    std::optional<std::chrono::steady_clock::time_point>
+        post_reap_drain_deadline;
     std::optional<JobAttemptReport> candidate_report;
     bool cancel_attempted = false;
     bool cancel_delivery_failed = false;
@@ -1376,6 +1402,10 @@ class WorkerManager::Impl final {
     for (;;) {
       observe_exit(record, process);
       const auto now = std::chrono::steady_clock::now();
+      if (process->reaped && !channel_eof &&
+          !post_reap_drain_deadline.has_value()) {
+        post_reap_drain_deadline = now + options_.post_report_timeout;
+      }
       const bool cancel = cancellation_requested(record);
       if (cancel && !cancel_attempted && !process->reaped) {
         cancel_attempted = true;
@@ -1391,8 +1421,14 @@ class WorkerManager::Impl final {
       }
       if (cancel_deadline.has_value() && !process->reaped &&
           std::chrono::steady_clock::now() >= *cancel_deadline) {
-        const bool signal_delivered = terminate_and_reap(record, process);
-        if (signal_delivered) {
+        if (options_.await_cancel_deadline_zero_exit_for_test) {
+          await_pre_signal_zero_exit_for_test(
+              process->pid,
+              std::chrono::steady_clock::now() + options_.terminate_timeout);
+        }
+        const TerminateAndReapResult termination =
+            terminate_and_reap(record, process);
+        if (termination == TerminateAndReapResult::EscalationMatched) {
           return forced_cancellation_completion(
               record->identity,
               cancel_delivery_failed
@@ -1400,6 +1436,13 @@ class WorkerManager::Impl final {
                     "escalation reaped the worker"
                   : "worker exceeded cooperative cancellation grace; "
                     "manager signal escalation reaped it");
+        }
+        if (termination ==
+            TerminateAndReapResult::ExitedBeforeChannelRevocation) {
+          cancel_deadline.reset();
+          post_reap_drain_deadline =
+              std::chrono::steady_clock::now() + options_.post_report_timeout;
+          continue;
         }
         channel_eof = true;
         continue;
@@ -1447,6 +1490,13 @@ class WorkerManager::Impl final {
           return report_completion(record->identity,
                                    std::move(*candidate_report));
         }
+        if (post_reap_drain_deadline.has_value() &&
+            now >= *post_reap_drain_deadline) {
+          process->control.reset();
+          return failure_completion(
+              record->identity, JobAttemptFailure::WorkerChannel,
+              "worker channel did not drain after clean exit");
+        }
       }
 
       if (channel_eof) {
@@ -1466,15 +1516,20 @@ class WorkerManager::Impl final {
 
       auto read_deadline =
           std::chrono::steady_clock::now() + kSupervisorPollInterval;
-      if (!cancel && !candidate_report.has_value()) {
-        read_deadline = std::min(read_deadline, heartbeat_deadline);
+      if (!process->reaped) {
+        if (!cancel && !candidate_report.has_value()) {
+          read_deadline = std::min(read_deadline, heartbeat_deadline);
+        }
+        read_deadline = std::min(read_deadline, runtime_deadline);
+        if (cancel_deadline.has_value()) {
+          read_deadline = std::min(read_deadline, *cancel_deadline);
+        }
       }
-      read_deadline = std::min(read_deadline, runtime_deadline);
-      if (cancel_deadline.has_value()) {
-        read_deadline = std::min(read_deadline, *cancel_deadline);
-      }
-      if (report_deadline.has_value()) {
+      if (!process->reaped && report_deadline.has_value()) {
         read_deadline = std::min(read_deadline, *report_deadline);
+      }
+      if (post_reap_drain_deadline.has_value()) {
+        read_deadline = std::min(read_deadline, *post_reap_drain_deadline);
       }
       try {
         WorkerProtocolFrame frame =
@@ -1855,29 +1910,32 @@ class WorkerManager::Impl final {
   }
 
   /**
-   * @brief Revokes channel, escalates TERM/KILL, and exactly reaps one child.
+   * @brief Observes natural exit or revokes, escalates, and reaps one child.
    * @param record Exact retained assignment record.
    * @param process Non-null process owner.
-   * @return True only when authority-owned signal escalation was delivered and
-   * remains consistent with the exact wait status; false when channel closure
-   * or a pre-existing worker failure allowed exact reaping.
+   * @return Whether exact reaping preceded channel revocation, followed
+   * revocation without matching signal death, or matched delivered owned
+   * escalation.
    * @throws std::invalid_argument when `process` is null.
-   * @note Every signal revalidates complete record/PID ownership under mutex.
-   * Missing the final reap deadline or losing exact wait authority fail-stops
-   * the authority process; this function never falls back to an unbounded
-   * `waitpid` or a recoverable manager completion.
+   * @note Exact natural exit observed before revocation leaves `control` open
+   * for the caller's bounded report/EOF drain. Every signal revalidates
+   * complete record/PID ownership under mutex. Missing the final reap deadline
+   * or losing exact wait authority fail-stops the authority process; this
+   * function never falls back to an unbounded `waitpid` or a recoverable
+   * manager completion.
    */
-  bool terminate_and_reap(const std::shared_ptr<Record>& record,
-                          ChildProcess* process) {
+  TerminateAndReapResult terminate_and_reap(
+      const std::shared_ptr<Record>& record, ChildProcess* process) {
     if (process == nullptr) {
       throw std::invalid_argument("worker termination process is null");
     }
     if (process->reaped) {
-      return false;
+      return process->control.get() >= 0
+                 ? TerminateAndReapResult::ExitedBeforeChannelRevocation
+                 : TerminateAndReapResult::ReapedAfterChannelRevocation;
     }
     if (observe_exit(record, process)) {
-      process->control.reset();
-      return false;
+      return TerminateAndReapResult::ExitedBeforeChannelRevocation;
     }
     process->control.reset();
     if (options_.await_pre_signal_zero_exit_for_test) {
@@ -1890,7 +1948,9 @@ class WorkerManager::Impl final {
     if (wait_for_exit_until(
             record, process,
             std::chrono::steady_clock::now() + options_.terminate_timeout)) {
-      return escalation_matches_wait_status(*process, term_delivered, false);
+      return escalation_matches_wait_status(*process, term_delivered, false)
+                 ? TerminateAndReapResult::EscalationMatched
+                 : TerminateAndReapResult::ReapedAfterChannelRevocation;
     }
     const bool kill_delivered = signal_owned(record, process->pid, SIGKILL) ==
                                 OwnedSignalResult::Delivered;
@@ -1900,7 +1960,9 @@ class WorkerManager::Impl final {
       fail_stop_unreaped_worker();
     }
     return escalation_matches_wait_status(*process, term_delivered,
-                                          kill_delivered);
+                                          kill_delivered)
+               ? TerminateAndReapResult::EscalationMatched
+               : TerminateAndReapResult::ReapedAfterChannelRevocation;
   }
 
   /**

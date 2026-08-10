@@ -1213,6 +1213,32 @@ TEST(WorkerSupervisor, ZeroExitZombieIsNotForcedCancellation) {
   EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
 }
 
+TEST(WorkerSupervisor, CancelDeadlineReapMustDrainBufferedFailedReport) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.cooperative_cancel_timeout = 10ms;
+  options.await_cancel_deadline_zero_exit_for_test = true;
+  auto service = make_service(root.path(), std::move(options));
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.cancel-race.failed-report"));
+
+  ASSERT_TRUE(service->cancel(submitted.job_id));
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::Compute) << terminal.message;
+  EXPECT_EQ(terminal.message,
+            "fixture preserved worker failure after cancel send closed");
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerChannel);
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+      0U);
+}
+
 TEST(WorkerSupervisor, CancelSendFailurePreservesWorkerFailureAndExit) {
   /**
    * @brief Maps one fixture cancel-channel fault to its exact terminal truth.

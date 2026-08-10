@@ -112,10 +112,11 @@ struct WorkerManagerOwnershipSnapshot final {
  *
  * One move-only record and supervision thread owns each exact attempt. Product
  * records prepare one assignment, fork/exec one fresh process, join every
- * message to the complete identity, escalate cancellation, classify exit, and
- * clear/reap the PID before delivering one completion. The explicit test mode
- * executes a marked factory in its supervision thread and makes no process-
- * isolation or bounded-termination claim.
+ * message to the complete identity, escalate cancellation, preserve bounded
+ * buffered report/EOF drainage when natural exit wins the deadline-side reap,
+ * classify exit, and clear/reap the PID before delivering one completion. The
+ * explicit test mode executes a marked factory in its supervision thread and
+ * makes no process-isolation or bounded-termination claim.
  *
  * @throws Construction validates factory, callbacks, bounds, product
  * executable access, a waitable product `SIGCHLD` disposition, and creates one

@@ -358,6 +358,19 @@ struct WorkerManagerOptions final {
    */
   std::shared_ptr<std::atomic<bool>> fail_record_construction_for_test;
   /**
+   * @brief Holds one cancel-deadline escalation until clean zero exit in tests.
+   * @note False in product construction. When true, `WorkerManager` first
+   * completes the monitor loop's ordinary `waitpid(WNOHANG)` observation and
+   * reaches the expired cooperative-cancellation deadline, then uses
+   * `waitid(WNOWAIT)` to preserve a zero-exit zombie before the real
+   * termination path performs its second exact `waitpid` observation. The
+   * worker channel remains untouched during this wait so a complete report
+   * already written to the socket is available to the production decoder.
+   * This deterministic seam neither reaps the child nor transfers PID,
+   * channel, signal, or completion authority to test code.
+   */
+  bool await_cancel_deadline_zero_exit_for_test = false;
+  /**
    * @brief Holds escalation until a normally exited child is waitable in tests.
    * @note False in product construction. When true, `WorkerManager` performs
    * one initial exact `waitpid(WNOHANG)` observation, revokes the channel, and
