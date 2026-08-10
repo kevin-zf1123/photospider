@@ -204,6 +204,18 @@ restart(active, no matching artifact) -> Failed(RecoveryInterrupted)
 restart(any non-cancelled state, matching stable artifact) -> Succeeded
 ```
 
+`Running` is the durable control-plane fence that a still-current,
+non-cancelled assignment has begun manager supervision. It is published before
+the external process is spawned and therefore does not prove exec,
+`AssignmentAccepted`, or entry into the worker's heartbeat/cancellation loop.
+Maintained real-process cancellation evidence waits instead for a
+source-private, non-authorizing first-valid-heartbeat observation. The
+cooperative and ignoring fixtures run in separate service instances with
+branch-local heartbeat/cooperative bounds, so scheduler headroom for a
+responsive worker does not slow the short forced-escalation branch. That
+observer changes no production deadline and exposes no identity, PID,
+descriptor, signal, wait, reap, cancellation, or completion authority.
+
 `submit()` validates/finalizes JobSpec and checkpoint, reserves the complete
 quota envelope, inserts the in-memory Job, and asks WorkerManager to construct
 and retain its sole manager record and supervision handle while the service
@@ -502,7 +514,8 @@ read-only availability, report/mutation fencing, and restart convergence,
 ongoing handle/process reaping, target-inventory platform gating, bounded
 protocol reconstruction, fresh process identity, crash/protocol/heartbeat/
 runtime isolation, FIFO-held fresh-retry stale-lease rejection, cooperative/
-forced cancellation, cancel-channel-versus-wait-status attribution,
+forced cancellation after a first-heartbeat rendezvous with branch-local
+bounds, cancel-channel-versus-wait-status attribution,
 deadline-side natural-reap buffered-report drainage, candidate-Report-deadline-
 versus-wait-status attribution, complete Report aggregate exact-boundary/one-
 byte-over typing across variable identity/diagnostic lengths,

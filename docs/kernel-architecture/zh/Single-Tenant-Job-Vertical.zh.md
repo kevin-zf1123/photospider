@@ -172,6 +172,15 @@ restart(active, no matching artifact) -> Failed(RecoveryInterrupted)
 restart(any non-cancelled state, matching stable artifact) -> Succeeded
 ```
 
+`Running` 是耐久 control-plane fence，表示仍为当前值且未取消的 assignment 已开始接受
+manager supervision。它在 external process spawn 前发布，因此不能证明 exec、
+`AssignmentAccepted`，也不能证明 worker 已进入 heartbeat/cancellation loop。长期真实进程
+cancellation 证据会改为等待一个 source-private、无权威能力的“首个合法 heartbeat 已观察”
+信号。合作 fixture 与忽略取消 fixture 使用独立 service instance 及分支局部的 heartbeat/
+cooperative bound，因此为 responsive worker 提供 scheduler 余量不会拖慢短时 forced
+escalation 分支。该 observer 不改变任何产品 deadline，也不暴露 identity、PID、descriptor、
+signal、wait、reap、cancellation 或 completion authority。
+
 `submit()` 会校验并冻结 JobSpec/checkpoint，预留完整 quota envelope，插入内存 Job，
 并在 service mutex 仍阻塞 assignment progress 时请求 WorkerManager 构造并保留唯一 manager
 record 与 supervision handle，然后发布 accepted truth。因此 manager-record 构造、registry
@@ -405,7 +414,8 @@ release-failure ownership、Failed/Cancelled/rejected/malformed/pre-manifest ter
 read-only availability、report/mutation fencing 与 restart convergence、持续 handle/process
 reaping、target-inventory platform gating、bounded protocol reconstruction、fresh process
 identity、crash/protocol/heartbeat/runtime isolation、FIFO-held fresh-retry stale-lease rejection、
-cooperative/forced cancellation、cancel-channel-versus-wait-status attribution、deadline-side
+在首个 heartbeat rendezvous 与分支局部 bound 后验证 cooperative/forced cancellation、
+cancel-channel-versus-wait-status attribution、deadline-side
 natural-reap buffered-report drainage、candidate-Report-deadline-versus-wait-status attribution、
 在可变 identity/diagnostic 长度下完整 Report aggregate 精确边界/多一个字节的类型化、
 concurrent shutdown drainage、实际首次 completion/重建
