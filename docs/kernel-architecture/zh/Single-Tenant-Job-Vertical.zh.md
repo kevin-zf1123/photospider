@@ -328,6 +328,11 @@ wait status 或已经 decode 的 Report 优先于 `WorkerChannel`。只有没有
 exit 仍是 channel failure。当 cooperative deadline 仍然有效时，普通 EOF/post-report
 deadline 必须服从它，不能先通过 generic channel path 终止并 reap worker。因此，精确 exit
 status 或 manager-owned escalation 会先完成裁决，之后才允许剩余 `WorkerChannel` fact。
+当对应 worker 仍然存活时，完整、有效的 candidate Report 不会削弱这一顺序：普通
+post-report close/exit deadline 不能先终止或 reap worker。在 cooperative deadline 之前观察到
+的 worker-owned signal 或 nonzero exit 仍是权威事实；只有在该 deadline 到达时仍然存活的
+worker 才会进入 cancellation 所有的 `SIGTERM`/`SIGKILL` escalation，并且才可能被分类为
+forced cancellation。
 只有匹配 owner 已成功发送
 `SIGTERM` 或 `SIGKILL` 的精确 `WIFSIGNALED` 状态才能产生 forced-cancellation fact。对已经
 退出的 zombie 调用 `kill()` 成功不构成因果证明；正常零退出仍按 report/channel/exit truth
@@ -401,8 +406,9 @@ read-only availability、report/mutation fencing 与 restart convergence、持�
 reaping、target-inventory platform gating、bounded protocol reconstruction、fresh process
 identity、crash/protocol/heartbeat/runtime isolation、FIFO-held fresh-retry stale-lease rejection、
 cooperative/forced cancellation、cancel-channel-versus-wait-status attribution、deadline-side
-natural-reap buffered-report drainage、在可变 identity/diagnostic 长度下完整 Report aggregate
-精确边界/多一个字节的类型化、concurrent shutdown drainage、实际首次 completion/重建
+natural-reap buffered-report drainage、candidate-Report-deadline-versus-wait-status attribution、
+在可变 identity/diagnostic 长度下完整 Report aggregate 精确边界/多一个字节的类型化、
+concurrent shutdown drainage、实际首次 completion/重建
 allocation fail-stop、completion callback 异常 fail-stop，
 以及真实 Embedded Host output/checkpoint/restart 行为。
 

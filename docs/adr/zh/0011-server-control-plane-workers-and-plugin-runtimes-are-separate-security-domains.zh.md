@@ -240,6 +240,11 @@ ownership 与 reap deadline 继续，因此 signal/nonzero wait status 或已经
 优先于较弱 channel fact。当 cooperative cancellation deadline 仍然有效时，普通 EOF/post-
 report deadline 必须服从它，不能先通过 generic channel path 终止并 reap worker。因此，精确
 exit status 或 manager-owned escalation 会先完成裁决，之后才允许剩余 `WorkerChannel` fact。
+该规则也覆盖 worker 仍然存活时收到完整、有效 candidate Report 的情形：它的普通 post-report
+close/exit deadline 不能在有效 cooperative deadline 之前终止或 reap worker。在该 deadline
+之前观察到的 worker-owned signal 或 nonzero exit 仍是权威 wait-status fact；只有在
+cooperative deadline 到达时仍然存活的 worker 才会进入 cancellation state machine 所有的
+`SIGTERM`/`SIGKILL` escalation，并且才可能产生 forced cancellation。
 
 Exec bootstrap 还会在 control descriptor 之外携带必填的精确 startup 与 worker-write
 deadline。worker 不使用本地默认值或更短 cap，而是直接采用 manager value，因此即使第一帧

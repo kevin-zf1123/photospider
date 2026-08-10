@@ -287,6 +287,13 @@ the cooperative cancellation deadline remains active, the ordinary EOF/post-
 report deadline is subordinate to it and cannot terminate/reap the worker
 through the generic channel path first. Exact exit status or manager-owned
 escalation therefore settles before any residual `WorkerChannel` fact.
+This rule also covers a complete, valid candidate Report received while the
+worker remains alive: its ordinary post-report close/exit deadline cannot
+terminate or reap the worker before the active cooperative deadline. A
+worker-owned signal or nonzero exit observed before that deadline remains the
+authoritative wait-status fact; only a worker still alive at the cooperative
+deadline enters the cancellation state machine's owned `SIGTERM`/`SIGKILL`
+escalation and may produce forced cancellation.
 
 The exec bootstrap also carries required exact startup and worker-write
 deadlines alongside the control descriptor. The worker uses the manager values

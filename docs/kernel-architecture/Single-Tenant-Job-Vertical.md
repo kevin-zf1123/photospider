@@ -411,6 +411,12 @@ channel failure. While the cooperative deadline is active, the ordinary EOF/
 post-report deadline is subordinate to it and cannot terminate/reap the worker
 through the generic channel path first. Exact exit status or manager-owned
 escalation therefore settles before any residual `WorkerChannel` fact.
+A complete, valid candidate Report does not weaken this ordering while its
+worker remains alive: the ordinary post-report close/exit deadline cannot
+terminate or reap first. A worker-owned signal or nonzero exit observed before
+the cooperative deadline remains authoritative; only a worker still alive at
+that deadline enters cancellation-owned `SIGTERM`/`SIGKILL` escalation and may
+be classified as forced cancellation.
 Only an exact `WIFSIGNALED` status matching a successfully delivered owned
 `SIGTERM` or `SIGKILL` yields a forced-cancellation fact. Successful `kill()`
 against an already exited zombie is not causality; a normal zero exit remains
@@ -497,8 +503,9 @@ ongoing handle/process reaping, target-inventory platform gating, bounded
 protocol reconstruction, fresh process identity, crash/protocol/heartbeat/
 runtime isolation, FIFO-held fresh-retry stale-lease rejection, cooperative/
 forced cancellation, cancel-channel-versus-wait-status attribution,
-deadline-side natural-reap buffered-report drainage, complete Report aggregate
-exact-boundary/one-byte-over typing across variable identity/diagnostic lengths,
+deadline-side natural-reap buffered-report drainage, candidate-Report-deadline-
+versus-wait-status attribution, complete Report aggregate exact-boundary/one-
+byte-over typing across variable identity/diagnostic lengths,
 concurrent shutdown drainage, actual first completion/reconstruction allocation
 fail-stop, completion-callback exception fail-stop, and real Embedded Host
 output/checkpoint/restart behavior.
