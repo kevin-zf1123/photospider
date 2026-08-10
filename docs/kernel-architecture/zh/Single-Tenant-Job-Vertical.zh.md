@@ -176,7 +176,11 @@ restart(any non-cancelled state, matching stable artifact) -> Succeeded
 并在 service mutex 仍阻塞 assignment progress 时请求 WorkerManager 构造并保留唯一 manager
 record 与 supervision handle，然后发布 accepted truth。因此 manager-record 构造、registry
 插入或 supervision-thread 启动失败发生在 child spawn 和 durable publication 之前，不会暴露
-Job 或 handle。`NotPublished` journal failure 会移除 candidate
+Job 或 handle。Supervision-thread 只会在 `records_.emplace()` 成功后开始构造，并与一个
+确定性的 source-private start-failure seam 共用同一 catch 边界；任一异常都会先删除该精确
+record，再由 submit/retry 执行 Job 与 candidate-quota 回滚。长期测试会捕获“此前已插入”的
+证明，观察异常后 manager ownership 为零，再证明后续 submit/retry 能恢复。`NotPublished`
+journal failure 会移除 candidate
 并释放其 quota；任一
 published failure 会保留与 visible record 对齐的 Job、worker authority 与 quota，并进入单调
 journal fail-stop。如果 manager-record/thread start 或 `NotPublished` rollback 无法释放 quota，
@@ -243,6 +247,12 @@ descriptor 会在限制随后降低后继续存在。Linux child 使用 raw
 userspace 扫描。长期进程回归会在隔离 authority 中保持一个高位 non-close-on-exec
 sentinel，同时覆盖 infinite soft limit 与把 soft limit 降到既有 sentinel 以下两种情况，
 并证明及时 exec、sentinel 不被继承，同时 parent 副本仍保持打开。
+
+Parent-side WorkerManager descriptor 使用与 fork-child closure sweep 不同的 close 规则：
+`UniqueFd` 会先替换或清除 ownership，再恰好调用一次 `close`，并忽略包括 `EINTR` 在内的
+每种结果。Linux 可能在报告 interrupted close 前已经释放并重新分配该数字 fd，因此重试可能
+关闭另一个 thread 新取得的 descriptor。一个 source-private callback 回归会强制形成这种
+release/reuse 顺序，并证明不会有第二次 close 消耗复用后的 descriptor。
 
 Private bounded protocol 具有固定 magic、唯一支持的 version、封闭 message kind、64-MiB
 frame-payload 上限、deadline-aware partial I/O，以及严格的 trailing-byte、enum、identity、

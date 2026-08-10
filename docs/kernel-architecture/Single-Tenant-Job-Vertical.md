@@ -210,7 +210,12 @@ and retain its sole manager record and supervision handle while the service
 mutex still blocks assignment progress, then publishes accepted truth. A
 manager-record construction, registry insertion, or supervision-thread start
 failure therefore occurs before child spawn or durable publication and exposes
-neither a Job nor a handle. A
+neither a Job nor a handle. Supervision-thread construction begins only after
+`records_.emplace()` succeeds and shares one catch boundary with a deterministic
+source-private start-failure seam; any exception erases that exact record before
+submit/retry performs its Job and candidate-quota rollback. Maintained tests
+capture proof of prior insertion, observe zero manager ownership after the
+exception, and then prove later submit/retry recovery. A
 `NotPublished` journal failure removes the candidate and releases its quota. A
 published failure keeps the Job, worker authority, and quota aligned with the
 visible record and enters the monotonic journal fail-stop.
@@ -296,6 +301,14 @@ maintained process regressions hold a high non-close-on-exec sentinel in an
 isolated authority, exercise both an infinite soft limit and a soft limit
 lowered below the already-open sentinel, and prove timely exec plus sentinel
 non-inheritance while the parent copy stays open.
+
+Parent-side WorkerManager descriptors follow a different close rule from the
+fork-child closure sweep: a `UniqueFd` first replaces or clears ownership, then
+issues exactly one `close` and ignores every result, including `EINTR`. Linux
+may already have released and reassigned the numeric fd before reporting an
+interrupted close, so a retry could close another thread's newly acquired
+descriptor. A source-private callback regression forces that release/reuse
+ordering and proves no second close consumes the reused descriptor.
 
 The private bounded protocol has fixed magic, one supported version, closed
 message kinds, a 64-MiB frame-payload maximum, deadline-aware partial I/O, and
