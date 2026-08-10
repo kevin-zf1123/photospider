@@ -3,10 +3,13 @@
  * @brief Verifies Issue #100 real-process crash isolation and bounded
  * lifecycle.
  */
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -20,6 +23,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -36,6 +40,31 @@ namespace {
 
 using std::chrono_literals::operator""ms;
 using std::chrono_literals::operator""s;
+
+/** @brief High descriptor floor that rejects a small fixed closure cap. */
+constexpr int kHighDescriptorSentinelFloor = 100000;
+/** @brief Probe exit when requested `RLIMIT_NOFILE` setup unexpectedly fails.
+ */
+constexpr int kDescriptorLimitSetupFailed = 71;
+/** @brief Probe exit when a high inheritable sentinel cannot be created. */
+constexpr int kHighDescriptorSentinelSetupFailed = 72;
+/** @brief Probe exit when the worker did not finish successfully in time. */
+constexpr int kDescriptorWorkerExecutionFailed = 73;
+/** @brief Probe exit when child closure changed the authority's descriptor. */
+constexpr int kParentDescriptorOwnershipChanged = 74;
+/** @brief Probe exit for an unexpected C++ setup or service exception. */
+constexpr int kDescriptorProbeRaised = 75;
+
+/**
+ * @brief Process-global descriptor-limit shape exercised by an isolated probe.
+ * @throws Nothing for value operations.
+ */
+enum class DescriptorLimitProbeMode : std::uint8_t {
+  /** @brief Sets the soft descriptor limit to `RLIM_INFINITY`. */
+  Unlimited,
+  /** @brief Lowers the soft limit only after opening the high sentinel. */
+  LoweredAfterSentinel,
+};
 
 /**
  * @brief Owns one unique durable root through all service restarts in a test.
@@ -270,6 +299,20 @@ WorkerManagerOptions supervisor_options() {
 }
 
 /**
+ * @brief Closes one probe-owned descriptor through interrupted syscalls.
+ * @param fd Descriptor or negative sentinel.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void close_probe_descriptor(int fd) noexcept {
+  if (fd < 0) {
+    return;
+  }
+  while (::close(fd) < 0 && errno == EINTR) {
+  }
+}
+
+/**
  * @brief Builds one fixture-selected immutable JobSpec.
  * @param mode Exact graph id interpreted only by the process fixture.
  * @param checkpoint Optional durable checkpoint identity.
@@ -346,6 +389,97 @@ JobSnapshot wait_terminal(SingleTenantJobService& service,
     throw std::runtime_error("supervisor Job did not become terminal");
   }
   return *snapshot;
+}
+
+/**
+ * @brief Exercises real worker exec across one descriptor-limit boundary.
+ * @param mode Process-global soft-limit sequence to install around the high fd.
+ * @return Zero only when the worker succeeds in under two seconds, the execed
+ * fixture observes the high sentinel as closed, and the authority still owns
+ * its original sentinel; otherwise one stable nonzero probe code.
+ * @throws Nothing; exceptions are converted to a stable probe exit.
+ * @note The caller runs this function only in an isolated death-test child.
+ * Its process-global `RLIMIT_NOFILE` mutation therefore cannot affect another
+ * test, while the service still exercises the real fork/exec product path.
+ */
+int run_descriptor_closure_probe(DescriptorLimitProbeMode mode) noexcept {
+  int source_descriptor = -1;
+  int sentinel_descriptor = -1;
+  try {
+    rlimit descriptor_limit{};
+    if (::getrlimit(RLIMIT_NOFILE, &descriptor_limit) != 0) {
+      return kDescriptorLimitSetupFailed;
+    }
+    if (mode == DescriptorLimitProbeMode::Unlimited) {
+      if (descriptor_limit.rlim_max != RLIM_INFINITY) {
+        return kDescriptorLimitSetupFailed;
+      }
+      descriptor_limit.rlim_cur = RLIM_INFINITY;
+    } else {
+      const rlim_t required =
+          static_cast<rlim_t>(kHighDescriptorSentinelFloor + 1);
+      if (descriptor_limit.rlim_max != RLIM_INFINITY &&
+          descriptor_limit.rlim_max < required) {
+        return kDescriptorLimitSetupFailed;
+      }
+      descriptor_limit.rlim_cur =
+          descriptor_limit.rlim_max == RLIM_INFINITY
+              ? required
+              : std::max(descriptor_limit.rlim_cur, required);
+    }
+    if (::setrlimit(RLIMIT_NOFILE, &descriptor_limit) != 0) {
+      return kDescriptorLimitSetupFailed;
+    }
+
+    source_descriptor = ::open("/dev/null", O_RDONLY);
+    if (source_descriptor < 0) {
+      return kHighDescriptorSentinelSetupFailed;
+    }
+    sentinel_descriptor =
+        ::fcntl(source_descriptor, F_DUPFD, kHighDescriptorSentinelFloor);
+    close_probe_descriptor(source_descriptor);
+    source_descriptor = -1;
+    if (sentinel_descriptor < kHighDescriptorSentinelFloor) {
+      close_probe_descriptor(sentinel_descriptor);
+      return kHighDescriptorSentinelSetupFailed;
+    }
+    if (mode == DescriptorLimitProbeMode::LoweredAfterSentinel) {
+      descriptor_limit.rlim_cur = 1024;
+      if (::setrlimit(RLIMIT_NOFILE, &descriptor_limit) != 0 ||
+          ::fcntl(sentinel_descriptor, F_GETFD) < 0) {
+        close_probe_descriptor(sentinel_descriptor);
+        return kDescriptorLimitSetupFailed;
+      }
+    }
+
+    ScopedSupervisorRoot root;
+    WorkerManagerOptions options = supervisor_options();
+    options.startup_timeout = 1s;
+    auto service = make_service(root.path(), std::move(options));
+    const std::string mode =
+        "fixture.fd.closed." + std::to_string(sentinel_descriptor);
+    const auto started = std::chrono::steady_clock::now();
+    const JobSubmission submitted = service->submit(fixture_spec(mode));
+    const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    if (terminal.state != JobState::Succeeded || elapsed >= 2s) {
+      service.reset();
+      close_probe_descriptor(sentinel_descriptor);
+      return kDescriptorWorkerExecutionFailed;
+    }
+    if (::fcntl(sentinel_descriptor, F_GETFD) < 0) {
+      service.reset();
+      close_probe_descriptor(sentinel_descriptor);
+      return kParentDescriptorOwnershipChanged;
+    }
+    service.reset();
+    close_probe_descriptor(sentinel_descriptor);
+    return 0;
+  } catch (...) {
+    close_probe_descriptor(source_descriptor);
+    close_probe_descriptor(sentinel_descriptor);
+    return kDescriptorProbeRaised;
+  }
 }
 
 /**
@@ -442,6 +576,39 @@ TEST(WorkerSupervisor, ConcurrentAttemptsUseFreshProcessesAndReapCompletely) {
   EXPECT_EQ(
       SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
       0U);
+}
+
+TEST(WorkerSupervisor,
+     UnlimitedNoFileLimitClosesHighDescriptorAndExecsPromptly) {
+  rlimit descriptor_limit{};
+  ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &descriptor_limit), 0);
+  if (descriptor_limit.rlim_max != RLIM_INFINITY) {
+    GTEST_SKIP() << "hard RLIMIT_NOFILE cannot represent unlimited";
+  }
+
+  EXPECT_EXIT(
+      {
+        ::_exit(
+            run_descriptor_closure_probe(DescriptorLimitProbeMode::Unlimited));
+      },
+      ::testing::ExitedWithCode(0), "");
+}
+
+TEST(WorkerSupervisor, LoweredNoFileLimitStillClosesPreexistingHighDescriptor) {
+  rlimit descriptor_limit{};
+  ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &descriptor_limit), 0);
+  if (descriptor_limit.rlim_max != RLIM_INFINITY &&
+      descriptor_limit.rlim_max <=
+          static_cast<rlim_t>(kHighDescriptorSentinelFloor)) {
+    GTEST_SKIP() << "hard RLIMIT_NOFILE cannot allocate the high sentinel";
+  }
+
+  EXPECT_EXIT(
+      {
+        ::_exit(run_descriptor_closure_probe(
+            DescriptorLimitProbeMode::LoweredAfterSentinel));
+      },
+      ::testing::ExitedWithCode(0), "");
 }
 
 TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {

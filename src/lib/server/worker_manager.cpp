@@ -10,6 +10,11 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -45,6 +50,18 @@ constexpr int kWorkerControlDescriptor = 3;
 constexpr int kWorkerExecStatusDescriptor = 4;
 /** @brief Supervisor poll cadence for cancel, exit, and deadline checks. */
 constexpr std::chrono::milliseconds kSupervisorPollInterval{20};
+
+/**
+ * @brief Immutable platform input for closing inherited child descriptors.
+ * @throws Nothing for value construction and copies.
+ * @note Darwin needs the kernel-wide exclusive descriptor ceiling prepared
+ * before `fork`; Linux performs one unbounded kernel `close_range` operation
+ * and therefore leaves the field unused.
+ */
+struct ChildDescriptorClosurePlan final {
+  /** @brief Darwin `kern.maxfilesperproc` exclusive descriptor ceiling. */
+  int darwin_exclusive_maximum = 0;
+};
 
 /**
  * @brief Typed internal exception carrying one trusted manager failure domain.
@@ -400,34 +417,76 @@ void configure_descriptor(int fd, bool nonblocking) {
 }
 
 /**
- * @brief Closes every child descriptor at or above the supplied bound.
- * @param maximum_descriptor Exclusive checked upper bound prepared pre-fork.
- * @note This child-side loop uses only async-signal-safe `close` calls.
+ * @brief Closes every inherited child descriptor except exact fd 0 through 4.
+ * @param plan Immutable platform input prepared before `fork`.
+ * @return Zero after complete closure, otherwise the positive setup errno.
+ * @throws Nothing.
+ * @note Darwin scans the kernel-authoritative process descriptor space with
+ * async-signal-safe `close` calls and accepts only `EBADF` for unused slots.
+ * Linux requests `[5, UINT_MAX]` in one raw `close_range` syscall. An absent or
+ * rejected Linux syscall fails closed instead of falling back to a finite cap.
  */
-void close_child_descriptors(int maximum_descriptor) noexcept {
-  for (int fd = kWorkerExecStatusDescriptor + 1; fd < maximum_descriptor;
-       ++fd) {
-    static_cast<void>(::close(fd));
+int close_child_descriptors(const ChildDescriptorClosurePlan& plan) noexcept {
+#if defined(__APPLE__)
+  for (int fd = kWorkerExecStatusDescriptor + 1;
+       fd < plan.darwin_exclusive_maximum; ++fd) {
+    if (::close(fd) == 0 || errno == EBADF) {
+      continue;
+    }
+    return errno == 0 ? EIO : errno;
   }
+  return 0;
+#elif defined(__linux__)
+  static_cast<void>(plan);
+#if defined(SYS_close_range)
+  const auto result =
+      ::syscall(SYS_close_range,
+                static_cast<unsigned int>(kWorkerExecStatusDescriptor + 1),
+                std::numeric_limits<unsigned int>::max(), 0U);
+  if (result == 0) {
+    return 0;
+  }
+  return errno == 0 ? EIO : errno;
+#else
+  return ENOSYS;
+#endif
+#else
+  static_cast<void>(plan);
+  return ENOSYS;
+#endif
 }
 
 /**
- * @brief Computes one finite descriptor-close upper bound before fork.
- * @return Exclusive positive fd bound no larger than `INT_MAX`.
- * @throws std::system_error when the process limit cannot be queried.
+ * @brief Prepares platform state for exact post-fork descriptor closure.
+ * @return Immutable closure input containing Darwin's kernel-wide descriptor
+ * ceiling, or an empty Linux plan for the later raw syscall.
+ * @throws std::system_error when Darwin's authoritative ceiling cannot be
+ * queried or is invalid, or when the build platform is unsupported.
+ * @note The Darwin query deliberately does not use soft `RLIMIT_NOFILE`:
+ * descriptors opened before a soft-limit decrease remain valid above that
+ * limit. `kern.maxfilesperproc` is the kernel ceiling, not an arbitrary cap.
  */
-int descriptor_close_bound() {
-  rlimit limit{};
-  if (::getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+ChildDescriptorClosurePlan prepare_child_descriptor_closure() {
+#if defined(__APPLE__)
+  int maximum_descriptor = 0;
+  std::size_t result_size = sizeof(maximum_descriptor);
+  if (::sysctlbyname("kern.maxfilesperproc", &maximum_descriptor, &result_size,
+                     nullptr, 0U) != 0) {
     throw std::system_error(errno, std::generic_category(),
-                            "query worker descriptor limit");
+                            "query Darwin worker descriptor ceiling");
   }
-  if (limit.rlim_cur == RLIM_INFINITY ||
-      limit.rlim_cur > static_cast<rlim_t>(std::numeric_limits<int>::max())) {
-    return std::numeric_limits<int>::max();
+  if (result_size != sizeof(maximum_descriptor) ||
+      maximum_descriptor <= kWorkerExecStatusDescriptor) {
+    throw std::system_error(EIO, std::generic_category(),
+                            "invalid Darwin worker descriptor ceiling");
   }
-  return std::max(static_cast<int>(limit.rlim_cur),
-                  kWorkerExecStatusDescriptor + 1);
+  return ChildDescriptorClosurePlan{maximum_descriptor};
+#elif defined(__linux__)
+  return ChildDescriptorClosurePlan{};
+#else
+  throw std::system_error(ENOSYS, std::generic_category(),
+                          "worker descriptor closure is unsupported");
+#endif
 }
 
 /**
@@ -890,9 +949,12 @@ class WorkerManager::Impl final {
    * @throws ManagerFailure for setup, fork, resource-limit, or exec failure.
    * @throws std::system_error for pre-fork descriptor setup failure.
    * @note The fork child performs only async-signal-safe descriptor, limit,
-   * status-write, and exec operations using storage prepared before fork. The
-   * parent revalidates waitable `SIGCHLD` policy immediately before `fork` and
-   * fail-stops if process-global exact-reaping authority changed.
+   * status-write, and exec operations using storage prepared before fork.
+   * Darwin closes fd 5 through the kernel `kern.maxfilesperproc` ceiling;
+   * Linux uses raw `close_range(5, UINT_MAX, 0)` and reports any unavailable or
+   * rejected syscall through close-on-exec fd 4. The parent revalidates
+   * waitable `SIGCHLD` policy immediately before `fork` and fail-stops if
+   * process-global exact-reaping authority changed.
    */
   ChildProcess spawn_process(const std::shared_ptr<Record>& record) {
     int sockets[2] = {-1, -1};
@@ -926,7 +988,8 @@ class WorkerManager::Impl final {
     configure_descriptor(status_read.get(), true);
     configure_descriptor(status_write.get(), false);
 
-    const int close_bound = descriptor_close_bound();
+    const ChildDescriptorClosurePlan descriptor_closure =
+        prepare_child_descriptor_closure();
     const rlimit address_space = worker_address_space_limit(
         record->assignment.spec->resource_request().host_memory_bytes);
     const std::string executable = options_.worker_executable.string();
@@ -963,7 +1026,10 @@ class WorkerManager::Impl final {
           ::setrlimit(RLIMIT_AS, &address_space) != 0) {
         child_setup_failed(kWorkerExecStatusDescriptor, errno);
       }
-      close_child_descriptors(close_bound);
+      const int close_error = close_child_descriptors(descriptor_closure);
+      if (close_error != 0) {
+        child_setup_failed(kWorkerExecStatusDescriptor, close_error);
+      }
       char* const arguments[] = {const_cast<char*>(executable_pointer),
                                  const_cast<char*>(control_pointer), nullptr};
       ::execv(executable_pointer, arguments);

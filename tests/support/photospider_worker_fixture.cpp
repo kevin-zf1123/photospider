@@ -2,6 +2,7 @@
  * @file photospider_worker_fixture.cpp
  * @brief Provides deterministic real-process faults for WorkerManager tests.
  */
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -17,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -41,6 +43,8 @@ constexpr std::chrono::milliseconds kFixtureHeartbeatCadence{25};
 constexpr std::chrono::milliseconds kFixtureCancelFragmentGap{27};
 /** @brief Fixed v1 private worker frame header width. */
 constexpr std::size_t kFixtureFrameHeaderBytes = 12U;
+/** @brief Graph-artifact mode prefix carrying one forbidden inherited fd. */
+constexpr std::string_view kClosedDescriptorPrefix = "fixture.fd.closed.";
 
 /**
  * @brief Parses the exact private control descriptor argument.
@@ -64,6 +68,34 @@ int parse_control_descriptor(int argc, char* argv[]) {
   if (parsed != argument.size() - kPrefix.size() || value < 3 ||
       value > 1024 * 1024) {
     throw std::invalid_argument("worker fixture descriptor is out of range");
+  }
+  return static_cast<int>(value);
+}
+
+/**
+ * @brief Parses an optional descriptor non-inheritance fixture mode.
+ * @param mode Exact trusted graph-artifact mode from the assignment.
+ * @return Empty for another fixture mode, otherwise the nonnegative descriptor
+ * that must be absent after exec.
+ * @throws std::invalid_argument when the prefixed decimal value is malformed
+ * or cannot name a process descriptor.
+ * @throws std::out_of_range when decimal conversion exceeds `long long`.
+ * @note The returned number grants no capability; `run_fixture()` uses only
+ * `F_GETFD` to prove that the manager did not pass the descriptor through
+ * exec.
+ */
+std::optional<int> parse_closed_descriptor_mode(std::string_view mode) {
+  if (mode.compare(0U, kClosedDescriptorPrefix.size(),
+                   kClosedDescriptorPrefix) != 0) {
+    return std::nullopt;
+  }
+  const std::string encoded(mode.substr(kClosedDescriptorPrefix.size()));
+  std::size_t parsed = 0U;
+  const std::int64_t value = std::stoll(encoded, &parsed, 10);
+  if (encoded.empty() || parsed != encoded.size() || value < 0 ||
+      value > std::numeric_limits<int>::max()) {
+    throw std::invalid_argument(
+        "worker fixture closed descriptor mode is invalid");
   }
   return static_cast<int>(value);
 }
@@ -534,6 +566,15 @@ int run_fixture(int fd) {
   send_worker_identity(fd, WorkerMessageKind::AssignmentAccepted,
                        assignment.identity,
                        std::chrono::steady_clock::now() + kFixtureIoTimeout);
+
+  const std::optional<int> forbidden_descriptor =
+      parse_closed_descriptor_mode(mode);
+  if (forbidden_descriptor.has_value()) {
+    errno = 0;
+    if (::fcntl(*forbidden_descriptor, F_GETFD) != -1 || errno != EBADF) {
+      return 31;
+    }
+  }
 
   if (mode == "fixture.nonzero" ||
       (mode == "fixture.retry" &&
