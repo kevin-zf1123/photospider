@@ -28,7 +28,7 @@ enum class WorkerManagerCompletionKind : std::uint8_t {
   Failure,
   /**
    * @brief Accepted cancellation required actual owned signal escalation and
-   * exact reaping.
+   * matching signal death plus exact reaping.
    */
   ForcedCancellation,
 };
@@ -103,7 +103,8 @@ struct WorkerManagerOwnershipSnapshot final {
  * isolation or bounded-termination claim.
  *
  * @throws Construction validates factory, callbacks, bounds, product
- * executable access, and creates one internal supervision-thread reaper.
+ * executable access, a waitable product `SIGCHLD` disposition, and creates one
+ * internal supervision-thread reaper.
  * @note No API accepts a PID. Callbacks are never invoked while the manager
  * mutex is held, and `shutdown()` waits for no service mutex.
  */
@@ -115,8 +116,10 @@ class WorkerManager final {
    * @param callbacks Complete control-plane callback set.
    * @param options Valid bounded process configuration.
    * @param in_process_test_mode True only for the non-installed test marker.
-   * @throws std::invalid_argument for invalid configuration.
-   * @throws std::system_error when the internal reaper thread cannot start.
+   * @throws std::invalid_argument for invalid configuration, including product
+   * `SIGCHLD=SIG_IGN` or `SA_NOCLDWAIT` auto-reaping.
+   * @throws std::system_error when `SIGCHLD` cannot be queried or the internal
+   * reaper thread cannot start.
    * @throws std::bad_alloc when retained state allocation fails.
    */
   WorkerManager(std::shared_ptr<JobAttemptWorkerFactory> factory,
@@ -125,7 +128,8 @@ class WorkerManager final {
 
   /**
    * @brief Cancels, terminates, reaps, and joins all retained workers.
-   * @throws Nothing; worker/signal/protocol/callback failures are contained.
+   * @throws Nothing; ordinary worker/signal/protocol/callback failures are
+   * contained, while loss of exact reaping authority fail-stops the process.
    */
   ~WorkerManager() noexcept;
 
@@ -168,7 +172,8 @@ class WorkerManager final {
   /**
    * @brief Requests concurrent drainage and joins every worker and reaper.
    * @return Nothing after no live process or supervision handle remains.
-   * @throws Nothing; repeated calls are idempotent.
+   * @throws Nothing; repeated calls are idempotent. Exact reaping authority
+   * loss fail-stops rather than returning incomplete ownership.
    */
   void shutdown() noexcept;
 

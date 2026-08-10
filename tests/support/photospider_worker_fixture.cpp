@@ -380,6 +380,49 @@ JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
 }
 
 /**
+ * @brief Waits for one exact cancel and then exits only after manager closure.
+ * @param fd Connected manager socket.
+ * @param assignment Exact current assignment.
+ * @return Nothing after the cancel was validated and clean channel EOF arrived.
+ * @throws Protocol/channel failures other than the expected final EOF.
+ * @note Heartbeats continue only until cancellation is observed. The final
+ * return lets the fixture process reach normal `exit(0)` after channel
+ * revocation, which the manager test seam can retain as a zombie.
+ */
+void wait_for_cancel_then_channel_close(int fd,
+                                        const JobAssignment& assignment) {
+  auto next_heartbeat =
+      std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
+  bool cancel_observed = false;
+  WorkerFrameDecoder frame_decoder;
+  for (;;) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!cancel_observed && now >= next_heartbeat) {
+      send_heartbeat(fd, assignment.identity);
+      next_heartbeat =
+          std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
+    }
+    try {
+      const WorkerProtocolFrame frame = frame_decoder.read_frame(
+          fd, std::chrono::steady_clock::now() + kFixtureHeartbeatCadence);
+      if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
+          assignment.identity) {
+        throw WorkerProtocolError(
+            "fixture cancel identity does not match assignment");
+      }
+      cancel_observed = true;
+    } catch (const WorkerProtocolTimeout&) {
+    } catch (const WorkerProtocolEof&) {
+      if (!cancel_observed) {
+        throw WorkerProtocolError(
+            "fixture channel closed before exact cancellation");
+      }
+      return;
+    }
+  }
+}
+
+/**
  * @brief Receives one manager Cancel through a fragmenting local relay.
  * @param fd Connected manager socket supplying the valid Cancel frame.
  * @param assignment Exact current assignment expected by the receiver.
@@ -555,6 +598,10 @@ int run_fixture(int fd) {
   if (mode == "fixture.cancel-race.channel-close") {
     close_fixture_fd(fd);
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    return 0;
+  }
+  if (mode == "fixture.cancel-race.zero-exit-zombie") {
+    wait_for_cancel_then_channel_close(fd, assignment);
     return 0;
   }
   if (mode == "fixture.ignore") {

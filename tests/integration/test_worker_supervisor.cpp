@@ -4,9 +4,12 @@
  * lifecycle.
  */
 #include <gtest/gtest.h>
+#include <signal.h>
+#include <unistd.h>
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -74,6 +77,79 @@ class ScopedSupervisorRoot final {
  private:
   /** @brief Sole recursively cleaned durable root. */
   std::filesystem::path path_;
+};
+
+/**
+ * @brief Installs and restores one process-global `SIGCHLD` disposition.
+ * @throws std::system_error when installation fails.
+ * @note Tests use this owner only inside an isolated death-test child. Calling
+ * `restore()` before child exit proves the disposition did not leak even
+ * within that process.
+ */
+class ScopedSigchldDisposition final {
+ public:
+  /**
+   * @brief Saves the current action and installs one auto-reaping candidate.
+   * @param ignore Whether the handler is `SIG_IGN` rather than `SIG_DFL`.
+   * @param flags Additional `sigaction` flags such as `SA_NOCLDWAIT`.
+   * @throws std::system_error when mask initialization or installation fails.
+   */
+  ScopedSigchldDisposition(bool ignore, int flags) {
+    struct sigaction replacement{};
+    replacement.sa_handler = ignore ? SIG_IGN : SIG_DFL;
+    replacement.sa_flags = flags;
+    if (sigemptyset(&replacement.sa_mask) != 0 ||
+        ::sigaction(SIGCHLD, &replacement, &previous_) != 0) {
+      throw std::system_error(errno, std::generic_category(),
+                              "install test SIGCHLD disposition");
+    }
+    installed_ = true;
+  }
+
+  /**
+   * @brief Best-effort restores the prior action when still installed.
+   * @throws Nothing.
+   * @note Death-test children that intentionally abort cannot run this tail;
+   * process isolation preserves the parent action in those cases.
+   */
+  ~ScopedSigchldDisposition() noexcept { static_cast<void>(restore()); }
+
+  /**
+   * @brief Prevents duplicate process-global disposition ownership.
+   * @param other Existing owner that remains unchanged.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedSigchldDisposition(const ScopedSigchldDisposition& other) = delete;
+  /**
+   * @brief Prevents duplicate process-global disposition assignment.
+   * @param other Existing owner that remains unchanged.
+   * @return No assignment result because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedSigchldDisposition& operator=(const ScopedSigchldDisposition& other) =
+      delete;
+
+  /**
+   * @brief Restores the exact saved action once.
+   * @return True after restoration or when already restored.
+   * @throws Nothing.
+   */
+  bool restore() noexcept {
+    if (!installed_) {
+      return true;
+    }
+    if (::sigaction(SIGCHLD, &previous_, nullptr) != 0) {
+      return false;
+    }
+    installed_ = false;
+    return true;
+  }
+
+ private:
+  /** @brief Exact action observed before test installation. */
+  struct sigaction previous_{};
+  /** @brief Whether this owner still owes one restoration. */
+  bool installed_ = false;
 };
 
 /**
@@ -223,6 +299,40 @@ std::unique_ptr<SingleTenantJobService> make_service(
 }
 
 /**
+ * @brief Probes construction rejection under one auto-reaping policy.
+ * @param root Fresh service root that must remain unopened on rejection.
+ * @param ignore Whether to install `SIG_IGN`.
+ * @param flags Additional signal-action flags.
+ * @return Zero only for an explicit `SIGCHLD` rejection plus restoration.
+ * @throws Nothing; distinct nonzero codes preserve child-process diagnostics.
+ */
+int probe_sigchld_construction_rejection(const std::filesystem::path& root,
+                                         bool ignore, int flags) noexcept {
+  try {
+    ScopedSigchldDisposition disposition(ignore, flags);
+    bool rejected = false;
+    try {
+      auto service = make_service(root, supervisor_options());
+      static_cast<void>(service);
+    } catch (const std::invalid_argument& error) {
+      rejected = std::string(error.what()).find("SIGCHLD") != std::string::npos;
+    } catch (...) {
+      return 2;
+    }
+    const bool root_untouched = !std::filesystem::exists(root);
+    if (!disposition.restore()) {
+      return 3;
+    }
+    if (!rejected) {
+      return 4;
+    }
+    return root_untouched ? 0 : 5;
+  } catch (...) {
+    return 6;
+  }
+}
+
+/**
  * @brief Waits for one terminal Job and asserts presence.
  * @param service Live service.
  * @param job_id Exact accepted Job identity.
@@ -255,6 +365,33 @@ bool wait_until(const std::function<bool()>& predicate,
     std::this_thread::sleep_for(10ms);
   }
   return predicate();
+}
+
+/**
+ * @brief Provokes exact-reaping authority loss after a worker is live.
+ * @param root Fresh service root used only by the isolated death-test child.
+ * @param ignore Whether to install `SIG_IGN`.
+ * @param flags Additional signal-action flags.
+ * @return Nothing; a conforming manager fail-stops during service drainage.
+ * @throws Setup failures unchanged so the death-test regex cannot hide them.
+ * @note The signal action is process-local to the death-test child; expected
+ * `SIGABRT` ends that child, while the parent test process remains unchanged.
+ */
+void provoke_reap_authority_loss(const std::filesystem::path& root, bool ignore,
+                                 int flags) {
+  auto service = make_service(root, supervisor_options());
+  static_cast<void>(service->submit(fixture_spec("fixture.ignore")));
+  if (!wait_until(
+          [&] {
+            return SingleTenantJobServiceTestAccess::live_worker_process_count(
+                       *service) == 1U;
+          },
+          2s)) {
+    throw std::runtime_error("authority-loss worker did not become live");
+  }
+  ScopedSigchldDisposition disposition(ignore, flags);
+  service.reset();
+  throw std::runtime_error("authority loss returned ordinary settlement");
 }
 
 /**
@@ -450,6 +587,30 @@ TEST(WorkerSupervisor, CooperativeAndForcedCancellationRemainDistinct) {
   EXPECT_LT(elapsed, 2s);
 }
 
+TEST(WorkerSupervisor, ZeroExitZombieIsNotForcedCancellation) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.await_pre_signal_zero_exit_for_test = true;
+  auto service = make_service(root.path(), std::move(options));
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.cancel-race.zero-exit-zombie"));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto snapshot = service->query(submitted.job_id);
+        return snapshot.has_value() && snapshot->state == JobState::Running;
+      },
+      2s));
+
+  ASSERT_TRUE(service->cancel(submitted.job_id));
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::WorkerChannel)
+      << terminal.message;
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
+}
+
 TEST(WorkerSupervisor, CancelSendFailurePreservesWorkerFailureAndExit) {
   /**
    * @brief Maps one fixture cancel-channel fault to its exact terminal truth.
@@ -592,6 +753,41 @@ TEST(WorkerSupervisor, ProductConstructionRejectsUnmarkedOrMissingExecutable) {
                                       DurableServerStateOptions{},
                                       TenantQuotaAuthorityOptions{}, missing),
                std::invalid_argument);
+}
+
+TEST(WorkerSupervisor, ProductConstructionRejectsAutoReapingSigchldPolicies) {
+  ScopedSupervisorRoot root;
+  EXPECT_EXIT(
+      {
+        ::_exit(probe_sigchld_construction_rejection(
+            root.path() / "sigign-construction", true, 0));
+      },
+      ::testing::ExitedWithCode(0), "");
+#ifdef SA_NOCLDWAIT
+  EXPECT_EXIT(
+      {
+        ::_exit(probe_sigchld_construction_rejection(
+            root.path() / "nocldwait-construction", false, SA_NOCLDWAIT));
+      },
+      ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+TEST(WorkerSupervisor, AutoReapAfterSpawnFailStopsReapingAuthority) {
+  ScopedSupervisorRoot root;
+  EXPECT_EXIT(
+      { provoke_reap_authority_loss(root.path() / "sigign-runtime", true, 0); },
+      ::testing::KilledBySignal(SIGABRT),
+      "exact worker reaping authority was lost");
+#ifdef SA_NOCLDWAIT
+  EXPECT_EXIT(
+      {
+        provoke_reap_authority_loss(root.path() / "nocldwait-runtime", false,
+                                    SA_NOCLDWAIT);
+      },
+      ::testing::KilledBySignal(SIGABRT),
+      "exact worker reaping authority was lost");
+#endif
 }
 
 }  // namespace

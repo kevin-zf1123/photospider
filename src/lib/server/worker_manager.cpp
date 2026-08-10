@@ -176,6 +176,35 @@ enum class OwnedSignalResult : std::uint8_t {
 };
 
 /**
+ * @brief Writes one allocation-free authority diagnostic and aborts.
+ * @param message Non-null trusted null-terminated diagnostic.
+ * @return Never returns.
+ * @throws Nothing.
+ * @note This terminal path performs no callback, record deletion, or ordinary
+ * completion publication because exact process authority can no longer be
+ * represented safely.
+ */
+[[noreturn]] void fail_stop_worker_authority(const char* message) noexcept {
+  if (message != nullptr) {
+    const std::size_t size = std::strlen(message);
+    std::size_t offset = 0U;
+    while (offset != size) {
+      const ssize_t written =
+          ::write(STDERR_FILENO, message + offset, size - offset);
+      if (written > 0) {
+        offset += static_cast<std::size_t>(written);
+        continue;
+      }
+      if (written < 0 && errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+  }
+  std::abort();
+}
+
+/**
  * @brief Terminates the authority process after its final reap deadline.
  * @return Never returns.
  * @throws Nothing.
@@ -188,20 +217,73 @@ enum class OwnedSignalResult : std::uint8_t {
   static constexpr char kMessage[] =
       "photospider WorkerManager fail-stop: exact worker was not reaped "
       "before the SIGKILL deadline\n";
-  std::size_t offset = 0U;
-  while (offset != sizeof(kMessage) - 1U) {
-    const ssize_t written = ::write(STDERR_FILENO, kMessage + offset,
-                                    sizeof(kMessage) - 1U - offset);
-    if (written > 0) {
-      offset += static_cast<std::size_t>(written);
-      continue;
-    }
-    if (written < 0 && errno == EINTR) {
-      continue;
-    }
-    break;
+  fail_stop_worker_authority(kMessage);
+}
+
+/**
+ * @brief Terminates after exact PID/reaping authority becomes unavailable.
+ * @return Never returns.
+ * @throws Nothing.
+ * @note `ECHILD`, another non-retryable `waitpid` error, or an impossible
+ * retained-PID transition means no ordinary Job completion can be proven.
+ */
+[[noreturn]] void fail_stop_reaping_authority_lost() noexcept {
+  static constexpr char kMessage[] =
+      "photospider WorkerManager fail-stop: exact worker reaping authority "
+      "was lost\n";
+  fail_stop_worker_authority(kMessage);
+}
+
+/**
+ * @brief Reports whether one `SIGCHLD` action enables kernel auto-reaping.
+ * @param action Process-global action returned by `sigaction`.
+ * @return True for `SIG_IGN` or `SA_NOCLDWAIT`.
+ * @throws Nothing.
+ */
+bool sigchld_action_auto_reaps(const struct sigaction& action) noexcept {
+  if (action.sa_handler == SIG_IGN) {
+    return true;
   }
-  std::abort();
+#ifdef SA_NOCLDWAIT
+  return (action.sa_flags & SA_NOCLDWAIT) != 0;
+#else
+  return false;
+#endif
+}
+
+/**
+ * @brief Validates that product construction can retain exact child statuses.
+ * @return Nothing when the current `SIGCHLD` disposition preserves waitability.
+ * @throws std::system_error when the process action cannot be queried.
+ * @throws std::invalid_argument for `SIG_IGN` or `SA_NOCLDWAIT`.
+ * @note The caller invokes this before starting any manager thread or worker.
+ */
+void validate_sigchld_reaping_configuration() {
+  struct sigaction action{};
+  if (::sigaction(SIGCHLD, nullptr, &action) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "query WorkerManager SIGCHLD disposition");
+  }
+  if (sigchld_action_auto_reaps(action)) {
+    throw std::invalid_argument(
+        "WorkerManager SIGCHLD disposition must not use SIG_IGN or "
+        "SA_NOCLDWAIT");
+  }
+}
+
+/**
+ * @brief Revalidates exact child waitability immediately before `fork`.
+ * @return Nothing while the process-wide action still preserves wait status.
+ * @throws Nothing.
+ * @note A host mutation after successful service construction is an authority
+ * violation, not an attempt-local startup failure, and therefore fail-stops.
+ */
+void require_sigchld_reaping_authority_before_fork() noexcept {
+  struct sigaction action{};
+  if (::sigaction(SIGCHLD, nullptr, &action) != 0 ||
+      sigchld_action_auto_reaps(action)) {
+    fail_stop_reaping_authority_lost();
+  }
 }
 
 /**
@@ -209,9 +291,12 @@ enum class OwnedSignalResult : std::uint8_t {
  * @param process Exactly reaped child status.
  * @param term_delivered Whether the kernel accepted owned `SIGTERM` delivery.
  * @param kill_delivered Whether the kernel accepted owned `SIGKILL` delivery.
- * @return True for matching signal death or clean exit after an accepted
- * escalation; false for a pre-existing nonzero or unrelated signal failure.
+ * @return True only for signal death matching an accepted owned escalation;
+ * false for every normal exit, pre-existing failure, or unrelated signal.
  * @throws Nothing.
+ * @note `kill()` success does not prove causality for a zombie. With no worker
+ * TERM-exit handshake, a normal zero exit remains ordinary report/channel/exit
+ * truth even when the kernel accepted a later signal request for that PID.
  */
 bool escalation_matches_wait_status(const ChildProcess& process,
                                     bool term_delivered,
@@ -224,7 +309,46 @@ bool escalation_matches_wait_status(const ChildProcess& process,
     return (term_delivered && signal_number == SIGTERM) ||
            (kill_delivered && signal_number == SIGKILL);
   }
-  return WIFEXITED(process.status) && WEXITSTATUS(process.status) == 0;
+  return false;
+}
+
+/**
+ * @brief Waits until a child has exited zero without consuming its wait status.
+ * @param pid Exact positive child PID still owned by the calling supervisor.
+ * @param deadline Absolute monotonic test-only observation deadline.
+ * @return Nothing once `waitid(WNOWAIT)` proves a normal zero exit.
+ * @throws ManagerFailure when the child exits abnormally or the deterministic
+ * test deadline expires.
+ * @note This source-private seam is reached only when explicitly enabled by a
+ * test option. The later production `waitpid` remains the sole exact reaper;
+ * inability to observe this owned child fail-stops as authority loss.
+ */
+void await_pre_signal_zero_exit_for_test(
+    pid_t pid, std::chrono::steady_clock::time_point deadline) {
+  for (;;) {
+    siginfo_t information{};
+    const int observed = ::waitid(P_PID, static_cast<id_t>(pid), &information,
+                                  WEXITED | WNOHANG | WNOWAIT);
+    if (observed == 0 && information.si_pid == pid) {
+      if (information.si_code != CLD_EXITED || information.si_status != 0) {
+        throw ManagerFailure(
+            JobAttemptFailure::WorkerExit,
+            "pre-signal test child did not reach a normal zero exit");
+      }
+      return;
+    }
+    if (observed < 0 && errno != EINTR) {
+      fail_stop_reaping_authority_lost();
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      throw ManagerFailure(
+          JobAttemptFailure::WorkerExit,
+          "pre-signal test child did not become a zero-exit zombie");
+    }
+    std::this_thread::sleep_until(
+        std::min(deadline, now + kSupervisorPollInterval));
+  }
 }
 
 /**
@@ -626,7 +750,12 @@ class WorkerManager::Impl final {
  private:
   /**
    * @brief Validates every callback, duration, factory, and product executable.
+   * @return Nothing after every applicable invariant is validated.
    * @throws std::invalid_argument for any fail-closed configuration error.
+   * @throws std::system_error when the product `SIGCHLD` action cannot be
+   * queried.
+   * @note Explicit in-process test mode validates common bounds but neither
+   * creates a child nor claims process-global reaping authority.
    */
   void validate_configuration() const {
     if (factory_ == nullptr || !callbacks_.begin_assignment ||
@@ -650,6 +779,7 @@ class WorkerManager::Impl final {
     if (in_process_test_mode_) {
       return;
     }
+    validate_sigchld_reaping_configuration();
     if (!factory_->supports_external_assignment() ||
         options_.worker_executable.empty()) {
       throw std::invalid_argument(
@@ -760,7 +890,9 @@ class WorkerManager::Impl final {
    * @throws ManagerFailure for setup, fork, resource-limit, or exec failure.
    * @throws std::system_error for pre-fork descriptor setup failure.
    * @note The fork child performs only async-signal-safe descriptor, limit,
-   * status-write, and exec operations using storage prepared before fork.
+   * status-write, and exec operations using storage prepared before fork. The
+   * parent revalidates waitable `SIGCHLD` policy immediately before `fork` and
+   * fail-stops if process-global exact-reaping authority changed.
    */
   ChildProcess spawn_process(const std::shared_ptr<Record>& record) {
     int sockets[2] = {-1, -1};
@@ -802,6 +934,7 @@ class WorkerManager::Impl final {
     const char* const executable_pointer = executable.c_str();
     const char* const control_pointer = control_argument.c_str();
 
+    require_sigchld_reaping_authority_before_fork();
     const pid_t pid = ::fork();
     if (pid < 0) {
       throw ManagerFailure(
@@ -1164,35 +1297,48 @@ class WorkerManager::Impl final {
    * @brief Publishes one exact live PID into its immutable record.
    * @param record Exact retained record.
    * @param pid Positive freshly forked child PID.
-   * @throws std::logic_error when record ownership changed unexpectedly.
+   * @throws Nothing.
+   * @note An impossible post-fork publication transition fail-stops before the
+   * child can escape the sole lifecycle authority.
    */
-  void set_live_pid(const std::shared_ptr<Record>& record, pid_t pid) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = records_.find(record->identity.attempt_id.value());
-    if (pid <= 0 || found == records_.end() || found->second != record ||
-        found->second->identity != record->identity || record->pid > 0) {
-      throw std::logic_error("worker PID ownership publication failed");
+  void set_live_pid(const std::shared_ptr<Record>& record, pid_t pid) noexcept {
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto found = records_.find(record->identity.attempt_id.value());
+      if (pid <= 0 || found == records_.end() || found->second != record ||
+          found->second->identity != record->identity || record->pid > 0) {
+        fail_stop_reaping_authority_lost();
+      }
+      record->pid = pid;
+    } catch (...) {
+      fail_stop_reaping_authority_lost();
     }
-    record->pid = pid;
   }
 
   /**
    * @brief Clears one PID immediately after exact successful waitpid reaping.
    * @param record Exact retained record.
    * @param pid Exact reaped PID.
-   * @throws std::logic_error when retained ownership does not match.
+   * @throws Nothing.
+   * @note An ownership mismatch after exact `waitpid` fail-stops rather than
+   * leaving a stale live-PID record eligible for ordinary completion.
    */
-  void clear_reaped_pid(const std::shared_ptr<Record>& record, pid_t pid) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (record->pid != pid ||
-        record->identity.worker_instance_id !=
-            record->assignment.identity.worker_instance_id ||
-        record->identity.worker_lease_generation !=
-            record->assignment.identity.worker_lease_generation) {
-      throw std::logic_error("worker PID reap ownership changed");
+  void clear_reaped_pid(const std::shared_ptr<Record>& record,
+                        pid_t pid) noexcept {
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (record->pid != pid ||
+          record->identity.worker_instance_id !=
+              record->assignment.identity.worker_instance_id ||
+          record->identity.worker_lease_generation !=
+              record->assignment.identity.worker_lease_generation) {
+        fail_stop_reaping_authority_lost();
+      }
+      record->pid = -1;
+      condition_.notify_all();
+    } catch (...) {
+      fail_stop_reaping_authority_lost();
     }
-    record->pid = -1;
-    condition_.notify_all();
   }
 
   /**
@@ -1203,20 +1349,26 @@ class WorkerManager::Impl final {
    * @return Whether delivery occurred, the process vanished, or signaling was
    * rejected.
    * @throws Nothing.
+   * @note A retained record/PID mismatch or synchronization failure fail-stops
+   * because the caller can no longer prove exact lifecycle authority.
    */
   OwnedSignalResult signal_owned(const std::shared_ptr<Record>& record,
                                  pid_t pid, int signal_number) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = records_.find(record->identity.attempt_id.value());
-    if (pid <= 0 || found == records_.end() || found->second != record ||
-        record->pid != pid || found->second->identity != record->identity) {
-      return OwnedSignalResult::Rejected;
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto found = records_.find(record->identity.attempt_id.value());
+      if (pid <= 0 || found == records_.end() || found->second != record ||
+          record->pid != pid || found->second->identity != record->identity) {
+        fail_stop_reaping_authority_lost();
+      }
+      if (::kill(pid, signal_number) == 0) {
+        return OwnedSignalResult::Delivered;
+      }
+      return errno == ESRCH ? OwnedSignalResult::AlreadyExited
+                            : OwnedSignalResult::Rejected;
+    } catch (...) {
+      fail_stop_reaping_authority_lost();
     }
-    if (::kill(pid, signal_number) == 0) {
-      return OwnedSignalResult::Delivered;
-    }
-    return errno == ESRCH ? OwnedSignalResult::AlreadyExited
-                          : OwnedSignalResult::Rejected;
   }
 
   /**
@@ -1225,9 +1377,10 @@ class WorkerManager::Impl final {
    * @param process Non-null child state.
    * @return True when this call or an earlier call has reaped the child.
    * @throws std::invalid_argument when `process` is null.
-   * @throws ManagerFailure for waitpid errors other than interruption.
    * @note The source-private test gate may suppress the syscall to exercise
-   * final deadline handling; product configuration leaves that gate null.
+   * final deadline handling; product configuration leaves that gate null. A
+   * non-interruption error, including `ECHILD`, means exact status authority
+   * was lost and fail-stops without a completion callback or record deletion.
    */
   bool observe_exit(const std::shared_ptr<Record>& record,
                     ChildProcess* process) {
@@ -1257,9 +1410,7 @@ class WorkerManager::Impl final {
       if (waited < 0 && errno == EINTR) {
         continue;
       }
-      throw ManagerFailure(
-          JobAttemptFailure::WorkerExit,
-          std::string("worker waitpid failed: ") + std::strerror(errno));
+      fail_stop_reaping_authority_lost();
     }
   }
 
@@ -1270,7 +1421,7 @@ class WorkerManager::Impl final {
    * @param deadline Absolute monotonic deadline.
    * @return True when reaped before deadline.
    * @throws std::invalid_argument when `process` is null.
-   * @throws ManagerFailure from waitpid unchanged.
+   * @note Reaping authority loss fail-stops rather than throwing.
    */
   bool wait_for_exit_until(const std::shared_ptr<Record>& record,
                            ChildProcess* process,
@@ -1295,11 +1446,11 @@ class WorkerManager::Impl final {
    * @return True only when authority-owned signal escalation was delivered and
    * remains consistent with the exact wait status; false when channel closure
    * or a pre-existing worker failure allowed exact reaping.
-   * @throws ManagerFailure for unrecoverable waitpid failure.
    * @throws std::invalid_argument when `process` is null.
    * @note Every signal revalidates complete record/PID ownership under mutex.
-   * Missing the final reap deadline fail-stops the authority process; this
-   * function never falls back to an unbounded `waitpid`.
+   * Missing the final reap deadline or losing exact wait authority fail-stops
+   * the authority process; this function never falls back to an unbounded
+   * `waitpid` or a recoverable manager completion.
    */
   bool terminate_and_reap(const std::shared_ptr<Record>& record,
                           ChildProcess* process) {
@@ -1309,9 +1460,15 @@ class WorkerManager::Impl final {
     if (process->reaped) {
       return false;
     }
-    process->control.reset();
     if (observe_exit(record, process)) {
+      process->control.reset();
       return false;
+    }
+    process->control.reset();
+    if (options_.await_pre_signal_zero_exit_for_test) {
+      await_pre_signal_zero_exit_for_test(
+          process->pid,
+          std::chrono::steady_clock::now() + options_.terminate_timeout);
     }
     const bool term_delivered = signal_owned(record, process->pid, SIGTERM) ==
                                 OwnedSignalResult::Delivered;
@@ -1335,14 +1492,19 @@ class WorkerManager::Impl final {
    * @brief Marks one supervision record complete and wakes the handle reaper.
    * @param record Exact retained record whose thread is returning.
    * @throws Nothing.
+   * @note A retained live PID or synchronization failure fail-stops before the
+   * record becomes eligible for callback-independent deletion.
    */
   void mark_completed(const std::shared_ptr<Record>& record) noexcept {
     try {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (record->pid > 0) {
+        fail_stop_reaping_authority_lost();
+      }
       record->completed = true;
       condition_.notify_all();
     } catch (...) {
-      std::terminate();
+      fail_stop_reaping_authority_lost();
     }
   }
 
@@ -1362,6 +1524,8 @@ class WorkerManager::Impl final {
    * @brief Joins completed supervision threads outside the manager mutex.
    * @return Nothing after shutdown and complete record drainage.
    * @throws Nothing.
+   * @note A completed record that still retains a live PID fail-stops before
+   * map erasure or supervisor-handle transfer.
    */
   void reap_supervisors() noexcept {
     for (;;) {
@@ -1379,6 +1543,9 @@ class WorkerManager::Impl final {
           return;
         }
         record = completed->second;
+        if (record->pid > 0) {
+          fail_stop_reaping_authority_lost();
+        }
         joining_record_ = record;
         records_.erase(completed);
       }

@@ -219,6 +219,15 @@ struct WorkerManagerOptions final {
    * transferring PID ownership or enabling an unbounded wait.
    */
   std::shared_ptr<std::atomic<bool>> defer_reap_observation_for_test;
+  /**
+   * @brief Holds escalation until a normally exited child is waitable in tests.
+   * @note False in product construction. When true, `WorkerManager` performs
+   * one initial exact `waitpid(WNOHANG)` observation, revokes the channel, and
+   * then uses `waitid(WNOWAIT)` to preserve a zero-exit zombie until the real
+   * signal-decision path runs. This deterministic seam neither reaps the child
+   * nor transfers PID or signal authority to test code.
+   */
+  bool await_pre_signal_zero_exit_for_test = false;
 };
 
 /**
@@ -309,8 +318,8 @@ struct JobSnapshot final {
  * Job/artifact truth with no process-local active reservation.
  *
  * @throws std::invalid_argument when construction receives an invalid tenant,
- * null/non-externalizable product factory, invalid manager bounds, or unusable
- * worker executable.
+ * null/non-externalizable product factory, invalid manager bounds, unusable
+ * worker executable, or an auto-reaping product `SIGCHLD` disposition.
  * @note Methods are thread-safe. Destruction records cancellation intent,
  * releases `mutex_`, then asks WorkerManager to concurrently drain, terminate,
  * and reap every exact child. Callers must not race object destruction with a
@@ -327,12 +336,13 @@ class SingleTenantJobService final {
    * @param state_options Optional source-private durable commit observer.
    * @param quota_options Optional source-private quota mutation observer.
    * @param worker_options Bounded process-supervision configuration.
-   * @throws std::invalid_argument for invalid configuration.
+   * @throws std::invalid_argument for invalid configuration, including
+   * `SIGCHLD=SIG_IGN` or `SA_NOCLDWAIT` in product mode.
    * @throws std::bad_alloc when service/manager state allocation fails.
    * @throws DurableStateError and derived durability, corruption, or commit
    * errors while recovering the durable root or publishing a repaired Job.
-   * @throws std::system_error for filesystem or manager-thread creation
-   * failures.
+   * @throws std::system_error for filesystem, `SIGCHLD` query, or
+   * manager-thread creation failures.
    * @note Product worker configuration is validated before the durable root is
    * opened or repaired. No manager record exists until recovery completes.
    */
@@ -346,7 +356,8 @@ class SingleTenantJobService final {
 
   /**
    * @brief Requests cancellation and drains all process-local workers.
-   * @throws Nothing; WorkerManager contains escalation and reaping failures.
+   * @throws Nothing; WorkerManager contains ordinary escalation failures but
+   * fail-stops if exact reaping authority is lost.
    * @note No service mutex is held during any process or thread wait.
    */
   ~SingleTenantJobService() noexcept;
