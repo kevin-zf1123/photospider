@@ -407,7 +407,10 @@ marks the channel unavailable inside the same bounded monitor. Further decoding
 stops, but process ownership, cooperative/escalation deadlines, and exact reap
 observation continue, so a signal/nonzero wait status or already decoded Report
 outranks `WorkerChannel`. Only a clean zero exit with no Report remains a
-channel failure.
+channel failure. While the cooperative deadline is active, the ordinary EOF/
+post-report deadline is subordinate to it and cannot terminate/reap the worker
+through the generic channel path first. Exact exit status or manager-owned
+escalation therefore settles before any residual `WorkerChannel` fact.
 Only an exact `WIFSIGNALED` status matching a successfully delivered owned
 `SIGTERM` or `SIGKILL` yields a forced-cancellation fact. Successful `kill()`
 against an already exited zombie is not causality; a normal zero exit remains

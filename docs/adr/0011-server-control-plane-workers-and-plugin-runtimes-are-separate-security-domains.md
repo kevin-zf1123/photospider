@@ -282,7 +282,11 @@ worker truth rather than an uncaught write exception later inferred as process
 or channel loss. After cancellation delivery has been attempted, a socket-
 system error likewise remains inside the bounded monitor: decoding stops, but
 exact process ownership and reap deadlines continue so signal/nonzero wait
-status or an already decoded Report outranks the weaker channel fact.
+status or an already decoded Report outranks the weaker channel fact. While
+the cooperative cancellation deadline remains active, the ordinary EOF/post-
+report deadline is subordinate to it and cannot terminate/reap the worker
+through the generic channel path first. Exact exit status or manager-owned
+escalation therefore settles before any residual `WorkerChannel` fact.
 
 The exec bootstrap also carries required exact startup and worker-write
 deadlines alongside the control descriptor. The worker uses the manager values

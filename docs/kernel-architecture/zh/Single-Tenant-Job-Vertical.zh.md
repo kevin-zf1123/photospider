@@ -325,7 +325,10 @@ truth 分类。该路径不发送 signal、不执行第二次 reap，也不能�
 时，会在同一个有界 monitor 内把 channel 标记为 unavailable。后续 decode 停止，但 process
 ownership、cooperative/escalation deadline 与精确 reap observation 继续，因此 signal/nonzero
 wait status 或已经 decode 的 Report 优先于 `WorkerChannel`。只有没有 Report 的 clean zero
-exit 仍是 channel failure。只有匹配 owner 已成功发送
+exit 仍是 channel failure。当 cooperative deadline 仍然有效时，普通 EOF/post-report
+deadline 必须服从它，不能先通过 generic channel path 终止并 reap worker。因此，精确 exit
+status 或 manager-owned escalation 会先完成裁决，之后才允许剩余 `WorkerChannel` fact。
+只有匹配 owner 已成功发送
 `SIGTERM` 或 `SIGKILL` 的精确 `WIFSIGNALED` 状态才能产生 forced-cancellation fact。对已经
 退出的 zombie 调用 `kill()` 成功不构成因果证明；正常零退出仍按 report/channel/exit truth
 分类。Destruction 会记录 cancellation，且不在 Job mutex 下等待，随后通过相同 escalation path

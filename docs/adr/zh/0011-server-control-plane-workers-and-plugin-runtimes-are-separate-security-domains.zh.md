@@ -237,7 +237,9 @@ image metadata 与 tight image bytes。当其他方面有效且已 settled 的 s
 exception 再被推断为 process 或 channel loss。在已经尝试 cancellation delivery 后发生
 socket-system error 时，同样会让错误留在有界 monitor 内：decode 停止，但精确 process
 ownership 与 reap deadline 继续，因此 signal/nonzero wait status 或已经 decode 的 Report
-优先于较弱 channel fact。
+优先于较弱 channel fact。当 cooperative cancellation deadline 仍然有效时，普通 EOF/post-
+report deadline 必须服从它，不能先通过 generic channel path 终止并 reap worker。因此，精确
+exit status 或 manager-owned escalation 会先完成裁决，之后才允许剩余 `WorkerChannel` fact。
 
 Exec bootstrap 还会在 control descriptor 之外携带必填的精确 startup 与 worker-write
 deadline。worker 不使用本地默认值或更短 cap，而是直接采用 manager value，因此即使第一帧
