@@ -1445,6 +1445,9 @@ class WorkerManager::Impl final {
    * open and drains the stateful decoder through one bounded post-reap window;
    * only matching delivered TERM/KILL escalation yields
    * `ForcedCancellation`.
+   * A source-private observation flag may record the first exact external
+   * heartbeat for deterministic test rendezvous. It changes no deadline and
+   * grants no process, channel, cancellation, or completion authority.
    * Every first `Report`, `Failure`, or `ForcedCancellation` construction is
    * locally fail-stop protected after exact reaping and cannot be reclassified
    * by the outer catch boundary.
@@ -1629,6 +1632,10 @@ class WorkerManager::Impl final {
           }
           heartbeat_deadline =
               std::chrono::steady_clock::now() + options_.heartbeat_timeout;
+          if (options_.first_external_heartbeat_observed_for_test != nullptr) {
+            options_.first_external_heartbeat_observed_for_test->store(
+                true, std::memory_order_release);
+          }
         } else if (frame.kind == WorkerMessageKind::Report) {
           JobAttemptReport report =
               decode_worker_report(frame, *record->assignment.spec);

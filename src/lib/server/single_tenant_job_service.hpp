@@ -364,6 +364,16 @@ struct WorkerManagerOptions final {
    */
   std::shared_ptr<std::atomic<bool>> fail_record_construction_for_test;
   /**
+   * @brief Optional observation of the first valid external-worker heartbeat.
+   * @note Null in product construction. Real-process tests may wait for this
+   * release-stored flag before requesting cancellation, proving that the
+   * worker has entered its active control loop rather than treating `Running`
+   * as process readiness. The observation exposes no identity, PID,
+   * descriptor, signal, wait, reap, cancellation, or completion authority and
+   * does not alter any manager deadline.
+   */
+  std::shared_ptr<std::atomic<bool>> first_external_heartbeat_observed_for_test;
+  /**
    * @brief Holds one cancel-deadline escalation until clean zero exit in tests.
    * @note False in product construction. When true, `WorkerManager` first
    * completes the monitor loop's ordinary `waitpid(WNOHANG)` observation and
@@ -697,7 +707,9 @@ class SingleTenantJobService final {
    * @return True when the assignment remains current and may execute.
    * @throws Durable-state failures from Running publication unchanged.
    * @note WorkerManager invokes this without its mutex. A false result spawns
-   * no process and publishes no completion fact.
+   * no process and publishes no completion fact. A true result publishes the
+   * supervision fence before external spawn or protocol acceptance and does
+   * not establish worker readiness.
    */
   bool begin_managed_assignment(const AttemptIdentity& expected);
 

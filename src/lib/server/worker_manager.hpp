@@ -69,6 +69,9 @@ struct WorkerManagerCallbacks final {
   /**
    * @brief Fences and publishes Running for one still-current assignment.
    * @note Returning false retires the record without spawning or completion.
+   * A true result is the control-plane supervision fence and deliberately
+   * precedes external process spawn, `AssignmentAccepted`, and heartbeats; it
+   * is not an external-worker readiness observation.
    */
   std::function<bool(const AttemptIdentity&)> begin_assignment;
   /** @brief Observes monotonic cancel/fail-stop/replacement/shutdown intent. */

@@ -280,7 +280,11 @@ enum class ArtifactDurability : std::uint8_t {
 enum class JobState : std::uint8_t {
   /** @brief Accepted current assignment has not entered worker execution. */
   Queued,
-  /** @brief Current assignment worker execution is active. */
+  /**
+   * @brief Current assignment supervision has begun.
+   * @note External process spawn, `AssignmentAccepted`, and the first
+   * heartbeat may still be pending; this state is not worker readiness.
+   */
   Running,
   /** @brief Monotonic cancellation intent awaits current settlement. */
   Cancelling,

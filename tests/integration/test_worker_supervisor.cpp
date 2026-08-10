@@ -1187,38 +1187,59 @@ TEST(WorkerSupervisor,
 }
 
 TEST(WorkerSupervisor, CooperativeAndForcedCancellationRemainDistinct) {
-  ScopedSupervisorRoot root;
-  auto service = make_service(root.path(), supervisor_options());
-  const JobSubmission cooperative =
-      service->submit(fixture_spec("fixture.cooperative"));
-  ASSERT_TRUE(wait_until(
-      [&] {
-        const auto snapshot = service->query(cooperative.job_id);
-        return snapshot.has_value() && snapshot->state == JobState::Running;
-      },
-      2s));
-  ASSERT_TRUE(service->cancel(cooperative.job_id));
-  const JobSnapshot cooperative_terminal =
-      wait_terminal(*service, cooperative.job_id);
-  EXPECT_EQ(cooperative_terminal.state, JobState::Cancelled);
-  EXPECT_EQ(cooperative_terminal.failure,
-            JobAttemptFailure::CancellationObserved);
+  {
+    ScopedSupervisorRoot root;
+    auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
+    WorkerManagerOptions options = supervisor_options();
+    options.heartbeat_timeout = 2s;
+    options.cooperative_cancel_timeout = 2s;
+    options.first_external_heartbeat_observed_for_test = heartbeat_observed;
+    auto service = make_service(root.path(), std::move(options));
+    const JobSubmission cooperative =
+        service->submit(fixture_spec("fixture.cooperative"));
 
-  const JobSubmission ignored = service->submit(fixture_spec("fixture.ignore"));
-  ASSERT_TRUE(wait_until(
-      [&] {
-        const auto snapshot = service->query(ignored.job_id);
-        return snapshot.has_value() && snapshot->state == JobState::Running;
-      },
-      2s));
-  const auto started = std::chrono::steady_clock::now();
-  ASSERT_TRUE(service->cancel(ignored.job_id));
-  const JobSnapshot ignored_terminal = wait_terminal(*service, ignored.job_id);
-  const auto elapsed = std::chrono::steady_clock::now() - started;
-  EXPECT_EQ(ignored_terminal.state, JobState::Cancelled);
-  EXPECT_EQ(ignored_terminal.failure,
-            JobAttemptFailure::WorkerCancellationForced);
-  EXPECT_LT(elapsed, 2s);
+    ASSERT_TRUE(wait_until(
+        [&] { return heartbeat_observed->load(std::memory_order_acquire); },
+        2s));
+    ASSERT_TRUE(service->cancel(cooperative.job_id));
+    const JobSnapshot terminal = wait_terminal(*service, cooperative.job_id);
+
+    EXPECT_EQ(terminal.state, JobState::Cancelled) << terminal.message;
+    EXPECT_TRUE(terminal.attempt_settled);
+    EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Cancelled);
+    EXPECT_EQ(terminal.failure, JobAttemptFailure::CancellationObserved);
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+        0U);
+  }
+
+  {
+    ScopedSupervisorRoot root;
+    auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
+    WorkerManagerOptions options = supervisor_options();
+    options.heartbeat_timeout = 2s;
+    options.first_external_heartbeat_observed_for_test = heartbeat_observed;
+    auto service = make_service(root.path(), std::move(options));
+    const JobSubmission ignored =
+        service->submit(fixture_spec("fixture.ignore"));
+
+    ASSERT_TRUE(wait_until(
+        [&] { return heartbeat_observed->load(std::memory_order_acquire); },
+        2s));
+    const auto started = std::chrono::steady_clock::now();
+    ASSERT_TRUE(service->cancel(ignored.job_id));
+    const JobSnapshot terminal = wait_terminal(*service, ignored.job_id);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_EQ(terminal.state, JobState::Cancelled) << terminal.message;
+    EXPECT_TRUE(terminal.attempt_settled);
+    EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Cancelled);
+    EXPECT_EQ(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
+    EXPECT_LT(elapsed, 2s);
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+        0U);
+  }
 }
 
 TEST(WorkerSupervisor, ZeroExitZombieIsNotForcedCancellation) {
