@@ -308,7 +308,12 @@ durability barrier 或 completion observer 失败，service 会保留 `Cancellin
 cancellation。发送失败会继续有界排空 report/EOF/wait status，并保留真实 Failed report、
 nonzero exit、signal death 或 channel close；发送失败本身不会 mint forced cancellation。
 Cooperative deadline 时仍存活的 worker 会先被关闭/撤销 channel，再在 configured bound 下接收
-owner-validated `SIGTERM`/`SIGKILL` escalation，最后精确 reap。只有匹配 owner 已成功发送
+owner-validated `SIGTERM`/`SIGKILL` escalation，最后精确 reap。Deadline 决策会再执行一次
+精确的 nonblocking exit observation。如果该观察在 channel 撤销前 reap 了自然退出，reaping
+不得被当作 channel EOF：WorkerManager 会在独立且有界的 post-reap drain 期间保留 parent
+socket 与 stateful decoder，使已经进入缓冲区的 Report 与 EOF 仍按普通 report/channel/exit
+truth 分类。该路径不发送 signal、不执行第二次 reap，也不能仅因 cooperative deadline 已到就
+产生 forced cancellation。只有匹配 owner 已成功发送
 `SIGTERM` 或 `SIGKILL` 的精确 `WIFSIGNALED` 状态才能产生 forced-cancellation fact。对已经
 退出的 zombie 调用 `kill()` 成功不构成因果证明；正常零退出仍按 report/channel/exit truth
 分类。Destruction 会记录 cancellation，且不在 Job mutex 下等待，随后通过相同 escalation path
@@ -380,8 +385,9 @@ release-failure ownership、Failed/Cancelled/rejected/malformed/pre-manifest ter
 read-only availability、report/mutation fencing 与 restart convergence、持续 handle/process
 reaping、target-inventory platform gating、bounded protocol reconstruction、fresh process
 identity、crash/protocol/heartbeat/runtime isolation、stale-lease rejection、cooperative/forced
-cancellation、concurrent shutdown drainage、实际首次 completion/重建 allocation fail-stop、
-completion callback 异常 fail-stop，以及真实 Embedded Host output/checkpoint/restart 行为。
+cancellation、deadline-side natural-reap buffered-report drainage、concurrent shutdown
+drainage、实际首次 completion/重建 allocation fail-stop、completion callback 异常 fail-stop，
+以及真实 Embedded Host output/checkpoint/restart 行为。
 
 这一本地 Issue #100 可执行子集不新增 network/multi-tenant control plane、独立部署的
 WorkerManager、artifact data plane、untrusted plugin sandbox，或 Issues #101-#106 分配的

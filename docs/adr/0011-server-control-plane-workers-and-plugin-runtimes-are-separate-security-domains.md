@@ -265,9 +265,13 @@ single-tenant authority rather than as the target separate WorkerManager
 process. It uses one private socket pair, a fixed bounded protocol, fresh
 `fork`/`exec`, `RLIMIT_AS`, cooperative cancel followed by `SIGTERM`/`SIGKILL`,
 and exact `waitpid`. A report is eligible only after clean exit and reap. This
-is process crash isolation for the trusted Embedded worker composition; it is
-not network peer authentication, a syscall sandbox, device isolation, or the
-isolated tenant-plugin runtime assigned to Issues #101-#104.
+includes the deadline-side race where a second exact observation reaps natural
+exit before channel revocation: the manager keeps the parent socket and
+stateful decoder for one bounded post-reap Report/EOF drain rather than
+inventing channel loss or forced cancellation. This is process crash isolation
+for the trusted Embedded worker composition; it is not network peer
+authentication, a syscall sandbox, device isolation, or the isolated tenant-
+plugin runtime assigned to Issues #101-#104.
 
 The exec bootstrap also carries required exact startup and worker-write
 deadlines alongside the control descriptor. The worker uses the manager values

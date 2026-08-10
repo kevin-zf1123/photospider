@@ -223,9 +223,12 @@ plane 应用 retry policy。
 当前 Issue #100 子集在本地 single-tenant authority 内实例化这一 lifecycle，而不是目标中的
 独立 WorkerManager process。它使用一个 private socket pair、固定 bounded protocol、全新
 `fork`/`exec`、`RLIMIT_AS`、cooperative cancel 后的 `SIGTERM`/`SIGKILL`，以及精确
-`waitpid`。Report 只有在 clean exit 与 reap 后才具备资格。这为可信 Embedded worker
-composition 提供 process crash isolation；它不是 network peer authentication、syscall
-sandbox、device isolation，也不是 Issues #101-#104 分配的 isolated tenant-plugin runtime。
+`waitpid`。Report 只有在 clean exit 与 reap 后才具备资格。这也包括 deadline-side 竞态：第二次
+精确观察在 channel 撤销前 reap 了自然退出时，manager 会为一次有界的 post-reap Report/EOF
+drain 保留 parent socket 与 stateful decoder，而不是虚构 channel loss 或 forced cancellation。
+这为可信 Embedded worker composition 提供 process crash isolation；它不是 network peer
+authentication、syscall sandbox、device isolation，也不是 Issues #101-#104 分配的 isolated
+tenant-plugin runtime。
 
 Exec bootstrap 还会在 control descriptor 之外携带必填的精确 startup 与 worker-write
 deadline。worker 不使用本地默认值或更短 cap，而是直接采用 manager value，因此即使第一帧

@@ -385,6 +385,13 @@ and preserves an actual Failed report, nonzero exit, signal death, or channel
 close; it does not itself mint forced cancellation. A worker still alive at the
 cooperative deadline has its channel closed/revoked and receives owned
 `SIGTERM`/`SIGKILL` escalation under configured bounds before exact reaping.
+The deadline decision performs another exact nonblocking exit observation. If
+that observation reaps a natural exit before channel revocation, reaping is not
+treated as channel EOF: WorkerManager retains the parent socket and stateful
+decoder through a separate bounded post-reap drain so an already buffered
+Report and EOF remain ordinary report/channel/exit truth. That path sends no
+signal, performs no second reap, and cannot produce forced cancellation merely
+because the cooperative deadline elapsed.
 Only an exact `WIFSIGNALED` status matching a successfully delivered owned
 `SIGTERM` or `SIGKILL` yields a forced-cancellation fact. Successful `kill()`
 against an already exited zombie is not causality; a normal zero exit remains
@@ -470,9 +477,10 @@ read-only availability, report/mutation fencing, and restart convergence,
 ongoing handle/process reaping, target-inventory platform gating, bounded
 protocol reconstruction, fresh process identity, crash/protocol/heartbeat/
 runtime isolation, stale-lease rejection, cooperative/forced cancellation,
-concurrent shutdown drainage, actual first completion/reconstruction
-allocation fail-stop, completion-callback exception fail-stop, and real
-Embedded Host output/checkpoint/restart behavior.
+deadline-side natural-reap buffered-report drainage, concurrent shutdown
+drainage, actual first completion/reconstruction allocation fail-stop,
+completion-callback exception fail-stop, and real Embedded Host output/
+checkpoint/restart behavior.
 
 This local Issue #100 executable subset does not add the network/multi-tenant
 control plane, a separately deployed WorkerManager, artifact data plane,
