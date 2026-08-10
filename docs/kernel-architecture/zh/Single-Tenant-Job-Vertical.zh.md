@@ -173,12 +173,13 @@ restart(any non-cancelled state, matching stable artifact) -> Succeeded
 ```
 
 `submit()` 会校验并冻结 JobSpec/checkpoint，预留完整 quota envelope，插入内存 Job，
-并在 service mutex 仍阻塞 assignment progress 时请求 WorkerManager 保留唯一 supervision
-handle，然后发布 accepted truth。因此 supervision-thread 启动失败发生在 durable
-publication 之前，不会暴露 Job 或 handle。`NotPublished` journal failure 会移除 candidate
+并在 service mutex 仍阻塞 assignment progress 时请求 WorkerManager 构造并保留唯一 manager
+record 与 supervision handle，然后发布 accepted truth。因此 manager-record 构造、registry
+插入或 supervision-thread 启动失败发生在 child spawn 和 durable publication 之前，不会暴露
+Job 或 handle。`NotPublished` journal failure 会移除 candidate
 并释放其 quota；任一
 published failure 会保留与 visible record 对齐的 Job、worker authority 与 quota，并进入单调
-journal fail-stop。如果 supervision-thread-start 或 `NotPublished` rollback 无法释放 quota，
+journal fail-stop。如果 manager-record/thread start 或 `NotPublished` rollback 无法释放 quota，
 candidate Job 仍未发布，精确 reservation owner 会转移到 service 的 stranded slot，原始
 submit error 会被重新抛出，后续所有 mutation 在 restart 前均被 fail-stop。`query()` 复制
 当前 truth；`wait_for()` 只限制
@@ -192,7 +193,7 @@ outcome 都会保留新 attempt 与 reservation、fence worker progress，并 fa
 mutation。Report 与 manager action 必须匹配完整 current tenant/Job/spec/attempt/worker/
 lease tuple，因此 stale
 attempt 会被 fence，不能 settle、fail、cancel 或 commit replacement。
-如果 supervision-thread-start 或 `NotPublished` retry rollback 无法释放 fresh reservation，先前 failed
+如果 manager-record/thread start 或 `NotPublished` retry rollback 无法释放 fresh reservation，先前 failed
 Job truth 仍是 authoritative，fresh owner 会转移到 stranded slot，触发 retry 的 error 会被
 重新抛出，并且同一 fail-stop 生效，不会在同一进程内重试。
 
@@ -267,14 +268,16 @@ timeout、runtime timeout 与 forced-cancellation fact 使用彼此分离的 dur
 PID 的 record 绝不能被标记为 complete 或删除。
 
 仅仅完成精确 reaping 同样不能退役 manager record。Assignment begin 一旦成功或抛出异常，
-WorkerManager 就必须构造一个 typed terminal fact，并且控制面 callback 必须在
-`mark_completed` 前返回。如果 fact 构造抛出异常（包括 `std::bad_alloc`），就不会调用
-callback；如果 callback 抛出异常，则不会重试，因为它可能已经部分应用 durable truth。
-两种情况都会通过 allocation-free fail-stop 路径写出固定诊断，且发生在 completed-record
-标记或普通 record 删除之前。它们绝不伪造 replacement completion，也不释放 service-owned
-quota reservation。这次 fail-stop 后，重启仍是 durable Job 与 quota owner 唯一的
-reconciliation 边界。Begin callback 返回 false 是唯一合法的不带 completion 退役路径，
-因为它在 worker 执行前就 fence 了未发布或已被替换的 assignment。
+WorkerManager 就会在各自的 no-throw 构造边界内构造每个实际首次 `Report`（外部进程或显式
+in-process test marker）、`Failure` 与 `ForcedCancellation` completion，并且控制面 callback
+必须在 `mark_completed` 前返回。如果 fault injection、identity/message/report 保留、wait-status
+格式化或返回值构造抛出异常（包括 `std::bad_alloc`），该局部边界不会调用 callback，而是立即
+进入固定的 allocation-free fail-stop；异常不能逃逸到外层通用分类器再被改写成第二个 failure
+completion。如果 callback 抛出异常，则不会重试，因为它可能已经部分应用 durable truth。
+两种情况都会在 completed-record 标记或普通 record 删除之前 fail-stop。它们绝不伪造
+replacement completion，也不释放 service-owned quota reservation。这次 fail-stop 后，重启仍是
+durable Job 与 quota owner 唯一的 reconciliation 边界。Begin callback 返回 false 是唯一合法
+的不带 completion 退役路径，因为它在 worker 执行前就 fence 了未发布或已被替换的 assignment。
 
 Worker report shape 与 full-tuple fencing 仍是封闭集合。Worker-owned failure fact 优先于
 cancellation relabelling。来自旧 attempt 的 stale 调用会被忽略，不会改变 current retry；
@@ -346,14 +349,14 @@ failure、root barrier 后 acknowledgement 丢失、quota-conversion reconciliat
 root lock/no-follow/identity drift、safe cleanup、corruption 与精确 Job/artifact recovery join、
 idempotent reconciliation、所有 artifact-deletion fault stage 的双 alias 撤销、精确 quota、
 fail-stop 与 restart cleanup、同进程 deleted-checkpoint rejection、checkpoint
-authorization/re-authorization、显式 retry 与 fresh fencing、submit/retry thread-start
+authorization/re-authorization、显式 retry 与 fresh fencing、submit/retry manager-record/thread-start
 rollback、submit/retry/cancel journal fail-stop、interrupted/successful restart、cancellation
-ordering、stale/malformed report、submit/retry thread-start 与 `NotPublished` rollback 的
+ordering、stale/malformed report、submit/retry manager-record/thread start 与 `NotPublished` rollback 的
 release-failure ownership、Failed/Cancelled/rejected/malformed/pre-manifest terminal truth、
 read-only availability、report/mutation fencing 与 restart convergence、持续 handle/process
 reaping、target-inventory platform gating、bounded protocol reconstruction、fresh process
 identity、crash/protocol/heartbeat/runtime isolation、stale-lease rejection、cooperative/forced
-cancellation、concurrent shutdown drainage、completion 重建 allocation fail-stop、
+cancellation、concurrent shutdown drainage、实际首次 completion/重建 allocation fail-stop、
 completion callback 异常 fail-stop，以及真实 Embedded Host output/checkpoint/restart 行为。
 
 这一本地 Issue #100 可执行子集不新增 network/multi-tenant control plane、独立部署的

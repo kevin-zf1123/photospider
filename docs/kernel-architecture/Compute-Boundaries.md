@@ -1172,14 +1172,17 @@ competing reaper, or any non-`EINTR` exact-`waitpid` error including `ECHILD`
 fail-stops the authority before a completion callback, completed-record mark,
 or record deletion. After exact reaping, the manager still retains its record
 until one typed terminal fact is constructed and its control-plane callback
-returns. A `std::bad_alloc` or any other exception during construction or
-callback delivery takes a fixed allocation-free fail-stop path before record
-completion/deletion; construction failure invokes no callback, callback
-failure is not retried, and neither path fabricates an ordinary completion or
-releases ownership. Successful `kill()` delivery alone does not prove that a
-zombie died from that signal: forced cancellation requires an exact
-`WIFSIGNALED` status matching the delivered `SIGTERM` or `SIGKILL`, while a
-normal zero exit remains report/channel/exit truth.
+returns. The actual first external/in-process `Report`, `Failure`, and
+`ForcedCancellation` constructors each include fault injection plus all
+identity/message/report retention in a local no-throw boundary. A
+`std::bad_alloc` or any other exception in that boundary or callback delivery
+takes a fixed allocation-free fail-stop path before record completion/deletion;
+construction failure cannot escape to generic reclassification and invokes no
+callback, callback failure is not retried, and neither path fabricates an
+ordinary completion or releases ownership. Successful `kill()` delivery alone
+does not prove that a zombie died from that signal: forced cancellation
+requires an exact `WIFSIGNALED` status matching the delivered `SIGTERM` or
+`SIGKILL`, while a normal zero exit remains report/channel/exit truth.
 If exact reaping remains unobservable after the final kill/reap deadline, the
 authority process fails stop instead of entering an unbounded wait or returning
 with live ownership.

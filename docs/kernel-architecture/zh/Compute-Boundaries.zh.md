@@ -898,10 +898,12 @@ report/EOF/exit truth，而不会直接视为 forced cancellation。产品构造
 该可等待策略。之后若 process-global 策略被修改、出现竞争 reaper，或精确 `waitpid` 返回任何
 非 `EINTR` 错误（包括 `ECHILD`），authority 都会在执行 completion callback、标记 completed
 record 或删除 record 前 fail-stop。即使已经精确 reap，manager 仍会保留 record，直到构造出
-一个 typed terminal fact 且控制面 callback 返回为止。构造或 callback 投递期间发生
-`std::bad_alloc` 或任何其他异常，都会在 record 完成/删除之前进入固定的 allocation-free
-fail-stop；构造失败不会调用 callback，callback 失败不会重试，两条路径都不会伪造普通
-completion 或释放 ownership。`kill()` 成功本身不能证明 zombie 死于该 signal：forced
+一个 typed terminal fact 且控制面 callback 返回为止。实际首次外部/进程内 `Report`、
+`Failure` 与 `ForcedCancellation` 构造都会把 fault injection 及所有 identity/message/report
+保留纳入局部 no-throw 边界。该边界或 callback 投递期间发生 `std::bad_alloc` 或任何其他异常，
+都会在 record 完成/删除之前进入固定的 allocation-free fail-stop；构造失败不能逃逸到通用
+重新分类路径且不会调用 callback，callback 失败不会重试，两条路径都不会伪造普通 completion
+或释放 ownership。`kill()` 成功本身不能证明 zombie 死于该 signal：forced
 cancellation 必须由精确 `WIFSIGNALED` 状态证明，且该状态必须匹配已成功发送的 `SIGTERM` 或
 `SIGKILL`；正常零退出仍按 report/channel/exit truth 分类。若最终 kill/reap deadline 后仍无法
 观察到精确回收，authority process 会 fail-stop，而不是进入无界等待或带着 live ownership

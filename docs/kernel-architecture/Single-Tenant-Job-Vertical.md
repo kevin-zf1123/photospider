@@ -205,18 +205,19 @@ restart(any non-cancelled state, matching stable artifact) -> Succeeded
 ```
 
 `submit()` validates/finalizes JobSpec and checkpoint, reserves the complete
-quota envelope, inserts the in-memory Job, and asks WorkerManager to retain its
-sole supervision handle while the service mutex still blocks assignment
-progress, then publishes accepted truth. A supervision-thread start failure
-therefore occurs before durable publication and exposes neither a Job nor a
-handle. A
+quota envelope, inserts the in-memory Job, and asks WorkerManager to construct
+and retain its sole manager record and supervision handle while the service
+mutex still blocks assignment progress, then publishes accepted truth. A
+manager-record construction, registry insertion, or supervision-thread start
+failure therefore occurs before child spawn or durable publication and exposes
+neither a Job nor a handle. A
 `NotPublished` journal failure removes the candidate and releases its quota. A
 published failure keeps the Job, worker authority, and quota aligned with the
 visible record and enters the monotonic journal fail-stop.
-If supervision-thread-start or `NotPublished` rollback cannot release quota, the
-candidate Job remains unpublished, the exact reservation owner moves to the
-service's stranded slot, the original submit error is rethrown, and all later
-mutation is fail-stopped until restart.
+If manager-record/thread start or `NotPublished` rollback cannot release quota,
+the candidate Job remains unpublished, the exact reservation owner moves to
+the service's stranded slot, the original submit error is rethrown, and all
+later mutation is fail-stopped until restart.
 `query()` copies current truth; `wait_for()` bounds only observer waiting, and
 both remain available while fail-stopped.
 
@@ -231,10 +232,10 @@ manager actions must match the complete current tenant/Job/spec/attempt/worker/
 lease tuple, so a
 stale attempt is fenced without settling, failing, cancelling, or committing
 the replacement.
-If supervision-thread-start or `NotPublished` retry rollback cannot release the fresh
-reservation, the prior failed Job truth remains authoritative, the fresh owner
-moves to the stranded slot, the triggering retry error is rethrown, and the
-same fail-stop applies without a same-process retry.
+If manager-record/thread start or `NotPublished` retry rollback cannot release
+the fresh reservation, the prior failed Job truth remains authoritative, the
+fresh owner moves to the stranded slot, the triggering retry error is rethrown,
+and the same fail-stop applies without a same-process retry.
 
 Once a worker report passes the identity and semantic-shape fence, a later
 control-plane durability failure does not erase its outcome or settlement
@@ -327,17 +328,22 @@ mark, or record deletion. A record retaining a live PID can never be marked
 complete or erased.
 
 Exact reaping alone also cannot retire the manager record. Once assignment
-begin succeeds or raises, WorkerManager must construct one typed terminal fact
-and its control-plane callback must return before `mark_completed`. If fact
-construction raises, including `std::bad_alloc`, the callback is not invoked;
-if the callback raises, it is not retried because it may have partially applied
-durable truth. Both cases write a fixed diagnostic through an allocation-free
-fail-stop path before completed-record marking or ordinary record deletion.
-They never fabricate a replacement completion or release the service-owned
-quota reservation. Restart remains the only reconciliation boundary for the
-durable Job and quota owner after this fail-stop. A begin callback that returns
-false remains the sole legitimate no-completion retirement path because it
-fences an unpublished or replaced assignment before worker execution.
+begin succeeds or raises, WorkerManager constructs every actual first
+`Report` (external or explicit in-process test marker), `Failure`, and
+`ForcedCancellation` completion inside its own no-throw construction boundary,
+and its control-plane callback must return before `mark_completed`. If fault
+injection, identity/message/report retention, wait-status formatting, or return
+construction raises, including `std::bad_alloc`, that local boundary invokes no
+callback and immediately enters the fixed allocation-free fail-stop; the
+exception cannot escape to the outer generic classifier and be rewritten as a
+second failure completion. If the callback raises, it is not retried because it
+may have partially applied durable truth. Both cases fail-stop before completed-
+record marking or ordinary record deletion. They never fabricate a replacement
+completion or release the service-owned quota reservation. Restart remains the
+only reconciliation boundary for the durable Job and quota owner after this
+fail-stop. A begin callback that returns false remains the sole legitimate no-
+completion retirement path because it fences an unpublished or replaced
+assignment before worker execution.
 
 Worker report shapes and full-tuple fencing remain closed. Worker-owned failure
 facts take precedence over cancellation relabelling. A stale prior-attempt
@@ -424,17 +430,17 @@ Job/artifact recovery joins, idempotent reconciliation, all artifact-deletion
 fault stages with dual-alias revocation, exact quota, fail-stop and restart
 cleanup, same-process deleted-checkpoint rejection, checkpoint
 authorization/re-authorization, explicit retry and fresh fencing, submit/retry
-thread-start rollback, submit/retry/cancel journal fail-stop,
+manager-record/thread-start rollback, submit/retry/cancel journal fail-stop,
 interrupted/successful restart, cancellation ordering, stale/malformed reports,
-release-failure ownership for submit/retry thread-start and `NotPublished`
-rollback, Failed/Cancelled/rejected/malformed/pre-manifest terminal truth,
+release-failure ownership for submit/retry manager-record/thread start and
+`NotPublished` rollback, Failed/Cancelled/rejected/malformed/pre-manifest terminal truth,
 read-only availability, report/mutation fencing, and restart convergence,
 ongoing handle/process reaping, target-inventory platform gating, bounded
 protocol reconstruction, fresh process identity, crash/protocol/heartbeat/
 runtime isolation, stale-lease rejection, cooperative/forced cancellation,
-concurrent shutdown drainage, completion-reconstruction allocation fail-stop,
-completion-callback exception fail-stop, and real Embedded Host output/
-checkpoint/restart behavior.
+concurrent shutdown drainage, actual first completion/reconstruction
+allocation fail-stop, completion-callback exception fail-stop, and real
+Embedded Host output/checkpoint/restart behavior.
 
 This local Issue #100 executable subset does not add the network/multi-tenant
 control plane, a separately deployed WorkerManager, artifact data plane,
