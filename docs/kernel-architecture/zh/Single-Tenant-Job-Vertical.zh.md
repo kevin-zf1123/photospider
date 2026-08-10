@@ -249,6 +249,11 @@ clean worker exit、channel closure 与精确 reap 之后，才有资格交给 c
 Startup/exec、nonzero exit、signal death、channel loss、protocol violation、heartbeat
 timeout、runtime timeout 与 forced-cancellation fact 使用彼此分离的 durable failure category，
 且只影响拥有它的 attempt。
+产品构造会在打开 durable root 前拒绝 `SIGCHLD=SIG_IGN` 与 `SA_NOCLDWAIT`，每次 spawn 还会
+在 `fork` 前立即重新校验 `SIGCHLD` 是否保持可等待。之后若策略被修改、出现竞争 reaper，或
+精确 `waitpid` 返回任何非 `EINTR` 错误（包括 `ECHILD`），就表示精确回收授权丢失；authority
+会在任何 completion callback、completed-record 标记或 record 删除前 fail-stop。仍保留 live
+PID 的 record 绝不能被标记为 complete 或删除。
 
 Worker report shape 与 full-tuple fencing 仍是封闭集合。Worker-owned failure fact 优先于
 cancellation relabelling。来自旧 attempt 的 stale 调用会被忽略，不会改变 current retry；
@@ -261,16 +266,19 @@ durability barrier 或 completion observer 失败，service 会保留 `Cancellin
 cancellation。发送失败会继续有界排空 report/EOF/wait status，并保留真实 Failed report、
 nonzero exit、signal death 或 channel close；发送失败本身不会 mint forced cancellation。
 Cooperative deadline 时仍存活的 worker 会先被关闭/撤销 channel，再在 configured bound 下接收
-owner-validated `SIGTERM`/`SIGKILL` escalation，最后精确 reap。只有实际 signal escalation 才会
-产生 forced-cancellation fact。Destruction 会记录 cancellation，且不在 Job mutex 下等待，随后
-通过相同 escalation path 并发排空所有 attempt。Reap observation 在最终 kill/reap deadline 前
-保持非阻塞；如果仍无法观察到精确 reaping，authority process 会 fail-stop，而不是无限阻塞或
-带着 live ownership 返回。
+owner-validated `SIGTERM`/`SIGKILL` escalation，最后精确 reap。只有匹配 owner 已成功发送
+`SIGTERM` 或 `SIGKILL` 的精确 `WIFSIGNALED` 状态才能产生 forced-cancellation fact。对已经
+退出的 zombie 调用 `kill()` 成功不构成因果证明；正常零退出仍按 report/channel/exit truth
+分类。Destruction 会记录 cancellation，且不在 Job mutex 下等待，随后通过相同 escalation path
+并发排空所有 attempt。Reap observation 在最终 kill/reap deadline 前保持非阻塞；如果仍无法
+观察到精确 reaping，authority process 会 fail-stop，而不是无限阻塞或带着 live ownership
+返回。
 
 一个 private reaper 会在 manager 与 Job mutex 之外 join 已完成的 supervision handle。显式
 源码私有 test marker 可以在 supervision thread 内执行 deterministic unit-test worker；它不
 安装，也不声明 process-isolation 或 bounded-termination。普通构造会拒绝未标记的
-in-process factory，或者不存在/不可执行的 worker path。
+in-process factory、不存在/不可执行的 worker path，或把产品进程配置为自动回收 `SIGCHLD`
+child 的策略。
 
 ## 产品边界与持续维护证据
 

@@ -92,6 +92,12 @@ runtime deadline、cancellation escalation 与精确 reaping。参见
 授权，也不是独立部署的 WorkerManager、syscall/device isolation 或 untrusted-plugin
 security domain。
 
+产品 WorkerManager 构造要求 `SIGCHLD` 保持可等待语义，并拒绝 `SIG_IGN` 或
+`SA_NOCLDWAIT`。它会在 `fork` 前立即重新校验该策略；之后的自动回收、竞争 reaper，或精确
+`waitpid` 的任何非 `EINTR` 错误（包括 `ECHILD`），都会在发布 completion 或删除 ownership
+record 前 fail-stop。Forced cancellation 表示精确 `WIFSIGNALED` 状态匹配 owner 已成功发送的
+`SIGTERM`/`SIGKILL`；对零退出 zombie 成功调用 `kill()` 并不是 signal-death 证据。
+
 **通用耐久输出提交（超出 Issue #99/#100 子集的已接受目标）**
 更广泛的未来 user-output transaction 由稳定 `OutputCommitId` 标识，只有在完整
 payload/metadata 校验与文件同步、canonical manifest 暂存/校验/文件同步、原子

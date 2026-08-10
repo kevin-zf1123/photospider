@@ -114,6 +114,14 @@ checkpoint `OutputStore` or bulk data plane, multi-tenant authorization, a
 separately deployed WorkerManager, syscall/device isolation, or an untrusted-
 plugin security domain.
 
+Product WorkerManager construction requires waitable `SIGCHLD` semantics and
+rejects `SIG_IGN` or `SA_NOCLDWAIT`. It revalidates that policy immediately
+before `fork`; later auto-reaping, a competing reaper, or any non-`EINTR`
+exact-`waitpid` error including `ECHILD` fail-stops before completion
+publication or ownership-record deletion. Forced cancellation means an exact
+`WIFSIGNALED` status matching an owned delivered `SIGTERM`/`SIGKILL`; successful
+`kill()` delivery to a zero-exit zombie is not signal-death evidence.
+
 **General durable output commit (accepted target beyond the Issue #99/#100 subset)**
 The broader future user-output transaction is identified by a stable
 `OutputCommitId` and completed only after full payload/metadata validation and

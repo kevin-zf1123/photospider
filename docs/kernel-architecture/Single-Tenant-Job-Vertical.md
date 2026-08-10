@@ -303,6 +303,13 @@ channel closure, and exact reap. Startup/exec, nonzero exit, signal death,
 channel loss, protocol violation, heartbeat timeout, runtime timeout, and
 forced-cancellation facts use separate durable failure categories and affect
 only the owning attempt.
+Product construction rejects `SIGCHLD=SIG_IGN` and `SA_NOCLDWAIT` before
+opening the durable root, and every spawn revalidates waitable `SIGCHLD`
+immediately before `fork`. A later policy mutation, a competing reaper, or any
+non-`EINTR` exact-`waitpid` error including `ECHILD` loses exact-reaping
+authority and fail-stops before any completion callback, completed-record
+mark, or record deletion. A record retaining a live PID can never be marked
+complete or erased.
 
 Worker report shapes and full-tuple fencing remain closed. Worker-owned failure
 facts take precedence over cancellation relabelling. A stale prior-attempt
@@ -320,18 +327,21 @@ and preserves an actual Failed report, nonzero exit, signal death, or channel
 close; it does not itself mint forced cancellation. A worker still alive at the
 cooperative deadline has its channel closed/revoked and receives owned
 `SIGTERM`/`SIGKILL` escalation under configured bounds before exact reaping.
-Only actual signal escalation yields a forced-cancellation fact. Destruction
-records cancellation without waiting under the Job mutex, then drains all
-attempts concurrently through the same escalation path. Reap observation is
-nonblocking through the final kill/reap deadline; if exact reaping remains
-unobservable, the authority process fails stop rather than block indefinitely
-or return live ownership.
+Only an exact `WIFSIGNALED` status matching a successfully delivered owned
+`SIGTERM` or `SIGKILL` yields a forced-cancellation fact. Successful `kill()`
+against an already exited zombie is not causality; a normal zero exit remains
+report/channel/exit truth. Destruction records cancellation without waiting
+under the Job mutex, then drains all attempts concurrently through the same
+escalation path. Reap observation is nonblocking through the final kill/reap
+deadline; if exact reaping remains unobservable, the authority process fails
+stop rather than block indefinitely or return live ownership.
 
 One private reaper joins completed supervision handles outside both manager and
 Job mutexes. The explicit source-private test marker may execute deterministic
 unit-test workers in the supervision thread; it is non-installed and makes no
 process-isolation or bounded-termination claim. Ordinary construction rejects
-an unmarked in-process factory or an absent/non-executable worker path.
+an unmarked in-process factory, an absent/non-executable worker path, or a
+product process configured to auto-reap `SIGCHLD` children.
 
 ## Product Boundaries and Maintained Evidence
 

@@ -893,7 +893,13 @@ WorkerManager。每个产品 attempt 都在一个全新、绝不复用的 `photo
 拥有其私有有界协议、heartbeat/runtime deadline、精确 lease/PID fencing、cooperative
 cancellation、TERM/KILL escalation 与精确非阻塞 `waitpid` reaping。短 poll deadline 之间会
 保留部分 protocol header 与 payload；cancellation 发送失败会继续有界排空 worker
-report/EOF/exit truth，而不会直接视为 forced cancellation。若最终 kill/reap deadline 后仍无法
+report/EOF/exit truth，而不会直接视为 forced cancellation。产品构造会在打开 durable root 前
+拒绝 `SIGCHLD=SIG_IGN` 与 `SA_NOCLDWAIT`，WorkerManager 还会在每次 `fork` 前立即重新校验
+该可等待策略。之后若 process-global 策略被修改、出现竞争 reaper，或精确 `waitpid` 返回任何
+非 `EINTR` 错误（包括 `ECHILD`），authority 都会在执行 completion callback、标记 completed
+record 或删除 record 前 fail-stop。`kill()` 成功本身不能证明 zombie 死于该 signal：forced
+cancellation 必须由精确 `WIFSIGNALED` 状态证明，且该状态必须匹配已成功发送的 `SIGTERM` 或
+`SIGKILL`；正常零退出仍按 report/channel/exit truth 分类。若最终 kill/reap deadline 后仍无法
 观察到精确回收，authority process 会 fail-stop，而不是进入无界等待或带着 live ownership
 返回。
 

@@ -1165,6 +1165,15 @@ exact lease/PID fencing, cooperative cancellation, TERM/KILL escalation, and
 exact nonblocking `waitpid` reaping. Partial protocol headers and payloads are
 retained across short poll deadlines; cancellation-send failure is drained to
 the worker report/EOF/exit deadline rather than treated as forced cancellation.
+Product construction rejects `SIGCHLD=SIG_IGN` and `SA_NOCLDWAIT` before the
+durable root is opened, and WorkerManager revalidates that waitable policy
+immediately before every `fork`. A later process-global policy mutation, a
+competing reaper, or any non-`EINTR` exact-`waitpid` error including `ECHILD`
+fail-stops the authority before a completion callback, completed-record mark,
+or record deletion. Successful `kill()` delivery alone does not prove that a
+zombie died from that signal: forced cancellation requires an exact
+`WIFSIGNALED` status matching the delivered `SIGTERM` or `SIGKILL`, while a
+normal zero exit remains report/channel/exit truth.
 If exact reaping remains unobservable after the final kill/reap deadline, the
 authority process fails stop instead of entering an unbounded wait or returning
 with live ownership.
