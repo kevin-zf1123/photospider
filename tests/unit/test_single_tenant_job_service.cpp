@@ -2,10 +2,13 @@
  * @file test_single_tenant_job_service.cpp
  * @brief Verifies Issue #99 quota, durable artifacts, retry, and fencing.
  */
+#include <fcntl.h>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -27,9 +30,63 @@
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {
+
+/**
+ * @brief Mutable state for one interrupted-close descriptor-reuse probe.
+ * @throws Nothing for value operations.
+ */
+struct InterruptedCloseReuseProbe final {
+  /** @brief Still-open source duplicated onto the released descriptor value. */
+  int replacement_source = -1;
+  /** @brief Number of close callbacks observed by the production primitive. */
+  std::size_t close_calls = 0U;
+  /** @brief First unexpected raw close error, or zero. */
+  int close_error = 0;
+  /** @brief First unexpected descriptor-duplication error, or zero. */
+  int duplicate_error = 0;
+};
+
+/**
+ * @brief Simulates Linux releasing and reusing an fd before reporting EINTR.
+ * @param descriptor Former owned numeric descriptor.
+ * @param context Non-null `InterruptedCloseReuseProbe`.
+ * @return `-1`/`EINTR` after first close and reuse; a second invocation closes
+ * the reused descriptor and returns the raw close result.
+ * @throws Nothing.
+ */
+int close_and_reuse_before_eintr(int descriptor, void* context) noexcept {
+  auto* probe = static_cast<InterruptedCloseReuseProbe*>(context);
+  ++probe->close_calls;
+  if (probe->close_calls == 1U) {
+    if (::close(descriptor) != 0) {
+      probe->close_error = errno;
+      return 0;
+    }
+    if (::dup2(probe->replacement_source, descriptor) != descriptor) {
+      probe->duplicate_error = errno;
+      return 0;
+    }
+    errno = EINTR;
+    return -1;
+  }
+  return ::close(descriptor);
+}
+
+/**
+ * @brief Closes one test-owned descriptor exactly once when valid.
+ * @param descriptor Descriptor or negative sentinel.
+ * @return Nothing.
+ * @throws Nothing; cleanup errors are intentionally ignored.
+ */
+void close_test_descriptor_once(int descriptor) noexcept {
+  if (descriptor >= 0) {
+    static_cast<void>(::close(descriptor));
+  }
+}
 
 /**
  * @brief Builds the complete default Job resource request used by unit tests.
@@ -3804,7 +3861,7 @@ TEST(SingleTenantJobService,
 }
 
 TEST(SingleTenantJobService,
-     AssignmentThreadStartFailureRollsBackStateAndOwnership) {
+     ManagerThreadStartFailureErasesInsertedRecordAndRollsBackSubmission) {
   std::atomic<std::size_t> worker_calls{0U};
   auto factory = std::make_shared<FunctionWorkerFactory>(
       [&worker_calls](const JobAssignment& assignment,
@@ -3821,20 +3878,27 @@ TEST(SingleTenantJobService,
     static_cast<void>(service.submit(JobSpec(GraphArtifactId("graph.test"), 7,
                                              OutputSlotId("image.final"),
                                              test_job_resources())));
-    ADD_FAILURE() << "injected worker-thread start did not fail";
+    ADD_FAILURE() << "injected manager supervision-thread start did not fail";
   } catch (const std::system_error& error) {
     start_error = error.code();
   } catch (...) {
-    FAIL() << "injected worker-thread start raised a non-system exception";
+    FAIL() << "injected manager supervision-thread start raised a "
+              "non-system exception";
   }
   ASSERT_TRUE(start_error.has_value());
   EXPECT_EQ(*start_error,
             std::make_error_code(std::errc::resource_unavailable_try_again));
   ASSERT_TRUE(failure_injection.attempted_job_id().has_value());
+  EXPECT_TRUE(failure_injection.manager_record_inserted_before_failure());
   const JobId failed_job_id = *failure_injection.attempted_job_id();
 
   EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 0U);
   EXPECT_EQ(SingleTenantJobServiceTestAccess::accepted_job_count(service), 0U);
+  EXPECT_EQ(service.quota_snapshot().active_attempts, 0U);
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::quota_reservation_ownership(service)
+          .total(),
+      0U);
   EXPECT_FALSE(service.query(failed_job_id).has_value());
   const WorkerThreadOwnershipSnapshot failed_ownership =
       SingleTenantJobServiceTestAccess::worker_thread_ownership(service);
@@ -3862,7 +3926,7 @@ TEST(SingleTenantJobService,
 }
 
 TEST(SingleTenantJobService,
-     RetryThreadStartFailureRestoresDurableTruthQuotaAndOwnership) {
+     RetryManagerThreadStartFailureErasesRecordAndRestoresPriorTruth) {
   std::atomic<std::size_t> worker_calls{0U};
   auto factory = std::make_shared<FunctionWorkerFactory>(
       [&worker_calls](const JobAssignment& assignment,
@@ -3890,6 +3954,7 @@ TEST(SingleTenantJobService,
                std::system_error);
   ASSERT_TRUE(failure_injection.attempted_job_id().has_value());
   EXPECT_EQ(*failure_injection.attempted_job_id(), submission.job_id);
+  EXPECT_TRUE(failure_injection.manager_record_inserted_before_failure());
 
   const std::optional<JobSnapshot> restored = service.query(submission.job_id);
   ASSERT_TRUE(restored.has_value());
@@ -3900,6 +3965,10 @@ TEST(SingleTenantJobService,
   EXPECT_EQ(restored->failure, original_failure->failure);
   EXPECT_EQ(restored->message, original_failure->message);
   EXPECT_EQ(service.quota_snapshot().active_attempts, 0U);
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::quota_reservation_ownership(service)
+          .total(),
+      0U);
   EXPECT_EQ(
       SingleTenantJobServiceTestAccess::owned_worker_thread_count(service), 0U);
 
@@ -3912,6 +3981,34 @@ TEST(SingleTenantJobService,
   EXPECT_EQ(succeeded->state, JobState::Succeeded);
   EXPECT_EQ(succeeded->assignment, recovered_retry->assignment);
   EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 2U);
+}
+
+TEST(WorkerManagerDescriptorOwnership,
+     InterruptedCloseDoesNotRetryAgainstReusedDescriptorValue) {
+  const int owned_descriptor = ::open("/dev/null", O_RDONLY);
+  ASSERT_GE(owned_descriptor, 0);
+  const int replacement_source = ::open("/dev/null", O_RDONLY);
+  if (replacement_source < 0) {
+    close_test_descriptor_once(owned_descriptor);
+    FAIL() << "failed to open replacement descriptor source";
+  }
+  ASSERT_NE(replacement_source, owned_descriptor);
+
+  int owner = owned_descriptor;
+  InterruptedCloseReuseProbe probe;
+  probe.replacement_source = replacement_source;
+  WorkerManagerTestAccess::reset_descriptor_for_test(
+      &owner, -1, close_and_reuse_before_eintr, &probe);
+
+  EXPECT_EQ(owner, -1);
+  EXPECT_EQ(probe.close_error, 0);
+  EXPECT_EQ(probe.duplicate_error, 0);
+  EXPECT_EQ(probe.close_calls, 1U);
+  EXPECT_NE(::fcntl(owned_descriptor, F_GETFD), -1)
+      << "a repeated close consumed the descriptor reused after EINTR";
+
+  close_test_descriptor_once(owned_descriptor);
+  close_test_descriptor_once(replacement_source);
 }
 
 TEST(SingleTenantJobService,

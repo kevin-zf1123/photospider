@@ -38,8 +38,11 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
+#include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_protocol.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
@@ -51,6 +54,137 @@ constexpr int kWorkerControlDescriptor = 3;
 constexpr int kWorkerExecStatusDescriptor = 4;
 /** @brief Supervisor poll cadence for cancel, exit, and deadline checks. */
 constexpr std::chrono::milliseconds kSupervisorPollInterval{20};
+
+/**
+ * @brief Invokes POSIX `close` for one manager-owned descriptor.
+ * @param descriptor Nonnegative descriptor whose owner has already changed.
+ * @param context Unused callback context.
+ * @return The raw `close` result with `errno` preserved on failure.
+ * @throws Nothing.
+ */
+int close_manager_descriptor(int descriptor, void* context) noexcept {
+  static_cast<void>(context);
+  return ::close(descriptor);
+}
+
+/**
+ * @brief Replaces descriptor ownership and closes the former value.
+ * @param descriptor Non-null descriptor owner.
+ * @param replacement Replacement descriptor or `-1`.
+ * @param close_call Non-null allocation-free close-style callback.
+ * @param context Borrowed callback context.
+ * @return Nothing after the former descriptor receives one close attempt.
+ * @throws Nothing; callers provide valid pointers and a non-throwing callback.
+ * @note Ownership changes before `close_call` runs. Its result, including
+ * `EINTR`, is ignored because Linux may already have released and reused the
+ * numeric descriptor before reporting interruption; retrying could close an
+ * unrelated descriptor acquired by another thread.
+ */
+void reset_manager_descriptor(
+    int* descriptor, int replacement,
+    WorkerManagerTestAccess::DescriptorCloseCall close_call,
+    void* context) noexcept {
+  const int owned = std::exchange(*descriptor, replacement);
+  if (owned >= 0) {
+    static_cast<void>(close_call(owned, context));
+  }
+}
+
+/**
+ * @brief Current-thread state for one source-private manager-start injection.
+ * @throws Nothing for value operations.
+ * @note Capture pointers are non-null only while their non-movable guard is
+ * alive on this thread. Product threads leave this state disarmed.
+ */
+struct ManagerThreadStartFailureInjectionState final {
+  /** @brief Guard-owned destination for the rolled-back JobId, or null. */
+  std::optional<JobId>* attempted_job_id = nullptr;
+  /** @brief Guard-owned proof of successful manager-record insertion. */
+  bool* manager_record_inserted_before_failure = nullptr;
+  /** @brief Whether the next manager supervision-thread start must raise. */
+  bool armed = false;
+};
+
+/** @brief Guarantees fault capture cannot replace the injected exception. */
+static_assert(std::is_nothrow_move_constructible_v<JobId>);
+
+/**
+ * @brief Per-calling-thread deterministic manager-thread start injection.
+ * @note Thread-local storage prevents concurrent tests or submitters on other
+ * threads from consuming this source-private test arm.
+ */
+thread_local ManagerThreadStartFailureInjectionState
+    g_manager_thread_start_failure;  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Arms one current-thread manager supervision-start failure.
+ * @param attempted_job_id Non-null guard-owned JobId capture destination.
+ * @param record_inserted Non-null guard-owned registry-insertion proof.
+ * @return Nothing.
+ * @throws std::invalid_argument when either capture destination is null.
+ * @throws std::logic_error when another guard already owns this thread's seam.
+ */
+void arm_manager_thread_start_failure(std::optional<JobId>* attempted_job_id,
+                                      bool* record_inserted) {
+  if (attempted_job_id == nullptr || record_inserted == nullptr) {
+    throw std::invalid_argument("manager-start failure capture is null");
+  }
+  if (g_manager_thread_start_failure.attempted_job_id != nullptr) {
+    throw std::logic_error("manager-start failure injection is already armed");
+  }
+  attempted_job_id->reset();
+  *record_inserted = false;
+  g_manager_thread_start_failure.attempted_job_id = attempted_job_id;
+  g_manager_thread_start_failure.manager_record_inserted_before_failure =
+      record_inserted;
+  g_manager_thread_start_failure.armed = true;
+}
+
+/**
+ * @brief Disarms one matching current-thread manager-start injection guard.
+ * @param attempted_job_id Exact JobId capture supplied while arming.
+ * @param record_inserted Exact insertion-proof capture supplied while arming.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Mismatched pointers are ignored so one guard cannot disarm another.
+ */
+void disarm_manager_thread_start_failure(
+    const std::optional<JobId>* attempted_job_id,
+    const bool* record_inserted) noexcept {
+  if (g_manager_thread_start_failure.attempted_job_id != attempted_job_id ||
+      g_manager_thread_start_failure.manager_record_inserted_before_failure !=
+          record_inserted) {
+    return;
+  }
+  g_manager_thread_start_failure.armed = false;
+  g_manager_thread_start_failure.attempted_job_id = nullptr;
+  g_manager_thread_start_failure.manager_record_inserted_before_failure =
+      nullptr;
+}
+
+/**
+ * @brief Raises one armed failure at the real manager thread-start boundary.
+ * @param attempted_job_id Mutable JobId in the exact inserted manager record;
+ * moved into the guard only when the injection is consumed.
+ * @return Nothing when the current thread has no armed injection.
+ * @throws std::system_error with resource-unavailable status when armed.
+ * @throws std::bad_alloc only if constructing the injected diagnostic fails.
+ * @note The caller invokes this helper only after `records_.emplace()` and
+ * inside the catch boundary that erases that exact record. Consumption occurs
+ * before native `std::thread` construction and cannot affect another thread.
+ */
+void throw_manager_thread_start_failure_if_armed(JobId& attempted_job_id) {
+  if (!g_manager_thread_start_failure.armed) {
+    return;
+  }
+  g_manager_thread_start_failure.armed = false;
+  *g_manager_thread_start_failure.manager_record_inserted_before_failure = true;
+  g_manager_thread_start_failure.attempted_job_id->emplace(
+      std::move(attempted_job_id));
+  throw std::system_error(
+      std::make_error_code(std::errc::resource_unavailable_try_again),
+      "injected manager supervision-thread start failure");
+}
 
 /**
  * @brief Immutable platform input for closing inherited child descriptors.
@@ -151,13 +285,14 @@ class UniqueFd final {
   /**
    * @brief Closes the current descriptor and takes an optional replacement.
    * @param replacement New descriptor or -1.
+   * @return Nothing.
+   * @throws Nothing; close failures are intentionally ignored.
+   * @note Ownership changes before exactly one close attempt. `EINTR` is not
+   * retried because the numeric descriptor may already have been reused.
    */
   void reset(int replacement = -1) noexcept {
-    if (fd_ >= 0) {
-      while (::close(fd_) < 0 && errno == EINTR) {
-      }
-    }
-    fd_ = replacement;
+    reset_manager_descriptor(&fd_, replacement, close_manager_descriptor,
+                             nullptr);
   }
 
  private:
@@ -617,6 +752,30 @@ std::string wait_status_message(int status) {
 
 }  // namespace
 
+/** @copydoc ps::server::WorkerManagerTestAccess::reset_descriptor_for_test */
+void WorkerManagerTestAccess::reset_descriptor_for_test(
+    int* descriptor, int replacement, DescriptorCloseCall close_call,
+    void* context) {
+  if (descriptor == nullptr || close_call == nullptr) {
+    throw std::invalid_argument("worker descriptor reset seam is incomplete");
+  }
+  reset_manager_descriptor(descriptor, replacement, close_call, context);
+}
+
+/** @copydoc ps::server::ScopedWorkerThreadStartFailure */
+ScopedWorkerThreadStartFailure::ScopedWorkerThreadStartFailure() {
+  arm_manager_thread_start_failure(&attempted_job_id_,
+                                   &manager_record_inserted_before_failure_);
+}
+
+/** @copydoc
+ * ps::server::ScopedWorkerThreadStartFailure::~ScopedWorkerThreadStartFailure
+ */
+ScopedWorkerThreadStartFailure::~ScopedWorkerThreadStartFailure() noexcept {
+  disarm_manager_thread_start_failure(&attempted_job_id_,
+                                      &manager_record_inserted_before_failure_);
+}
+
 /**
  * @brief Complete private WorkerManager implementation and record registry.
  * @throws Constructor behavior is documented by `WorkerManager`.
@@ -719,6 +878,7 @@ class WorkerManager::Impl final {
       throw std::logic_error("worker manager attempt identity collided");
     }
     try {
+      throw_manager_thread_start_failure_if_armed(record->identity.job_id);
       record->supervisor = std::thread(&Impl::supervise, this, record);
     } catch (...) {
       records_.erase(inserted.first);

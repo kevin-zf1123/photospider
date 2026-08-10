@@ -45,12 +45,12 @@ class InProcessJobAttemptWorkerFactoryForTest : public JobAttemptWorkerFactory {
 };
 
 /**
- * @brief Arms one scoped deterministic assignment-thread start failure.
+ * @brief Arms one scoped deterministic manager supervision-thread failure.
  *
- * Construction arms the next `WorkerThreadRecord` start attempted by the
- * current thread. The injected path records that attempt's `JobId`, consumes
- * the arm, and raises `std::system_error` before any `std::thread` owns a
- * native handle. Destruction disarms an unused injection.
+ * Construction arms the next worker-manager supervision-thread start attempted
+ * by the current thread. The injected path records that attempt's `JobId`,
+ * consumes the arm, and raises `std::system_error` before any `std::thread`
+ * owns a native handle. Destruction disarms an unused injection.
  *
  * @throws std::logic_error when another injection guard is already alive on
  * the current thread.
@@ -62,7 +62,7 @@ class InProcessJobAttemptWorkerFactoryForTest : public JobAttemptWorkerFactory {
 class ScopedWorkerThreadStartFailure final {
  public:
   /**
-   * @brief Arms the next assignment-thread start on the current thread.
+   * @brief Arms the next manager supervision-thread start on this thread.
    * @throws std::logic_error when that thread already owns an active guard.
    */
   ScopedWorkerThreadStartFailure();
@@ -118,9 +118,23 @@ class ScopedWorkerThreadStartFailure final {
     return attempted_job_id_;
   }
 
+  /**
+   * @brief Reports whether manager record insertion preceded the fault.
+   * @return True only when the arm was consumed after successful registry
+   * insertion and before native supervision-thread construction.
+   * @throws Nothing.
+   * @note Combining true here with zero post-failure manager ownership proves
+   * the `WorkerManager::start` catch path erased the inserted record.
+   */
+  bool manager_record_inserted_before_failure() const noexcept {
+    return manager_record_inserted_before_failure_;
+  }
+
  private:
   /** @brief Rolled-back Job identity captured before the injected exception. */
   std::optional<JobId> attempted_job_id_;
+  /** @brief Whether the manager registry owned the record before injection. */
+  bool manager_record_inserted_before_failure_ = false;
 };
 
 /**

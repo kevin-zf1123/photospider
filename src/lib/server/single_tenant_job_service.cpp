@@ -16,7 +16,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <type_traits>
 #include <utility>
 
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
@@ -27,88 +26,6 @@ namespace {
 
 /** @brief Process-wide uniqueness input for service identity namespaces. */
 std::atomic<std::uint64_t> g_service_namespace_sequence{0U};
-
-/**
- * @brief Current-thread state for one source-private worker-start injection.
- * @throws Nothing for value operations.
- * @note The capture pointer is non-null only while its non-movable guard is
- * alive on this thread. Normal production threads leave this state disarmed.
- */
-struct AssignmentThreadStartFailureInjectionState final {
-  /** @brief Guard-owned destination for the rolled-back JobId, or null. */
-  std::optional<JobId>* attempted_job_id = nullptr;
-  /** @brief Whether the next assignment-thread start must raise. */
-  bool armed = false;
-};
-
-/** @brief Guarantees failure capture cannot replace the injected exception. */
-static_assert(std::is_nothrow_move_constructible_v<JobId>);
-
-/**
- * @brief Per-calling-thread deterministic assignment-thread start injection.
- * @note Thread-local storage prevents concurrent tests or submitters on other
- * threads from consuming this source-private test arm.
- */
-thread_local AssignmentThreadStartFailureInjectionState g_worker_start_failure;
-
-/**
- * @brief Arms one current-thread assignment-thread start failure.
- * @param attempted_job_id Non-null guard-owned capture destination that stays
- * alive until matching disarm.
- * @return Nothing.
- * @throws std::invalid_argument when the capture destination is null.
- * @throws std::logic_error when another guard already owns this thread's seam.
- */
-void arm_assignment_thread_start_failure(
-    std::optional<JobId>* attempted_job_id) {
-  if (attempted_job_id == nullptr) {
-    throw std::invalid_argument("worker-start failure capture is null");
-  }
-  if (g_worker_start_failure.attempted_job_id != nullptr) {
-    throw std::logic_error("worker-start failure injection is already armed");
-  }
-  attempted_job_id->reset();
-  g_worker_start_failure.attempted_job_id = attempted_job_id;
-  g_worker_start_failure.armed = true;
-}
-
-/**
- * @brief Disarms one matching current-thread worker-start injection guard.
- * @param attempted_job_id Exact guard-owned capture destination supplied when
- * arming.
- * @return Nothing.
- * @throws Nothing.
- * @note A mismatched pointer is ignored so one guard cannot disarm another.
- */
-void disarm_assignment_thread_start_failure(
-    const std::optional<JobId>* attempted_job_id) noexcept {
-  if (g_worker_start_failure.attempted_job_id != attempted_job_id) {
-    return;
-  }
-  g_worker_start_failure.armed = false;
-  g_worker_start_failure.attempted_job_id = nullptr;
-}
-
-/**
- * @brief Raises the armed current-thread assignment-start failure, if any.
- * @param attempted_job_id Exact pending JobId, moved into the guard capture
- * only when the injection is consumed.
- * @return Nothing when the current thread has no armed injection.
- * @throws std::system_error with resource-unavailable status when armed.
- * @throws std::bad_alloc only if constructing the injected diagnostic fails.
- * @note Consumption occurs before native thread construction. The guard stays
- * alive but cannot inject a second failure, and other threads are unaffected.
- */
-void throw_assignment_thread_start_failure_if_armed(JobId& attempted_job_id) {
-  if (!g_worker_start_failure.armed) {
-    return;
-  }
-  g_worker_start_failure.armed = false;
-  g_worker_start_failure.attempted_job_id->emplace(std::move(attempted_job_id));
-  throw std::system_error(
-      std::make_error_code(std::errc::resource_unavailable_try_again),
-      "injected assignment-thread start failure");
-}
 
 /**
  * @brief Reserves the next nonzero value from one identity sequence.
@@ -374,18 +291,6 @@ bool checkpoint_is_authorized(const TenantId& tenant_id,
 
 }  // namespace
 
-/** @copydoc ps::server::ScopedWorkerThreadStartFailure */
-ScopedWorkerThreadStartFailure::ScopedWorkerThreadStartFailure() {
-  arm_assignment_thread_start_failure(&attempted_job_id_);
-}
-
-/** @copydoc
- * ps::server::ScopedWorkerThreadStartFailure::~ScopedWorkerThreadStartFailure
- */
-ScopedWorkerThreadStartFailure::~ScopedWorkerThreadStartFailure() noexcept {
-  disarm_assignment_thread_start_failure(&attempted_job_id_);
-}
-
 /** @copydoc
  * ps::server::SingleTenantJobServiceTestAccess::reserve_identity_sequence_value
  */
@@ -628,7 +533,6 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
       throw std::logic_error("fresh durable JobId collided in service state");
     }
     rollback_reservation.reset();
-    throw_assignment_thread_start_failure_if_armed(assignment.identity.job_id);
     worker_manager_->start(std::move(assignment));
   } catch (...) {
     std::exception_ptr failure = std::current_exception();
@@ -728,7 +632,6 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
       std::move(replacement),
       std::optional<TenantQuotaReservation>(std::move(reservation))};
   try {
-    throw_assignment_thread_start_failure_if_armed(assignment.identity.job_id);
     worker_manager_->start(std::move(assignment));
   } catch (...) {
     std::exception_ptr failure = std::current_exception();
