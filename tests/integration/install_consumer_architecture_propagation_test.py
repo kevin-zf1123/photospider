@@ -20,6 +20,7 @@ from unittest import mock
 import cmake_build_smoke_support as architecture_support
 import dependency_disabled_install_smoke as dependency_disabled
 import ipc_disabled_install_smoke as ipc_disabled
+import openexr_deep_provider_option_off_smoke as openexr_option_off
 import static_product_consumer_smoke as static_product
 
 
@@ -760,6 +761,234 @@ class DependencyDisabledResidueClassifierTest(unittest.TestCase):
                 self.assertEqual(
                     dependency_disabled.forbidden_deep_codec_markers(text), []
                 )
+
+
+class TrustedDarwinTemporaryAliasConsumerTest(unittest.TestCase):
+    """@brief Lock trusted Darwin tmp aliases at non-destructive consumers.
+
+    @throws OSError If disposable paths, manifests, or symlinks cannot be
+      created or inspected.
+    @throws AssertionError If trusted logical/physical spellings diverge,
+      arbitrary symlinks gain trust, or evidence scrubbing hides a real
+      optional-dependency marker.
+    @note Every mapping is synthetic and injected into the shared production
+      helper. The tests neither inspect nor replace the host's real ``/tmp``.
+    """
+
+    def test_shared_spellings_are_exact_and_bidirectional(self) -> None:
+        """@brief Map only matching logical and physical tmp descendants.
+
+        @return None after both trusted spellings yield the same two-path set
+          and an unrelated absolute path remains unchanged.
+        @throws AssertionError If spelling equivalence is one-way or widens
+          beyond the injected trusted roots.
+        @note The pure spelling helper receives synthetic absolute paths and
+          proves that user-selected aliases are not inferred from canonical
+          targets.
+        """
+
+        synthetic_root = (
+            pathlib.Path(tempfile.gettempdir()).resolve()
+            / "photospider-trusted-tmp-spelling-fixture"
+        )
+        logical_root = synthetic_root / "logical-tmp"
+        physical_root = synthetic_root / "physical-tmp"
+        logical_child = logical_root / "nested" / "artifact"
+        physical_child = physical_root / "nested" / "artifact"
+        unrelated = pathlib.Path("/synthetic/user-alias/artifact")
+        mapping = (logical_root, physical_root)
+
+        with mock.patch.object(
+            architecture_support,
+            "_trusted_system_tmp_mapping",
+            return_value=None,
+        ):
+            self.assertEqual(
+                architecture_support.trusted_system_tmp_path_spellings(
+                    logical_child
+                ),
+                (logical_child,),
+            )
+
+        with mock.patch.object(
+            architecture_support,
+            "_trusted_system_tmp_mapping",
+            return_value=mapping,
+        ):
+            self.assertEqual(
+                set(
+                    architecture_support.trusted_system_tmp_path_spellings(
+                        logical_child
+                    )
+                ),
+                {logical_child, physical_child},
+            )
+            self.assertEqual(
+                set(
+                    architecture_support.trusted_system_tmp_path_spellings(
+                        physical_child
+                    )
+                ),
+                {logical_child, physical_child},
+            )
+            self.assertEqual(
+                architecture_support.trusted_system_tmp_path_spellings(
+                    unrelated
+                ),
+                (unrelated,),
+            )
+
+    def test_manifest_accepts_trusted_alias_and_rejects_nested_symlink(
+        self,
+    ) -> None:
+        """@brief Accept the system alias but reject a later user symlink.
+
+        @return None after logical and physical manifest spellings bind to the
+          same executable while a symlinked configuration directory fails.
+        @throws OSError If fixture creation or executable inspection fails.
+        @throws AssertionError If the trusted root is rejected or a nested
+          arbitrary symlink reaches consumer execution.
+        @note The injected mapping models only Darwin's platform-owned alias;
+          both symlinks and every target live below a disposable sandbox.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-trusted-tmp-alias-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            logical_root = sandbox / "logical-tmp"
+            physical_root = sandbox / "physical-tmp"
+            physical_root.mkdir()
+            try:
+                logical_root.symlink_to(
+                    physical_root, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+            mapping = (logical_root, physical_root)
+            configuration = "RelWithDebInfo"
+            target_name = "consumer_safe"
+            build = physical_root / "consumer-build"
+            executable_by_target = write_consumer_target_inventory_fixture(
+                build,
+                configuration,
+                (target_name,),
+            )
+            physical_executable = executable_by_target[target_name]
+            logical_executable = logical_root / build.name / target_name
+            manifest = dependency_disabled.consumer_target_file_manifest_path(
+                build, configuration
+            )
+
+            def write_target_path(path: pathlib.Path) -> None:
+                """@brief Replace the test-owned target-file manifest path.
+
+                @param path Absolute executable spelling for this assertion.
+                @return None after serializing one valid target-file record.
+                @throws OSError If the disposable manifest cannot be written.
+                @note Target name and configured filename remain unchanged so
+                  only path equivalence varies between assertions.
+                """
+
+                write_exact_text(
+                    manifest,
+                    (
+                        dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                        + "\n"
+                        + f"{target_name}\t{target_name}\t{path}\n"
+                    ),
+                )
+
+            with mock.patch.object(
+                architecture_support,
+                "_trusted_system_tmp_mapping",
+                return_value=mapping,
+            ):
+                for executable_spelling in (
+                    logical_executable,
+                    physical_executable,
+                ):
+                    with self.subTest(spelling=executable_spelling):
+                        write_target_path(executable_spelling)
+                        self.assertEqual(
+                            dependency_disabled.configured_consumer_target_files(
+                                build, configuration
+                            ),
+                            [(target_name, physical_executable)],
+                        )
+
+                real_configuration = build / "real-configuration"
+                real_configuration.mkdir()
+                relocated_executable = real_configuration / target_name
+                physical_executable.replace(relocated_executable)
+                configured_alias = build / configuration
+                configured_alias.symlink_to(
+                    real_configuration, target_is_directory=True
+                )
+                write_target_path(
+                    logical_root
+                    / build.name
+                    / configuration
+                    / target_name
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "noncanonical path"
+                ):
+                    dependency_disabled.configured_consumer_target_files(
+                        build, configuration
+                    )
+
+    def test_command_scrub_covers_aliases_but_preserves_real_markers(
+        self,
+    ) -> None:
+        """@brief Scrub trusted root names without hiding dependency leakage.
+
+        @return None after logical and physical work prefixes disappear while
+          a real OpenEXR library marker remains rejected.
+        @throws AssertionError If a trusted spelling survives or the marker
+          classifier is weakened.
+        @throws Nothing; the expected real-leak RuntimeError is asserted
+          locally.
+        @note The work basename intentionally contains both forbidden marker
+          spellings that caused the Darwin build-smoke false positive.
+        """
+
+        synthetic_root = (
+            pathlib.Path(tempfile.gettempdir()).resolve()
+            / "photospider-trusted-tmp-scrub-fixture"
+        )
+        logical_root = synthetic_root / "logical-tmp"
+        physical_root = synthetic_root / "physical-tmp"
+        work_name = "openexr_deep_provider_option_off_smoke"
+        logical_work = logical_root / work_name
+        physical_work = physical_root / work_name
+        command_surface = (
+            f"cc -c {logical_work}/consumer/main.c\n"
+            f"cmake -E chdir {physical_work}/consumer-build"
+        )
+        mapping = (logical_root, physical_root)
+
+        with mock.patch.object(
+            architecture_support,
+            "_trusted_system_tmp_mapping",
+            return_value=mapping,
+        ):
+            scrubbed = openexr_option_off.scrub_paths(
+                command_surface, [physical_work]
+            )
+            self.assertNotIn("openexr", scrubbed.lower())
+            openexr_option_off.reject_forbidden_surface(
+                scrubbed, "trusted alias command evidence"
+            )
+            leaked_surface = openexr_option_off.scrub_paths(
+                command_surface + "\n-lOpenEXR",
+                [physical_work],
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "openexr"):
+            openexr_option_off.reject_forbidden_surface(
+                leaked_surface, "real dependency evidence"
+            )
 
 
 class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):

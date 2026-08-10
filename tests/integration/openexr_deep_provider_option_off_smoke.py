@@ -14,6 +14,7 @@ from textwrap import dedent
 from cmake_build_smoke_support import (
     producer_osx_architecture_arguments,
     remove_work_tree,
+    trusted_system_tmp_path_spellings,
 )
 
 
@@ -419,12 +420,25 @@ def scrub_paths(surface: str, roots: list[Path]) -> str:
     @param surface Complete command/dependency/symbol output.
     @param roots Exact work/build/install paths whose names are non-semantic.
     @return Text with each exact native/POSIX path replaced by an audit token.
-    @throws Nothing under string replacement.
-    @note Header/library names below those roots remain visible and scannable.
+    @throws OSError If trusted Darwin system roots cannot be inspected or
+      strictly resolved.
+    @throws RuntimeError If trusted root resolution or mapping is invalid.
+    @throws ValueError If a supplied root is relative or contains parent
+      traversal.
+    @note Both spellings of Darwin's trusted ``/tmp``/``/private/tmp`` root are
+      scrubbed. No caller-controlled symlink is resolved; header/library names
+      below those exact roots remain visible and scannable.
     """
 
     scrubbed = surface
-    for root in sorted(set(roots), key=lambda item: len(str(item)), reverse=True):
+    root_spellings = {
+        spelling
+        for root in roots
+        for spelling in trusted_system_tmp_path_spellings(root)
+    }
+    for root in sorted(
+        root_spellings, key=lambda item: len(str(item)), reverse=True
+    ):
         scrubbed = scrubbed.replace(str(root), "<audit-root>")
         scrubbed = scrubbed.replace(root.as_posix(), "<audit-root>")
     return scrubbed
