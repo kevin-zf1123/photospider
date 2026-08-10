@@ -1201,6 +1201,11 @@ removal 失败会原样传播，`lstat` 风格 postcondition 还会确认目录�
 Check/delete 序列不是跨平台原子 filesystem transaction，因此这些 driver 只接受由 caller
 独占、且 component 不会被并发替换的临时 subtree。
 
+Live install-consumer CTest inventory validator 只会把同一受信映射应用于 command argv index two
+处的精确 maintained driver。配置的 Python launcher 与 `-B` flag 仍须精确匹配；普通、
+intermediate 或 leaf symlink、parent traversal，以及 driver basename 或 layout drift 都不会进入
+可接受候选集合。
+
 同一份受信 root inspector 还服务于三个非破坏性 consumer。
 `DependencyDisabledInstallSmoke` 只有在严格 resolution 等于共享的物理拼写时，才会接受位于任一
 受信 root 下的 generated manifest target；任意 intermediate 或 leaf symlink 仍会因不相等而失败。

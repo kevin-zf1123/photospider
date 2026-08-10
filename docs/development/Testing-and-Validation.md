@@ -1518,6 +1518,12 @@ directory or dangling link remains. The check/delete sequence is not an atomic
 cross-platform filesystem transaction, so these drivers accept only
 caller-owned transient subtrees whose components are not concurrently replaced.
 
+The live install-consumer CTest inventory validator applies that same trusted
+mapping only to the exact maintained driver at command argv index two. The
+configured Python launcher and `-B` flag remain exact, while ordinary,
+intermediate, or leaf symlinks, parent traversal, and driver basename or layout
+drift remain outside the accepted candidate set.
+
 The same trusted-root inspector also serves three non-destructive consumers.
 `DependencyDisabledInstallSmoke` accepts a generated manifest target spelled
 under either trusted root only when strict resolution equals the shared
