@@ -233,6 +233,8 @@ symbol 与 dependency。在 marker 分类前，每个精确 audit root 都会通
 必须先以 Photospider 自有诊断失败，不得发现 OpenEXR。
 `OpenExrDeepProviderInstallConsumerSmoke` 是启用态 companion：它安装显式 component，加载真实
 module，解析两个 v3 export，校验 API table，调用 provider destruction，然后卸载 module。
+其生成的 imported-provider path 只有在严格解析后的物理文件仍位于 installed prefix 内、且该
+prefix 之后的每个 component 都不含 symlink 时，才可以使用任一受信 Darwin tmp 拼写。
 
 生成的 clean consumer project 会维护一份有序的 CMake executable target list。同一份 list
 负责创建 target、写出 configure-time 精确 target declaration，并通过 `file(GENERATE)` 提供
@@ -1199,14 +1201,17 @@ removal 失败会原样传播，`lstat` 风格 postcondition 还会确认目录�
 Check/delete 序列不是跨平台原子 filesystem transaction，因此这些 driver 只接受由 caller
 独占、且 component 不会被并发替换的临时 subtree。
 
-同一份受信 root inspector 还服务于两个非破坏性 consumer。
+同一份受信 root inspector 还服务于三个非破坏性 consumer。
 `DependencyDisabledInstallSmoke` 只有在严格 resolution 等于共享的物理拼写时，才会接受位于任一
 受信 root 下的 generated manifest target；任意 intermediate 或 leaf symlink 仍会因不相等而失败。
 `OpenExrDeepProviderOptionOffSmoke` 在 scrub 工具 evidence 前，只把自身精确 audit root 展开成两种
 受信拼写，从而避免 smoke 自身目录名成为 OpenEXR marker，同时保留真实 dependency 名称供扫描。
+它的启用态 companion 只有在 physical-prefix confinement 与 prefix 之后的 component 检查拒绝
+后续每个 symlink 或 escape 后，才会接受使用任一受信拼写的 generated provider target。
 `InstallConsumerArchitecturePropagationSafety` 会注入 synthetic mapping，在不触碰 `/tmp` 的前提下
-跨平台锁定双向拼写、manifest acceptance、root 之后的 symlink 反例、双拼写 evidence scrub，
-以及真实 `-lOpenEXR` rejection。
+跨平台锁定双向拼写、manifest acceptance、root 之后的 symlink 与 escape 反例、双拼写 evidence
+scrub、真实 `-lOpenEXR` rejection、alias 拼写的 `libImath.dylib`/`libOpenEXR.dylib` rejection，
+以及 enabled-provider containment。
 
 `OpenCvOperationProviderBuildSmokeSafety` 只针对 disposable temporary root 下的 synthetic
 repository、ancestor 和无关 symlink target，验证这些破坏性 guard、失败传播和 postcondition。

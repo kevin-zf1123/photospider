@@ -307,7 +307,9 @@ component must fail with the Photospider-owned diagnostic before OpenEXR
 discovery. `OpenExrDeepProviderInstallConsumerSmoke` is the enabled companion:
 it installs the explicit component, loads the actual module, resolves both v3
 exports, validates the API table, invokes provider destruction, and unloads
-the module.
+the module. Its generated imported-provider path may use either trusted Darwin
+tmp spelling only when the strictly resolved physical file remains inside the
+installed prefix and every component after that prefix is free of symlinks.
 
 The generated clean consumer project maintains one ordered CMake executable
 target list. That same list creates the targets, writes a configure-time exact
@@ -1516,17 +1518,22 @@ directory or dangling link remains. The check/delete sequence is not an atomic
 cross-platform filesystem transaction, so these drivers accept only
 caller-owned transient subtrees whose components are not concurrently replaced.
 
-The same trusted-root inspector also serves two non-destructive consumers.
+The same trusted-root inspector also serves three non-destructive consumers.
 `DependencyDisabledInstallSmoke` accepts a generated manifest target spelled
 under either trusted root only when strict resolution equals the shared
 physical spelling; an arbitrary intermediate or leaf symlink still differs and
 fails. `OpenExrDeepProviderOptionOffSmoke` expands only its exact audit roots to
 both trusted spellings before scrubbing tool evidence, preventing the smoke's
 own directory name from becoming an OpenEXR marker while leaving real
-dependency names scannable. `InstallConsumerArchitecturePropagationSafety`
-injects a synthetic mapping to lock bidirectional spelling, manifest
-acceptance, a post-root symlink counterexample, dual-spelling evidence scrub,
-and a real `-lOpenEXR` rejection on every platform without touching `/tmp`.
+dependency names scannable. Its enabled companion accepts the generated
+provider target under either trusted spelling only after physical-prefix
+confinement and post-prefix component checks reject every later symlink or
+escape. `InstallConsumerArchitecturePropagationSafety` injects a synthetic
+mapping to lock bidirectional spelling, manifest acceptance, post-root symlink
+and escape counterexamples, dual-spelling evidence scrub, a real
+`-lOpenEXR` rejection, alias-spelled `libImath.dylib`/`libOpenEXR.dylib`
+rejections, and enabled-provider containment on every platform without
+touching `/tmp`.
 
 `OpenCvOperationProviderBuildSmokeSafety` exercises those destructive guards,
 failure propagation, and postcondition only against a synthetic repository,
