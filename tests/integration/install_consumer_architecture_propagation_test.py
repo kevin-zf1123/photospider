@@ -990,6 +990,177 @@ class TrustedDarwinTemporaryAliasConsumerTest(unittest.TestCase):
                 leaked_surface, "real dependency evidence"
             )
 
+    def test_native_audit_preserves_alias_spelled_library_markers(
+        self,
+    ) -> None:
+        """@brief Preserve library basenames across trusted-alias scrubbing.
+
+        @return None after logical and physical spellings of ``libImath`` and
+          ``libOpenEXR`` remain rejectable on symbol and dependency surfaces.
+        @throws AssertionError If native artifact auditing hides a qualified
+          library marker by scrubbing the artifact leaf as an audit root.
+        @throws Nothing; each expected native-leak RuntimeError is asserted
+          locally while inspector execution is replaced by bounded fixtures.
+        @note The physical artifact path models the file supplied to the native
+          inspector, while its evidence deliberately alternates both trusted
+          Darwin spellings without inspecting the host's real ``/tmp``.
+        """
+
+        synthetic_root = (
+            pathlib.Path(tempfile.gettempdir()).resolve()
+            / "photospider-trusted-tmp-native-audit-fixture"
+        )
+        logical_root = synthetic_root / "logical-tmp"
+        physical_root = synthetic_root / "physical-tmp"
+        work_name = "openexr_deep_provider_option_off_smoke"
+        logical_work = logical_root / work_name
+        physical_work = physical_root / work_name
+        mapping = (logical_root, physical_root)
+
+        with mock.patch.object(
+            architecture_support,
+            "_trusted_system_tmp_mapping",
+            return_value=mapping,
+        ):
+            for library_name, expected_marker in (
+                ("libImath.dylib", "libimath"),
+                ("libOpenEXR.dylib", "openexr"),
+            ):
+                artifact = physical_work / library_name
+                for evidence_root in (logical_work, physical_work):
+                    evidence_path = str(evidence_root / library_name)
+                    for surface_kind in ("symbols", "dependencies"):
+                        symbol_surface = (
+                            evidence_path
+                            if surface_kind == "symbols"
+                            else "_photospider_neutral_symbol"
+                        )
+                        dependency_surface = (
+                            evidence_path
+                            if surface_kind == "dependencies"
+                            else "/usr/lib/libSystem.B.dylib"
+                        )
+                        with self.subTest(
+                            library=library_name,
+                            spelling=evidence_root,
+                            surface=surface_kind,
+                        ), mock.patch.object(
+                            openexr_option_off,
+                            "symbol_surfaces",
+                            return_value=(symbol_surface, ""),
+                        ), mock.patch.object(
+                            openexr_option_off,
+                            "dependency_surface",
+                            return_value=dependency_surface,
+                        ):
+                            with self.assertRaisesRegex(
+                                RuntimeError, expected_marker
+                            ):
+                                openexr_option_off.validate_native_artifacts(
+                                    [artifact],
+                                    pathlib.Path("/synthetic/nm"),
+                                    "nm",
+                                    [physical_work],
+                                    "trusted-alias-native-audit",
+                                )
+
+    def test_enabled_provider_accepts_aliases_and_rejects_symlink_escape(
+        self,
+    ) -> None:
+        """@brief Confine the enabled provider across trusted tmp spellings.
+
+        @return None after logical/physical manifest spellings resolve to the
+          same physical provider while leaf, intermediate, and ``..`` escapes
+          are rejected.
+        @throws OSError If disposable directories, files, or symlinks cannot be
+          created or inspected.
+        @throws AssertionError If a trusted spelling is rejected or an
+          untrusted post-root path reaches the enabled consumer.
+        @note The synthetic logical root is the only trusted symlink. Every
+          later symlink and all files remain inside the disposable sandbox.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-enabled-provider-trusted-tmp-alias-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            logical_root = sandbox / "logical-tmp"
+            physical_root = sandbox / "physical-tmp"
+            physical_root.mkdir()
+            try:
+                logical_root.symlink_to(
+                    physical_root, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+
+            mapping = (logical_root, physical_root)
+            work_name = "openexr_deep_provider_install_consumer_smoke"
+            provider_relative = (
+                pathlib.Path("lib")
+                / "photospider"
+                / "providers"
+                / "libphotospider_openexr_deep_provider.so"
+            )
+            physical_prefix = physical_root / work_name / "prefix"
+            physical_provider = physical_prefix / provider_relative
+            physical_provider.parent.mkdir(parents=True)
+            write_exact_text(physical_provider, "provider fixture\n")
+            logical_provider = (
+                logical_root / work_name / "prefix" / provider_relative
+            )
+
+            outside_directory = physical_root / work_name / "outside"
+            outside_directory.mkdir()
+            outside_provider = outside_directory / physical_provider.name
+            write_exact_text(outside_provider, "outside provider fixture\n")
+            leaf_symlink = physical_prefix / "provider-link.so"
+            nested_symlink = physical_prefix / "linked-provider-directory"
+            try:
+                leaf_symlink.symlink_to(physical_provider)
+                nested_symlink.symlink_to(
+                    outside_directory, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"provider symlinks unavailable: {error}")
+
+            escaped_provider = (
+                physical_prefix
+                / ".."
+                / outside_directory.name
+                / outside_provider.name
+            )
+            invalid_paths = (
+                leaf_symlink,
+                nested_symlink / outside_provider.name,
+                escaped_provider,
+            )
+
+            with mock.patch.object(
+                architecture_support,
+                "_trusted_system_tmp_mapping",
+                return_value=mapping,
+            ):
+                for provider_spelling in (
+                    logical_provider,
+                    physical_provider,
+                ):
+                    with self.subTest(spelling=provider_spelling):
+                        self.assertEqual(
+                            openexr_option_off.validate_enabled_provider_path(
+                                provider_spelling, physical_prefix
+                            ),
+                            physical_provider,
+                        )
+                for invalid_path in invalid_paths:
+                    with self.subTest(invalid=invalid_path):
+                        with self.assertRaisesRegex(
+                            RuntimeError, "escaped its prefix"
+                        ):
+                            openexr_option_off.validate_enabled_provider_path(
+                                invalid_path, physical_prefix
+                            )
+
 
 class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
     """@brief Validate dynamic consumer discovery and fail-closed execution.
