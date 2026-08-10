@@ -143,6 +143,24 @@ INSTALL_CONSUMER_CTEST_NAMES = tuple(
 )
 
 
+def darwin_architecture_arguments_for_test(
+    build: pathlib.Path,
+) -> tuple[str, ...]:
+    """@brief Derive producer architecture argv through a Darwin-only seam.
+
+    @param build Synthetic configured producer whose cache owns the value.
+    @return Exact production helper result for a Darwin child configure.
+    @throws OSError If an existing producer cache cannot be read.
+    @note Passing the platform directly to the architecture helper leaves
+      ``platform.system()`` host-native for trusted temporary-path discovery,
+      so a non-Darwin runner never inspects Darwin's ``/private/tmp`` root.
+    """
+
+    return architecture_support.producer_osx_architecture_arguments(
+        build, system_name="Darwin"
+    )
+
+
 def ctest_test_entry(
     name: str,
     command: list[str] | None,
@@ -1194,8 +1212,9 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
         @throws RuntimeError If producer or consumer inventory validation fails.
         @throws subprocess.CalledProcessError If the recorder injects a build or
           consumer execution failure.
-        @note Darwin is selected so the same invocation also retains the six
-          child-configure architecture propagation boundary.
+        @note Darwin is injected only at the producer-architecture helper, so
+          the same invocation retains the six child-configure propagation
+          boundary without changing host temporary-path discovery.
         """
 
         repo = sandbox / "repo"
@@ -1243,7 +1262,11 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 "validate_no_optional_deep_codec_residue",
                 return_value=None,
             ),
-            mock.patch("platform.system", return_value="Darwin"),
+            mock.patch.object(
+                dependency_disabled,
+                "producer_osx_architecture_arguments",
+                side_effect=darwin_architecture_arguments_for_test,
+            ),
         ):
             return dependency_disabled.main()
 
@@ -3448,6 +3471,8 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
           architecture argument.
         @note The test exercises the real reusable-producer validator and
           ``main`` command construction while replacing subprocess execution.
+          Darwin is injected only at the producer-architecture helper, leaving
+          trusted temporary-path discovery scoped to the actual host.
         """
 
         with tempfile.TemporaryDirectory(
@@ -3507,8 +3532,10 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
                     "validate_no_optional_deep_codec_residue",
                     return_value=None,
                 ),
-                mock.patch(
-                    "platform.system", return_value="Darwin"
+                mock.patch.object(
+                    dependency_disabled,
+                    "producer_osx_architecture_arguments",
+                    side_effect=darwin_architecture_arguments_for_test,
                 ),
             ):
                 self.assertEqual(dependency_disabled.main(), 0)
