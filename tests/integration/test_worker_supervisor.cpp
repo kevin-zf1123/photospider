@@ -1355,6 +1355,40 @@ TEST(
   EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
 }
 
+TEST(WorkerSupervisor,
+     CandidateReportDeadlineCannotPreemptActiveCancellationSignalTruth) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.post_report_timeout = 10ms;
+  options.cooperative_cancel_timeout = 1s;
+  auto service = make_service(root.path(), std::move(options));
+  const JobSubmission submitted = service->submit(
+      fixture_spec("fixture.cancel-race.report-delayed-signal"));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto snapshot = service->query(submitted.job_id);
+        return snapshot.has_value() && snapshot->state == JobState::Running;
+      },
+      2s));
+
+  ASSERT_TRUE(service->cancel(submitted.job_id));
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::WorkerSignal)
+      << terminal.message;
+  EXPECT_EQ(terminal.message,
+            "worker died by signal 9 (OOM-compatible SIGKILL)");
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerProtocol);
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+      0U);
+}
+
 TEST(WorkerSupervisor, StaleLeaseCannotCancelFreshRetryProcess) {
   ScopedSupervisorRoot root;
   const std::filesystem::path fifo = root.path() / "worker-retry.fifo";

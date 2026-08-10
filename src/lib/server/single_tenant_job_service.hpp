@@ -316,9 +316,10 @@ struct WorkerManagerOptions final {
   std::chrono::milliseconds attempt_runtime_timeout{std::chrono::minutes(30)};
   /**
    * @brief Maximum ordinary wait for clean exit or EOF settlement.
-   * @note After accepted cancellation this bound cannot preempt the still-
-   * active cooperative deadline; exact exit status and owned escalation remain
-   * under the cancellation state machine.
+   * @note After accepted cancellation this bound applies equally to a live
+   * worker after candidate-Report receipt and to ordinary EOF, but neither may
+   * preempt the still-active cooperative deadline. Exact exit status and owned
+   * escalation remain under the cancellation state machine.
    */
   std::chrono::milliseconds post_report_timeout{2000};
   /** @brief Cooperative cancellation grace before `SIGTERM`. */

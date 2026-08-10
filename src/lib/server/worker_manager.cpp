@@ -57,6 +57,30 @@ constexpr int kWorkerExecStatusDescriptor = 4;
 constexpr std::chrono::milliseconds kSupervisorPollInterval{20};
 
 /**
+ * @brief Subordinates one ordinary channel deadline to active cancellation.
+ * @param ordinary_deadline Optional EOF or candidate-Report deadline.
+ * @param cancel_deadline Optional active cooperative-cancellation deadline.
+ * @return No deadline when `ordinary_deadline` is absent; otherwise the later
+ * of the ordinary and active cancellation deadlines.
+ * @throws Nothing.
+ * @note This is the sole ordinary-deadline arbitration for both channel EOF
+ * and a candidate Report whose worker remains alive. Equal deadlines remain
+ * equal, and the monitor checks cancellation before either ordinary branch so
+ * manager-owned cancellation settlement wins the tie.
+ */
+std::optional<std::chrono::steady_clock::time_point>
+subordinate_ordinary_deadline(
+    const std::optional<std::chrono::steady_clock::time_point>&
+        ordinary_deadline,
+    const std::optional<std::chrono::steady_clock::time_point>&
+        cancel_deadline) noexcept {
+  if (!ordinary_deadline.has_value() || !cancel_deadline.has_value()) {
+    return ordinary_deadline;
+  }
+  return std::max(*ordinary_deadline, *cancel_deadline);
+}
+
+/**
  * @brief Invokes POSIX `close` for one manager-owned descriptor.
  * @param descriptor Nonnegative descriptor whose owner has already changed.
  * @param context Unused callback context.
@@ -1412,10 +1436,11 @@ class WorkerManager::Impl final {
    * @throws std::invalid_argument when `process` is null.
    * @note Short read slices share one stateful frame decoder. Cancellation-send
    * failure starts the same cooperative deadline and keeps draining worker
-   * report/EOF/exit truth. A subsequent socket-system read failure disables
-   * decoding inside this monitor, but its EOF/post-report bound cannot preempt
-   * the still-active cooperative deadline, so exact wait status can still
-   * outrank channel loss. If the deadline-side exact observation reaps a
+   * report/EOF/exit truth. Every ordinary EOF or candidate-Report deadline is
+   * subordinated through one shared arbitration to the still-active
+   * cooperative deadline, so it cannot terminate/reap first and exact wait
+   * status can still outrank channel or protocol loss. If the deadline-side
+   * exact observation reaps a
    * natural exit before channel revocation, the monitor keeps that descriptor
    * open and drains the stateful decoder through one bounded post-reap window;
    * only matching delivered TERM/KILL escalation yields
@@ -1464,6 +1489,8 @@ class WorkerManager::Impl final {
           cancel_delivery_failed = true;
         }
       }
+      const auto effective_report_deadline =
+          subordinate_ordinary_deadline(report_deadline, cancel_deadline);
       if (cancel_deadline.has_value() && !process->reaped &&
           std::chrono::steady_clock::now() >= *cancel_deadline) {
         if (options_.await_cancel_deadline_zero_exit_for_test) {
@@ -1505,8 +1532,8 @@ class WorkerManager::Impl final {
                                   JobAttemptFailure::WorkerHeartbeatTimeout,
                                   "worker heartbeat deadline expired");
       }
-      if (report_deadline.has_value() && !process->reaped &&
-          now >= *report_deadline) {
+      if (effective_report_deadline.has_value() && !process->reaped &&
+          now >= *effective_report_deadline) {
         terminate_and_reap(record, process);
         return failure_completion(
             record->identity, JobAttemptFailure::WorkerProtocol,
@@ -1549,12 +1576,8 @@ class WorkerManager::Impl final {
 
       if (channel_eof) {
         if (!candidate_report.has_value()) {
-          auto terminal_channel_deadline = eof_deadline;
-          if (terminal_channel_deadline.has_value() &&
-              cancel_deadline.has_value()) {
-            terminal_channel_deadline =
-                std::max(*terminal_channel_deadline, *cancel_deadline);
-          }
+          const auto terminal_channel_deadline =
+              subordinate_ordinary_deadline(eof_deadline, cancel_deadline);
           if (terminal_channel_deadline.has_value() &&
               now >= *terminal_channel_deadline) {
             terminate_and_reap(record, process);
@@ -1580,8 +1603,8 @@ class WorkerManager::Impl final {
           read_deadline = std::min(read_deadline, *cancel_deadline);
         }
       }
-      if (!process->reaped && report_deadline.has_value()) {
-        read_deadline = std::min(read_deadline, *report_deadline);
+      if (!process->reaped && effective_report_deadline.has_value()) {
+        read_deadline = std::min(read_deadline, *effective_report_deadline);
       }
       if (post_reap_drain_deadline.has_value()) {
         read_deadline = std::min(read_deadline, *post_reap_drain_deadline);
