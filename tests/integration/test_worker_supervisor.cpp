@@ -54,6 +54,12 @@ constexpr int kDescriptorWorkerExecutionFailed = 73;
 constexpr int kParentDescriptorOwnershipChanged = 74;
 /** @brief Probe exit for an unexpected C++ setup or service exception. */
 constexpr int kDescriptorProbeRaised = 75;
+/** @brief Probe exit if allocation failure fabricates a completion callback. */
+constexpr int kCompletionCallbackInvoked = 76;
+/** @brief Probe exit if the failed record is ordinarily marked and deleted. */
+constexpr int kCompletionRecordDeleted = 77;
+/** @brief Probe exit for unexpected allocation-fault test setup failure. */
+constexpr int kCompletionProbeRaised = 78;
 
 /**
  * @brief Process-global descriptor-limit shape exercised by an isolated probe.
@@ -247,6 +253,50 @@ class UnmarkedWorkerFactory final : public JobAttemptWorkerFactory {
 };
 
 /**
+ * @brief Externalizable factory that raises one deterministic primary
+ * supervision failure before process spawn.
+ * @throws Nothing for construction.
+ * @note The manager wraps this primary failure as `ManagerFailure` and attempts
+ * to reconstruct one typed completion; the separate options seam faults that
+ * reconstruction with the actual `std::bad_alloc` under test.
+ */
+class CompletionConstructionFailureFactory final
+    : public JobAttemptWorkerFactory {
+ public:
+  /**
+   * @brief Rejects accidental in-process execution.
+   * @param assignment Exact assignment, intentionally unused.
+   * @return Never returns.
+   * @throws std::logic_error unconditionally.
+   */
+  std::unique_ptr<JobAttemptWorker> create(
+      const JobAssignment& assignment) override {
+    static_cast<void>(assignment);
+    throw std::logic_error(
+        "completion allocation-fault factory must not execute in process");
+  }
+
+  /**
+   * @brief Advertises product-shaped external assignment support.
+   * @return True.
+   * @throws Nothing.
+   */
+  bool supports_external_assignment() const noexcept override { return true; }
+
+  /**
+   * @brief Raises the primary supervision failure before any child is spawned.
+   * @param assignment Exact assignment, intentionally unused.
+   * @return Never returns.
+   * @throws std::runtime_error unconditionally.
+   */
+  ResolvedGraphArtifact prepare_external_graph(
+      const JobAssignment& assignment) const override {
+    static_cast<void>(assignment);
+    throw std::runtime_error("injected external assignment preparation fault");
+  }
+};
+
+/**
  * @brief Builds complete finite resources realistic for a freshly execed image.
  * @return 512-GiB Darwin-compatible address-space envelope and one-MiB
  * artifact bounds.
@@ -324,6 +374,26 @@ JobSpec fixture_spec(std::string mode,
   return JobSpec(GraphArtifactId(std::move(mode)), 0,
                  OutputSlotId("image.final"), supervisor_resources(),
                  std::move(checkpoint));
+}
+
+/**
+ * @brief Builds one valid assignment for the completion allocation-fault
+ * probe.
+ * @return Complete immutable exact assignment.
+ * @throws Contract or allocation failures unchanged.
+ */
+JobAssignment completion_failure_assignment() {
+  auto spec = std::make_shared<const JobSpec>(
+      fixture_spec("fixture.completion-allocation-failure"));
+  AttemptIdentity identity;
+  identity.tenant_id = TenantId("tenant.supervisor.completion-failure");
+  identity.job_id = JobId("job.supervisor.completion-failure");
+  identity.job_spec_digest = spec->digest();
+  identity.attempt_id = JobAttemptId("attempt.supervisor.completion-failure");
+  identity.worker_instance_id =
+      WorkerInstanceId("worker.supervisor.completion-failure");
+  identity.worker_lease_generation = WorkerLeaseGeneration{1U};
+  return JobAssignment{std::move(identity), std::move(spec), nullptr};
 }
 
 /**
@@ -717,6 +787,70 @@ TEST(WorkerSupervisor, ReapDeadlineFailStopsWithoutBlockingFallback) {
         service.reset();
       },
       "exact worker was not reaped before the SIGKILL deadline");
+}
+
+TEST(WorkerSupervisor,
+     CompletionReconstructionBadAllocFailStopsBeforeRecordRetirement) {
+  WorkerManagerOptions options = supervisor_options();
+  options.fail_completion_construction_for_test =
+      std::make_shared<std::atomic<bool>>(true);
+
+  EXPECT_EXIT(
+      {
+        try {
+          WorkerManagerCallbacks callbacks;
+          callbacks.begin_assignment = [](const AttemptIdentity&) {
+            return true;
+          };
+          callbacks.cancellation_requested = [](const AttemptIdentity&) {
+            return false;
+          };
+          callbacks.complete_assignment = [](WorkerManagerCompletion) {
+            ::_exit(kCompletionCallbackInvoked);
+          };
+          WorkerManager manager(
+              std::make_shared<CompletionConstructionFailureFactory>(),
+              std::move(callbacks), options, false);
+          manager.start(completion_failure_assignment());
+          manager.shutdown();
+          ::_exit(kCompletionRecordDeleted);
+        } catch (...) {
+          ::_exit(kCompletionProbeRaised);
+        }
+      },
+      ::testing::KilledBySignal(SIGABRT),
+      "completion fact could not be constructed or delivered");
+}
+
+TEST(WorkerSupervisor,
+     CompletionCallbackExceptionFailStopsBeforeRecordRetirement) {
+  WorkerManagerOptions options = supervisor_options();
+
+  EXPECT_EXIT(
+      {
+        try {
+          WorkerManagerCallbacks callbacks;
+          callbacks.begin_assignment = [](const AttemptIdentity&) {
+            return true;
+          };
+          callbacks.cancellation_requested = [](const AttemptIdentity&) {
+            return false;
+          };
+          callbacks.complete_assignment = [](WorkerManagerCompletion) {
+            throw std::runtime_error("injected completion callback fault");
+          };
+          WorkerManager manager(
+              std::make_shared<CompletionConstructionFailureFactory>(),
+              std::move(callbacks), options, false);
+          manager.start(completion_failure_assignment());
+          manager.shutdown();
+          ::_exit(kCompletionRecordDeleted);
+        } catch (...) {
+          ::_exit(kCompletionProbeRaised);
+        }
+      },
+      ::testing::KilledBySignal(SIGABRT),
+      "completion fact could not be constructed or delivered");
 }
 
 TEST(WorkerSupervisor, CooperativeAndForcedCancellationRemainDistinct) {

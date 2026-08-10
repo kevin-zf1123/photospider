@@ -64,7 +64,13 @@ struct WorkerManagerCallbacks final {
   std::function<bool(const AttemptIdentity&)> begin_assignment;
   /** @brief Observes monotonic cancel/fail-stop/replacement/shutdown intent. */
   std::function<bool(const AttemptIdentity&)> cancellation_requested;
-  /** @brief Applies one exact report or trusted post-reap terminal fact. */
+  /**
+   * @brief Applies one exact report or trusted post-reap terminal fact.
+   * @note The callback must return only after accepting the handoff or entering
+   * its own monotonic service fail-stop. Throwing means terminal-fact delivery
+   * cannot be proven and allocation-free fail-stops WorkerManager before
+   * completed-record marking or deletion.
+   */
   std::function<void(WorkerManagerCompletion)> complete_assignment;
 };
 
@@ -106,7 +112,9 @@ struct WorkerManagerOwnershipSnapshot final {
  * executable access, a waitable product `SIGCHLD` disposition, and creates one
  * internal supervision-thread reaper.
  * @note No API accepts a PID. Callbacks are never invoked while the manager
- * mutex is held, and `shutdown()` waits for no service mutex.
+ * mutex is held, and `shutdown()` waits for no service mutex. After an
+ * assignment begins, inability to construct or deliver its terminal fact
+ * allocation-free fail-stops before completed-record marking or deletion.
  */
 class WorkerManager final {
  public:

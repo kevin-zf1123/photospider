@@ -220,6 +220,16 @@ struct WorkerManagerOptions final {
    */
   std::shared_ptr<std::atomic<bool>> defer_reap_observation_for_test;
   /**
+   * @brief Optional one-shot completion-reconstruction allocation fault.
+   * @note Null in product construction. Tests may arm this flag so the first
+   * supervisor exception-to-completion reconstruction consumes it and throws
+   * `std::bad_alloc` before any completion callback, completed-record mark, or
+   * record deletion. The seam grants no Job, quota, process, or retry
+   * authority and is available only on this non-installed source-private
+   * contract.
+   */
+  std::shared_ptr<std::atomic<bool>> fail_completion_construction_for_test;
+  /**
    * @brief Holds escalation until a normally exited child is waitable in tests.
    * @note False in product construction. When true, `WorkerManager` performs
    * one initial exact `waitpid(WNOHANG)` observation, revokes the channel, and

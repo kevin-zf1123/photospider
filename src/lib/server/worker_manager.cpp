@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -248,6 +249,23 @@ enum class OwnedSignalResult : std::uint8_t {
   static constexpr char kMessage[] =
       "photospider WorkerManager fail-stop: exact worker reaping authority "
       "was lost\n";
+  fail_stop_worker_authority(kMessage);
+}
+
+/**
+ * @brief Terminates when one required typed terminal fact cannot be retained
+ * or delivered.
+ * @return Never returns.
+ * @throws Nothing.
+ * @note The child may already be exactly reaped, but Job/quota reconciliation
+ * is still incomplete. This allocation-free path therefore runs before the
+ * completion callback can be forged or retried and before the record is marked
+ * completed or exposed to the handle reaper.
+ */
+[[noreturn]] void fail_stop_completion_delivery_lost() noexcept {
+  static constexpr char kMessage[] =
+      "photospider WorkerManager fail-stop: terminal completion fact could "
+      "not be constructed or delivered\n";
   fail_stop_worker_authority(kMessage);
 }
 
@@ -857,43 +875,57 @@ class WorkerManager::Impl final {
    * @brief Runs one exact record and contains every exception at thread scope.
    * @param record Shared stable record retained by the registry and thread.
    * @return Nothing after optional completion callback and completed marking.
-   * @throws Nothing.
+   * @throws Nothing; fallback-completion construction failure or completion-
+   * callback failure allocation-free fail-stops the authority before
+   * completed-record marking or deletion.
+   * @note `begin_assignment()` returning false is the sole no-completion
+   * retirement path. Once begin succeeds or raises, supervision must deliver
+   * one typed terminal fact or fail-stop while retaining the record.
    */
   void supervise(const std::shared_ptr<Record>& record) noexcept {
     std::optional<WorkerManagerCompletion> completion;
+    bool assignment_began = false;
     try {
-      if (callbacks_.begin_assignment(record->identity)) {
+      assignment_began = callbacks_.begin_assignment(record->identity);
+      if (assignment_began) {
         completion = in_process_test_mode_ ? run_in_process(record)
                                            : run_external_process(record);
       }
     } catch (const ManagerFailure& error) {
       try {
+        inject_completion_construction_failure_for_test();
         completion =
             failure_completion(record->identity, error.failure(), error.what());
       } catch (...) {
+        fail_stop_completion_delivery_lost();
       }
     } catch (const std::exception& error) {
       try {
+        inject_completion_construction_failure_for_test();
         completion = failure_completion(
             record->identity, JobAttemptFailure::WorkerStartup,
             std::string("worker supervision raised: ") + error.what());
       } catch (...) {
+        fail_stop_completion_delivery_lost();
       }
     } catch (...) {
       try {
+        inject_completion_construction_failure_for_test();
         completion = failure_completion(
             record->identity, JobAttemptFailure::WorkerStartup,
             "worker supervision raised a non-standard exception");
       } catch (...) {
+        fail_stop_completion_delivery_lost();
       }
     }
     if (completion.has_value()) {
       try {
         callbacks_.complete_assignment(std::move(*completion));
       } catch (...) {
-        // The service callback is specified no-throw. Contain a future broken
-        // callback so lifecycle ownership can still reach exact completion.
+        fail_stop_completion_delivery_lost();
       }
+    } else if (assignment_began) {
+      fail_stop_completion_delivery_lost();
     }
     mark_completed(record);
   }
@@ -1356,6 +1388,23 @@ class WorkerManager::Impl final {
       return callbacks_.cancellation_requested(record->identity);
     } catch (...) {
       return true;
+    }
+  }
+
+  /**
+   * @brief Injects one deterministic allocation failure during completion
+   * reconstruction.
+   * @return Nothing when the source-private gate is absent or disarmed.
+   * @throws std::bad_alloc after atomically consuming one armed test request.
+   * @note Product configuration leaves the gate null. The exception is raised
+   * at the real supervisor reconstruction boundary without replacing the
+   * process allocator or exposing an installed fault-control surface.
+   */
+  void inject_completion_construction_failure_for_test() const {
+    if (options_.fail_completion_construction_for_test != nullptr &&
+        options_.fail_completion_construction_for_test->exchange(
+            false, std::memory_order_acq_rel)) {
+      throw std::bad_alloc();
     }
   }
 
