@@ -236,6 +236,14 @@ classification, and reaping. It targets the current
 `{WorkerInstanceId, WorkerLeaseGeneration}`, never an unqualified PID. The
 control plane does not kill or reuse worker processes directly.
 
+Potentially blocking graph resolution is not part of that supervisor before a
+PID exists. Product composition completes it before service ownership and
+retains only an immutable prepared catalog. WorkerManager registers the exact
+execed child PID before a non-virtual in-memory handoff; filesystem opening and
+graph loading occur inside that owned process. A blocked trusted read can
+therefore be cancelled, signalled, and exactly reaped instead of holding the
+manager's handle reaper indefinitely.
+
 Cancellation proceeds through four owners:
 
 1. the control plane records monotonic cancellation intent for the current
@@ -260,6 +268,11 @@ and exact `waitpid`. A report is eligible only after clean exit and reap. This
 is process crash isolation for the trusted Embedded worker composition; it is
 not network peer authentication, a syscall sandbox, device isolation, or the
 isolated tenant-plugin runtime assigned to Issues #101-#104.
+
+The exec bootstrap also carries required exact startup and worker-write
+deadlines alongside the control descriptor. The worker uses the manager values
+without local defaults or shorter caps, so both sides enforce one configured
+lifecycle policy even before the first assignment frame is available.
 
 ### Artifact store and data plane
 

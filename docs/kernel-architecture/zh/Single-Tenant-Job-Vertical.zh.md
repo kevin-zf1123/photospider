@@ -229,13 +229,15 @@ Job-state update 丢失的 commit。Terminal receipt 内嵌于 Job record，因�
 
 ## Worker、Cancellation 与 Completion Ordering
 
-Control plane 会在 JobSpec 外解析可信 graph material，随后 WorkerManager 创建 private
-socket pair，并为精确一个 immutable assignment fork/exec 一个不安装的
-`photospider-worker`。Fork child 只执行 descriptor setup、`RLIMIT_AS`、descriptor closure
+产品 composition 会在 JobSpec 外、service ownership 建立前解析可信 graph material，并把它
+保留在 immutable `PreparedExternalGraphCatalog` 中。WorkerManager 创建 private socket pair，
+fork/exec 一个不安装的 `photospider-worker`，先登记其精确 PID，再通过不可覆写的内存 catalog
+lookup 把 material 复制进精确一个 immutable assignment。Supervision thread 不调用 resolver，
+也不执行 filesystem I/O。Fork child 只执行 descriptor setup、`RLIMIT_AS`、descriptor closure
 与 `exec`；全新 exec 的 worker 会校验 assignment、JobSpec digest 与 optional checkpoint，
-创建并 seed 一个全新的 Embedded Host，加载 attempt-local Graph，在已预留 CPU parallelism
-内 compute，校验一个非空 CPU image，关闭 Graph，销毁 Host ownership，最后只返回 typed
-attempt fact 与 candidate image。
+创建并 seed 一个全新的 Embedded Host，打开并加载 attempt-local Graph，在已预留 CPU
+parallelism 内 compute，校验一个非空 CPU image，关闭 Graph，销毁 Host ownership，最后只
+返回 typed attempt fact 与 candidate image。
 
 Exec 前的 descriptor ownership 是精确的：fd 0-2 是标准 stream，fd 3 是 private control
 socket，close-on-exec fd 4 用于向 parent 传递 setup `errno`。Darwin parent 在 `fork` 前查询
@@ -253,6 +255,12 @@ Parent-side WorkerManager descriptor 使用与 fork-child closure sweep 不同�
 每种结果。Linux 可能在报告 interrupted close 前已经释放并重新分配该数字 fd，因此重试可能
 关闭另一个 thread 新取得的 descriptor。一个 source-private callback 回归会强制形成这种
 release/reuse 顺序，并证明不会有第二次 close 消耗复用后的 descriptor。
+
+Worker exec bootstrap 要求 `--control-fd`、`--startup-timeout-ms` 与
+`--io-timeout-ms`。WorkerManager 在 fork 前准备这些 string。worker 把精确 configured startup
+duration 用于初始 assignment receive，并把精确 I/O duration 用于 acceptance、heartbeat 与
+report write；worker 本地默认值或 cap 无法缩短 manager policy。Startup 不进入 assignment
+payload，因为 worker 在收到第一帧 protocol 前已经需要该 deadline。
 
 Private bounded protocol 具有固定 magic、唯一支持的 version、封闭 message kind、64-MiB
 frame-payload 上限、deadline-aware partial I/O，以及严格的 trailing-byte、enum、identity、
@@ -307,6 +315,12 @@ owner-validated `SIGTERM`/`SIGKILL` escalation，最后精确 reap。只有匹�
 并发排空所有 attempt。Reap observation 在最终 kill/reap deadline 前保持非阻塞；如果仍无法
 观察到精确 reaping，authority process 会 fail-stop，而不是无限阻塞或带着 live ownership
 返回。
+
+由于全部 filesystem open 与 graph load 现在都发生在 exec 后、精确保留 PID 的约束下，阻塞
+的可信 I/O 会进入同一 escalation path。长期 FIFO process fixture 证明有界 forced
+cancellation 与精确 reaping、有界 service 析构，以及 material 可读后由 fresh worker 成功
+执行。不可覆写的 prepared catalog boundary 则另外移除了可能无限占住 manager reaper 的
+pre-PID resolver callback。
 
 一个 private reaper 会在 manager 与 Job mutex 之外 join 已完成的 supervision handle。显式
 源码私有 test marker 可以在 supervision thread 内执行 deterministic unit-test worker；它不

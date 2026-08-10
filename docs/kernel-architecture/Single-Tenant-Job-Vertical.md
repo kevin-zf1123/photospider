@@ -277,15 +277,18 @@ recovery reports durable corruption instead of adopting or overwriting it.
 
 ## Worker, Cancellation, and Completion Ordering
 
-The control plane resolves trusted graph material outside JobSpec, then
-WorkerManager creates a private socket pair and forks/execs one non-installed
-`photospider-worker` for exactly one immutable assignment. The fork child
-performs only descriptor setup, `RLIMIT_AS`, descriptor closure, and `exec`;
-the freshly execed worker validates the assignment, JobSpec digest, and
-optional checkpoint, creates and seeds a fresh Embedded Host, loads an
-attempt-local Graph, computes within reserved CPU parallelism, validates one
-nonempty CPU image, closes the Graph, destroys Host ownership, and returns only
-typed attempt facts plus a candidate image.
+Product composition resolves trusted graph material outside JobSpec and before
+service ownership, then retains it in an immutable
+`PreparedExternalGraphCatalog`. WorkerManager creates a private socket pair,
+forks/execs one non-installed `photospider-worker`, and registers its exact PID
+before a non-virtual in-memory catalog lookup copies material into exactly one
+immutable assignment. The supervision thread invokes no resolver and performs
+no filesystem I/O. The fork child performs only descriptor setup, `RLIMIT_AS`,
+descriptor closure, and `exec`; the freshly execed worker validates the
+assignment, JobSpec digest, and optional checkpoint, creates and seeds a fresh
+Embedded Host, opens and loads an attempt-local Graph, computes within reserved
+CPU parallelism, validates one nonempty CPU image, closes the Graph, destroys
+Host ownership, and returns only typed attempt facts plus a candidate image.
 
 Pre-exec descriptor ownership is exact: fd 0-2 are standard streams, fd 3 is
 the private control socket, and close-on-exec fd 4 carries setup `errno` to the
@@ -309,6 +312,14 @@ may already have released and reassigned the numeric fd before reporting an
 interrupted close, so a retry could close another thread's newly acquired
 descriptor. A source-private callback regression forces that release/reuse
 ordering and proves no second close consumes the reused descriptor.
+
+The worker exec bootstrap requires `--control-fd`,
+`--startup-timeout-ms`, and `--io-timeout-ms`. WorkerManager prepares those
+strings before fork. The worker applies the exact configured startup duration
+to its initial assignment receive and the exact I/O duration to acceptance,
+heartbeat, and report writes; no worker-local default or cap can shorten the
+manager policy. Startup remains outside the assignment payload because the
+worker needs that deadline before receiving the first protocol frame.
 
 The private bounded protocol has fixed magic, one supported version, closed
 message kinds, a 64-MiB frame-payload maximum, deadline-aware partial I/O, and
@@ -382,6 +393,14 @@ under the Job mutex, then drains all attempts concurrently through the same
 escalation path. Reap observation is nonblocking through the final kill/reap
 deadline; if exact reaping remains unobservable, the authority process fails
 stop rather than block indefinitely or return live ownership.
+
+Because all filesystem opening and graph loading now occurs after exec under an
+exact retained PID, blocked trusted I/O follows that same escalation path. A
+maintained FIFO-backed process fixture proves bounded forced cancellation and
+exact reaping, bounded service destruction, and successful execution by a
+fresh worker after the material becomes readable. The non-virtual prepared
+catalog boundary separately removes any pre-PID resolver callback that could
+hold the manager reaper indefinitely.
 
 One private reaper joins completed supervision handles outside both manager and
 Job mutexes. The explicit source-private test marker may execute deterministic

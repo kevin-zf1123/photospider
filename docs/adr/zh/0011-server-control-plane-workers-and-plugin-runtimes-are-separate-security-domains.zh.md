@@ -201,6 +201,12 @@ revocation、termination escalation、exit classification 与 reaping。它只�
 `{WorkerInstanceId, WorkerLeaseGeneration}` 操作，绝不针对未经限定的 PID。Control plane
 不直接 kill 或复用 worker process。
 
+潜在阻塞的 graph resolution 不属于 PID 出现前的 supervisor。产品 composition 会在 service
+ownership 前完成它，并且只保留 immutable prepared catalog。WorkerManager 先登记精确 exec 后
+child PID，再执行不可覆写的内存 handoff；filesystem open 与 graph load 发生在该 owned process
+内。因此 blocked trusted read 可以被取消、signal 并精确 reap，而不会无限占住 manager handle
+reaper。
+
 Cancellation 由四个 owner 依次处理：
 
 1. control plane 为 current JobAttempt 记录 monotonic cancellation intent；
@@ -220,6 +226,10 @@ plane 应用 retry policy。
 `waitpid`。Report 只有在 clean exit 与 reap 后才具备资格。这为可信 Embedded worker
 composition 提供 process crash isolation；它不是 network peer authentication、syscall
 sandbox、device isolation，也不是 Issues #101-#104 分配的 isolated tenant-plugin runtime。
+
+Exec bootstrap 还会在 control descriptor 之外携带必填的精确 startup 与 worker-write
+deadline。worker 不使用本地默认值或更短 cap，而是直接采用 manager value，因此即使第一帧
+assignment 尚不可用，两端也执行同一 configured lifecycle policy。
 
 ### Artifact Store 与 Data Plane
 
