@@ -297,12 +297,17 @@ empty dependency surface. A neutral installed-package consumer then performs a
 real verbose compile and executable link. Its verbose output,
 `compile_commands.json`, link scripts, response files, evaluated imported-
 target properties, native symbols, and dependencies are scanned before the
-executable runs. The default and optional-component probes must remain usable,
-while a required absent component must fail with the Photospider-owned
-diagnostic before OpenEXR discovery. `OpenExrDeepProviderInstallConsumerSmoke`
-is the enabled companion: it installs the explicit component, loads the actual
-module, resolves both v3 exports, validates the API table, invokes provider
-destruction, and unloads the module.
+executable runs. Before marker classification, every exact audit root expands
+through the shared trusted Darwin mapping so `/tmp/...` and
+`/private/tmp/...` tool output are scrubbed as the same non-semantic prefix.
+No caller-controlled symlink is resolved, and library, header, symbol, and
+dependency names below the prefix remain visible to the scan. The default and
+optional-component probes must remain usable, while a required absent
+component must fail with the Photospider-owned diagnostic before OpenEXR
+discovery. `OpenExrDeepProviderInstallConsumerSmoke` is the enabled companion:
+it installs the explicit component, loads the actual module, resolves both v3
+exports, validates the API table, invokes provider destruction, and unloads
+the module.
 
 The generated clean consumer project maintains one ordered CMake executable
 target list. That same list creates the targets, writes a configure-time exact
@@ -332,12 +337,16 @@ configuration postfix. This target-to-filename binding prevents a forged new
 field from selecting an arbitrary build-local executable. The full target path
 must use canonical native spelling, remain unique, stay at the consumer build
 root or its selected configuration directory, have a basename exactly equal to
-the CMake-declared filename, avoid symlinks, and identify an executable regular
-file. Both manifests are accepted only as products of this invocation's
-disposable configure/generate step, and the reader nevertheless completes all
-record, identity, set, filename, and path validation before any consumer
-starts. Valid consumers then run in declaration order, and a runtime failure
-prevents later consumers from starting.
+the CMake-declared filename, and identify an executable regular file. On
+Darwin, only the shared root-owned `/tmp` alias and its physical
+`/private/tmp` root may provide alternate spellings of that same build-local
+suffix. The comparison never resolves a caller-controlled path into the
+trusted set, so every later intermediate component and the executable leaf
+must remain free of arbitrary symlinks. Both manifests are accepted only as
+products of this invocation's disposable configure/generate step, and the
+reader nevertheless completes all record, identity, set, filename, and path
+validation before any consumer starts. Valid consumers then run in declaration
+order, and a runtime failure prevents later consumers from starting.
 
 When the selected CMake generator exposes multiple configurations, the smoke
 uses that same generator for producer and consumer, checks each
@@ -1506,6 +1515,18 @@ failures propagate, and an `lstat`-style postcondition verifies that no
 directory or dangling link remains. The check/delete sequence is not an atomic
 cross-platform filesystem transaction, so these drivers accept only
 caller-owned transient subtrees whose components are not concurrently replaced.
+
+The same trusted-root inspector also serves two non-destructive consumers.
+`DependencyDisabledInstallSmoke` accepts a generated manifest target spelled
+under either trusted root only when strict resolution equals the shared
+physical spelling; an arbitrary intermediate or leaf symlink still differs and
+fails. `OpenExrDeepProviderOptionOffSmoke` expands only its exact audit roots to
+both trusted spellings before scrubbing tool evidence, preventing the smoke's
+own directory name from becoming an OpenEXR marker while leaving real
+dependency names scannable. `InstallConsumerArchitecturePropagationSafety`
+injects a synthetic mapping to lock bidirectional spelling, manifest
+acceptance, a post-root symlink counterexample, dual-spelling evidence scrub,
+and a real `-lOpenEXR` rejection on every platform without touching `/tmp`.
 
 `OpenCvOperationProviderBuildSmokeSafety` exercises those destructive guards,
 failure propagation, and postcondition only against a synthetic repository,

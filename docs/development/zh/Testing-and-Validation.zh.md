@@ -226,8 +226,11 @@ undefined symbol surface 分别检查。Dynamic dependency 在 Darwin 使用 `ot
 surface 通过。随后，一个中立 installed-package consumer 会执行真实的 verbose compile 与
 executable link；在 executable 运行前，smoke 会扫描其 verbose output、
 `compile_commands.json`、link script、response file、求值后的 imported-target property、native
-symbol 与 dependency。Default 和 optional-component probe 必须继续可用；required absent
-component 必须先以 Photospider 自有诊断失败，不得发现 OpenEXR。
+symbol 与 dependency。在 marker 分类前，每个精确 audit root 都会通过共享的 Darwin 受信映射
+展开，因此工具输出中的 `/tmp/...` 与 `/private/tmp/...` 会作为同一个无语义 prefix 被 scrub。
+该过程不会解析 caller-controlled symlink，prefix 之下的 library、header、symbol 与 dependency
+名称仍对扫描可见。Default 和 optional-component probe 必须继续可用；required absent component
+必须先以 Photospider 自有诊断失败，不得发现 OpenEXR。
 `OpenExrDeepProviderInstallConsumerSmoke` 是启用态 companion：它安装显式 component，加载真实
 module，解析两个 v3 export，校验 API table，调用 provider destruction，然后卸载 module。
 
@@ -251,10 +254,13 @@ Windows separator，不得为 `.` 或 `..`，必须唯一，并且只能精确�
 suffix 或 configuration postfix。这项 target-to-filename 绑定会阻止伪造的新字段选择任意
 build-local executable。完整 target path 必须使用 canonical native 拼写、保持唯一、位于
 consumer build root 或所选 configuration 目录，其 basename 与 CMake 声明的 filename 精确相等，
-同时不得是 symlink，且必须指向可执行 regular file。两份 manifest 只有作为本次调用的可丢弃
-configure/generate step 的产物才会被接受；即便如此，reader 仍会在任何 consumer 启动前完成
-全部 record、identity、set、filename 与 path 校验。有效 consumer 随后按声明顺序运行；某个
-consumer 运行失败时，后续 consumer 不会启动。
+且必须指向可执行 regular file。在 Darwin 上，只有共享的 root-owned `/tmp` alias 及其物理
+`/private/tmp` root 可以为同一个 build-local suffix 提供不同拼写。比较过程绝不会把
+caller-controlled path 解析进受信集合，因此后续每个 intermediate component 与 executable leaf
+都不得包含任意 symlink。两份 manifest 只有作为本次调用的可丢弃 configure/generate step 的产物
+才会被接受；即便如此，reader 仍会在任何 consumer 启动前完成全部 record、identity、set、
+filename 与 path 校验。有效 consumer 随后按声明顺序运行；某个 consumer 运行失败时，后续
+consumer 不会启动。
 
 当所选 CMake generator 提供多个 configuration 时，smoke 会为 producer 与 consumer 使用同一个
 generator，检查两侧的 `CMAKE_GENERATOR` 和 `CMAKE_CONFIGURATION_TYPES` cache 值，并从
@@ -1192,6 +1198,15 @@ CTest command。这样，无需改写原始 CTest registration，也无需放宽
 removal 失败会原样传播，`lstat` 风格 postcondition 还会确认目录或 dangling link 都没有残留。
 Check/delete 序列不是跨平台原子 filesystem transaction，因此这些 driver 只接受由 caller
 独占、且 component 不会被并发替换的临时 subtree。
+
+同一份受信 root inspector 还服务于两个非破坏性 consumer。
+`DependencyDisabledInstallSmoke` 只有在严格 resolution 等于共享的物理拼写时，才会接受位于任一
+受信 root 下的 generated manifest target；任意 intermediate 或 leaf symlink 仍会因不相等而失败。
+`OpenExrDeepProviderOptionOffSmoke` 在 scrub 工具 evidence 前，只把自身精确 audit root 展开成两种
+受信拼写，从而避免 smoke 自身目录名成为 OpenEXR marker，同时保留真实 dependency 名称供扫描。
+`InstallConsumerArchitecturePropagationSafety` 会注入 synthetic mapping，在不触碰 `/tmp` 的前提下
+跨平台锁定双向拼写、manifest acceptance、root 之后的 symlink 反例、双拼写 evidence scrub，
+以及真实 `-lOpenEXR` rejection。
 
 `OpenCvOperationProviderBuildSmokeSafety` 只针对 disposable temporary root 下的 synthetic
 repository、ancestor 和无关 symlink target，验证这些破坏性 guard、失败传播和 postcondition。
