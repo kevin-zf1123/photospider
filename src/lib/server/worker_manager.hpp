@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 
@@ -38,6 +39,9 @@ enum class WorkerManagerCompletionKind : std::uint8_t {
  * @throws Nothing for default construction; contained values may allocate.
  * @note `Report` alone carries `report`; manager-owned forms carry a closed
  * failure and no image, artifact, quota, or retry claim.
+ * Move construction/assignment must remain non-throwing so a completion that
+ * left its local fail-stop construction boundary cannot escape into an outer
+ * generic classifier during handoff.
  */
 struct WorkerManagerCompletion final {
   /** @brief Exact retained assignment identity. */
@@ -51,6 +55,11 @@ struct WorkerManagerCompletion final {
   /** @brief Trusted bounded supervisor diagnostic. */
   std::string message;
 };
+
+/** @brief Guards allocation-free post-construction completion handoff. */
+static_assert(std::is_nothrow_move_constructible_v<WorkerManagerCompletion> &&
+                  std::is_nothrow_move_assignable_v<WorkerManagerCompletion>,
+              "WorkerManagerCompletion handoff must remain non-throwing");
 
 /**
  * @brief Service callbacks invoked only outside the WorkerManager mutex.
@@ -154,8 +163,11 @@ class WorkerManager final {
    * @throws std::logic_error for an attempt-identity collision.
    * @throws std::system_error when supervision-thread creation fails.
    * @throws std::bad_alloc when record/thread storage allocation fails.
-   * @note Thread construction is the only throwing lifecycle step; an exception
-   * leaves no retained record or child process.
+   * @note Record identity retention, registry-key construction, registry
+   * insertion, and thread construction all precede child spawn. Any exception
+   * leaves no live child or unowned transient state: failed insertion retains
+   * no record, while thread failure erases the exact inserted record before
+   * propagating so the caller can roll back admission authority.
    */
   void start(JobAssignment assignment);
 

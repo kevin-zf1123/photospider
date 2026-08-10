@@ -615,42 +615,6 @@ std::string wait_status_message(int status) {
   return "worker exited with an unsupported wait status";
 }
 
-/**
- * @brief Builds one manager-owned terminal completion without a report.
- * @param identity Exact retained assignment identity.
- * @param failure Closed manager failure category.
- * @param message Trusted supervisor diagnostic.
- * @return Complete failure completion.
- * @throws std::bad_alloc when copying values exhausts memory.
- */
-WorkerManagerCompletion failure_completion(const AttemptIdentity& identity,
-                                           JobAttemptFailure failure,
-                                           std::string message) {
-  WorkerManagerCompletion completion;
-  completion.identity = identity;
-  completion.kind = WorkerManagerCompletionKind::Failure;
-  completion.failure = failure;
-  completion.message = std::move(message);
-  return completion;
-}
-
-/**
- * @brief Builds forced cancellation after owned signal delivery and reaping.
- * @param identity Exact retained assignment identity.
- * @param message Trusted escalation diagnostic.
- * @return Complete forced-cancellation fact.
- * @throws std::bad_alloc when copying values exhausts memory.
- */
-WorkerManagerCompletion forced_cancellation_completion(
-    const AttemptIdentity& identity, std::string message) {
-  WorkerManagerCompletion completion;
-  completion.identity = identity;
-  completion.kind = WorkerManagerCompletionKind::ForcedCancellation;
-  completion.failure = JobAttemptFailure::WorkerCancellationForced;
-  completion.message = std::move(message);
-  return completion;
-}
-
 }  // namespace
 
 /**
@@ -667,10 +631,33 @@ class WorkerManager::Impl final {
     /**
      * @brief Retains one exact immutable assignment before thread creation.
      * @param value Assignment moved into sole record ownership.
-     * @throws Nothing after argument construction.
+     * @param fail_construction_for_test Optional one-shot identity-retention
+     * allocation fault used only by source-private tests.
+     * @throws std::bad_alloc when identity retention or its test seam fails.
      */
-    explicit Record(JobAssignment value) noexcept
-        : identity(value.identity), assignment(std::move(value)) {}
+    explicit Record(
+        JobAssignment value,
+        const std::shared_ptr<std::atomic<bool>>& fail_construction_for_test)
+        : identity(retain_identity(value.identity, fail_construction_for_test)),
+          assignment(std::move(value)) {}
+
+    /**
+     * @brief Copies the exact identity at the retained-record boundary.
+     * @param value Valid assignment identity to retain.
+     * @param fail_construction_for_test Optional one-shot test fault.
+     * @return Independent retained identity.
+     * @throws std::bad_alloc when the test fault is consumed or copying fails.
+     */
+    static AttemptIdentity retain_identity(
+        const AttemptIdentity& value,
+        const std::shared_ptr<std::atomic<bool>>& fail_construction_for_test) {
+      if (fail_construction_for_test != nullptr &&
+          fail_construction_for_test->exchange(false,
+                                               std::memory_order_acq_rel)) {
+        throw std::bad_alloc();
+      }
+      return value;
+    }
 
     /** @brief Complete immutable attempt identity used for every action. */
     AttemptIdentity identity;
@@ -720,7 +707,8 @@ class WorkerManager::Impl final {
       throw std::invalid_argument("worker manager assignment has no JobSpec");
     }
     validate_job_spec(*assignment.spec);
-    auto record = std::make_shared<Record>(std::move(assignment));
+    auto record = std::make_shared<Record>(
+        std::move(assignment), options_.fail_record_construction_for_test);
     const std::string key = record->identity.attempt_id.value();
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutting_down_) {
@@ -875,8 +863,8 @@ class WorkerManager::Impl final {
    * @brief Runs one exact record and contains every exception at thread scope.
    * @param record Shared stable record retained by the registry and thread.
    * @return Nothing after optional completion callback and completed marking.
-   * @throws Nothing; fallback-completion construction failure or completion-
-   * callback failure allocation-free fail-stops the authority before
+   * @throws Nothing; first or fallback completion construction failure and
+   * completion-callback failure allocation-free fail-stop the authority before
    * completed-record marking or deletion.
    * @note `begin_assignment()` returning false is the sole no-completion
    * retirement path. Once begin succeeds or raises, supervision must deliver
@@ -902,9 +890,9 @@ class WorkerManager::Impl final {
     } catch (const std::exception& error) {
       try {
         inject_completion_construction_failure_for_test();
-        completion = failure_completion(
+        completion = prefixed_failure_completion(
             record->identity, JobAttemptFailure::WorkerStartup,
-            std::string("worker supervision raised: ") + error.what());
+            "worker supervision raised: ", error.what());
       } catch (...) {
         fail_stop_completion_delivery_lost();
       }
@@ -934,7 +922,10 @@ class WorkerManager::Impl final {
    * @brief Executes the explicit deterministic in-process test marker path.
    * @param record Exact assignment record.
    * @return One report completion without an OS-isolation claim.
-   * @throws Allocation failures while constructing completion unchanged.
+   * @throws Worker creation/execution fact preparation failures may propagate
+   * to the thread classifier. First `Report` completion construction never
+   * propagates: any failure allocation-free fail-stops before callback or
+   * record retirement.
    */
   WorkerManagerCompletion run_in_process(
       const std::shared_ptr<Record>& record) {
@@ -966,12 +957,7 @@ class WorkerManager::Impl final {
       report.failure = JobAttemptFailure::Unexpected;
       report.message = "worker execution raised a non-standard exception";
     }
-    WorkerManagerCompletion completion;
-    completion.identity = record->identity;
-    completion.kind = WorkerManagerCompletionKind::Report;
-    completion.report = std::move(report);
-    completion.failure = JobAttemptFailure::None;
-    return completion;
+    return report_completion(record->identity, std::move(report));
   }
 
   /**
@@ -1100,7 +1086,8 @@ class WorkerManager::Impl final {
    * @param record Exact immutable attempt record.
    * @return One report, failure, or forced-cancellation completion after reap.
    * @throws ManagerFailure for preparation or spawn failures before a process
-   * state machine can classify locally.
+   * state machine can classify locally. First completion construction never
+   * propagates and instead allocation-free fail-stops.
    */
   WorkerManagerCompletion run_external_process(
       const std::shared_ptr<Record>& record) {
@@ -1165,16 +1152,14 @@ class WorkerManager::Impl final {
       }
       if (process.reaped && WIFSIGNALED(process.status)) {
         process.control.reset();
-        return failure_completion(record->identity,
-                                  JobAttemptFailure::WorkerSignal,
-                                  wait_status_message(process.status));
+        return wait_status_failure_completion(
+            record->identity, JobAttemptFailure::WorkerSignal, process.status);
       }
       if (process.reaped &&
           (!WIFEXITED(process.status) || WEXITSTATUS(process.status) != 0)) {
         process.control.reset();
-        return failure_completion(record->identity,
-                                  JobAttemptFailure::WorkerExit,
-                                  wait_status_message(process.status));
+        return wait_status_failure_completion(
+            record->identity, JobAttemptFailure::WorkerExit, process.status);
       }
       terminate_and_reap(record, &process);
       return failure_completion(record->identity,
@@ -1202,7 +1187,9 @@ class WorkerManager::Impl final {
    * @note Short read slices share one stateful frame decoder. Cancellation-send
    * failure starts the same cooperative deadline and keeps draining worker
    * report/EOF/exit truth; only delivered TERM/KILL escalation yields
-   * `ForcedCancellation`.
+   * `ForcedCancellation`. Every first `Report`, `Failure`, or
+   * `ForcedCancellation` construction is locally fail-stop protected after
+   * exact reaping and cannot be reclassified by the outer catch boundary.
    */
   WorkerManagerCompletion monitor_process(const std::shared_ptr<Record>& record,
                                           ChildProcess* process) {
@@ -1276,15 +1263,14 @@ class WorkerManager::Impl final {
       if (process->reaped) {
         if (WIFSIGNALED(process->status)) {
           process->control.reset();
-          return failure_completion(record->identity,
-                                    JobAttemptFailure::WorkerSignal,
-                                    wait_status_message(process->status));
+          return wait_status_failure_completion(record->identity,
+                                                JobAttemptFailure::WorkerSignal,
+                                                process->status);
         }
         if (!WIFEXITED(process->status) || WEXITSTATUS(process->status) != 0) {
           process->control.reset();
-          return failure_completion(record->identity,
-                                    JobAttemptFailure::WorkerExit,
-                                    wait_status_message(process->status));
+          return wait_status_failure_completion(
+              record->identity, JobAttemptFailure::WorkerExit, process->status);
         }
         if (channel_eof) {
           process->control.reset();
@@ -1293,12 +1279,8 @@ class WorkerManager::Impl final {
                 record->identity, JobAttemptFailure::WorkerChannel,
                 "worker exited cleanly without one report");
           }
-          WorkerManagerCompletion completion;
-          completion.identity = record->identity;
-          completion.kind = WorkerManagerCompletionKind::Report;
-          completion.report = std::move(candidate_report);
-          completion.failure = JobAttemptFailure::None;
-          return completion;
+          return report_completion(record->identity,
+                                   std::move(*candidate_report));
         }
       }
 
@@ -1388,6 +1370,159 @@ class WorkerManager::Impl final {
       return callbacks_.cancellation_requested(record->identity);
     } catch (...) {
       return true;
+    }
+  }
+
+  /**
+   * @brief Builds one first manager-owned failure completion.
+   * @param identity Exact retained assignment identity.
+   * @param failure Closed manager failure category.
+   * @param message Trusted supervisor diagnostic.
+   * @return Complete failure completion.
+   * @throws Nothing; any construction failure allocation-free fail-stops.
+   */
+  WorkerManagerCompletion failure_completion(
+      const AttemptIdentity& identity, JobAttemptFailure failure,
+      const char* message) const noexcept {
+    try {
+      inject_initial_completion_construction_failure_for_test(
+          WorkerManagerCompletionConstructionPointForTest::Failure);
+      WorkerManagerCompletion completion;
+      completion.identity = identity;
+      completion.kind = WorkerManagerCompletionKind::Failure;
+      completion.failure = failure;
+      completion.message = message == nullptr ? "" : message;
+      return completion;
+    } catch (...) {
+      fail_stop_completion_delivery_lost();
+    }
+  }
+
+  /**
+   * @brief Builds one prefixed first failure completion within the fail-stop
+   * construction boundary.
+   * @param identity Exact retained assignment identity.
+   * @param failure Closed manager failure category.
+   * @param prefix Trusted diagnostic prefix, or null for none.
+   * @param detail Trusted diagnostic suffix, or null for none.
+   * @return Complete failure completion.
+   * @throws Nothing; any construction failure allocation-free fail-stops.
+   */
+  WorkerManagerCompletion prefixed_failure_completion(
+      const AttemptIdentity& identity, JobAttemptFailure failure,
+      const char* prefix, const char* detail) const noexcept {
+    try {
+      inject_initial_completion_construction_failure_for_test(
+          WorkerManagerCompletionConstructionPointForTest::Failure);
+      WorkerManagerCompletion completion;
+      completion.identity = identity;
+      completion.kind = WorkerManagerCompletionKind::Failure;
+      completion.failure = failure;
+      if (prefix != nullptr) {
+        completion.message = prefix;
+      }
+      if (detail != nullptr) {
+        completion.message.append(detail);
+      }
+      return completion;
+    } catch (...) {
+      fail_stop_completion_delivery_lost();
+    }
+  }
+
+  /**
+   * @brief Builds one wait-status first failure completion within the fail-stop
+   * construction boundary.
+   * @param identity Exact retained assignment identity.
+   * @param failure Closed manager failure category.
+   * @param status Exact status returned by `waitpid`.
+   * @return Complete failure completion.
+   * @throws Nothing; formatting or value-retention failure allocation-free
+   * fail-stops.
+   */
+  WorkerManagerCompletion wait_status_failure_completion(
+      const AttemptIdentity& identity, JobAttemptFailure failure,
+      int status) const noexcept {
+    try {
+      inject_initial_completion_construction_failure_for_test(
+          WorkerManagerCompletionConstructionPointForTest::Failure);
+      WorkerManagerCompletion completion;
+      completion.identity = identity;
+      completion.kind = WorkerManagerCompletionKind::Failure;
+      completion.failure = failure;
+      completion.message = wait_status_message(status);
+      return completion;
+    } catch (...) {
+      fail_stop_completion_delivery_lost();
+    }
+  }
+
+  /**
+   * @brief Builds one first forced-cancellation completion after exact reaping.
+   * @param identity Exact retained assignment identity.
+   * @param message Trusted escalation diagnostic.
+   * @return Complete forced-cancellation fact.
+   * @throws Nothing; any construction failure allocation-free fail-stops.
+   */
+  WorkerManagerCompletion forced_cancellation_completion(
+      const AttemptIdentity& identity, const char* message) const noexcept {
+    try {
+      inject_initial_completion_construction_failure_for_test(
+          WorkerManagerCompletionConstructionPointForTest::ForcedCancellation);
+      WorkerManagerCompletion completion;
+      completion.identity = identity;
+      completion.kind = WorkerManagerCompletionKind::ForcedCancellation;
+      completion.failure = JobAttemptFailure::WorkerCancellationForced;
+      completion.message = message == nullptr ? "" : message;
+      return completion;
+    } catch (...) {
+      fail_stop_completion_delivery_lost();
+    }
+  }
+
+  /**
+   * @brief Builds one first report completion after in-process or exact-reap
+   * execution.
+   * @param identity Exact retained assignment identity.
+   * @param report Candidate worker report to transfer.
+   * @return Complete report fact.
+   * @throws Nothing; any construction failure allocation-free fail-stops.
+   */
+  WorkerManagerCompletion report_completion(
+      const AttemptIdentity& identity,
+      JobAttemptReport&& report) const noexcept {
+    try {
+      inject_initial_completion_construction_failure_for_test(
+          WorkerManagerCompletionConstructionPointForTest::Report);
+      WorkerManagerCompletion completion;
+      completion.identity = identity;
+      completion.kind = WorkerManagerCompletionKind::Report;
+      completion.report = std::move(report);
+      completion.failure = JobAttemptFailure::None;
+      return completion;
+    } catch (...) {
+      fail_stop_completion_delivery_lost();
+    }
+  }
+
+  /**
+   * @brief Injects one deterministic allocation failure at a selected first
+   * terminal-completion constructor.
+   * @param point Constructor boundary currently entered.
+   * @return Nothing when the source-private selection is absent or different.
+   * @throws std::bad_alloc after atomically consuming an exact selected point.
+   */
+  void inject_initial_completion_construction_failure_for_test(
+      WorkerManagerCompletionConstructionPointForTest point) const {
+    const auto& gate = options_.fail_initial_completion_construction_for_test;
+    if (gate == nullptr) {
+      return;
+    }
+    auto expected = point;
+    if (gate->compare_exchange_strong(
+            expected, WorkerManagerCompletionConstructionPointForTest::None,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+      throw std::bad_alloc();
     }
   }
 

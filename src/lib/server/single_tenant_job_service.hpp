@@ -186,6 +186,24 @@ class JobAttemptWorkerFactory {
 };
 
 /**
+ * @brief Selects one first terminal-completion construction boundary for a
+ * deterministic source-private allocation fault.
+ * @throws Nothing for value operations.
+ * @note Product configuration always uses `None`; the remaining values expose
+ * no Job, quota, process, callback, or retry authority.
+ */
+enum class WorkerManagerCompletionConstructionPointForTest : std::uint8_t {
+  /** @brief No first-completion construction fault is armed. */
+  None,
+  /** @brief Fault the next first `Report` completion construction. */
+  Report,
+  /** @brief Fault the next first `Failure` completion construction. */
+  Failure,
+  /** @brief Fault the next first `ForcedCancellation` construction. */
+  ForcedCancellation,
+};
+
+/**
  * @brief Bounded source-private WorkerManager process-lifecycle configuration.
  * @throws Nothing for default construction; path copies may allocate.
  * @note Ordinary product construction requires an executable path. Durations
@@ -229,6 +247,22 @@ struct WorkerManagerOptions final {
    * contract.
    */
   std::shared_ptr<std::atomic<bool>> fail_completion_construction_for_test;
+  /**
+   * @brief Optional one-shot first terminal-completion allocation fault.
+   * @note Null in product construction. Tests atomically select the exact
+   * `Report`, `Failure`, or `ForcedCancellation` constructor that must raise
+   * `std::bad_alloc`. The manager consumes the selection back to `None` and
+   * exposes no installed or runtime control surface.
+   */
+  std::shared_ptr<std::atomic<WorkerManagerCompletionConstructionPointForTest>>
+      fail_initial_completion_construction_for_test;
+  /**
+   * @brief Optional one-shot retained-record construction allocation fault.
+   * @note Null in product construction. Tests may arm this flag so exact
+   * identity retention in `WorkerManager::start()` raises `std::bad_alloc`
+   * before registry insertion, supervision-thread creation, or child spawn.
+   */
+  std::shared_ptr<std::atomic<bool>> fail_record_construction_for_test;
   /**
    * @brief Holds escalation until a normally exited child is waitable in tests.
    * @note False in product construction. When true, `WorkerManager` performs
@@ -394,14 +428,16 @@ class SingleTenantJobService final {
    * @throws std::bad_alloc when Job state or worker setup exhausts memory.
    * @throws std::system_error when manager supervision-thread creation fails.
    * @note Checkpoint validation and complete quota reservation precede durable
-   * accepted-state publication. Supervision-handle construction occurs while
-   * `mutex_` prevents assignment entry and before journal publication. A
-   * pre-publication journal failure removes process-local acceptance, releases
-   * quota, and lets WorkerManager retire the fenced record. If rollback release
-   * itself fails, the service retains the reservation in its stranded-owner
-   * slot, fail-stops all later mutation, and rethrows the triggering submit
-   * failure. A post- publication failure throws `DurableJobCommitError`,
-   * retains aligned truth/ quota, and fail-stops writes. The remaining
+   * accepted-state publication. Manager record identity retention, registry
+   * insertion, and supervision-handle construction occur while `mutex_`
+   * prevents assignment entry and before any child spawn or journal
+   * publication. Any such start failure removes process-local acceptance and
+   * releases its exact quota reservation. A pre-publication journal failure
+   * additionally lets WorkerManager retire the fenced record. If rollback
+   * release itself fails, the service retains the reservation in its stranded-
+   * owner slot, fail-stops all later mutation, and rethrows the triggering
+   * submit failure. A post-publication failure throws `DurableJobCommitError`,
+   * retains aligned truth/quota, and fail-stops writes. The remaining
    * successful return path is a non-throwing move.
    */
   JobSubmission submit(JobSpec spec);
@@ -413,9 +449,12 @@ class SingleTenantJobService final {
    * the Job is absent, not failed, unsettled, or service shutdown has begun.
    * @throws TenantQuotaExceeded when the unchanged envelope cannot be reserved.
    * @throws DurableStateError/system/allocation failures during durable
-   * replacement or worker start. A pre-publication failure preserves prior
-   * failed truth; a post-publication `DurableJobCommitError` preserves the new
-   * attempt truth/quota and fail-stops writes until restart.
+   * replacement or worker start. A manager record, registry, or thread-start
+   * failure occurs before child spawn and releases only the candidate quota,
+   * preserving the prior failed memory and durable truth. A later
+   * pre-publication failure has the same prior-truth guarantee; a post-
+   * publication `DurableJobCommitError` preserves the new attempt truth/quota
+   * and fail-stops writes until restart.
    * @note JobId, JobSpecDigest, checkpoint, stable artifact, and stable commit
    * identity are preserved. Attempt/worker/lease/quota identities are fresh.
    * If rollback release fails, the service retains the fresh reservation in

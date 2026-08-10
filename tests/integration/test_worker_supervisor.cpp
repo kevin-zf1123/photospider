@@ -297,6 +297,54 @@ class CompletionConstructionFailureFactory final
 };
 
 /**
+ * @brief Returns one minimal report for the explicit in-process completion
+ * construction probe.
+ * @throws Nothing for construction; report identity copies may allocate.
+ */
+class InProcessCompletionProbeWorker final : public JobAttemptWorker {
+ public:
+  /**
+   * @brief Produces one worker-owned failed report without an artifact.
+   * @param assignment Exact current assignment to echo.
+   * @param cancellation_requested Unused monotonic observer.
+   * @return Complete candidate report for the manager's first `Report` fact.
+   * @throws std::bad_alloc when identity or message retention fails.
+   */
+  JobAttemptReport execute(
+      const JobAssignment& assignment,
+      const std::function<bool()>& cancellation_requested) override {
+    static_cast<void>(cancellation_requested);
+    JobAttemptReport report;
+    report.identity = assignment.identity;
+    report.outcome = JobAttemptOutcome::Failed;
+    report.settled = false;
+    report.failure = JobAttemptFailure::Unexpected;
+    report.message = "in-process completion construction probe";
+    return report;
+  }
+};
+
+/**
+ * @brief Creates one explicit source-private in-process completion probe.
+ * @throws Nothing for construction; `create()` may allocate.
+ */
+class InProcessCompletionProbeFactory final
+    : public InProcessJobAttemptWorkerFactoryForTest {
+ public:
+  /**
+   * @brief Creates one fresh deterministic probe worker.
+   * @param assignment Exact assignment, unused until worker execution.
+   * @return Non-null fresh worker owner.
+   * @throws std::bad_alloc when worker allocation fails.
+   */
+  std::unique_ptr<JobAttemptWorker> create(
+      const JobAssignment& assignment) override {
+    static_cast<void>(assignment);
+    return std::make_unique<InProcessCompletionProbeWorker>();
+  }
+};
+
+/**
  * @brief Builds complete finite resources realistic for a freshly execed image.
  * @return 512-GiB Darwin-compatible address-space envelope and one-MiB
  * artifact bounds.
@@ -377,14 +425,14 @@ JobSpec fixture_spec(std::string mode,
 }
 
 /**
- * @brief Builds one valid assignment for the completion allocation-fault
- * probe.
+ * @brief Builds one valid assignment for a completion allocation-fault probe.
+ * @param mode Exact fixture graph mode or in-process diagnostic selector.
  * @return Complete immutable exact assignment.
  * @throws Contract or allocation failures unchanged.
  */
-JobAssignment completion_failure_assignment() {
-  auto spec = std::make_shared<const JobSpec>(
-      fixture_spec("fixture.completion-allocation-failure"));
+JobAssignment completion_failure_assignment(
+    std::string mode = "fixture.completion-allocation-failure") {
+  auto spec = std::make_shared<const JobSpec>(fixture_spec(std::move(mode)));
   AttemptIdentity identity;
   identity.tenant_id = TenantId("tenant.supervisor.completion-failure");
   identity.job_id = JobId("job.supervisor.completion-failure");
@@ -569,6 +617,62 @@ bool wait_until(const std::function<bool()>& predicate,
     std::this_thread::sleep_for(10ms);
   }
   return predicate();
+}
+
+/**
+ * @brief Drives one actual first terminal-completion constructor under a
+ * deterministic allocation fault.
+ * @param point Exact completion kind whose first construction must fail-stop.
+ * @param in_process_test_mode Whether to use the explicit in-process marker.
+ * @param mode External fixture mode or in-process diagnostic selector.
+ * @return Never returns normally; stable nonzero exits diagnose an invalid
+ * callback, ordinary record retirement, or setup exception.
+ * @throws Nothing; all setup exceptions become `kCompletionProbeRaised`.
+ * @note The conforming path aborts before the callback and before completed-
+ * record retirement. The death-test parent owns process isolation.
+ */
+[[noreturn]] void provoke_initial_completion_construction_failure(
+    WorkerManagerCompletionConstructionPointForTest point,
+    bool in_process_test_mode, std::string mode) noexcept {
+  try {
+    WorkerManagerOptions options = supervisor_options();
+    options.fail_initial_completion_construction_for_test = std::make_shared<
+        std::atomic<WorkerManagerCompletionConstructionPointForTest>>(point);
+    WorkerManagerCallbacks callbacks;
+    callbacks.begin_assignment = [](const AttemptIdentity&) { return true; };
+    callbacks.cancellation_requested = [](const AttemptIdentity&) {
+      return false;
+    };
+    callbacks.complete_assignment = [](WorkerManagerCompletion) {
+      ::_exit(kCompletionCallbackInvoked);
+    };
+    std::shared_ptr<JobAttemptWorkerFactory> factory;
+    if (in_process_test_mode) {
+      factory = std::make_shared<InProcessCompletionProbeFactory>();
+    } else {
+      factory = std::make_shared<FixtureWorkerFactory>();
+    }
+    JobAssignment assignment = completion_failure_assignment(std::move(mode));
+    const AttemptIdentity identity = assignment.identity;
+    WorkerManager manager(std::move(factory), std::move(callbacks),
+                          std::move(options), in_process_test_mode);
+    manager.start(std::move(assignment));
+    if (point ==
+        WorkerManagerCompletionConstructionPointForTest::ForcedCancellation) {
+      if (!wait_until(
+              [&] { return manager.ownership_snapshot().live_processes == 1U; },
+              2s) ||
+          !manager.request_cancel(identity)) {
+        ::_exit(kCompletionProbeRaised);
+      }
+    }
+    if (!manager.wait_for_owned_count_at_most(0U, 5s)) {
+      ::_exit(kCompletionProbeRaised);
+    }
+    ::_exit(kCompletionRecordDeleted);
+  } catch (...) {
+    ::_exit(kCompletionProbeRaised);
+  }
 }
 
 /**
@@ -817,6 +921,54 @@ TEST(WorkerSupervisor,
         } catch (...) {
           ::_exit(kCompletionProbeRaised);
         }
+      },
+      ::testing::KilledBySignal(SIGABRT),
+      "completion fact could not be constructed or delivered");
+}
+
+TEST(WorkerSupervisor,
+     FirstFailureCompletionBadAllocFailStopsBeforeCallbackOrRetirement) {
+  EXPECT_EXIT(
+      {
+        provoke_initial_completion_construction_failure(
+            WorkerManagerCompletionConstructionPointForTest::Failure, false,
+            "fixture.nonzero");
+      },
+      ::testing::KilledBySignal(SIGABRT),
+      "completion fact could not be constructed or delivered");
+}
+
+TEST(WorkerSupervisor,
+     FirstForcedCancellationBadAllocFailStopsBeforeCallbackOrRetirement) {
+  EXPECT_EXIT(
+      {
+        provoke_initial_completion_construction_failure(
+            WorkerManagerCompletionConstructionPointForTest::ForcedCancellation,
+            false, "fixture.ignore");
+      },
+      ::testing::KilledBySignal(SIGABRT),
+      "completion fact could not be constructed or delivered");
+}
+
+TEST(WorkerSupervisor,
+     FirstExternalReportBadAllocFailStopsBeforeCallbackOrRetirement) {
+  EXPECT_EXIT(
+      {
+        provoke_initial_completion_construction_failure(
+            WorkerManagerCompletionConstructionPointForTest::Report, false,
+            "fixture.slow.success");
+      },
+      ::testing::KilledBySignal(SIGABRT),
+      "completion fact could not be constructed or delivered");
+}
+
+TEST(WorkerSupervisor,
+     FirstInProcessReportBadAllocFailStopsBeforeCallbackOrRetirement) {
+  EXPECT_EXIT(
+      {
+        provoke_initial_completion_construction_failure(
+            WorkerManagerCompletionConstructionPointForTest::Report, true,
+            "fixture.in-process.report");
       },
       ::testing::KilledBySignal(SIGABRT),
       "completion fact could not be constructed or delivered");

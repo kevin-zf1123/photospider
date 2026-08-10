@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -219,12 +220,15 @@ class TestJobService final {
    * @brief Creates one real service with finite default test quota.
    * @param tenant_id Exact configured tenant.
    * @param factory Non-null worker factory.
+   * @param worker_options Optional source-private manager test configuration.
    * @throws As `SingleTenantJobService` construction.
    */
   TestJobService(TenantId tenant_id,
-                 std::shared_ptr<JobAttemptWorkerFactory> factory)
+                 std::shared_ptr<JobAttemptWorkerFactory> factory,
+                 WorkerManagerOptions worker_options = {})
       : service_(std::move(tenant_id), test_quota_limits(), root_.path(),
-                 std::move(factory)) {}
+                 std::move(factory), DurableServerStateOptions{},
+                 TenantQuotaAuthorityOptions{}, std::move(worker_options)) {}
 
   /** @brief Prevents duplicate service/root ownership. */
   TestJobService(const TestJobService&) = delete;
@@ -3907,6 +3911,142 @@ TEST(SingleTenantJobService,
   ASSERT_TRUE(succeeded.has_value());
   EXPECT_EQ(succeeded->state, JobState::Succeeded);
   EXPECT_EQ(succeeded->assignment, recovered_retry->assignment);
+  EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 2U);
+}
+
+TEST(SingleTenantJobService,
+     SubmitRecordBadAllocRollsBackJobQuotaAndWorkerOwnership) {
+  ScopedTestStateRoot root;
+  auto record_failure = std::make_shared<std::atomic<bool>>(true);
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [](const JobAssignment& assignment,
+         const std::function<bool()>& cancellation_requested) {
+        EXPECT_FALSE(cancellation_requested());
+        return successful_report(assignment);
+      });
+  WorkerManagerOptions options;
+  options.fail_record_construction_for_test = record_failure;
+  {
+    SingleTenantJobService service(
+        TenantId("tenant.test"), test_quota_limits(), root.path(), factory,
+        DurableServerStateOptions{}, TenantQuotaAuthorityOptions{}, options);
+
+    EXPECT_THROW(service.submit(JobSpec(GraphArtifactId("graph.test"), 7,
+                                        OutputSlotId("image.final"),
+                                        test_job_resources())),
+                 std::bad_alloc);
+    EXPECT_FALSE(record_failure->load(std::memory_order_acquire));
+    EXPECT_EQ(SingleTenantJobServiceTestAccess::accepted_job_count(service),
+              0U);
+    EXPECT_EQ(service.quota_snapshot().active_attempts, 0U);
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::quota_reservation_ownership(service)
+            .total(),
+        0U);
+    EXPECT_EQ(SingleTenantJobServiceTestAccess::worker_thread_ownership(service)
+                  .total(),
+              0U);
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::live_worker_process_count(service),
+        0U);
+  }
+
+  SingleTenantJobService recovered(
+      TenantId("tenant.test"), test_quota_limits(), root.path(), factory,
+      DurableServerStateOptions{}, TenantQuotaAuthorityOptions{}, options);
+  EXPECT_EQ(SingleTenantJobServiceTestAccess::accepted_job_count(recovered),
+            0U);
+  EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
+  const JobSubmission accepted = recovered.submit(
+      JobSpec(GraphArtifactId("graph.test.recovered"), 8,
+              OutputSlotId("image.final"), test_job_resources()));
+  const std::optional<JobSnapshot> terminal =
+      recovered.wait_for(accepted.job_id, std::chrono::seconds(2));
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_EQ(terminal->state, JobState::Succeeded);
+}
+
+TEST(SingleTenantJobService,
+     RetryRecordBadAllocPreservesPriorDurableTruthAndOwnership) {
+  ScopedTestStateRoot root;
+  auto record_failure = std::make_shared<std::atomic<bool>>(false);
+  std::atomic<std::size_t> worker_calls{0U};
+  auto factory = std::make_shared<FunctionWorkerFactory>(
+      [&worker_calls](const JobAssignment& assignment,
+                      const std::function<bool()>& cancellation_requested) {
+        EXPECT_FALSE(cancellation_requested());
+        if (worker_calls.fetch_add(1U, std::memory_order_relaxed) == 0U) {
+          return settled_failed_report(assignment);
+        }
+        return successful_report(assignment);
+      });
+  WorkerManagerOptions options;
+  options.fail_record_construction_for_test = record_failure;
+  JobSubmission submission;
+  JobSnapshot prior_failure;
+  {
+    SingleTenantJobService service(
+        TenantId("tenant.test"), test_quota_limits(), root.path(), factory,
+        DurableServerStateOptions{}, TenantQuotaAuthorityOptions{}, options);
+    submission = service.submit(JobSpec(GraphArtifactId("graph.test"), 7,
+                                        OutputSlotId("image.final"),
+                                        test_job_resources()));
+    const std::optional<JobSnapshot> failed =
+        service.wait_for(submission.job_id, std::chrono::seconds(2));
+    ASSERT_TRUE(failed.has_value());
+    ASSERT_EQ(failed->state, JobState::Failed);
+    prior_failure = *failed;
+    ASSERT_TRUE(SingleTenantJobServiceTestAccess::
+                    wait_for_owned_worker_thread_count_at_most(
+                        service, 0U, std::chrono::seconds(2)));
+
+    record_failure->store(true, std::memory_order_release);
+    EXPECT_THROW(static_cast<void>(service.retry(submission.job_id)),
+                 std::bad_alloc);
+    EXPECT_FALSE(record_failure->load(std::memory_order_acquire));
+    const std::optional<JobSnapshot> unchanged =
+        service.query(submission.job_id);
+    ASSERT_TRUE(unchanged.has_value());
+    EXPECT_EQ(unchanged->state, prior_failure.state);
+    EXPECT_EQ(unchanged->assignment, prior_failure.assignment);
+    EXPECT_EQ(unchanged->attempt_settled, prior_failure.attempt_settled);
+    EXPECT_EQ(unchanged->attempt_outcome, prior_failure.attempt_outcome);
+    EXPECT_EQ(unchanged->failure, prior_failure.failure);
+    EXPECT_EQ(unchanged->message, prior_failure.message);
+    EXPECT_EQ(service.quota_snapshot().active_attempts, 0U);
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::quota_reservation_ownership(service)
+            .total(),
+        0U);
+    EXPECT_EQ(SingleTenantJobServiceTestAccess::worker_thread_ownership(service)
+                  .total(),
+              0U);
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::live_worker_process_count(service),
+        0U);
+    EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 1U);
+  }
+
+  SingleTenantJobService recovered(
+      TenantId("tenant.test"), test_quota_limits(), root.path(), factory,
+      DurableServerStateOptions{}, TenantQuotaAuthorityOptions{}, options);
+  const std::optional<JobSnapshot> durable = recovered.query(submission.job_id);
+  ASSERT_TRUE(durable.has_value());
+  EXPECT_EQ(durable->state, prior_failure.state);
+  EXPECT_EQ(durable->assignment, prior_failure.assignment);
+  EXPECT_EQ(durable->attempt_settled, prior_failure.attempt_settled);
+  EXPECT_EQ(durable->attempt_outcome, prior_failure.attempt_outcome);
+  EXPECT_EQ(durable->failure, prior_failure.failure);
+  EXPECT_EQ(durable->message, prior_failure.message);
+  EXPECT_EQ(recovered.quota_snapshot().active_attempts, 0U);
+  const std::optional<JobSubmission> retried =
+      recovered.retry(submission.job_id);
+  ASSERT_TRUE(retried.has_value());
+  const std::optional<JobSnapshot> succeeded =
+      recovered.wait_for(submission.job_id, std::chrono::seconds(2));
+  ASSERT_TRUE(succeeded.has_value());
+  EXPECT_EQ(succeeded->state, JobState::Succeeded);
+  EXPECT_EQ(succeeded->assignment, retried->assignment);
   EXPECT_EQ(worker_calls.load(std::memory_order_relaxed), 2U);
 }
 
