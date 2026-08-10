@@ -273,7 +273,8 @@ def require_install_consumer_ctest_commands(
     name zero times. It then reuses the production build-smoke selector to
     reject missing labels, disabled state, and unusable commands. Each
     surviving argv must start with the configured Python launcher, immediately
-    followed by ``-B`` and the exact maintained driver.
+    followed by ``-B`` and the exact maintained driver. Only the driver path
+    may use either spelling of Darwin's verified system tmp-root alias.
 
     @param inventory Parsed production ``Inventory`` instance to validate.
     @param python_executable Exact CMake-selected Python launcher.
@@ -285,8 +286,16 @@ def require_install_consumer_ctest_commands(
       configuration-inactive maintained name is present; or an expected entry
       lacks the label, is disabled/commandless, or has a different command
       prefix.
+    @throws OSError If Darwin's trusted system roots cannot be inspected or
+      strictly resolved.
+    @throws RuntimeError If strict root resolution loops or the trusted mapping
+      cannot preserve the exact driver suffix inside both roots.
+    @throws ValueError If an internal expected driver path is relative or
+      contains parent traversal.
     @note The function inspects only immutable in-memory inventory. It neither
-      launches CTest nor executes any smoke command.
+      launches CTest nor executes any smoke command. Alias equivalence applies
+      only to argv index two; the launcher, ``-B``, basename, and repository
+      layout remain exact.
     """
 
     expected_install_consumer_ctest_entries(
@@ -314,20 +323,29 @@ def require_install_consumer_ctest_commands(
         if expected_count == 0:
             continue
         record = inventory.require_selected(test_name)
-        expected_prefix = (
-            python_executable,
-            "-B",
-            str(integration_directory / driver_name),
+        expected_driver_spellings = (
+            architecture_support.trusted_system_tmp_path_spellings(
+                integration_directory / driver_name
+            )
         )
-        if record.command is None or record.command[:3] != expected_prefix:
+        expected_prefixes = tuple(
+            (python_executable, "-B", str(driver_spelling))
+            for driver_spelling in expected_driver_spellings
+        )
+        if (
+            record.command is None
+            or record.command[:3] not in expected_prefixes
+        ):
             observed_prefix = (
                 None
                 if record.command is None
                 else list(record.command[:3])
             )
             raise ctest_inventory.InventoryError(
-                f"Install-consumer smoke {test_name!r} must start with "
-                f"{list(expected_prefix)!r}; observed {observed_prefix!r}."
+                f"Install-consumer smoke {test_name!r} must start with one "
+                "of "
+                f"{[list(prefix) for prefix in expected_prefixes]!r}; "
+                f"observed {observed_prefix!r}."
             )
 
 
@@ -2586,6 +2604,157 @@ class InstallConsumerCTestRegistrationTest(unittest.TestCase):
                 python_executable=python_executable,
                 expected_test_names=INSTALL_CONSUMER_CTEST_NAMES[:2],
             )
+
+    def test_trusted_darwin_driver_spellings_are_accepted(self) -> None:
+        """@brief Accept both trusted spellings of each exact driver path.
+
+        @return None after logical and physical Darwin tmp-root spellings pass
+          without changing the launcher, flag, driver basename, or layout.
+        @throws AssertionError If either trusted spelling is rejected.
+        @note A synthetic mapping exercises the production spelling helper on
+          every platform without inspecting or replacing the host's ``/tmp``.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-ctest-command-trusted-tmp-alias-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            logical_root = sandbox / "logical-tmp"
+            physical_root = sandbox / "physical-tmp"
+            repository = physical_root / "repo"
+            mapping = (logical_root, physical_root)
+            python_executable = "/fixture/python3"
+            driver_by_name = dict(INSTALL_CONSUMER_CTEST_REGISTRATIONS)
+
+            with (
+                mock.patch.object(
+                    sys.modules[__name__],
+                    "REPOSITORY_ROOT",
+                    repository,
+                ),
+                mock.patch.object(
+                    architecture_support,
+                    "_trusted_system_tmp_mapping",
+                    return_value=mapping,
+                ),
+            ):
+                for spelling_root in (logical_root, physical_root):
+                    with self.subTest(spelling_root=spelling_root):
+                        entries = expected_install_consumer_ctest_entries(
+                            python_executable
+                        )
+                        for entry in entries:
+                            command = list(entry["command"])
+                            command[2] = str(
+                                spelling_root
+                                / "repo"
+                                / "tests"
+                                / "integration"
+                                / driver_by_name[str(entry["name"])]
+                            )
+                            entry["command"] = command
+                        inventory = ctest_inventory.parse_inventory(
+                            ctest_inventory_payload(entries)
+                        )
+                        require_install_consumer_ctest_commands(
+                            inventory,
+                            python_executable=python_executable,
+                        )
+
+    def test_untrusted_driver_aliases_and_path_drift_fail_closed(
+        self,
+    ) -> None:
+        """@brief Reject non-system aliases and lexical driver-path drift.
+
+        @return None after ordinary-root, intermediate, and leaf symlinks,
+          parent traversal, basename drift, and layout drift all fail.
+        @throws OSError If disposable files or symlinks cannot be created.
+        @throws AssertionError If any path outside the exact trusted root
+          spelling pair is accepted as a maintained driver.
+        @note Each symlink resolves to the expected disposable driver, proving
+          that canonical equality alone never widens the command contract.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-ctest-command-untrusted-alias-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            logical_root = sandbox / "logical-tmp"
+            physical_root = sandbox / "physical-tmp"
+            ordinary_root_alias = sandbox / "ordinary-tmp-alias"
+            repository = physical_root / "repo"
+            integration_directory = repository / "tests" / "integration"
+            integration_directory.mkdir(parents=True)
+            driver_name = INSTALL_CONSUMER_CTEST_REGISTRATIONS[0][1]
+            expected_driver = integration_directory / driver_name
+            write_exact_text(expected_driver, "# driver fixture\n")
+            intermediate_alias = repository / "tests" / "integration-alias"
+            leaf_alias = integration_directory / "driver-leaf-alias.py"
+            try:
+                logical_root.symlink_to(
+                    physical_root, target_is_directory=True
+                )
+                ordinary_root_alias.symlink_to(
+                    physical_root, target_is_directory=True
+                )
+                intermediate_alias.symlink_to(
+                    integration_directory, target_is_directory=True
+                )
+                leaf_alias.symlink_to(expected_driver)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+
+            mapping = (logical_root, physical_root)
+            invalid_paths = (
+                ordinary_root_alias
+                / "repo"
+                / "tests"
+                / "integration"
+                / driver_name,
+                intermediate_alias / driver_name,
+                leaf_alias,
+                logical_root
+                / os.pardir
+                / physical_root.name
+                / "repo"
+                / "tests"
+                / "integration"
+                / driver_name,
+                integration_directory / "not_the_install_driver.py",
+                repository / "tests" / "wrong-layout" / driver_name,
+            )
+            python_executable = "/fixture/python3"
+            with (
+                mock.patch.object(
+                    sys.modules[__name__],
+                    "REPOSITORY_ROOT",
+                    repository,
+                ),
+                mock.patch.object(
+                    architecture_support,
+                    "_trusted_system_tmp_mapping",
+                    return_value=mapping,
+                ),
+            ):
+                for invalid_path in invalid_paths:
+                    with self.subTest(invalid_path=invalid_path):
+                        entries = expected_install_consumer_ctest_entries(
+                            python_executable
+                        )
+                        command = list(entries[0]["command"])
+                        command[2] = str(invalid_path)
+                        entries[0]["command"] = command
+                        inventory = ctest_inventory.parse_inventory(
+                            ctest_inventory_payload(entries)
+                        )
+                        with self.assertRaisesRegex(
+                            ctest_inventory.InventoryError,
+                            "must start with",
+                        ):
+                            require_install_consumer_ctest_commands(
+                                inventory,
+                                python_executable=python_executable,
+                            )
 
     def test_missing_inactive_and_commented_entries_fail_closed(
         self,
