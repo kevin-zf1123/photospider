@@ -232,6 +232,17 @@ socket pair，并为精确一个 immutable assignment fork/exec 一个不安装�
 内 compute，校验一个非空 CPU image，关闭 Graph，销毁 Host ownership，最后只返回 typed
 attempt fact 与 candidate image。
 
+Exec 前的 descriptor ownership 是精确的：fd 0-2 是标准 stream，fd 3 是 private control
+socket，close-on-exec fd 4 用于向 parent 传递 setup `errno`。Darwin parent 在 `fork` 前查询
+内核 `kern.maxfilesperproc` 上界，且不分配内存的 child 关闭 `[5, 上界)` 中每个 slot，只把
+`EBADF` 视为未使用 slot。当前 soft `RLIMIT_NOFILE` 不是安全边界，因为已经打开的高位
+descriptor 会在限制随后降低后继续存在。Linux child 使用 raw
+`close_range(5, UINT_MAX, 0)`；包括旧内核不提供 syscall 在内的任何错误都会通过 fd 4 报告，
+并令 startup 失败。这里不存在任意有限 fallback 或从 `RLIM_INFINITY` 到 `INT_MAX` 的
+userspace 扫描。长期进程回归会在隔离 authority 中保持一个高位 non-close-on-exec
+sentinel，同时覆盖 infinite soft limit 与把 soft limit 降到既有 sentinel 以下两种情况，
+并证明及时 exec、sentinel 不被继承，同时 parent 副本仍保持打开。
+
 Private bounded protocol 具有固定 magic、唯一支持的 version、封闭 message kind、64-MiB
 frame-payload 上限、deadline-aware partial I/O，以及严格的 trailing-byte、enum、identity、
 digest、image-shape 与 Job-resource 校验。它传输一个 Assignment、精确的

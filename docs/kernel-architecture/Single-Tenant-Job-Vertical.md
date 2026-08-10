@@ -281,6 +281,21 @@ attempt-local Graph, computes within reserved CPU parallelism, validates one
 nonempty CPU image, closes the Graph, destroys Host ownership, and returns only
 typed attempt facts plus a candidate image.
 
+Pre-exec descriptor ownership is exact: fd 0-2 are standard streams, fd 3 is
+the private control socket, and close-on-exec fd 4 carries setup `errno` to the
+parent. On Darwin, the parent queries the kernel `kern.maxfilesperproc` ceiling
+before `fork` and the allocation-free child closes every slot in
+`[5, ceiling)`, treating only `EBADF` as an unused slot. The current soft
+`RLIMIT_NOFILE` is not a safe boundary because an already-open high descriptor
+survives a later limit decrease. On Linux, the child uses raw
+`close_range(5, UINT_MAX, 0)`; any error, including an unavailable syscall on
+an older kernel, is reported through fd 4 and fails startup. There is no
+arbitrary finite fallback or `RLIM_INFINITY`-to-`INT_MAX` userspace scan. The
+maintained process regressions hold a high non-close-on-exec sentinel in an
+isolated authority, exercise both an infinite soft limit and a soft limit
+lowered below the already-open sentinel, and prove timely exec plus sentinel
+non-inheritance while the parent copy stays open.
+
 The private bounded protocol has fixed magic, one supported version, closed
 message kinds, a 64-MiB frame-payload maximum, deadline-aware partial I/O, and
 strict trailing-byte, enum, identity, digest, image-shape, and Job-resource
