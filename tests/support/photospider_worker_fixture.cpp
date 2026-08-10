@@ -51,6 +51,8 @@ constexpr std::chrono::milliseconds kExpectedLaunchIoTimeout{3500};
 /** @brief Mode that blocks in trusted filesystem I/O after assignment accept.
  */
 constexpr std::string_view kFilesystemBlockMode = "fixture.fs.block";
+/** @brief Retry mode whose fresh generation blocks on trusted FIFO input. */
+constexpr std::string_view kRetryFilesystemHoldMode = "fixture.retry.hold";
 
 /**
  * @brief Parses an optional descriptor non-inheritance fixture mode.
@@ -594,7 +596,9 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
                        assignment.identity,
                        std::chrono::steady_clock::now() + launch.io_timeout);
 
-  if (mode == kFilesystemBlockMode) {
+  if (mode == kFilesystemBlockMode ||
+      (mode == kRetryFilesystemHoldMode &&
+       assignment.identity.worker_lease_generation.value > 1U)) {
     const int filesystem_result =
         run_filesystem_block_probe(prepared.graph.yaml_path);
     if (filesystem_result != 0) {
@@ -612,7 +616,7 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
   }
 
   if (mode == "fixture.nonzero" ||
-      (mode == "fixture.retry" &&
+      ((mode == "fixture.retry" || mode == kRetryFilesystemHoldMode) &&
        assignment.identity.worker_lease_generation.value == 1U)) {
     return 23;
   }

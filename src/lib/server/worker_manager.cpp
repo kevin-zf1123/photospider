@@ -544,6 +544,39 @@ void await_pre_signal_zero_exit_for_test(
 }
 
 /**
+ * @brief Waits until a child has exited without consuming its wait status.
+ * @param pid Exact positive child PID still owned by the calling supervisor.
+ * @param deadline Absolute monotonic test-only observation deadline.
+ * @return Nothing once `waitid(WNOWAIT)` proves any terminal child status.
+ * @throws ManagerFailure when the deterministic test deadline expires.
+ * @note This source-private seam is reached only when explicitly enabled by a
+ * test option. The later production `waitpid` remains the sole exact reaper;
+ * inability to observe this owned child fail-stops as authority loss.
+ */
+void await_any_exit_for_test(pid_t pid,
+                             std::chrono::steady_clock::time_point deadline) {
+  for (;;) {
+    siginfo_t information{};
+    const int observed = ::waitid(P_PID, static_cast<id_t>(pid), &information,
+                                  WEXITED | WNOHANG | WNOWAIT);
+    if (observed == 0 && information.si_pid == pid) {
+      return;
+    }
+    if (observed < 0 && errno != EINTR) {
+      fail_stop_reaping_authority_lost();
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      throw ManagerFailure(
+          JobAttemptFailure::WorkerExit,
+          "cancel-channel test child did not reach a terminal status");
+    }
+    std::this_thread::sleep_until(
+        std::min(deadline, now + kSupervisorPollInterval));
+  }
+}
+
+/**
  * @brief Sets close-on-exec and nonblocking flags on one parent-created fd.
  * @param fd Valid descriptor.
  * @param nonblocking Whether to add `O_NONBLOCK`.
@@ -1320,6 +1353,11 @@ class WorkerManager::Impl final {
                                     : JobAttemptFailure::WorkerStartup,
                                 error.what());
     } catch (const WorkerChannelError& error) {
+      if (accepted && options_.await_cancel_channel_failure_exit_for_test &&
+          !process.reaped) {
+        await_any_exit_for_test(process.pid, std::chrono::steady_clock::now() +
+                                                 options_.terminate_timeout);
+      }
       terminate_and_reap(record, &process);
       return failure_completion(record->identity,
                                 JobAttemptFailure::WorkerChannel, error.what());
@@ -1368,14 +1406,18 @@ class WorkerManager::Impl final {
    * @param record Exact assignment record.
    * @param process Non-null live/reap-tracked child owner.
    * @return One completion only after `process` is reaped.
-   * @throws Worker protocol/channel exceptions for the outer classifier.
+   * @throws Worker protocol exceptions and channel failures unrelated to an
+   * accepted cancellation for the outer classifier. Accepted-cancel channel
+   * failures remain inside this bounded process/wait-status state machine.
    * @throws std::invalid_argument when `process` is null.
    * @note Short read slices share one stateful frame decoder. Cancellation-send
    * failure starts the same cooperative deadline and keeps draining worker
-   * report/EOF/exit truth. If the deadline-side exact observation reaps a
-   * natural exit before channel revocation, the monitor keeps that descriptor
-   * open and drains the stateful decoder through one bounded post-reap window;
-   * only matching delivered TERM/KILL escalation yields `ForcedCancellation`.
+   * report/EOF/exit truth. A subsequent socket-system read failure disables
+   * decoding inside this monitor so exact wait status can still outrank channel
+   * loss. If the deadline-side exact observation reaps a natural exit before
+   * channel revocation, the monitor keeps that descriptor open and drains the
+   * stateful decoder through one bounded post-reap window; only matching
+   * delivered TERM/KILL escalation yields `ForcedCancellation`.
    * Every first `Report`, `Failure`, or `ForcedCancellation` construction is
    * locally fail-stop protected after exact reaping and cannot be reclassified
    * by the outer catch boundary.
@@ -1396,6 +1438,7 @@ class WorkerManager::Impl final {
     std::optional<JobAttemptReport> candidate_report;
     bool cancel_attempted = false;
     bool cancel_delivery_failed = false;
+    bool cancel_channel_failed = false;
     bool channel_eof = false;
     WorkerFrameDecoder frame_decoder;
 
@@ -1431,7 +1474,7 @@ class WorkerManager::Impl final {
         if (termination == TerminateAndReapResult::EscalationMatched) {
           return forced_cancellation_completion(
               record->identity,
-              cancel_delivery_failed
+              (cancel_delivery_failed || cancel_channel_failed)
                   ? "cancellation channel failed and manager signal "
                     "escalation reaped the worker"
                   : "worker exceeded cooperative cancellation grace; "
@@ -1485,7 +1528,10 @@ class WorkerManager::Impl final {
           if (!candidate_report.has_value()) {
             return failure_completion(
                 record->identity, JobAttemptFailure::WorkerChannel,
-                "worker exited cleanly without one report");
+                cancel_channel_failed
+                    ? "worker cancellation channel failed before its terminal "
+                      "report"
+                    : "worker exited cleanly without one report");
           }
           return report_completion(record->identity,
                                    std::move(*candidate_report));
@@ -1532,6 +1578,11 @@ class WorkerManager::Impl final {
         read_deadline = std::min(read_deadline, *post_reap_drain_deadline);
       }
       try {
+        if (cancel_attempted &&
+            options_.inject_cancel_channel_failure_for_test) {
+          throw WorkerChannelError(
+              "injected accepted-cancel worker channel failure");
+        }
         WorkerProtocolFrame frame =
             frame_decoder.read_frame(process->control.get(), read_deadline);
         if (candidate_report.has_value()) {
@@ -1566,6 +1617,20 @@ class WorkerManager::Impl final {
         channel_eof = true;
         eof_deadline =
             std::chrono::steady_clock::now() + options_.post_report_timeout;
+      } catch (const WorkerChannelError&) {
+        if (!cancel_attempted) {
+          throw;
+        }
+        cancel_channel_failed = true;
+        channel_eof = true;
+        eof_deadline =
+            std::chrono::steady_clock::now() + options_.post_report_timeout;
+        if (options_.await_cancel_channel_failure_exit_for_test &&
+            !process->reaped) {
+          await_any_exit_for_test(
+              process->pid,
+              std::chrono::steady_clock::now() + options_.terminate_timeout);
+        }
       }
     }
   }

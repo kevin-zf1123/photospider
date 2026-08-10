@@ -32,6 +32,11 @@ constexpr std::uint16_t kWorkerProtocolVersion = 1U;
 constexpr std::size_t kMaximumWorkerPathBytes = 16U << 10U;
 /** @brief Maximum worker or resolver diagnostic length. */
 constexpr std::size_t kMaximumWorkerDiagnosticBytes = 16U << 10U;
+/** @brief Fixed metadata bytes before one tight Report image payload. */
+constexpr std::size_t kWorkerReportImageMetadataBytes = 21U;
+/** @brief Typed diagnostic replacing an untransportable success candidate. */
+constexpr std::string_view kWorkerCandidateImageBoundDiagnostic =
+    "worker candidate image exceeds private Report bounds";  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Checked append-only encoder for one already-bounded frame payload.
@@ -137,6 +142,16 @@ class ByteWriter final {
       return;
     }
     bytes_.insert(bytes_.end(), bytes, bytes + size);
+  }
+
+  /**
+   * @brief Reports aggregate payload capacity still available.
+   * @return Exact bytes that may still be appended without exceeding the
+   * private frame-payload maximum.
+   * @throws Nothing.
+   */
+  std::size_t remaining_capacity() const noexcept {
+    return kMaximumWorkerFramePayloadBytes - bytes_.size();
   }
 
   /**
@@ -500,6 +515,27 @@ void encode_identity(const AttemptIdentity& identity, ByteWriter* writer) {
   writer->put_string(identity.worker_instance_id.value(),
                      kMaximumOpaqueIdentityBytes);
   writer->put_u64(identity.worker_lease_generation.value);
+}
+
+/**
+ * @brief Encodes the bounded worker-owned failure for an oversized candidate.
+ * @param identity Exact attempt identity copied from the successful report.
+ * @return Complete small Report frame with `Failed/Compute` and no image.
+ * @throws Contract, length, or allocation failures unchanged.
+ * @note This is used only for an otherwise valid settled success shape whose
+ * image cannot fit the aggregate private Report or Job resource envelope.
+ */
+WorkerProtocolFrame encode_candidate_image_bound_failure(
+    const AttemptIdentity& identity) {
+  ByteWriter writer;
+  encode_identity(identity, &writer);
+  writer.put_u8(static_cast<std::uint8_t>(JobAttemptOutcome::Failed));
+  writer.put_bool(true);
+  writer.put_u8(static_cast<std::uint8_t>(JobAttemptFailure::Compute));
+  writer.put_string(kWorkerCandidateImageBoundDiagnostic,
+                    kMaximumWorkerDiagnosticBytes);
+  writer.put_bool(false);
+  return WorkerProtocolFrame{WorkerMessageKind::Report, writer.finish()};
 }
 
 /**
@@ -1094,10 +1130,9 @@ AttemptIdentity decode_worker_identity(const WorkerProtocolFrame& frame,
   });
 }
 
-/** @copydoc ps::server::send_worker_report */
-void send_worker_report(int fd, const JobAttemptReport& report,
-                        const JobSpec& spec,
-                        std::chrono::steady_clock::time_point deadline) {
+/** @copydoc ps::server::encode_worker_report */
+WorkerProtocolFrame encode_worker_report(const JobAttemptReport& report,
+                                         const JobSpec& spec) {
   validate_attempt_identity(report.identity);
   validate_job_spec(spec);
   ByteWriter writer;
@@ -1123,10 +1158,19 @@ void send_worker_report(int fd, const JobAttemptReport& report,
         row_bytes * static_cast<std::size_t>(image.height);
     const JobResourceRequest& resources = spec.resource_request();
     const std::uint64_t payload_u64 = size_to_u64(payload_bytes);
+    const bool exceeds_job_resources = payload_u64 > resources.output_bytes ||
+                                       payload_u64 > resources.staging_bytes ||
+                                       payload_u64 > resources.retention_bytes;
+    const bool exceeds_aggregate_frame =
+        writer.remaining_capacity() < kWorkerReportImageMetadataBytes ||
+        payload_bytes >
+            writer.remaining_capacity() - kWorkerReportImageMetadataBytes;
     if (payload_bytes > kMaximumWorkerFramePayloadBytes ||
-        payload_u64 > resources.output_bytes ||
-        payload_u64 > resources.staging_bytes ||
-        payload_u64 > resources.retention_bytes) {
+        exceeds_job_resources || exceeds_aggregate_frame) {
+      if (report.outcome == JobAttemptOutcome::Succeeded && report.settled &&
+          report.failure == JobAttemptFailure::None) {
+        return encode_candidate_image_bound_failure(report.identity);
+      }
       throw std::length_error("worker report image exceeds Job bounds");
     }
     writer.put_u32(static_cast<std::uint32_t>(image.width));
@@ -1138,7 +1182,15 @@ void send_worker_report(int fd, const JobAttemptReport& report,
       writer.put_raw(image_buffer_row_data(image, row), row_bytes);
     }
   }
-  write_worker_frame(fd, WorkerMessageKind::Report, writer.finish(), deadline);
+  return WorkerProtocolFrame{WorkerMessageKind::Report, writer.finish()};
+}
+
+/** @copydoc ps::server::send_worker_report */
+void send_worker_report(int fd, const JobAttemptReport& report,
+                        const JobSpec& spec,
+                        std::chrono::steady_clock::time_point deadline) {
+  WorkerProtocolFrame frame = encode_worker_report(report, spec);
+  write_worker_frame(fd, frame.kind, frame.payload, deadline);
 }
 
 /** @copydoc ps::server::decode_worker_report */

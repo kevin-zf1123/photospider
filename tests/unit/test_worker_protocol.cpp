@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -127,6 +128,19 @@ JobResourceRequest protocol_resources() {
 }
 
 /**
+ * @brief Builds resources large enough to isolate the aggregate frame bound.
+ * @return Valid CPU/host envelope whose image-byte limits exceed one frame.
+ * @throws Nothing.
+ */
+JobResourceRequest frame_bound_resources() {
+  JobResourceRequest resources = protocol_resources();
+  resources.output_bytes = 128U << 20U;
+  resources.staging_bytes = 128U << 20U;
+  resources.retention_bytes = 128U << 20U;
+  return resources;
+}
+
+/**
  * @brief Builds one identity joined to a supplied immutable JobSpec.
  * @param spec Exact JobSpec whose digest enters the tuple.
  * @return Complete valid attempt identity.
@@ -141,6 +155,52 @@ AttemptIdentity protocol_identity(const JobSpec& spec) {
   identity.worker_instance_id = WorkerInstanceId("worker.protocol.1");
   identity.worker_lease_generation = WorkerLeaseGeneration{1U};
   return identity;
+}
+
+/**
+ * @brief Builds one valid identity with caller-selected encoded field lengths.
+ * @param spec Exact JobSpec whose digest enters the tuple.
+ * @param padding Number of safe suffix bytes added to every opaque text id.
+ * @return Complete valid attempt identity.
+ * @throws Identity allocation or validation failures unchanged.
+ */
+AttemptIdentity padded_protocol_identity(const JobSpec& spec,
+                                         std::size_t padding) {
+  AttemptIdentity identity = protocol_identity(spec);
+  identity.tenant_id = TenantId("tenant.frame." + std::string(padding, 't'));
+  identity.job_id = JobId("job.frame." + std::string(padding, 'j'));
+  identity.attempt_id =
+      JobAttemptId("attempt.frame." + std::string(padding, 'a'));
+  identity.worker_instance_id =
+      WorkerInstanceId("worker.frame." + std::string(padding, 'w'));
+  return identity;
+}
+
+/**
+ * @brief Builds one settled success report with a tight one-row CPU image.
+ * @param identity Exact report identity.
+ * @param diagnostic Variable bounded success diagnostic.
+ * @param payload_bytes Positive one-row image payload size.
+ * @return Complete successful candidate report.
+ * @throws Image, string, or allocation failures unchanged.
+ */
+JobAttemptReport frame_bound_success_report(AttemptIdentity identity,
+                                            std::string diagnostic,
+                                            std::size_t payload_bytes) {
+  if (payload_bytes == 0U ||
+      payload_bytes >
+          static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument("protocol boundary payload width is invalid");
+  }
+  JobAttemptReport report;
+  report.identity = std::move(identity);
+  report.outcome = JobAttemptOutcome::Succeeded;
+  report.settled = true;
+  report.failure = JobAttemptFailure::None;
+  report.message = std::move(diagnostic);
+  report.image = make_aligned_cpu_image_buffer(static_cast<int>(payload_bytes),
+                                               1, 1, DataType::UINT8, 64U);
+  return report;
 }
 
 /**
@@ -302,6 +362,91 @@ TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
             image_buffer_row_data(*sent.image, static_cast<int>(row)), 6U),
         0);
   }
+}
+
+TEST(WorkerProtocol,
+     CompleteReportFrameAcceptsExactBoundaryAndTypesOneByteOver) {
+  /**
+   * @brief Variable identity and diagnostic sizes for aggregate accounting.
+   * @throws Nothing for aggregate initialization and value operations.
+   */
+  struct FrameProfile final {
+    /** @brief Suffix bytes added to every opaque identity field. */
+    std::size_t identity_padding;
+    /** @brief Success diagnostic retained in the boundary-size calculation. */
+    std::string diagnostic;
+  };
+  const std::array<FrameProfile, 2U> profiles{{
+      {0U, ""},
+      {73U, std::string(777U, 'd')},
+  }};
+  const JobSpec spec(GraphArtifactId("graph.protocol.frame-bound"), 7,
+                     OutputSlotId("image.final"), frame_bound_resources());
+
+  for (const FrameProfile& profile : profiles) {
+    JobAttemptReport probe = frame_bound_success_report(
+        padded_protocol_identity(spec, profile.identity_padding),
+        profile.diagnostic, 1U);
+    const WorkerProtocolFrame probe_frame = encode_worker_report(probe, spec);
+    ASSERT_GT(probe_frame.payload.size(), 1U);
+    const std::size_t report_overhead = probe_frame.payload.size() - 1U;
+    ASSERT_LT(report_overhead, kMaximumWorkerFramePayloadBytes);
+    const std::size_t exact_image_bytes =
+        kMaximumWorkerFramePayloadBytes - report_overhead;
+
+    {
+      JobAttemptReport exact = frame_bound_success_report(
+          padded_protocol_identity(spec, profile.identity_padding),
+          profile.diagnostic, exact_image_bytes);
+      WorkerProtocolFrame exact_frame = encode_worker_report(exact, spec);
+      EXPECT_EQ(exact_frame.payload.size(), kMaximumWorkerFramePayloadBytes);
+      exact.image.reset();
+      const JobAttemptReport exact_decoded =
+          decode_worker_report(exact_frame, spec);
+      ASSERT_TRUE(exact_decoded.image.has_value());
+      EXPECT_EQ(image_buffer_row_bytes(*exact_decoded.image),
+                exact_image_bytes);
+      EXPECT_EQ(exact_decoded.outcome, JobAttemptOutcome::Succeeded);
+      EXPECT_EQ(exact_decoded.failure, JobAttemptFailure::None);
+    }
+
+    JobAttemptReport oversized = frame_bound_success_report(
+        padded_protocol_identity(spec, profile.identity_padding),
+        profile.diagnostic, exact_image_bytes + 1U);
+    const WorkerProtocolFrame oversized_frame =
+        encode_worker_report(oversized, spec);
+    const JobAttemptReport oversized_decoded =
+        decode_worker_report(oversized_frame, spec);
+    EXPECT_EQ(oversized_decoded.identity, oversized.identity);
+    EXPECT_EQ(oversized_decoded.outcome, JobAttemptOutcome::Failed);
+    EXPECT_TRUE(oversized_decoded.settled);
+    EXPECT_EQ(oversized_decoded.failure, JobAttemptFailure::Compute);
+    EXPECT_FALSE(oversized_decoded.image.has_value());
+    EXPECT_EQ(oversized_decoded.message,
+              "worker candidate image exceeds private Report bounds");
+  }
+}
+
+TEST(WorkerProtocol, SuccessfulCandidateAboveJobResourcesBecomesTypedFailure) {
+  JobResourceRequest resources = protocol_resources();
+  resources.output_bytes = 1U;
+  resources.staging_bytes = 1U;
+  resources.retention_bytes = 1U;
+  const JobSpec spec(GraphArtifactId("graph.protocol.resource-bound"), 7,
+                     OutputSlotId("image.final"), resources);
+  const JobAttemptReport report = frame_bound_success_report(
+      protocol_identity(spec), "candidate computed", 2U);
+
+  const WorkerProtocolFrame frame = encode_worker_report(report, spec);
+  const JobAttemptReport decoded = decode_worker_report(frame, spec);
+
+  EXPECT_EQ(decoded.identity, report.identity);
+  EXPECT_EQ(decoded.outcome, JobAttemptOutcome::Failed);
+  EXPECT_TRUE(decoded.settled);
+  EXPECT_EQ(decoded.failure, JobAttemptFailure::Compute);
+  EXPECT_EQ(decoded.message,
+            "worker candidate image exceeds private Report bounds");
+  EXPECT_FALSE(decoded.image.has_value());
 }
 
 TEST(WorkerProtocol, RejectsUnsupportedVersionBeforePayloadAllocation) {

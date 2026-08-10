@@ -379,6 +379,24 @@ struct WorkerManagerOptions final {
    * nor transfers PID or signal authority to test code.
    */
   bool await_pre_signal_zero_exit_for_test = false;
+  /**
+   * @brief Holds cancellation-channel classification until child exit in tests.
+   * @note False in product construction. When true, an accepted worker channel
+   * system error waits through bounded `waitid(WNOWAIT)` observation before
+   * production code classifies and exactly reaps the child. The seam exposes
+   * no status or process authority to test code and exists only to make the
+   * wait-status-versus-channel ordering deterministic.
+   */
+  bool await_cancel_channel_failure_exit_for_test = false;
+  /**
+   * @brief Injects one accepted-cancel channel read failure in tests.
+   * @note False in product construction. When true, the monitor raises one
+   * source-private `WorkerChannelError` after attempting exact cancellation
+   * delivery and before its next socket read. Normal process ownership,
+   * bounded deadlines, signalling, exact reaping, and completion authority
+   * remain in production code.
+   */
+  bool inject_cancel_channel_failure_for_test = false;
 };
 
 /**

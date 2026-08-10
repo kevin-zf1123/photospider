@@ -263,13 +263,32 @@ AttemptIdentity decode_worker_identity(const WorkerProtocolFrame& frame,
                                        WorkerMessageKind expected_kind);
 
 /**
+ * @brief Encodes one bounded worker attempt report without performing I/O.
+ * @param report Complete worker-local attempt facts.
+ * @param spec Immutable JobSpec used for image resource bounds.
+ * @return Complete private Report frame ready for bounded transport. An
+ * otherwise valid settled success whose image exceeds the aggregate frame or
+ * Job resource envelope becomes one bounded `Failed/Compute` report without
+ * an image.
+ * @throws Contract, image, allocation, or aggregate protocol-bound failures.
+ * @note This source-private seam lets protocol tests exercise the exact
+ * aggregate Report boundary without changing the installed ABI or owning a
+ * socket. The typed fallback preserves exact identity and settlement while
+ * replacing untransportable candidate bytes and diagnostic with one fixed
+ * bounded worker-owned failure. `send_worker_report()` is the sole transport
+ * wrapper.
+ */
+WorkerProtocolFrame encode_worker_report(const JobAttemptReport& report,
+                                         const JobSpec& spec);
+
+/**
  * @brief Sends one bounded worker attempt report.
  * @param fd Connected worker socket.
  * @param report Complete worker-local attempt facts.
  * @param spec Immutable JobSpec used for image resource bounds.
  * @param deadline Absolute monotonic I/O deadline.
  * @return Nothing after one report frame is written.
- * @throws Contract, image, allocation, timeout, or channel failures.
+ * @throws As `encode_worker_report`, plus timeout or channel failures.
  */
 void send_worker_report(int fd, const JobAttemptReport& report,
                         const JobSpec& spec,

@@ -394,6 +394,13 @@ class ScopedProbeDescriptor final {
     descriptor_ = -1;
   }
 
+  /**
+   * @brief Borrows the currently owned descriptor.
+   * @return Nonnegative descriptor while ownership remains armed.
+   * @throws Nothing.
+   */
+  int get() const noexcept { return descriptor_; }
+
  private:
   /** @brief Exact owned descriptor, or negative after reset. */
   int descriptor_ = -1;
@@ -454,6 +461,31 @@ int wait_for_worker_filesystem_reader(const std::filesystem::path& path,
     std::this_thread::sleep_for(10ms);
   }
   throw std::runtime_error("worker did not enter filesystem FIFO read");
+}
+
+/**
+ * @brief Releases one worker blocked on the exact filesystem FIFO reader.
+ * @param descriptor Connected nonnegative FIFO writer descriptor.
+ * @return Nothing after exactly one byte is written.
+ * @throws std::invalid_argument for a negative descriptor.
+ * @throws std::system_error for an unexpected write failure.
+ */
+void release_worker_filesystem_reader(int descriptor) {
+  if (descriptor < 0) {
+    throw std::invalid_argument("worker filesystem FIFO writer is invalid");
+  }
+  const char release = 'x';
+  for (;;) {
+    const ssize_t written = ::write(descriptor, &release, sizeof(release));
+    if (written == static_cast<ssize_t>(sizeof(release))) {
+      return;
+    }
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
+    throw std::system_error(errno, std::generic_category(),
+                            "release worker filesystem FIFO reader");
+  }
 }
 
 /**
@@ -1279,10 +1311,37 @@ TEST(WorkerSupervisor, CancelSendFailurePreservesWorkerFailureAndExit) {
   }
 }
 
+TEST(WorkerSupervisor,
+     CancelChannelFailureCannotEraseObservedSignalWaitStatus) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.await_cancel_channel_failure_exit_for_test = true;
+  options.inject_cancel_channel_failure_for_test = true;
+  auto service = make_service(root.path(), std::move(options));
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.cancel-race.signal"));
+
+  ASSERT_TRUE(service->cancel(submitted.job_id));
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::WorkerSignal)
+      << terminal.message;
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerChannel);
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerCancellationForced);
+}
+
 TEST(WorkerSupervisor, StaleLeaseCannotCancelFreshRetryProcess) {
   ScopedSupervisorRoot root;
-  auto service = make_service(root.path(), supervisor_options());
-  const JobSubmission first = service->submit(fixture_spec("fixture.retry"));
+  const std::filesystem::path fifo = root.path() / "worker-retry.fifo";
+  create_worker_filesystem_fifo(fifo);
+  const GraphArtifactId graph_id("fixture.retry.hold");
+  auto factory = std::make_shared<FixtureWorkerFactory>(
+      filesystem_fixture_catalog(graph_id, fifo));
+  auto service =
+      make_service(root.path(), supervisor_options(), std::move(factory));
+  const JobSubmission first = service->submit(fixture_spec(graph_id.value()));
   const JobSnapshot failed = wait_terminal(*service, first.job_id);
   ASSERT_EQ(failed.failure, JobAttemptFailure::WorkerExit);
   ASSERT_TRUE(SingleTenantJobServiceTestAccess::
@@ -1292,14 +1351,14 @@ TEST(WorkerSupervisor, StaleLeaseCannotCancelFreshRetryProcess) {
 
   const std::optional<JobSubmission> retry = service->retry(first.job_id);
   ASSERT_TRUE(retry.has_value());
-  ASSERT_TRUE(wait_until(
-      [&] {
-        return SingleTenantJobServiceTestAccess::live_worker_process_count(
-                   *service) == 1U;
-      },
-      2s));
+  ScopedProbeDescriptor writer(wait_for_worker_filesystem_reader(fifo, 2s));
+  ASSERT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+      1U);
   EXPECT_FALSE(SingleTenantJobServiceTestAccess::request_exact_worker_cancel(
       *service, first.assignment));
+  release_worker_filesystem_reader(writer.get());
+  writer.reset();
   const JobSnapshot succeeded = wait_terminal(*service, retry->job_id);
   EXPECT_EQ(succeeded.state, JobState::Succeeded);
   EXPECT_NE(retry->assignment.worker_instance_id,
