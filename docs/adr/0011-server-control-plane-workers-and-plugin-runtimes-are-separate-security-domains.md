@@ -273,6 +273,17 @@ for the trusted Embedded worker composition; it is not network peer
 authentication, a syscall sandbox, device isolation, or the isolated tenant-
 plugin runtime assigned to Issues #101-#104.
 
+That private protocol applies its 64-MiB bound to the complete encoded Report,
+including identity, diagnostic, flags, image metadata, and tight image bytes.
+An otherwise valid settled success that cannot fit the remaining frame or Job
+output/staging/retention envelope becomes one bounded identity-preserving
+`Failed/Compute` Report with no image, so an untransportable candidate is typed
+worker truth rather than an uncaught write exception later inferred as process
+or channel loss. After cancellation delivery has been attempted, a socket-
+system error likewise remains inside the bounded monitor: decoding stops, but
+exact process ownership and reap deadlines continue so signal/nonzero wait
+status or an already decoded Report outranks the weaker channel fact.
+
 The exec bootstrap also carries required exact startup and worker-write
 deadlines alongside the control descriptor. The worker uses the manager values
 without local defaults or shorter caps, so both sides enforce one configured

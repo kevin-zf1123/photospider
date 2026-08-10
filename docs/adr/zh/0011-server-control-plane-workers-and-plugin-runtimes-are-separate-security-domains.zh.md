@@ -230,6 +230,15 @@ drain 保留 parent socket 与 stateful decoder，而不是虚构 channel loss �
 authentication、syscall sandbox、device isolation，也不是 Issues #101-#104 分配的 isolated
 tenant-plugin runtime。
 
+该 private protocol 把 64-MiB bound 应用于完整编码 Report，包括 identity、diagnostic、flag、
+image metadata 与 tight image bytes。当其他方面有效且已 settled 的 success 无法装入剩余 frame
+或 Job output/staging/retention envelope 时，会变成一个有界、保留 identity 且没有 image 的
+`Failed/Compute` Report，因此不可传输 candidate 是 typed worker truth，而不是未捕获的 write
+exception 再被推断为 process 或 channel loss。在已经尝试 cancellation delivery 后发生
+socket-system error 时，同样会让错误留在有界 monitor 内：decode 停止，但精确 process
+ownership 与 reap deadline 继续，因此 signal/nonzero wait status 或已经 decode 的 Report
+优先于较弱 channel fact。
+
 Exec bootstrap 还会在 control descriptor 之外携带必填的精确 startup 与 worker-write
 deadline。worker 不使用本地默认值或更短 cap，而是直接采用 manager value，因此即使第一帧
 assignment 尚不可用，两端也执行同一 configured lifecycle policy。

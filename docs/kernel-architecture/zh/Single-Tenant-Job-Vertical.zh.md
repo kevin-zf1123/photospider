@@ -269,6 +269,14 @@ AssignmentAccepted/Heartbeat/Cancel identity message，以及至多一个 Report
 root、quota reservation、artifact-commit capability、credential、network listener、native
 handle 或第二个 assignment。Worker 控制的 image dimension 会先经过 arithmetic、frame、
 output、staging 与 retention bound 校验，control plane 才分配精确紧密的 CPU storage。
+
+64-MiB maximum 适用于完整编码 Report，包括 identity、outcome/settlement/failure 字段、
+diagnostic、image-presence flag、image metadata 与 tight row bytes。在写入 metadata 或 row 前，
+worker 会检查其精确剩余 aggregate capacity。当其他方面有效且已 settled 的 success image
+超过该 capacity 或其 Job output/staging/retention envelope 时，会变成一个保留 identity、
+已 settled 的 `Failed(Compute)` Report，携带固定有界 diagnostic 且没有 image；它不会作为
+encoder exception 逃逸，再被误判为 process 或 channel loss。
+
 Manager 与 worker 的短 poll loop 都会为自己的 channel 保留一个 decoder：deadline 到期会保留
 partial header/payload byte 与精确 offset，而 clean EOF 只在 fresh frame boundary 上有效。
 
@@ -313,7 +321,11 @@ owner-validated `SIGTERM`/`SIGKILL` escalation，最后精确 reap。Deadline �
 不得被当作 channel EOF：WorkerManager 会在独立且有界的 post-reap drain 期间保留 parent
 socket 与 stateful decoder，使已经进入缓冲区的 Report 与 EOF 仍按普通 report/channel/exit
 truth 分类。该路径不发送 signal、不执行第二次 reap，也不能仅因 cooperative deadline 已到就
-产生 forced cancellation。只有匹配 owner 已成功发送
+产生 forced cancellation。在已经尝试 cancellation delivery 后发生 socket-system read error
+时，会在同一个有界 monitor 内把 channel 标记为 unavailable。后续 decode 停止，但 process
+ownership、cooperative/escalation deadline 与精确 reap observation 继续，因此 signal/nonzero
+wait status 或已经 decode 的 Report 优先于 `WorkerChannel`。只有没有 Report 的 clean zero
+exit 仍是 channel failure。只有匹配 owner 已成功发送
 `SIGTERM` 或 `SIGKILL` 的精确 `WIFSIGNALED` 状态才能产生 forced-cancellation fact。对已经
 退出的 zombie 调用 `kill()` 成功不构成因果证明；正常零退出仍按 report/channel/exit truth
 分类。Destruction 会记录 cancellation，且不在 Job mutex 下等待，随后通过相同 escalation path
@@ -384,9 +396,11 @@ ordering、stale/malformed report、submit/retry manager-record/thread start 与
 release-failure ownership、Failed/Cancelled/rejected/malformed/pre-manifest terminal truth、
 read-only availability、report/mutation fencing 与 restart convergence、持续 handle/process
 reaping、target-inventory platform gating、bounded protocol reconstruction、fresh process
-identity、crash/protocol/heartbeat/runtime isolation、stale-lease rejection、cooperative/forced
-cancellation、deadline-side natural-reap buffered-report drainage、concurrent shutdown
-drainage、实际首次 completion/重建 allocation fail-stop、completion callback 异常 fail-stop，
+identity、crash/protocol/heartbeat/runtime isolation、FIFO-held fresh-retry stale-lease rejection、
+cooperative/forced cancellation、cancel-channel-versus-wait-status attribution、deadline-side
+natural-reap buffered-report drainage、在可变 identity/diagnostic 长度下完整 Report aggregate
+精确边界/多一个字节的类型化、concurrent shutdown drainage、实际首次 completion/重建
+allocation fail-stop、completion callback 异常 fail-stop，
 以及真实 Embedded Host output/checkpoint/restart 行为。
 
 这一本地 Issue #100 可执行子集不新增 network/multi-tenant control plane、独立部署的

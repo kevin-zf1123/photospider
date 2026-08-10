@@ -330,6 +330,16 @@ quota reservation, artifact-commit capability, credential, network listener,
 native handle, or second assignment. Worker-controlled image dimensions are
 checked against arithmetic, frame, output, staging, and retention bounds before
 the control plane allocates exact tight CPU storage.
+
+The 64-MiB maximum applies to the complete encoded Report, including identity,
+outcome/settlement/failure fields, diagnostic, image-presence flag, image
+metadata, and tight row bytes. Before writing metadata or rows, the worker
+checks their exact remaining aggregate capacity. An otherwise valid settled
+success whose image exceeds that capacity or its Job output/staging/retention
+envelope becomes one identity-preserving settled `Failed(Compute)` Report with
+a fixed bounded diagnostic and no image; it does not escape as an encoder
+exception that would later look like process or channel loss.
+
 Manager and worker short-poll loops each retain one decoder for their channel:
 deadline expiry preserves partial header/payload bytes and exact offsets, while
 clean EOF remains valid only at a fresh frame boundary.
@@ -392,6 +402,12 @@ decoder through a separate bounded post-reap drain so an already buffered
 Report and EOF remain ordinary report/channel/exit truth. That path sends no
 signal, performs no second reap, and cannot produce forced cancellation merely
 because the cooperative deadline elapsed.
+After cancellation delivery has been attempted, a socket-system read error
+marks the channel unavailable inside the same bounded monitor. Further decoding
+stops, but process ownership, cooperative/escalation deadlines, and exact reap
+observation continue, so a signal/nonzero wait status or already decoded Report
+outranks `WorkerChannel`. Only a clean zero exit with no Report remains a
+channel failure.
 Only an exact `WIFSIGNALED` status matching a successfully delivered owned
 `SIGTERM` or `SIGKILL` yields a forced-cancellation fact. Successful `kill()`
 against an already exited zombie is not causality; a normal zero exit remains
@@ -476,11 +492,13 @@ release-failure ownership for submit/retry manager-record/thread start and
 read-only availability, report/mutation fencing, and restart convergence,
 ongoing handle/process reaping, target-inventory platform gating, bounded
 protocol reconstruction, fresh process identity, crash/protocol/heartbeat/
-runtime isolation, stale-lease rejection, cooperative/forced cancellation,
-deadline-side natural-reap buffered-report drainage, concurrent shutdown
-drainage, actual first completion/reconstruction allocation fail-stop,
-completion-callback exception fail-stop, and real Embedded Host output/
-checkpoint/restart behavior.
+runtime isolation, FIFO-held fresh-retry stale-lease rejection, cooperative/
+forced cancellation, cancel-channel-versus-wait-status attribution,
+deadline-side natural-reap buffered-report drainage, complete Report aggregate
+exact-boundary/one-byte-over typing across variable identity/diagnostic lengths,
+concurrent shutdown drainage, actual first completion/reconstruction allocation
+fail-stop, completion-callback exception fail-stop, and real Embedded Host
+output/checkpoint/restart behavior.
 
 This local Issue #100 executable subset does not add the network/multi-tenant
 control plane, a separately deployed WorkerManager, artifact data plane,
