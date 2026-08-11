@@ -830,7 +830,10 @@ void send_packet(int socket, const std::vector<std::byte>& packet,
  * @note Storage is fully reserved before receiving, and `SCM_RIGHTS` is valid
  * only on the first nonempty stream segment. Later segments carry bytes only.
  * A declared frame is accepted only when followed by peer write-half EOF;
- * bytes or rights arriving after the exact length are rejected. This
+ * bytes or rights arriving after the exact length are rejected. Every
+ * `recvmsg` result is checked for truncation and its complete control records
+ * are adopted before a zero byte count is interpreted as EOF, because Darwin
+ * can install `SCM_RIGHTS` while returning zero payload bytes. This
  * non-supervised vertical intentionally has no receive deadline.
  */
 ReceivedPacket receive_packet(int socket) {
@@ -869,14 +872,7 @@ ReceivedPacket receive_packet(int socket) {
           std::string("isolated CPU framed stream receive failed: ") +
           std::strerror(errno));
     }
-    if (count == 0 && expected_bytes != 0U &&
-        received_bytes == expected_bytes) {
-      break;
-    }
-    if (count == 0) {
-      throw IsolatedCpuInvocationError(
-          "isolated CPU channel closed before its framed packet completed");
-    }
+    const bool truncated = (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0;
 
     for (struct cmsghdr* header = CMSG_FIRSTHDR(&message); header != nullptr;
          header = CMSG_NXTHDR(&message, header)) {
@@ -919,9 +915,17 @@ ReceivedPacket receive_packet(int socket) {
       }
     }
 
-    if ((message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0) {
+    if (truncated) {
       throw IsolatedCpuProtocolError(
           "isolated CPU packet or ancillary data was truncated");
+    }
+    if (count == 0 && expected_bytes != 0U &&
+        received_bytes == expected_bytes) {
+      break;
+    }
+    if (count == 0) {
+      throw IsolatedCpuInvocationError(
+          "isolated CPU channel closed before its framed packet completed");
     }
     received_bytes += static_cast<std::size_t>(count);
     if (received_bytes >= kIsolatedCpuPacketHeaderBytes &&

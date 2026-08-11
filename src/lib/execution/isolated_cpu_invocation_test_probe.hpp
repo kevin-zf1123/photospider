@@ -54,13 +54,14 @@ class IsolatedCpuInvocationTestProbe final {
    * @brief Runs the production one-frame receiver and discards its payload.
    * @param socket Connected blocking Unix stream descriptor borrowed for the
    * call.
-   * @return Nothing after one exact frame, its terminating EOF, and retirement
-   * of all received FDs.
+   * @return Nothing after one exact frame, its control-free terminating EOF,
+   * and retirement of all received FDs.
    * @throws IsolatedCpuProtocolError for malformed framing or ancillary data.
    * @throws IsolatedCpuInvocationError for channel-system failure or early EOF.
    * @throws std::bad_alloc when bounded receive storage cannot allocate.
    * @note This test seam invokes the same receiver used before the runtime
-   * callback and does not decode, map, or retain the frame.
+   * callback and does not decode, map, or retain the frame. Control records
+   * installed by a zero-payload `recvmsg` are validated before EOF handling.
    */
   static void receive_one_packet(int socket);
 };

@@ -450,6 +450,62 @@ void send_delayed_tail(int socket, bool with_descriptor) {
 }
 
 /**
+ * @brief Sends one real descriptor with no stream payload on Darwin.
+ * @param socket Connected test sender after the exact frame was consumed.
+ * @return Nothing after `sendmsg` reports zero payload bytes.
+ * @throws std::system_error when the descriptor open or send fails.
+ * @throws std::runtime_error when the platform reports nonzero payload
+ * progress.
+ * @note Darwin installs the descriptor at the receiver even though both
+ * `sendmsg` and `recvmsg` return zero. The caller deliberately retains the
+ * socket write half so that this zero result cannot denote peer EOF.
+ */
+void send_zero_payload_right(int socket) {
+  ScopedTestFd descriptor(::open("/dev/null", O_RDONLY));
+  if (descriptor.get() < 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "open zero-payload invocation test descriptor");
+  }
+  union AncillaryBuffer {
+    struct cmsghdr alignment;
+    std::array<unsigned char, CMSG_SPACE(sizeof(int))> bytes;
+  } control{};
+  std::byte empty{};
+  struct iovec data{&empty, 0U};
+  struct msghdr message{};
+  message.msg_iov = &data;
+  message.msg_iovlen = 1U;
+  message.msg_control = control.bytes.data();
+  message.msg_controllen = control.bytes.size();
+  struct cmsghdr* header = CMSG_FIRSTHDR(&message);
+  if (header == nullptr) {
+    throw std::runtime_error(
+        "construct zero-payload invocation ancillary header");
+  }
+  header->cmsg_level = SOL_SOCKET;
+  header->cmsg_type = SCM_RIGHTS;
+  header->cmsg_len = CMSG_LEN(sizeof(int));
+  const int raw_descriptor = descriptor.get();
+  std::memcpy(CMSG_DATA(header), &raw_descriptor, sizeof(raw_descriptor));
+  int flags = 0;
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+  ssize_t sent = -1;
+  do {
+    sent = ::sendmsg(socket, &message, flags);
+  } while (sent < 0 && errno == EINTR);
+  if (sent < 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "send zero-payload invocation ancillary right");
+  }
+  if (sent != 0) {
+    throw std::runtime_error(
+        "zero-payload invocation ancillary send made byte progress");
+  }
+}
+
+/**
  * @brief Exercises delayed trailing data against the production receiver.
  * @param with_descriptor Whether the delayed byte carries `SCM_RIGHTS`.
  * @return Nothing only when the receiver incorrectly accepts the exact frame.
@@ -481,6 +537,48 @@ void receive_frame_with_delayed_tail(bool with_descriptor) {
   }
   send_delayed_tail(sender.get(), with_descriptor);
   sender_write.finish();
+  receive.get();
+}
+
+/**
+ * @brief Exercises Darwin zero-payload rights against the production receiver.
+ * @return Nothing only when the receiver incorrectly accepts the exact frame.
+ * @throws IsolatedCpuProtocolError when the receiver rejects the ancillary
+ * right.
+ * @throws Invocation test setup/channel errors unchanged.
+ * @note The sender write half remains open until the asynchronous production
+ * receiver returns or throws, proving that its zero-byte `recvmsg` is not EOF.
+ */
+void receive_frame_with_zero_payload_right() {
+  int sockets[2] = {-1, -1};
+  if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "create invocation framing test socketpair");
+  }
+  ScopedTestFd sender(sockets[0]);
+  ScopedTestFd receiver(sockets[1]);
+  configure_test_sender(sender.get());
+  const std::uint64_t prior_frames =
+      IsolatedCpuInvocationTestProbe::snapshot().exact_frames_received;
+  std::future<void> receive = std::async(std::launch::async, [&receiver]() {
+    IsolatedCpuInvocationTestProbe::receive_one_packet(receiver.get());
+  });
+  ScopedTestWriteHalf sender_write(sender.get());
+  std::array<std::byte, kIsolatedCpuPacketHeaderBytes> exact_frame{};
+  send_test_frame(sender.get(), exact_frame.data(), exact_frame.size());
+  if (!wait_for_exact_frame_observation(prior_frames)) {
+    sender_write.finish();
+    receive.get();
+    throw std::runtime_error(
+        "invocation test receiver did not observe the exact frame");
+  }
+  send_zero_payload_right(sender.get());
+  if (receive.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+    sender_write.finish();
+    receive.get();
+    throw std::runtime_error(
+        "invocation receiver blocked on a delivered zero-payload right");
+  }
   receive.get();
 }
 
@@ -688,6 +786,18 @@ TEST(IsolatedCpuInvocation, RejectsDelayedRightsAfterExactFrameWithoutFdLeak) {
   const std::size_t before = count_open_descriptors();
   EXPECT_THROW(receive_frame_with_delayed_tail(true), IsolatedCpuProtocolError);
   EXPECT_EQ(count_open_descriptors(), before);
+}
+
+TEST(IsolatedCpuInvocation,
+     RejectsZeroPayloadRightsAfterExactFrameWithoutFdLeak) {
+#if defined(__APPLE__)
+  const std::size_t before = count_open_descriptors();
+  EXPECT_THROW(receive_frame_with_zero_payload_right(),
+               IsolatedCpuProtocolError);
+  EXPECT_EQ(count_open_descriptors(), before);
+#else
+  GTEST_SKIP() << "Linux stream SCM_RIGHTS requires a nonempty payload";
+#endif
 }
 
 TEST(IsolatedCpuInvocation, FreshExecClearsEnvironmentAndUnrelatedDescriptors) {
