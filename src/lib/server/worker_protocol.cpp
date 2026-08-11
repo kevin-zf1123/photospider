@@ -34,9 +34,84 @@ constexpr std::size_t kMaximumWorkerPathBytes = 16U << 10U;
 constexpr std::size_t kMaximumWorkerDiagnosticBytes = 16U << 10U;
 /** @brief Fixed metadata bytes before one tight Report image payload. */
 constexpr std::size_t kWorkerReportImageMetadataBytes = 21U;
+/** @brief Encoded width of one closed boolean, enum, or scalar byte. */
+constexpr std::size_t kWorkerU8Bytes = sizeof(std::uint8_t);
+/** @brief Encoded width of one length prefix or 32-bit scalar. */
+constexpr std::size_t kWorkerU32Bytes = sizeof(std::uint32_t);
+/** @brief Encoded width of one 64-bit scalar. */
+constexpr std::size_t kWorkerU64Bytes = sizeof(std::uint64_t);
+/** @brief Exact SHA-256 width shared by JobSpec and artifact digests. */
+constexpr std::size_t kWorkerDigestBytes = sizeof(JobSpecDigest{}.bytes);
+
+/**
+ * @brief Computes the encoded width of one maximum-length prefixed field.
+ * @param maximum Maximum raw field bytes.
+ * @return Four-byte length prefix plus the supplied maximum.
+ * @throws Nothing.
+ */
+constexpr std::size_t maximum_prefixed_field_bytes(
+    std::size_t maximum) noexcept {
+  return kWorkerU32Bytes + maximum;
+}
+
+// NOLINTBEGIN(whitespace/indent_namespace)
+/** @brief Maximum encoded width of one opaque identity field. */
+constexpr std::size_t kMaximumEncodedOpaqueIdentityBytes =
+    maximum_prefixed_field_bytes(kMaximumOpaqueIdentityBytes);
+/** @brief Maximum encoded width of one complete AttemptIdentity. */
+constexpr std::size_t kMaximumEncodedAttemptIdentityBytes =
+    4U * kMaximumEncodedOpaqueIdentityBytes + kWorkerDigestBytes +
+    kWorkerU64Bytes;
+/** @brief Maximum encoded width of one complete supported JobSpec. */
+constexpr std::size_t kMaximumEncodedJobSpecBytes =
+    3U * kMaximumEncodedOpaqueIdentityBytes + 3U * kWorkerU32Bytes +
+    2U * kWorkerU8Bytes + 4U * kWorkerU64Bytes +
+    kMaximumConfiguredDevicesPerJob *
+        (kMaximumEncodedOpaqueIdentityBytes + kWorkerU64Bytes) +
+    kWorkerU8Bytes;
+/**
+ * @brief Maximum checkpoint receipt/descriptor/blob-prefix bytes before data.
+ */
+constexpr std::size_t kMaximumEncodedArtifactEnvelopeBytes =
+    kMaximumEncodedAttemptIdentityBytes +
+    3U * kMaximumEncodedOpaqueIdentityBytes + 3U * kWorkerU32Bytes +
+    kWorkerU8Bytes + 2U * kWorkerU64Bytes + kWorkerDigestBytes +
+    kWorkerU8Bytes + kWorkerU32Bytes;
+/** @brief Maximum graph material and cadence bytes after the checkpoint. */
+constexpr std::size_t kMaximumEncodedAssignmentTailBytes =
+    kWorkerU8Bytes +
+    4U * maximum_prefixed_field_bytes(kMaximumWorkerPathBytes) +
+    maximum_prefixed_field_bytes(kMaximumWorkerDiagnosticBytes) +
+    kWorkerU32Bytes;
+/**
+ * @brief Complete worst-case Assignment envelope excluding checkpoint data.
+ */
+constexpr std::size_t kMaximumEncodedAssignmentEnvelopeBytes =
+    kMaximumEncodedAttemptIdentityBytes + kMaximumEncodedJobSpecBytes +
+    kWorkerU8Bytes + kMaximumEncodedArtifactEnvelopeBytes +
+    kMaximumEncodedAssignmentTailBytes;
+/** @brief Checkpoint bytes remaining after the complete worst-case envelope. */
+constexpr std::size_t kMaximumWorkerCheckpointPayloadBytes =
+    kMaximumWorkerFramePayloadBytes - kMaximumEncodedAssignmentEnvelopeBytes;
+/** @brief Maximum complete Report envelope before tight image bytes. */
+constexpr std::size_t kMaximumEncodedReportEnvelopeBytes =
+    kMaximumEncodedAttemptIdentityBytes + 4U * kWorkerU8Bytes +
+    maximum_prefixed_field_bytes(kMaximumWorkerDiagnosticBytes) +
+    kWorkerReportImageMetadataBytes;
+
+static_assert(kWorkerDigestBytes == sizeof(ArtifactContentDigest{}.bytes));
+static_assert(kMaximumEncodedAssignmentEnvelopeBytes <
+              kMaximumWorkerFramePayloadBytes);
+static_assert(kMaximumWorkerCheckpointPayloadBytes +
+                  kMaximumEncodedAssignmentEnvelopeBytes ==
+              kMaximumWorkerFramePayloadBytes);
+static_assert(kMaximumWorkerCheckpointPayloadBytes +
+                  kMaximumEncodedReportEnvelopeBytes <=
+              kMaximumWorkerFramePayloadBytes);
 /** @brief Typed diagnostic replacing an untransportable success candidate. */
 constexpr std::string_view kWorkerCandidateImageBoundDiagnostic =
-    "worker candidate image exceeds private Report bounds";  // NOLINT(whitespace/indent_namespace)
+    "worker candidate image exceeds private checkpoint transport bounds";
+// NOLINTEND
 
 /**
  * @brief Checked append-only encoder for one already-bounded frame payload.
@@ -523,7 +598,8 @@ void encode_identity(const AttemptIdentity& identity, ByteWriter* writer) {
  * @return Complete small Report frame with `Failed/Compute` and no image.
  * @throws Contract, length, or allocation failures unchanged.
  * @note This is used only for an otherwise valid settled success shape whose
- * image cannot fit the aggregate private Report or Job resource envelope.
+ * image cannot fit the reusable-checkpoint, aggregate private Report, or Job
+ * resource envelope.
  */
 WorkerProtocolFrame encode_candidate_image_bound_failure(
     const AttemptIdentity& identity) {
@@ -774,6 +850,9 @@ ImageBuffer make_tight_worker_image(std::uint32_t width, std::uint32_t height,
  * @param artifact Valid checkpoint artifact record.
  * @param writer Non-null payload owner.
  * @throws Contract, length, digest, or allocation failures unchanged.
+ * @note The blob uses the reusable-checkpoint bound rather than the larger raw
+ * frame maximum. This keeps every accepted artifact transportable in a future
+ * Assignment whose other fields all have their maximum supported width.
  */
 void encode_artifact(const ArtifactRecord& artifact, ByteWriter* writer) {
   if (writer == nullptr) {
@@ -804,14 +883,15 @@ void encode_artifact(const ArtifactRecord& artifact, ByteWriter* writer) {
     throw std::invalid_argument(
         "worker checkpoint artifact payload does not match its receipt");
   }
-  writer->put_blob(artifact.payload, kMaximumWorkerFramePayloadBytes);
+  writer->put_blob(artifact.payload, kMaximumWorkerCheckpointPayloadBytes);
 }
 
 /**
  * @brief Decodes and validates one immutable artifact receipt and payload.
  * @param reader Non-null current payload reader.
  * @return Independently owned artifact record.
- * @throws WorkerProtocolError for malformed descriptor/digest/durability.
+ * @throws WorkerProtocolError for malformed descriptor/digest/durability or a
+ * payload above the reusable-checkpoint transport bound.
  * @throws Allocation and hashing failures unchanged.
  */
 ArtifactRecord read_artifact(ByteReader* reader) {
@@ -850,7 +930,7 @@ ArtifactRecord read_artifact(ByteReader* reader) {
   if (receipt.achieved_durability != ArtifactDurability::CrashDurable) {
     throw WorkerProtocolError("worker artifact durability is invalid");
   }
-  artifact.payload = reader->get_blob(kMaximumWorkerFramePayloadBytes);
+  artifact.payload = reader->get_blob(kMaximumWorkerCheckpointPayloadBytes);
   const std::size_t width_size = static_cast<std::size_t>(descriptor.width);
   const std::size_t channel_count =
       static_cast<std::size_t>(descriptor.channels);
@@ -952,6 +1032,11 @@ auto decode_checked(Function&& function) -> decltype(function()) {
 
 }  // namespace
 
+/** @copydoc ps::server::maximum_worker_checkpoint_payload_bytes */
+std::size_t maximum_worker_checkpoint_payload_bytes() noexcept {
+  return kMaximumWorkerCheckpointPayloadBytes;
+}
+
 /** @copydoc ps::server::write_worker_frame */
 void write_worker_frame(int fd, WorkerMessageKind kind,
                         const std::vector<std::byte>& payload,
@@ -1027,9 +1112,9 @@ WorkerProtocolFrame read_worker_frame(
   return decoder.read_frame(fd, deadline);
 }
 
-/** @copydoc ps::server::send_worker_assignment */
-void send_worker_assignment(int fd, const PreparedWorkerAssignment& assignment,
-                            std::chrono::steady_clock::time_point deadline) {
+/** @copydoc ps::server::encode_worker_assignment */
+WorkerProtocolFrame encode_worker_assignment(
+    const PreparedWorkerAssignment& assignment) {
   validate_attempt_identity(assignment.assignment.identity);
   if (assignment.assignment.spec == nullptr ||
       assignment.heartbeat_interval.count() <= 0 ||
@@ -1058,8 +1143,14 @@ void send_worker_assignment(int fd, const PreparedWorkerAssignment& assignment,
   writer.put_string(assignment.graph.message, kMaximumWorkerDiagnosticBytes);
   writer.put_u32(
       static_cast<std::uint32_t>(assignment.heartbeat_interval.count()));
-  write_worker_frame(fd, WorkerMessageKind::Assignment, writer.finish(),
-                     deadline);
+  return WorkerProtocolFrame{WorkerMessageKind::Assignment, writer.finish()};
+}
+
+/** @copydoc ps::server::send_worker_assignment */
+void send_worker_assignment(int fd, const PreparedWorkerAssignment& assignment,
+                            std::chrono::steady_clock::time_point deadline) {
+  WorkerProtocolFrame frame = encode_worker_assignment(assignment);
+  write_worker_frame(fd, frame.kind, frame.payload, deadline);
 }
 
 /** @copydoc ps::server::receive_worker_assignment */
@@ -1158,6 +1249,8 @@ WorkerProtocolFrame encode_worker_report(const JobAttemptReport& report,
         row_bytes * static_cast<std::size_t>(image.height);
     const JobResourceRequest& resources = spec.resource_request();
     const std::uint64_t payload_u64 = size_to_u64(payload_bytes);
+    const bool exceeds_checkpoint_transport =
+        payload_bytes > kMaximumWorkerCheckpointPayloadBytes;
     const bool exceeds_job_resources = payload_u64 > resources.output_bytes ||
                                        payload_u64 > resources.staging_bytes ||
                                        payload_u64 > resources.retention_bytes;
@@ -1165,13 +1258,14 @@ WorkerProtocolFrame encode_worker_report(const JobAttemptReport& report,
         writer.remaining_capacity() < kWorkerReportImageMetadataBytes ||
         payload_bytes >
             writer.remaining_capacity() - kWorkerReportImageMetadataBytes;
-    if (payload_bytes > kMaximumWorkerFramePayloadBytes ||
-        exceeds_job_resources || exceeds_aggregate_frame) {
+    if (exceeds_checkpoint_transport || exceeds_job_resources ||
+        exceeds_aggregate_frame) {
       if (report.outcome == JobAttemptOutcome::Succeeded && report.settled &&
           report.failure == JobAttemptFailure::None) {
         return encode_candidate_image_bound_failure(report.identity);
       }
-      throw std::length_error("worker report image exceeds Job bounds");
+      throw std::length_error(
+          "worker report image exceeds reusable checkpoint bounds");
     }
     writer.put_u32(static_cast<std::uint32_t>(image.width));
     writer.put_u32(static_cast<std::uint32_t>(image.height));
@@ -1228,7 +1322,7 @@ JobAttemptReport decode_worker_report(const WorkerProtocolFrame& frame,
       const JobResourceRequest& resources = spec.resource_request();
       const std::uint64_t payload_u64 = size_to_u64(payload_bytes);
       if (declared_payload != payload_bytes ||
-          payload_bytes > kMaximumWorkerFramePayloadBytes ||
+          payload_bytes > kMaximumWorkerCheckpointPayloadBytes ||
           payload_u64 > resources.output_bytes ||
           payload_u64 > resources.staging_bytes ||
           payload_u64 > resources.retention_bytes) {

@@ -22,6 +22,18 @@ inline constexpr std::size_t kMaximumWorkerFramePayloadBytes = 64U << 20U;
 inline constexpr std::size_t kWorkerFrameHeaderBytes = 12U;
 
 /**
+ * @brief Returns the largest artifact payload safe in every valid Assignment.
+ * @return Exact checkpoint payload capacity after reserving the worst-case
+ * identity, JobSpec, receipt/descriptor, graph-material, and cadence envelope.
+ * @throws Nothing.
+ * @note The bound is source-private and does not change an installed ABI. It
+ * is intentionally smaller than the complete frame maximum so any retained
+ * checkpoint accepted at this boundary remains transportable even when every
+ * other supported Assignment field has its maximum encoded length.
+ */
+std::size_t maximum_worker_checkpoint_payload_bytes() noexcept;
+
+/**
  * @brief Closed message kinds in the one-assignment worker protocol.
  * @throws Nothing for value operations.
  */
@@ -216,6 +228,18 @@ WorkerProtocolFrame read_worker_frame(
     int fd, std::chrono::steady_clock::time_point deadline);
 
 /**
+ * @brief Encodes one complete immutable external worker assignment.
+ * @param assignment Complete identity/spec/checkpoint/graph/control payload.
+ * @return Complete private Assignment frame ready for bounded transport.
+ * @throws Contract, allocation, digest, or aggregate protocol-bound failures.
+ * @note This source-private seam lets protocol tests prove the exact aggregate
+ * Assignment boundary without blocking on a socket. `send_worker_assignment`
+ * is the sole transport wrapper.
+ */
+WorkerProtocolFrame encode_worker_assignment(
+    const PreparedWorkerAssignment& assignment);
+
+/**
  * @brief Sends one complete immutable external worker assignment.
  * @param fd Connected worker socket.
  * @param assignment Complete identity/spec/checkpoint/graph/control payload.
@@ -267,16 +291,18 @@ AttemptIdentity decode_worker_identity(const WorkerProtocolFrame& frame,
  * @param report Complete worker-local attempt facts.
  * @param spec Immutable JobSpec used for image resource bounds.
  * @return Complete private Report frame ready for bounded transport. An
- * otherwise valid settled success whose image exceeds the aggregate frame or
- * Job resource envelope becomes one bounded `Failed/Compute` report without
- * an image.
+ * otherwise valid settled success whose image exceeds the reusable-checkpoint,
+ * aggregate-frame, or Job resource envelope becomes one bounded
+ * `Failed/Compute` report without an image.
  * @throws Contract, image, allocation, or aggregate protocol-bound failures.
  * @note This source-private seam lets protocol tests exercise the exact
  * aggregate Report boundary without changing the installed ABI or owning a
  * socket. The typed fallback preserves exact identity and settlement while
  * replacing untransportable candidate bytes and diagnostic with one fixed
- * bounded worker-owned failure. `send_worker_report()` is the sole transport
- * wrapper.
+ * bounded worker-owned failure. The reusable-checkpoint bound reserves the
+ * complete worst-case future Assignment envelope, so a successful retained
+ * artifact cannot later fail solely because identity, JobSpec, graph material,
+ * or cadence grew. `send_worker_report()` is the sole transport wrapper.
  */
 WorkerProtocolFrame encode_worker_report(const JobAttemptReport& report,
                                          const JobSpec& spec);

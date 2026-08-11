@@ -53,6 +53,9 @@ constexpr std::chrono::milliseconds kExpectedLaunchIoTimeout{3500};
 constexpr std::string_view kFilesystemBlockMode = "fixture.fs.block";
 /** @brief Retry mode whose fresh generation blocks on trusted FIFO input. */
 constexpr std::string_view kRetryFilesystemHoldMode = "fixture.retry.hold";
+/** @brief Mode producing one byte above the reusable checkpoint payload cap. */
+constexpr std::string_view kCheckpointBoundaryOverMode =
+    "fixture.checkpoint-boundary-over";  // NOLINT(whitespace/indent_namespace)
 /**
  * @brief Natural signal delay that remains inside the long cancellation grace.
  * @note The gap is deliberately much larger than one supervisor poll slice so
@@ -105,6 +108,36 @@ JobAttemptReport success_report(const JobAssignment& assignment) {
   report.image = make_aligned_cpu_image_buffer(1, 1, 4, DataType::UINT8, 64U);
   const std::uint32_t pid = static_cast<std::uint32_t>(::getpid());
   std::memcpy(report.image->data.get(), &pid, sizeof(pid));
+  return report;
+}
+
+/**
+ * @brief Creates a successful candidate one byte above checkpoint transport.
+ * @param assignment Exact current assignment.
+ * @return Settled success candidate that the protocol must type as
+ * `Failed/Compute` before any artifact can be retained.
+ * @throws std::overflow_error if the source-private cap cannot fit one image
+ * dimension; image allocation failures propagate unchanged.
+ * @note The fixture allocates candidate bytes but sends no oversized payload:
+ * `send_worker_report()` must replace the candidate with the bounded typed
+ * failure before socket transport.
+ */
+JobAttemptReport checkpoint_boundary_over_report(
+    const JobAssignment& assignment) {
+  const std::size_t payload_bytes =
+      maximum_worker_checkpoint_payload_bytes() + 1U;
+  if (payload_bytes >
+      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error(
+        "worker fixture checkpoint payload exceeds image width");
+  }
+  JobAttemptReport report;
+  report.identity = assignment.identity;
+  report.outcome = JobAttemptOutcome::Succeeded;
+  report.settled = true;
+  report.failure = JobAttemptFailure::None;
+  report.image = make_aligned_cpu_image_buffer(static_cast<int>(payload_bytes),
+                                               1, 1, DataType::UINT8, 64U);
   return report;
 }
 
@@ -736,6 +769,13 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
   if (mode == "fixture.slow.success") {
     heartbeat_for(launch.control_fd, assignment.identity,
                   std::chrono::milliseconds(300), launch.io_timeout);
+  }
+  if (mode == kCheckpointBoundaryOverMode) {
+    const JobAttemptReport report = checkpoint_boundary_over_report(assignment);
+    send_worker_report(launch.control_fd, report, *assignment.spec,
+                       std::chrono::steady_clock::now() + launch.io_timeout);
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
+    return 0;
   }
   if (mode == "fixture.checkpoint" && assignment.checkpoint == nullptr) {
     return 28;

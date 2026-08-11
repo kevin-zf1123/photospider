@@ -32,6 +32,7 @@
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_protocol.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_TEST_WORKER_FIXTURE_PATH
 #error "PS_TEST_WORKER_FIXTURE_PATH must name the real-process fixture"
@@ -313,6 +314,21 @@ JobResourceRequest supervisor_resources() {
 }
 
 /**
+ * @brief Builds resources that isolate the reusable-checkpoint protocol cap.
+ * @return Valid request whose image limits reach the raw 64-MiB frame bound.
+ * @throws Nothing.
+ * @note The one-byte-over fixture remains inside these Job resource bounds, so
+ * only the smaller future-Assignment closure cap can convert its candidate.
+ */
+JobResourceRequest checkpoint_transport_resources() {
+  JobResourceRequest request = supervisor_resources();
+  request.output_bytes = kMaximumWorkerFramePayloadBytes;
+  request.staging_bytes = kMaximumWorkerFramePayloadBytes;
+  request.retention_bytes = kMaximumWorkerFramePayloadBytes;
+  return request;
+}
+
+/**
  * @brief Builds permissive finite capacity for concurrent process tests.
  * @return Capacity for eight active 512-GiB attempts and retained outputs.
  * @throws Nothing.
@@ -325,6 +341,19 @@ TenantQuotaLimits supervisor_quota() {
   limits.capacity.output_bytes = 8U << 20U;
   limits.capacity.staging_bytes = 8U << 20U;
   limits.capacity.retention_bytes = 8U << 20U;
+  return limits;
+}
+
+/**
+ * @brief Builds finite quota for one near-frame-boundary process candidate.
+ * @return Supervisor quota with output/staging/retention enlarged to 64 MiB.
+ * @throws Nothing.
+ */
+TenantQuotaLimits checkpoint_transport_quota() {
+  TenantQuotaLimits limits = supervisor_quota();
+  limits.capacity.output_bytes = kMaximumWorkerFramePayloadBytes;
+  limits.capacity.staging_bytes = kMaximumWorkerFramePayloadBytes;
+  limits.capacity.retention_bytes = kMaximumWorkerFramePayloadBytes;
   return limits;
 }
 
@@ -549,17 +578,19 @@ JobAssignment completion_failure_assignment(
  * @param options Valid manager options.
  * @param factory Optional externalizable factory; null selects the default
  * process fixture catalog.
+ * @param quota_limits Complete tenant capacity for this service instance.
  * @return Unique service owner.
  * @throws Service construction failures unchanged.
  */
 std::unique_ptr<SingleTenantJobService> make_service(
     const std::filesystem::path& root, WorkerManagerOptions options,
-    std::shared_ptr<JobAttemptWorkerFactory> factory = nullptr) {
+    std::shared_ptr<JobAttemptWorkerFactory> factory = nullptr,
+    TenantQuotaLimits quota_limits = supervisor_quota()) {
   if (factory == nullptr) {
     factory = std::make_shared<FixtureWorkerFactory>();
   }
   return std::make_unique<SingleTenantJobService>(
-      TenantId("tenant.supervisor"), supervisor_quota(), root,
+      TenantId("tenant.supervisor"), std::move(quota_limits), root,
       std::move(factory), DurableServerStateOptions{},
       TenantQuotaAuthorityOptions{}, std::move(options));
 }
@@ -1410,6 +1441,50 @@ TEST(WorkerSupervisor,
       0U);
 }
 
+TEST(WorkerSupervisor,
+     CheckpointBoundOverageBecomesComputeFailureWithoutOwnershipResidue) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.heartbeat_timeout = 2s;
+  options.attempt_runtime_timeout = 5s;
+  options.io_timeout = 2s;
+  auto service = make_service(root.path(), std::move(options), nullptr,
+                              checkpoint_transport_quota());
+  const JobSpec spec(GraphArtifactId("fixture.checkpoint-boundary-over"), 0,
+                     OutputSlotId("image.final"),
+                     checkpoint_transport_resources());
+
+  const JobSubmission submitted = service->submit(spec);
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.assignment, submitted.assignment);
+  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_TRUE(terminal.attempt_settled);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::Compute);
+  EXPECT_EQ(terminal.message,
+            "worker candidate image exceeds private checkpoint transport "
+            "bounds");
+  EXPECT_FALSE(terminal.output_receipt.has_value());
+  EXPECT_EQ(service->find_artifact(terminal.output_artifact_id), nullptr);
+  const TenantQuotaSnapshot quota = service->quota_snapshot();
+  EXPECT_EQ(quota.active_attempts, 0U);
+  EXPECT_EQ(quota.cpu_slots, 0U);
+  EXPECT_EQ(quota.host_memory_bytes, 0U);
+  EXPECT_EQ(quota.output_bytes, 0U);
+  EXPECT_EQ(quota.staging_bytes, 0U);
+  EXPECT_EQ(quota.retention_bytes, 0U);
+  EXPECT_EQ(quota.retained_artifacts, 0U);
+  for (const auto& device : quota.device_bytes) {
+    EXPECT_EQ(device.second, 0U);
+  }
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+      0U);
+}
+
 TEST(WorkerSupervisor, StaleLeaseCannotCancelFreshRetryProcess) {
   ScopedSupervisorRoot root;
   const std::filesystem::path fifo = root.path() / "worker-retry.fifo";
@@ -1451,6 +1526,8 @@ TEST(WorkerSupervisor, RetryCheckpointAndRestartPreserveDurableAuthority) {
   ScopedSupervisorRoot root;
   JobId completed_job_id;
   ArtifactId checkpoint_id;
+  OutputCommitReceipt checkpoint_receipt;
+  std::vector<std::byte> checkpoint_payload;
   {
     auto service = make_service(root.path(), supervisor_options());
     const JobSubmission first = service->submit(fixture_spec("fixture.retry"));
@@ -1464,7 +1541,41 @@ TEST(WorkerSupervisor, RetryCheckpointAndRestartPreserveDurableAuthority) {
     const JobSnapshot succeeded = wait_terminal(*service, first.job_id);
     ASSERT_EQ(succeeded.state, JobState::Succeeded);
     ASSERT_TRUE(succeeded.output_receipt.has_value());
+    ASSERT_NE(succeeded.spec, nullptr);
+    EXPECT_EQ(succeeded.assignment, retry->assignment);
+    EXPECT_EQ(succeeded.assignment.job_spec_digest, retry->job_spec_digest);
+    EXPECT_EQ(succeeded.output_receipt->attempt, retry->assignment);
+    EXPECT_EQ(succeeded.output_receipt->attempt.job_spec_digest,
+              succeeded.spec->digest());
+    EXPECT_EQ(succeeded.output_receipt->achieved_durability,
+              ArtifactDurability::CrashDurable);
     checkpoint_id = succeeded.output_receipt->artifact_id;
+    checkpoint_receipt = *succeeded.output_receipt;
+    const std::shared_ptr<const ArtifactRecord> artifact =
+        service->find_artifact(checkpoint_id);
+    ASSERT_NE(artifact, nullptr);
+    EXPECT_EQ(artifact->receipt.attempt, checkpoint_receipt.attempt);
+    EXPECT_EQ(artifact->receipt.artifact_id, checkpoint_id);
+    EXPECT_EQ(artifact->receipt.output_commit_id,
+              checkpoint_receipt.output_commit_id);
+    EXPECT_EQ(artifact->receipt.content_digest,
+              checkpoint_receipt.content_digest);
+    EXPECT_EQ(artifact->receipt.achieved_durability,
+              ArtifactDurability::CrashDurable);
+    EXPECT_EQ(artifact->receipt.content_digest,
+              hash_artifact_content(artifact->payload.data(),
+                                    artifact->payload.size()));
+    checkpoint_payload = artifact->payload;
+    const TenantQuotaSnapshot quota = service->quota_snapshot();
+    EXPECT_EQ(quota.active_attempts, 0U);
+    EXPECT_EQ(quota.retained_artifacts, 1U);
+    EXPECT_EQ(quota.retention_bytes, checkpoint_payload.size());
+    EXPECT_TRUE(
+        SingleTenantJobServiceTestAccess::
+            wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+        0U);
   }
   {
     auto recovered = make_service(root.path(), supervisor_options());
@@ -1473,11 +1584,57 @@ TEST(WorkerSupervisor, RetryCheckpointAndRestartPreserveDurableAuthority) {
     ASSERT_EQ(prior->state, JobState::Succeeded);
     ASSERT_TRUE(prior->output_receipt.has_value());
     EXPECT_EQ(prior->output_receipt->artifact_id, checkpoint_id);
+    EXPECT_EQ(prior->output_receipt->attempt, checkpoint_receipt.attempt);
+    EXPECT_EQ(prior->output_receipt->content_digest,
+              checkpoint_receipt.content_digest);
+    EXPECT_EQ(prior->output_receipt->achieved_durability,
+              ArtifactDurability::CrashDurable);
+    const std::shared_ptr<const ArtifactRecord> recovered_checkpoint =
+        recovered->find_artifact(checkpoint_id);
+    ASSERT_NE(recovered_checkpoint, nullptr);
+    EXPECT_EQ(recovered_checkpoint->payload, checkpoint_payload);
+    EXPECT_EQ(recovered_checkpoint->receipt.content_digest,
+              checkpoint_receipt.content_digest);
+    EXPECT_EQ(recovered_checkpoint->receipt.achieved_durability,
+              ArtifactDurability::CrashDurable);
+    const TenantQuotaSnapshot recovered_quota = recovered->quota_snapshot();
+    EXPECT_EQ(recovered_quota.active_attempts, 0U);
+    EXPECT_EQ(recovered_quota.retained_artifacts, 1U);
+    EXPECT_EQ(recovered_quota.retention_bytes, checkpoint_payload.size());
     const JobSubmission checkpoint =
         recovered->submit(fixture_spec("fixture.checkpoint", checkpoint_id));
     const JobSnapshot terminal = wait_terminal(*recovered, checkpoint.job_id);
     EXPECT_EQ(terminal.state, JobState::Succeeded);
-    EXPECT_EQ(recovered->quota_snapshot().active_attempts, 0U);
+    ASSERT_NE(terminal.spec, nullptr);
+    ASSERT_TRUE(terminal.spec->checkpoint_artifact_id().has_value());
+    EXPECT_EQ(*terminal.spec->checkpoint_artifact_id(), checkpoint_id);
+    EXPECT_EQ(terminal.assignment, checkpoint.assignment);
+    EXPECT_EQ(terminal.assignment.job_spec_digest, checkpoint.job_spec_digest);
+    EXPECT_NE(terminal.assignment.job_id, checkpoint_receipt.attempt.job_id);
+    EXPECT_NE(terminal.assignment.worker_instance_id,
+              checkpoint_receipt.attempt.worker_instance_id);
+    ASSERT_TRUE(terminal.output_receipt.has_value());
+    EXPECT_EQ(terminal.output_receipt->attempt, checkpoint.assignment);
+    EXPECT_EQ(terminal.output_receipt->achieved_durability,
+              ArtifactDurability::CrashDurable);
+    const std::shared_ptr<const ArtifactRecord> reused_checkpoint =
+        recovered->find_artifact(checkpoint_id);
+    ASSERT_NE(reused_checkpoint, nullptr);
+    EXPECT_EQ(reused_checkpoint->payload, checkpoint_payload);
+    EXPECT_EQ(reused_checkpoint->receipt.content_digest,
+              checkpoint_receipt.content_digest);
+    const TenantQuotaSnapshot final_quota = recovered->quota_snapshot();
+    EXPECT_EQ(final_quota.active_attempts, 0U);
+    EXPECT_EQ(final_quota.retained_artifacts, 2U);
+    EXPECT_EQ(final_quota.retention_bytes,
+              checkpoint_payload.size() +
+                  terminal.output_receipt->descriptor.payload_bytes);
+    EXPECT_TRUE(
+        SingleTenantJobServiceTestAccess::
+            wait_for_owned_worker_thread_count_at_most(*recovered, 0U, 2s));
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::live_worker_process_count(*recovered),
+        0U);
   }
 }
 

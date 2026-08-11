@@ -141,6 +141,131 @@ JobResourceRequest frame_bound_resources() {
 }
 
 /**
+ * @brief Builds one exact maximum-length valid opaque field.
+ * @param prefix Nonempty valid opaque prefix shorter than the field maximum.
+ * @param padding Valid alphanumeric byte used to fill the remaining width.
+ * @return Exact `kMaximumOpaqueIdentityBytes`-byte token.
+ * @throws std::invalid_argument for an unusable prefix or padding byte.
+ * @throws std::bad_alloc when allocating the field exhausts memory.
+ */
+std::string maximum_opaque_field(std::string prefix, char padding) {
+  const bool padding_valid = (padding >= 'a' && padding <= 'z') ||
+                             (padding >= 'A' && padding <= 'Z') ||
+                             (padding >= '0' && padding <= '9');
+  if (prefix.empty() || prefix.size() >= kMaximumOpaqueIdentityBytes ||
+      !padding_valid) {
+    throw std::invalid_argument("maximum opaque test field is invalid");
+  }
+  prefix.append(kMaximumOpaqueIdentityBytes - prefix.size(), padding);
+  return prefix;
+}
+
+/**
+ * @brief Builds the largest encoded valid Job resource/device vector shape.
+ * @return Positive resources with 128 sorted maximum-length device labels.
+ * @throws Contract or allocation failures unchanged.
+ */
+JobResourceRequest maximum_assignment_resources() {
+  JobResourceRequest resources = frame_bound_resources();
+  resources.devices.reserve(kMaximumConfiguredDevicesPerJob);
+  for (std::size_t index = 0U; index < kMaximumConfiguredDevicesPerJob;
+       ++index) {
+    const std::string decimal = std::to_string(index);
+    const std::string prefix =
+        "device-" + std::string(3U - decimal.size(), '0') + decimal;
+    resources.devices.push_back(
+        DeviceResourceRequest{maximum_opaque_field(prefix, 'x'),
+                              static_cast<std::uint64_t>(index + 1U)});
+  }
+  return resources;
+}
+
+/**
+ * @brief Builds one maximum-encoded-width identity joined to a JobSpec.
+ * @param spec Exact JobSpec whose digest enters the tuple.
+ * @param domain Distinct valid byte used to keep identity fields readable.
+ * @return Complete valid maximum-field attempt identity.
+ * @throws Contract or allocation failures unchanged.
+ */
+AttemptIdentity maximum_assignment_identity(const JobSpec& spec, char domain) {
+  AttemptIdentity identity;
+  identity.tenant_id = TenantId(maximum_opaque_field("tenant-", domain));
+  identity.job_id = JobId(maximum_opaque_field("job-", domain));
+  identity.job_spec_digest = spec.digest();
+  identity.attempt_id = JobAttemptId(maximum_opaque_field("attempt-", domain));
+  identity.worker_instance_id =
+      WorkerInstanceId(maximum_opaque_field("worker-", domain));
+  identity.worker_lease_generation =
+      WorkerLeaseGeneration{std::numeric_limits<std::uint64_t>::max()};
+  return identity;
+}
+
+/**
+ * @brief Builds a valid checkpoint with caller-selected tight payload bytes.
+ * @param spec JobSpec that names the checkpoint ArtifactId.
+ * @param payload_bytes Positive payload width no larger than `INT_MAX`.
+ * @return Complete digest-consistent crash-durable artifact record.
+ * @throws Contract, allocation, or hashing failures unchanged.
+ */
+ArtifactRecord maximum_assignment_checkpoint(const JobSpec& spec,
+                                             std::size_t payload_bytes) {
+  if (!spec.checkpoint_artifact_id().has_value() || payload_bytes == 0U ||
+      payload_bytes >
+          static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument("maximum checkpoint test payload is invalid");
+  }
+  ArtifactRecord artifact;
+  artifact.payload.assign(payload_bytes, std::byte{0x5a});
+  artifact.receipt.attempt = maximum_assignment_identity(spec, 'r');
+  artifact.receipt.output_slot_id =
+      OutputSlotId(maximum_opaque_field("checkpoint-slot-", 's'));
+  artifact.receipt.artifact_id = *spec.checkpoint_artifact_id();
+  artifact.receipt.output_commit_id =
+      OutputCommitId(maximum_opaque_field("checkpoint-commit-", 'c'));
+  artifact.receipt.descriptor.width = static_cast<int>(payload_bytes);
+  artifact.receipt.descriptor.height = 1;
+  artifact.receipt.descriptor.channels = 1;
+  artifact.receipt.descriptor.type = DataType::UINT8;
+  artifact.receipt.descriptor.row_bytes = payload_bytes;
+  artifact.receipt.descriptor.payload_bytes = payload_bytes;
+  artifact.receipt.content_digest =
+      hash_artifact_content(artifact.payload.data(), artifact.payload.size());
+  artifact.receipt.achieved_durability = ArtifactDurability::CrashDurable;
+  return artifact;
+}
+
+/**
+ * @brief Builds an Assignment with every variable envelope field at maximum.
+ * @param checkpoint_payload_bytes Positive tight checkpoint payload size.
+ * @return Complete valid assignment with maximum encoded non-payload fields.
+ * @throws Contract, allocation, or hashing failures unchanged.
+ */
+PreparedWorkerAssignment maximum_field_assignment(
+    std::size_t checkpoint_payload_bytes) {
+  const ArtifactId checkpoint_id(
+      maximum_opaque_field("checkpoint-artifact-", 'k'));
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId(maximum_opaque_field("graph-", 'g')),
+      std::numeric_limits<int>::max(),
+      OutputSlotId(maximum_opaque_field("output-", 'o')),
+      maximum_assignment_resources(), checkpoint_id);
+  PreparedWorkerAssignment prepared;
+  prepared.assignment.identity = maximum_assignment_identity(*spec, 'a');
+  prepared.assignment.spec = spec;
+  prepared.assignment.checkpoint = std::make_shared<const ArtifactRecord>(
+      maximum_assignment_checkpoint(*spec, checkpoint_payload_bytes));
+  prepared.graph.ok = true;
+  prepared.graph.root_dir.assign(16U << 10U, 'r');
+  prepared.graph.yaml_path.assign(16U << 10U, 'y');
+  prepared.graph.config_path.assign(16U << 10U, 'c');
+  prepared.graph.cache_root_dir.assign(16U << 10U, 'h');
+  prepared.graph.message.assign(16U << 10U, 'm');
+  prepared.heartbeat_interval =
+      std::chrono::milliseconds(std::numeric_limits<std::uint32_t>::max());
+  return prepared;
+}
+
+/**
  * @brief Builds one identity joined to a supplied immutable JobSpec.
  * @param spec Exact JobSpec whose digest enters the tuple.
  * @return Complete valid attempt identity.
@@ -365,7 +490,7 @@ TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
 }
 
 TEST(WorkerProtocol,
-     CompleteReportFrameAcceptsExactBoundaryAndTypesOneByteOver) {
+     CompleteReportAccountingTypesUnsafeCheckpointAcrossVariableFields) {
   /**
    * @brief Variable identity and diagnostic sizes for aggregate accounting.
    * @throws Nothing for aggregate initialization and value operations.
@@ -393,21 +518,24 @@ TEST(WorkerProtocol,
     ASSERT_LT(report_overhead, kMaximumWorkerFramePayloadBytes);
     const std::size_t exact_image_bytes =
         kMaximumWorkerFramePayloadBytes - report_overhead;
+    ASSERT_GT(exact_image_bytes, maximum_worker_checkpoint_payload_bytes());
 
     {
       JobAttemptReport exact = frame_bound_success_report(
           padded_protocol_identity(spec, profile.identity_padding),
           profile.diagnostic, exact_image_bytes);
       WorkerProtocolFrame exact_frame = encode_worker_report(exact, spec);
-      EXPECT_EQ(exact_frame.payload.size(), kMaximumWorkerFramePayloadBytes);
       exact.image.reset();
       const JobAttemptReport exact_decoded =
           decode_worker_report(exact_frame, spec);
-      ASSERT_TRUE(exact_decoded.image.has_value());
-      EXPECT_EQ(image_buffer_row_bytes(*exact_decoded.image),
-                exact_image_bytes);
-      EXPECT_EQ(exact_decoded.outcome, JobAttemptOutcome::Succeeded);
-      EXPECT_EQ(exact_decoded.failure, JobAttemptFailure::None);
+      EXPECT_EQ(exact_decoded.identity, exact.identity);
+      EXPECT_EQ(exact_decoded.outcome, JobAttemptOutcome::Failed);
+      EXPECT_TRUE(exact_decoded.settled);
+      EXPECT_EQ(exact_decoded.failure, JobAttemptFailure::Compute);
+      EXPECT_FALSE(exact_decoded.image.has_value());
+      EXPECT_EQ(exact_decoded.message,
+                "worker candidate image exceeds private checkpoint transport "
+                "bounds");
     }
 
     JobAttemptReport oversized = frame_bound_success_report(
@@ -423,8 +551,66 @@ TEST(WorkerProtocol,
     EXPECT_EQ(oversized_decoded.failure, JobAttemptFailure::Compute);
     EXPECT_FALSE(oversized_decoded.image.has_value());
     EXPECT_EQ(oversized_decoded.message,
-              "worker candidate image exceeds private Report bounds");
+              "worker candidate image exceeds private checkpoint transport "
+              "bounds");
   }
+}
+
+TEST(WorkerProtocol,
+     ReusableCheckpointBoundAcceptsExactAndTypesOneByteOverSuccess) {
+  const std::size_t checkpoint_boundary =
+      maximum_worker_checkpoint_payload_bytes();
+  ASSERT_GT(checkpoint_boundary, 0U);
+  EXPECT_EQ(checkpoint_boundary, 67006957U);
+
+  const JobSpec report_spec(GraphArtifactId("graph.protocol.checkpoint-bound"),
+                            7, OutputSlotId("image.final"),
+                            frame_bound_resources());
+  {
+    JobAttemptReport report = frame_bound_success_report(
+        maximum_assignment_identity(report_spec, 'q'),
+        std::string(16U << 10U, 'd'), checkpoint_boundary);
+    WorkerProtocolFrame report_frame =
+        encode_worker_report(report, report_spec);
+    EXPECT_LT(report_frame.payload.size(), kMaximumWorkerFramePayloadBytes);
+    report.image.reset();
+    const JobAttemptReport decoded =
+        decode_worker_report(report_frame, report_spec);
+    EXPECT_EQ(decoded.outcome, JobAttemptOutcome::Succeeded);
+    EXPECT_TRUE(decoded.settled);
+    EXPECT_EQ(decoded.failure, JobAttemptFailure::None);
+    ASSERT_TRUE(decoded.image.has_value());
+    EXPECT_EQ(image_buffer_row_bytes(*decoded.image), checkpoint_boundary);
+  }
+
+  {
+    const WorkerProtocolFrame exact =
+        encode_worker_assignment(maximum_field_assignment(checkpoint_boundary));
+    EXPECT_EQ(exact.kind, WorkerMessageKind::Assignment);
+    EXPECT_EQ(exact.payload.size(), kMaximumWorkerFramePayloadBytes);
+  }
+
+  {
+    EXPECT_THROW(encode_worker_assignment(
+                     maximum_field_assignment(checkpoint_boundary + 1U)),
+                 std::length_error);
+  }
+
+  JobAttemptReport report = frame_bound_success_report(
+      maximum_assignment_identity(report_spec, 'q'),
+      std::string(16U << 10U, 'd'), checkpoint_boundary + 1U);
+  WorkerProtocolFrame report_frame = encode_worker_report(report, report_spec);
+  report.image.reset();
+  const JobAttemptReport decoded =
+      decode_worker_report(report_frame, report_spec);
+
+  EXPECT_EQ(decoded.outcome, JobAttemptOutcome::Failed);
+  EXPECT_TRUE(decoded.settled);
+  EXPECT_EQ(decoded.failure, JobAttemptFailure::Compute);
+  EXPECT_FALSE(decoded.image.has_value());
+  EXPECT_EQ(decoded.message,
+            "worker candidate image exceeds private checkpoint transport "
+            "bounds");
 }
 
 TEST(WorkerProtocol, SuccessfulCandidateAboveJobResourcesBecomesTypedFailure) {
@@ -445,7 +631,8 @@ TEST(WorkerProtocol, SuccessfulCandidateAboveJobResourcesBecomesTypedFailure) {
   EXPECT_TRUE(decoded.settled);
   EXPECT_EQ(decoded.failure, JobAttemptFailure::Compute);
   EXPECT_EQ(decoded.message,
-            "worker candidate image exceeds private Report bounds");
+            "worker candidate image exceeds private checkpoint transport "
+            "bounds");
   EXPECT_FALSE(decoded.image.has_value());
 }
 
