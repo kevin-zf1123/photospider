@@ -3,11 +3,13 @@
  * @brief Provides deterministic fresh-exec callbacks for CPU invocation tests.
  */
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -15,8 +17,10 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include "execution/isolated_cpu_invocation.hpp"  // NOLINT(build/include_subdir)
+#include "execution/plugin_runtime_supervisor.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::execution {
 namespace {
@@ -96,11 +100,44 @@ namespace {
 }
 
 /**
+ * @brief Sends a deliberately truncated response prefix and exits normally.
+ * @return Never returns; the process exits with status zero after the prefix.
+ * @throws Nothing; syscall failure exits with status 74.
+ * @note The Host must classify this normal-exit output as bad output rather
+ * than process crash or a successful plugin result.
+ */
+[[noreturn]] void send_truncated_response_and_exit() noexcept {
+  const std::array<std::byte, 4U> prefix{std::byte{'B'}, std::byte{'A'},
+                                         std::byte{'D'}, std::byte{'!'}};
+  int flags = 0;
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+  std::size_t offset = 0U;
+  while (offset != prefix.size()) {
+    const ssize_t count =
+        ::send(kIsolatedCpuRuntimeControlDescriptor, prefix.data() + offset,
+               prefix.size() - offset, flags);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+      continue;
+    }
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    _exit(74);
+  }
+  _exit(0);
+}
+
+/**
  * @brief Executes one deterministic fixture operation over mapped ranges.
  * @param invocation Fully validated callback-local invocation.
  * @return Typed success, plugin failure, or cancellation result.
  * @throws std::runtime_error for the explicit exception fixture operation.
  * @note No pointer, mapping, FD, or invocation state is retained after return.
+ * The delayed fill operation simulates callback work while the endpoint's
+ * independent heartbeat thread remains live.
  */
 IsolatedCpuRuntimeCallbackResult run_fixture_operation(
     const IsolatedCpuRuntimeInvocation& invocation) {
@@ -109,6 +146,30 @@ IsolatedCpuRuntimeCallbackResult run_fixture_operation(
   }
   if (invocation.operation == "fixture.crash") {
     _exit(73);
+  }
+  if (invocation.operation == "fixture.sigkill") {
+    static_cast<void>(::kill(::getpid(), SIGKILL));
+    _exit(74);
+  }
+  if (invocation.operation == "fixture.truncated") {
+    send_truncated_response_and_exit();
+  }
+  if (invocation.operation == "fixture.hang") {
+    for (;;) {
+      static_cast<void>(::pause());
+    }
+  }
+  if (invocation.operation == "fixture.ignore_termination_hang") {
+    static_cast<void>(::signal(SIGTERM, SIG_IGN));
+    for (;;) {
+      static_cast<void>(::pause());
+    }
+  }
+  if (invocation.operation == "fixture.stop") {
+    static_cast<void>(::raise(SIGSTOP));
+    for (;;) {
+      static_cast<void>(::pause());
+    }
   }
   if (invocation.operation == "fixture.throw") {
     throw std::runtime_error("fixture callback exception");
@@ -123,11 +184,16 @@ IsolatedCpuRuntimeCallbackResult run_fixture_operation(
         IsolatedCpuInvocationOutcome::Cancelled,
         "fixture callback observed cooperative cancellation"};
   }
-  if (invocation.operation == "fixture.fill_sequence") {
+  if (invocation.operation == "fixture.fill_sequence" ||
+      invocation.operation == "fixture.delayed_fill_sequence" ||
+      invocation.operation == "fixture.response_hang") {
     if (!invocation.inputs.empty() || invocation.outputs.size() != 1U) {
       return IsolatedCpuRuntimeCallbackResult{
           IsolatedCpuInvocationOutcome::PluginFailed,
           "fixture fill_sequence shape is invalid"};
+    }
+    if (invocation.operation == "fixture.delayed_fill_sequence") {
+      std::this_thread::sleep_for(std::chrono::milliseconds{600});
     }
     const IsolatedCpuRuntimeTensor& output = invocation.outputs[0];
     for (std::size_t index = 0U; index < output.size; ++index) {
@@ -190,6 +256,41 @@ IsolatedCpuRuntimeCallbackResult run_fixture_operation(
       "fixture operation is unknown"};
 }
 
+/**
+ * @brief Applies deterministic callback-adjacent endpoint behavior.
+ * @param point Exact supervised endpoint milestone.
+ * @param invocation Fully validated callback-local invocation.
+ * @return Nothing for ordinary operations; response-hang waits for supervisor
+ * termination after authenticating callback completion.
+ * @throws Nothing.
+ */
+void run_fixture_lifecycle_hook(
+    PluginRuntimeLifecyclePoint point,
+    const IsolatedCpuRuntimeInvocation& invocation) noexcept {
+  if (point == PluginRuntimeLifecyclePoint::BeforeResponse &&
+      invocation.operation == "fixture.response_hang") {
+    for (;;) {
+      static_cast<void>(::pause());
+    }
+  }
+}
+
+/**
+ * @brief Selects one compile-time startup behavior for a fixture executable.
+ * @return Normal, silent, or corrupted-startup behavior.
+ * @throws Nothing.
+ */
+constexpr PluginRuntimeEndpointStartupBehavior
+fixture_startup_behavior() noexcept {
+#if defined(PS_TEST_PLUGIN_RUNTIME_SUPPRESS_STARTED)
+  return PluginRuntimeEndpointStartupBehavior::SuppressStarted;
+#elif defined(PS_TEST_PLUGIN_RUNTIME_CORRUPT_STARTED_NONCE)
+  return PluginRuntimeEndpointStartupBehavior::CorruptStartedNonce;
+#else
+  return PluginRuntimeEndpointStartupBehavior::Normal;
+#endif
+}
+
 }  // namespace
 }  // namespace ps::execution
 
@@ -199,6 +300,16 @@ IsolatedCpuRuntimeCallbackResult run_fixture_operation(
  * @throws Nothing; the endpoint contains callback and protocol exceptions.
  */
 int main() {
+  errno = 0;
+  if (::fcntl(ps::execution::kPluginRuntimeSupervisionDescriptor, F_GETFD) >=
+      0) {
+    return ps::execution::serve_supervised_isolated_cpu_invocation_once(
+        ps::execution::kIsolatedCpuRuntimeControlDescriptor,
+        ps::execution::kPluginRuntimeSupervisionDescriptor, {},
+        ps::execution::run_fixture_operation,
+        ps::execution::fixture_startup_behavior(),
+        ps::execution::run_fixture_lifecycle_hook);
+  }
   return ps::execution::serve_non_supervised_isolated_cpu_invocation_once(
       ps::execution::kIsolatedCpuRuntimeControlDescriptor, {},
       ps::execution::run_fixture_operation);

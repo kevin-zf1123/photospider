@@ -35,17 +35,40 @@ data plane, syscall/device isolation, or untrusted-plugin isolation. Current
 behavior is defined by
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
 
-Issue #102 now also provides a source-private Darwin/Linux CPU invocation
-slice. `NonSupervisedIsolatedCpuInvocationExecutor` uses an independently
-versioned, pointer-free request/response protocol, a framed Unix stream,
-ordered `SCM_RIGHTS` descriptors, and unlinked POSIX shared memory. Every call
+Issue #102 also provides a source-private Darwin/Linux CPU invocation transport.
+`NonSupervisedIsolatedCpuInvocationExecutor` uses an independently versioned,
+pointer-free request/response protocol, a framed Unix stream, ordered
+`SCM_RIGHTS` descriptors, and unlinked POSIX shared memory. Every direct call
 starts one fresh empty-environment runtime process, and the Host exposes output
 only after normal zero exit, descriptor/header revalidation, copy into a fresh
 Host allocation, and content-binding validation of that snapshot before seal.
-This slice does not yet provide authenticated
-supervision, heartbeat, deadline, restart, sandboxing, or resource enforcement;
-an invoked callback can still hang. It is neither the Issue #103 supervisor nor
-the Issue #104 trust/resource-policy delivery.
+That deliberately named adapter remains the unbounded #102 transport seam and
+is never a fallback.
+
+Issue #103 now composes that transport through source-private
+`PluginInvocationExecutor` and `PluginRuntimeSupervisor`. Each invocation gets
+a fresh execed child, exact PID ownership, a dedicated Unix datagram lifecycle
+channel, an OS-random 128-bit nonce bound to the complete invocation identity,
+strict lifecycle sequences, a Host-selected heartbeat interval, and absolute
+monotonic startup, invocation, heartbeat-gap, response, termination, and reap
+bounds. Complete request transfer receives one independent full invocation-
+duration window; only after it finishes are the callback invocation and
+heartbeat-gap deadlines armed. Faults preserve observable deadline, protocol,
+channel, bad-output, natural exit, signal, and escalation facts; `SIGKILL` is
+only marked memory-pressure-compatible and never asserted to prove OOM.
+Failure revokes the channels, escalates `SIGTERM` to `SIGKILL` when needed, exactly reaps or
+quarantines one deferred exact reaper, and starts a later invocation only in a
+new process after bounded backoff. Product-linked integration composes the
+executor inside the existing `ExecutionService` callback/request boundary and
+proves a failed Run does not kill its fixed worker or a later unrelated Run.
+
+This is authenticated private-session supervision, not hostile-child
+attestation, package trust, sandboxing, resource enforcement, or a selected
+end-user operation route. No current `ExecutionService`, `WorkerManager`,
+embedded Host/CLI, `photospider-worker`, or operation loader constructs this
+path for an end-user Graph operation; Issue #104 still owns trust and enforceable
+resource policy, and the complete operation-ABI migration still owns final
+selection.
 
 ## Context
 
@@ -382,25 +405,40 @@ pointer-bearing records are serialized. It binds the canonical request and
 every declared physical tensor range to the invocation identity, grants only
 declared directional capabilities, and fails closed on malformed or mutated
 request, response, descriptor, header, FD, or content state. The one-shot
-process and RAII owners provide exact normal/error-path retirement, but they do
-not classify or bound a callback that never returns.
+process and RAII owners provide exact normal/error-path transport retirement.
+Direct use of the accurately named non-supervised adapter still does not bound a
+callback that never returns.
 
 Those source-private Issue #102 objects are compiled into the installable
-product archive and exercised from that archive by a real-exec fixture. No
-current `ExecutionService`, `WorkerManager`, embedded Host/CLI,
-`photospider-worker`, or other product composition root selects them. The
-non-supervised adapter is a pre-supervisor transport sub-role rather than the
-target private `PluginInvocationExecutor`; #103 still owns composing that role
-through `PluginRuntimeSupervisor`. Wiring current ABI v2 or implementing or
-shimming target-only ABI v1 is outside #102.
+product archive and exercised from that archive by a real-exec fixture. Issue
+#103 adds the product-archive `PluginInvocationExecutor`/
+`PluginRuntimeSupervisor` composition and a separate authenticated lifecycle
+channel without changing the #102 data frame. The supervisor binds an
+OS-random nonce, the full invocation identity, and a strictly increasing event
+sequence; enforces startup, invocation, heartbeat-gap, response, TERM, KILL,
+and reap bounds; preserves typed observable failure facts; and launches every
+later invocation in a fresh process instead of falling back in-process.
+
+Maintained integration also invokes that executor from a real
+`ExecutionService` ready callback. The original `PluginRuntimeFault` reaches
+the request boundary, that boundary publishes the owning Run as Failed, and the
+fixed service worker executes a later unrelated Run. This is a product-linked
+Run-failure composition proof, not an end-user route: no current
+`ExecutionService`, `WorkerManager`, embedded Host/CLI,
+`photospider-worker`, or operation loader constructs an isolated request from a
+Graph operation. Wiring current ABI v2 or implementing or shimming target-only
+ABI v1 remains outside #102 and #103.
 
 Issue #101 owns the pure-C operation ABI decision and Issue #102 now owns this
-first invocation record. Issue #103 owns authenticated supervision, heartbeat,
-deadlines, fault classification, restart, and bounded hang containment. Issue
-#104 owns allowlist/signature, sandbox/capability, and enforceable plugin
-resource policy. This ADR fixes their authority and process boundaries; the
-Issue #102 protocol-v1 layout is its own separately versioned implementation
-decision. Cross-process GPU handles/fences remain a later decision.
+first invocation record. Issue #103 now implements authenticated private-session
+supervision, heartbeat, deadlines, factual fault classification, fresh-process
+restart, and bounded maintained hang containment. Issue #104 still owns
+allowlist/signature, sandbox/capability, and enforceable plugin resource policy.
+Session authentication proves binding and liveness of the private launch; it
+does not prove plugin truth or trust. This ADR fixes their authority and process
+boundaries; the Issue #102 protocol-v1 layout and Issue #103 lifecycle frame are
+separately versioned private implementation decisions. Cross-process GPU
+handles/fences remain a later decision.
 
 ### Failure, revocation, and replay
 

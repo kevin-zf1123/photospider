@@ -350,9 +350,9 @@ callback/configured context 在 validation、status normalization 与一次 dest
 回收 write grant、destroy context 或安全卸载 DSO。因此 operation v1 是 operator-trusted
 compatibility boundary。Issue #102 现在实现一个源码私有、无指针的 Darwin/Linux
 protocol-v1 invocation 切片，它使用 framed Unix stream、有序 `SCM_RIGHTS` descriptor 与已
-unlink 的 POSIX shared memory。Issue #103 仍负责 bounded authenticated supervision，Issue
-#104 仍负责 tenant code 的 trust/resource enforcement；ABI pointer record 永远不是其 wire
-protocol。
+unlink 的 POSIX shared memory。Issue #103 现在已经围绕该 transport 实现源码私有的有界
+supervision 组合，而 Issue #104 仍拥有 tenant code 的 trust、sandbox 与可执行 resource
+policy；ABI pointer record 永远不是其 wire protocol。
 
 `NonSupervisedIsolatedCpuInvocationExecutor` 会在 spawn 前验证 invocation identity、
 generation/operation binding、scalar parameter、resource declaration、readiness/ownership、
@@ -364,14 +364,39 @@ binding。RAII owner 会在成功或失败时关闭 mapping、descriptor、chann
 该切片有意不包含 supervisor、authentication、deadline、heartbeat、
 restart、sandbox 或 resource enforcement，因此永不返回的 callback 仍无时间边界。
 
-Adapter 与 runtime endpoint 定义会编入 installable product archive，真实 exec integration
-test 会链接这些 product object。这是完整的 Issue #102 product inclusion 证明，不是终端用户
-路径：没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
-`photospider-worker` 或其他 composition root 会选择它们。因此，刻意如此命名的
-`NonSupervisedIsolatedCpuInvocationExecutor` 是 pre-supervisor transport 子角色，而不是目标
-私有 `PluginInvocationExecutor`。通过 `PluginRuntimeSupervisor` 选择该目标仍属于 #103；
-当前 operation ABI v2 无法跨越此 wire，仍为目标态的 operation ABI v1 也没有在本切片中
-实现或通过 shim 接入。
+Issue #103 在同一个源码私有 product module 中加入 `PluginRuntimeSupervisor` 与
+`PluginInvocationExecutor`，但不改变 #102 request/response wire。每次受监督调用都使用一个
+全新 exec child，并在固定 descriptor 5 上使用专用 Unix datagram lifecycle channel。Host 会
+发送一个定长 hello，其中包含 OS 随机 128-bit nonce、完整六部分 invocation identity 加
+worker/plugin generation，以及选中的 heartbeat interval。Child 必须在严格有序的
+`RuntimeStarted`、`Heartbeat` 与 `InvocationCompleted` event 中回显这些事实。这样会把
+liveness 绑定到精确私有 launch；由于 child 会知道 nonce，它是 session authentication，而不是
+plugin attestation 或 output truth。
+
+Supervisor 会强制绝对单调的 startup、invocation、heartbeat-gap、response、graceful-
+termination、kill 与 reap bound。完整 request transfer 会获得一个独立、完整的 invocation-
+duration window。只有在该传输结束后才启动 callback invocation 与 heartbeat-gap deadline，
+因此有界的大 request send 不会消耗 callback-liveness budget；即使 callback 继续发送
+heartbeat，绝对 invocation deadline 仍会终止它。Fault 会暴露精确可观测的 deadline、
+lifecycle-protocol、channel、bad-output、natural exit、signal 与 termination-stage 事实。
+匹配的 `SIGKILL` 只会标记为 memory-pressure-compatible，不能证明 OOM 因果。Failure 会关闭两条 channel，必要时
+从 `SIGTERM` 升级到 `SIGKILL`，并在 reap 或 quarantined deferred-reaper integrity path 完成前
+保留精确 PID ownership。
+
+`PluginInvocationExecutor` 绝不会回退到 in-process 或 non-supervised call。有界 restart
+backoff 后，下一次 invocation 会获得全新 PID、nonce、lifecycle channel 与 data channel。
+链接产品的真实 exec 测试会证明 success、startup authentication、各类 deadline、natural exit
+与 signal classification、malformed output、descriptor/PID 精确 retirement、无 fallback 与后续
+健康恢复。一项测试会在 production `ExecutionService` ready callback 中调用该 executor：原始
+`PluginRuntimeFault` 到达 request boundary，该 boundary 只把 owning Run 发布为 Failed，固定
+service worker 随后会执行无关 Run。
+
+Adapter、runtime endpoint、supervisor 与 executor 都会编入 installable product archive，但
+这仍是内部 composition proof，不是终端用户路径。当前没有 `ExecutionService`、
+`WorkerManager`、embedded Host/CLI、`photospider-worker` 或 operation loader 会从 Graph
+operation 构造 isolated request。当前 operation ABI v2 无法跨越此 wire；仍为目标态的
+operation ABI v1 既未在此实现也未通过 shim 接入；#104 仍负责 allowlist/signature、
+sandbox/capability 与可执行 resource policy。
 
 ## 请求行为
 
@@ -1084,6 +1109,8 @@ owner。
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/isolated_cpu_invocation.*`
+- `src/lib/execution/plugin_runtime_supervisor.hpp`
 - `src/lib/policy/policy_registry.*`
 - `src/lib/providers/configured_operation_providers.*`
 - `src/lib/providers/opencv/*`
@@ -1112,3 +1139,4 @@ owner。
 - `tests/unit/test_i2_profile.cpp`
 - `tests/unit/test_i2_evidence.cpp`
 - `tests/integration/test_i2_product_path.cpp`
+- `tests/integration/test_plugin_runtime_supervisor.cpp`

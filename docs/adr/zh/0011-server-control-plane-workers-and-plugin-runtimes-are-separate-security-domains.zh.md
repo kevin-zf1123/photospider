@@ -27,15 +27,33 @@ multi-tenant authorization、独立部署的 WorkerManager、authenticated netwo
 standalone artifact data plane、syscall/device isolation 或 untrusted-plugin isolation。当前行为由
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)定义。
 
-Issue #102 现在也提供源码私有的 Darwin/Linux CPU invocation 切片。
+Issue #102 也提供源码私有的 Darwin/Linux CPU invocation transport。
 `NonSupervisedIsolatedCpuInvocationExecutor` 使用独立版本化、无指针的 request/response
 protocol、framed Unix stream、有序 `SCM_RIGHTS` descriptor 与已 unlink 的 POSIX shared
-memory。每次调用都会启动一个全新且 environment 为空的 runtime process；只有在进程正常以
-零状态退出，并且 descriptor/header 重新验证通过、结果被复制到全新 Host allocation，且该
-snapshot 的 content binding 在 seal 前验证通过后，Host 才会暴露 output。该切片尚不提供
-authenticated supervision、heartbeat、deadline、
-restart、sandboxing 或 resource enforcement；被调用的 callback 仍可能 hang。它既不是 Issue
-#103 的 supervisor，也不是 Issue #104 的 trust/resource-policy 交付。
+memory。每次直接调用都会启动一个全新且 environment 为空的 runtime process；只有在进程正常
+以零状态退出，并且 descriptor/header 重新验证通过、结果被复制到全新 Host allocation，且该
+snapshot 的 content binding 在 seal 前验证通过后，Host 才会暴露 output。这个刻意如此命名的
+adapter 仍是无时间边界的 #102 transport seam，且绝不作为 fallback。
+
+Issue #103 现在通过源码私有的 `PluginInvocationExecutor` 与
+`PluginRuntimeSupervisor` 组合该 transport。每次 invocation 都获得一个全新 exec child、
+精确 PID ownership、专用 Unix datagram lifecycle channel、绑定完整 invocation identity 的
+OS 随机 128-bit nonce、严格 lifecycle sequence、Host 选择的 heartbeat interval，以及绝对
+单调的 startup、invocation、heartbeat-gap、response、termination 与 reap bound。完整 request
+transfer 会获得一个独立、完整的 invocation-duration window；只有在它结束后才启用 callback
+invocation 与 heartbeat-gap deadline。Fault 会
+保留可观测的 deadline、protocol、channel、bad-output、natural exit、signal 与 escalation
+事实；`SIGKILL` 只标记为 memory-pressure-compatible，绝不声称它证明 OOM。Failure 会撤销
+channel，必要时从 `SIGTERM` 升级到 `SIGKILL`，精确 reap 或把唯一精确 reaper 移入
+quarantine，并且只在有界 backoff 后于新进程中启动后续 invocation。链接产品的 integration
+会把 executor 组合进既有 `ExecutionService` callback/request boundary，并证明失败 Run 不会
+终止其固定 worker 或后续无关 Run。
+
+这是经过认证的私有 session supervision，不是 hostile-child attestation、package trust、
+sandboxing、resource enforcement 或已选择的最终用户 operation route。当前没有
+`ExecutionService`、`WorkerManager`、embedded Host/CLI、`photospider-worker` 或 operation
+loader 会为最终用户 Graph operation 构造该路径；Issue #104 仍负责 trust 与可执行 resource
+policy，完整 operation-ABI migration 仍负责最终选择。
 
 ## 背景
 
@@ -318,21 +336,31 @@ code；两个 ABI family 的 pointer-bearing record 都不会被序列化。该�
 与每个已声明的 physical tensor range 绑定到 invocation identity，只授予声明方向的
 capability，并对 malformed 或已变更的 request、response、descriptor、header、FD 或 content
 state 进行 fail-closed 处理。One-shot process 与 RAII owner 在正常/错误路径提供精确
-retirement，但不会对永不返回的 callback 进行分类或时间约束。
+transport retirement。直接使用准确命名的 non-supervised adapter 时，永不返回的 callback
+仍没有时间边界。
 
 这些 source-private Issue #102 object 会编入 installable product archive，并由真实 exec
-fixture 从该 archive 加以验证。当前没有 `ExecutionService`、`WorkerManager`、embedded
-Host/CLI、`photospider-worker` 或其他 product composition root 会选择它们。Non-supervised
-adapter 是 pre-supervisor transport 子角色，而不是目标私有 `PluginInvocationExecutor`；#103
-仍负责通过 `PluginRuntimeSupervisor` 组合该角色。接入当前 ABI v2，或实现、shim 仍为目标态
-的 ABI v1，均不属于 #102。
+fixture 从该 archive 加以验证。Issue #103 增加 product-archive 中的
+`PluginInvocationExecutor`/`PluginRuntimeSupervisor` 组合，以及一条不会改变 #102 data
+frame 的独立 authenticated lifecycle channel。Supervisor 绑定 OS 随机 nonce、完整
+invocation identity 与严格递增 event sequence；强制 startup、invocation、heartbeat-gap、
+response、TERM、KILL 与 reap bound；保留类型化可观测 failure fact；并为每个后续 invocation
+启动全新 process，而不是回退到进程内执行。
+
+长期 integration 还会从真实 `ExecutionService` ready callback 调用该 executor。原始
+`PluginRuntimeFault` 会到达 request boundary，该 boundary 把 owning Run 发布为 Failed，固定
+service worker 随后会执行无关 Run。这是链接产品的 Run-failure composition proof，不是最终
+用户路径：当前没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
+`photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated request。接入当前
+ABI v2，或实现、shim 仍为目标态的 ABI v1，均不属于 #102 或 #103。
 
 Issue #101 拥有 pure-C operation ABI 决策，Issue #102 现在拥有该首个 invocation record。
-Issue #103 拥有 authenticated supervision、heartbeat、deadline、fault classification、restart
-与有界 hang containment。Issue #104 拥有 allowlist/signature、sandbox/capability 与可执行
-plugin resource policy。本 ADR 冻结其 authority 与 process boundary；Issue #102 的
-protocol-v1 layout 是它自己的独立版本化实现决策。Cross-process GPU handle/fence 留给后续
-决策。
+Issue #103 现在实现 authenticated private-session supervision、heartbeat、deadline、基于事实
+的 fault classification、fresh-process restart 与长期维护场景中的有界 hang containment。
+Issue #104 仍拥有 allowlist/signature、sandbox/capability 与可执行 plugin resource policy。
+Session authentication 只证明私有 launch 的 binding 与 liveness，不证明 plugin truth 或 trust。
+本 ADR 冻结其 authority 与 process boundary；Issue #102 protocol-v1 layout 与 Issue #103
+lifecycle frame 是分别版本化的私有实现决策。Cross-process GPU handle/fence 留给后续决策。
 
 ### Failure、Revocation 与 Replay
 

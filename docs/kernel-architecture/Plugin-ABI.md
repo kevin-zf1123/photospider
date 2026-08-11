@@ -655,7 +655,10 @@ An in-process callback that never returns may retain its invocation, write
 grants, contexts, generation, and DSO forever. Operation ABI v1 is therefore
 only an operator-trusted compatibility and validation boundary, never a
 sandbox. Tenant-untrusted pointer-free wire records, runtime supervision, and
-trust/resource enforcement remain owned by Issues #102, #103, and #104.
+trust/resource enforcement are independently versioned boundaries owned by
+Issues #102, #103, and #104. Issue #103 now implements the source-private
+supervision composition; it does not implement this ABI, select an end-user
+operation, or absorb Issue #104 policy.
 
 The later migration adds v1 and migrates every repository operation and
 installed consumer before deleting v2 in the same release. It leaves no
@@ -1157,13 +1160,36 @@ the target-only operation ABI v1. This non-supervised slice does not by itself
 admit tenant code, authenticate a runtime, impose a deadline, sandbox syscalls,
 or enforce resource policy.
 
-Its adapter and runtime endpoint are compiled into the installable product
-archive and exercised by a product-linked real-exec fixture, but no current
-composition root selects them for end-user execution. In particular,
-`ExecutionService`, `WorkerManager`, the embedded Host/CLI, and
-`photospider-worker` have no caller. The deliberately narrower
-`NonSupervisedIsolatedCpuInvocationExecutor` name does not claim the target
-private `PluginInvocationExecutor`; #103 still owns its supervised composition.
+Issue #103 now realizes the supervised portion through source-private
+`PluginRuntimeSupervisor` and `PluginInvocationExecutor`. A dedicated fixed-
+size lifecycle protocol on a Unix datagram socket binds an OS-random 128-bit
+nonce, the complete invocation identity, worker/plugin generations, a
+Host-selected heartbeat interval, and strictly increasing event sequences to
+the exact execed PID. Startup, invocation, heartbeat-gap, response, TERM, KILL,
+and reap bounds use absolute monotonic deadlines. Complete request transfer
+receives one independent full invocation-duration window; callback invocation
+and heartbeat-gap deadlines are armed only after that transfer finishes. The
+nonce proves only private launch/session binding and liveness; because the child
+learns it, the protocol
+does not attest plugin truth or make returned bytes trusted.
+
+The supervisor preserves typed observable deadline, protocol, channel,
+bad-output, natural-exit, signal, and escalation facts. It never attributes OOM
+from wait status: `SIGKILL` is only memory-pressure-compatible. A fault closes
+both channels, escalates exact-PID termination when required, keeps reap
+ownership, and never falls back in-process. A later call waits bounded restart
+backoff and starts another fresh process. Product-linked real-exec tests cover
+that lifecycle and compose the executor inside an `ExecutionService` ready
+callback; the request boundary publishes only the owning Run as Failed and the
+fixed worker executes a later unrelated Run.
+
+The adapter, endpoint, supervisor, and executor are compiled into the
+installable product archive, but no current operation loader or product
+composition root constructs an isolated request for an end-user Graph
+operation. In particular, `ExecutionService`, `WorkerManager`, the embedded
+Host/CLI, and `photospider-worker` have no selection caller. Operation ABI v2
+and target-only v1 remain absent from this wire, and Issue #104 still owns
+allowlist/signature, sandbox/capability, and enforceable resource policy.
 
 Shadow publication prevents partial operation-registry or policy-type-map
 visibility. DSO leases keep callback state and plugin-owned values or contexts
@@ -1233,6 +1259,8 @@ record the follow-up direction.
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
 - `src/lib/execution/device_completion.*`
+- `src/lib/execution/isolated_cpu_invocation.*`
+- `src/lib/execution/plugin_runtime_supervisor.hpp`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
@@ -1262,5 +1290,6 @@ record the follow-up direction.
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/test_i2_product_path.cpp`
+- `tests/integration/test_plugin_runtime_supervisor.cpp`
 - `tests/unit/test_progressive_compute.cpp`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

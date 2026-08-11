@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 
 namespace ps::execution {
@@ -30,14 +31,18 @@ struct IsolatedCpuInvocationTestSnapshot final {
 };
 
 /**
- * @brief Source-private observation and framing seam for transport tests.
+ * @brief Source-private observation, timing, and framing seam for tests.
  * @throws Nothing for construction because the type has no instances.
  * @note This header is not installed. Snapshot access exposes no authority;
- * framing borrows only the caller-supplied test socket for one receive.
+ * timing is a one-shot bounded-send perturbation, and framing borrows only the
+ * caller-supplied test socket for one receive.
  */
 class IsolatedCpuInvocationTestProbe final {
  public:
-  /** @brief Prevents construction of the static observation seam. */
+  /**
+   * @brief Prevents construction of the static observation seam.
+   * @throws Nothing because the operation is deleted.
+   */
   IsolatedCpuInvocationTestProbe() = delete;
 
   /**
@@ -49,6 +54,17 @@ class IsolatedCpuInvocationTestProbe final {
    * maintained callers compare them around one synchronous invocation.
    */
   static IsolatedCpuInvocationTestSnapshot snapshot() noexcept;
+
+  /**
+   * @brief Delays the next supervised request send exactly once.
+   * @param delay Nonnegative process-local delay applied before send polling.
+   * @return Nothing after publishing the next-send perturbation.
+   * @throws std::invalid_argument when `delay` is negative.
+   * @note This maintained deadline-test seam is not installed, affects no
+   * already-started send, and grants no PID, descriptor, or mapping authority.
+   */
+  static void delay_next_supervised_request_send(
+      std::chrono::milliseconds delay);
 
   /**
    * @brief Runs the production one-frame receiver and discards its payload.

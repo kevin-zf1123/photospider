@@ -24,8 +24,8 @@ inline constexpr int kIsolatedCpuRuntimeControlDescriptor = 3;
 /**
  * @brief Local process/transport failure outside a valid plugin outcome.
  * @throws std::bad_alloc when retaining the diagnostic exhausts memory.
- * @note This non-supervised slice exposes no crash/hang/OOM taxonomy; Issue
- * #103 owns authenticated supervision and bounded failure classification.
+ * @note This non-supervised slice exposes no crash/hang/OOM taxonomy;
+ * `PluginRuntimeSupervisor` supplies authenticated bounded classification.
  */
 class IsolatedCpuInvocationError : public std::runtime_error {
  public:
@@ -161,12 +161,13 @@ using IsolatedCpuRuntimeCallback = std::function<
  * FDs, waits for one response and normal exit, validates output again, and
  * retires every local capability. There is deliberately no authentication,
  * heartbeat, deadline, pool, restart, sandbox, or enforceable resource policy.
- * A callback that never returns can block the caller forever; Issue #103 owns
- * bounded supervision and Issue #104 owns trust/resource enforcement.
+ * A callback that never returns can block the caller forever;
+ * `PluginRuntimeSupervisor` supplies bounded supervision while Issue #104 owns
+ * trust/resource enforcement.
  * This Issue #102 transport sub-role is compiled into the product archive but
  * is not selected by `ExecutionService`, `WorkerManager`, an embedded Host/CLI,
  * or another end-user route. It deliberately does not claim the target private
- * `PluginInvocationExecutor` role, whose supervised composition remains #103.
+ * `PluginInvocationExecutor` role, whose supervised composition is separate.
  *
  * @throws std::invalid_argument for invalid construction options.
  * @throws std::system_error when process-wide POSIX setup inspection fails.

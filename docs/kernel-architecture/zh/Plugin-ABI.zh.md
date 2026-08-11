@@ -508,7 +508,9 @@ diagnostic。Exception/foreign unwind 不跨 DSO；C++ wrapper 在 plugin 内映
 进程内 callback 永不返回时，可能永久保留 invocation、write grant、context、generation 与
 DSO。因此 operation ABI v1 只是 operator-trusted compatibility/validation boundary，绝非
 sandbox。Tenant-untrusted pointer-free wire record、runtime supervision、trust/resource
-enforcement 继续分别由 Issues #102、#103、#104 负责。
+enforcement 是分别版本化的独立边界，由 Issues #102、#103、#104 负责。Issue #103 现在已经
+实现源码私有的 supervision 组合；它不实现本 ABI、不选择最终用户 operation，也不吸收 Issue
+#104 policy。
 
 后续 migration 先新增 v1，并迁移每个仓库 operation 与 installed consumer，然后在同一
 release 删除 v2。不保留 wrapper、alias、dual loader、forwarding header、v2-to-v1 adapter、
@@ -913,11 +915,29 @@ callback seam 不会调用或迁移 operation ABI v2，也不会调用或迁移�
 v1。该 non-supervised 切片本身不会准入 tenant code、认证 runtime、施加 deadline、sandbox
 syscall 或执行 resource policy。
 
-其 adapter 与 runtime endpoint 会编入 installable product archive，并由链接 product 的真实
-exec fixture 加以验证，但当前没有 composition root 会选择它们进行终端用户执行。具体而言，
-`ExecutionService`、`WorkerManager`、embedded Host/CLI 与 `photospider-worker` 均不存在
-caller。刻意收窄的 `NonSupervisedIsolatedCpuInvocationExecutor` 名称并不宣称目标私有
-`PluginInvocationExecutor`；#103 仍负责其受监督的组合。
+Issue #103 现在通过源码私有的 `PluginRuntimeSupervisor` 与
+`PluginInvocationExecutor` 实现受监督部分。专用 Unix datagram socket 上的定长 lifecycle
+protocol 会把 OS 随机 128-bit nonce、完整 invocation identity、worker/plugin generation、
+Host 选择的 heartbeat interval 与严格递增 event sequence 绑定到精确 exec PID。Startup、
+invocation、heartbeat-gap、response、TERM、KILL 与 reap bound 都使用绝对单调 deadline。完整
+request transfer 会获得一个独立、完整的 invocation-duration window；callback invocation 与
+heartbeat-gap deadline 只在该传输结束后启用。
+Nonce 只证明私有 launch/session binding 与 liveness；由于 child 会知道它，该 protocol 不会
+attest plugin truth，也不会让返回 byte 自动受信任。
+
+Supervisor 会保留类型化可观测的 deadline、protocol、channel、bad-output、natural-exit、
+signal 与 escalation 事实。它不会根据 wait status 推断 OOM：`SIGKILL` 只表示
+memory-pressure-compatible。Fault 会关闭两条 channel，必要时升级精确 PID termination，保留
+reap ownership，并且绝不回退到进程内执行。后续调用会等待有界 restart backoff，再启动另一
+个全新进程。链接产品的真实 exec 测试会覆盖该 lifecycle，并把 executor 组合进
+`ExecutionService` ready callback；request boundary 只把 owning Run 发布为 Failed，固定 worker
+随后会执行无关 Run。
+
+Adapter、endpoint、supervisor 与 executor 都会编入 installable product archive，但当前没有
+operation loader 或 product composition root 会为最终用户 Graph operation 构造 isolated
+request。具体而言，`ExecutionService`、`WorkerManager`、embedded Host/CLI 与
+`photospider-worker` 均不存在 selection caller。Operation ABI v2 与仍为目标态的 v1 都不会
+进入该 wire；Issue #104 仍负责 allowlist/signature、sandbox/capability 与可执行 resource policy。
 
 影子发布阻止操作注册表或策略类型 map 局部可见。DSO 租约让回调状态和插件拥有
 的值或上下文保持在其定义库的生命周期内。匹配的操作恢复 token 和策略绑定代次
@@ -977,6 +997,8 @@ caller。刻意收窄的 `NonSupervisedIsolatedCpuInvocationExecutor` 名称并�
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
 - `src/lib/execution/device_completion.*`
+- `src/lib/execution/isolated_cpu_invocation.*`
+- `src/lib/execution/plugin_runtime_supervisor.hpp`
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
@@ -1006,5 +1028,6 @@ caller。刻意收窄的 `NonSupervisedIsolatedCpuInvocationExecutor` 名称并�
 - `tests/unit/test_dense_tensor_content_digest.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/test_i2_product_path.cpp`
+- `tests/integration/test_plugin_runtime_supervisor.cpp`
 - `tests/unit/test_progressive_compute.cpp`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

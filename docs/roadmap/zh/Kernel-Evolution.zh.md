@@ -1253,9 +1253,10 @@ CPU output，或保持在 Host-private adapter 后面。未来 native/async exec
 Publication 保留当前 shadow transaction、atomic immutable slot visibility、per-slot revision/
 predecessor restoration、middle-generation splice、reverse retirement，以及精确 callback/context
 DSO lease。永不返回的 callback 可以永久保留这些 owner；pure C 不提供 bounded termination。
-Issue #102 现在已经实现其 pointer-free shared-memory/FD invocation record，Issue #103 负责
-authenticated supervision 与 crash/hang/OOM/bad-output containment，Issue #104 负责
-allowlist/signature 与 enforceable resource policy。
+Issue #102 现在已经实现其 pointer-free shared-memory/FD invocation record，Issue #103 现在
+已经实现 authenticated private-session supervision 与基于事实的 crash/hang/signal/bad-output
+containment，Issue #104 负责 allowlist/signature、sandboxing 与 enforceable resource policy。
+`SIGKILL` observation 只表示 memory-pressure-compatible，不能证明 OOM。
 
 当这些中英文 artifact 通过本地验证、fresh 独立 diff 审核、经授权的 exact-head PR
 Integration、finding 已裁定的 fresh Codex exact-head review、zero unresolved review thread
@@ -1295,12 +1296,47 @@ Adapter 与 endpoint 会编入 installable product archive，该真实 exec inte
 
 每次调用都使用全新的 `fork`/`execve` process，environment 为空，并且除 stdio 外只保留固定
 control/status descriptor。这样可提供 process-crash containment 与确定性的 post-exit output
-adoption，但该切片有意保持 non-supervised：它不包含 authenticated supervisor、deadline、
-heartbeat、crash/hang/OOM classification、restart policy、sandbox 或 enforceable resource
-policy，callback 可以无限期 hang。这些能力仍属于 Issues #103 和 #104。Process-local callback
-seam 既不调用也不迁移当前 operation ABI v2 或仍为目标态的 operation ABI v1；它不会新增 ABI
-compatibility wrapper、shim、adapter 或 dual loader。Cross-process GPU/native-handle support
-仍是后续工作。
+adoption，但直接调用时该切片有意保持 non-supervised：它不包含 deadline、heartbeat、restart
+policy、sandbox 或 enforceable resource policy，callback 可以无限期 hang。Issue #103 现在会
+组合下文所述的独立 supervised path；non-supervised adapter 绝不作为其 fallback。Process-local
+callback seam 既不调用也不迁移当前 operation ABI v2 或仍为目标态的 operation ABI v1；它不会
+新增 ABI compatibility wrapper、shim、adapter 或 dual loader。Cross-process GPU/native-handle
+support 仍是后续工作。
+
+### Issue #103 当前 plugin runtime supervision 切片
+
+Issue #103 现在在 product archive 中提供源码私有的 `PluginRuntimeSupervisor` 与
+`PluginInvocationExecutor`。每次 invocation 都保留 #102 data protocol，但会启动一个由精确
+PID ownership 管理的全新 exec child、在固定 descriptor 5 上使用独立 Unix datagram lifecycle
+socket，并保持空 environment。定长 hello 会把 OS 随机 128-bit nonce、完整 tenant/Job/
+attempt/worker-lease/plugin-generation/invocation identity 与 Host 选择的 heartbeat interval
+绑定到该 launch。严格递增的 `RuntimeStarted`、`Heartbeat` 与 `InvocationCompleted` event
+必须回显这些事实。这是 private-session authentication 与 liveness，不是 hostile-child
+attestation、package trust 或 output validation。
+
+绝对单调 bound 会覆盖 exec/startup、完整 request transfer、invocation、heartbeat gap、精确
+response/EOF/exit reconciliation、graceful termination、kill 与 reap。完整 request transfer
+会获得自己的完整 invocation-duration window；callback invocation 与 heartbeat gap 只在传输
+完成后启用，而绝对 invocation deadline 仍会防止存活的 heartbeat thread 掩盖
+hung callback。可观测 typed fault 会保留 deadline、lifecycle-protocol、channel、bad-output、
+natural exit、signal 与 supervisor escalation 事实。`SIGKILL` 只标记为
+memory-pressure-compatible，绝不虚构 OOM 因果。Supervisor 会撤销两条 channel，发送
+`SIGTERM`，必要时升级到 `SIGKILL`，并在有界 reap 或唯一 quarantined deferred reaper 完成前
+保留精确 PID ownership。
+
+不存在 in-process 或 non-supervised fallback。后续调用会等待有界 restart backoff，并获得新
+PID、nonce、data channel 与 lifecycle channel。链接产品的真实 exec coverage 会证明 startup
+authentication、各类 timeout、natural exit 与 signal 报告、ignore-TERM escalation、malformed
+output rejection、FD/PID 精确 retirement、后续健康恢复，以及真实 `ExecutionService` callback
+boundary。在该 boundary，原始 `PluginRuntimeFault` 到达 request owner，只有 owning Run 被发布
+为 Failed，固定 service worker 随后会执行无关 Run。
+
+这尚不是最终用户选择的 operation path。当前没有 `ExecutionService`、`WorkerManager`、
+embedded Host/CLI、`photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated
+invocation。Operation ABI v2 无法跨越该 wire，仍为目标态的 ABI v1 既未实现也未通过 shim
+接入；Issue #104 仍负责 package trust/sandbox/enforceable quota，Issue #105 负责 network/
+artifact plane，Issue #106 负责长期 fuzz、audit 与 cross-layer trace。作为 Issue #125 单独
+跟踪的 I2 runner 工作不属于本 runtime-supervision 切片。
 
 当前 Issue #99/#100 基线是源码私有的
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结
@@ -1334,7 +1370,7 @@ Issue #97 只做分配，不吸收后续交付：
 | [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision、crash isolation 与 bounded cancellation/shutdown |
 | [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 已接受的独立版本化 pure-C operation-plugin ABI v1 决策；实现仍属于后续 breaking migration |
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | 已实现源码私有的 Darwin/Linux isolated CPU shared-memory/FD invocation，并具有精确 descriptor/stride/size/ownership/content validation；authenticated supervision 仍属于 #103 |
-| [#103](https://github.com/kevin-zf1123/photospider/issues/103) | `PluginRuntimeSupervisor` heartbeat/deadline 与 crash/hang/OOM/bad-output containment |
+| [#103](https://github.com/kevin-zf1123/photospider/issues/103) | 已实现源码私有的 `PluginRuntimeSupervisor` heartbeat/deadline、基于事实的 crash/hang/signal/bad-output containment、fresh-process restart 与精确 reap；不包含最终用户路径或 OOM 归因 |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature 与可执行 resource policy |
 | [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata 与 bulk artifact data-plane separation |
 | [#106](https://github.com/kevin-zf1123/photospider/issues/106) | 长期 codec/descriptor fuzzing、security audit 与跨层 identity trace |

@@ -44,8 +44,10 @@ execute in an isolated plugin runtime. Pure C is necessary for explicit,
 validatable records, but it is not process isolation. Issue #102 now implements
 a separately versioned source-private CPU wire/runtime slice without changing
 the current operation ABI v2 or implementing this ADR's target-only operation
-ABI v1. Issues #103 and #104 continue to own supervision and trust/resource
-policy.
+ABI v1. Issue #103 now implements the separately versioned source-private
+supervision composition around that transport; Issue #104 continues to own
+trust, sandbox, and enforceable resource policy. Neither slice changes the ABI
+replacement decision or supplies an end-user operation loader.
 
 ## Decision
 
@@ -425,8 +427,11 @@ Tenant-untrusted CPU code never uses pointer-bearing ABI records as IPC:
   response, `SCM_RIGHTS` POSIX-shared-memory capabilities, canonical
   descriptor/content binding, strict offset/range/ownership validation, and a
   one-shot process-local callback seam;
-- Issue #103 owns authenticated `PluginRuntimeSupervisor` lifecycle,
-  heartbeat/deadline, crash/hang/OOM/bad-output containment, restart, and reap;
+- Issue #103 implements authenticated private-session
+  `PluginRuntimeSupervisor` lifecycle, heartbeat/deadline,
+  crash/hang/bad-output containment, factual signal reporting,
+  fresh-process restart, and exact reap; `SIGKILL` is only
+  memory-pressure-compatible and does not prove OOM;
 - Issue #104 owns package allowlist/signature, sandbox/capability, and
   enforceable resource policy.
 
@@ -435,8 +440,15 @@ authentication, or policy formats. Issue #102 has since selected its own
 independently versioned protocol-v1 frame and capability layout. That protocol
 does not serialize operation ABI v2, the target operation ABI v1, or any ABI
 pointer record, and it introduces no migration wrapper, shim, adapter, or dual
-loader. Authentication and policy formats remain owned by Issues #103 and
-#104. Cross-process GPU/native-handle work remains a later decision.
+loader. Issue #103 has since selected a private fixed lifecycle frame with an
+OS-random nonce, complete invocation identity, strict sequence, and
+Host-selected heartbeat interval on a dedicated Unix datagram channel. That
+session binding is not plugin attestation or trust. Issue #104 still owns
+package admission, sandbox/capability, and enforceable resource-policy formats.
+No current operation loader maps ABI v2 or target-only ABI v1 into the
+supervised executor; final end-user selection remains part of the complete
+breaking ABI migration. Cross-process GPU/native-handle work remains a later
+decision.
 
 ### One complete breaking migration
 

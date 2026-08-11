@@ -1910,9 +1910,44 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_include_directories(test_isolated_cpu_plugin_fixture PRIVATE
             "${PROJECT_SOURCE_DIR}/include"
             "${PROJECT_SOURCE_DIR}/src/lib")
-        # Exercise both source-private #102 endpoints from the installable
-        # product archive without creating a public composition or SDK surface.
+        # Exercise the source-private #102 transport and #103 supervised
+        # endpoint from the installable product archive without creating a
+        # public composition or SDK surface.
         target_link_libraries(test_isolated_cpu_plugin_fixture PRIVATE
+            photospider
+            Threads::Threads)
+
+        # Compile deterministic startup-fault variants from the same real
+        # product-linked endpoint; no test replacement implements supervision.
+        add_executable(test_plugin_runtime_silent_fixture
+            tests/support/isolated_cpu_plugin_fixture.cpp)
+        set_target_properties(test_plugin_runtime_silent_fixture PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(test_plugin_runtime_silent_fixture PRIVATE
+            cxx_std_17)
+        target_include_directories(test_plugin_runtime_silent_fixture PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib")
+        target_compile_definitions(test_plugin_runtime_silent_fixture PRIVATE
+            PS_TEST_PLUGIN_RUNTIME_SUPPRESS_STARTED)
+        target_link_libraries(test_plugin_runtime_silent_fixture PRIVATE
+            photospider
+            Threads::Threads)
+
+        add_executable(test_plugin_runtime_corrupt_fixture
+            tests/support/isolated_cpu_plugin_fixture.cpp)
+        set_target_properties(test_plugin_runtime_corrupt_fixture PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(test_plugin_runtime_corrupt_fixture PRIVATE
+            cxx_std_17)
+        target_include_directories(test_plugin_runtime_corrupt_fixture PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib")
+        target_compile_definitions(test_plugin_runtime_corrupt_fixture PRIVATE
+            PS_TEST_PLUGIN_RUNTIME_CORRUPT_STARTED_NONCE)
+        target_link_libraries(test_plugin_runtime_corrupt_fixture PRIVATE
             photospider
             Threads::Threads)
 
@@ -1923,6 +1958,22 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         add_dependencies(test_isolated_cpu_invocation
             test_isolated_cpu_plugin_fixture)
         gtest_discover_tests(test_isolated_cpu_invocation
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS execution
+                TIMEOUT 30)
+
+        add_ps_test(test_plugin_runtime_supervisor
+            tests/integration/test_plugin_runtime_supervisor.cpp)
+        target_compile_definitions(test_plugin_runtime_supervisor PRIVATE
+            PS_TEST_ISOLATED_CPU_FIXTURE_PATH="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>"
+            PS_TEST_PLUGIN_RUNTIME_SILENT_FIXTURE_PATH="$<TARGET_FILE:test_plugin_runtime_silent_fixture>"
+            PS_TEST_PLUGIN_RUNTIME_CORRUPT_FIXTURE_PATH="$<TARGET_FILE:test_plugin_runtime_corrupt_fixture>")
+        add_dependencies(test_plugin_runtime_supervisor
+            test_isolated_cpu_plugin_fixture
+            test_plugin_runtime_silent_fixture
+            test_plugin_runtime_corrupt_fixture)
+        gtest_discover_tests(test_plugin_runtime_supervisor
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES
                 LABELS execution

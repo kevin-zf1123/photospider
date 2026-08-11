@@ -1,14 +1,17 @@
 /**
  * @file isolated_cpu_invocation.cpp
- * @brief Implements the non-supervised shared-memory CPU invocation vertical.
+ * @brief Implements non-supervised transport and bounded runtime supervision.
  */
 #include "execution/isolated_cpu_invocation.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+
+#include "execution/plugin_runtime_supervisor.hpp"  // NOLINT(build/include_subdir)
 #if defined(__APPLE__)
 #include <libproc.h>
 #include <sys/proc_info.h>
@@ -25,14 +28,19 @@
 #include <atomic>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -43,8 +51,10 @@ namespace {
 
 /** @brief Fixed close-on-exec child setup-status descriptor. */
 constexpr int kIsolatedCpuRuntimeSetupDescriptor = 4;
-/** @brief First descriptor closed during child exec preparation. */
-constexpr int kFirstClosedChildDescriptor = 5;
+/** @brief First disposable descriptor for non-supervised child preparation. */
+constexpr int kFirstNonSupervisedChildDescriptor = 5;
+/** @brief First disposable descriptor after supervised fd 5 is installed. */
+constexpr int kFirstSupervisedChildDescriptor = 6;
 /** @brief Fixed capability header width before one tensor payload range. */
 constexpr std::size_t kCapabilityHeaderBytes = 40U;
 /** @brief Capability header magic spelling ASCII `PSC1`. */
@@ -333,6 +343,8 @@ struct ReceivedPacket final {
  * @throws Nothing for ordinary value operations.
  */
 struct ChildDescriptorClosurePlan final {
+  /** @brief First inherited descriptor that must be closed. */
+  int first_closed_descriptor = kFirstNonSupervisedChildDescriptor;
   /** @brief Darwin kernel-exclusive descriptor ceiling; unused on Linux. */
   int darwin_exclusive_maximum = 0;
 };
@@ -349,6 +361,8 @@ std::atomic<std::uint64_t> g_reaped_children{0U};
 std::atomic<std::int64_t> g_last_reaped_child{-1};
 /** @brief Monotonic frames reaching their exact declared byte length. */
 std::atomic<std::uint64_t> g_exact_frames_received{0U};
+/** @brief One-shot supervised request-send delay used only by tests. */
+std::atomic<std::int64_t> g_next_supervised_request_send_delay_ms{0};
 
 /**
  * @brief Records one exact successful blocking child reap.
@@ -738,9 +752,99 @@ MappedCapability prepare_capability(
   return MappedCapability{capability, std::move(exported), std::move(mapping)};
 }
 
+/** @brief Monotonic clock used for every supervised lifecycle bound. */
+using SupervisorClock = std::chrono::steady_clock;
+/** @brief Absolute monotonic deadline used by bounded channel helpers. */
+using SupervisorDeadline = SupervisorClock::time_point;
+
+/**
+ * @brief Internal signal that an absolute channel deadline was reached.
+ * @throws std::bad_alloc when fixed runtime-error storage cannot allocate.
+ */
+class SupervisorDeadlineExpired final : public std::runtime_error {
+ public:
+  /**
+   * @brief Creates the fixed internal timeout diagnostic.
+   * @throws std::bad_alloc when runtime-error storage cannot allocate.
+   */
+  SupervisorDeadlineExpired()
+      : std::runtime_error("isolated CPU supervisor deadline expired") {}
+};
+
+/**
+ * @brief Enables nonblocking I/O on one retained descriptor.
+ * @param descriptor Valid descriptor.
+ * @return Nothing after preserving existing status flags.
+ * @throws IsolatedCpuInvocationError when `fcntl` fails.
+ */
+void set_nonblocking(int descriptor) {
+  const int flags = ::fcntl(descriptor, F_GETFL);
+  if (flags < 0 || ::fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) < 0) {
+    throw IsolatedCpuInvocationError(
+        std::string("isolated CPU descriptor nonblocking setup failed: ") +
+        std::strerror(errno));
+  }
+}
+
+/**
+ * @brief Converts one future absolute deadline into a ceil-rounded poll wait.
+ * @param deadline Absolute monotonic deadline.
+ * @return Zero when reached, otherwise a positive value capped at `INT_MAX`.
+ * @throws Nothing.
+ */
+int poll_timeout_until(SupervisorDeadline deadline) noexcept {
+  const SupervisorDeadline now = SupervisorClock::now();
+  if (now >= deadline) {
+    return 0;
+  }
+  const auto remaining = deadline - now;
+  auto milliseconds =
+      std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
+  if (milliseconds < remaining) {
+    milliseconds += std::chrono::milliseconds{1};
+  }
+  const auto capped = std::min<std::int64_t>(milliseconds.count(),
+                                             std::numeric_limits<int>::max());
+  return static_cast<int>(std::max<std::int64_t>(capped, 1));
+}
+
+/**
+ * @brief Waits for one descriptor event through an absolute deadline.
+ * @param descriptor Valid descriptor.
+ * @param events Requested poll event mask.
+ * @param deadline Absolute monotonic deadline.
+ * @return Observed `revents` mask.
+ * @throws SupervisorDeadlineExpired when the bound is reached.
+ * @throws IsolatedCpuInvocationError when `poll` fails.
+ */
+int poll_descriptor_until(int descriptor, int events,
+                          SupervisorDeadline deadline) {
+  for (;;) {
+    if (SupervisorClock::now() >= deadline) {
+      throw SupervisorDeadlineExpired();
+    }
+    struct pollfd descriptor_poll{descriptor, static_cast<std::int16_t>(events),
+                                  0};
+    const int result =
+        ::poll(&descriptor_poll, 1U, poll_timeout_until(deadline));
+    if (result > 0) {
+      return static_cast<int>(descriptor_poll.revents);
+    }
+    if (result == 0) {
+      throw SupervisorDeadlineExpired();
+    }
+    if (errno != EINTR) {
+      throw IsolatedCpuInvocationError(
+          std::string("isolated CPU supervisor poll failed: ") +
+          std::strerror(errno));
+    }
+  }
+}
+
 /**
  * @brief Streams one bounded frame and its ordered descriptor capabilities.
- * @param socket Connected blocking Unix stream socket.
+ * @param socket Connected Unix stream socket; it may be nonblocking.
+ * @param deadline Optional absolute monotonic receive bound.
  * @param packet Nonempty canonical request or response packet.
  * @param descriptors Ordered descriptors installed with `SCM_RIGHTS`.
  * @return Nothing after the frame and rights are completely sent and the
@@ -820,11 +924,103 @@ void send_packet(int socket, const std::vector<std::byte>& packet,
 }
 
 /**
+ * @brief Sends one canonical frame and rights through an absolute deadline.
+ * @param socket Connected nonblocking Unix stream socket.
+ * @param packet Nonempty bounded canonical request packet.
+ * @param descriptors Ordered borrowed capability descriptors.
+ * @param deadline Absolute monotonic send/shutdown bound.
+ * @return Nothing after exact send and write-half shutdown.
+ * @throws SupervisorDeadlineExpired when the bound is reached.
+ * @throws IsolatedCpuProtocolError for local packet or descriptor overflow.
+ * @throws IsolatedCpuInvocationError for channel or shutdown failure.
+ * @note Rights accompany only the first successfully sent byte segment;
+ * ownership remains with the caller on every path.
+ * A source-private one-shot delay can simulate bounded sender backpressure for
+ * maintained deadline tests; it grants no channel or lifecycle authority.
+ */
+void send_packet_until(int socket, const std::vector<std::byte>& packet,
+                       const std::vector<int>& descriptors,
+                       SupervisorDeadline deadline) {
+  if (packet.empty() || packet.size() > kMaximumIsolatedCpuPacketBytes ||
+      descriptors.size() > kMaximumIsolatedCpuCapabilities) {
+    throw IsolatedCpuProtocolError(
+        "isolated CPU outbound packet or FD count exceeds its bound");
+  }
+  const auto test_delay = std::chrono::milliseconds{
+      g_next_supervised_request_send_delay_ms.exchange(
+          0, std::memory_order_acq_rel)};
+  if (test_delay.count() > 0) {
+    std::this_thread::sleep_for(test_delay);
+  }
+
+  union AncillaryBuffer {
+    struct cmsghdr alignment;
+    std::array<unsigned char,
+               CMSG_SPACE(sizeof(int) * kMaximumIsolatedCpuCapabilities)>
+        bytes;
+  } control{};
+  int flags = MSG_DONTWAIT;
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+  std::size_t offset = 0U;
+  while (offset != packet.size()) {
+    static_cast<void>(poll_descriptor_until(socket, POLLOUT, deadline));
+    struct iovec data{const_cast<std::byte*>(packet.data() + offset),
+                      packet.size() - offset};
+    struct msghdr message{};
+    message.msg_iov = &data;
+    message.msg_iovlen = 1U;
+    if (offset == 0U && !descriptors.empty()) {
+      message.msg_control = control.bytes.data();
+      message.msg_controllen = CMSG_SPACE(sizeof(int) * descriptors.size());
+      struct cmsghdr* header = CMSG_FIRSTHDR(&message);
+      if (header == nullptr) {
+        throw IsolatedCpuInvocationError(
+            "isolated CPU ancillary header construction failed");
+      }
+      header->cmsg_level = SOL_SOCKET;
+      header->cmsg_type = SCM_RIGHTS;
+      header->cmsg_len = CMSG_LEN(sizeof(int) * descriptors.size());
+      std::memcpy(CMSG_DATA(header), descriptors.data(),
+                  sizeof(int) * descriptors.size());
+    }
+    const ssize_t sent = ::sendmsg(socket, &message, flags);
+    if (sent < 0) {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+        continue;
+      }
+      throw IsolatedCpuInvocationError(
+          std::string("isolated CPU supervised frame send failed: ") +
+          std::strerror(errno));
+    }
+    if (sent == 0) {
+      throw IsolatedCpuInvocationError(
+          "isolated CPU supervised frame send made no progress");
+    }
+    offset += static_cast<std::size_t>(sent);
+  }
+  if (SupervisorClock::now() >= deadline) {
+    throw SupervisorDeadlineExpired();
+  }
+  int shutdown_result = -1;
+  do {
+    shutdown_result = ::shutdown(socket, SHUT_WR);
+  } while (shutdown_result < 0 && errno == EINTR);
+  if (shutdown_result != 0) {
+    throw IsolatedCpuInvocationError(
+        std::string("isolated CPU supervised frame shutdown failed: ") +
+        std::strerror(errno));
+  }
+}
+
+/**
  * @brief Assembles one bounded stream frame and owns all installed FDs.
  * @param socket Connected blocking Unix stream socket.
  * @return Exact framed bytes and RAII-owned ancillary descriptors.
  * @throws IsolatedCpuInvocationError for premature EOF or a channel-system
  * failure.
+ * @throws SupervisorDeadlineExpired when `deadline` is reached.
  * @throws IsolatedCpuProtocolError for truncation, malformed control data, or
  * excessive packet/descriptor counts.
  * @throws std::bad_alloc only before `recvmsg` installs descriptor rights.
@@ -839,9 +1035,10 @@ void send_packet(int socket, const std::vector<std::byte>& packet,
  * and its complete control records are adopted before a zero byte count is
  * interpreted as EOF, because Darwin can install `SCM_RIGHTS` while returning
  * zero payload bytes. This non-supervised vertical intentionally has no
- * receive deadline.
+ * receive deadline when `deadline` is absent.
  */
-ReceivedPacket receive_packet(int socket) {
+ReceivedPacket receive_packet(
+    int socket, std::optional<SupervisorDeadline> deadline = std::nullopt) {
   ReceivedPacket received;
   received.packet.resize(kMaximumIsolatedCpuPacketBytes + 1U);
   received.descriptors.reserve(kMaximumIsolatedCpuCapabilities);
@@ -855,6 +1052,9 @@ ReceivedPacket receive_packet(int socket) {
   std::size_t received_bytes = 0U;
   std::size_t expected_bytes = 0U;
   for (;;) {
+    if (deadline.has_value()) {
+      static_cast<void>(poll_descriptor_until(socket, POLLIN, *deadline));
+    }
     union AncillaryBuffer {
       struct cmsghdr alignment;
       std::array<unsigned char,
@@ -873,6 +1073,9 @@ ReceivedPacket receive_packet(int socket) {
       count = ::recvmsg(socket, &message, flags);
     } while (count < 0 && errno == EINTR);
     if (count < 0) {
+      if ((errno == EAGAIN || errno == EWOULDBLOCK) && deadline.has_value()) {
+        continue;
+      }
       throw IsolatedCpuInvocationError(
           std::string("isolated CPU framed stream receive failed: ") +
           std::strerror(errno));
@@ -1112,16 +1315,18 @@ void require_sigchld_reaping_configuration_before_fork() {
 }
 
 /**
- * @brief Closes every inherited child descriptor except exact fd 0 through 4.
+ * @brief Closes every inherited child descriptor at or above the plan bound.
  * @param plan Platform closure input prepared before fork.
  * @return Zero after complete closure, otherwise a positive setup errno.
  * @throws Nothing; only async-signal-safe operations run after fork.
- * @note Darwin scans its kernel descriptor ceiling; Linux uses the unbounded
- * raw `close_range` syscall and fails closed when unavailable.
+ * @note The non-supervised plan retains fds 0 through 4; the supervised plan
+ * additionally retains fixed supervision fd 5. Darwin scans its kernel
+ * descriptor ceiling; Linux uses raw `close_range` and fails closed when
+ * unavailable.
  */
 int close_child_descriptors(const ChildDescriptorClosurePlan& plan) noexcept {
 #if defined(__APPLE__)
-  for (int descriptor = kFirstClosedChildDescriptor;
+  for (int descriptor = plan.first_closed_descriptor;
        descriptor < plan.darwin_exclusive_maximum; ++descriptor) {
     if (::close(descriptor) == 0 || errno == EBADF) {
       continue;
@@ -1130,10 +1335,9 @@ int close_child_descriptors(const ChildDescriptorClosurePlan& plan) noexcept {
   }
   return 0;
 #elif defined(__linux__)
-  static_cast<void>(plan);
 #if defined(SYS_close_range)
   const auto result = ::syscall(
-      SYS_close_range, static_cast<unsigned int>(kFirstClosedChildDescriptor),
+      SYS_close_range, static_cast<unsigned int>(plan.first_closed_descriptor),
       std::numeric_limits<unsigned int>::max(), 0U);
   return result == 0 ? 0 : (errno == 0 ? EIO : errno);
 #else
@@ -1147,10 +1351,18 @@ int close_child_descriptors(const ChildDescriptorClosurePlan& plan) noexcept {
 
 /**
  * @brief Prepares authoritative platform state for post-fork FD closure.
+ * @param first_closed_descriptor First descriptor that the child must close;
+ * must be above every fixed endpoint descriptor retained across exec.
  * @return Darwin kernel ceiling or empty Linux plan.
+ * @throws std::invalid_argument for a descriptor below the supported bounds.
  * @throws std::system_error when the platform query fails or is unsupported.
  */
-ChildDescriptorClosurePlan prepare_child_descriptor_closure() {
+ChildDescriptorClosurePlan prepare_child_descriptor_closure(
+    int first_closed_descriptor = kFirstNonSupervisedChildDescriptor) {
+  if (first_closed_descriptor < kFirstNonSupervisedChildDescriptor) {
+    throw std::invalid_argument(
+        "isolated CPU first closed descriptor is below fixed endpoints");
+  }
 #if defined(__APPLE__)
   int maximum_descriptor = 0;
   std::size_t result_size = sizeof(maximum_descriptor);
@@ -1160,13 +1372,14 @@ ChildDescriptorClosurePlan prepare_child_descriptor_closure() {
                             "query isolated CPU descriptor ceiling");
   }
   if (result_size != sizeof(maximum_descriptor) ||
-      maximum_descriptor <= kIsolatedCpuRuntimeSetupDescriptor) {
+      maximum_descriptor <= first_closed_descriptor) {
     throw std::system_error(EIO, std::generic_category(),
                             "invalid isolated CPU descriptor ceiling");
   }
-  return ChildDescriptorClosurePlan{maximum_descriptor};
+  return ChildDescriptorClosurePlan{first_closed_descriptor,
+                                    maximum_descriptor};
 #elif defined(__linux__)
-  return ChildDescriptorClosurePlan{};
+  return ChildDescriptorClosurePlan{first_closed_descriptor, 0};
 #else
   throw std::system_error(ENOSYS, std::generic_category(),
                           "isolated CPU descriptor closure is unsupported");
@@ -1214,7 +1427,8 @@ std::optional<int> read_exec_status(int descriptor) {
  * @brief Sole exact PID owner for one non-supervised child.
  * @throws Nothing for moves and destruction.
  * @note Emergency destruction sends SIGKILL and synchronously waits with no
- * bounded deadline; #103 owns supervised escalation and hang classification.
+ * bounded deadline; `PluginRuntimeSupervisor` owns bounded escalation and hang
+ * classification instead.
  */
 class ChildOwner final {
  public:
@@ -1382,17 +1596,17 @@ SpawnedChild spawn_runtime(const std::filesystem::path& runtime_executable) {
   }
   if (pid == 0) {
     const int control_copy = ::fcntl(child_socket.get(), F_DUPFD_CLOEXEC,
-                                     kFirstClosedChildDescriptor);
+                                     kFirstNonSupervisedChildDescriptor);
     if (control_copy < 0) {
       child_setup_failed(status_write.get(), errno);
     }
     const int status_copy = ::fcntl(status_write.get(), F_DUPFD_CLOEXEC,
-                                    kFirstClosedChildDescriptor);
+                                    kFirstNonSupervisedChildDescriptor);
     if (status_copy < 0) {
       child_setup_failed(status_write.get(), errno);
     }
     const int null_copy = ::fcntl(null_device.get(), F_DUPFD_CLOEXEC,
-                                  kFirstClosedChildDescriptor);
+                                  kFirstNonSupervisedChildDescriptor);
     if (null_copy < 0) {
       child_setup_failed(status_copy, errno);
     }
@@ -1432,6 +1646,897 @@ SpawnedChild spawn_runtime(const std::filesystem::path& runtime_executable) {
   }
   return SpawnedChild{std::move(child), std::move(parent_socket)};
 }
+
+/** @brief Fixed lifecycle frame magic spelling ASCII `PSS1`. */
+constexpr std::uint32_t kPluginRuntimeLifecycleMagic = 0x50535331U;
+/** @brief Exact private lifecycle protocol version. */
+constexpr std::uint16_t kPluginRuntimeLifecycleVersion = 1U;
+/** @brief Exact fixed-size lifecycle datagram width. */
+constexpr std::size_t kPluginRuntimeLifecycleFrameBytes = 152U;
+
+/**
+ * @brief Closed fixed lifecycle frame kinds on the private supervision socket.
+ */
+enum class PluginRuntimeLifecycleKind : std::uint16_t {
+  /** @brief Parent-to-child launch nonce and invocation binding. */
+  Hello = 1U,
+  /** @brief Child-to-parent authenticated endpoint readiness. */
+  RuntimeStarted = 2U,
+  /** @brief Child-to-parent callback-liveness observation. */
+  Heartbeat = 3U,
+  /** @brief Child-to-parent callback/response-materialization completion. */
+  InvocationCompleted = 4U,
+};
+
+/** @brief Unpredictable per-launch session nonce. */
+using PluginRuntimeSessionNonce = std::array<std::byte, 16U>;
+
+/**
+ * @brief Decoded fixed lifecycle frame without native-layout dependence.
+ * @throws Nothing for ordinary value operations.
+ */
+struct PluginRuntimeLifecycleFrame final {
+  /** @brief Closed lifecycle event kind. */
+  PluginRuntimeLifecycleKind kind = PluginRuntimeLifecycleKind::Hello;
+  /** @brief Strictly increasing child event sequence; hello uses zero. */
+  std::uint64_t sequence = 0U;
+  /** @brief Exact launch nonce. */
+  PluginRuntimeSessionNonce nonce{};
+  /** @brief Exact complete retained invocation identity tuple. */
+  IsolatedCpuInvocationIdentity identity;
+  /** @brief Host-selected positive child heartbeat interval in milliseconds. */
+  std::uint64_t heartbeat_interval_milliseconds = 0U;
+};
+
+/**
+ * @brief Reads an unpredictable 128-bit nonce from the OS random device.
+ * @return Complete nonce generated before child ownership begins.
+ * @throws IsolatedCpuInvocationError for open, read, or premature EOF failure.
+ */
+PluginRuntimeSessionNonce generate_plugin_runtime_nonce() {
+  int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+  flags |= O_CLOEXEC;
+#endif
+  UniqueFd random_device(::open("/dev/urandom", flags));
+  if (!random_device.valid()) {
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime nonce source open failed: ") +
+        std::strerror(errno));
+  }
+  set_close_on_exec(random_device.get());
+  PluginRuntimeSessionNonce nonce{};
+  std::size_t offset = 0U;
+  while (offset != nonce.size()) {
+    const ssize_t count = ::read(random_device.get(), nonce.data() + offset,
+                                 nonce.size() - offset);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+      continue;
+    }
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    const int error = count == 0 ? EIO : errno;
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime nonce source read failed: ") +
+        std::strerror(error));
+  }
+  return nonce;
+}
+
+/**
+ * @brief Encodes one lifecycle frame into exact big-endian canonical bytes.
+ * @param frame Complete typed frame.
+ * @return Exact fixed-width wire bytes.
+ * @throws Nothing.
+ */
+std::array<std::byte, kPluginRuntimeLifecycleFrameBytes>
+encode_plugin_runtime_lifecycle_frame(
+    const PluginRuntimeLifecycleFrame& frame) noexcept {
+  std::array<std::byte, kPluginRuntimeLifecycleFrameBytes> bytes{};
+  put_header_u32(bytes.data(), 0U, kPluginRuntimeLifecycleMagic);
+  put_header_u16(bytes.data(), 4U, kPluginRuntimeLifecycleVersion);
+  put_header_u16(bytes.data(), 6U, static_cast<std::uint16_t>(frame.kind));
+  put_header_u64(bytes.data(), 8U, frame.sequence);
+  std::copy(frame.nonce.begin(), frame.nonce.end(), bytes.begin() + 16U);
+  std::copy(frame.identity.tenant_id.bytes.begin(),
+            frame.identity.tenant_id.bytes.end(), bytes.begin() + 32U);
+  std::copy(frame.identity.job_id.bytes.begin(),
+            frame.identity.job_id.bytes.end(), bytes.begin() + 48U);
+  std::copy(frame.identity.attempt_id.bytes.begin(),
+            frame.identity.attempt_id.bytes.end(), bytes.begin() + 64U);
+  std::copy(frame.identity.worker_id.bytes.begin(),
+            frame.identity.worker_id.bytes.end(), bytes.begin() + 80U);
+  put_header_u64(bytes.data(), 96U, frame.identity.worker_lease_generation);
+  std::copy(frame.identity.plugin_package_id.bytes.begin(),
+            frame.identity.plugin_package_id.bytes.end(), bytes.begin() + 104U);
+  put_header_u64(bytes.data(), 120U, frame.identity.plugin_generation);
+  std::copy(frame.identity.invocation_id.bytes.begin(),
+            frame.identity.invocation_id.bytes.end(), bytes.begin() + 128U);
+  put_header_u64(bytes.data(), 144U, frame.heartbeat_interval_milliseconds);
+  return bytes;
+}
+
+/**
+ * @brief Decodes and structurally validates one exact lifecycle datagram.
+ * @param bytes Exact fixed-width datagram bytes.
+ * @return Typed frame with no authority beyond later session comparison.
+ * @throws IsolatedCpuProtocolError for magic, version, or kind mismatch.
+ */
+PluginRuntimeLifecycleFrame decode_plugin_runtime_lifecycle_frame(
+    const std::array<std::byte, kPluginRuntimeLifecycleFrameBytes>& bytes) {
+  if (get_header_u32(bytes.data(), 0U) != kPluginRuntimeLifecycleMagic ||
+      get_header_u16(bytes.data(), 4U) != kPluginRuntimeLifecycleVersion) {
+    throw IsolatedCpuProtocolError(
+        "plugin runtime lifecycle magic or version is invalid");
+  }
+  const auto raw_kind = get_header_u16(bytes.data(), 6U);
+  PluginRuntimeLifecycleKind kind;
+  switch (raw_kind) {
+    case static_cast<std::uint16_t>(PluginRuntimeLifecycleKind::Hello):
+      kind = PluginRuntimeLifecycleKind::Hello;
+      break;
+    case static_cast<std::uint16_t>(PluginRuntimeLifecycleKind::RuntimeStarted):
+      kind = PluginRuntimeLifecycleKind::RuntimeStarted;
+      break;
+    case static_cast<std::uint16_t>(PluginRuntimeLifecycleKind::Heartbeat):
+      kind = PluginRuntimeLifecycleKind::Heartbeat;
+      break;
+    case static_cast<std::uint16_t>(
+        PluginRuntimeLifecycleKind::InvocationCompleted):
+      kind = PluginRuntimeLifecycleKind::InvocationCompleted;
+      break;
+    default:
+      throw IsolatedCpuProtocolError(
+          "plugin runtime lifecycle kind is invalid");
+  }
+  PluginRuntimeLifecycleFrame frame;
+  frame.kind = kind;
+  frame.sequence = get_header_u64(bytes.data(), 8U);
+  std::copy(bytes.begin() + 16U, bytes.begin() + 32U, frame.nonce.begin());
+  std::copy(bytes.begin() + 32U, bytes.begin() + 48U,
+            frame.identity.tenant_id.bytes.begin());
+  std::copy(bytes.begin() + 48U, bytes.begin() + 64U,
+            frame.identity.job_id.bytes.begin());
+  std::copy(bytes.begin() + 64U, bytes.begin() + 80U,
+            frame.identity.attempt_id.bytes.begin());
+  std::copy(bytes.begin() + 80U, bytes.begin() + 96U,
+            frame.identity.worker_id.bytes.begin());
+  frame.identity.worker_lease_generation = get_header_u64(bytes.data(), 96U);
+  std::copy(bytes.begin() + 104U, bytes.begin() + 120U,
+            frame.identity.plugin_package_id.bytes.begin());
+  frame.identity.plugin_generation = get_header_u64(bytes.data(), 120U);
+  std::copy(bytes.begin() + 128U, bytes.begin() + 144U,
+            frame.identity.invocation_id.bytes.begin());
+  frame.heartbeat_interval_milliseconds = get_header_u64(bytes.data(), 144U);
+  return frame;
+}
+
+/**
+ * @brief Sends one fixed lifecycle datagram through an absolute deadline.
+ * @param descriptor Connected nonblocking Unix `SOCK_DGRAM` endpoint.
+ * @param frame Complete lifecycle frame.
+ * @param deadline Absolute monotonic bound.
+ * @return Nothing after one exact datagram send.
+ * @throws SupervisorDeadlineExpired when the bound is reached.
+ * @throws IsolatedCpuInvocationError for channel failure or short send.
+ */
+void send_plugin_runtime_lifecycle_frame_until(
+    int descriptor, const PluginRuntimeLifecycleFrame& frame,
+    SupervisorDeadline deadline) {
+  const auto bytes = encode_plugin_runtime_lifecycle_frame(frame);
+  int flags = MSG_DONTWAIT;
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+  for (;;) {
+    static_cast<void>(poll_descriptor_until(descriptor, POLLOUT, deadline));
+    const ssize_t count = ::send(descriptor, bytes.data(), bytes.size(), flags);
+    if (count == static_cast<ssize_t>(bytes.size())) {
+      return;
+    }
+    if (count < 0 &&
+        (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+      continue;
+    }
+    if (count < 0) {
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime lifecycle send failed: ") +
+          std::strerror(errno));
+    }
+    throw IsolatedCpuInvocationError(
+        "plugin runtime lifecycle datagram was sent partially");
+  }
+}
+
+/**
+ * @brief Sends one fixed lifecycle datagram from the runtime endpoint.
+ * @param descriptor Connected blocking Unix `SOCK_DGRAM` endpoint.
+ * @param frame Complete lifecycle frame.
+ * @return Nothing after one exact datagram send.
+ * @throws IsolatedCpuInvocationError for channel failure or short send.
+ */
+void send_plugin_runtime_lifecycle_frame_blocking(
+    int descriptor, const PluginRuntimeLifecycleFrame& frame) {
+  const auto bytes = encode_plugin_runtime_lifecycle_frame(frame);
+  int flags = 0;
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+  ssize_t count = -1;
+  do {
+    count = ::send(descriptor, bytes.data(), bytes.size(), flags);
+  } while (count < 0 && errno == EINTR);
+  if (count != static_cast<ssize_t>(bytes.size())) {
+    const int error = count < 0 ? errno : EIO;
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime lifecycle send failed: ") +
+        std::strerror(error));
+  }
+}
+
+/**
+ * @brief Receives one exact lifecycle datagram without blocking.
+ * @param descriptor Connected nonblocking Unix `SOCK_DGRAM` endpoint.
+ * @return Empty when no datagram is ready, otherwise one decoded frame.
+ * @throws IsolatedCpuInvocationError for channel failure or EOF.
+ * @throws IsolatedCpuProtocolError for truncation, trailing bytes, or content.
+ */
+std::optional<PluginRuntimeLifecycleFrame>
+receive_plugin_runtime_lifecycle_frame_nonblocking(int descriptor) {
+  std::array<std::byte, kPluginRuntimeLifecycleFrameBytes + 1U> storage{};
+  const ssize_t count =
+      ::recv(descriptor, storage.data(), storage.size(), MSG_DONTWAIT);
+  if (count < 0 &&
+      (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+    return std::nullopt;
+  }
+  if (count < 0) {
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime lifecycle receive failed: ") +
+        std::strerror(errno));
+  }
+  if (count == 0) {
+    throw IsolatedCpuInvocationError(
+        "plugin runtime lifecycle channel closed unexpectedly");
+  }
+  if (count != static_cast<ssize_t>(kPluginRuntimeLifecycleFrameBytes)) {
+    throw IsolatedCpuProtocolError(
+        "plugin runtime lifecycle datagram is truncated or trailing");
+  }
+  std::array<std::byte, kPluginRuntimeLifecycleFrameBytes> frame_bytes{};
+  std::copy_n(storage.begin(), frame_bytes.size(), frame_bytes.begin());
+  return decode_plugin_runtime_lifecycle_frame(frame_bytes);
+}
+
+/**
+ * @brief Receives one exact blocking hello inside the fresh runtime.
+ * @param descriptor Connected blocking Unix `SOCK_DGRAM` endpoint.
+ * @return Decoded lifecycle hello frame.
+ * @throws IsolatedCpuInvocationError for channel failure or EOF.
+ * @throws IsolatedCpuProtocolError for framing/content or non-hello state.
+ */
+PluginRuntimeLifecycleFrame receive_plugin_runtime_hello_blocking(
+    int descriptor) {
+  std::array<std::byte, kPluginRuntimeLifecycleFrameBytes + 1U> storage{};
+  ssize_t count = -1;
+  do {
+    count = ::recv(descriptor, storage.data(), storage.size(), 0);
+  } while (count < 0 && errno == EINTR);
+  if (count <= 0) {
+    const int error = count == 0 ? ECONNRESET : errno;
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime hello receive failed: ") +
+        std::strerror(error));
+  }
+  if (count != static_cast<ssize_t>(kPluginRuntimeLifecycleFrameBytes)) {
+    throw IsolatedCpuProtocolError(
+        "plugin runtime hello datagram is truncated or trailing");
+  }
+  std::array<std::byte, kPluginRuntimeLifecycleFrameBytes> frame_bytes{};
+  std::copy_n(storage.begin(), frame_bytes.size(), frame_bytes.begin());
+  PluginRuntimeLifecycleFrame frame =
+      decode_plugin_runtime_lifecycle_frame(frame_bytes);
+  if (frame.kind != PluginRuntimeLifecycleKind::Hello || frame.sequence != 0U) {
+    throw IsolatedCpuProtocolError(
+        "plugin runtime first lifecycle frame is not hello");
+  }
+  return frame;
+}
+
+/**
+ * @brief Result of bounded supervisor termination and exact-PID reconciliation.
+ * @throws Nothing for ordinary value operations.
+ */
+struct SupervisedTerminationResult final {
+  /** @brief Strongest supervisor signal sent. */
+  PluginRuntimeTerminationStage stage = PluginRuntimeTerminationStage::None;
+  /** @brief Exact reaped wait status when synchronously available. */
+  std::optional<int> wait_status;
+  /** @brief True when PID ownership moved to a deferred reaper. */
+  bool reap_pending = false;
+  /** @brief Deferred exact-reap completion flag when ownership moved. */
+  std::shared_ptr<std::atomic<bool>> reap_completion;
+};
+
+/**
+ * @brief Sole move-only exact PID owner for one supervised fresh runtime.
+ * @throws Nothing for construction and moves; explicit waits may throw.
+ * @note Destruction never intentionally performs an unbounded caller wait.
+ */
+class SupervisedChildOwner final {
+ public:
+  /**
+   * @brief Creates an empty PID owner.
+   * @throws Nothing.
+   */
+  SupervisedChildOwner() noexcept = default;
+
+  /**
+   * @brief Takes exact wait/signal authority for one positive child PID.
+   * @param pid Fresh child PID.
+   * @throws Nothing.
+   */
+  explicit SupervisedChildOwner(pid_t pid) noexcept : pid_(pid) {}
+
+  /**
+   * @brief Emergency-signals and transfers any still-owned exact PID.
+   * @throws Nothing; thread-creation failure falls back to exact reap.
+   * @note Normal callers use bounded explicit retirement before destruction.
+   */
+  ~SupervisedChildOwner() noexcept { emergency_retire(); }
+
+  /**
+   * @brief Prevents duplicate exact-PID authority.
+   * @param other Source owner, never consumed because copying is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  SupervisedChildOwner(const SupervisedChildOwner&) = delete;
+  /**
+   * @brief Prevents duplicate exact-PID assignment.
+   * @param other Source owner, never consumed because copying is deleted.
+   * @return No value because assignment is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  SupervisedChildOwner& operator=(const SupervisedChildOwner&) = delete;
+
+  /**
+   * @brief Transfers exact-PID authority and any observed status.
+   * @param other Source owner cleared by the move.
+   * @throws Nothing.
+   */
+  SupervisedChildOwner(SupervisedChildOwner&& other) noexcept
+      : pid_(std::exchange(other.pid_, -1)),
+        wait_status_(std::exchange(other.wait_status_, std::nullopt)),
+        termination_stage_(std::exchange(
+            other.termination_stage_, PluginRuntimeTerminationStage::None)) {}
+
+  /**
+   * @brief Replaces authority after emergency-retiring any prior child.
+   * @param other Source owner cleared by the move.
+   * @return This owner.
+   * @throws Nothing.
+   */
+  SupervisedChildOwner& operator=(SupervisedChildOwner&& other) noexcept {
+    if (this != &other) {
+      emergency_retire();
+      pid_ = std::exchange(other.pid_, -1);
+      wait_status_ = std::exchange(other.wait_status_, std::nullopt);
+      termination_stage_ = std::exchange(other.termination_stage_,
+                                         PluginRuntimeTerminationStage::None);
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Reports whether an unreaped exact PID remains owned.
+   * @return True only while this object retains positive-PID authority.
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return pid_ > 0; }
+  /**
+   * @brief Returns the exact owned PID or invalid sentinel.
+   * @return Positive owned PID or -1 after transfer/reap.
+   * @throws Nothing.
+   */
+  pid_t pid() const noexcept { return pid_; }
+  /**
+   * @brief Returns the exact reaped wait status when observed.
+   * @return Exact POSIX status, or no value before successful reap.
+   * @throws Nothing.
+   */
+  std::optional<int> wait_status() const noexcept { return wait_status_; }
+
+  /**
+   * @brief Returns the strongest supervisor signal successfully sent.
+   * @return None, SIGTERM, or SIGKILL for this exact child lifecycle.
+   * @throws Nothing.
+   */
+  PluginRuntimeTerminationStage termination_stage() const noexcept {
+    return termination_stage_;
+  }
+
+  /**
+   * @brief Performs one nonblocking exact-PID reap observation.
+   * @return True once exact wait status has been observed.
+   * @throws IsolatedCpuInvocationError for an exact `waitpid` failure.
+   */
+  bool poll_reap() {
+    if (!active()) {
+      return wait_status_.has_value();
+    }
+    int status = 0;
+    pid_t result = -1;
+    do {
+      result = ::waitpid(pid_, &status, WNOHANG);
+    } while (result < 0 && errno == EINTR);
+    if (result == 0) {
+      return false;
+    }
+    if (result != pid_) {
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime exact waitpid failed: ") +
+          std::strerror(errno));
+    }
+    const pid_t reaped = std::exchange(pid_, -1);
+    wait_status_ = status;
+    record_reaped_child(reaped);
+    return true;
+  }
+
+  /**
+   * @brief Polls exact status only until one absolute deadline.
+   * @param deadline Absolute monotonic wait bound.
+   * @return True when reaped, false when the bound expires.
+   * @throws IsolatedCpuInvocationError for exact `waitpid` failure.
+   */
+  bool wait_until(SupervisorDeadline deadline) {
+    while (SupervisorClock::now() < deadline) {
+      if (poll_reap()) {
+        return true;
+      }
+      const int pause_ms = std::min(poll_timeout_until(deadline), 5);
+      int result = -1;
+      do {
+        result = ::poll(nullptr, 0U, pause_ms);
+      } while (result < 0 && errno == EINTR);
+      if (result < 0) {
+        throw IsolatedCpuInvocationError(
+            std::string("plugin runtime reap poll failed: ") +
+            std::strerror(errno));
+      }
+    }
+    return poll_reap();
+  }
+
+  /**
+   * @brief Applies bounded TERM-to-KILL escalation and exact reconciliation.
+   * @param options Validated termination and reap timing policy.
+   * @return Exact wait/escalation result or deferred-reap ownership record.
+   * @throws IsolatedCpuInvocationError for signal or exact wait failure.
+   * @throws std::bad_alloc if completion-state allocation fails before PID
+   * transfer.
+   * @throws std::system_error if the deferred reaper thread cannot be created.
+   * @note The final deadline transfers sole PID ownership rather than blocking
+   * the caller or falsely reporting successful reap. All potentially throwing
+   * completion-state allocation finishes while this object still owns the PID;
+   * thread-construction failure restores that same sole authority. A deferred
+   * exact-wait failure deliberately leaves completion false so the supervisor
+   * remains quarantined instead of claiming an unproved reap.
+   */
+  SupervisedTerminationResult terminate_and_reap(
+      const PluginRuntimeSupervisorOptions& options) {
+    SupervisedTerminationResult result;
+    result.stage = termination_stage_;
+    if (!active()) {
+      result.wait_status = wait_status_;
+      return result;
+    }
+
+    if (::kill(pid_, SIGTERM) == 0) {
+      termination_stage_ = PluginRuntimeTerminationStage::Sigterm;
+      result.stage = termination_stage_;
+    } else if (errno != ESRCH) {
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime SIGTERM failed: ") +
+          std::strerror(errno));
+    }
+    if (wait_until(SupervisorClock::now() + options.termination_grace)) {
+      result.wait_status = wait_status_;
+      return result;
+    }
+
+    if (::kill(pid_, SIGKILL) == 0) {
+      termination_stage_ = PluginRuntimeTerminationStage::Sigkill;
+      result.stage = termination_stage_;
+    } else if (errno != ESRCH) {
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime SIGKILL failed: ") +
+          std::strerror(errno));
+    }
+    if (wait_until(SupervisorClock::now() + options.kill_reap_timeout)) {
+      result.wait_status = wait_status_;
+      return result;
+    }
+
+    const auto completion = std::make_shared<std::atomic<bool>>(false);
+    const pid_t transferred = std::exchange(pid_, -1);
+    result.reap_pending = true;
+    result.reap_completion = completion;
+    try {
+      std::thread([transferred, completion]() noexcept {
+        int status = 0;
+        pid_t waited = -1;
+        do {
+          waited = ::waitpid(transferred, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited == transferred) {
+          record_reaped_child(transferred);
+          completion->store(true, std::memory_order_release);
+        }
+      }).detach();
+    } catch (...) {
+      pid_ = transferred;
+      throw;
+    }
+    return result;
+  }
+
+ private:
+  /**
+   * @brief Best-effort emergency transfer used only by destructor fallback.
+   * @return Nothing after clearing this owner.
+   * @throws Nothing; a thread-construction failure falls back to exact reap.
+   */
+  void emergency_retire() noexcept {
+    const pid_t transferred = std::exchange(pid_, -1);
+    if (transferred <= 0) {
+      return;
+    }
+    static_cast<void>(::kill(transferred, SIGKILL));
+    try {
+      std::thread([transferred]() noexcept {
+        int status = 0;
+        pid_t waited = -1;
+        do {
+          waited = ::waitpid(transferred, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited == transferred) {
+          record_reaped_child(transferred);
+        }
+      }).detach();
+    } catch (...) {
+      int status = 0;
+      pid_t waited = -1;
+      do {
+        waited = ::waitpid(transferred, &status, 0);
+      } while (waited < 0 && errno == EINTR);
+      if (waited == transferred) {
+        record_reaped_child(transferred);
+      }
+    }
+  }
+
+  /** @brief Exact positive unreaped PID or invalid sentinel. */
+  pid_t pid_ = -1;
+  /** @brief Exact status after one successful reap. */
+  std::optional<int> wait_status_;
+  /** @brief Strongest supervisor signal successfully sent to the exact PID. */
+  PluginRuntimeTerminationStage termination_stage_ =
+      PluginRuntimeTerminationStage::None;
+};
+
+/**
+ * @brief Fresh supervised child plus all parent lifecycle endpoints.
+ * @throws Nothing for moves and destruction.
+ */
+struct SupervisedSpawnedChild final {
+  /** @brief Sole exact child signal/reap authority. */
+  SupervisedChildOwner child;
+  /** @brief Sole parent request/response stream endpoint. */
+  UniqueFd control;
+  /** @brief Sole parent lifecycle Unix datagram endpoint. */
+  UniqueFd supervision;
+  /** @brief Sole parent exec-status pipe read endpoint. */
+  UniqueFd setup_status;
+};
+
+/**
+ * @brief Forks one supervised runtime with fixed fds 3, 4, and 5.
+ * @param runtime_executable Operability-validated executable path.
+ * @return Exact child and nonblocking parent endpoints before exec completes.
+ * @throws IsolatedCpuInvocationError for socket, pipe, device, fork, or setup
+ * preparation failure.
+ * @throws std::system_error for descriptor-ceiling inspection failure.
+ * @note The child receives an empty environment and no descriptor above fd 5.
+ */
+SupervisedSpawnedChild spawn_supervised_runtime(
+    const std::filesystem::path& runtime_executable) {
+  int control_sockets[2] = {-1, -1};
+  if (::socketpair(AF_UNIX, SOCK_STREAM, 0, control_sockets) != 0) {
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime control socketpair failed: ") +
+        std::strerror(errno));
+  }
+  UniqueFd parent_control(control_sockets[0]);
+  UniqueFd child_control(control_sockets[1]);
+  configure_socket(parent_control.get());
+  configure_socket(child_control.get());
+
+  int supervision_sockets[2] = {-1, -1};
+  if (::socketpair(AF_UNIX, SOCK_DGRAM, 0, supervision_sockets) != 0) {
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime supervision socketpair failed: ") +
+        std::strerror(errno));
+  }
+  UniqueFd parent_supervision(supervision_sockets[0]);
+  UniqueFd child_supervision(supervision_sockets[1]);
+  configure_socket(parent_supervision.get());
+  configure_socket(child_supervision.get());
+
+  int status_pipe[2] = {-1, -1};
+  if (::pipe(status_pipe) != 0) {
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime exec-status pipe failed: ") +
+        std::strerror(errno));
+  }
+  UniqueFd status_read(status_pipe[0]);
+  UniqueFd status_write(status_pipe[1]);
+  set_close_on_exec(status_read.get());
+  set_close_on_exec(status_write.get());
+
+  int null_flags = O_RDWR;
+#ifdef O_CLOEXEC
+  null_flags |= O_CLOEXEC;
+#endif
+  UniqueFd null_device(::open("/dev/null", null_flags));
+  if (!null_device.valid()) {
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime /dev/null open failed: ") +
+        std::strerror(errno));
+  }
+  set_close_on_exec(null_device.get());
+
+  const ChildDescriptorClosurePlan closure =
+      prepare_child_descriptor_closure(kFirstSupervisedChildDescriptor);
+  const std::string executable = runtime_executable.string();
+  const char* const executable_pointer = executable.c_str();
+  char* const empty_environment[] = {nullptr};
+
+  require_sigchld_reaping_configuration_before_fork();
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    throw IsolatedCpuInvocationError(
+        std::string("plugin runtime fork failed: ") + std::strerror(errno));
+  }
+  if (pid == 0) {
+    const int control_copy = ::fcntl(child_control.get(), F_DUPFD_CLOEXEC,
+                                     kFirstSupervisedChildDescriptor);
+    if (control_copy < 0) {
+      child_setup_failed(status_write.get(), errno);
+    }
+    const int status_copy = ::fcntl(status_write.get(), F_DUPFD_CLOEXEC,
+                                    kFirstSupervisedChildDescriptor);
+    if (status_copy < 0) {
+      child_setup_failed(status_write.get(), errno);
+    }
+    const int supervision_copy =
+        ::fcntl(child_supervision.get(), F_DUPFD_CLOEXEC,
+                kFirstSupervisedChildDescriptor);
+    if (supervision_copy < 0) {
+      child_setup_failed(status_copy, errno);
+    }
+    const int null_copy = ::fcntl(null_device.get(), F_DUPFD_CLOEXEC,
+                                  kFirstSupervisedChildDescriptor);
+    if (null_copy < 0) {
+      child_setup_failed(status_copy, errno);
+    }
+    if (::dup2(null_copy, STDIN_FILENO) < 0 ||
+        ::dup2(null_copy, STDOUT_FILENO) < 0 ||
+        ::dup2(null_copy, STDERR_FILENO) < 0 ||
+        ::dup2(control_copy, kIsolatedCpuRuntimeControlDescriptor) < 0 ||
+        ::dup2(status_copy, kIsolatedCpuRuntimeSetupDescriptor) < 0 ||
+        ::dup2(supervision_copy, kPluginRuntimeSupervisionDescriptor) < 0) {
+      child_setup_failed(status_copy, errno);
+    }
+    if (::fcntl(kIsolatedCpuRuntimeControlDescriptor, F_SETFD, 0) < 0 ||
+        ::fcntl(kIsolatedCpuRuntimeSetupDescriptor, F_SETFD, FD_CLOEXEC) < 0 ||
+        ::fcntl(kPluginRuntimeSupervisionDescriptor, F_SETFD, 0) < 0) {
+      child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, errno);
+    }
+    const int close_error = close_child_descriptors(closure);
+    if (close_error != 0) {
+      child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, close_error);
+    }
+    char* const arguments[] = {const_cast<char*>(executable_pointer), nullptr};
+    ::execve(executable_pointer, arguments, empty_environment);
+    child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, errno);
+  }
+
+  g_spawned_children.fetch_add(1U, std::memory_order_relaxed);
+  SupervisedChildOwner child(pid);
+  child_control.reset();
+  child_supervision.reset();
+  status_write.reset();
+  null_device.reset();
+  set_nonblocking(parent_control.get());
+  set_nonblocking(parent_supervision.get());
+  set_nonblocking(status_read.get());
+  return SupervisedSpawnedChild{std::move(child), std::move(parent_control),
+                                std::move(parent_supervision),
+                                std::move(status_read)};
+}
+
+/**
+ * @brief Serializes runtime lifecycle events and emits periodic heartbeats.
+ * @throws std::invalid_argument for an invalid hello heartbeat interval.
+ * @throws std::system_error when the heartbeat thread cannot be created.
+ * @note The callback thread and heartbeat thread share only this private
+ * fixed-frame sender; neither can extend the Host invocation deadline.
+ */
+class RuntimeHeartbeatEmitter final {
+ public:
+  /**
+   * @brief Retains one endpoint, authenticated session, and interval.
+   * @param descriptor Borrowed connected supervision descriptor.
+   * @param hello Exact Host hello containing nonce and invocation id.
+   * The heartbeat interval is decoded from the authenticated Host hello.
+   * @throws std::invalid_argument for invalid input.
+   */
+  RuntimeHeartbeatEmitter(int descriptor,
+                          const PluginRuntimeLifecycleFrame& hello)
+      : descriptor_(descriptor), session_(hello) {
+    const auto maximum_interval = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::hours{24})
+            .count());
+    if (descriptor_ < 0 || hello.heartbeat_interval_milliseconds == 0U ||
+        hello.heartbeat_interval_milliseconds > maximum_interval) {
+      throw std::invalid_argument(
+          "plugin runtime heartbeat endpoint or interval is invalid");
+    }
+    interval_ = std::chrono::milliseconds{
+        static_cast<std::int64_t>(hello.heartbeat_interval_milliseconds)};
+  }
+
+  /**
+   * @brief Stops and joins a running heartbeat thread.
+   * @throws Nothing.
+   * @note Destruction returns only after periodic emission has ceased.
+   */
+  ~RuntimeHeartbeatEmitter() noexcept { stop(); }
+
+  /**
+   * @brief Prevents duplicate descriptor/session use.
+   * @param other Source emitter, never consumed because copying is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  RuntimeHeartbeatEmitter(const RuntimeHeartbeatEmitter&) = delete;
+  /**
+   * @brief Prevents duplicate descriptor/session assignment.
+   * @param other Source emitter, never consumed because copying is deleted.
+   * @return No value because assignment is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  RuntimeHeartbeatEmitter& operator=(const RuntimeHeartbeatEmitter&) = delete;
+
+  /**
+   * @brief Sends the first authenticated started event.
+   * @param corrupt_nonce True only for the deterministic fail-closed fixture.
+   * @return Nothing after exact send.
+   * @throws IsolatedCpuInvocationError for channel failure.
+   */
+  void send_started(bool corrupt_nonce) {
+    send_event(PluginRuntimeLifecycleKind::RuntimeStarted, corrupt_nonce);
+  }
+
+  /**
+   * @brief Starts periodic authenticated heartbeat emission.
+   * @return Nothing after the background thread owns its loop.
+   * @throws std::system_error when thread creation fails.
+   */
+  void start() {
+    heartbeat_thread_ = std::thread([this]() noexcept { heartbeat_loop(); });
+  }
+
+  /**
+   * @brief Stops periodic emission and joins the thread once.
+   * @return Nothing after no heartbeat thread remains.
+   * @throws Nothing.
+   */
+  void stop() noexcept {
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      stopping_ = true;
+    }
+    state_changed_.notify_all();
+    if (heartbeat_thread_.joinable()) {
+      heartbeat_thread_.join();
+    }
+  }
+
+  /**
+   * @brief Sends callback-completion after heartbeat emission has stopped.
+   * @return Nothing after the exact next-sequence event is sent.
+   * @throws IsolatedCpuInvocationError when heartbeat or completion send
+   * failed.
+   */
+  void send_completed() {
+    if (heartbeat_failed_.load(std::memory_order_acquire)) {
+      throw IsolatedCpuInvocationError(
+          "plugin runtime heartbeat channel failed before completion");
+    }
+    send_event(PluginRuntimeLifecycleKind::InvocationCompleted, false);
+  }
+
+ private:
+  /**
+   * @brief Sends one next-sequence event under the sole sender mutex.
+   * @param kind Closed child-to-parent event kind.
+   * @param corrupt_nonce True only for deterministic startup rejection.
+   * @return Nothing after exact send.
+   * @throws IsolatedCpuInvocationError for channel failure.
+   */
+  void send_event(PluginRuntimeLifecycleKind kind, bool corrupt_nonce) {
+    std::lock_guard<std::mutex> lock(send_mutex_);
+    if (next_sequence_ == std::numeric_limits<std::uint64_t>::max()) {
+      throw IsolatedCpuProtocolError(
+          "plugin runtime lifecycle sequence is exhausted");
+    }
+    PluginRuntimeLifecycleFrame event = session_;
+    event.kind = kind;
+    event.sequence = next_sequence_++;
+    if (corrupt_nonce) {
+      event.nonce[0] ^= std::byte{1U};
+    }
+    send_plugin_runtime_lifecycle_frame_blocking(descriptor_, event);
+  }
+
+  /**
+   * @brief Waits one interval at a time and contains heartbeat send failures.
+   * @return Nothing after stop request or channel failure.
+   * @throws Nothing.
+   */
+  void heartbeat_loop() noexcept {
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    while (!stopping_) {
+      if (state_changed_.wait_for(lock, interval_,
+                                  [this]() { return stopping_; })) {
+        return;
+      }
+      lock.unlock();
+      try {
+        send_event(PluginRuntimeLifecycleKind::Heartbeat, false);
+      } catch (...) {
+        heartbeat_failed_.store(true, std::memory_order_release);
+        return;
+      }
+      lock.lock();
+    }
+  }
+
+  /** @brief Borrowed connected endpoint valid for this process lifetime. */
+  int descriptor_ = -1;
+  /** @brief Exact hello-derived nonce and invocation binding. */
+  PluginRuntimeLifecycleFrame session_;
+  /** @brief Positive periodic emission interval. */
+  std::chrono::milliseconds interval_{0};
+  /** @brief Serializes sequence allocation and fixed datagram sends. */
+  std::mutex send_mutex_;
+  /** @brief Protects stop state and heartbeat wait. */
+  std::mutex state_mutex_;
+  /** @brief Wakes the background heartbeat wait during endpoint completion. */
+  std::condition_variable state_changed_;
+  /** @brief Next strictly increasing child event sequence. */
+  std::uint64_t next_sequence_ = 1U;
+  /** @brief True after endpoint completion requests thread retirement. */
+  bool stopping_ = false;
+  /** @brief True after the background sender observes a channel failure. */
+  std::atomic<bool> heartbeat_failed_{false};
+  /** @brief Sole joinable periodic sender thread. */
+  std::thread heartbeat_thread_;
+};
 
 /**
  * @brief Converts one public element semantic into the closed wire value.
@@ -2074,6 +3179,613 @@ std::vector<Value> publish_host_outputs(
   return outputs;
 }
 
+/** @brief Maximum accepted lifecycle duration preventing clock overflow. */
+constexpr std::chrono::hours kMaximumSupervisorDuration{24};
+
+/**
+ * @brief Validates every supervisor duration before child ownership begins.
+ * @param options Candidate lifecycle timing policy.
+ * @return Nothing for positive, ordered, exactly bounded durations.
+ * @throws std::invalid_argument for non-positive, inverted, or excessive
+ * durations.
+ */
+void validate_plugin_runtime_supervisor_options(
+    const PluginRuntimeSupervisorOptions& options) {
+  const auto positive_and_bounded = [](std::chrono::milliseconds value) {
+    return value.count() > 0 && value <= kMaximumSupervisorDuration;
+  };
+  if (!positive_and_bounded(options.startup_timeout) ||
+      !positive_and_bounded(options.heartbeat_interval) ||
+      !positive_and_bounded(options.heartbeat_timeout) ||
+      !positive_and_bounded(options.invocation_timeout) ||
+      !positive_and_bounded(options.response_timeout) ||
+      !positive_and_bounded(options.termination_grace) ||
+      !positive_and_bounded(options.kill_reap_timeout) ||
+      options.restart_backoff.count() < 0 ||
+      options.restart_backoff > kMaximumSupervisorDuration ||
+      options.heartbeat_interval >= options.heartbeat_timeout) {
+    throw std::invalid_argument(
+        "plugin runtime supervisor durations are invalid or unbounded");
+  }
+}
+
+/**
+ * @brief Constructs one future absolute deadline from validated duration.
+ * @param duration Positive duration already validated below the safe cap.
+ * @return Current steady time plus the exact duration.
+ * @throws Nothing under the validated duration precondition.
+ */
+SupervisorDeadline supervisor_deadline_after(
+    std::chrono::milliseconds duration) noexcept {
+  return SupervisorClock::now() + duration;
+}
+
+/**
+ * @brief Builds the strongest factual fault from one exact wait status.
+ * @param status Exact status returned by `waitpid`.
+ * @param context Bounded-intended lifecycle context.
+ * @return Typed natural exit, signal, or unexpected-normal-output fault.
+ * @throws std::bad_alloc when diagnostic storage cannot allocate.
+ */
+PluginRuntimeFault plugin_runtime_fault_from_wait_status(
+    int status, const std::string& context) {
+  if (WIFSIGNALED(status)) {
+    const int signal_number = WTERMSIG(status);
+    return PluginRuntimeFault(PluginRuntimeFaultKind::ProcessSignal,
+                              context + ": runtime terminated by signal " +
+                                  std::to_string(signal_number),
+                              status, std::nullopt, signal_number,
+                              PluginRuntimeTerminationStage::None,
+                              signal_number == SIGKILL);
+  }
+  if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+    const int exit_code = WEXITSTATUS(status);
+    return PluginRuntimeFault(
+        PluginRuntimeFaultKind::ProcessExit,
+        context + ": runtime exited with status " + std::to_string(exit_code),
+        status, exit_code);
+  }
+  if (WIFEXITED(status)) {
+    return PluginRuntimeFault(
+        PluginRuntimeFaultKind::BadOutput,
+        context + ": runtime exited normally without complete valid output",
+        status, 0);
+  }
+  return PluginRuntimeFault(
+      PluginRuntimeFaultKind::Channel,
+      context + ": runtime produced an unsupported wait status", status);
+}
+
+/**
+ * @brief Validates one child event against the retained private session.
+ * @param event Decoded child event.
+ * @param nonce Exact Host-generated nonce.
+ * @param identity Exact retained complete invocation identity.
+ * @param heartbeat_interval_milliseconds Exact Host-selected interval.
+ * @param expected_sequence Next required child sequence.
+ * @return Nothing after exact comparison.
+ * @throws PluginRuntimeFault for nonce, identity, or sequence mismatch.
+ */
+void validate_plugin_runtime_lifecycle_session(
+    const PluginRuntimeLifecycleFrame& event,
+    const PluginRuntimeSessionNonce& nonce,
+    const IsolatedCpuInvocationIdentity& identity,
+    std::uint64_t heartbeat_interval_milliseconds,
+    std::uint64_t expected_sequence) {
+  if (event.nonce != nonce || !(event.identity == identity) ||
+      event.heartbeat_interval_milliseconds !=
+          heartbeat_interval_milliseconds ||
+      event.sequence != expected_sequence) {
+    throw PluginRuntimeFault(
+        PluginRuntimeFaultKind::LifecycleProtocol,
+        "plugin runtime lifecycle session, identity, or sequence mismatch");
+  }
+}
+
+/**
+ * @brief Gives a just-closed lifecycle channel a short exact-status priority.
+ * @param child Exact child owner.
+ * @param enclosing_deadline Current absolute lifecycle bound.
+ * @return Exact status when it becomes waitable in the bounded observation.
+ * @throws IsolatedCpuInvocationError for exact wait failure.
+ */
+std::optional<int> observe_child_after_channel_close(
+    SupervisedChildOwner* child, SupervisorDeadline enclosing_deadline) {
+  if (child == nullptr) {
+    return std::nullopt;
+  }
+  const SupervisorDeadline observation_deadline =
+      std::min(enclosing_deadline,
+               SupervisorClock::now() + std::chrono::milliseconds{20});
+  if (child->wait_until(observation_deadline)) {
+    return child->wait_status();
+  }
+  return std::nullopt;
+}
+
+/**
+ * @brief Enriches a primary fault after bounded channel revocation/escalation.
+ * @param fault Primary lifecycle fact.
+ * @param process Exact child and invocation endpoints to retire.
+ * @param options Validated termination timing policy.
+ * @param pending_reap Receives deferred exact-reap completion ownership.
+ * @return Never returns; throws the enriched primary or reap-pending fault.
+ * @throws PluginRuntimeFault after best-effort exact cleanup.
+ */
+[[noreturn]] void throw_after_supervised_cleanup(
+    const PluginRuntimeFault& fault, SupervisedSpawnedChild* process,
+    const PluginRuntimeSupervisorOptions& options,
+    std::shared_ptr<std::atomic<bool>>* pending_reap) {
+  SupervisedTerminationResult termination;
+  if (process != nullptr) {
+    process->control.reset();
+    process->supervision.reset();
+    process->setup_status.reset();
+    try {
+      termination = process->child.terminate_and_reap(options);
+    } catch (const std::exception& error) {
+      std::optional<int> wait_status = fault.wait_status();
+      if (!wait_status.has_value()) {
+        wait_status = process->child.wait_status();
+      }
+      const PluginRuntimeTerminationStage cleanup_stage =
+          process->child.termination_stage();
+      const PluginRuntimeTerminationStage strongest_stage =
+          static_cast<std::uint8_t>(cleanup_stage) >
+                  static_cast<std::uint8_t>(fault.termination_stage())
+              ? cleanup_stage
+              : fault.termination_stage();
+      throw PluginRuntimeFault(
+          fault.kind(),
+          std::string(fault.what()) +
+              "; plugin runtime cleanup also failed: " + error.what(),
+          wait_status, fault.exit_code(), fault.signal_number(),
+          strongest_stage, fault.memory_pressure_compatible());
+    }
+  }
+  if (termination.reap_pending) {
+    if (pending_reap != nullptr) {
+      *pending_reap = termination.reap_completion;
+    }
+    throw PluginRuntimeFault(
+        PluginRuntimeFaultKind::ReapPending,
+        std::string(fault.what()) +
+            "; exact PID ownership moved to deferred reaper",
+        std::nullopt, std::nullopt, std::nullopt, termination.stage);
+  }
+
+  std::optional<int> wait_status = fault.wait_status();
+  std::optional<int> exit_code = fault.exit_code();
+  std::optional<int> signal_number = fault.signal_number();
+  if (!wait_status.has_value() && termination.wait_status.has_value()) {
+    wait_status = termination.wait_status;
+    if (WIFEXITED(*wait_status)) {
+      exit_code = WEXITSTATUS(*wait_status);
+    } else if (WIFSIGNALED(*wait_status)) {
+      signal_number = WTERMSIG(*wait_status);
+    }
+  }
+  const bool memory_pressure_compatible =
+      fault.memory_pressure_compatible() ||
+      (signal_number.has_value() && *signal_number == SIGKILL);
+  throw PluginRuntimeFault(fault.kind(), fault.what(), wait_status, exit_code,
+                           signal_number, termination.stage,
+                           memory_pressure_compatible);
+}
+
+/**
+ * @brief Waits through exec-status EOF under the startup deadline.
+ * @param process Fresh child and nonblocking setup-status endpoint.
+ * @param deadline Absolute startup deadline.
+ * @return Nothing only after close-on-exec proves successful exec.
+ * @throws PluginRuntimeFault for timeout, setup record, or natural child exit.
+ * @throws IsolatedCpuInvocationError for poll/read/exact-wait failures.
+ */
+void await_supervised_exec(SupervisedSpawnedChild* process,
+                           SupervisorDeadline deadline) {
+  if (process == nullptr || !process->setup_status.valid()) {
+    throw PluginRuntimeFault(PluginRuntimeFaultKind::Channel,
+                             "plugin runtime setup-status owner is absent");
+  }
+  std::array<std::byte, sizeof(int)> setup_bytes{};
+  std::size_t offset = 0U;
+  for (;;) {
+    if (SupervisorClock::now() >= deadline) {
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::StartupDeadline,
+                               "plugin runtime exec startup timed out");
+    }
+    if (process->child.poll_reap()) {
+      throw plugin_runtime_fault_from_wait_status(
+          *process->child.wait_status(), "plugin runtime exec startup");
+    }
+    struct pollfd status_poll{process->setup_status.get(),
+                              static_cast<std::int16_t>(POLLIN | POLLHUP), 0};
+    const int timeout = std::min(poll_timeout_until(deadline), 10);
+    const int result = ::poll(&status_poll, 1U, timeout);
+    if (result < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime exec-status poll failed: ") +
+          std::strerror(errno));
+    }
+    if (result == 0) {
+      continue;
+    }
+    for (;;) {
+      const ssize_t count =
+          ::read(process->setup_status.get(), setup_bytes.data() + offset,
+                 setup_bytes.size() - offset);
+      if (count > 0) {
+        offset += static_cast<std::size_t>(count);
+        if (offset == setup_bytes.size()) {
+          int child_error = 0;
+          std::memcpy(&child_error, setup_bytes.data(), sizeof(child_error));
+          throw PluginRuntimeFault(
+              PluginRuntimeFaultKind::LifecycleProtocol,
+              std::string("plugin runtime setup/exec failed: ") +
+                  std::strerror(child_error == 0 ? EIO : child_error));
+        }
+        continue;
+      }
+      if (count == 0) {
+        process->setup_status.reset();
+        if (offset != 0U) {
+          throw PluginRuntimeFault(
+              PluginRuntimeFaultKind::LifecycleProtocol,
+              "plugin runtime exec-status record was truncated");
+        }
+        return;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      }
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime exec-status read failed: ") +
+          std::strerror(errno));
+    }
+  }
+}
+
+/**
+ * @brief Waits for and authenticates the first child startup event.
+ * @param process Fresh child and supervision endpoint.
+ * @param nonce Exact retained Host nonce.
+ * @param identity Exact retained complete invocation identity.
+ * @param heartbeat_interval_milliseconds Exact Host-selected interval.
+ * @param deadline Absolute startup deadline.
+ * @return Monotonic time of authenticated startup observation.
+ * @throws PluginRuntimeFault for timeout, protocol/channel, or process fault.
+ * @throws IsolatedCpuInvocationError for exact wait failure.
+ */
+SupervisorDeadline await_authenticated_runtime_started(
+    SupervisedSpawnedChild* process, const PluginRuntimeSessionNonce& nonce,
+    const IsolatedCpuInvocationIdentity& identity,
+    std::uint64_t heartbeat_interval_milliseconds,
+    SupervisorDeadline deadline) {
+  for (;;) {
+    if (SupervisorClock::now() >= deadline) {
+      throw PluginRuntimeFault(
+          PluginRuntimeFaultKind::StartupDeadline,
+          "plugin runtime authenticated startup timed out");
+    }
+    if (process->child.poll_reap()) {
+      throw plugin_runtime_fault_from_wait_status(
+          *process->child.wait_status(),
+          "plugin runtime authenticated startup");
+    }
+    struct pollfd lifecycle_poll{
+        process->supervision.get(),
+        static_cast<std::int16_t>(POLLIN | POLLHUP | POLLERR), 0};
+    const int timeout = std::min(poll_timeout_until(deadline), 10);
+    const int result = ::poll(&lifecycle_poll, 1U, timeout);
+    if (result < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime startup poll failed: ") +
+          std::strerror(errno));
+    }
+    if (result == 0) {
+      continue;
+    }
+    try {
+      const auto event = receive_plugin_runtime_lifecycle_frame_nonblocking(
+          process->supervision.get());
+      if (!event.has_value()) {
+        continue;
+      }
+      validate_plugin_runtime_lifecycle_session(
+          *event, nonce, identity, heartbeat_interval_milliseconds, 1U);
+      if (event->kind != PluginRuntimeLifecycleKind::RuntimeStarted) {
+        throw PluginRuntimeFault(
+            PluginRuntimeFaultKind::LifecycleProtocol,
+            "plugin runtime first child event was not RuntimeStarted");
+      }
+      return SupervisorClock::now();
+    } catch (const IsolatedCpuProtocolError& error) {
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::LifecycleProtocol,
+                               error.what());
+    } catch (const IsolatedCpuInvocationError& error) {
+      const auto status =
+          observe_child_after_channel_close(&process->child, deadline);
+      if (status.has_value()) {
+        throw plugin_runtime_fault_from_wait_status(
+            *status, "plugin runtime authenticated startup");
+      }
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::Channel, error.what());
+    }
+  }
+}
+
+/**
+ * @brief Monitors authenticated heartbeats until callback completion.
+ * @param process Live exact child and lifecycle endpoint.
+ * @param nonce Exact retained Host nonce.
+ * @param identity Exact retained complete invocation identity.
+ * @param heartbeat_interval_milliseconds Exact Host-selected interval.
+ * @param invocation_deadline Absolute callback-completion deadline.
+ * @param heartbeat_timeout Maximum gap from the latest valid event.
+ * @param request_transferred_at Time the complete request transfer finished.
+ * @return Time of authenticated `InvocationCompleted` observation.
+ * @throws PluginRuntimeFault for deadline, heartbeat, protocol, channel, or
+ * natural process failure.
+ * @throws IsolatedCpuInvocationError for exact wait failure.
+ */
+SupervisorDeadline await_authenticated_invocation_completed(
+    SupervisedSpawnedChild* process, const PluginRuntimeSessionNonce& nonce,
+    const IsolatedCpuInvocationIdentity& identity,
+    std::uint64_t heartbeat_interval_milliseconds,
+    SupervisorDeadline invocation_deadline,
+    std::chrono::milliseconds heartbeat_timeout,
+    SupervisorDeadline request_transferred_at) {
+  std::uint64_t expected_sequence = 2U;
+  SupervisorDeadline heartbeat_deadline =
+      request_transferred_at + heartbeat_timeout;
+  for (;;) {
+    const SupervisorDeadline now = SupervisorClock::now();
+    if (now >= invocation_deadline) {
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::InvocationDeadline,
+                               "plugin runtime invocation timed out");
+    }
+    if (now >= heartbeat_deadline) {
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::HeartbeatTimeout,
+                               "plugin runtime heartbeat timed out");
+    }
+    if (process->child.poll_reap()) {
+      throw plugin_runtime_fault_from_wait_status(*process->child.wait_status(),
+                                                  "plugin runtime invocation");
+    }
+    const SupervisorDeadline next_deadline =
+        std::min(invocation_deadline, heartbeat_deadline);
+    struct pollfd lifecycle_poll{
+        process->supervision.get(),
+        static_cast<std::int16_t>(POLLIN | POLLHUP | POLLERR), 0};
+    const int timeout = std::min(poll_timeout_until(next_deadline), 10);
+    const int result = ::poll(&lifecycle_poll, 1U, timeout);
+    if (result < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime invocation poll failed: ") +
+          std::strerror(errno));
+    }
+    if (result == 0) {
+      continue;
+    }
+    try {
+      const auto event = receive_plugin_runtime_lifecycle_frame_nonblocking(
+          process->supervision.get());
+      if (!event.has_value()) {
+        continue;
+      }
+      validate_plugin_runtime_lifecycle_session(*event, nonce, identity,
+                                                heartbeat_interval_milliseconds,
+                                                expected_sequence++);
+      if (event->kind == PluginRuntimeLifecycleKind::Heartbeat) {
+        heartbeat_deadline = SupervisorClock::now() + heartbeat_timeout;
+        continue;
+      }
+      if (event->kind == PluginRuntimeLifecycleKind::InvocationCompleted) {
+        return SupervisorClock::now();
+      }
+      throw PluginRuntimeFault(
+          PluginRuntimeFaultKind::LifecycleProtocol,
+          "plugin runtime emitted an unexpected invocation event");
+    } catch (const IsolatedCpuProtocolError& error) {
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::LifecycleProtocol,
+                               error.what());
+    } catch (const IsolatedCpuInvocationError& error) {
+      const auto status =
+          observe_child_after_channel_close(&process->child, next_deadline);
+      if (status.has_value()) {
+        throw plugin_runtime_fault_from_wait_status(
+            *status, "plugin runtime invocation");
+      }
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::Channel, error.what());
+    }
+  }
+}
+
+/**
+ * @brief Current phase used only to map internal channel/deadline exceptions.
+ */
+enum class SupervisedHostPhase : std::uint8_t {
+  /** @brief Fork, exec-status, hello, and authenticated start. */
+  Startup = 0,
+  /** @brief Complete request transfer under its independent full bound. */
+  RequestTransfer = 1,
+  /** @brief Callback, heartbeat monitoring, and authenticated completion. */
+  Invocation = 2,
+  /** @brief Response, exact exit, validation, and Host publication. */
+  Response = 3,
+};
+
+/**
+ * @brief Executes one complete fresh supervised invocation.
+ * @param runtime_executable Operability-validated runtime path.
+ * @param options Validated lifecycle timing policy.
+ * @param limits Retained protocol-v1 bounds.
+ * @param invocation Host-owned invocation plan.
+ * @param pending_reap Receives quarantine completion if synchronous reap fails.
+ * @return Complete typed callback result with fresh outputs after success.
+ * @throws PluginRuntimeFault for every supervised lifecycle/process/output
+ * fault.
+ * @throws IsolatedCpuProtocolError for Host preflight failures before spawn.
+ * @throws Value/readiness/access/allocation failures from Host preparation or
+ * publication.
+ * @note Every caught post-spawn fault revokes channels before bounded
+ * escalation; no direct non-supervised retry exists.
+ */
+IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
+    const std::filesystem::path& runtime_executable,
+    const PluginRuntimeSupervisorOptions& options,
+    const IsolatedCpuInvocationLimits& limits,
+    const IsolatedCpuHostInvocation& invocation,
+    std::shared_ptr<std::atomic<bool>>* pending_reap) {
+  PreparedHostInvocation prepared = prepare_host_invocation(invocation, limits);
+  std::vector<int> descriptors;
+  descriptors.reserve(prepared.capabilities.size());
+  for (const MappedCapability& capability : prepared.capabilities) {
+    descriptors.push_back(capability.descriptor.get());
+  }
+  const PluginRuntimeSessionNonce nonce = generate_plugin_runtime_nonce();
+
+  SupervisedSpawnedChild process{};
+  const SupervisorDeadline startup_deadline =
+      supervisor_deadline_after(options.startup_timeout);
+  try {
+    process = spawn_supervised_runtime(runtime_executable);
+  } catch (const IsolatedCpuInvocationError& error) {
+    throw PluginRuntimeFault(PluginRuntimeFaultKind::Channel, error.what());
+  }
+
+  SupervisedHostPhase phase = SupervisedHostPhase::Startup;
+  try {
+    await_supervised_exec(&process, startup_deadline);
+    const PluginRuntimeLifecycleFrame hello{
+        PluginRuntimeLifecycleKind::Hello, 0U, nonce, prepared.request.identity,
+        static_cast<std::uint64_t>(options.heartbeat_interval.count())};
+    send_plugin_runtime_lifecycle_frame_until(process.supervision.get(), hello,
+                                              startup_deadline);
+    static_cast<void>(await_authenticated_runtime_started(
+        &process, nonce, prepared.request.identity,
+        hello.heartbeat_interval_milliseconds, startup_deadline));
+
+    phase = SupervisedHostPhase::RequestTransfer;
+    const SupervisorDeadline request_transfer_deadline =
+        supervisor_deadline_after(options.invocation_timeout);
+    send_packet_until(process.control.get(), prepared.request_packet,
+                      descriptors, request_transfer_deadline);
+    const SupervisorDeadline request_transferred_at = SupervisorClock::now();
+    const SupervisorDeadline invocation_deadline =
+        request_transferred_at + options.invocation_timeout;
+    phase = SupervisedHostPhase::Invocation;
+    const SupervisorDeadline completed_at =
+        await_authenticated_invocation_completed(
+            &process, nonce, prepared.request.identity,
+            hello.heartbeat_interval_milliseconds, invocation_deadline,
+            options.heartbeat_timeout, request_transferred_at);
+
+    phase = SupervisedHostPhase::Response;
+    const SupervisorDeadline response_deadline =
+        completed_at + options.response_timeout;
+    ReceivedPacket received =
+        receive_packet(process.control.get(), response_deadline);
+    process.control.reset();
+    process.supervision.reset();
+    if (!process.child.wait_until(response_deadline)) {
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::ResponseDeadline,
+                               "plugin runtime response exit timed out");
+    }
+    const int wait_status = *process.child.wait_status();
+    if (!WIFEXITED(wait_status) || WEXITSTATUS(wait_status) != 0) {
+      throw plugin_runtime_fault_from_wait_status(
+          wait_status, "plugin runtime response completion");
+    }
+    if (!received.descriptors.empty()) {
+      throw PluginRuntimeFault(
+          PluginRuntimeFaultKind::BadOutput,
+          "plugin runtime response unexpectedly carried descriptors",
+          wait_status, 0);
+    }
+    if (SupervisorClock::now() >= response_deadline) {
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::ResponseDeadline,
+                               "plugin runtime response decode timed out",
+                               wait_status, 0);
+    }
+    const IsolatedCpuInvocationResponse response =
+        decode_isolated_cpu_invocation_response(prepared.request,
+                                                received.packet, limits);
+    validate_host_capabilities_after_exit(prepared.request,
+                                          prepared.capabilities);
+
+    IsolatedCpuHostInvocationResult result;
+    result.outcome = response.outcome;
+    result.diagnostic = response.diagnostic;
+    if (response.outcome == IsolatedCpuInvocationOutcome::Succeeded) {
+      result.outputs =
+          publish_host_outputs(invocation, response, prepared.capabilities);
+    }
+    if (SupervisorClock::now() >= response_deadline) {
+      throw PluginRuntimeFault(PluginRuntimeFaultKind::ResponseDeadline,
+                               "plugin runtime Host publication timed out",
+                               wait_status, 0);
+    }
+    return result;
+  } catch (const PluginRuntimeFault& fault) {
+    throw_after_supervised_cleanup(fault, &process, options, pending_reap);
+  } catch (const SupervisorDeadlineExpired&) {
+    PluginRuntimeFaultKind kind = PluginRuntimeFaultKind::StartupDeadline;
+    const char* message = "plugin runtime startup channel timed out";
+    if (phase == SupervisedHostPhase::RequestTransfer) {
+      kind = PluginRuntimeFaultKind::InvocationDeadline;
+      message = "plugin runtime request transfer timed out";
+    } else if (phase == SupervisedHostPhase::Invocation) {
+      kind = PluginRuntimeFaultKind::InvocationDeadline;
+      message = "plugin runtime invocation channel timed out";
+    } else if (phase == SupervisedHostPhase::Response) {
+      kind = PluginRuntimeFaultKind::ResponseDeadline;
+      message = "plugin runtime response transfer timed out";
+    }
+    throw_after_supervised_cleanup(PluginRuntimeFault(kind, message), &process,
+                                   options, pending_reap);
+  } catch (const IsolatedCpuProtocolError& error) {
+    const PluginRuntimeFaultKind kind =
+        phase == SupervisedHostPhase::Response
+            ? PluginRuntimeFaultKind::BadOutput
+            : PluginRuntimeFaultKind::LifecycleProtocol;
+    throw_after_supervised_cleanup(PluginRuntimeFault(kind, error.what()),
+                                   &process, options, pending_reap);
+  } catch (const IsolatedCpuInvocationError& error) {
+    std::optional<int> status = process.child.wait_status();
+    if (!status.has_value()) {
+      try {
+        status = observe_child_after_channel_close(
+            &process.child,
+            SupervisorClock::now() + std::chrono::milliseconds{20});
+      } catch (...) {
+        status = std::nullopt;
+      }
+    }
+    if (status.has_value()) {
+      throw_after_supervised_cleanup(
+          plugin_runtime_fault_from_wait_status(
+              *status, "plugin runtime channel failure"),
+          &process, options, pending_reap);
+    }
+    throw_after_supervised_cleanup(
+        PluginRuntimeFault(PluginRuntimeFaultKind::Channel, error.what()),
+        &process, options, pending_reap);
+  }
+}
+
 }  // namespace
 
 /** @copydoc IsolatedCpuInvocationTestProbe::snapshot */
@@ -2088,9 +3800,196 @@ IsolatedCpuInvocationTestProbe::snapshot() noexcept {
       g_exact_frames_received.load(std::memory_order_relaxed)};
 }
 
+/** @copydoc IsolatedCpuInvocationTestProbe::delay_next_supervised_request_send
+ */
+void IsolatedCpuInvocationTestProbe::delay_next_supervised_request_send(
+    std::chrono::milliseconds delay) {
+  if (delay.count() < 0) {
+    throw std::invalid_argument(
+        "supervised request-send test delay must be nonnegative");
+  }
+  g_next_supervised_request_send_delay_ms.store(delay.count(),
+                                                std::memory_order_release);
+}
+
 /** @copydoc IsolatedCpuInvocationTestProbe::receive_one_packet */
 void IsolatedCpuInvocationTestProbe::receive_one_packet(int socket) {
   static_cast<void>(receive_packet(socket));
+}
+
+/** @copydoc PluginRuntimeFault::PluginRuntimeFault */
+PluginRuntimeFault::PluginRuntimeFault(
+    PluginRuntimeFaultKind kind, const std::string& message,
+    std::optional<int> wait_status, std::optional<int> exit_code,
+    std::optional<int> signal_number,
+    PluginRuntimeTerminationStage termination_stage,
+    bool memory_pressure_compatible)
+    : std::runtime_error(message),
+      kind_(kind),
+      wait_status_(wait_status),
+      exit_code_(exit_code),
+      signal_number_(signal_number),
+      termination_stage_(termination_stage),
+      memory_pressure_compatible_(memory_pressure_compatible &&
+                                  signal_number.has_value() &&
+                                  *signal_number == SIGKILL) {}
+
+/**
+ * @brief Address-stable serialized state for one source-private supervisor.
+ * @throws std::bad_alloc when retained path state cannot allocate.
+ * @note One mutex prevents overlapping child authority and protects restart
+ * backoff plus deferred-reap quarantine state.
+ */
+class PluginRuntimeSupervisor::Impl final {
+ public:
+  /**
+   * @brief Retains already validated immutable construction state.
+   * @param runtime_executable Operability-validated runtime path.
+   * @param supervisor_options Validated lifecycle timing policy.
+   * @param invocation_limits Validated protocol-v1 bounds.
+   * @throws std::bad_alloc when retained path storage cannot allocate.
+   */
+  Impl(std::filesystem::path runtime_executable,
+       PluginRuntimeSupervisorOptions supervisor_options,
+       IsolatedCpuInvocationLimits invocation_limits)
+      : executable(std::move(runtime_executable)),
+        options(supervisor_options),
+        limits(invocation_limits) {}
+
+  /** @brief Immutable operability-validated runtime path. */
+  std::filesystem::path executable;
+  /** @brief Immutable positive bounded lifecycle timing policy. */
+  PluginRuntimeSupervisorOptions options;
+  /** @brief Immutable protocol-v1 endpoint bounds. */
+  IsolatedCpuInvocationLimits limits;
+  /** @brief Serializes calls and all exact child/recovery authority. */
+  std::mutex invocation_mutex;
+  /** @brief Earliest launch time after a prior classified fault. */
+  SupervisorDeadline next_launch_not_before = SupervisorDeadline::min();
+  /** @brief Deferred exact-reap completion while the instance is quarantined.
+   */
+  std::shared_ptr<std::atomic<bool>> pending_reap;
+};
+
+// NOLINTBEGIN(whitespace/indent_namespace)
+/**
+ * @brief Validates and retains one bounded fresh-runtime supervision route.
+ * @param runtime_executable Existing executable regular file.
+ * @param options Positive, ordered lifecycle bounds.
+ * @param limits Protocol-v1 endpoint bounds.
+ * @throws std::invalid_argument for invalid path, options, or limits.
+ * @throws std::system_error when `SIGCHLD` state cannot be queried.
+ * @throws std::bad_alloc when private state cannot allocate.
+ * @note Construction creates no child, session nonce, descriptor, or trust
+ * authority.
+ */
+PluginRuntimeSupervisor::PluginRuntimeSupervisor(
+    std::filesystem::path runtime_executable,
+    PluginRuntimeSupervisorOptions options,
+    IsolatedCpuInvocationLimits limits) {
+  validate_plugin_runtime_supervisor_options(options);
+  validate_isolated_cpu_invocation_limits(limits);
+  const std::string executable = runtime_executable.string();
+  if (executable.empty() || executable.find('\0') != std::string::npos) {
+    throw std::invalid_argument(
+        "plugin runtime executable path is empty or malformed");
+  }
+  struct stat status{};
+  if (::stat(executable.c_str(), &status) != 0 || !S_ISREG(status.st_mode) ||
+      ::access(executable.c_str(), X_OK) != 0) {
+    throw std::invalid_argument(
+        "plugin runtime path is not an executable regular file");
+  }
+  validate_sigchld_reaping_configuration();
+  impl_ =
+      std::make_unique<Impl>(std::move(runtime_executable), options, limits);
+}
+// NOLINTEND
+
+/**
+ * @brief Destroys immutable/quarantine state without owning a live child.
+ * @throws Nothing.
+ * @note Per-call RAII retires or transfers exact PID ownership before return.
+ */
+PluginRuntimeSupervisor::~PluginRuntimeSupervisor() noexcept = default;
+
+/**
+ * @brief Serializes and executes one fresh supervised invocation.
+ * @param invocation Host-owned identity, inputs, and exact output plans.
+ * @return Complete callback outcome with fresh Values on success.
+ * @throws PluginRuntimeFault for lifecycle/process/output or quarantine fault.
+ * @throws IsolatedCpuProtocolError and public Value failures from Host
+ * preflight/publication unchanged.
+ * @note A classified failure arms only bounded restart backoff; no transport
+ * fallback or child-state reuse occurs.
+ */
+IsolatedCpuHostInvocationResult PluginRuntimeSupervisor::invoke(
+    const IsolatedCpuHostInvocation& invocation) {
+  std::unique_lock<std::mutex> lock(impl_->invocation_mutex);
+  if (impl_->pending_reap) {
+    if (!impl_->pending_reap->load(std::memory_order_acquire)) {
+      throw PluginRuntimeFault(
+          PluginRuntimeFaultKind::ReapPending,
+          "plugin runtime supervisor is quarantined pending exact reap");
+    }
+    impl_->pending_reap.reset();
+  }
+  const SupervisorDeadline now = SupervisorClock::now();
+  if (now < impl_->next_launch_not_before) {
+    std::this_thread::sleep_until(impl_->next_launch_not_before);
+  }
+  try {
+    return run_supervised_plugin_invocation(impl_->executable, impl_->options,
+                                            impl_->limits, invocation,
+                                            &impl_->pending_reap);
+  } catch (const PluginRuntimeFault&) {
+    impl_->next_launch_not_before =
+        SupervisorClock::now() + impl_->options.restart_backoff;
+    throw;
+  }
+}
+
+/** @copydoc PluginRuntimeSupervisor::runtime_executable */
+const std::filesystem::path& PluginRuntimeSupervisor::runtime_executable()
+    const noexcept {
+  return impl_->executable;
+}
+
+/** @copydoc PluginRuntimeSupervisor::options */
+PluginRuntimeSupervisorOptions PluginRuntimeSupervisor::options()
+    const noexcept {
+  return impl_->options;
+}
+
+/** @copydoc PluginRuntimeSupervisor::limits */
+IsolatedCpuInvocationLimits PluginRuntimeSupervisor::limits() const noexcept {
+  return impl_->limits;
+}
+
+// NOLINTBEGIN(whitespace/indent_namespace)
+/**
+ * @brief Constructs the sole supervised route selected by this executor.
+ * @param runtime_executable Existing executable regular file.
+ * @param options Positive lifecycle timing policy.
+ * @param limits Protocol-v1 endpoint bounds.
+ * @throws Construction failures from `PluginRuntimeSupervisor` unchanged.
+ */
+PluginInvocationExecutor::PluginInvocationExecutor(
+    std::filesystem::path runtime_executable,
+    PluginRuntimeSupervisorOptions options, IsolatedCpuInvocationLimits limits)
+    : supervisor_(std::move(runtime_executable), options, limits) {}
+// NOLINTEND
+
+/**
+ * @brief Invokes only the owned supervised route.
+ * @param invocation Host-owned invocation plan.
+ * @return Complete Host result from the supervisor.
+ * @throws All supervisor, preflight, and publication failures unchanged.
+ * @note No direct non-supervised adapter exists in this selection path.
+ */
+IsolatedCpuHostInvocationResult PluginInvocationExecutor::invoke(
+    const IsolatedCpuHostInvocation& invocation) {
+  return supervisor_.invoke(invocation);
 }
 
 // NOLINTBEGIN(whitespace/indent_namespace)
@@ -2210,6 +4109,91 @@ int serve_non_supervised_isolated_cpu_invocation_once(
         execute_runtime_callback(request, mappings, callback, limits);
     const std::vector<std::byte> response_packet =
         encode_isolated_cpu_invocation_response(request, response, limits);
+    send_packet(control_fd, response_packet, {});
+    return 0;
+  } catch (...) {
+    return 1;
+  }
+}
+
+/**
+ * @brief Serves one nonce-bound invocation with independent heartbeat events.
+ * @param control_fd Connected #102 framed stream, normally fixed fd 3.
+ * @param supervision_fd Connected lifecycle datagram socket, normally fd 5.
+ * @param limits Runtime-local protocol-v1 hard bounds.
+ * @param callback Nonempty process-local callback.
+ * @param startup_behavior Deterministic startup behavior for maintained
+ * fail-closed fixtures.
+ * @param lifecycle_hook Optional process-local callback-adjacent
+ * instrumentation.
+ * @return Zero after one exact response, two for invalid local arguments, and
+ * one for contained protocol, mapping, callback-adjacent, or channel failure.
+ * @throws Nothing; every exception remains inside the fresh runtime process.
+ * @note The endpoint authenticates only its private launch/session. It grants
+ * no package trust, sandbox, quota, or hostile-code attestation.
+ */
+int serve_supervised_isolated_cpu_invocation_once(
+    int control_fd, int supervision_fd,
+    const IsolatedCpuInvocationLimits& limits,
+    const IsolatedCpuRuntimeCallback& callback,
+    PluginRuntimeEndpointStartupBehavior startup_behavior,
+    const PluginRuntimeLifecycleHook& lifecycle_hook) noexcept {
+  try {
+    if (control_fd < 0 || supervision_fd < 0 || !callback) {
+      return 2;
+    }
+    validate_isolated_cpu_invocation_limits(limits);
+    configure_socket(control_fd);
+    configure_socket(supervision_fd);
+    const PluginRuntimeLifecycleFrame hello =
+        receive_plugin_runtime_hello_blocking(supervision_fd);
+    RuntimeHeartbeatEmitter heartbeat(supervision_fd, hello);
+    if (startup_behavior ==
+        PluginRuntimeEndpointStartupBehavior::SuppressStarted) {
+      for (;;) {
+        static_cast<void>(::pause());
+      }
+    }
+    const bool corrupt_started_nonce =
+        startup_behavior ==
+        PluginRuntimeEndpointStartupBehavior::CorruptStartedNonce;
+    heartbeat.send_started(corrupt_started_nonce);
+    if (corrupt_started_nonce) {
+      for (;;) {
+        static_cast<void>(::pause());
+      }
+    }
+    if (startup_behavior != PluginRuntimeEndpointStartupBehavior::Normal) {
+      return 2;
+    }
+    heartbeat.start();
+
+    ReceivedPacket received = receive_packet(control_fd);
+    const IsolatedCpuInvocationRequest request =
+        decode_isolated_cpu_invocation_request(received.packet, limits);
+    if (!(request.identity == hello.identity)) {
+      throw IsolatedCpuProtocolError(
+          "plugin runtime hello and request identities differ");
+    }
+    std::vector<MappedCapability> mappings =
+        map_received_capabilities(request, &received.descriptors);
+    validate_runtime_input_bindings(request, mappings);
+    const IsolatedCpuInvocationResponse response =
+        execute_runtime_callback(request, mappings, callback, limits);
+    const IsolatedCpuRuntimeInvocation lifecycle_invocation =
+        build_runtime_invocation(request, mappings);
+    if (lifecycle_hook) {
+      lifecycle_hook(PluginRuntimeLifecyclePoint::BeforeInvocationCompleted,
+                     lifecycle_invocation);
+    }
+    const std::vector<std::byte> response_packet =
+        encode_isolated_cpu_invocation_response(request, response, limits);
+    heartbeat.stop();
+    heartbeat.send_completed();
+    if (lifecycle_hook) {
+      lifecycle_hook(PluginRuntimeLifecyclePoint::BeforeResponse,
+                     lifecycle_invocation);
+    }
     send_packet(control_fd, response_packet, {});
     return 0;
   } catch (...) {

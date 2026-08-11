@@ -35,8 +35,9 @@ ADR 0011 建立了独立 security-domain 方向。Operator-trusted DSO 可以在
 执行；tenant-supplied CPU code 最终必须在 isolated plugin runtime 执行。Pure C 是显式
 可验证 record 的必要条件，却不是 process isolation。Issue #102 现在已经实现一个独立
 版本化、源码私有的 CPU wire/runtime 切片，但不更改当前 operation ABI v2，也不实现本 ADR
-仍为目标态的 operation ABI v1。Issues #103 和 #104 继续分别拥有 supervision 与
-trust/resource policy。
+仍为目标态的 operation ABI v1。Issue #103 现在已经围绕该 transport 实现独立版本化、源码
+私有的 supervision 组合；Issue #104 继续拥有 trust、sandbox 与可执行 resource policy。两个
+切片都不会改变 ABI replacement 决策，也不会提供最终用户 operation loader。
 
 ## 决策
 
@@ -372,16 +373,23 @@ Tenant-untrusted CPU code 不把 pointer-bearing ABI record 用作 IPC：
 - Issue #102 实现源码私有的无指针 protocol-v1 request/response、基于 `SCM_RIGHTS` 的
   POSIX-shared-memory capability、canonical descriptor/content binding、严格
   offset/range/ownership validation，以及 one-shot process-local callback seam；
-- Issue #103 负责 authenticated `PluginRuntimeSupervisor` lifecycle、heartbeat/
-  deadline、crash/hang/OOM/bad-output containment、restart、reap；
+- Issue #103 实现 authenticated private-session `PluginRuntimeSupervisor` lifecycle、
+  heartbeat/deadline、crash/hang/bad-output containment、基于事实的 signal 报告、
+  fresh-process restart 与精确 reap；`SIGKILL` 只表示 memory-pressure-compatible，
+  不能证明 OOM；
 - Issue #104 负责 package allowlist/signature、sandbox/capability 与 enforceable
   resource policy。
 
 本 ADR 被接受时并未预选其 frame、handle、authentication 或 policy format。Issue #102
 随后为自身选择了独立版本化的 protocol-v1 frame 与 capability layout。该 protocol 不会
 序列化 operation ABI v2、目标 operation ABI v1 或任何 ABI pointer record，也不引入
-migration wrapper、shim、adapter 或 dual loader。Authentication 与 policy format 仍由
-Issues #103 和 #104 拥有。Cross-process GPU/native-handle 工作仍是后续决策。
+migration wrapper、shim、adapter 或 dual loader。Issue #103 随后选择了一种私有定长
+lifecycle frame：它在专用 Unix datagram channel 上携带 OS 随机 nonce、完整 invocation
+identity、严格 sequence 与 Host 选择的 heartbeat interval。该 session binding 不是 plugin
+attestation 或 trust。Issue #104 仍拥有 package admission、sandbox/capability 与可执行
+resource-policy format。当前没有 operation loader 会把 ABI v2 或仍为目标态的 ABI v1 映射到
+supervised executor；最终用户选择仍属于完整 breaking ABI migration。Cross-process GPU/
+native-handle 工作仍是后续决策。
 
 ### 一次完整 breaking migration
 

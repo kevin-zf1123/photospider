@@ -1552,9 +1552,11 @@ visibility, per-slot revision/predecessor restoration, middle-generation
 splice, reverse retirement, and exact callback/context DSO leases. A callback
 that never returns may retain those owners forever; pure C does not add bounded
 termination. Issue #102 now implements its pointer-free shared-memory/FD
-invocation record, Issue #103 owns authenticated supervision and
-crash/hang/OOM/bad-output containment, and Issue #104 owns allowlist/signature
-and enforceable resource policy.
+invocation record, Issue #103 now implements authenticated private-session
+supervision and factual crash/hang/signal/bad-output containment, and Issue #104
+owns allowlist/signature, sandboxing, and enforceable resource policy. A
+`SIGKILL` observation is only memory-pressure-compatible and does not prove
+OOM.
 
 Issue #101 is complete as a decision when these bilingual artifacts pass local
 validation, fresh independent diff review, authorized exact-head PR
@@ -1602,13 +1604,57 @@ composition through `PluginRuntimeSupervisor` belongs to #103.
 Every call uses a fresh `fork`/`execve` process with an empty environment and,
 besides stdio, only its fixed control/status descriptors retained. This gives
 process-crash containment and deterministic post-exit output adoption, but it
-is deliberately non-supervised: there is no authenticated supervisor, deadline,
-heartbeat, crash/hang/OOM classification, restart policy, sandbox, or
-enforceable resource policy, and a callback can hang indefinitely. Those
-remain Issues #103 and #104. The process-local callback seam neither calls nor
-migrates current operation ABI v2 or target-only operation ABI v1; it adds no
-compatibility wrapper, shim, ABI adapter, or dual loader. Cross-process
-GPU/native-handle support remains later work.
+is deliberately non-supervised when called directly: there is no deadline,
+heartbeat, restart policy, sandbox, or enforceable resource policy, and a
+callback can hang indefinitely. Issue #103 now composes the separate supervised
+path described below; the non-supervised adapter is never its fallback. The
+process-local callback seam neither calls nor migrates current operation ABI v2
+or target-only operation ABI v1; it adds no compatibility wrapper, shim, ABI
+adapter, or dual loader. Cross-process GPU/native-handle support remains later
+work.
+
+### Issue #103 current plugin runtime supervision slice
+
+Issue #103 now supplies source-private `PluginRuntimeSupervisor` and
+`PluginInvocationExecutor` in the product archive. Each invocation retains the
+#102 data protocol but launches one fresh execed child with exact PID ownership,
+a separate Unix datagram lifecycle socket on fixed descriptor 5, and an empty
+environment. A fixed hello binds an OS-random 128-bit nonce, the complete
+tenant/Job/attempt/worker-lease/plugin-generation/invocation identity, and the
+Host-selected heartbeat interval to the launch. Strictly increasing
+`RuntimeStarted`, `Heartbeat`, and `InvocationCompleted` events must echo those
+facts. This is private-session authentication and liveness, not hostile-child
+attestation, package trust, or output validation.
+
+Absolute monotonic bounds cover exec/startup, complete request transfer,
+invocation, heartbeat gap, exact response/EOF/exit reconciliation, graceful
+termination, kill, and reap. Complete request transfer receives its own full
+invocation-duration window; callback invocation and the heartbeat gap are
+armed only after transfer completes, while the absolute invocation deadline
+still prevents a live heartbeat thread from masking a hung callback. Observable
+typed faults preserve deadline, lifecycle-protocol, channel, bad-output,
+natural exit, signal, and supervisor escalation facts. `SIGKILL` is marked only
+memory-pressure-compatible; no OOM cause is invented. The supervisor revokes
+both channels, sends `SIGTERM`, escalates to `SIGKILL` when needed, and retains
+exact PID ownership through bounded reap or one quarantined deferred reaper.
+
+There is no in-process or non-supervised fallback. A later call waits bounded
+restart backoff and gets a new PID, nonce, data channel, and lifecycle channel.
+Product-linked real-exec coverage proves startup authentication, each timeout
+class, natural exit and signal reporting, ignored-TERM escalation, malformed
+output rejection, exact FD/PID retirement, later healthy recovery, and a real
+`ExecutionService` callback boundary. At that boundary the original
+`PluginRuntimeFault` reaches the request owner, only the owning Run is published
+Failed, and the fixed service worker executes a later unrelated Run.
+
+This is not yet an end-user selected operation path. No current
+`ExecutionService`, `WorkerManager`, embedded Host/CLI, `photospider-worker`, or
+operation loader constructs the isolated invocation from a Graph operation.
+Operation ABI v2 cannot cross this wire, target-only ABI v1 is not implemented
+or shimmed, Issue #104 still owns package trust/sandbox/enforceable quota, Issue
+#105 owns the network/artifact planes, and Issue #106 owns long-lived fuzz,
+audit, and cross-layer trace. The I2 runner work tracked separately as Issue
+#125 is not part of this runtime-supervision slice.
 
 The current Issue #99/#100 baseline is the source-private
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
@@ -1650,7 +1696,7 @@ Delivery remains allocated rather than absorbed by Issue #97:
 | [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision, crash isolation, and bounded cancellation/shutdown |
 | [#101](https://github.com/kevin-zf1123/photospider/issues/101) | Accepted separately versioned pure-C operation-plugin ABI v1 decision; implementation remains a later breaking migration |
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | Implemented source-private Darwin/Linux isolated CPU shared-memory/FD invocation with exact descriptor/stride/size/ownership/content validation; authenticated supervision remains #103 |
-| [#103](https://github.com/kevin-zf1123/photospider/issues/103) | `PluginRuntimeSupervisor` heartbeat/deadline and crash/hang/OOM/bad-output containment |
+| [#103](https://github.com/kevin-zf1123/photospider/issues/103) | Implemented source-private `PluginRuntimeSupervisor` heartbeat/deadline, factual crash/hang/signal/bad-output containment, fresh-process restart, and exact reap; no end-user route or OOM attribution |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature and enforceable resource policy |
 | [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata and bulk artifact data-plane separation |
 | [#106](https://github.com/kevin-zf1123/photospider/issues/106) | Long-lived codec/descriptor fuzzing, security audit, and cross-layer identity trace |

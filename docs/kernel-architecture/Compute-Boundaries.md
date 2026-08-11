@@ -443,9 +443,10 @@ grant, destroy its context, or unload its DSO safely. Operation v1 is therefore
 an operator-trusted compatibility boundary. Issue #102 now implements a
 source-private, pointer-free Darwin/Linux protocol-v1 invocation slice over a
 framed Unix stream, ordered `SCM_RIGHTS` descriptors, and unlinked POSIX shared
-memory. Issue #103 still owns bounded authenticated supervision, and Issue #104
-still owns trust/resource enforcement for tenant code; ABI pointer records are
-never their wire protocol.
+memory. Issue #103 now implements the source-private bounded supervision
+composition around that transport, while Issue #104 still owns trust,
+sandboxing, and enforceable resource policy for tenant code; ABI pointer
+records are never their wire protocol.
 
 `NonSupervisedIsolatedCpuInvocationExecutor` validates the invocation identity,
 generation/operation binding, scalar parameters, resource declarations,
@@ -460,17 +461,48 @@ reap the exact child on success or failure. This slice deliberately has no
 supervisor, authentication, deadline, heartbeat, restart, sandbox, or resource
 enforcement, so a callback that never returns remains unbounded.
 
-The adapter and runtime endpoint definitions are compiled into the installable
-product archive, and the real-exec integration test links those product objects.
-That is the complete Issue #102 product inclusion proof, not an end-user route:
-no `ExecutionService`, `WorkerManager`, embedded Host/CLI,
-`photospider-worker`, or other composition root selects them. The deliberately
-named `NonSupervisedIsolatedCpuInvocationExecutor` is therefore a
-pre-supervisor transport sub-role, not the target private
-`PluginInvocationExecutor`. Selecting that target through
-`PluginRuntimeSupervisor` remains #103; current operation ABI v2 cannot cross
-this wire, and target-only operation ABI v1 is neither implemented nor shimmed
-by this slice.
+Issue #103 adds `PluginRuntimeSupervisor` and `PluginInvocationExecutor` to the
+same source-private product module without changing the #102 request/response
+wire. Every supervised call uses a fresh execed child and a dedicated Unix
+datagram lifecycle channel on fixed descriptor 5. The Host sends a fixed hello
+containing an OS-random 128-bit nonce, the complete six-part invocation identity
+plus worker/plugin generations, and the selected heartbeat interval. The child
+must echo those facts in strictly sequenced `RuntimeStarted`, `Heartbeat`, and
+`InvocationCompleted` events. This binds liveness to the exact private launch;
+because the child learns the nonce, it is session authentication rather than
+plugin attestation or output truth.
+
+The supervisor applies absolute monotonic startup, invocation, heartbeat-gap,
+response, graceful-termination, kill, and reap bounds. Complete request
+transfer receives one independent full invocation-duration window. Only after
+that transfer finishes do the callback invocation and heartbeat-gap deadlines
+start, so a large bounded send cannot consume the callback-liveness budget;
+the absolute invocation deadline still ends a callback that continues to emit
+heartbeats. Faults expose exact observable
+deadline, lifecycle-protocol, channel, bad-output, natural exit, signal, and
+termination-stage facts. A matching `SIGKILL` is only marked
+memory-pressure-compatible; it does not prove an OOM cause. Failure closes both
+channels, escalates `SIGTERM` to `SIGKILL` when necessary, and retains exact PID
+ownership through reap or the quarantined deferred-reaper integrity path.
+
+`PluginInvocationExecutor` never falls back to an in-process or non-supervised
+call. After bounded restart backoff, the next invocation receives a fresh PID,
+nonce, lifecycle channel, and data channel. Product-linked real-exec tests prove
+success, startup authentication, each deadline class, natural exit and signal
+classification, malformed output, exact descriptor/PID retirement, no fallback,
+and later healthy recovery. One test invokes the executor inside a production
+`ExecutionService` ready callback: the original `PluginRuntimeFault` reaches the
+request boundary, that boundary publishes only the owning Run as Failed, and
+the fixed service worker executes a later unrelated Run.
+
+The adapter, runtime endpoint, supervisor, and executor are compiled into the
+installable product archive, but this remains an internal composition proof,
+not an end-user route. No current `ExecutionService`, `WorkerManager`, embedded
+Host/CLI, `photospider-worker`, or operation loader constructs an isolated
+request from a Graph operation. Current operation ABI v2 cannot cross this
+wire, target-only operation ABI v1 is neither implemented nor shimmed here, and
+#104 still owns allowlist/signature, sandbox/capability, and enforceable
+resource policy.
 
 ## Request Behavior
 
@@ -1400,6 +1432,8 @@ command, plugin callback, scheduler route, or second resource/residency owner.
 - `src/lib/execution/residency_manager.*`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/isolated_cpu_invocation.*`
+- `src/lib/execution/plugin_runtime_supervisor.hpp`
 - `src/lib/policy/policy_registry.*`
 - `src/lib/providers/configured_operation_providers.*`
 - `src/lib/providers/opencv/*`
@@ -1428,3 +1462,4 @@ command, plugin callback, scheduler route, or second resource/residency owner.
 - `tests/unit/test_i2_profile.cpp`
 - `tests/unit/test_i2_evidence.cpp`
 - `tests/integration/test_i2_product_path.cpp`
+- `tests/integration/test_plugin_runtime_supervisor.cpp`
