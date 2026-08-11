@@ -673,6 +673,24 @@ set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
 )
 set(PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES)
 set(PHOTOSPIDER_HAS_METAL_EXECUTOR OFF)
+set(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION OFF)
+if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION ON)
+    list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+        src/lib/execution/isolated_cpu_invocation_protocol.cpp
+        src/lib/execution/isolated_cpu_invocation.cpp)
+    if(APPLE)
+        find_library(PHOTOSPIDER_PROC_LIBRARY NAMES proc)
+        if(NOT PHOTOSPIDER_PROC_LIBRARY)
+            message(FATAL_ERROR
+                "Photospider isolated CPU invocation requires libproc")
+        endif()
+        list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES
+            ${PHOTOSPIDER_PROC_LIBRARY})
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES rt)
+    endif()
+endif()
 if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     enable_language(OBJCXX)
     find_library(METAL_FRAMEWORK NAMES Metal)
@@ -924,7 +942,8 @@ function(configure_photospider_product_archive TARGET_NAME)
         Photospider::operation_runtime
         Photospider::policy_sdk
         Threads::Threads
-        ${CMAKE_DL_LIBS})
+        ${CMAKE_DL_LIBS}
+        ${PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES})
     if(PHOTOSPIDER_ENABLE_OPENCV)
         target_link_libraries(${TARGET_NAME} PRIVATE
             Photospider::operation_opencv
@@ -1814,6 +1833,17 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
             LABELS execution
             TIMEOUT 30)
 
+    if(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION)
+        add_ps_test(test_isolated_cpu_invocation_protocol
+            tests/unit/test_isolated_cpu_invocation_protocol.cpp
+            photospider_execution_internal)
+        gtest_discover_tests(test_isolated_cpu_invocation_protocol
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS execution
+                TIMEOUT 20)
+    endif()
+
     add_ps_test(test_disk_cache_diagnostic_concurrency
         tests/integration/test_disk_cache_diagnostic_concurrency.cpp)
     gtest_discover_tests(test_disk_cache_diagnostic_concurrency
@@ -1869,6 +1899,36 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 endif()
 
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+    if(PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION)
+        add_executable(test_isolated_cpu_plugin_fixture
+            tests/support/isolated_cpu_plugin_fixture.cpp)
+        set_target_properties(test_isolated_cpu_plugin_fixture PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(test_isolated_cpu_plugin_fixture PRIVATE
+            cxx_std_17)
+        target_include_directories(test_isolated_cpu_plugin_fixture PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib")
+        # Exercise both source-private #102 endpoints from the installable
+        # product archive without creating a public composition or SDK surface.
+        target_link_libraries(test_isolated_cpu_plugin_fixture PRIVATE
+            photospider
+            Threads::Threads)
+
+        add_ps_test(test_isolated_cpu_invocation
+            tests/integration/test_isolated_cpu_invocation.cpp)
+        target_compile_definitions(test_isolated_cpu_invocation PRIVATE
+            PS_TEST_ISOLATED_CPU_FIXTURE_PATH="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>")
+        add_dependencies(test_isolated_cpu_invocation
+            test_isolated_cpu_plugin_fixture)
+        gtest_discover_tests(test_isolated_cpu_invocation
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS execution
+                TIMEOUT 30)
+    endif()
+
     if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
         add_executable(test_worker_process_fixture
             tests/support/photospider_worker_fixture.cpp)
