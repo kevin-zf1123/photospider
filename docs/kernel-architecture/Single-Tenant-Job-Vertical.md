@@ -301,7 +301,14 @@ recovery reports durable corruption instead of adopting or overwriting it.
 
 Product composition resolves trusted graph material outside JobSpec and before
 service ownership, then retains it in an immutable
-`PreparedExternalGraphCatalog`. WorkerManager creates a private socket pair,
+`PreparedExternalGraphCatalog`. Before retaining each entry, catalog
+construction applies the private protocol's sole 16-KiB text-field byte bound
+to `root_dir`, `yaml_path`, `config_path`, `cache_root_dir`, and `message`.
+Exactly 16 KiB is valid; one extra byte synchronously raises a field-specific
+`std::length_error` before factory/service construction and therefore before
+DurableServerState, quota, Job, supervision-thread, channel, or process
+ownership. A failed constructor exposes no partial catalog and cannot become a
+late `WorkerStartup` fact. WorkerManager creates a private socket pair,
 forks/execs one non-installed `photospider-worker`, and registers its exact PID
 before a non-virtual in-memory catalog lookup copies material into exactly one
 immutable assignment. The supervision thread invokes no resolver and performs
@@ -346,12 +353,17 @@ worker needs that deadline before receiving the first protocol frame.
 The private bounded protocol has fixed magic, one supported version, closed
 message kinds, a 64-MiB frame-payload maximum, deadline-aware partial I/O, and
 strict trailing-byte, enum, identity, digest, image-shape, and Job-resource
-validation. It carries one Assignment, exact AssignmentAccepted/Heartbeat/
-Cancel identity messages, and at most one Report. It carries no state root,
-quota reservation, artifact-commit capability, credential, network listener,
-native handle, or second assignment. Worker-controlled image dimensions are
-checked against arithmetic, frame, output, staging, and retention bounds before
-the control plane allocates exact tight CPU storage.
+validation. One source-private `kMaximumWorkerTextFieldBytes` constant governs
+all five prepared graph strings plus Report diagnostics in catalog admission,
+Assignment/Report encoding, and decoding. The exact limit is inclusive; local
+prepared-value excess is `std::length_error`, while oversized wire content is
+`WorkerProtocolError`. The protocol carries one Assignment, exact
+AssignmentAccepted/Heartbeat/Cancel identity messages, and at most one Report.
+It carries no state root, quota reservation, artifact-commit capability,
+credential, network listener, native handle, or second assignment. Worker-
+controlled image dimensions are checked against arithmetic, frame, output,
+staging, and retention bounds before the control plane allocates exact tight
+CPU storage.
 
 The 64-MiB maximum applies to the complete encoded Report, including identity,
 outcome/settlement/failure fields, diagnostic, image-presence flag, image
@@ -535,9 +547,12 @@ deadline-side natural-reap buffered-report drainage, candidate-Report-deadline-
 versus-wait-status attribution, complete Report aggregate accounting and
 typed over-bound behavior across variable identity/diagnostic lengths, reusable
 checkpoint exact-boundary/one-byte-over closure against a worst-case future
-Assignment, real-process over-bound failure with zero artifact/quota/process
-residue, and retry/restart/new-Job preservation of checkpoint identity, digest,
-durability, and quota truth,
+Assignment, all five prepared graph fields at the exact shared boundary through
+a real process, field-specific one-byte-over catalog rejection before service
+ownership with no durable-root/Job/quota/thread/process residue or
+`WorkerStartup`, real-process over-bound failure with zero artifact/quota/
+process residue, and retry/restart/new-Job preservation of checkpoint identity,
+digest, durability, and quota truth,
 concurrent shutdown drainage, actual first completion/reconstruction allocation
 fail-stop, completion-callback exception fail-stop, and real Embedded Host
 output/checkpoint/restart behavior.

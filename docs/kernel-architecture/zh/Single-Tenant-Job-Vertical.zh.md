@@ -247,14 +247,19 @@ Job-state update 丢失的 commit。Terminal receipt 内嵌于 Job record，因�
 ## Worker、Cancellation 与 Completion Ordering
 
 产品 composition 会在 JobSpec 外、service ownership 建立前解析可信 graph material，并把它
-保留在 immutable `PreparedExternalGraphCatalog` 中。WorkerManager 创建 private socket pair，
-fork/exec 一个不安装的 `photospider-worker`，先登记其精确 PID，再通过不可覆写的内存 catalog
-lookup 把 material 复制进精确一个 immutable assignment。Supervision thread 不调用 resolver，
-也不执行 filesystem I/O。Fork child 只执行 descriptor setup、`RLIMIT_AS`、descriptor closure
-与 `exec`；全新 exec 的 worker 会校验 assignment、JobSpec digest 与 optional checkpoint，
-创建并 seed 一个全新的 Embedded Host，打开并加载 attempt-local Graph，在已预留 CPU
-parallelism 内 compute，校验一个非空 CPU image，关闭 Graph，销毁 Host ownership，最后只
-返回 typed attempt fact 与 candidate image。
+保留在 immutable `PreparedExternalGraphCatalog` 中。Catalog 构造会在保留每个 entry 前，对
+`root_dir`、`yaml_path`、`config_path`、`cache_root_dir` 与 `message` 应用 private protocol
+唯一的 16-KiB 文本字段 byte 上限。精确 16 KiB 有效；多一个字节会在 factory/service 构造前
+同步抛出指出具体字段的 `std::length_error`，因此也先于 DurableServerState、quota、Job、
+supervision-thread、channel 或 process ownership。失败 constructor 不暴露部分 catalog，也不会
+变成之后的 `WorkerStartup` fact。WorkerManager 创建 private socket pair，fork/exec 一个不安装的
+`photospider-worker`，先登记其精确 PID，再通过不可覆写的内存 catalog lookup 把 material
+复制进精确一个 immutable assignment。Supervision thread 不调用 resolver，也不执行 filesystem
+I/O。Fork child 只执行 descriptor setup、`RLIMIT_AS`、descriptor closure 与 `exec`；全新 exec
+的 worker 会校验 assignment、JobSpec digest 与 optional checkpoint，创建并 seed 一个全新的
+Embedded Host，打开并加载 attempt-local Graph，在已预留 CPU parallelism 内 compute，校验一个
+非空 CPU image，关闭 Graph，销毁 Host ownership，最后只返回 typed attempt fact 与 candidate
+image。
 
 Exec 前的 descriptor ownership 是精确的：fd 0-2 是标准 stream，fd 3 是 private control
 socket，close-on-exec fd 4 用于向 parent 传递 setup `errno`。Darwin parent 在 `fork` 前查询
@@ -281,11 +286,15 @@ payload，因为 worker 在收到第一帧 protocol 前已经需要该 deadline�
 
 Private bounded protocol 具有固定 magic、唯一支持的 version、封闭 message kind、64-MiB
 frame-payload 上限、deadline-aware partial I/O，以及严格的 trailing-byte、enum、identity、
-digest、image-shape 与 Job-resource 校验。它传输一个 Assignment、精确的
-AssignmentAccepted/Heartbeat/Cancel identity message，以及至多一个 Report。它不传输 state
-root、quota reservation、artifact-commit capability、credential、network listener、native
-handle 或第二个 assignment。Worker 控制的 image dimension 会先经过 arithmetic、frame、
-output、staging 与 retention bound 校验，control plane 才分配精确紧密的 CPU storage。
+digest、image-shape 与 Job-resource 校验。唯一的 source-private
+`kMaximumWorkerTextFieldBytes` 常量在 catalog admission、Assignment/Report encoding 与 decoding
+中统一约束五个 prepared graph string 及 Report diagnostic。精确上限是包含式的；本地 prepared
+value 超界是 `std::length_error`，wire content 超界则是 `WorkerProtocolError`。协议传输一个
+Assignment、精确的 AssignmentAccepted/Heartbeat/Cancel identity message，以及至多一个 Report。
+它不传输 state root、quota reservation、artifact-commit capability、credential、network
+listener、native handle 或第二个 assignment。Worker 控制的 image dimension 会先经过
+arithmetic、frame、output、staging 与 retention bound 校验，control plane 才分配精确紧密的
+CPU storage。
 
 64-MiB maximum 适用于完整编码 Report，包括 identity、outcome/settlement/failure 字段、
 diagnostic、image-presence flag、image metadata 与 tight row bytes。由于任何 successful
@@ -431,6 +440,8 @@ cancel-channel-versus-wait-status attribution、deadline-side
 natural-reap buffered-report drainage、candidate-Report-deadline-versus-wait-status attribution、
 在可变 identity/diagnostic 长度下完整 Report aggregate accounting 与超界类型化行为、
 以最坏情况后续 Assignment 为约束的可复用 checkpoint 精确边界/多一个字节闭包、真实进程
+中五个 prepared graph 字段达到共享精确边界、在 service ownership 前针对具体字段同步拒绝
+多一个字节且不留下 durable-root/Job/quota/thread/process residue 或 `WorkerStartup`、真实进程
 超界失败的 artifact/quota/process 零残留，以及 retry/restart/new-Job 对 checkpoint identity、
 digest、durability 与 quota truth 的保持、
 concurrent shutdown drainage、实际首次 completion/重建
