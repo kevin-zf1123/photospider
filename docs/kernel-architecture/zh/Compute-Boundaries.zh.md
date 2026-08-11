@@ -18,6 +18,10 @@ transport 或进程级 operation plugin
 与 operation ABI v2 使用 checked derived `PixelRect`/`PixelSize`。OpenCV geometry 只存在于
 provider 或算法实现内部，并且位于真正消费它的 library call 处。
 
+[ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)
+还冻结了已接受的 operation-plugin ABI v1 目标。本文中的目标段落均有明确标记，不会覆盖
+上述当前 v2 事实，也不表示已经安装 v1 loader。
+
 ## 所有权图
 
 ```mermaid
@@ -297,6 +301,56 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 源码 consumer 不会获得 compatibility alias 或已安装 replacement。组合 limit 使用 source tree
 私有的 `ExecutionResourceLimits`；第三方 policy selection 使用独立的纯 C policy ABI v1，且不会
 获得任何执行资源。
+
+### 已接受的 operation-plugin v1 compute adapter 目标
+
+未来 operation-v1 loader 仍把 immutable implementation 发布到 process-owned registry；
+plugin 不获得 `ComputeService`、`ExecutionService`、`OpRegistry`、scheduler、cache、
+Graph、Run、ledger、device owner 或 commit callback。一个 Host adapter 把 private compute
+snapshot 转为 borrowed exact-size C record，再把 copied sink output 转回 private plan、
+Region、dependency 与 temporary result。该 adapter 是 public ABI 与 private compute model
+唯一交汇点。
+
+每个 invocation-scoped callback 绑定到 Host-minted generation/invocation handle、
+permanently identified operation/implementation、configured plugin context、intent 与
+accepted descriptor。Definition、configuration-lifetime、root-query、destroy callback 则绑定
+到精确 leased DSO generation 与显式 identity/context，不虚构 invocation handle。这些 opaque
+128-bit handle 是 correlation fact，不是 pointer、lookup API、resource grant、durable identity
+或 wire value。Configuration/descriptor view immutable 且只在 callback 内有效；inference、
+Region propagation、dependency construction 期间没有 payload pointer。
+
+调用顺序固定为：
+
+1. configured operation 可调用前，完成 configuration validation 与 context creation；
+2. allocation 前，inference 返回全部 immutable output descriptor、extent、buffer size 与
+   access requirement；
+3. backward dirty 与 forward active-edge Region callback 派生 checked planning fact；
+4. 声明 data dependence 的 implementation 在 cache 前生成 copied/validated dependency
+   record；
+5. monolithic/tiled execution 只接收 immutable input，以及从 accepted inference plan 派生
+   的精确 Host-owned mutable CPU range。
+
+Operation ABI v1 同步且只支持 CPU-addressable buffer。Callback return 结束全部 borrowed
+descriptor/write grant。它不携带 native device handle、device-resident buffer、fence、
+completion owner、delayed sink 或 asynchronous lease。Private device work 必须在 return
+前 stage 到 Host CPU binding；否则应位于 Host-private adapter 后面，或等待未来独立版本化
+native/async suite。
+
+Host 拥有 output allocation，且不公开 allocator callback。Planning/diagnostic 通过一个
+callback-local Host sink 流动，其第一次 failure 为 sticky。Host 在 return 前验证并 deep-copy
+emitted record；missing、duplicate、stale、malformed、out-of-plan、out-of-range 或 overlapping
+write 都会在 cache/Run-visible commit 前被拒绝。
+
+未来 v1 publication 保留当前 strong transaction 与 per-slot revision/predecessor rule。每个
+callback/configured context 在 validation、status normalization 与一次 destroy attempt 完成前
+保留精确 DSO generation。Retirement 先移除 visibility，再等待，reverse destroy，最后 unmap。
+调用 plugin code 时不持有 registry、scheduler、execution 或 publication lock。
+
+进程内 callback 仍可永久忽略 cancellation。Host 可令其 result 失去资格，却不能虚构 return、
+回收 write grant、destroy context 或安全卸载 DSO。因此 operation v1 是 operator-trusted
+compatibility boundary。Issue #102 负责 pointer-free shared-memory/FD invocation record，
+Issue #103 负责 bounded supervision，Issue #104 负责 tenant code 的 trust/resource
+enforcement；ABI pointer record 永远不是其 wire protocol。
 
 ## 请求行为
 
@@ -926,7 +980,8 @@ standalone artifact data plane、syscall/device sandbox 或 untrusted-plugin pro
 
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)、
-[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)与精确的
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)、
+[ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
 契约。本文是当前已实现计算边界的权威说明，其中包括 Issue #89 的 V-12 验证范围：所有 HP/RT
 ready work 都进入一个 Host-owned 有界 store；

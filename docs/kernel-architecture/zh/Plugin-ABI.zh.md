@@ -1,11 +1,13 @@
 # 插件 ABI
 
 Photospider 支持操作插件、数据定义 provider 和策略插件。操作插件通过 Host 提供的 registrar
-扩展进程拥有的 `OpRegistry`，它仍是临时 C++ ABI。数据定义 provider 通过纯 C ABI v3
-发布不可变 Schema/Facet/Layout bundle 和受界限约束的语义回调；它不获得 access、conversion、
-execution、device、registry mutation 或 graph 能力。策略插件通过纯 C ABI v1 对 Host 已准入的
-不可变候选项排序；它不拥有工作线程、队列、设备、资源、Run 或 Graph 能力。可安装的开发契约
-只位于 `include/photospider/plugin/` 和
+扩展进程拥有的 `OpRegistry`，当前安装的边界仍是临时 C++ ABI v2。
+[ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)
+接受独立 pure-C operation-plugin ABI v1 作为替代目标；其 header、loader、SDK 与已迁移 plugin
+尚不存在。数据定义 provider 通过纯 C ABI v3 发布不可变 Schema/Facet/Layout bundle 和受界限
+约束的语义回调；它不获得 access、conversion、execution、device、registry mutation 或 graph
+能力。策略插件通过纯 C ABI v1 对 Host 已准入的不可变候选项排序；它不拥有工作线程、队列、
+设备、资源、Run 或 Graph 能力。当前可安装的开发契约只位于 `include/photospider/plugin/` 和
 `include/photospider/policy/policy_plugin_api.h`。
 
 ## 操作插件 ABI
@@ -301,6 +303,178 @@ predecessor，也适用于原本不存在的 key；每个 retired plugin callbac
 
 内置 callback 注册同样归进程 owner 管理。它最多执行一次，并且发生在 process-owner plugin 发布之前；
 后续 Host seed 调用只对齐 source label，不能把内置实现重播到 active plugin replacement 之上。
+
+## 已接受的 Operation Plugin ABI v1 目标
+
+Issue #101 冻结替代 contract，但不实现它。目标是独立 operation-plugin ABI v1，不是
+provider-v3 suite 或 policy-v1 extension。其未来 self-contained C11/C++17 header 为
+`photospider/plugin/operation_plugin_api.h`，discovery 只能使用：
+
+```c
+uint32_t ps_operation_plugin_get_abi_version(void);
+ps_operation_status_v1 ps_operation_plugin_get_api_v1(
+    ps_operation_plugin_api_v1 *api);
+```
+
+Host 只在 numeric handshake 后请求 root API。C++ declaration 使用 `extern "C"` 与
+`noexcept`；所有 callback 使用 `PS_OPERATION_CALL`，即 platform C convention，Windows
+为 `__cdecl`。V1 profile 冻结 8-bit byte、4/8-byte `uint32_t`/`uint64_t`、8-byte data/
+function pointer、natural 8-byte pointer/`uint64_t` alignment、Host-process endianness 与
+匹配 convention。Packed、over-aligned、32-bit、foreign-endian 或 foreign-convention
+record 不兼容。
+
+只有 Diagnostic 至 Tile 这 20 个 versioned semantic record 以精确 `struct_size`、
+`struct_kind`、`struct_version`、`flags` 开头。Plain fixed identity/handle、byte-view、
+digest、array-reference、configuration-value、axis-range helper 不携带 record header；
+root/suite table 使用各自 prefix。每个 suite 以 `struct_size`、`suite_version`、`flags`
+与 reserved storage 开头。V1 拒绝
+unknown kind/version/flag、非零 reserved、short/long record、unknown tail、wrong stride/
+alignment 与 arithmetic/range overflow。新增字段需要新 owning-suite version 或 operation
+ABI v2；v1 不解释 minimum-size prefix。
+
+Root API 精确为 96/8 byte/alignment，以 `struct_size`、`abi_version`、`flags`、
+`reserved0` 开头，随后包含 permanent 128-bit plugin identity、bounded implementation-
+version view、opaque plugin context、`query_suite`、
+`destroy_plugin` 与 reserved pointer word。每个 v1 suite table 精确为 64/8：
+
+| ID | Suite | 要求 | Callback |
+| ---: | --- | --- | --- |
+| 1 | Definition | 始终 | operation count/get；implementation count/get |
+| 2 | Configuration | 始终 | validate；create context；destroy context |
+| 3 | Inference | 始终 | infer complete output plan |
+| 4 | Region | 始终 | backward dirty；forward active-edge propagation |
+| 5 | Dependency | 任一 implementation 声明 data dependence 时 | build dependency record |
+| 6 | Execution | 始终 | synchronous monolithic；synchronous tiled |
+
+Unknown suite 返回 `UNSUPPORTED`。缺失、版本错误、malformed 或不完整的 required/declared
+suite 会在 callback、source 或 handle 可见前拒绝整个 candidate。Table 不公开 allocator、
+registry、Host service、Graph、Run、scheduler、cache、executor、device service、resource
+token、filesystem、artifact、credential、thread 或 symbol lookup。
+
+Host 预清零每个 Host-prepared output 并设置其 exact prefix；plugin 保留 prefix，只填写
+declared remaining field。Plugin-authored sink record 携带 complete prefix，Host 在读取任何
+后续 field 前验证它。
+
+全部 suite/record version 都是 1。封闭 numeric set 包括：ADR catalogue 中 Diagnostic 到
+Tile 的 record kind 1 至 20、configuration kind 1 Null 至 8 Object、direction 1 Input/
+2 Output、intent bit 1 HP/2 RT、shape bit 1 Monolithic/2 Tiled、device 1 CPU、access bit
+1 Read/2 Write、behavior bit 1 SideEffect/2 DataDependent、Region outcome 1 Exact 至
+4 Unknown、Region atom 1 Whole 至 4 TensorSlice、sink channel 1 Diagnostic 至
+4 DependencyRecord。Unknown value/bit 与 invalid zero 以 `INVALID_DESCRIPTOR` 失败；
+boolean 为 0 或 1。ValueView flag bit 1 是 PayloadAvailable；其他 semantic-record flag
+与所有 root/suite flag 在 v1 中均为零。
+
+Callback parameter order 在 ADR 0012 中冻结：plugin context 首先，随后是精确 identity/
+configuration/invocation view，再后是 pointer/count/exact-stride array，Host sink 最后。
+即使 context 为 null，Configuration destroy 仍接收 operation/implementation identity。Sink
+signature 为 `emit(host_context,channel,records,count,stride)`。不公开 cancellation callback；
+Host 在 entry 前、sink call 时、return 后检查，可以 normalize 为 `CANCELLED` 并丢弃 late
+result。
+
+Plugin、operation、implementation、port、Schema、Facet、Layout identity 是 permanent
+publisher-assigned definition identity。Value、edge、allocation、binding、site、Region
+identity 是 Host-minted process-local runtime identity，分别限定于 logical value、Graph
+revision、allocation、binding/write grant 或 invocation snapshot。Host 另行以不同 helper
+type 生成 nonzero、unpredictable 128-bit generation/invocation handle。这些 handle 只是
+process-local correlation handle，不是 semantic identity、pointer、lookup API、capability、
+durable identity、resource token 或 wire value。Invocation-scoped callback 携带两者；
+definition/configuration-lifetime/root/destroy callback 依赖精确 DSO generation lease 与显式
+identity/context。Plugin/configured-operation context 是
+plugin-owned opaque `void *` round-trip value。成功 null context 有效，仍得到精确一次 matching
+destroy attempt；create 失败不转移 destroy obligation。
+
+Sink `host_context` 是 Host-owned callback-local round-trip token。Plugin code 只能把它传回
+`emit`，不得 dereference、free、retain 或解释为 semantic identity。
+
+未来 header 冻结以下 natural record size/alignment class；详细 ordered field group 在
+ADR 0012 与 active OpenSpec design 中具有规范性：
+
+| Layout category | Size/alignment |
+| --- | --- |
+| record header | 16/4 |
+| identity、generation/invocation handle、immutable/mutable byte view、exact-stride array reference、configuration value、axis range | 16/8 |
+| SHA-256 digest | 32/8 |
+| diagnostic、output sink、configuration view、Region-set view | 48/8 |
+| configuration node、facet view、tile | 64/8 |
+| buffer view、input binding、Region binding | 80/8 |
+| output plan、mutable output binding、invocation、Region atom、dependency record | 96/8 |
+| port descriptor | 112/8 |
+| operation descriptor 与 value view | 128/8 |
+| value descriptor | 192/8 |
+| implementation descriptor | 192/8 |
+| root API 与每个 suite v1 table | 96/8 与 64/8 |
+
+Active OpenSpec design 冻结每个 field type 与 byte offset。128-byte operation descriptor
+能够成立，是因为 offset 96/112 分别为两个 16-byte input/output port
+`{pointer,count,stride}` helper，不重复存储 count。Root 的 exact prefix 位于 0，plugin
+identity 位于 16，version view 位于 32，context/query/destroy 位于 48/56/64，三个 reserved
+word 从 72 开始。六个 suite table 从 offset 16 使用固定 callback slot，并以要求为零的
+pointer slot 补足 byte 63。
+
+全部 pointer/count/stride view 只在一次同步 call 或 sink emission 中借用。Null 精确对应
+zero count，stride 等于 exact element size；任一侧都在 dereference 前检查 alignment、
+multiplication、base/offset、subrange、aggregate bound、output overlap。Host 在 return 前
+deep-copy accepted descriptor/emitted result。
+
+Operation/port descriptor 冻结 permanent identity、canonical name、borrowed exact-stride
+port array、direction、configuration schema 与 Schema/Facet/Layout identity。Type/subtype
+是不含 NUL 或 `:` 的 nonempty UTF-8，并组成唯一 `type:subtype` key。Port/implementation
+name 是不含 NUL 的 nonempty UTF-8；display/exclusive key 可为空，非空时是不含 NUL 的
+UTF-8。Name 不 normalize、case-fold 或截断。Implementation descriptor 冻结 HP/RT intent、
+monolithic/tiled shape、CPU device profile、tile/access/side-effect/data-dependence fact、
+reentrancy、maximum parallelism、retained/scratch byte、relative cost 与 exclusive key。
+Callback、copied metadata、implementation identity、source generation 与 revision 作为一个
+slot 一起发布和恢复。
+
+Configuration 是 Host-owned immutable exact-stride tree，节点为 null、boolean、signed
+64-bit integer、binary64、UTF-8 string、bytes、array、object，不是 YAML、`ParameterMap`
+或 C++ variant。Value record 区分 Schema/Facet/Layout identity/version、logical revision、
+allocation/binding identity 与 descriptor/content/layout digest。Inference、Region、
+dependency call 只接收 payload pointer 已清空的 descriptor-only view。只有 execution
+接收 payload，只有 Host mutable-output grant 允许写入。
+
+Inference 在 allocation 前生成每个 immutable output plan。Region v1 明确提供 backward
+dirty 与 forward active-edge propagation，outcome 为 Exact、Whole、Empty、Unknown，atom
+为 Whole、Empty、ImageRect、TensorSlice。Data-dependent implementation 必须提供
+Dependency v1；copied record 在 cache 前把 output port/site/region fact 绑定到 input
+edge/region fact。
+
+Execution v1 同步且只支持 CPU-addressable buffer。它不公开 native device handle、device-
+resident buffer、fence、deferred completion、retained invocation owner 或 delayed sink。
+Plugin 只有在 return 前复制到 Host CPU output 时才能私下使用 device。仓库 Metal 示例
+必须使用 synchronous CPU staging，或在 v2 删除前移到 Host-private adapter 后面。Native/
+async 工作需要未来独立 suite 或 ABI。
+
+V1 没有 allocator callback。Definition string 在 return 前复制，execution 写 Host-owned
+buffer，planning/diagnostic record 使用一个 callback-local 48-byte Host output sink。其
+closed channel 按需接受 diagnostic、output-plan、Region-binding 或 dependency record。即使
+plugin 忽略并返回 success，第一次 sink failure 仍 sticky。Host memory 由 Host destroy；
+plugin memory 与成功 context 在精确 DSO lease 下得到一次 plugin destroy attempt。
+
+`ps_operation_status_v1` 的精确 `uint32_t` 值 0 至 8 分别为 `OK`、
+`INVALID_ARGUMENT`、`OUT_OF_MEMORY`、`UNSUPPORTED`、`INVALID_DESCRIPTOR`、
+`TOO_COMPLEX`、`CANCELLED`、`FAILED_PRECONDITION`、`INTERNAL_ERROR`。Unknown status
+作为 ABI fault 失败。一个 non-OK callback 可 emit 一条最多 4 KiB、被复制的 UTF-8
+diagnostic。Exception/foreign unwind 不跨 DSO；C++ wrapper 在 plugin 内映射
+`std::bad_alloc`、invalid input 与其他可捕获 failure。
+
+实现必须在移除 C++ boundary 的同时保留当前 strong shadow transaction。它验证并复制
+完整 root、suite、descriptor、callback、identity、bound，分配一个 Host generation，再原子
+发布 immutable per-slot callback/metadata/identity/source/revision value。每个 callback/context
+保留精确 generation 与 DSO。Retirement 先移除 publication，等待 lease，reverse destroy，
+最后 unmap。Middle-generation unload 只 splice owned predecessor。Plugin code 执行期间不
+持有 Host registry、publication、scheduler 或 execution lock。
+
+进程内 callback 永不返回时，可能永久保留 invocation、write grant、context、generation 与
+DSO。因此 operation ABI v1 只是 operator-trusted compatibility/validation boundary，绝非
+sandbox。Tenant-untrusted pointer-free wire record、runtime supervision、trust/resource
+enforcement 继续分别由 Issues #102、#103、#104 负责。
+
+后续 migration 先新增 v1，并迁移每个仓库 operation 与 installed consumer，然后在同一
+release 删除 v2。不保留 wrapper、alias、dual loader、forwarding header、v2-to-v1 adapter、
+missing-tail interpretation 或 runtime fallback。在这些实现与测试门禁通过前，本节只是目标，
+前述 v2 章节仍描述当前事实。
+
 ## 数据定义 Provider ABI v3
 
 数据定义 provider 精确导出由自包含 C11/C++17 头文件声明的两个函数：
@@ -569,11 +743,12 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 
 ## 边界与原理
 
-当前三个扩展边界刻意采用不同的兼容与权限 profile：
+当前三个扩展边界与已接受替代目标刻意采用不同的兼容与权限 profile：
 
 | 边界 | 数据 ABI | 权限 |
 | --- | --- | --- |
 | 操作插件 v2 | 临时 C++ registrar 与回调值 | 在 Host 校验下执行操作计算并返回值 |
+| 操作插件 v1 目标 | exact-size pure C、独立版本化 suite、Host sink、同步 CPU grant | 未来在 Host 校验下执行 operation definition/planning/execution；尚未安装 |
 | 数据定义 provider v3 | 冻结 64 位 profile 下、大小精确的纯 C definition-suite 记录 | 只执行 Schema/Facet/Layout 校验和受界限约束的语义观察 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
 
@@ -638,7 +813,8 @@ PImpl 放进 v2 callback record。V-14 在不改变另外两个边界的前提�
 在每个仓库自有 operation 与 installed consumer 完成 migration 前，
 operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry point、SDK、
 fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding header 或
-v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
+v2-to-v1 shim。替代项是 ADR 0012 接受的独立版本化 operation-plugin ABI v1，不是
+provider-v3 suite。Policy ABI v1 继续独立版本化。
 
 操作插件的 C linkage 入口名称只是身份/代次 gate，并不是稳定 C data ABI。
 二进制兼容性仍依赖匹配的 SDK、编译器、标准库、C++ ABI、分配器/runtime、
@@ -722,8 +898,9 @@ sandbox。
   的前缀/保留字段，并且只返回已声明的状态/枚举值。
 - 策略回调不保留快照内存，并把每个候选项 ID 当作不透明值。它们绝不创建工作
   线程，也不声称选择结果已经启动工作。
-- 系统不存在 operation v1 兼容路径、scheduler SDK、scheduler ABI、
-  `IScheduler` adapter 或执行路由插件 ABI。
+- 当前不存在 installed operation-v1 header、loader、SDK 或 dual-compatibility path。
+  已接受 v1 目标只在完整 migration gate 后替代并删除 v2；scheduler SDK/ABI、
+  `IScheduler` adapter 与执行路由插件 ABI 继续不存在。
 
 ## 实现与验证入口
 

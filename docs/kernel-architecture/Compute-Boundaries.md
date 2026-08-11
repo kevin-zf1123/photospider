@@ -23,6 +23,11 @@ helpers, and operation ABI v2 use checked derived `PixelRect`/`PixelSize`.
 OpenCV geometry exists only inside a provider or algorithm implementation at
 the library call that consumes it.
 
+[ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md)
+also freezes the accepted operation-plugin ABI v1 target. Target paragraphs in
+this document are explicitly labeled and do not override the current v2 facts
+above or imply an installed v1 loader.
+
 ## Ownership Map
 
 ```mermaid
@@ -377,6 +382,68 @@ scheduler ABI are removed. Source consumers receive no compatibility alias or
 installed replacement. Composition limits use the private source-tree
 `ExecutionResourceLimits`; third-party policy selection uses the independent
 pure-C policy ABI v1 and receives no execution resource.
+
+### Accepted operation-plugin v1 compute adapter target
+
+The future operation-v1 loader still publishes immutable implementations into
+the process-owned registry; the plugin receives no `ComputeService`,
+`ExecutionService`, `OpRegistry`, scheduler, cache, Graph, Run, ledger, device
+owner, or commit callback. One Host adapter converts private compute snapshots
+into borrowed exact-size C records and converts copied sink output back into
+private plans, Regions, dependencies, and temporary results. That adapter is
+the only place where the public ABI and private compute model meet.
+
+Each invocation-scoped callback is bound to Host-minted generation and
+invocation handles, permanently identified operation/implementation,
+configured plugin context, intent, and accepted descriptors. Definition,
+configuration-lifetime, root-query, and destroy callbacks instead bind to the
+exact leased DSO generation and their explicit identities/contexts; they have
+no fabricated invocation handle. Those opaque 128-bit handles are correlation
+facts, never pointers, lookup APIs, resource grants, durable identities, or
+wire values. Configuration and descriptor views are immutable and callback-
+local; no payload pointer is present during inference, Region propagation, or
+dependency construction.
+
+The call sequence is fixed:
+
+1. configuration validation and context creation happen before the configured
+   operation becomes invocable;
+2. inference returns every immutable output descriptor, extent, buffer size,
+   and access requirement before allocation;
+3. backward dirty and forward active-edge Region callbacks derive checked
+   planning facts;
+4. a declared data-dependent implementation produces copied, validated
+   dependency records before cache use; and
+5. monolithic or tiled execution receives immutable inputs and only the exact
+   Host-owned mutable CPU ranges derived from the accepted inference plan.
+
+Operation ABI v1 is synchronous and CPU-addressable. Callback return ends all
+borrowed descriptors and write grants. It carries no native device handle,
+device-resident buffer, fence, completion owner, delayed sink, or asynchronous
+lease. Private device work must stage into the Host CPU binding before return;
+otherwise it belongs behind a Host-private adapter or a future separately
+versioned native/async suite.
+
+The Host owns output allocation and exposes no allocator callback. Planning
+and diagnostics flow through a callback-local Host sink whose first failure is
+sticky. The Host validates and deep-copies emitted records before return and
+rejects missing, duplicate, stale, malformed, out-of-plan, out-of-range, or
+overlapping writes before any cache or Run-visible commit.
+
+Future v1 publication preserves the current strong transaction and per-slot
+revision/predecessor rules. Every callback and configured context retains its
+exact DSO generation through validation, status normalization, and exactly one
+destroy attempt. Retirement removes visibility before waiting, destroys in
+reverse order, and unmaps last. No registry, scheduler, execution, or
+publication lock is held while plugin code runs.
+
+An in-process callback can still ignore cancellation forever. The Host may
+make its result ineligible, but cannot fabricate return, reclaim its write
+grant, destroy its context, or unload its DSO safely. Operation v1 is therefore
+an operator-trusted compatibility boundary. Issue #102 owns pointer-free
+shared-memory/FD invocation records, Issue #103 owns bounded supervision, and
+Issue #104 owns trust/resource enforcement for tenant code; ABI pointer records
+are never their wire protocol.
 
 ## Request Behavior
 
@@ -1209,6 +1276,7 @@ four independent correctness points:
 [ADR 0003](../adr/0003-process-owned-execution-resources.md),
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md),
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md),
+[ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md),
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document

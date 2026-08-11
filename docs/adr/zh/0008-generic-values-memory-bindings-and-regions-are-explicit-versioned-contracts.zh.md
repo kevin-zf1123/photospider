@@ -528,11 +528,12 @@ ParameterMap    -> configuration only, never a data payload
 
 仓库自有 operation 与 provider 首先迁移。随后按依赖顺序迁移自有 adapter、cache、graph
 document、Host value、CLI/IPC translation、test、installed consumer 与文档。只有全部自有
-operation plugin 与 consumer 都有 v3 replacement 后，才删除 operation ABI v2、其 entry point、
-SDK、fixture 与 package surface。
+operation plugin 与 consumer 都迁移到 ADR 0012 接受的独立版本化 pure-C operation-plugin
+ABI v1 replacement 后，才删除 operation ABI v2、其 entry point、SDK、fixture 与 package
+surface。
 
 最终状态不存在永久 compatibility wrapper、alias class、重复 old/new API、forwarding header、
-dual loader、v2-to-v3 shim 或双重 descriptor/cache/ABI authority。Temporary edge adaptation
+dual loader、v2-to-v1 shim 或双重 descriptor/cache/ABI authority。Temporary edge adaptation
 只能存在于显式限定的实现切片内，并且必须在该切片的 completion boundary 删除。
 
 ### 验证边界

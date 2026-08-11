@@ -724,9 +724,10 @@ OperationOutput -> named Value outputs
 ParameterMap    -> configuration only
 ```
 
-只有精确 record 与自有 consumer 已经存在后，operation provider 才从临时 C++ ABI v2 迁移到
-单独版本化的 pure-C provider ABI v3。完成边界会删除 v2，不保留永久 wrapper、alias、
-forwarding header、dual loader 或 v2-to-v3 shim。Policy ABI v1 保持独立。
+只有精确 record 与自有 consumer 已经存在后，operation plugin 才从临时 C++ ABI v2 迁移到
+ADR 0012 接受的独立版本化 pure-C operation-plugin ABI v1。完成边界会删除 v2，不保留永久
+wrapper、alias、forwarding header、dual loader 或 v2-to-v1 shim。Data-definition provider
+v3 与 policy ABI v1 仍是独立 family。
 
 ### Project 4 实现依赖契约
 
@@ -1218,6 +1219,50 @@ credential、artifact capability 或 resource token。可信 Host 代码会在 R
 descriptor、offset、ownership、size、readiness、identity 与 declared bound。纯 C 能改善 record
 compatibility；它不能让恶意 native code 在进程内安全执行。
 
+### Issue #101 已接受的 operation ABI 决策
+
+[ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)
+接受独立 operation-plugin ABI v1 目标。它既不是 data-provider-v3 suite，也不是 policy-v1
+演进。在后续一次 implementation 迁移每个仓库 plugin 与 installed consumer 并完整删除 v2 之前，
+当前 installed boundary 仍是 operation C++ ABI v2；不保留 wrapper、alias、dual loader、
+forwarding header 或 v2-to-v1 shim。
+
+未来 self-contained C11/C++17 contract 具有 numeric ABI-one handshake、一个 exact 96-byte
+root API，以及独立 exact 64-byte v1 Definition、Configuration、Inference、Region、Dependency、
+Execution suite。Definition、Configuration、Inference、Region、Execution required；当 copied
+implementation metadata 声明 data dependence 时 Dependency required。只有 20 个 semantic
+record kind 携带 exact size/kind/version/flags。Plain identity、handle、byte view、digest、array
+reference、configuration value、axis range 不携带 record header；root/suite 使用各自 prefix。
+Reserved storage、pointer/count/stride framing 与全部 exact offset 都会检查。Unknown tail 与
+partial-prefix compatibility 会被拒绝。
+
+Permanent 128-bit plugin/operation/implementation identity 与 Host-minted process-local
+generation/invocation handle 保持不同。Opaque plugin context 只 round-trip 到 defining generation。
+Input 在一次同步 call 中借用；metadata 与 sink output 会被验证并复制；Host 拥有 output buffer，
+不提供 allocator callback。成功 root/configured context 在精确 DSO lease 下得到一次 destroy
+attempt。Status 0 至 8 分别冻结 success、caller error、allocation failure、unsupported request、
+invalid descriptor、excessive complexity、cancellation、failed precondition、internal failure。
+Exception 不跨 DSO。
+
+V1 execution 有意限制为 synchronous、CPU-addressable。它不携带 native device handle、
+device-resident buffer、fence、completion owner、delayed sink、Graph/Run/scheduler/cache/resource
+authority 或 wire representation。Private device implementation 必须在 return 前 stage 到 Host
+CPU output，或保持在 Host-private adapter 后面。未来 native/async execution 使用新 suite/ABI
+决策。
+
+Publication 保留当前 shadow transaction、atomic immutable slot visibility、per-slot revision/
+predecessor restoration、middle-generation splice、reverse retirement，以及精确 callback/context
+DSO lease。永不返回的 callback 可以永久保留这些 owner；pure C 不提供 bounded termination。
+Issue #102 单独负责 pointer-free shared-memory/FD invocation record，Issue #103 负责
+authenticated supervision 与 crash/hang/OOM/bad-output containment，Issue #104 负责
+allowlist/signature 与 enforceable resource policy。
+
+当这些中英文 artifact 通过本地验证、fresh 独立 diff 审核、经授权的 exact-head PR
+Integration、finding 已裁定的 fresh Codex exact-head review、zero unresolved review thread
+与 Issue/Project 行政门禁时，Issue #101 作为 decision 即完成。归档该 decision 与关闭 #101
+不等待后续 header/loader/plugin 迁移或 v2 删除；v2 仍为 current、v1 仍为 target-only 时，
+这些工作仍属于一次独立 breaking implementation change。
+
 当前 Issue #99/#100 基线是源码私有的
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结
 `jobspec-v2`，原子核算完整 tenant resource envelope，在一个 locked root 下持久化 Job record 与
@@ -1248,7 +1293,7 @@ Issue #97 只做分配，不吸收后续交付：
 | [#98](https://github.com/kevin-zf1123/photospider/issues/98) | Immutable single-tenant JobSpec，以及带 artifact identity 的 control-plane-to-worker submit/query/cancel/completion |
 | [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota、durable artifact、retry/checkpoint 与 recovery semantics |
 | [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision、crash isolation 与 bounded cancellation/shutdown |
-| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 单独版本化的 pure-C operation-plugin ABI 决策 |
+| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 已接受的独立版本化 pure-C operation-plugin ABI v1 决策；实现仍属于后续 breaking migration |
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | 隔离 CPU shared-memory/FD invocation，以及精确 descriptor/stride/size/ownership validation |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | `PluginRuntimeSupervisor` heartbeat/deadline 与 crash/hang/OOM/bad-output containment |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature 与可执行 resource policy |

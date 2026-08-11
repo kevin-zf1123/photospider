@@ -18,6 +18,7 @@ kernel architecture documents and issue/project tracking respectively.
 | [0009](0009-compute-io-durability-and-completion-semantics.md) | Compute I/O durability and completion are separate contracts. |
 | [0010](0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md) | Execution-profile SLOs are six independent benchmark verdicts. |
 | [0011](0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md) | Server control plane, workers, artifact authority, and plugin runtimes are separate security domains. |
+| [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md) | Operation plugins use a separately versioned pure-C ABI. |
 
 New ADRs use the next four-digit number. A superseded ADR remains in this
 sequence and links to its replacement rather than being silently rewritten or

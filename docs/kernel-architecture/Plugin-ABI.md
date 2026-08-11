@@ -2,13 +2,16 @@
 
 Photospider supports operation plugins, data-definition providers, and policy
 plugins. Operation plugins extend the process-owned `OpRegistry` through a
-Host-provided registrar and remain a provisional C++ ABI. Data-definition
+Host-provided registrar and remain the currently installed provisional C++ ABI
+v2. [ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md)
+accepts a separate pure-C operation-plugin ABI v1 as the replacement target;
+its header, loader, SDK, and migrated plugins do not yet exist. Data-definition
 providers publish immutable Schema/Facet/Layout bundles and bounded semantic
 callbacks through pure-C ABI v3; they receive no access, conversion, execution,
 device, registry-mutation, or graph capability. Policy plugins rank immutable
 Host-admissible candidates through pure-C ABI v1; they own no worker, queue,
-device, resource, Run, or Graph capability. The installable authoring contracts
-live only under `include/photospider/plugin/` and
+device, resource, Run, or Graph capability. Current installable authoring
+contracts live only under `include/photospider/plugin/` and
 `include/photospider/policy/policy_plugin_api.h`.
 
 ## Operation Plugin ABI
@@ -413,6 +416,208 @@ most once, before process-owner plugin publication; later Host seed calls only
 reconcile source labels and cannot replay built-ins over an active plugin
 replacement.
 
+## Accepted Operation Plugin ABI v1 Target
+
+Issue #101 freezes the replacement contract without implementing it. The
+target is an independent operation-plugin ABI v1, not a provider-v3 suite or a
+policy-v1 extension. Its future self-contained C11/C++17 header is
+`photospider/plugin/operation_plugin_api.h`, and discovery uses only:
+
+```c
+uint32_t ps_operation_plugin_get_abi_version(void);
+ps_operation_status_v1 ps_operation_plugin_get_api_v1(
+    ps_operation_plugin_api_v1 *api);
+```
+
+The Host performs only the numeric handshake before requesting the root API.
+C++ declarations are `extern "C"` and `noexcept`; every callback uses
+`PS_OPERATION_CALL`, the platform C convention and `__cdecl` on Windows. The
+v1 profile freezes 8-bit bytes, 4/8-byte `uint32_t`/`uint64_t`, 8-byte data and
+function pointers, natural 8-byte pointer/`uint64_t` alignment, Host-process
+endianness, and that matching convention. Packed, over-aligned, 32-bit,
+foreign-endian, or foreign-convention records are incompatible.
+
+Exactly the 20 versioned semantic records, Diagnostic through Tile, begin with
+exact `struct_size`, `struct_kind`, `struct_version`, and `flags` fields. Plain
+fixed identity/handle, byte-view, digest, array-reference, configuration-value,
+and axis-range helpers carry no record header. Root and suite tables use their
+own prefixes. Every suite begins with `struct_size`, `suite_version`, `flags`,
+and reserved storage. V1 rejects unknown kinds,
+versions, flags, nonzero reserved data, short/long records, unknown tails,
+wrong stride/alignment, and arithmetic/range overflow. A new field requires a
+new owning-suite version or operation ABI v2; v1 never interprets a minimum-
+size prefix.
+
+The root API is exactly 96/8 bytes/alignment and begins with `struct_size`,
+`abi_version`, `flags`, and `reserved0`, followed by permanent 128-bit plugin
+identity, bounded implementation-version view, opaque plugin
+context, `query_suite`, `destroy_plugin`, and reserved pointer words. Each v1
+suite table is exactly 64/8:
+
+| ID | Suite | Requirement | Callbacks |
+| ---: | --- | --- | --- |
+| 1 | Definition | Always | operation count/get; implementation count/get |
+| 2 | Configuration | Always | validate; create context; destroy context |
+| 3 | Inference | Always | infer complete output plans |
+| 4 | Region | Always | backward dirty; forward active-edge propagation |
+| 5 | Dependency | If any implementation declares data dependence | build dependency records |
+| 6 | Execution | Always | synchronous monolithic; synchronous tiled |
+
+Unknown suites return `UNSUPPORTED`. A missing, wrong-version, malformed, or
+incomplete required/declared suite rejects the complete candidate before any
+callback, source, or handle becomes visible. The tables expose no allocator,
+registry, Host service, Graph, Run, scheduler, cache, executor, device service,
+resource token, filesystem, artifact, credential, thread, or symbol lookup.
+
+The Host pre-zeroes each Host-prepared output and sets its exact prefix; the
+plugin preserves it and fills only declared remaining fields. Plugin-authored
+sink records carry a complete prefix, which the Host validates before any later
+field.
+
+All suite/record versions are one. The closed numeric sets are record kinds 1
+through 20 (Diagnostic through Tile in the ADR catalogue), configuration kinds
+1 Null through 8 Object, directions 1 Input/2 Output, intent bits 1 HP/2 RT,
+shape bits 1 Monolithic/2 Tiled, device 1 CPU, access bits 1 Read/2 Write,
+behavior bits 1 SideEffect/2 DataDependent, Region outcomes 1 Exact through 4
+Unknown, Region atoms 1 Whole through 4 TensorSlice, and sink channels 1
+Diagnostic through 4 DependencyRecord. Unknown values/bits and invalid zero
+fail as `INVALID_DESCRIPTOR`; booleans are zero or one. ValueView flag bit 1 is
+PayloadAvailable; all other semantic-record flags and all root/suite flags are
+zero in v1.
+
+Callback parameter order is frozen in ADR 0012: plugin context first, exact
+identity/configuration/invocation views next, pointer/count/exact-stride arrays
+next, and the Host sink last. Configuration destroy receives operation and
+implementation identity even for a null context. The sink signature is
+`emit(host_context,channel,records,count,stride)`. No cancellation callback is
+exposed; the Host checks before entry, on sink calls, and after return, may
+normalize to `CANCELLED`, and discards a late result.
+
+Plugin, operation, implementation, port, Schema, Facet, and Layout identities
+are permanent publisher-assigned definition identities. Value, edge,
+allocation, binding, site, and Region identities are Host-minted process-local
+runtime identities scoped respectively to their logical value, Graph revision,
+allocation, binding/write grant, or invocation snapshot. The Host separately
+mints nonzero, unpredictable 128-bit generation and invocation handles as
+distinct helper types. Those handles are process-local correlation handles,
+not semantic identities, pointers, lookup APIs, capabilities, durable
+identities, resource tokens, or wire values. Invocation-scoped callbacks carry
+both handles; definition/configuration-lifetime/root/destroy callbacks rely on
+their exact DSO generation lease and explicit identities/contexts instead.
+Plugin and configured-
+operation contexts are opaque plugin-owned `void *` round-trip values. A
+successful null context is valid and still receives exactly one matching
+destroy attempt; a failed create transfers no destroy obligation.
+
+The sink `host_context` is a Host-owned callback-local round-trip token. Plugin
+code may only pass it back to `emit` and may not dereference, free, retain, or
+interpret it as semantic identity.
+
+The future header freezes the following natural record size/alignment classes;
+the detailed ordered field groups are normative in ADR 0012 and the active
+OpenSpec design:
+
+| Layout category | Size/alignment |
+| --- | --- |
+| record header | 16/4 |
+| identity, generation/invocation handles, immutable/mutable byte views, exact-stride array reference, configuration value, axis range | 16/8 |
+| SHA-256 digest | 32/8 |
+| diagnostic, output sink, configuration view, Region-set view | 48/8 |
+| configuration node, facet view, tile | 64/8 |
+| buffer view, input binding, Region binding | 80/8 |
+| output plan, mutable output binding, invocation, Region atom, dependency record | 96/8 |
+| port descriptor | 112/8 |
+| operation descriptor and value view | 128/8 |
+| value descriptor | 192/8 |
+| implementation descriptor | 192/8 |
+| root API and every suite v1 table | 96/8 and 64/8 |
+
+The active OpenSpec design freezes every field type and byte offset. The
+128-byte operation descriptor is realizable because offsets 96 and 112 are
+the two 16-byte input/output port `{pointer,count,stride}` helpers; it does not
+store duplicate count fields. The root uses its exact prefix at 0, plugin
+identity at 16, version view at 32, context/query/destroy at 48/56/64, and
+three reserved words at 72. The six suite tables use the fixed callback slots
+from offset 16 and zero-required pointer slots through byte 63.
+
+All pointer/count/stride views are borrowed for one synchronous call or sink
+emission. Null corresponds exactly to zero count, stride equals the exact
+element size, and both sides check alignment, multiplication, base/offset,
+subranges, aggregate bounds, and output overlap before dereference. The Host
+deep-copies accepted descriptors and emitted results before return.
+
+Operation and port descriptors freeze permanent identities, canonical names,
+borrowed exact-stride port arrays, directions, configuration schema, and
+Schema/Facet/Layout identities. Type/subtype are nonempty UTF-8 without NUL or
+`:`, forming the unique `type:subtype` key. Port/implementation names are
+nonempty UTF-8 without NUL; display/exclusive key may be empty but are otherwise
+UTF-8 without NUL. Names are never normalized, case-folded, or truncated.
+Implementation descriptors freeze HP/RT intent, monolithic/tiled shape, CPU
+device profile, tile/access/side-effect/data-dependence facts, reentrancy,
+maximum parallelism, retained/scratch bytes, relative cost, and exclusive key.
+Callback, copied metadata, implementation identity, source generation, and
+revision publish and restore as one slot.
+
+Configuration is a Host-owned immutable exact-stride tree of null, boolean,
+signed 64-bit integer, binary64, UTF-8 string, bytes, array, and object nodes,
+not YAML, `ParameterMap`, or a C++ variant. Value records keep Schema/Facet/
+Layout identities and versions, logical revision, allocation/binding
+identities, and descriptor/content/layout digests distinct. Inference, Region,
+and dependency calls receive descriptor-only views with payload pointers
+cleared. Execution alone receives payload; only Host mutable-output grants
+permit writes.
+
+Inference produces every immutable output plan before allocation. Region v1
+has explicit backward dirty and forward active-edge propagation with Exact,
+Whole, Empty, and Unknown outcomes and Whole, Empty, ImageRect, and TensorSlice
+atoms. Data-dependent implementations require Dependency v1; copied records
+bind output port/site/region facts to input edge/region facts before cache use.
+
+Execution v1 is synchronous and CPU-addressable only. It exposes neither
+native device handles nor device-resident buffers, fences, deferred completion,
+retained invocation owners, or delayed sinks. A plugin may use a private device
+only if it copies into the Host CPU output before return. The repository Metal
+example must use synchronous CPU staging or move behind a Host-private adapter
+before v2 deletion. Native/async work requires a future separate suite or ABI.
+
+V1 has no allocator callback. Definition strings are copied before return,
+execution writes Host-owned buffers, and planning/diagnostic records use one
+callback-local 48-byte Host output sink. Its closed channels accept diagnostic,
+output-plan, Region-binding, or dependency records as appropriate. The first
+sink failure is sticky, including when the plugin ignores it and returns
+success. Host memory is destroyed by the Host; plugin memory and successful
+contexts receive exactly one plugin destroy attempt under the exact DSO lease.
+
+`ps_operation_status_v1` has exact `uint32_t` values 0 through 8 for `OK`,
+`INVALID_ARGUMENT`, `OUT_OF_MEMORY`, `UNSUPPORTED`, `INVALID_DESCRIPTOR`,
+`TOO_COMPLEX`, `CANCELLED`, `FAILED_PRECONDITION`, and `INTERNAL_ERROR`.
+Unknown status fails as an ABI fault. One non-OK callback may emit one copied
+UTF-8 diagnostic up to 4 KiB. No exception or foreign unwind crosses the DSO;
+C++ wrappers map `std::bad_alloc`, invalid input, and every other catchable
+failure inside the plugin.
+
+The implementation must preserve the current strong shadow transaction while
+removing the C++ boundary. It validates and copies the complete root, suites,
+descriptors, callbacks, identities, and bounds; assigns one Host generation;
+and atomically publishes immutable per-slot callback/metadata/identity/source/
+revision values. Every callback/context retains its exact generation and DSO.
+Retirement removes publication, waits for leases, destroys in reverse order,
+and unmaps last. Middle-generation unload splices only owned predecessors.
+No Host registry, publication, scheduler, or execution lock is held during
+plugin code.
+
+An in-process callback that never returns may retain its invocation, write
+grants, contexts, generation, and DSO forever. Operation ABI v1 is therefore
+only an operator-trusted compatibility and validation boundary, never a
+sandbox. Tenant-untrusted pointer-free wire records, runtime supervision, and
+trust/resource enforcement remain owned by Issues #102, #103, and #104.
+
+The later migration adds v1 and migrates every repository operation and
+installed consumer before deleting v2 in the same release. It leaves no
+wrapper, alias, dual loader, forwarding header, v2-to-v1 adapter, missing-tail
+interpretation, or runtime fallback. Until those implementation and test gates
+pass, this section is a target and the preceding v2 sections remain current.
+
 ## Data-Definition Provider ABI v3
 
 A data-definition provider exports exactly the two functions declared by the
@@ -742,12 +947,13 @@ supervision is a separate architecture generation.
 
 ## Boundaries and Rationale
 
-The three current extension boundaries intentionally have different
-compatibility and authority profiles:
+The three current extension boundaries and the accepted replacement target
+intentionally have different compatibility and authority profiles:
 
 | Boundary | Data ABI | Authority |
 | --- | --- | --- |
 | Operation plugin v2 | Provisional C++ registrar and callback values | Operation computation and returned values under Host validation |
+| Operation plugin v1 target | Exact-size pure C, separately versioned suites, Host sinks, synchronous CPU grants | Future operation definition/planning/execution under Host validation; not yet installed |
 | Data-definition provider v3 | Exact-size pure C definition-suite records under a frozen 64-bit profile | Schema/Facet/Layout validation and bounded semantic observation only |
 | Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
 
@@ -830,8 +1036,9 @@ operation contract until every
 repository-owned operation and installed consumer has migrated. The completion
 boundary then deletes v2, its entry point, SDK, fixtures, and package surface
 without a permanent dual loader, wrapper, alias, forwarding header, or
-v2-to-v3 shim. Policy ABI v1 remains independently versioned and is not renamed
-to v3.
+v2-to-v1 shim. The replacement is the separately versioned operation-plugin
+ABI v1 accepted by ADR 0012; it is not a provider-v3 suite. Policy ABI v1
+remains independently versioned.
 
 The operation C-linkage entry name is an identity/generation gate, not a stable
 C data ABI. Binary compatibility still depends on the matching SDK, compiler,
@@ -937,8 +1144,10 @@ record the follow-up direction.
   declared status/enum values.
 - Policy callbacks retain no snapshot memory and treat every candidate id as
   opaque. They never create workers or claim that selection starts work.
-- There is no operation v1 compatibility path, scheduler SDK, scheduler ABI,
-  `IScheduler` adapter, or execution-route plugin ABI.
+- There is currently no installed operation-v1 header, loader, SDK, or dual-
+  compatibility path. The accepted v1 target replaces and deletes v2 only
+  after the complete migration gate; scheduler SDK/ABI, `IScheduler` adapter,
+  and execution-route plugin ABI remain absent.
 
 ## Implementation and Validation Entry Points
 

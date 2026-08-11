@@ -908,11 +908,11 @@ OperationOutput -> named Value outputs
 ParameterMap    -> configuration only
 ```
 
-Operation providers migrate from provisional C++ ABI v2 to separately
-versioned pure-C provider ABI v3 only after exact records and owned consumers
-exist. The completion boundary deletes v2 without a permanent wrapper, alias,
-forwarding header, dual loader, or v2-to-v3 shim. Policy ABI v1 remains
-independent.
+Operation plugins migrate from provisional C++ ABI v2 to the separately
+versioned pure-C operation-plugin ABI v1 accepted by ADR 0012 only after exact
+records and owned consumers exist. The completion boundary deletes v2 without
+a permanent wrapper, alias, forwarding header, dual loader, or v2-to-v1 shim.
+Data-definition provider v3 and policy ABI v1 remain independent families.
 
 ### Project 4 implementation dependency contract
 
@@ -1510,6 +1510,60 @@ ownership, sizes, readiness, identities, and declared bounds before Run use.
 Pure C improves record compatibility; it does not make hostile native code
 safe in-process.
 
+### Issue #101 accepted operation ABI decision
+
+[ADR 0012](../adr/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md)
+accepts an independent operation-plugin ABI v1 target. It is neither a
+data-provider-v3 suite nor policy-v1 evolution. The current installed boundary
+remains operation C++ ABI v2 until one later implementation migrates every
+repository plugin and installed consumer and deletes v2 completely, with no
+wrapper, alias, dual loader, forwarding header, or v2-to-v1 shim.
+
+The future self-contained C11/C++17 contract has a numeric ABI-one handshake,
+one exact 96-byte root API, and separate exact 64-byte v1 Definition,
+Configuration, Inference, Region, Dependency, and Execution suites. Definition,
+Configuration, Inference, Region, and Execution are required; Dependency is
+required when copied implementation metadata declares data dependence. Exactly
+20 semantic record kinds have exact size/kind/version/flags. Plain identities,
+handles, byte views, digests, array references, configuration values, and axis
+ranges have no record header; root and suites use their own prefixes. Reserved
+storage, pointer/count/stride framing, and all exact offsets are checked.
+Unknown tails and partial-prefix compatibility are rejected.
+
+Permanent 128-bit plugin/operation/implementation identities remain distinct
+from Host-minted process-local generation and invocation handles. Opaque plugin
+contexts only round-trip to the defining generation. Inputs are borrowed for
+one synchronous call; metadata and sink output are validated and copied; the
+Host owns output buffers and provides no allocator callback. Successful root
+and configured contexts receive one destroy attempt under the exact DSO lease.
+Statuses 0 through 8 freeze success, caller error, allocation failure,
+unsupported request, invalid descriptor, excessive complexity, cancellation,
+failed precondition, and internal failure. Exceptions never cross the DSO.
+
+V1 execution is deliberately synchronous and CPU-addressable. It carries no
+native device handle, device-resident buffer, fence, completion owner, delayed
+sink, Graph/Run/scheduler/cache/resource authority, or wire representation. A
+private device implementation must stage into Host CPU output before return or
+remain behind a Host-private adapter. Future native/async execution uses a new
+suite/ABI decision.
+
+Publication preserves the current shadow transaction, atomic immutable slot
+visibility, per-slot revision/predecessor restoration, middle-generation
+splice, reverse retirement, and exact callback/context DSO leases. A callback
+that never returns may retain those owners forever; pure C does not add bounded
+termination. Issue #102 alone owns pointer-free shared-memory/FD invocation
+records, Issue #103 owns authenticated supervision and crash/hang/OOM/bad-
+output containment, and Issue #104 owns allowlist/signature and enforceable
+resource policy.
+
+Issue #101 is complete as a decision when these bilingual artifacts pass local
+validation, fresh independent diff review, authorized exact-head PR
+Integration, fresh Codex exact-head review with findings adjudicated, zero
+unresolved review threads, and Issue/Project administration. Archiving that
+decision and closing #101 do not wait for the later header/loader/plugin
+migration or v2 deletion; those remain one independent breaking implementation
+change while v2 stays current and v1 target-only.
+
 The current Issue #99/#100 baseline is the source-private
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
 It freezes `jobspec-v2`, atomically accounts complete tenant resource envelopes,
@@ -1548,7 +1602,7 @@ Delivery remains allocated rather than absorbed by Issue #97:
 | [#98](https://github.com/kevin-zf1123/photospider/issues/98) | Immutable single-tenant JobSpec and control-plane-to-worker submit/query/cancel/completion with artifact identity |
 | [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota, durable artifacts, retry/checkpoint, and recovery semantics |
 | [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision, crash isolation, and bounded cancellation/shutdown |
-| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | Separately versioned pure-C operation-plugin ABI decision |
+| [#101](https://github.com/kevin-zf1123/photospider/issues/101) | Accepted separately versioned pure-C operation-plugin ABI v1 decision; implementation remains a later breaking migration |
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | Isolated CPU shared-memory/FD invocation and exact descriptor/stride/size/ownership validation |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | `PluginRuntimeSupervisor` heartbeat/deadline and crash/hang/OOM/bad-output containment |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature and enforceable resource policy |
