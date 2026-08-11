@@ -284,6 +284,16 @@ duration 用于初始 assignment receive，并把精确 I/O duration 用于 acce
 report write；worker 本地默认值或 cap 无法缩短 manager policy。Startup 不进入 assignment
 payload，因为 worker 在收到第一帧 protocol 前已经需要该 deadline。
 
+源码私有 duration 域会在取得 durable ownership 前封闭。九个 `WorkerManagerOptions` 字段都
+为正，且不大于包含式共享上限 `4,294,967,295 ms`。`heartbeat_interval` 采用更窄的包含式
+上限 `4,294,967,294 ms`，并且必须保持严格小于 `heartbeat_timeout`；这也保留了 protocol 的
+无符号 32-bit 毫秒 cadence。构造过程会在打开 durable root 前逐个校验具名字段，exec argument
+构造与解析则独立执行 startup/I/O 上限。受支持的 Darwin/Linux monotonic clock 能精确表示每个
+已接受毫秒值。每个 deadline 只捕获一次 base，检查
+`base <= time_point::max() - duration`，再与同一个 base 相加；clock-range 耗尽会抛出
+`std::overflow_error`，而不求值一个溢出的 sum。因此 `milliseconds::max()` 无法进入 conversion
+或 deadline arithmetic，validation 也不会相对于之后的时钟观察变得陈旧。
+
 Private bounded protocol 具有固定 magic、唯一支持的 version、封闭 message kind、64-MiB
 frame-payload 上限、deadline-aware partial I/O，以及严格的 trailing-byte、enum、identity、
 digest、image-shape 与 Job-resource 校验。唯一的 source-private
@@ -434,7 +444,9 @@ ordering、stale/malformed report、submit/retry manager-record/thread start 与
 release-failure ownership、Failed/Cancelled/rejected/malformed/pre-manifest terminal truth、
 read-only availability、report/mutation fencing 与 restart convergence、持续 handle/process
 reaping、target-inventory platform gating、bounded protocol reconstruction、fresh process
-identity、crash/protocol/heartbeat/runtime isolation、FIFO-held fresh-retry stale-lease rejection、
+identity、crash/protocol/heartbeat/runtime isolation、全部九个 duration 在 durable ownership 前的
+超界拒绝、精确共享 duration 与 heartbeat 关系边界、checked monotonic deadline range、FIFO-held
+fresh-retry stale-lease rejection、
 在首个 heartbeat rendezvous 与分支局部 bound 后验证 cooperative/forced cancellation、
 cancel-channel-versus-wait-status attribution、deadline-side
 natural-reap buffered-report drainage、candidate-Report-deadline-versus-wait-status attribution、

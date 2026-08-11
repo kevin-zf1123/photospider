@@ -350,6 +350,21 @@ heartbeat, and report writes; no worker-local default or cap can shorten the
 manager policy. Startup remains outside the assignment payload because the
 worker needs that deadline before receiving the first protocol frame.
 
+The source-private duration domain is closed before durable ownership. Each of
+the nine `WorkerManagerOptions` fields is positive and at most the inclusive
+`4,294,967,295 ms` shared maximum. `heartbeat_interval` has the narrower
+inclusive maximum `4,294,967,294 ms` and must remain strictly less than
+`heartbeat_timeout`; this also preserves the protocol's unsigned 32-bit
+millisecond cadence. Construction validates every named field before opening
+the durable root, while exec argument construction and parsing independently
+enforce the startup/I/O maximum. Supported Darwin/Linux monotonic clocks
+represent every admitted millisecond exactly. Each deadline captures its base
+once, checks `base <= time_point::max() - duration`, and adds to that same base;
+clock-range exhaustion raises `std::overflow_error` without evaluating an
+overflowing sum. Consequently `milliseconds::max()` cannot enter conversion or
+deadline arithmetic, and validation cannot become stale against a later clock
+observation.
+
 The private bounded protocol has fixed magic, one supported version, closed
 message kinds, a 64-MiB frame-payload maximum, deadline-aware partial I/O, and
 strict trailing-byte, enum, identity, digest, image-shape, and Job-resource
@@ -540,7 +555,10 @@ release-failure ownership for submit/retry manager-record/thread start and
 read-only availability, report/mutation fencing, and restart convergence,
 ongoing handle/process reaping, target-inventory platform gating, bounded
 protocol reconstruction, fresh process identity, crash/protocol/heartbeat/
-runtime isolation, FIFO-held fresh-retry stale-lease rejection, cooperative/
+runtime isolation, all-nine duration over-bound rejection before durable
+ownership, exact shared-duration and heartbeat-relation boundaries, checked
+monotonic deadline range, FIFO-held fresh-retry stale-lease rejection,
+cooperative/
 forced cancellation after a first-heartbeat rendezvous with branch-local
 bounds, cancel-channel-versus-wait-status attribution,
 deadline-side natural-reap buffered-report drainage, candidate-Report-deadline-

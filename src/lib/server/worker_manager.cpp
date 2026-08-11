@@ -535,6 +535,8 @@ bool escalation_matches_wait_status(const ChildProcess& process,
  * @return Nothing once `waitid(WNOWAIT)` proves a normal zero exit.
  * @throws ManagerFailure when the child exits abnormally or the deterministic
  * test deadline expires.
+ * @throws std::overflow_error if the monotonic clock cannot represent the next
+ * bounded poll slice.
  * @note This source-private seam is reached only when explicitly enabled by a
  * test option. The later production `waitpid` remains the sole exact reaper;
  * inability to observe this owned child fail-stops as authority loss.
@@ -562,8 +564,8 @@ void await_pre_signal_zero_exit_for_test(
           JobAttemptFailure::WorkerExit,
           "pre-signal test child did not become a zero-exit zombie");
     }
-    std::this_thread::sleep_until(
-        std::min(deadline, now + kSupervisorPollInterval));
+    std::this_thread::sleep_until(std::min(
+        deadline, checked_worker_deadline(now, kSupervisorPollInterval)));
   }
 }
 
@@ -573,6 +575,8 @@ void await_pre_signal_zero_exit_for_test(
  * @param deadline Absolute monotonic test-only observation deadline.
  * @return Nothing once `waitid(WNOWAIT)` proves any terminal child status.
  * @throws ManagerFailure when the deterministic test deadline expires.
+ * @throws std::overflow_error if the monotonic clock cannot represent the next
+ * bounded poll slice.
  * @note This source-private seam is reached only when explicitly enabled by a
  * test option. The later production `waitpid` remains the sole exact reaper;
  * inability to observe this owned child fail-stops as authority loss.
@@ -595,8 +599,8 @@ void await_any_exit_for_test(pid_t pid,
           JobAttemptFailure::WorkerExit,
           "cancel-channel test child did not reach a terminal status");
     }
-    std::this_thread::sleep_until(
-        std::min(deadline, now + kSupervisorPollInterval));
+    std::this_thread::sleep_until(std::min(
+        deadline, checked_worker_deadline(now, kSupervisorPollInterval)));
   }
 }
 
@@ -1056,6 +1060,8 @@ class WorkerManager::Impl final {
    * @brief Validates every callback, duration, factory, and product executable.
    * @return Nothing after every applicable invariant is validated.
    * @throws std::invalid_argument for any fail-closed configuration error.
+   * @throws std::bad_alloc when a field-specific duration diagnostic cannot be
+   * retained.
    * @throws std::system_error when the product `SIGCHLD` action cannot be
    * queried.
    * @note Explicit in-process test mode validates common bounds but neither
@@ -1066,19 +1072,34 @@ class WorkerManager::Impl final {
         !callbacks_.cancellation_requested || !callbacks_.complete_assignment) {
       throw std::invalid_argument("worker manager configuration is incomplete");
     }
-    const bool durations_valid =
-        options_.startup_timeout.count() > 0 &&
-        options_.heartbeat_interval.count() > 0 &&
-        options_.heartbeat_timeout.count() > 0 &&
-        options_.attempt_runtime_timeout.count() > 0 &&
-        options_.post_report_timeout.count() > 0 &&
-        options_.cooperative_cancel_timeout.count() > 0 &&
-        options_.terminate_timeout.count() > 0 &&
-        options_.kill_reap_timeout.count() > 0 &&
-        options_.io_timeout.count() > 0 &&
-        options_.heartbeat_interval < options_.heartbeat_timeout;
-    if (!durations_valid) {
-      throw std::invalid_argument("worker manager duration bounds are invalid");
+    static_cast<void>(validate_and_convert_worker_duration(
+        options_.startup_timeout, kMaximumWorkerDuration, "startup_timeout"));
+    static_cast<void>(validate_and_convert_worker_duration(
+        options_.heartbeat_interval, kMaximumWorkerHeartbeatInterval,
+        "heartbeat_interval"));
+    static_cast<void>(validate_and_convert_worker_duration(
+        options_.heartbeat_timeout, kMaximumWorkerDuration,
+        "heartbeat_timeout"));
+    static_cast<void>(validate_and_convert_worker_duration(
+        options_.attempt_runtime_timeout, kMaximumWorkerDuration,
+        "attempt_runtime_timeout"));
+    static_cast<void>(validate_and_convert_worker_duration(
+        options_.post_report_timeout, kMaximumWorkerDuration,
+        "post_report_timeout"));
+    static_cast<void>(validate_and_convert_worker_duration(
+        options_.cooperative_cancel_timeout, kMaximumWorkerDuration,
+        "cooperative_cancel_timeout"));
+    static_cast<void>(validate_and_convert_worker_duration(
+        options_.terminate_timeout, kMaximumWorkerDuration,
+        "terminate_timeout"));
+    static_cast<void>(validate_and_convert_worker_duration(
+        options_.kill_reap_timeout, kMaximumWorkerDuration,
+        "kill_reap_timeout"));
+    static_cast<void>(validate_and_convert_worker_duration(
+        options_.io_timeout, kMaximumWorkerDuration, "io_timeout"));
+    if (options_.heartbeat_interval >= options_.heartbeat_timeout) {
+      throw std::invalid_argument(
+          "heartbeat_interval must be less than heartbeat_timeout");
     }
     if (in_process_test_mode_) {
       return;
@@ -1205,6 +1226,8 @@ class WorkerManager::Impl final {
    * @return Live child and private parent socket.
    * @throws ManagerFailure for setup, fork, resource-limit, or exec failure.
    * @throws std::system_error for pre-fork descriptor setup failure.
+   * @throws std::overflow_error if the captured monotonic base cannot
+   * represent the validated startup deadline.
    * @note The fork child performs only async-signal-safe descriptor, limit,
    * status-write, and exec operations using storage prepared before fork.
    * Darwin closes fd 5 through the kernel `kern.maxfilesperproc` ceiling;
@@ -1308,9 +1331,10 @@ class WorkerManager::Impl final {
     process.pid = pid;
     process.control = std::move(parent_socket);
     try {
-      const std::optional<int> child_error =
-          read_exec_status(status_read.get(), std::chrono::steady_clock::now() +
-                                                  options_.startup_timeout);
+      const std::optional<int> child_error = read_exec_status(
+          status_read.get(),
+          checked_worker_deadline(std::chrono::steady_clock::now(),
+                                  options_.startup_timeout));
       status_read.reset();
       if (child_error.has_value()) {
         static_cast<void>(terminate_and_reap(record, &process));
@@ -1348,12 +1372,13 @@ class WorkerManager::Impl final {
           record->assignment,
           factory_->prepared_external_graph(record->assignment),
           options_.heartbeat_interval};
-      const auto startup_deadline =
-          std::chrono::steady_clock::now() + options_.startup_timeout;
+      const auto startup_deadline = checked_worker_deadline(
+          std::chrono::steady_clock::now(), options_.startup_timeout);
       send_worker_assignment(
           process.control.get(), prepared,
           std::min(startup_deadline,
-                   std::chrono::steady_clock::now() + options_.io_timeout));
+                   checked_worker_deadline(std::chrono::steady_clock::now(),
+                                           options_.io_timeout)));
       const WorkerProtocolFrame acceptance =
           read_worker_frame(process.control.get(), startup_deadline);
       if (decode_worker_identity(acceptance,
@@ -1379,8 +1404,10 @@ class WorkerManager::Impl final {
     } catch (const WorkerChannelError& error) {
       if (accepted && options_.await_cancel_channel_failure_exit_for_test &&
           !process.reaped) {
-        await_any_exit_for_test(process.pid, std::chrono::steady_clock::now() +
-                                                 options_.terminate_timeout);
+        await_any_exit_for_test(
+            process.pid,
+            checked_worker_deadline(std::chrono::steady_clock::now(),
+                                    options_.terminate_timeout));
       }
       terminate_and_reap(record, &process);
       return failure_completion(record->identity,
@@ -1390,7 +1417,8 @@ class WorkerManager::Impl final {
         if (!process.reaped) {
           static_cast<void>(wait_for_exit_until(
               record, &process,
-              std::chrono::steady_clock::now() + options_.post_report_timeout));
+              checked_worker_deadline(std::chrono::steady_clock::now(),
+                                      options_.post_report_timeout)));
         }
       } catch (...) {
         if (!process.reaped) {
@@ -1434,6 +1462,8 @@ class WorkerManager::Impl final {
    * accepted cancellation for the outer classifier. Accepted-cancel channel
    * failures remain inside this bounded process/wait-status state machine.
    * @throws std::invalid_argument when `process` is null.
+   * @throws std::overflow_error if a captured monotonic base cannot represent
+   * one of the validated lifecycle deadlines.
    * @note Short read slices share one stateful frame decoder. Cancellation-send
    * failure starts the same cooperative deadline and keeps draining worker
    * report/EOF/exit truth. Every ordinary EOF or candidate-Report deadline is
@@ -1458,8 +1488,10 @@ class WorkerManager::Impl final {
       throw std::invalid_argument("worker monitor process is null");
     }
     const auto started = std::chrono::steady_clock::now();
-    auto heartbeat_deadline = started + options_.heartbeat_timeout;
-    const auto runtime_deadline = started + options_.attempt_runtime_timeout;
+    auto heartbeat_deadline =
+        checked_worker_deadline(started, options_.heartbeat_timeout);
+    const auto runtime_deadline =
+        checked_worker_deadline(started, options_.attempt_runtime_timeout);
     std::optional<std::chrono::steady_clock::time_point> cancel_deadline;
     std::optional<std::chrono::steady_clock::time_point> report_deadline;
     std::optional<std::chrono::steady_clock::time_point> eof_deadline;
@@ -1477,17 +1509,20 @@ class WorkerManager::Impl final {
       const auto now = std::chrono::steady_clock::now();
       if (process->reaped && !channel_eof &&
           !post_reap_drain_deadline.has_value()) {
-        post_reap_drain_deadline = now + options_.post_report_timeout;
+        post_reap_drain_deadline =
+            checked_worker_deadline(now, options_.post_report_timeout);
       }
       const bool cancel = cancellation_requested(record);
       if (cancel && !cancel_attempted && !process->reaped) {
         cancel_attempted = true;
-        cancel_deadline = now + options_.cooperative_cancel_timeout;
+        cancel_deadline =
+            checked_worker_deadline(now, options_.cooperative_cancel_timeout);
         try {
           send_worker_identity(
               process->control.get(), WorkerMessageKind::Cancel,
               record->identity,
-              std::min(now + options_.io_timeout, *cancel_deadline));
+              std::min(checked_worker_deadline(now, options_.io_timeout),
+                       *cancel_deadline));
         } catch (...) {
           cancel_delivery_failed = true;
         }
@@ -1499,7 +1534,8 @@ class WorkerManager::Impl final {
         if (options_.await_cancel_deadline_zero_exit_for_test) {
           await_pre_signal_zero_exit_for_test(
               process->pid,
-              std::chrono::steady_clock::now() + options_.terminate_timeout);
+              checked_worker_deadline(std::chrono::steady_clock::now(),
+                                      options_.terminate_timeout));
         }
         const TerminateAndReapResult termination =
             terminate_and_reap(record, process);
@@ -1515,8 +1551,8 @@ class WorkerManager::Impl final {
         if (termination ==
             TerminateAndReapResult::ExitedBeforeChannelRevocation) {
           cancel_deadline.reset();
-          post_reap_drain_deadline =
-              std::chrono::steady_clock::now() + options_.post_report_timeout;
+          post_reap_drain_deadline = checked_worker_deadline(
+              std::chrono::steady_clock::now(), options_.post_report_timeout);
           continue;
         }
         channel_eof = true;
@@ -1595,8 +1631,8 @@ class WorkerManager::Impl final {
         continue;
       }
 
-      auto read_deadline =
-          std::chrono::steady_clock::now() + kSupervisorPollInterval;
+      auto read_deadline = checked_worker_deadline(
+          std::chrono::steady_clock::now(), kSupervisorPollInterval);
       if (!process->reaped) {
         if (!cancel && !candidate_report.has_value()) {
           read_deadline = std::min(read_deadline, heartbeat_deadline);
@@ -1630,8 +1666,8 @@ class WorkerManager::Impl final {
             throw WorkerProtocolError(
                 "worker heartbeat identity does not match its exact lease");
           }
-          heartbeat_deadline =
-              std::chrono::steady_clock::now() + options_.heartbeat_timeout;
+          heartbeat_deadline = checked_worker_deadline(
+              std::chrono::steady_clock::now(), options_.heartbeat_timeout);
           if (options_.first_external_heartbeat_observed_for_test != nullptr) {
             options_.first_external_heartbeat_observed_for_test->store(
                 true, std::memory_order_release);
@@ -1644,8 +1680,8 @@ class WorkerManager::Impl final {
                 "worker report identity does not match its exact lease");
           }
           candidate_report = std::move(report);
-          report_deadline =
-              std::chrono::steady_clock::now() + options_.post_report_timeout;
+          report_deadline = checked_worker_deadline(
+              std::chrono::steady_clock::now(), options_.post_report_timeout);
         } else {
           throw WorkerProtocolError(
               "worker sent a message invalid for its active state");
@@ -1654,21 +1690,22 @@ class WorkerManager::Impl final {
         // The short poll slice exists only to revisit process/deadline state.
       } catch (const WorkerProtocolEof&) {
         channel_eof = true;
-        eof_deadline =
-            std::chrono::steady_clock::now() + options_.post_report_timeout;
+        eof_deadline = checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               options_.post_report_timeout);
       } catch (const WorkerChannelError&) {
         if (!cancel_attempted) {
           throw;
         }
         cancel_channel_failed = true;
         channel_eof = true;
-        eof_deadline =
-            std::chrono::steady_clock::now() + options_.post_report_timeout;
+        eof_deadline = checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               options_.post_report_timeout);
         if (options_.await_cancel_channel_failure_exit_for_test &&
             !process->reaped) {
           await_any_exit_for_test(
               process->pid,
-              std::chrono::steady_clock::now() + options_.terminate_timeout);
+              checked_worker_deadline(std::chrono::steady_clock::now(),
+                                      options_.terminate_timeout));
         }
       }
     }
@@ -1995,6 +2032,8 @@ class WorkerManager::Impl final {
    * @param deadline Absolute monotonic deadline.
    * @return True when reaped before deadline.
    * @throws std::invalid_argument when `process` is null.
+   * @throws std::overflow_error if the monotonic clock cannot represent the
+   * next bounded poll slice.
    * @note Reaping authority loss fail-stops rather than throwing.
    */
   bool wait_for_exit_until(const std::shared_ptr<Record>& record,
@@ -2008,8 +2047,8 @@ class WorkerManager::Impl final {
       if (now >= deadline) {
         return observe_exit(record, process);
       }
-      std::this_thread::sleep_until(
-          std::min(deadline, now + kSupervisorPollInterval));
+      std::this_thread::sleep_until(std::min(
+          deadline, checked_worker_deadline(now, kSupervisorPollInterval)));
     }
   }
 
@@ -2021,6 +2060,8 @@ class WorkerManager::Impl final {
    * revocation without matching signal death, or matched delivered owned
    * escalation.
    * @throws std::invalid_argument when `process` is null.
+   * @throws std::overflow_error if a captured monotonic base cannot represent
+   * a validated termination or reap deadline.
    * @note Exact natural exit observed before revocation leaves `control` open
    * for the caller's bounded report/EOF drain. Every signal revalidates
    * complete record/PID ownership under mutex. Missing the final reap deadline
@@ -2045,13 +2086,15 @@ class WorkerManager::Impl final {
     if (options_.await_pre_signal_zero_exit_for_test) {
       await_pre_signal_zero_exit_for_test(
           process->pid,
-          std::chrono::steady_clock::now() + options_.terminate_timeout);
+          checked_worker_deadline(std::chrono::steady_clock::now(),
+                                  options_.terminate_timeout));
     }
     const bool term_delivered = signal_owned(record, process->pid, SIGTERM) ==
                                 OwnedSignalResult::Delivered;
     if (wait_for_exit_until(
             record, process,
-            std::chrono::steady_clock::now() + options_.terminate_timeout)) {
+            checked_worker_deadline(std::chrono::steady_clock::now(),
+                                    options_.terminate_timeout))) {
       return escalation_matches_wait_status(*process, term_delivered, false)
                  ? TerminateAndReapResult::EscalationMatched
                  : TerminateAndReapResult::ReapedAfterChannelRevocation;
@@ -2060,7 +2103,8 @@ class WorkerManager::Impl final {
                                 OwnedSignalResult::Delivered;
     if (!wait_for_exit_until(
             record, process,
-            std::chrono::steady_clock::now() + options_.kill_reap_timeout)) {
+            checked_worker_deadline(std::chrono::steady_clock::now(),
+                                    options_.kill_reap_timeout))) {
       fail_stop_unreaped_worker();
     }
     return escalation_matches_wait_status(*process, term_delivered,

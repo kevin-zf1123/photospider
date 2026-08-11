@@ -367,8 +367,9 @@ void send_fragmented_report(int fd, const JobAttemptReport& report,
                             "create fixture report capture socketpair");
   }
   try {
-    send_worker_report(capture[0], report, spec,
-                       std::chrono::steady_clock::now() + io_timeout);
+    send_worker_report(
+        capture[0], report, spec,
+        checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
     static_cast<void>(::shutdown(capture[0], SHUT_WR));
     forward_exact_bytes(capture[1], fd, 5U);
     std::this_thread::sleep_for(std::chrono::milliseconds(35));
@@ -395,8 +396,9 @@ void send_fragmented_report(int fd, const JobAttemptReport& report,
  */
 void send_heartbeat(int fd, const AttemptIdentity& identity,
                     std::chrono::milliseconds io_timeout) {
-  send_worker_identity(fd, WorkerMessageKind::Heartbeat, identity,
-                       std::chrono::steady_clock::now() + io_timeout);
+  send_worker_identity(
+      fd, WorkerMessageKind::Heartbeat, identity,
+      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
 }
 
 /**
@@ -413,20 +415,21 @@ void send_heartbeat(int fd, const AttemptIdentity& identity,
 JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
                                  bool ignore_cancel,
                                  std::chrono::milliseconds io_timeout) {
-  auto next_heartbeat =
-      std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
+  auto next_heartbeat = checked_worker_deadline(
+      std::chrono::steady_clock::now(), kFixtureHeartbeatCadence);
   WorkerFrameDecoder frame_decoder;
   for (;;) {
     const auto now = std::chrono::steady_clock::now();
     if (now >= next_heartbeat) {
       send_heartbeat(fd, assignment.identity, io_timeout);
-      next_heartbeat =
-          std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
+      next_heartbeat = checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               kFixtureHeartbeatCadence);
     }
     try {
       const WorkerProtocolFrame frame = frame_decoder.read_frame(
-          fd, std::min(next_heartbeat, std::chrono::steady_clock::now() +
-                                           kFixtureHeartbeatCadence));
+          fd, std::min(next_heartbeat,
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               kFixtureHeartbeatCadence)));
       if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
           assignment.identity) {
         throw WorkerProtocolError(
@@ -453,20 +456,21 @@ JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
  */
 void wait_for_cancel_then_channel_close(int fd, const JobAssignment& assignment,
                                         std::chrono::milliseconds io_timeout) {
-  auto next_heartbeat =
-      std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
+  auto next_heartbeat = checked_worker_deadline(
+      std::chrono::steady_clock::now(), kFixtureHeartbeatCadence);
   bool cancel_observed = false;
   WorkerFrameDecoder frame_decoder;
   for (;;) {
     const auto now = std::chrono::steady_clock::now();
     if (!cancel_observed && now >= next_heartbeat) {
       send_heartbeat(fd, assignment.identity, io_timeout);
-      next_heartbeat =
-          std::chrono::steady_clock::now() + kFixtureHeartbeatCadence;
+      next_heartbeat = checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               kFixtureHeartbeatCadence);
     }
     try {
       const WorkerProtocolFrame frame = frame_decoder.read_frame(
-          fd, std::chrono::steady_clock::now() + kFixtureHeartbeatCadence);
+          fd, checked_worker_deadline(std::chrono::steady_clock::now(),
+                                      kFixtureHeartbeatCadence));
       if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
           assignment.identity) {
         throw WorkerProtocolError(
@@ -550,11 +554,14 @@ JobAttemptReport receive_fragmented_cancel(
  * @param io_timeout Positive manager-selected write bound.
  * @return Nothing after duration expiry.
  * @throws Protocol I/O failures unchanged.
+ * @throws std::invalid_argument or std::overflow_error when the requested
+ * duration cannot form a supported monotonic deadline.
  */
 void heartbeat_for(int fd, const AttemptIdentity& identity,
                    std::chrono::milliseconds duration,
                    std::chrono::milliseconds io_timeout) {
-  const auto deadline = std::chrono::steady_clock::now() + duration;
+  const auto deadline =
+      checked_worker_deadline(std::chrono::steady_clock::now(), duration);
   while (std::chrono::steady_clock::now() < deadline) {
     send_heartbeat(fd, identity, io_timeout);
     std::this_thread::sleep_for(kFixtureHeartbeatCadence);
@@ -625,7 +632,8 @@ int run_filesystem_block_probe(const std::string& path) noexcept {
 int run_fixture(const WorkerProcessLaunchOptions& launch) {
   PreparedWorkerAssignment prepared = receive_worker_assignment(
       launch.control_fd,
-      std::chrono::steady_clock::now() + launch.startup_timeout);
+      checked_worker_deadline(std::chrono::steady_clock::now(),
+                              launch.startup_timeout));
   const JobAssignment& assignment = prepared.assignment;
   const std::string& mode = assignment.spec->graph_artifact_id().value();
   if (mode == kLaunchDeadlineMode &&
@@ -638,7 +646,8 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
   }
   send_worker_identity(launch.control_fd, WorkerMessageKind::AssignmentAccepted,
                        assignment.identity,
-                       std::chrono::steady_clock::now() + launch.io_timeout);
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               launch.io_timeout));
 
   if (mode == kFilesystemBlockMode ||
       (mode == kRetryFilesystemHoldMode &&
@@ -690,14 +699,16 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     const JobAttemptReport report = wait_for_cancel(
         launch.control_fd, assignment, false, launch.io_timeout);
     send_worker_report(launch.control_fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + launch.io_timeout);
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               launch.io_timeout));
     return 0;
   }
   if (mode == "fixture.fragmented.cancel") {
     const JobAttemptReport report = receive_fragmented_cancel(
         launch.control_fd, assignment, launch.io_timeout);
     send_worker_report(launch.control_fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + launch.io_timeout);
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               launch.io_timeout));
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
@@ -706,7 +717,8 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     const JobAttemptReport report = failed_report(assignment);
     send_worker_report(launch.control_fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + launch.io_timeout);
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               launch.io_timeout));
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
@@ -732,7 +744,8 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     const JobAttemptReport report = wait_for_cancel(
         launch.control_fd, assignment, false, launch.io_timeout);
     send_worker_report(launch.control_fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + launch.io_timeout);
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               launch.io_timeout));
     std::this_thread::sleep_for(kDelayedCancelSignalExit);
     static_cast<void>(::kill(::getpid(), SIGKILL));
     return 37;
@@ -755,7 +768,8 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
   if (mode == "fixture.report.hang") {
     const JobAttemptReport report = success_report(assignment);
     send_worker_report(launch.control_fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + launch.io_timeout);
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               launch.io_timeout));
     std::this_thread::sleep_for(std::chrono::seconds(10));
     return 27;
   }
@@ -773,7 +787,8 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
   if (mode == kCheckpointBoundaryOverMode) {
     const JobAttemptReport report = checkpoint_boundary_over_report(assignment);
     send_worker_report(launch.control_fd, report, *assignment.spec,
-                       std::chrono::steady_clock::now() + launch.io_timeout);
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               launch.io_timeout));
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
@@ -782,7 +797,8 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
   }
   const JobAttemptReport report = success_report(assignment);
   send_worker_report(launch.control_fd, report, *assignment.spec,
-                     std::chrono::steady_clock::now() + launch.io_timeout);
+                     checked_worker_deadline(std::chrono::steady_clock::now(),
+                                             launch.io_timeout));
   static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
   return 0;
 }

@@ -7,6 +7,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -20,6 +21,102 @@ constexpr std::string_view kWorkerControlFdPrefix{"--control-fd="};
 constexpr std::string_view kWorkerStartupTimeoutPrefix{"--startup-timeout-ms="};
 /** @brief Exact per-message I/O-deadline argument prefix shared across exec. */
 constexpr std::string_view kWorkerIoTimeoutPrefix{"--io-timeout-ms="};
+/**
+ * @brief Inclusive upper bound for every configured worker duration.
+ * @note The bound matches the protocol's unsigned 32-bit heartbeat-cadence
+ * field and is exactly representable by the supported Darwin/Linux monotonic
+ * clocks. It is a lifecycle-policy limit, not a wire-version change.
+ */
+constexpr std::chrono::milliseconds kMaximumWorkerDuration{
+    static_cast<std::chrono::milliseconds::rep>(
+        std::numeric_limits<std::uint32_t>::max())};
+/**
+ * @brief Inclusive heartbeat-interval bound with room for a larger timeout.
+ * @note Manager configuration additionally requires the interval to be
+ * strictly less than `heartbeat_timeout`.
+ */
+// NOLINTBEGIN(whitespace/indent_namespace)
+constexpr std::chrono::milliseconds kMaximumWorkerHeartbeatInterval =
+    kMaximumWorkerDuration - std::chrono::milliseconds{1};
+
+/** @brief Exact monotonic-clock ticks in one millisecond. */
+constexpr auto kWorkerClockTicksPerMillisecond =
+    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::milliseconds{1})
+        .count();
+static_assert(
+    kWorkerClockTicksPerMillisecond > 0 &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::duration{
+                kWorkerClockTicksPerMillisecond}) ==
+            std::chrono::milliseconds{1},
+    "supported worker supervision clocks must exactly represent milliseconds");
+static_assert(
+    std::numeric_limits<std::chrono::steady_clock::duration::rep>::is_integer,
+    "supported worker supervision clocks must use integer ticks");
+static_assert(
+    kMaximumWorkerDuration.count() <=
+        std::numeric_limits<std::chrono::steady_clock::duration::rep>::max() /
+            kWorkerClockTicksPerMillisecond,
+    "the shared worker duration bound must fit the monotonic clock");
+// NOLINTEND
+
+/**
+ * @brief Validates and exactly converts one worker lifecycle duration.
+ * @param duration Candidate positive millisecond duration.
+ * @param maximum Inclusive field-specific maximum no greater than the shared
+ * worker-duration bound.
+ * @param field_name Nonempty trusted configuration field name for diagnostics.
+ * @return Exact monotonic-clock duration for safe deadline arithmetic.
+ * @throws std::invalid_argument when the field name, maximum, or candidate is
+ * outside the closed supported domain.
+ * @throws std::bad_alloc when constructing a rejection diagnostic exhausts
+ * memory.
+ * @note Validation precedes `duration_cast`; compile-time scale checks prove
+ * that every admitted millisecond value converts without integer overflow or
+ * truncation on supported platforms.
+ */
+inline std::chrono::steady_clock::duration validate_and_convert_worker_duration(
+    std::chrono::milliseconds duration, std::chrono::milliseconds maximum,
+    std::string_view field_name) {
+  if (field_name.empty() || maximum.count() <= 0 ||
+      maximum > kMaximumWorkerDuration) {
+    throw std::invalid_argument("worker duration validation bound is invalid");
+  }
+  if (duration.count() <= 0 || duration > maximum) {
+    throw std::invalid_argument(
+        std::string(field_name) + " must be between 1 and " +
+        std::to_string(maximum.count()) + " milliseconds");
+  }
+  return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      duration);
+}
+
+/**
+ * @brief Adds one validated worker duration to one captured monotonic base.
+ * @param base Exact base captured once by the caller.
+ * @param duration Candidate positive worker duration within the shared bound.
+ * @return Exact absolute monotonic deadline.
+ * @throws std::invalid_argument when `duration` is outside the shared bound.
+ * @throws std::overflow_error when the exact sum exceeds the clock range.
+ * @throws std::bad_alloc when constructing a rejection diagnostic exhausts
+ * memory.
+ * @note The range check and addition use the same caller-provided `base`, so a
+ * second clock observation cannot invalidate the proof.
+ */
+inline std::chrono::steady_clock::time_point checked_worker_deadline(
+    std::chrono::steady_clock::time_point base,
+    std::chrono::milliseconds duration) {
+  const std::chrono::steady_clock::duration increment =
+      validate_and_convert_worker_duration(duration, kMaximumWorkerDuration,
+                                           "worker deadline duration");
+  const auto latest_base =
+      std::chrono::steady_clock::time_point::max() - increment;
+  if (base > latest_base) {
+    throw std::overflow_error("worker deadline exceeds monotonic clock range");
+  }
+  return base + increment;
+}
 
 /**
  * @brief Immutable manager policy required before assignment-frame receipt.
@@ -31,9 +128,9 @@ constexpr std::string_view kWorkerIoTimeoutPrefix{"--io-timeout-ms="};
 struct WorkerProcessLaunchOptions final {
   /** @brief Exact private manager/worker control descriptor. */
   int control_fd = -1;
-  /** @brief Manager-selected complete assignment-receive bound. */
+  /** @brief Manager-selected bounded complete assignment-receive duration. */
   std::chrono::milliseconds startup_timeout{0};
-  /** @brief Manager-selected bound for each worker-to-manager frame write. */
+  /** @brief Manager-selected bounded worker-to-manager frame-write duration. */
   std::chrono::milliseconds io_timeout{0};
 };
 
@@ -57,7 +154,7 @@ struct WorkerProcessLaunchArguments final {
  * @param options Valid manager-selected launch policy.
  * @return Three stable complete argument strings in parser order.
  * @throws std::invalid_argument for a standard/reserved descriptor or a
- * non-positive duration.
+ * duration outside the shared closed bound.
  * @throws std::bad_alloc when retaining argument strings exhausts memory.
  * @note Call only before `fork`; the returned strings must outlive `execv`.
  */
@@ -66,9 +163,10 @@ inline WorkerProcessLaunchArguments make_worker_process_launch_arguments(
   if (options.control_fd < 3 || options.control_fd > 1024 * 1024) {
     throw std::invalid_argument("worker control descriptor is out of range");
   }
-  if (options.startup_timeout.count() <= 0 || options.io_timeout.count() <= 0) {
-    throw std::invalid_argument("worker launch timeouts must be positive");
-  }
+  static_cast<void>(validate_and_convert_worker_duration(
+      options.startup_timeout, kMaximumWorkerDuration, "startup_timeout"));
+  static_cast<void>(validate_and_convert_worker_duration(
+      options.io_timeout, kMaximumWorkerDuration, "io_timeout"));
   WorkerProcessLaunchArguments arguments;
   arguments.control_fd =
       std::string(kWorkerControlFdPrefix) + std::to_string(options.control_fd);
@@ -111,8 +209,8 @@ inline std::int64_t parse_positive_worker_launch_value(
  * @return Valid exact control descriptor and manager-selected durations.
  * @throws std::invalid_argument for a missing, extra, reordered, malformed, or
  * out-of-range value.
- * @note No worker-local default or cap exists: accepted duration values equal
- * the manager arguments exactly.
+ * @note No worker-local default exists: accepted duration values equal the
+ * manager arguments exactly within the shared closed bound.
  */
 inline WorkerProcessLaunchOptions parse_worker_process_launch_options(
     int argc, char* const argv[]) {
@@ -130,9 +228,14 @@ inline WorkerProcessLaunchOptions parse_worker_process_launch_options(
   if (control < 3 || control > 1024 * 1024) {
     throw std::invalid_argument("worker control descriptor is out of range");
   }
-  return WorkerProcessLaunchOptions{static_cast<int>(control),
-                                    std::chrono::milliseconds(startup),
-                                    std::chrono::milliseconds(io)};
+  const std::chrono::milliseconds startup_timeout(startup);
+  const std::chrono::milliseconds io_timeout(io);
+  static_cast<void>(validate_and_convert_worker_duration(
+      startup_timeout, kMaximumWorkerDuration, "startup_timeout"));
+  static_cast<void>(validate_and_convert_worker_duration(
+      io_timeout, kMaximumWorkerDuration, "io_timeout"));
+  return WorkerProcessLaunchOptions{static_cast<int>(control), startup_timeout,
+                                    io_timeout};
 }
 
 }  // namespace ps::server

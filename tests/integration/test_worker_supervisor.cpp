@@ -21,10 +21,12 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -32,7 +34,8 @@
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
-#include "server/worker_protocol.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
 
 #ifndef PS_TEST_WORKER_FIXTURE_PATH
 #error "PS_TEST_WORKER_FIXTURE_PATH must name the real-process fixture"
@@ -376,6 +379,42 @@ WorkerManagerOptions supervisor_options() {
   options.io_timeout = 500ms;
   return options;
 }
+
+/**
+ * @brief Describes one independently bounded WorkerManager duration field.
+ * @throws Nothing for value construction.
+ * @note The pointer-to-member keeps the rejection matrix tied directly to the
+ * nine public source-private configuration fields.
+ */
+struct WorkerDurationFieldCase final {
+  /** @brief Stable field spelling expected in rejection diagnostics. */
+  std::string_view name;
+  /** @brief Exact duration member selected by this matrix row. */
+  std::chrono::milliseconds WorkerManagerOptions::* member;
+  /** @brief Inclusive field-specific accepted maximum. */
+  std::chrono::milliseconds maximum;
+};
+
+/** @brief Complete nine-field WorkerManager duration-bound matrix. */
+constexpr std::array<WorkerDurationFieldCase, 9U> kWorkerDurationFieldCases{{
+    {"startup_timeout", &WorkerManagerOptions::startup_timeout,
+     kMaximumWorkerDuration},
+    {"heartbeat_interval", &WorkerManagerOptions::heartbeat_interval,
+     kMaximumWorkerHeartbeatInterval},
+    {"heartbeat_timeout", &WorkerManagerOptions::heartbeat_timeout,
+     kMaximumWorkerDuration},
+    {"attempt_runtime_timeout", &WorkerManagerOptions::attempt_runtime_timeout,
+     kMaximumWorkerDuration},
+    {"post_report_timeout", &WorkerManagerOptions::post_report_timeout,
+     kMaximumWorkerDuration},
+    {"cooperative_cancel_timeout",
+     &WorkerManagerOptions::cooperative_cancel_timeout, kMaximumWorkerDuration},
+    {"terminate_timeout", &WorkerManagerOptions::terminate_timeout,
+     kMaximumWorkerDuration},
+    {"kill_reap_timeout", &WorkerManagerOptions::kill_reap_timeout,
+     kMaximumWorkerDuration},
+    {"io_timeout", &WorkerManagerOptions::io_timeout, kMaximumWorkerDuration},
+}};
 
 /**
  * @brief Closes one probe-owned descriptor through interrupted syscalls.
@@ -1745,6 +1784,95 @@ TEST(WorkerSupervisor, ShutdownDrainsIgnoringWorkersWithinConcurrentBound) {
   const auto started = std::chrono::steady_clock::now();
   service.reset();
   EXPECT_LT(std::chrono::steady_clock::now() - started, 2s);
+}
+
+TEST(WorkerSupervisor,
+     ProductConstructionRejectsEveryOversizedDurationBeforeDurableOwnership) {
+  ScopedSupervisorRoot root;
+  for (std::size_t field_index = 0U;
+       field_index < kWorkerDurationFieldCases.size(); ++field_index) {
+    const WorkerDurationFieldCase& field =
+        kWorkerDurationFieldCases[field_index];
+    const std::array<std::chrono::milliseconds, 2U> rejected_values{
+        field.maximum + 1ms, std::chrono::milliseconds::max()};
+    for (std::size_t value_index = 0U; value_index < rejected_values.size();
+         ++value_index) {
+      SCOPED_TRACE(std::string(field.name) + " candidate " +
+                   std::to_string(rejected_values[value_index].count()));
+      const std::filesystem::path rejected_root =
+          root.path() / ("duration-rejected-" + std::to_string(field_index) +
+                         "-" + std::to_string(value_index));
+      WorkerManagerOptions options = supervisor_options();
+      options.*(field.member) = rejected_values[value_index];
+      bool rejected = false;
+      try {
+        auto service = make_service(rejected_root, std::move(options));
+        static_cast<void>(service);
+      } catch (const std::invalid_argument& error) {
+        rejected = true;
+        EXPECT_NE(std::string(error.what()).find(field.name),
+                  std::string::npos);
+      } catch (...) {
+        ADD_FAILURE() << "oversized duration raised the wrong exception";
+      }
+      EXPECT_TRUE(rejected);
+      EXPECT_FALSE(std::filesystem::exists(rejected_root));
+    }
+  }
+}
+
+TEST(WorkerSupervisor, ExactDurationBoundsPreserveClosedLaunchPolicy) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions boundary_options = supervisor_options();
+  for (const WorkerDurationFieldCase& field : kWorkerDurationFieldCases) {
+    boundary_options.*(field.member) = field.maximum;
+  }
+  auto service = make_service(root.path() / "duration-exact-bound",
+                              std::move(boundary_options));
+  ASSERT_NE(service, nullptr);
+  service.reset();
+
+  WorkerProcessLaunchOptions launch{3, kMaximumWorkerDuration,
+                                    kMaximumWorkerDuration};
+  WorkerProcessLaunchArguments arguments =
+      make_worker_process_launch_arguments(launch);
+  char executable[] = "photospider-worker";
+  std::array<char*, 4U> argv{executable, arguments.control_fd.data(),
+                             arguments.startup_timeout.data(),
+                             arguments.io_timeout.data()};
+  const WorkerProcessLaunchOptions parsed = parse_worker_process_launch_options(
+      static_cast<int>(argv.size()), argv.data());
+  EXPECT_EQ(parsed.startup_timeout, kMaximumWorkerDuration);
+  EXPECT_EQ(parsed.io_timeout, kMaximumWorkerDuration);
+
+  launch.startup_timeout = kMaximumWorkerDuration + 1ms;
+  EXPECT_THROW(make_worker_process_launch_arguments(launch),
+               std::invalid_argument);
+
+  WorkerManagerOptions tied = supervisor_options();
+  tied.heartbeat_interval = 100ms;
+  tied.heartbeat_timeout = 100ms;
+  const std::filesystem::path tied_root =
+      root.path() / "duration-heartbeat-tie";
+  EXPECT_THROW(make_service(tied_root, std::move(tied)), std::invalid_argument);
+  EXPECT_FALSE(std::filesystem::exists(tied_root));
+}
+
+TEST(WorkerSupervisor, CheckedDeadlineRejectsClockRangeOverflow) {
+  const auto increment = validate_and_convert_worker_duration(
+      1ms, kMaximumWorkerDuration, "synthetic_timeout");
+  const auto latest_base =
+      std::chrono::steady_clock::time_point::max() - increment;
+  EXPECT_EQ(checked_worker_deadline(latest_base, 1ms),
+            std::chrono::steady_clock::time_point::max());
+  EXPECT_THROW(checked_worker_deadline(
+                   latest_base + std::chrono::steady_clock::duration{1}, 1ms),
+               std::overflow_error);
+  EXPECT_NO_THROW(checked_worker_deadline(
+      std::chrono::steady_clock::time_point{}, kMaximumWorkerDuration));
+  EXPECT_THROW(checked_worker_deadline(std::chrono::steady_clock::time_point{},
+                                       std::chrono::milliseconds::max()),
+               std::invalid_argument);
 }
 
 TEST(WorkerSupervisor, ProductConstructionRejectsUnmarkedOrMissingExecutable) {

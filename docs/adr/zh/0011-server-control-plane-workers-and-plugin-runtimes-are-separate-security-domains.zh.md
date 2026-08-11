@@ -249,6 +249,11 @@ cooperative deadline 到达时仍然存活的 worker 才会进入 cancellation s
 Exec bootstrap 还会在 control descriptor 之外携带必填的精确 startup 与 worker-write
 deadline。worker 不使用本地默认值或更短 cap，而是直接采用 manager value，因此即使第一帧
 assignment 尚不可用，两端也执行同一 configured lifecycle policy。
+全部九个 manager duration 使用同一个包含式 `4,294,967,295 ms` 封闭域；heartbeat interval
+止于 `4,294,967,294 ms`，从而能够保持严格小于 heartbeat timeout。产品构造会在取得 durable-
+root ownership 前拒绝每个字段的超界值。随后 manager 与 worker 使用精确可表示的 monotonic
+duration，并针对同一个已捕获 base 执行 checked addition 来构造 deadline，因此 duration
+conversion 与 time-point addition 都不会溢出或回绕。
 
 ### Artifact Store 与 Data Plane
 

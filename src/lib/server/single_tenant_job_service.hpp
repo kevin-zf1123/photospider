@@ -313,33 +313,37 @@ enum class WorkerManagerCompletionConstructionPointForTest : std::uint8_t {
  * @throws Nothing for default construction; path copies may allocate.
  * @note Ordinary product construction requires an executable path. Durations
  * govern local process supervision only and mint no Job or quota authority.
+ * Every duration is positive and no greater than the source-private shared
+ * `kMaximumWorkerDuration`; `heartbeat_interval` is additionally no greater
+ * than `kMaximumWorkerHeartbeatInterval` and strictly less than
+ * `heartbeat_timeout`.
  */
 struct WorkerManagerOptions final {
   /** @brief Exact non-installed `photospider-worker` executable path. */
   std::filesystem::path worker_executable;
-  /** @brief Maximum assignment/acceptance handshake duration. */
+  /** @brief Bounded maximum assignment/acceptance handshake duration. */
   std::chrono::milliseconds startup_timeout{5000};
-  /** @brief Heartbeat cadence requested from the worker. */
+  /** @brief Bounded heartbeat cadence requested from the worker. */
   std::chrono::milliseconds heartbeat_interval{250};
-  /** @brief Maximum silence after assignment acceptance. */
+  /** @brief Bounded maximum silence after assignment acceptance. */
   std::chrono::milliseconds heartbeat_timeout{3000};
-  /** @brief Maximum total runtime before manager-owned termination. */
+  /** @brief Bounded maximum runtime before manager-owned termination. */
   std::chrono::milliseconds attempt_runtime_timeout{std::chrono::minutes(30)};
   /**
-   * @brief Maximum ordinary wait for clean exit or EOF settlement.
+   * @brief Bounded maximum ordinary wait for clean exit or EOF settlement.
    * @note After accepted cancellation this bound applies equally to a live
    * worker after candidate-Report receipt and to ordinary EOF, but neither may
    * preempt the still-active cooperative deadline. Exact exit status and owned
    * escalation remain under the cancellation state machine.
    */
   std::chrono::milliseconds post_report_timeout{2000};
-  /** @brief Cooperative cancellation grace before `SIGTERM`. */
+  /** @brief Bounded cooperative cancellation grace before `SIGTERM`. */
   std::chrono::milliseconds cooperative_cancel_timeout{1000};
-  /** @brief `SIGTERM` grace before `SIGKILL`. */
+  /** @brief Bounded `SIGTERM` grace before `SIGKILL`. */
   std::chrono::milliseconds terminate_timeout{1000};
-  /** @brief Maximum `SIGKILL` reap observation interval. */
+  /** @brief Bounded maximum `SIGKILL` reap observation interval. */
   std::chrono::milliseconds kill_reap_timeout{2000};
-  /** @brief Per-frame read/write deadline bound. */
+  /** @brief Bounded per-frame read/write deadline duration. */
   std::chrono::milliseconds io_timeout{2000};
   /**
    * @brief Optional source-private gate suppressing `waitpid` observations.
@@ -532,15 +536,17 @@ class SingleTenantJobService final {
    * @param state_options Optional source-private durable commit observer.
    * @param quota_options Optional source-private quota mutation observer.
    * @param worker_options Bounded process-supervision configuration.
-   * @throws std::invalid_argument for invalid configuration, including
-   * `SIGCHLD=SIG_IGN` or `SA_NOCLDWAIT` in product mode.
+   * @throws std::invalid_argument for invalid configuration, including a
+   * worker duration outside its closed bound, an invalid heartbeat relation,
+   * `SIGCHLD=SIG_IGN`, or `SA_NOCLDWAIT` in product mode.
    * @throws std::bad_alloc when service/manager state allocation fails.
    * @throws DurableStateError and derived durability, corruption, or commit
    * errors while recovering the durable root or publishing a repaired Job.
    * @throws std::system_error for filesystem, `SIGCHLD` query, or
    * manager-thread creation failures.
-   * @note Product worker configuration is validated before the durable root is
-   * opened or repaired. No manager record exists until recovery completes.
+   * @note Product worker configuration, including all nine duration fields, is
+   * validated before the durable root is opened or repaired. No manager record
+   * exists until recovery completes.
    */
   SingleTenantJobService(
       TenantId tenant_id, TenantQuotaLimits quota_limits,

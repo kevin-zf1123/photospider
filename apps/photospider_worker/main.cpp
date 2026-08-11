@@ -79,6 +79,8 @@ class PreparedGraphResolver final : public GraphArtifactResolver {
  * @param io_timeout Positive manager-selected write bound.
  * @param write_mutex Non-null sole write serializer.
  * @throws Protocol timeout/channel failures unchanged.
+ * @throws std::overflow_error if the captured monotonic base cannot represent
+ * the validated I/O deadline.
  */
 void send_identity_locked(int fd, WorkerMessageKind kind,
                           const AttemptIdentity& identity,
@@ -88,8 +90,9 @@ void send_identity_locked(int fd, WorkerMessageKind kind,
     throw std::invalid_argument("worker write mutex is null");
   }
   std::lock_guard<std::mutex> lock(*write_mutex);
-  send_worker_identity(fd, kind, identity,
-                       std::chrono::steady_clock::now() + io_timeout);
+  send_worker_identity(
+      fd, kind, identity,
+      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
 }
 
 /**
@@ -115,19 +118,22 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
                       std::atomic<bool>* control_failed,
                       std::mutex* write_mutex) noexcept {
   try {
-    auto next_heartbeat = std::chrono::steady_clock::now() + heartbeat_interval;
+    auto next_heartbeat = checked_worker_deadline(
+        std::chrono::steady_clock::now(), heartbeat_interval);
     WorkerFrameDecoder frame_decoder;
     while (!done->load(std::memory_order_acquire)) {
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_heartbeat) {
         send_identity_locked(fd, WorkerMessageKind::Heartbeat, identity,
                              io_timeout, write_mutex);
-        next_heartbeat = std::chrono::steady_clock::now() + heartbeat_interval;
+        next_heartbeat = checked_worker_deadline(
+            std::chrono::steady_clock::now(), heartbeat_interval);
       }
       try {
         WorkerProtocolFrame frame = frame_decoder.read_frame(
-            fd, std::min(next_heartbeat, std::chrono::steady_clock::now() +
-                                             kControlPollInterval));
+            fd, std::min(next_heartbeat, checked_worker_deadline(
+                                             std::chrono::steady_clock::now(),
+                                             kControlPollInterval)));
         if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
             identity) {
           throw WorkerProtocolError(
@@ -149,11 +155,14 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
  * @param launch Exact validated manager-selected bootstrap policy.
  * @return Process exit code: zero only after one report was sent cleanly.
  * @throws Assignment receive/validation and thread creation failures unchanged.
+ * @throws std::overflow_error if the captured monotonic base cannot represent
+ * a validated launch deadline.
  */
 int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   PreparedWorkerAssignment prepared = receive_worker_assignment(
       launch.control_fd,
-      std::chrono::steady_clock::now() + launch.startup_timeout);
+      checked_worker_deadline(std::chrono::steady_clock::now(),
+                              launch.startup_timeout));
   validate_attempt_identity(prepared.assignment.identity);
   if (prepared.assignment.spec == nullptr ||
       prepared.assignment.spec->digest() !=
@@ -195,7 +204,8 @@ int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   {
     std::lock_guard<std::mutex> lock(write_mutex);
     send_worker_report(launch.control_fd, report, *prepared.assignment.spec,
-                       std::chrono::steady_clock::now() + launch.io_timeout);
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               launch.io_timeout));
   }
   static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
   return 0;

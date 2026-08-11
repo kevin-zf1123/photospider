@@ -299,6 +299,13 @@ The exec bootstrap also carries required exact startup and worker-write
 deadlines alongside the control descriptor. The worker uses the manager values
 without local defaults or shorter caps, so both sides enforce one configured
 lifecycle policy even before the first assignment frame is available.
+All nine manager durations use one inclusive `4,294,967,295 ms` closed domain;
+heartbeat interval stops at `4,294,967,294 ms` so it can remain strictly below
+heartbeat timeout. Product construction rejects every field-specific excess
+before durable-root ownership. Manager and worker deadline construction then
+uses an exactly representable monotonic duration plus checked addition against
+the same captured base, so neither duration conversion nor time-point addition
+can overflow or wrap.
 
 ### Artifact store and data plane
 
