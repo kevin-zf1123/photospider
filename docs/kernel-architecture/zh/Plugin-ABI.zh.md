@@ -311,31 +311,47 @@ provider-v3 suite 或 policy-v1 extension。其未来 self-contained C11/C++17 h
 `photospider/plugin/operation_plugin_api.h`，discovery 只能使用：
 
 ```c
-uint32_t ps_operation_plugin_get_abi_version(void);
-ps_operation_status_v1 ps_operation_plugin_get_api_v1(
-    ps_operation_plugin_api_v1 *api);
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
+PS_OPERATION_PLUGIN_EXPORT uint32_t PS_OPERATION_CALL
+ps_operation_plugin_get_abi_version(void) PS_OPERATION_NOEXCEPT;
+
+PS_OPERATION_PLUGIN_EXPORT ps_operation_status_v1 PS_OPERATION_CALL
+ps_operation_plugin_get_api_v1(
+    ps_operation_plugin_api_v1 *api_out) PS_OPERATION_NOEXCEPT;
+
+#if defined(__cplusplus)
+}
+#endif
 ```
 
-Host 只在 numeric handshake 后请求 root API。C++ declaration 使用 `extern "C"` 与
-`noexcept`；所有 callback 使用 `PS_OPERATION_CALL`，即 platform C convention，Windows
-为 `__cdecl`。V1 profile 冻结 8-bit byte、4/8-byte `uint32_t`/`uint64_t`、8-byte data/
-function pointer、natural 8-byte pointer/`uint64_t` alignment、Host-process endianness 与
-匹配 convention。Packed、over-aligned、32-bit、foreign-endian 或 foreign-convention
-record 不兼容。
+Host 只在 numeric handshake 后请求 root API。`PS_OPERATION_PLUGIN_EXPORT` 是只用于
+这两个具名 declaration 的平台 export/default-visibility annotation。
+`PS_OPERATION_CALL` 是 platform C convention，Windows 为 `__cdecl`；
+`PS_OPERATION_NOEXCEPT` 在 C++17 中为 `noexcept`，在 C11 中为空。两个
+resolved entrypoint typedef 与每个 callback 都携带后两个 macro。V1 profile 冻结
+8-bit byte、4/8-byte `uint32_t`/`uint64_t`、8-byte data 与每个具名
+function-pointer type、natural 8-byte data/function-pointer 与 `uint64_t` alignment、
+Host-process endianness 与匹配 convention。Packed、over-aligned、32-bit、foreign-endian
+或 foreign-convention record 不兼容。Object pointer、function pointer 与 integer slot
+保持为不同 C type。
 
 只有 Diagnostic 至 Tile 这 20 个 versioned semantic record 以精确 `struct_size`、
 `struct_kind`、`struct_version`、`flags` 开头。Plain fixed identity/handle、byte-view、
 digest、array-reference、configuration-value、axis-range helper 不携带 record header；
-root/suite table 使用各自 prefix。每个 suite 以 `struct_size`、`suite_version`、`flags`
-与 reserved storage 开头。V1 拒绝
-unknown kind/version/flag、非零 reserved、short/long record、unknown tail、wrong stride/
+root/suite table 使用各自 prefix。每个 suite 以 `struct_size`、`suite_id`、
+`suite_version`、`flags` 这四个 `uint32_t` 字段开头。V1 拒绝 unknown kind
+或 suite ID、version/flag、非零 reserved、short/long record、unknown tail、wrong stride/
 alignment 与 arithmetic/range overflow。新增字段需要新 owning-suite version 或 operation
 ABI v2；v1 不解释 minimum-size prefix。
 
 Root API 精确为 96/8 byte/alignment，以 `struct_size`、`abi_version`、`flags`、
 `reserved0` 开头，随后包含 permanent 128-bit plugin identity、bounded implementation-
 version view、opaque plugin context、`query_suite`、
-`destroy_plugin` 与 reserved pointer word。每个 v1 suite table 精确为 64/8：
+typed `destroy_plugin` 与精确的 `uint64_t reserved[3]`。`query_suite` 同样是 typed
+field。每个 v1 suite table 精确为 64/8：
 
 | ID | Suite | 要求 | Callback |
 | ---: | --- | --- | --- |
@@ -346,17 +362,28 @@ version view、opaque plugin context、`query_suite`、
 | 5 | Dependency | 任一 implementation 声明 data dependence 时 | build dependency record |
 | 6 | Execution | 始终 | synchronous monolithic；synchronous tiled |
 
-Unknown suite 返回 `UNSUPPORTED`。缺失、版本错误、malformed 或不完整的 required/declared
+每次 query 前，Host 把具体 64-byte suite 的每个 field 初始化为其 C semantic
+zero value——integer field 为零、pointer field 为 null——并把其 nonnull
+`ps_operation_suite_header_v1` 设置为 size 64、requested suite ID、requested version
+与 zero flag。这不假定 byte-zero 就是 null pointer。Plugin 保留这四个 prefix
+字段。Unknown ID 或 version 返回 `UNSUPPORTED`。
+返回 `OK` 后，returned size/ID/version/flag mismatch 是 `INVALID_DESCRIPTOR`，并且
+在读取 callback slot 前拒绝。缺失、malformed 或不完整的 required/declared
 suite 会在 callback、source 或 handle 可见前拒绝整个 candidate。Table 不公开 allocator、
 registry、Host service、Graph、Run、scheduler、cache、executor、device service、resource
 token、filesystem、artifact、credential、thread 或 symbol lookup。
 
-Host 预清零每个 Host-prepared output 并设置其 exact prefix；plugin 保留 prefix，只填写
-declared remaining field。Plugin-authored sink record 携带 complete prefix，Host 在读取任何
-后续 field 前验证它。
+`get_api_v1` 前，Host 把具体 96-byte root 的每个 field 初始化为其 C semantic
+zero value，并设置 size 96、ABI version 1、zero flag 与 zero `reserved0`；plugin
+保留该 prefix。Host-prepared semantic record 与
+suite 使用完整精确的 size/kind/version/flag 或 size/ID/version/flag prefix。
+Plugin-authored sink record 携带 complete semantic-record prefix。Receiver 在读取任何
+后续 field 前验证适用 prefix。
 
-全部 suite/record version 都是 1。封闭 numeric set 包括：ADR catalogue 中 Diagnostic 到
-Tile 的 record kind 1 至 20、configuration kind 1 Null 至 8 Object、direction 1 Input/
+全部 suite/record version 都是 1。Suite ID 精确为 1 Definition、2 Configuration、
+3 Inference、4 Region、5 Dependency、6 Execution。其他封闭 numeric set 包括：
+ADR catalogue 中 Diagnostic 到 Tile 的 record kind 1 至 20、configuration kind 1 Null 至
+8 Object、direction 1 Input/
 2 Output、intent bit 1 HP/2 RT、shape bit 1 Monolithic/2 Tiled、device 1 CPU、access bit
 1 Read/2 Write、behavior bit 1 SideEffect/2 DataDependent、Region outcome 1 Exact 至
 4 Unknown、Region atom 1 Whole 至 4 TensorSlice、sink channel 1 Diagnostic 至
@@ -364,10 +391,19 @@ Tile 的 record kind 1 至 20、configuration kind 1 Null 至 8 Object、directi
 boolean 为 0 或 1。ValueView flag bit 1 是 PayloadAvailable；其他 semantic-record flag
 与所有 root/suite flag 在 v1 中均为零。
 
-Callback parameter order 在 ADR 0012 中冻结：plugin context 首先，随后是精确 identity/
-configuration/invocation view，再后是 pointer/count/exact-stride array，Host sink 最后。
-即使 context 为 null，Configuration destroy 仍接收 operation/implementation identity。Sink
-signature 为 `emit(host_context,channel,records,count,stride)`。不公开 cancellation callback；
+ADR 0012 冻结了完整 normative C typedef prototype，而不只是 callback order。
+Resolved entrypoint 是 `ps_operation_plugin_get_abi_version_fn_v1` 与
+`ps_operation_plugin_get_api_fn_v1`；root 使用
+`ps_operation_query_suite_fn_v1` 与 `ps_operation_destroy_plugin_fn_v1`；sink 使用
+`ps_operation_emit_fn_v1`；Definition、Configuration、Inference、Region、Dependency 与
+Execution 按 table 顺序精确使用 4/3/1/2/1/2 个具名 typed callback。除 numeric
+entrypoint（`uint32_t`）与仅可为 null 的 reserved callback（`void`）外，每个 callback
+都返回 `ps_operation_status_v1`。Sink prototype 精确包含 `void *host_context`、
+`uint32_t channel`、`const void *records`、`uint32_t count`、`uint32_t stride`。
+所有 identity/view/record/helper input 与 sink 都是 `const` pointer，Host output 是 writable
+pointer，index/count/channel/stride 是 `uint32_t`，opaque context 是 `void *`，array
+input 是 `const ps_operation_array_ref_v1 *`。即使 context 为 null，Configuration destroy
+仍接收 operation/implementation identity。不公开 cancellation callback；
 Host 在 entry 前、sink call 时、return 后检查，可以 normalize 为 `CANCELLED` 并丢弃 late
 result。
 
@@ -391,7 +427,7 @@ ADR 0012 与 active OpenSpec design 中具有规范性：
 
 | Layout category | Size/alignment |
 | --- | --- |
-| record header | 16/4 |
+| record header / suite header | 16/4 与 16/4 |
 | identity、generation/invocation handle、immutable/mutable byte view、exact-stride array reference、configuration value、axis range | 16/8 |
 | SHA-256 digest | 32/8 |
 | diagnostic、output sink、configuration view、Region-set view | 48/8 |
@@ -404,12 +440,16 @@ ADR 0012 与 active OpenSpec design 中具有规范性：
 | implementation descriptor | 192/8 |
 | root API 与每个 suite v1 table | 96/8 与 64/8 |
 
-Active OpenSpec design 冻结每个 field type 与 byte offset。128-byte operation descriptor
-能够成立，是因为 offset 96/112 分别为两个 16-byte input/output port
+Active OpenSpec design 冻结每个 C field type 与 byte offset、每个精确 type/typedef
+spelling，以及它显式给出的每个 field name。
+29 个 fixed-layout payload type 精确由九个 plain helper 与 20 个 semantic record 组成；
+record/suite header、root 与 suite table 是单独的 prefix/table type。128-byte operation
+descriptor 能够成立，是因为 offset 96/112 分别为两个 16-byte input/output port
 `{pointer,count,stride}` helper，不重复存储 count。Root 的 exact prefix 位于 0，plugin
-identity 位于 16，version view 位于 32，context/query/destroy 位于 48/56/64，三个 reserved
-word 从 72 开始。六个 suite table 从 offset 16 使用固定 callback slot，并以要求为零的
-pointer slot 补足 byte 63。
+identity 位于 16，version view 位于 32，context/query/destroy 位于 48/56/64，三个
+`uint64_t` reserved word 从 72 开始。六个 suite table 从 offset 16 使用冻结的具名
+typed callback slot，并以为 null 的 `ps_operation_reserved_callback_fn_v1` slot 补足
+byte 63；不使用 object pointer 或 integer slot 代替 function pointer。
 
 全部 pointer/count/stride view 只在一次同步 call 或 sink emission 中借用。Null 精确对应
 zero count，stride 等于 exact element size；任一侧都在 dereference 前检查 alignment、

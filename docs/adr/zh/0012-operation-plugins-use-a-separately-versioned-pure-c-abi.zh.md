@@ -42,22 +42,36 @@ ADR 0011 建立了独立 security-domain 方向。Operator-trusted DSO 可以在
 
 替代项是独立的 **operation-plugin ABI v1**。其未来 self-contained C11/C++17 header
 为 `photospider/plugin/operation_plugin_api.h`，ABI 值为 1，并且只有两个 discovery
-export：
+export。`PS_OPERATION_CALL` 在 Windows 上为 `__cdecl`，在其他平台为 platform C
+calling convention；`PS_OPERATION_PLUGIN_EXPORT` 是平台 export/default-visibility
+annotation；`PS_OPERATION_NOEXCEPT` 在 C++17 中为 `noexcept`，在 C11 中为空：
 
 ```c
-uint32_t ps_operation_plugin_get_abi_version(void);
-ps_operation_status_v1 ps_operation_plugin_get_api_v1(
-    ps_operation_plugin_api_v1 *api);
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
+PS_OPERATION_PLUGIN_EXPORT uint32_t PS_OPERATION_CALL
+ps_operation_plugin_get_abi_version(void) PS_OPERATION_NOEXCEPT;
+
+PS_OPERATION_PLUGIN_EXPORT ps_operation_status_v1 PS_OPERATION_CALL
+ps_operation_plugin_get_api_v1(
+    ps_operation_plugin_api_v1 *api_out) PS_OPERATION_NOEXCEPT;
+
+#if defined(__cplusplus)
+}
+#endif
 ```
 
-C++ 中使用 `extern "C"` 与 `noexcept`。所有 ABI callback 使用 `PS_OPERATION_CALL`：
-platform C calling convention，Windows 为 `__cdecl`。Host 只完成 numeric handshake
-后才请求 root API。
+Export annotation 只适用于这两个具名 symbol。它们的 resolved function-pointer
+type 与每个 ABI callback 都使用 `PS_OPERATION_CALL` 与 C++17 `noexcept`
+function type。Host 只完成 numeric handshake 后才请求 root API。
 
 V1 支持 8-bit byte、4-byte `uint32_t`、8-byte `uint64_t`、8-byte data/function
-pointer、natural 8-byte pointer/`uint64_t` alignment、Host-process endianness 和匹配
-platform C convention。Packed、over-aligned、32-bit、foreign-endian 或不同 convention
-不兼容。
+pointer 与每个具名 function-pointer type、natural 8-byte data/function-pointer 与
+`uint64_t` alignment、Host-process endianness 和匹配 platform C convention。Packed、
+over-aligned、32-bit、foreign-endian 或不同 convention 不兼容。Object pointer、
+function pointer 与 integer slot 保持为不同 C type，绝不进行 representation conversion。
 
 ### Exact record 与独立版本化 suite
 
@@ -65,14 +79,16 @@ platform C convention。Packed、over-aligned、32-bit、foreign-endian 或不�
 `struct_size`、`struct_kind`、`struct_version`、`flags`。Plain fixed identity/handle、byte-
 view、digest、array-reference、configuration-value、axis-range helper 不携带 record header。
 Root API 与 suite table 使用各自的 root/suite prefix。每个 suite table 以 `struct_size`、
-`suite_version`、`flags`、`reserved0` 开头。V1 要求 exact size 而不是 minimum prefix：unknown kind/version/flag、非零
+`suite_id`、`suite_version`、`flags` 这四个 `uint32_t` 字段开头。V1 要求
+exact size 而不是 minimum prefix：unknown kind/version/flag、非零
 reserved、short/long record、unknown tail、wrong stride、misalignment、arithmetic/range
 overflow 都 fail closed。新增字段需要新 owning-suite version 或 operation ABI v2。
 
 Root API 为 96/8 byte/alignment，依次以 `struct_size`、`abi_version`、`flags`、
 `reserved0` 开头，随后包含 permanent 128-bit plugin identity、bounded implementation
 version、opaque plugin context、`query_suite`、`destroy_plugin`
-与 zero-required reserved pointer word。成功返回 null context 仍有效，且仍必须精确尝试
+与精确的 `uint64_t reserved[3]`。这些 root reserved word 是 integer field，不是
+pointer slot。成功返回 null context 仍有效，且仍必须精确尝试
 一次 destroy。
 
 每个 v1 suite table 为 64/8；冻结 ID 与 callback inventory 如下：
@@ -86,14 +102,27 @@ version、opaque plugin context、`query_suite`、`destroy_plugin`
 | 5 | Dependency | 任一 implementation 声明 data dependence 时 required | build dependency record |
 | 6 | Execution | Required | synchronous monolithic；synchronous tiled |
 
-Required callback 不能为 null。仅在没有 copied implementation 声明某 execution shape
-时，对应 callback 才可为 null。Unknown suite 返回 `UNSUPPORTED`；缺失或 malformed
-required/declared suite 会在 publication 前拒绝整个 candidate。
+`query_suite` 前，Host 把一个具体 64-byte suite 的每个 field 初始化为其 C
+semantic zero value——integer field 为零、pointer field 为 null——然后在其 nonnull
+`ps_operation_suite_header_v1` 首成员中写入 size 64、requested suite ID、
+requested version 与 zero flag。这不假定 byte-zero 就是 null pointer。Plugin 保留这
+四个 prefix 字段。Required callback 不能为
+null。仅在没有 copied implementation 声明某 execution shape 时，对应 callback
+才可为 null。Unknown suite ID 或 version 返回 `UNSUPPORTED`。返回 `OK` 后，
+returned size/ID/version/flag mismatch 是 `INVALID_DESCRIPTOR`；Host 在读取任何
+callback 前拒绝它。缺失或 malformed required/declared suite 会在 publication 前
+拒绝整个 candidate。
 
-Host 预清零每个 Host-prepared output 并设置其 exact prefix；plugin 保留 prefix，只填写
-declared remaining field。Sink record 携带 plugin-authored complete prefix，由 Host 首先验证。
+`get_api_v1` 前，Host 把具体 96-byte root 的每个 field 初始化为其 C semantic
+zero value，并写入 size 96、ABI version 1、zero flag 与 zero `reserved0`；plugin
+保留该 prefix。Host-prepared semantic record 与
+suite 同样携带其完整精确的 size/kind/version/flag 或 size/ID/version/flag
+prefix。Plugin 保留每个 Host-authored prefix，只填写 declared remaining field。Sink
+record 携带 plugin-authored complete semantic-record prefix，由 Host 首先验证。
 
-全部 suite/record version 都是 1。封闭 numeric domain 包括：record kind 1 至 20，依次为
+全部 suite/record version 都是 1。Suite ID 精确为 1 Definition、2 Configuration、
+3 Inference、4 Region、5 Dependency、6 Execution。封闭 numeric domain 包括：record
+kind 1 至 20，依次为
 Diagnostic、OutputSink、ConfigurationNode、ConfigurationView、OperationDescriptor、
 ImplementationDescriptor、PortDescriptor、ValueDescriptor、FacetView、BufferView、
 ValueView、InputBinding、OutputPlan、MutableOutputBinding、Invocation、RegionAtom、
@@ -111,6 +140,53 @@ input、demand、output 或 tile argument，Host sink 最后。即使 configured
 Configuration destroy 仍接收 operation 与 implementation identity。Sink 为
 `emit(host_context,channel,records,count,stride)`。Host 不公开 cancellation callback：它在
 entry 前、sink call 时、return 后检查，可以 normalize 为 `CANCELLED` 并丢弃 late result。
+
+下列 typedef prototype 是 normative contract。每个 typedef 都是 function-pointer type，
+不是 unprototyped function 或 pseudocode abbreviation。`PS_OPERATION_NOEXCEPT`
+使 `noexcept` 在 C++17 中成为 function type 的一部分，在 C11 中展开为空：
+
+```c
+typedef uint32_t(PS_OPERATION_CALL *ps_operation_plugin_get_abi_version_fn_v1)(void) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_plugin_get_api_fn_v1)(ps_operation_plugin_api_v1 *api_out) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_emit_fn_v1)(void *host_context, uint32_t channel, const void *records, uint32_t count, uint32_t stride) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_query_suite_fn_v1)(void *plugin_context, uint32_t suite_id, uint32_t requested_version, ps_operation_suite_header_v1 *suite_out) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_destroy_plugin_fn_v1)(void *plugin_context, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_get_operation_count_fn_v1)(void *plugin_context, uint32_t *operation_count_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_get_operation_fn_v1)(void *plugin_context, uint32_t operation_index, ps_operation_descriptor_v1 *operation_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_get_implementation_count_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, uint32_t *implementation_count_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_get_implementation_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, uint32_t implementation_index, ps_operation_implementation_descriptor_v1 *implementation_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_validate_configuration_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, const ps_operation_configuration_view_v1 *configuration, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_create_configured_context_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, const ps_operation_identity_v1 *implementation_identity, const ps_operation_configuration_view_v1 *configuration, void **configured_context_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_destroy_configured_context_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, const ps_operation_identity_v1 *implementation_identity, void *configured_context, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_infer_output_plans_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_propagate_region_backward_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_array_ref_v1 *demanded_output_region_bindings, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_propagate_region_forward_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_identity_v1 *active_input_edge_identity, const ps_operation_region_set_view_v1 *changed_input_regions, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_build_dependencies_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_array_ref_v1 *demanded_output_region_bindings, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_execute_monolithic_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_array_ref_v1 *mutable_output_bindings, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_execute_tiled_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_array_ref_v1 *mutable_output_bindings, const ps_operation_tile_v1 *tile, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef void(PS_OPERATION_CALL *ps_operation_reserved_callback_fn_v1)(void) PS_OPERATION_NOEXCEPT;
+```
+
+48-byte output sink 在 16 存放 `void *host_context`，在 24 存放
+`ps_operation_emit_fn_v1 emit`，在 32 存放 `uint64_t reserved[2]`。96-byte root
+在 56 存放 `ps_operation_query_suite_fn_v1 query_suite`，在 64 存放
+`ps_operation_destroy_plugin_fn_v1 destroy_plugin`，在 72 存放
+`uint64_t reserved[3]`。Definition 在 16/24/32/40 存放四个 typed callback，在 48
+存放 `ps_operation_reserved_callback_fn_v1 reserved[2]`；Configuration 在
+16/24/32 存放三个 callback，在 40 存放 `reserved[3]`；Inference 在 16 存放
+一个 callback，在 24 存放 `reserved[5]`；Region 与 Execution 都在 16/24 存放
+两个 callback，在 32 存放 `reserved[4]`；Dependency 在 16 存放一个 callback，
+在 24 存放 `reserved[5]`。每个 reserved callback 都为 null。任何 callback 或
+reserved slot 都不得使用 `void *`、`uintptr_t`、`uint64_t` 或 unprototyped
+function pointer 替代其 declared function-pointer type。
+
+除 round-trip context value 外，每个 pointer parameter 都为 nonnull。Array-reference
+pointer 在空 array 时仍为 nonnull；此时其 internal data pointer 为 null，count 为零。
+Host 把 count、descriptor、suite、root 与 configured-context output 初始化为其 typed C
+semantic zero value；create 失败
+保持 `*configured_context_out` 为 null。`emit` call 使用 nonnull `records`、正的
+bounded `uint32_t count` 与精确的 channel-specific `uint32_t stride`；不使用任何
+call 表示空结果。
 
 V1 中不存在 allocator、registry、Host service、Graph、Run、scheduler、cache、executor、
 resource ledger/token、device service、filesystem、artifact、credential、logging、thread
@@ -145,7 +221,7 @@ OpenSpec design 为未来 header 冻结 ordered field group 与以下 natural si
 
 | Layout category | Size/alignment |
 | --- | --- |
-| record header | 16/4 |
+| record header / suite header | 16/4 与 16/4 |
 | identity、generation/invocation handle、immutable/mutable bytes、exact-stride array reference、configuration value、axis range | 16/8 |
 | SHA-256 digest | 32/8 |
 | diagnostic、output sink、configuration view、Region-set view | 48/8 |
@@ -158,10 +234,14 @@ OpenSpec design 为未来 header 冻结 ordered field group 与以下 natural si
 | implementation descriptor | 192/8 |
 | root API / 每个 suite table | 96/8 与 64/8 |
 
-Header 必须在 C11/C++17 中 assert 这些值。它可以添加规定的
-`ps_operation_*_v1` spelling prefix，但不能在不修订本决策时改变冻结 numeric、parameter/
-field order、size、alignment、ownership 或 meaning。OpenSpec design 冻结每个 helper 与
-semantic-record 的 field type/byte offset，以及 96-byte root 与每个 64-byte suite slot。
+29 个 fixed-layout payload type 精确由九个具名 plain helper 与 20 个具名 semantic
+record 组成；record/suite header、root 与 suite table 是单独的 prefix/table type。
+Header 必须在 C11/C++17 中 assert 它们全部，以及每个具名 function-pointer
+type 的 size/alignment。它必须使用本 ADR 与 OpenSpec design 冻结的精确
+`ps_operation_*_v1` type、field 与 typedef spelling；不能在不修订本决策时改变
+numeric、parameter/field order、C type、size、alignment、ownership 或 meaning。OpenSpec
+design 冻结每个 helper 与 semantic-record 的 field type/byte offset，以及 96-byte root
+与每个 64-byte suite slot。
 特别地，128-byte operation descriptor 在 offset 96/112 各保存一个 16-byte input/output
 port pointer/count/stride helper，不在其他位置重复 count。因此所有 size 都能在冻结 64-bit
 profile 下机械实现，不是仅凭 field-group 估算的目标。

@@ -51,23 +51,39 @@ validatable records, but it is not process isolation. Issues #102, #103, and
 The replacement is an independent **operation-plugin ABI v1**. Its future
 self-contained C11/C++17 header is
 `photospider/plugin/operation_plugin_api.h`, with ABI value one and exactly two
-discovery exports:
+discovery exports. `PS_OPERATION_CALL` is `__cdecl` on Windows and the platform
+C calling convention elsewhere; `PS_OPERATION_PLUGIN_EXPORT` is the platform
+export/default-visibility annotation; and `PS_OPERATION_NOEXCEPT` is
+`noexcept` in C++17 and empty in C11:
 
 ```c
-uint32_t ps_operation_plugin_get_abi_version(void);
-ps_operation_status_v1 ps_operation_plugin_get_api_v1(
-    ps_operation_plugin_api_v1 *api);
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
+PS_OPERATION_PLUGIN_EXPORT uint32_t PS_OPERATION_CALL
+ps_operation_plugin_get_abi_version(void) PS_OPERATION_NOEXCEPT;
+
+PS_OPERATION_PLUGIN_EXPORT ps_operation_status_v1 PS_OPERATION_CALL
+ps_operation_plugin_get_api_v1(
+    ps_operation_plugin_api_v1 *api_out) PS_OPERATION_NOEXCEPT;
+
+#if defined(__cplusplus)
+}
+#endif
 ```
 
-In C++ they are `extern "C"` and `noexcept`. Every ABI callback uses
-`PS_OPERATION_CALL`: the platform C calling convention and `__cdecl` on
-Windows. The Host performs only the numeric handshake before requesting the
-root API.
+The export annotation applies only to these named symbols. Their resolved
+function-pointer types and every ABI callback use `PS_OPERATION_CALL` and the
+C++17 `noexcept` function type. The Host performs only the numeric handshake
+before requesting the root API.
 
 V1 supports 8-bit bytes, 4-byte `uint32_t`, 8-byte `uint64_t`, 8-byte data and
-function pointers, natural 8-byte pointer/`uint64_t` alignment, Host-process
-endianness, and the matching platform C convention. Packed, over-aligned,
-32-bit, foreign-endian, or foreign-calling-convention records are incompatible.
+every named function-pointer type, natural 8-byte data/function-pointer and
+`uint64_t` alignment, Host-process endianness, and the matching platform C
+convention. Packed, over-aligned, 32-bit, foreign-endian, or foreign-calling-
+convention records are incompatible. Object pointers, function pointers, and
+integer slots remain distinct C types and are never representation-converted.
 
 ### Exact records and separately versioned suites
 
@@ -76,8 +92,8 @@ four `uint32_t` values: `struct_size`, `struct_kind`, `struct_version`, and
 `flags`. Plain fixed identity/handle, byte-view, digest, array-reference,
 configuration-value, and axis-range helpers carry no record header. The root
 API and suite tables instead use their own root/suite prefixes. Every suite
-table begins with `struct_size`, `suite_version`, `flags`, and `reserved0`. V1
-has exact size, not a minimum
+table begins with four `uint32_t` fields: `struct_size`, `suite_id`,
+`suite_version`, and `flags`. V1 has exact size, not a minimum
 prefix: unknown kind/version/flags, nonzero reserved data, short/long records,
 unknown tails, wrong strides, misalignment, and arithmetic/range overflow fail
 closed. A new field requires a new owning-suite version or operation ABI v2.
@@ -85,7 +101,8 @@ closed. A new field requires a new owning-suite version or operation ABI v2.
 The root API is 96/8 bytes/alignment. It begins with `struct_size`,
 `abi_version`, `flags`, and `reserved0`, followed by permanent 128-bit plugin
 identity, bounded implementation version, opaque plugin context,
-`query_suite`, `destroy_plugin`, and zero-required reserved pointer words. A
+`query_suite`, `destroy_plugin`, and exactly `uint64_t reserved[3]`. Those root
+reserved words are integer fields, not pointer slots. A
 successful null context remains valid and still receives exactly one destroy
 attempt.
 
@@ -100,16 +117,30 @@ Every v1 suite table is 64/8. The frozen IDs and callback inventories are:
 | 5 | Dependency | Required when any implementation declares data dependence | build dependency records |
 | 6 | Execution | Required | synchronous monolithic; synchronous tiled |
 
-Required callbacks cannot be null. An execution-shape callback may be null
-only when no copied implementation declares that shape. Unknown suite IDs
-return `UNSUPPORTED`; a missing or malformed required/declared suite rejects
-the complete candidate before publication.
+Before `query_suite`, the Host initializes every field of one concrete 64-byte
+suite to its C semantic zero value—integer fields zero and pointer fields
+null—then writes size 64, the requested suite ID, requested version, and zero
+flags into its nonnull `ps_operation_suite_header_v1` first member. This does
+not assume that byte-zero is a null pointer. The plugin preserves all four
+prefix fields. Required callbacks cannot be null. An execution-shape callback may
+be null only when no copied implementation declares that shape. Unknown suite
+IDs or versions return `UNSUPPORTED`. After `OK`, a returned size/ID/version/
+flags mismatch is `INVALID_DESCRIPTOR`; the Host rejects it before reading a
+callback. A missing or malformed required/declared suite rejects the complete
+candidate before publication.
 
-The Host pre-zeroes every Host-prepared output and sets its exact prefix; the
-plugin preserves that prefix and fills declared remaining fields. Sink records
-carry a complete plugin-authored prefix, which the Host validates first.
+Before `get_api_v1`, the Host initializes every field of the concrete 96-byte
+root to its C semantic zero value and writes size 96, ABI version one, zero
+flags, and zero `reserved0`; the plugin preserves that prefix.
+Host-prepared semantic records and suites likewise carry their complete exact
+size/kind/version/flags or size/ID/version/flags prefixes. The plugin preserves
+every Host-authored prefix and fills declared remaining fields. Sink records
+carry a complete plugin-authored semantic-record prefix, which the Host validates
+first.
 
-All suite/record versions are one. Closed numeric domains are record kinds 1
+All suite/record versions are one. Suite IDs are exactly 1 Definition,
+2 Configuration, 3 Inference, 4 Region, 5 Dependency, and 6 Execution. Closed
+numeric domains are record kinds 1
 through 20 for Diagnostic, OutputSink, ConfigurationNode, ConfigurationView,
 OperationDescriptor, ImplementationDescriptor, PortDescriptor,
 ValueDescriptor, FacetView, BufferView, ValueView, InputBinding, OutputPlan,
@@ -131,6 +162,56 @@ implementation identity even when configured context is null. The sink is
 `emit(host_context,channel,records,count,stride)`. The Host exposes no
 cancellation callback: it checks before entry, on sink calls, and after return,
 may normalize to `CANCELLED`, and discards a late result.
+
+The following typedef prototypes are normative. Each typedef is a function-
+pointer type, not an unprototyped function or pseudocode abbreviation.
+`PS_OPERATION_NOEXCEPT` makes `noexcept` part of the function type in C++17 and
+is empty in C11:
+
+```c
+typedef uint32_t(PS_OPERATION_CALL *ps_operation_plugin_get_abi_version_fn_v1)(void) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_plugin_get_api_fn_v1)(ps_operation_plugin_api_v1 *api_out) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_emit_fn_v1)(void *host_context, uint32_t channel, const void *records, uint32_t count, uint32_t stride) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_query_suite_fn_v1)(void *plugin_context, uint32_t suite_id, uint32_t requested_version, ps_operation_suite_header_v1 *suite_out) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_destroy_plugin_fn_v1)(void *plugin_context, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_get_operation_count_fn_v1)(void *plugin_context, uint32_t *operation_count_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_get_operation_fn_v1)(void *plugin_context, uint32_t operation_index, ps_operation_descriptor_v1 *operation_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_get_implementation_count_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, uint32_t *implementation_count_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_get_implementation_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, uint32_t implementation_index, ps_operation_implementation_descriptor_v1 *implementation_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_validate_configuration_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, const ps_operation_configuration_view_v1 *configuration, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_create_configured_context_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, const ps_operation_identity_v1 *implementation_identity, const ps_operation_configuration_view_v1 *configuration, void **configured_context_out, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_destroy_configured_context_fn_v1)(void *plugin_context, const ps_operation_identity_v1 *operation_identity, const ps_operation_identity_v1 *implementation_identity, void *configured_context, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_infer_output_plans_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_propagate_region_backward_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_array_ref_v1 *demanded_output_region_bindings, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_propagate_region_forward_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_identity_v1 *active_input_edge_identity, const ps_operation_region_set_view_v1 *changed_input_regions, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_build_dependencies_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_array_ref_v1 *demanded_output_region_bindings, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_execute_monolithic_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_array_ref_v1 *mutable_output_bindings, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef ps_operation_status_v1(PS_OPERATION_CALL *ps_operation_execute_tiled_fn_v1)(void *plugin_context, const ps_operation_invocation_v1 *invocation, const ps_operation_configuration_view_v1 *configuration, const ps_operation_array_ref_v1 *input_bindings, const ps_operation_array_ref_v1 *mutable_output_bindings, const ps_operation_tile_v1 *tile, const ps_operation_output_sink_v1 *sink) PS_OPERATION_NOEXCEPT;
+typedef void(PS_OPERATION_CALL *ps_operation_reserved_callback_fn_v1)(void) PS_OPERATION_NOEXCEPT;
+```
+
+The 48-byte output sink stores `void *host_context` at 16,
+`ps_operation_emit_fn_v1 emit` at 24, and `uint64_t reserved[2]` at 32. The
+96-byte root stores `ps_operation_query_suite_fn_v1 query_suite` at 56,
+`ps_operation_destroy_plugin_fn_v1 destroy_plugin` at 64, and
+`uint64_t reserved[3]` at 72. Definition stores its four typed callbacks at
+16/24/32/40 and `ps_operation_reserved_callback_fn_v1 reserved[2]` at 48;
+Configuration stores three callbacks at 16/24/32 and `reserved[3]` at 40;
+Inference stores one callback at 16 and `reserved[5]` at 24; Region and
+Execution each store two callbacks at 16/24 and `reserved[4]` at 32; Dependency
+stores one callback at 16 and `reserved[5]` at 24. Every reserved callback is
+null. No callback or reserved slot uses `void *`, `uintptr_t`, `uint64_t`, or an
+unprototyped function pointer as a substitute for its declared function-pointer
+type.
+
+Every pointer parameter other than the round-trip context values is nonnull.
+Array-reference pointers remain nonnull for empty arrays, whose internal data
+pointer is null and count is zero. The Host initializes count, descriptor,
+suite, root, and configured-context outputs to their typed C semantic zero
+values; failed create leaves
+`*configured_context_out` null. An `emit` call uses nonnull `records`, positive
+bounded `uint32_t count`, and exact channel-specific `uint32_t stride`; no call
+represents an empty result.
 
 There is no allocator, registry, Host service, Graph, Run, scheduler, cache,
 executor, resource ledger/token, device service, filesystem, artifact,
@@ -173,7 +254,7 @@ size/alignment pairs for the future header:
 
 | Layout category | Size/alignment |
 | --- | --- |
-| record header | 16/4 |
+| record header / suite header | 16/4 and 16/4 |
 | identity, generation/invocation handles, immutable/mutable bytes, exact-stride array reference, configuration value, axis range | 16/8 |
 | SHA-256 digest | 32/8 |
 | diagnostic, output sink, configuration view, Region-set view | 48/8 |
@@ -186,11 +267,15 @@ size/alignment pairs for the future header:
 | implementation descriptor | 192/8 |
 | root API / every suite table | 96/8 and 64/8 |
 
-The header must assert them in C11 and C++17. It may apply required
-`ps_operation_*_v1` spelling prefixes, but it may not change frozen numerics,
-parameter/field order, size, alignment, ownership, or meaning without revising
-this decision. The OpenSpec design freezes every helper and semantic-record
-field type and byte offset, plus the 96-byte root and each 64-byte suite slot.
+The 29 fixed-layout payload types are exactly nine named plain helpers and 20
+named semantic records; the record/suite headers, root, and suite tables are
+separate prefix/table types. The header must assert all of them and every named
+function-pointer size/alignment in C11 and C++17. It must use the exact
+`ps_operation_*_v1` type, field, and typedef spellings frozen by this ADR and
+the OpenSpec design; it may not change numerics, parameter/field order, C type,
+size, alignment, ownership, or meaning without revising this decision. The
+OpenSpec design freezes every helper and semantic-record field type and byte
+offset, plus the 96-byte root and each 64-byte suite slot.
 In particular, the 128-byte operation descriptor stores each port sequence as
 one 16-byte pointer/count/stride helper at offsets 96 and 112; it has no second
 copy of either count. Thus all published sizes are mechanically realizable

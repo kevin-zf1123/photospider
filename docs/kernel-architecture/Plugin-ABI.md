@@ -424,25 +424,40 @@ policy-v1 extension. Its future self-contained C11/C++17 header is
 `photospider/plugin/operation_plugin_api.h`, and discovery uses only:
 
 ```c
-uint32_t ps_operation_plugin_get_abi_version(void);
-ps_operation_status_v1 ps_operation_plugin_get_api_v1(
-    ps_operation_plugin_api_v1 *api);
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
+PS_OPERATION_PLUGIN_EXPORT uint32_t PS_OPERATION_CALL
+ps_operation_plugin_get_abi_version(void) PS_OPERATION_NOEXCEPT;
+
+PS_OPERATION_PLUGIN_EXPORT ps_operation_status_v1 PS_OPERATION_CALL
+ps_operation_plugin_get_api_v1(
+    ps_operation_plugin_api_v1 *api_out) PS_OPERATION_NOEXCEPT;
+
+#if defined(__cplusplus)
+}
+#endif
 ```
 
 The Host performs only the numeric handshake before requesting the root API.
-C++ declarations are `extern "C"` and `noexcept`; every callback uses
-`PS_OPERATION_CALL`, the platform C convention and `__cdecl` on Windows. The
-v1 profile freezes 8-bit bytes, 4/8-byte `uint32_t`/`uint64_t`, 8-byte data and
-function pointers, natural 8-byte pointer/`uint64_t` alignment, Host-process
-endianness, and that matching convention. Packed, over-aligned, 32-bit,
-foreign-endian, or foreign-convention records are incompatible.
+`PS_OPERATION_PLUGIN_EXPORT` is the platform export/default-visibility
+annotation for only those named declarations. `PS_OPERATION_CALL` is the
+platform C convention and `__cdecl` on Windows; `PS_OPERATION_NOEXCEPT` is
+`noexcept` in C++17 and empty in C11. Both resolved entrypoint typedefs and
+every callback carry the latter two macros. The v1 profile freezes 8-bit bytes,
+4/8-byte `uint32_t`/`uint64_t`, 8-byte data and every named function-pointer
+type, natural 8-byte data/function-pointer and `uint64_t` alignment,
+Host-process endianness, and that matching convention. Packed, over-aligned,
+32-bit, foreign-endian, or foreign-convention records are incompatible. Object
+pointers, function pointers, and integer slots remain distinct C types.
 
 Exactly the 20 versioned semantic records, Diagnostic through Tile, begin with
 exact `struct_size`, `struct_kind`, `struct_version`, and `flags` fields. Plain
 fixed identity/handle, byte-view, digest, array-reference, configuration-value,
 and axis-range helpers carry no record header. Root and suite tables use their
-own prefixes. Every suite begins with `struct_size`, `suite_version`, `flags`,
-and reserved storage. V1 rejects unknown kinds,
+own prefixes. Every suite begins with four `uint32_t` fields: `struct_size`,
+`suite_id`, `suite_version`, and `flags`. V1 rejects unknown kinds or suite IDs,
 versions, flags, nonzero reserved data, short/long records, unknown tails,
 wrong stride/alignment, and arithmetic/range overflow. A new field requires a
 new owning-suite version or operation ABI v2; v1 never interprets a minimum-
@@ -451,8 +466,8 @@ size prefix.
 The root API is exactly 96/8 bytes/alignment and begins with `struct_size`,
 `abi_version`, `flags`, and `reserved0`, followed by permanent 128-bit plugin
 identity, bounded implementation-version view, opaque plugin
-context, `query_suite`, `destroy_plugin`, and reserved pointer words. Each v1
-suite table is exactly 64/8:
+context, typed `query_suite`, typed `destroy_plugin`, and exactly
+`uint64_t reserved[3]`. Each v1 suite table is exactly 64/8:
 
 | ID | Suite | Requirement | Callbacks |
 | ---: | --- | --- | --- |
@@ -463,18 +478,30 @@ suite table is exactly 64/8:
 | 5 | Dependency | If any implementation declares data dependence | build dependency records |
 | 6 | Execution | Always | synchronous monolithic; synchronous tiled |
 
-Unknown suites return `UNSUPPORTED`. A missing, wrong-version, malformed, or
-incomplete required/declared suite rejects the complete candidate before any
-callback, source, or handle becomes visible. The tables expose no allocator,
-registry, Host service, Graph, Run, scheduler, cache, executor, device service,
+Before each query the Host initializes every field of the concrete 64-byte
+suite to its C semantic zero value—integer fields zero and pointer fields
+null—and sets its nonnull `ps_operation_suite_header_v1` to size 64, requested
+suite ID, requested version, and zero flags. This does not assume that
+byte-zero is a null pointer. The plugin preserves those four prefix fields. Unknown IDs or
+versions return `UNSUPPORTED`. After `OK`, a returned size/ID/version/flags
+mismatch is `INVALID_DESCRIPTOR` and is rejected before a callback slot is
+read. A missing, malformed, or incomplete required/declared suite rejects the
+complete candidate before any callback, source, or handle becomes visible. The
+tables expose no allocator, registry, Host service, Graph, Run, scheduler,
+cache, executor, device service,
 resource token, filesystem, artifact, credential, thread, or symbol lookup.
 
-The Host pre-zeroes each Host-prepared output and sets its exact prefix; the
-plugin preserves it and fills only declared remaining fields. Plugin-authored
-sink records carry a complete prefix, which the Host validates before any later
-field.
+Before `get_api_v1`, the Host initializes every field of the concrete 96-byte
+root to its C semantic zero value and sets size 96, ABI version one, zero flags,
+and zero `reserved0`; the plugin preserves that prefix.
+Host-prepared semantic records and suites use complete exact size/kind/version/
+flags or size/ID/version/flags prefixes. Plugin-authored sink records carry a
+complete semantic-record prefix. The receiver validates the applicable prefix
+before any later field.
 
-All suite/record versions are one. The closed numeric sets are record kinds 1
+All suite/record versions are one. Suite IDs are exactly 1 Definition,
+2 Configuration, 3 Inference, 4 Region, 5 Dependency, and 6 Execution. The
+other closed numeric sets are record kinds 1
 through 20 (Diagnostic through Tile in the ADR catalogue), configuration kinds
 1 Null through 8 Object, directions 1 Input/2 Output, intent bits 1 HP/2 RT,
 shape bits 1 Monolithic/2 Tiled, device 1 CPU, access bits 1 Read/2 Write,
@@ -485,13 +512,24 @@ fail as `INVALID_DESCRIPTOR`; booleans are zero or one. ValueView flag bit 1 is
 PayloadAvailable; all other semantic-record flags and all root/suite flags are
 zero in v1.
 
-Callback parameter order is frozen in ADR 0012: plugin context first, exact
-identity/configuration/invocation views next, pointer/count/exact-stride arrays
-next, and the Host sink last. Configuration destroy receives operation and
-implementation identity even for a null context. The sink signature is
-`emit(host_context,channel,records,count,stride)`. No cancellation callback is
-exposed; the Host checks before entry, on sink calls, and after return, may
-normalize to `CANCELLED`, and discards a late result.
+ADR 0012 freezes complete normative C typedef prototypes, not only callback
+order. The resolved entrypoints are
+`ps_operation_plugin_get_abi_version_fn_v1` and
+`ps_operation_plugin_get_api_fn_v1`; root uses
+`ps_operation_query_suite_fn_v1` and `ps_operation_destroy_plugin_fn_v1`; the
+sink uses `ps_operation_emit_fn_v1`; and Definition, Configuration, Inference,
+Region, Dependency, and Execution use exactly 4/3/1/2/1/2 named typed callbacks
+in table order. Every callback returns `ps_operation_status_v1` except the
+numeric entrypoint (`uint32_t`) and null-only reserved callback (`void`). The
+sink prototype has exactly `void *host_context`, `uint32_t channel`,
+`const void *records`, `uint32_t count`, and `uint32_t stride`. All identity/
+view/record/helper
+inputs and sinks are `const` pointers, Host outputs are writable pointers,
+indices/counts/channel/stride are `uint32_t`, opaque contexts are `void *`, and
+array inputs are `const ps_operation_array_ref_v1 *`. Configuration destroy
+receives operation and implementation identity even for a null context. No
+cancellation callback is exposed; the Host checks before entry, on sink calls,
+and after return, may normalize to `CANCELLED`, and discards a late result.
 
 Plugin, operation, implementation, port, Schema, Facet, and Layout identities
 are permanent publisher-assigned definition identities. Value, edge,
@@ -519,7 +557,7 @@ OpenSpec design:
 
 | Layout category | Size/alignment |
 | --- | --- |
-| record header | 16/4 |
+| record header / suite header | 16/4 and 16/4 |
 | identity, generation/invocation handles, immutable/mutable byte views, exact-stride array reference, configuration value, axis range | 16/8 |
 | SHA-256 digest | 32/8 |
 | diagnostic, output sink, configuration view, Region-set view | 48/8 |
@@ -532,13 +570,20 @@ OpenSpec design:
 | implementation descriptor | 192/8 |
 | root API and every suite v1 table | 96/8 and 64/8 |
 
-The active OpenSpec design freezes every field type and byte offset. The
+The 29 fixed-layout payload types are nine plain helpers plus 20 semantic
+records; record/suite headers, root, and suites are separately typed. The
+active OpenSpec design freezes every C field type and byte offset, every exact
+type/typedef spelling, and every field name that it spells explicitly. The
 128-byte operation descriptor is realizable because offsets 96 and 112 are
 the two 16-byte input/output port `{pointer,count,stride}` helpers; it does not
 store duplicate count fields. The root uses its exact prefix at 0, plugin
 identity at 16, version view at 32, context/query/destroy at 48/56/64, and
-three reserved words at 72. The six suite tables use the fixed callback slots
-from offset 16 and zero-required pointer slots through byte 63.
+`uint64_t reserved[3]` words at 72. The six suite tables use typed callback
+slots from offset 16 and null `ps_operation_reserved_callback_fn_v1` slots
+through byte 63: Definition reserves two at 48, Configuration three at 40,
+Inference five at 24, Region four at 32, Dependency five at 24, and Execution
+four at 32. No object pointer or integer substitutes for any function-pointer
+slot.
 
 All pointer/count/stride views are borrowed for one synchronous call or sink
 emission. Null corresponds exactly to zero count, stride equals the exact
