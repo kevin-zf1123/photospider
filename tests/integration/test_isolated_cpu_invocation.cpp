@@ -545,9 +545,14 @@ void receive_frame_with_delayed_tail(bool with_descriptor) {
  * @return Nothing only when the receiver incorrectly accepts the exact frame.
  * @throws IsolatedCpuProtocolError when the receiver rejects the ancillary
  * right.
+ * @throws std::runtime_error when a test-harness observation deadline expires
+ * after the asynchronous receiver is cleaned up.
  * @throws Invocation test setup/channel errors unchanged.
- * @note The sender write half remains open until the asynchronous production
- * receiver returns or throws, proving that its zero-byte `recvmsg` is not EOF.
+ * @note On a timely path the sender write half remains open until the
+ * asynchronous production receiver returns or throws, proving that its
+ * zero-byte `recvmsg` is not EOF. Only a test-harness timeout closes that write
+ * half to unblock and consume the future; cleanup exceptions are discarded so
+ * they cannot replace the deterministic timeout failure.
  */
 void receive_frame_with_zero_payload_right() {
   int sockets[2] = {-1, -1};
@@ -566,16 +571,28 @@ void receive_frame_with_zero_payload_right() {
   ScopedTestWriteHalf sender_write(sender.get());
   std::array<std::byte, kIsolatedCpuPacketHeaderBytes> exact_frame{};
   send_test_frame(sender.get(), exact_frame.data(), exact_frame.size());
-  if (!wait_for_exact_frame_observation(prior_frames)) {
+  const bool exact_frame_timed_out =
+      !wait_for_exact_frame_observation(prior_frames);
+  if (exact_frame_timed_out) {
     sender_write.finish();
-    receive.get();
+    try {
+      receive.get();
+    } catch (...) {
+      // The harness timeout remains authoritative over cleanup failures.
+    }
     throw std::runtime_error(
         "invocation test receiver did not observe the exact frame");
   }
   send_zero_payload_right(sender.get());
-  if (receive.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+  const bool receive_timed_out =
+      receive.wait_for(std::chrono::seconds(2)) != std::future_status::ready;
+  if (receive_timed_out) {
     sender_write.finish();
-    receive.get();
+    try {
+      receive.get();
+    } catch (...) {
+      // The harness timeout remains authoritative over cleanup failures.
+    }
     throw std::runtime_error(
         "invocation receiver blocked on a delivered zero-payload right");
   }
