@@ -905,6 +905,99 @@ TEST(WorkerSupervisor,
 }
 
 TEST(WorkerSupervisor,
+     PreparedGraphTextBoundsFailBeforeServiceOwnershipAndExactValuesExecute) {
+  /**
+   * @brief Selects one transported prepared-graph text field for rejection.
+   * @throws Nothing for aggregate initialization and value operations.
+   */
+  struct GraphTextFieldCase final {
+    /** @brief Human-readable field name used in assertion diagnostics. */
+    const char* name;
+    /** @brief Exact `ResolvedGraphArtifact` string member under test. */
+    std::string ResolvedGraphArtifact::* member;
+    /** @brief Distinct byte repeated through the boundary condition. */
+    char padding;
+  };
+  const std::array<GraphTextFieldCase, 5U> cases{{
+      {"root_dir", &ResolvedGraphArtifact::root_dir, 'r'},
+      {"yaml_path", &ResolvedGraphArtifact::yaml_path, 'y'},
+      {"config_path", &ResolvedGraphArtifact::config_path, 'c'},
+      {"cache_root_dir", &ResolvedGraphArtifact::cache_root_dir, 'h'},
+      {"message", &ResolvedGraphArtifact::message, 'm'},
+  }};
+
+  ScopedSupervisorRoot root;
+  const GraphArtifactId graph_id("fixture.graph-text-bound");
+  ResolvedGraphArtifact exact_graph;
+  exact_graph.ok = true;
+  for (const GraphTextFieldCase& test_case : cases) {
+    exact_graph.*(test_case.member) =
+        std::string(kMaximumWorkerTextFieldBytes, test_case.padding);
+  }
+  auto exact_catalog = std::make_shared<const PreparedExternalGraphCatalog>(
+      std::vector<PreparedExternalGraphEntry>{{graph_id, exact_graph}});
+  auto exact_factory =
+      std::make_shared<FixtureWorkerFactory>(std::move(exact_catalog));
+  auto exact_service =
+      make_service(root.path() / "exact-bound", supervisor_options(),
+                   std::move(exact_factory));
+  const JobSubmission submitted =
+      exact_service->submit(fixture_spec(graph_id.value()));
+  const JobSnapshot terminal = wait_terminal(*exact_service, submitted.job_id);
+  EXPECT_EQ(terminal.state, JobState::Succeeded) << terminal.message;
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::None);
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerStartup);
+  EXPECT_TRUE(
+      SingleTenantJobServiceTestAccess::
+          wait_for_owned_worker_thread_count_at_most(*exact_service, 0U, 2s));
+  EXPECT_EQ(SingleTenantJobServiceTestAccess::live_worker_process_count(
+                *exact_service),
+            0U);
+  exact_service.reset();
+
+  for (const GraphTextFieldCase& test_case : cases) {
+    const std::filesystem::path rejected_root =
+        root.path() / (std::string("rejected-") + test_case.name);
+    std::shared_ptr<const PreparedExternalGraphCatalog> rejected_catalog;
+    std::shared_ptr<FixtureWorkerFactory> rejected_factory;
+    std::unique_ptr<SingleTenantJobService> rejected_service;
+    ResolvedGraphArtifact oversized_graph;
+    oversized_graph.ok = true;
+    oversized_graph.*(test_case.member) =
+        std::string(kMaximumWorkerTextFieldBytes + 1U, test_case.padding);
+    try {
+      rejected_catalog = std::make_shared<const PreparedExternalGraphCatalog>(
+          std::vector<PreparedExternalGraphEntry>{
+              {graph_id, std::move(oversized_graph)}});
+      rejected_factory =
+          std::make_shared<FixtureWorkerFactory>(rejected_catalog);
+      rejected_service =
+          make_service(rejected_root, supervisor_options(), rejected_factory);
+      ADD_FAILURE() << test_case.name
+                    << " reached service construction one byte over";
+    } catch (const std::length_error& error) {
+      const std::string diagnostic(error.what());
+      EXPECT_NE(diagnostic.find(test_case.name), std::string::npos)
+          << diagnostic;
+      EXPECT_NE(
+          diagnostic.find(std::to_string(kMaximumWorkerTextFieldBytes + 1U)),
+          std::string::npos)
+          << diagnostic;
+      EXPECT_NE(diagnostic.find(std::to_string(kMaximumWorkerTextFieldBytes)),
+                std::string::npos)
+          << diagnostic;
+    } catch (const std::exception& error) {
+      ADD_FAILURE() << test_case.name
+                    << " raised wrong exception: " << error.what();
+    }
+    EXPECT_EQ(rejected_catalog, nullptr) << test_case.name;
+    EXPECT_EQ(rejected_factory, nullptr) << test_case.name;
+    EXPECT_EQ(rejected_service, nullptr) << test_case.name;
+    EXPECT_FALSE(std::filesystem::exists(rejected_root)) << test_case.name;
+  }
+}
+
+TEST(WorkerSupervisor,
      BlockingTrustedFilesystemIoCanBeCancelledReapedAndRecovered) {
   ScopedSupervisorRoot root;
   const std::filesystem::path fifo = root.path() / "worker-filesystem.fifo";

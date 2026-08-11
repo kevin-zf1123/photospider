@@ -18,8 +18,31 @@ namespace ps::server {
 
 /** @brief Maximum encoded payload accepted in one private worker frame. */
 inline constexpr std::size_t kMaximumWorkerFramePayloadBytes = 64U << 20U;
+/**
+ * @brief Maximum bytes accepted in one private worker text field.
+ * @note This single source-private bound covers transported graph paths,
+ * configuration text, and diagnostics. The exact boundary is accepted.
+ */
+inline constexpr std::size_t kMaximumWorkerTextFieldBytes = 16U << 10U;
 /** @brief Fixed v1 private worker frame header width. */
 inline constexpr std::size_t kWorkerFrameHeaderBytes = 12U;
+
+/**
+ * @brief Validates every text field transported with prepared graph material.
+ * @param graph Complete trusted graph result before catalog retention or
+ * Assignment encoding.
+ * @return Nothing when root, YAML, config, cache-root, and diagnostic strings
+ * each fit the inclusive `kMaximumWorkerTextFieldBytes` bound.
+ * @throws std::length_error with the exact field name, observed byte count,
+ * and maximum when any transported string exceeds the shared bound.
+ * @throws std::bad_alloc when constructing the validation diagnostic fails.
+ * @note `PreparedExternalGraphCatalog` uses this boundary before service,
+ * quota, Job, supervision-thread, or process ownership. Assignment encoding
+ * reuses it defensively; decoding applies the same constant before copying.
+ * Length is measured in opaque encoded bytes rather than code points.
+ */
+void validate_worker_assignment_graph_transport(
+    const ResolvedGraphArtifact& graph);
 
 /**
  * @brief Returns the largest artifact payload safe in every valid Assignment.
@@ -231,7 +254,8 @@ WorkerProtocolFrame read_worker_frame(
  * @brief Encodes one complete immutable external worker assignment.
  * @param assignment Complete identity/spec/checkpoint/graph/control payload.
  * @return Complete private Assignment frame ready for bounded transport.
- * @throws Contract, allocation, digest, or aggregate protocol-bound failures.
+ * @throws Contract, allocation, digest, field, or aggregate protocol-bound
+ * failures. An oversized graph text field raises `std::length_error`.
  * @note This source-private seam lets protocol tests prove the exact aggregate
  * Assignment boundary without blocking on a socket. `send_worker_assignment`
  * is the sole transport wrapper.

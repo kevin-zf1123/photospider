@@ -63,7 +63,8 @@ struct JobAssignment final {
  * @throws Nothing for default construction; string values may allocate.
  * @note Paths are trusted source-private adapter configuration. They are
  * transported to one exact worker but grant no Job, quota, artifact, network,
- * or durable-state authority.
+ * or durable-state authority. Before catalog retention, every string must fit
+ * the private worker protocol's shared text-field bound.
  */
 struct ResolvedGraphArtifact final {
   /** @brief True only when trusted resolution found immutable graph material.
@@ -104,12 +105,15 @@ struct PreparedExternalGraphEntry final {
  * value copying; it invokes no resolver and performs no filesystem I/O.
  *
  * @throws std::invalid_argument for an invalid or duplicate graph identity.
+ * @throws std::length_error when prepared graph material exceeds the shared
+ * private worker text-field bound.
  * @throws std::bad_alloc when indexing or copying material exhausts memory.
  * @note An empty catalog remains externally usable and produces a closed
  * GraphResolution failure for every identity. This supports deterministic
  * process fixtures that ignore real graph material without adding a callback.
- * After construction the map never mutates, so concurrent const lookups share
- * no resolver, cache, or filesystem lifecycle.
+ * If any binding is invalid, construction unwinds without exposing a partial
+ * catalog. After construction the map never mutates, so concurrent const
+ * lookups share no resolver, cache, or filesystem lifecycle.
  */
 class PreparedExternalGraphCatalog final {
  public:
@@ -117,9 +121,14 @@ class PreparedExternalGraphCatalog final {
    * @brief Indexes all prepared exact graph bindings once.
    * @param entries Complete caller-owned bindings; ownership is consumed.
    * @throws std::invalid_argument for an invalid or duplicate identity.
+   * @throws std::length_error when root, YAML, config, cache-root, or
+   * diagnostic text exceeds the private worker transport bound.
    * @throws std::bad_alloc when retaining the bounded entries exhausts memory.
-   * @note Trusted identity-to-material resolution must already be complete;
-   * the catalog itself never opens the retained paths.
+   * @note Trusted identity-to-material resolution must already be complete.
+   * Callers complete catalog construction before factory/service construction.
+   * Transport validation occurs before an entry is retained and therefore
+   * before service, quota, Job, supervision-thread, or process ownership; a
+   * failure exposes no partial catalog, and the catalog never opens paths.
    */
   explicit PreparedExternalGraphCatalog(
       std::vector<PreparedExternalGraphEntry> entries);
@@ -263,8 +272,10 @@ class JobAttemptWorkerFactory {
    * @brief Creates one externalizable factory around pre-resolved material.
    * @param external_graphs Non-null immutable catalog for product mode.
    * @throws std::invalid_argument when `external_graphs` is null.
-   * @note The shared catalog remains read-only across concurrent supervisor
-   * threads and outlives every copy used for process handoff.
+   * @note The supplied catalog has already validated every transported text
+   * field before this factory can become service configuration. It remains
+   * read-only across concurrent supervisor threads and outlives every copy
+   * used for process handoff.
    */
   explicit JobAttemptWorkerFactory(
       std::shared_ptr<const PreparedExternalGraphCatalog> external_graphs)

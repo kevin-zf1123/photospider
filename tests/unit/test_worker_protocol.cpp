@@ -255,11 +255,11 @@ PreparedWorkerAssignment maximum_field_assignment(
   prepared.assignment.checkpoint = std::make_shared<const ArtifactRecord>(
       maximum_assignment_checkpoint(*spec, checkpoint_payload_bytes));
   prepared.graph.ok = true;
-  prepared.graph.root_dir.assign(16U << 10U, 'r');
-  prepared.graph.yaml_path.assign(16U << 10U, 'y');
-  prepared.graph.config_path.assign(16U << 10U, 'c');
-  prepared.graph.cache_root_dir.assign(16U << 10U, 'h');
-  prepared.graph.message.assign(16U << 10U, 'm');
+  prepared.graph.root_dir.assign(kMaximumWorkerTextFieldBytes, 'r');
+  prepared.graph.yaml_path.assign(kMaximumWorkerTextFieldBytes, 'y');
+  prepared.graph.config_path.assign(kMaximumWorkerTextFieldBytes, 'c');
+  prepared.graph.cache_root_dir.assign(kMaximumWorkerTextFieldBytes, 'h');
+  prepared.graph.message.assign(kMaximumWorkerTextFieldBytes, 'm');
   prepared.heartbeat_interval =
       std::chrono::milliseconds(std::numeric_limits<std::uint32_t>::max());
   return prepared;
@@ -423,6 +423,87 @@ TEST(WorkerProtocol, RoundTripsCompleteAssignmentAndExactLease) {
   EXPECT_EQ(received.heartbeat_interval, sent.heartbeat_interval);
 }
 
+TEST(WorkerProtocol, PreparedGraphTextFieldsShareExactCatalogAndEncoderBounds) {
+  /**
+   * @brief Selects one transported graph string and readable test padding.
+   * @throws Nothing for aggregate initialization and value operations.
+   */
+  struct GraphTextFieldCase final {
+    /** @brief Human-readable field name used in assertion diagnostics. */
+    const char* name;
+    /** @brief Exact `ResolvedGraphArtifact` string member under test. */
+    std::string ResolvedGraphArtifact::* member;
+    /** @brief Distinct byte repeated to the selected transport boundary. */
+    char padding;
+  };
+  const std::array<GraphTextFieldCase, 5U> cases{{
+      {"root_dir", &ResolvedGraphArtifact::root_dir, 'r'},
+      {"yaml_path", &ResolvedGraphArtifact::yaml_path, 'y'},
+      {"config_path", &ResolvedGraphArtifact::config_path, 'c'},
+      {"cache_root_dir", &ResolvedGraphArtifact::cache_root_dir, 'h'},
+      {"message", &ResolvedGraphArtifact::message, 'm'},
+  }};
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.graph-text-bound"), 7,
+      OutputSlotId("image.final"), protocol_resources());
+
+  for (const GraphTextFieldCase& test_case : cases) {
+    ResolvedGraphArtifact exact_graph;
+    exact_graph.ok = true;
+    exact_graph.*(test_case.member) =
+        std::string(kMaximumWorkerTextFieldBytes, test_case.padding);
+    EXPECT_NO_THROW(validate_worker_assignment_graph_transport(exact_graph))
+        << test_case.name;
+    EXPECT_NO_THROW(
+        PreparedExternalGraphCatalog(std::vector<PreparedExternalGraphEntry>{
+            {spec->graph_artifact_id(), exact_graph}}))
+        << test_case.name;
+    PreparedWorkerAssignment exact_assignment;
+    exact_assignment.assignment.identity = protocol_identity(*spec);
+    exact_assignment.assignment.spec = spec;
+    exact_assignment.graph = exact_graph;
+    exact_assignment.heartbeat_interval = std::chrono::milliseconds(125);
+    EXPECT_NO_THROW(encode_worker_assignment(exact_assignment))
+        << test_case.name;
+
+    ResolvedGraphArtifact oversized_graph = std::move(exact_graph);
+    oversized_graph.*(test_case.member) =
+        std::string(kMaximumWorkerTextFieldBytes + 1U, test_case.padding);
+    EXPECT_THROW(validate_worker_assignment_graph_transport(oversized_graph),
+                 std::length_error)
+        << test_case.name;
+    try {
+      static_cast<void>(
+          PreparedExternalGraphCatalog(std::vector<PreparedExternalGraphEntry>{
+              {spec->graph_artifact_id(), oversized_graph}}));
+      ADD_FAILURE() << test_case.name
+                    << " catalog construction accepted one byte over";
+    } catch (const std::length_error& error) {
+      const std::string diagnostic(error.what());
+      EXPECT_NE(diagnostic.find(test_case.name), std::string::npos)
+          << diagnostic;
+      EXPECT_NE(
+          diagnostic.find(std::to_string(kMaximumWorkerTextFieldBytes + 1U)),
+          std::string::npos)
+          << diagnostic;
+      EXPECT_NE(diagnostic.find(std::to_string(kMaximumWorkerTextFieldBytes)),
+                std::string::npos)
+          << diagnostic;
+    } catch (const std::exception& error) {
+      ADD_FAILURE() << test_case.name
+                    << " raised wrong exception: " << error.what();
+    }
+    PreparedWorkerAssignment oversized_assignment;
+    oversized_assignment.assignment.identity = protocol_identity(*spec);
+    oversized_assignment.assignment.spec = spec;
+    oversized_assignment.graph = std::move(oversized_graph);
+    oversized_assignment.heartbeat_interval = std::chrono::milliseconds(125);
+    EXPECT_THROW(encode_worker_assignment(oversized_assignment),
+                 std::length_error)
+        << test_case.name;
+  }
+}
+
 TEST(WorkerProtocol, StatefulDecoderPreservesHeaderAndPayloadAcrossTimeouts) {
   ScopedSocketPair sockets;
   const std::array<std::byte, 18U> frame_bytes{
@@ -569,7 +650,7 @@ TEST(WorkerProtocol,
   {
     JobAttemptReport report = frame_bound_success_report(
         maximum_assignment_identity(report_spec, 'q'),
-        std::string(16U << 10U, 'd'), checkpoint_boundary);
+        std::string(kMaximumWorkerTextFieldBytes, 'd'), checkpoint_boundary);
     WorkerProtocolFrame report_frame =
         encode_worker_report(report, report_spec);
     EXPECT_LT(report_frame.payload.size(), kMaximumWorkerFramePayloadBytes);
@@ -598,7 +679,7 @@ TEST(WorkerProtocol,
 
   JobAttemptReport report = frame_bound_success_report(
       maximum_assignment_identity(report_spec, 'q'),
-      std::string(16U << 10U, 'd'), checkpoint_boundary + 1U);
+      std::string(kMaximumWorkerTextFieldBytes, 'd'), checkpoint_boundary + 1U);
   WorkerProtocolFrame report_frame = encode_worker_report(report, report_spec);
   report.image.reset();
   const JobAttemptReport decoded =

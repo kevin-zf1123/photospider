@@ -342,6 +342,7 @@ PreparedExternalGraphCatalog::PreparedExternalGraphCatalog(
       throw std::invalid_argument(
           "prepared external graph identity is invalid");
     }
+    validate_worker_assignment_graph_transport(entry.graph);
     const auto inserted = entries_.emplace(entry.graph_artifact_id.value(),
                                            std::move(entry.graph));
     if (!inserted.second) {

@@ -28,10 +28,6 @@ namespace {
 constexpr std::uint32_t kWorkerProtocolMagic = 0x50535731U;
 /** @brief Sole supported private worker protocol version. */
 constexpr std::uint16_t kWorkerProtocolVersion = 1U;
-/** @brief Maximum transported path/configuration field length. */
-constexpr std::size_t kMaximumWorkerPathBytes = 16U << 10U;
-/** @brief Maximum worker or resolver diagnostic length. */
-constexpr std::size_t kMaximumWorkerDiagnosticBytes = 16U << 10U;
 /** @brief Fixed metadata bytes before one tight Report image payload. */
 constexpr std::size_t kWorkerReportImageMetadataBytes = 21U;
 /** @brief Encoded width of one closed boolean, enum, or scalar byte. */
@@ -80,8 +76,7 @@ constexpr std::size_t kMaximumEncodedArtifactEnvelopeBytes =
 /** @brief Maximum graph material and cadence bytes after the checkpoint. */
 constexpr std::size_t kMaximumEncodedAssignmentTailBytes =
     kWorkerU8Bytes +
-    4U * maximum_prefixed_field_bytes(kMaximumWorkerPathBytes) +
-    maximum_prefixed_field_bytes(kMaximumWorkerDiagnosticBytes) +
+    5U * maximum_prefixed_field_bytes(kMaximumWorkerTextFieldBytes) +
     kWorkerU32Bytes;
 /**
  * @brief Complete worst-case Assignment envelope excluding checkpoint data.
@@ -96,7 +91,7 @@ constexpr std::size_t kMaximumWorkerCheckpointPayloadBytes =
 /** @brief Maximum complete Report envelope before tight image bytes. */
 constexpr std::size_t kMaximumEncodedReportEnvelopeBytes =
     kMaximumEncodedAttemptIdentityBytes + 4U * kWorkerU8Bytes +
-    maximum_prefixed_field_bytes(kMaximumWorkerDiagnosticBytes) +
+    maximum_prefixed_field_bytes(kMaximumWorkerTextFieldBytes) +
     kWorkerReportImageMetadataBytes;
 
 static_assert(kWorkerDigestBytes == sizeof(ArtifactContentDigest{}.bytes));
@@ -609,7 +604,7 @@ WorkerProtocolFrame encode_candidate_image_bound_failure(
   writer.put_bool(true);
   writer.put_u8(static_cast<std::uint8_t>(JobAttemptFailure::Compute));
   writer.put_string(kWorkerCandidateImageBoundDiagnostic,
-                    kMaximumWorkerDiagnosticBytes);
+                    kMaximumWorkerTextFieldBytes);
   writer.put_bool(false);
   return WorkerProtocolFrame{WorkerMessageKind::Report, writer.finish()};
 }
@@ -1030,11 +1025,43 @@ auto decode_checked(Function&& function) -> decltype(function()) {
   }
 }
 
+/**
+ * @brief Enforces the shared byte bound for one Assignment graph text field.
+ * @param field_name Stable source-field name used in validation diagnostics.
+ * @param value Exact bytes that would be retained or encoded.
+ * @return Nothing when `value` is at or below the inclusive shared bound.
+ * @throws std::length_error when `value` exceeds the private worker bound.
+ * @throws std::bad_alloc when constructing the validation diagnostic fails.
+ * @note The comparison is byte-based because the private codec transports
+ * opaque string bytes and prefixes their exact byte count.
+ */
+void validate_worker_assignment_graph_text_field(std::string_view field_name,
+                                                 std::string_view value) {
+  if (value.size() <= kMaximumWorkerTextFieldBytes) {
+    return;
+  }
+  throw std::length_error("worker assignment graph " + std::string(field_name) +
+                          " has " + std::to_string(value.size()) +
+                          " bytes; maximum is " +
+                          std::to_string(kMaximumWorkerTextFieldBytes));
+}
+
 }  // namespace
 
 /** @copydoc ps::server::maximum_worker_checkpoint_payload_bytes */
 std::size_t maximum_worker_checkpoint_payload_bytes() noexcept {
   return kMaximumWorkerCheckpointPayloadBytes;
+}
+
+/** @copydoc ps::server::validate_worker_assignment_graph_transport */
+void validate_worker_assignment_graph_transport(
+    const ResolvedGraphArtifact& graph) {
+  validate_worker_assignment_graph_text_field("root_dir", graph.root_dir);
+  validate_worker_assignment_graph_text_field("yaml_path", graph.yaml_path);
+  validate_worker_assignment_graph_text_field("config_path", graph.config_path);
+  validate_worker_assignment_graph_text_field("cache_root_dir",
+                                              graph.cache_root_dir);
+  validate_worker_assignment_graph_text_field("message", graph.message);
 }
 
 /** @copydoc ps::server::write_worker_frame */
@@ -1128,6 +1155,7 @@ WorkerProtocolFrame encode_worker_assignment(
     throw std::invalid_argument(
         "prepared worker assignment digest is inconsistent");
   }
+  validate_worker_assignment_graph_transport(assignment.graph);
   ByteWriter writer;
   encode_identity(assignment.assignment.identity, &writer);
   encode_job_spec(*assignment.assignment.spec, &writer);
@@ -1136,11 +1164,12 @@ WorkerProtocolFrame encode_worker_assignment(
     encode_artifact(*assignment.assignment.checkpoint, &writer);
   }
   writer.put_bool(assignment.graph.ok);
-  writer.put_string(assignment.graph.root_dir, kMaximumWorkerPathBytes);
-  writer.put_string(assignment.graph.yaml_path, kMaximumWorkerPathBytes);
-  writer.put_string(assignment.graph.config_path, kMaximumWorkerPathBytes);
-  writer.put_string(assignment.graph.cache_root_dir, kMaximumWorkerPathBytes);
-  writer.put_string(assignment.graph.message, kMaximumWorkerDiagnosticBytes);
+  writer.put_string(assignment.graph.root_dir, kMaximumWorkerTextFieldBytes);
+  writer.put_string(assignment.graph.yaml_path, kMaximumWorkerTextFieldBytes);
+  writer.put_string(assignment.graph.config_path, kMaximumWorkerTextFieldBytes);
+  writer.put_string(assignment.graph.cache_root_dir,
+                    kMaximumWorkerTextFieldBytes);
+  writer.put_string(assignment.graph.message, kMaximumWorkerTextFieldBytes);
   writer.put_u32(
       static_cast<std::uint32_t>(assignment.heartbeat_interval.count()));
   return WorkerProtocolFrame{WorkerMessageKind::Assignment, writer.finish()};
@@ -1175,11 +1204,13 @@ PreparedWorkerAssignment receive_worker_assignment(
           std::make_shared<const ArtifactRecord>(read_artifact(&reader));
     }
     prepared.graph.ok = reader.get_bool();
-    prepared.graph.root_dir = reader.get_string(kMaximumWorkerPathBytes);
-    prepared.graph.yaml_path = reader.get_string(kMaximumWorkerPathBytes);
-    prepared.graph.config_path = reader.get_string(kMaximumWorkerPathBytes);
-    prepared.graph.cache_root_dir = reader.get_string(kMaximumWorkerPathBytes);
-    prepared.graph.message = reader.get_string(kMaximumWorkerDiagnosticBytes);
+    prepared.graph.root_dir = reader.get_string(kMaximumWorkerTextFieldBytes);
+    prepared.graph.yaml_path = reader.get_string(kMaximumWorkerTextFieldBytes);
+    prepared.graph.config_path =
+        reader.get_string(kMaximumWorkerTextFieldBytes);
+    prepared.graph.cache_root_dir =
+        reader.get_string(kMaximumWorkerTextFieldBytes);
+    prepared.graph.message = reader.get_string(kMaximumWorkerTextFieldBytes);
     const std::uint32_t heartbeat_ms = reader.get_u32();
     if (heartbeat_ms == 0U) {
       throw WorkerProtocolError("worker heartbeat cadence is zero");
@@ -1231,7 +1262,7 @@ WorkerProtocolFrame encode_worker_report(const JobAttemptReport& report,
   writer.put_u8(static_cast<std::uint8_t>(report.outcome));
   writer.put_bool(report.settled);
   writer.put_u8(static_cast<std::uint8_t>(report.failure));
-  writer.put_string(report.message, kMaximumWorkerDiagnosticBytes);
+  writer.put_string(report.message, kMaximumWorkerTextFieldBytes);
   writer.put_bool(report.image.has_value());
   if (report.image.has_value()) {
     const ImageBuffer& image = *report.image;
@@ -1301,7 +1332,7 @@ JobAttemptReport decode_worker_report(const WorkerProtocolFrame& frame,
     report.outcome = parse_attempt_outcome(reader.get_u8());
     report.settled = reader.get_bool();
     report.failure = parse_attempt_failure(reader.get_u8());
-    report.message = reader.get_string(kMaximumWorkerDiagnosticBytes);
+    report.message = reader.get_string(kMaximumWorkerTextFieldBytes);
     if (reader.get_bool()) {
       const std::uint32_t width = reader.get_u32();
       const std::uint32_t height = reader.get_u32();
