@@ -35,6 +35,18 @@ data plane, syscall/device isolation, or untrusted-plugin isolation. Current
 behavior is defined by
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
 
+Issue #102 now also provides a source-private Darwin/Linux CPU invocation
+slice. `NonSupervisedIsolatedCpuInvocationExecutor` uses an independently
+versioned, pointer-free request/response protocol, a framed Unix stream,
+ordered `SCM_RIGHTS` descriptors, and unlinked POSIX shared memory. Every call
+starts one fresh empty-environment runtime process, and the Host exposes output
+only after normal zero exit, descriptor/header revalidation, copy into a fresh
+Host allocation, and content-binding validation of that snapshot before seal.
+This slice does not yet provide authenticated
+supervision, heartbeat, deadline, restart, sandboxing, or resource enforcement;
+an invoked callback can still hang. It is neither the Issue #103 supervisor nor
+the Issue #104 trust/resource-policy delivery.
+
 ## Context
 
 The repository has a strong local/process baseline, but it is not a network
@@ -363,12 +375,32 @@ identity, current worker lease, and declared resource bounds. Returned
 descriptors, handles, offsets, digests, statuses, and diagnostics are untrusted
 data and never mint authority.
 
-Issue #101 owns the pure-C operation ABI decision. Issue #102 owns the first
-CPU shared-memory/FD invocation record. Issue #103 owns heartbeat, deadlines,
-and fault isolation. Issue #104 owns allowlist/signature and enforceable plugin
-resource policy. This ADR fixes their authority and process boundaries without
-preselecting their wire layouts. Cross-process GPU handles/fences remain a
-later decision.
+The current Issue #102 slice implements the first CPU shared-memory/FD record
+without migrating operation ABI v2 or implementing the target-only operation
+ABI v1. Its callback seam is process-local runtime code; neither ABI family's
+pointer-bearing records are serialized. It binds the canonical request and
+every declared physical tensor range to the invocation identity, grants only
+declared directional capabilities, and fails closed on malformed or mutated
+request, response, descriptor, header, FD, or content state. The one-shot
+process and RAII owners provide exact normal/error-path retirement, but they do
+not classify or bound a callback that never returns.
+
+Those source-private Issue #102 objects are compiled into the installable
+product archive and exercised from that archive by a real-exec fixture. No
+current `ExecutionService`, `WorkerManager`, embedded Host/CLI,
+`photospider-worker`, or other product composition root selects them. The
+non-supervised adapter is a pre-supervisor transport sub-role rather than the
+target private `PluginInvocationExecutor`; #103 still owns composing that role
+through `PluginRuntimeSupervisor`. Wiring current ABI v2 or implementing or
+shimming target-only ABI v1 is outside #102.
+
+Issue #101 owns the pure-C operation ABI decision and Issue #102 now owns this
+first invocation record. Issue #103 owns authenticated supervision, heartbeat,
+deadlines, fault classification, restart, and bounded hang containment. Issue
+#104 owns allowlist/signature, sandbox/capability, and enforceable plugin
+resource policy. This ADR fixes their authority and process boundaries; the
+Issue #102 protocol-v1 layout is its own separately versioned implementation
+decision. Cross-process GPU handles/fences remain a later decision.
 
 ### Failure, revocation, and replay
 

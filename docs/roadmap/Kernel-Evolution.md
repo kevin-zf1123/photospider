@@ -1551,10 +1551,10 @@ Publication preserves the current shadow transaction, atomic immutable slot
 visibility, per-slot revision/predecessor restoration, middle-generation
 splice, reverse retirement, and exact callback/context DSO leases. A callback
 that never returns may retain those owners forever; pure C does not add bounded
-termination. Issue #102 alone owns pointer-free shared-memory/FD invocation
-records, Issue #103 owns authenticated supervision and crash/hang/OOM/bad-
-output containment, and Issue #104 owns allowlist/signature and enforceable
-resource policy.
+termination. Issue #102 now implements its pointer-free shared-memory/FD
+invocation record, Issue #103 owns authenticated supervision and
+crash/hang/OOM/bad-output containment, and Issue #104 owns allowlist/signature
+and enforceable resource policy.
 
 Issue #101 is complete as a decision when these bilingual artifacts pass local
 validation, fresh independent diff review, authorized exact-head PR
@@ -1563,6 +1563,52 @@ unresolved review threads, and Issue/Project administration. Archiving that
 decision and closing #101 do not wait for the later header/loader/plugin
 migration or v2 deletion; those remain one independent breaking implementation
 change while v2 stays current and v1 target-only.
+
+### Issue #102 current isolated CPU invocation slice
+
+Issue #102 now supplies a source-private Darwin/Linux protocol-v1 CPU
+invocation adapter and one-call runtime endpoint. A bounded framed Unix stream
+carries the canonical request/response; ordered `SCM_RIGHTS` descriptors grant
+unlinked POSIX shared-memory capabilities. The wire includes the exact
+tenant/Job/attempt/worker-lease/plugin-generation/invocation identity tuple,
+operation key, immutable scalar parameters, capability and tensor descriptors,
+resource declarations, response status, and bounded diagnostics. It carries no
+pointer, `BufferHandle`, allocation/revision identity, lease, ABI record, Host
+callback, Graph/Run owner, credential, artifact capability, or resource token.
+
+Both Host and runtime independently enforce protocol/version/kind/count bounds,
+canonical scalar representation, identity and operation binding, Ready
+Host-visible NativeScalar Strided DenseTensor input, checked rank/extent/stride
+and descriptor ranges, directional FD rights, non-overlapping output plans,
+exact shared-memory type/physical size/header, and declared resource ceilings.
+Request content bindings cover canonical descriptors plus every Ready input's
+descriptor-addressable physical byte. After a success response, the Host first
+requires normal zero process exit, then revalidates all descriptors,
+capabilities, and output plans, copies each output through `ValueBuilder` into
+a fresh Host allocation, and validates the binding over those actual snapshot
+bytes before seal. Integration tests exercise success, zero input,
+failure/cancellation/exception responses, abnormal exit, empty environment and
+inherited-FD closure, and repeated exact descriptor/mapping/child retirement.
+
+The adapter and endpoint are compiled into the installable product archive, and
+that real-exec integration test links the product archive on both sides. This is
+the complete #102 product inclusion vertical, not a selected end-user path: no
+`ExecutionService`, `WorkerManager`, embedded Host/CLI,
+`photospider-worker`, or other composition root calls it. The narrower
+`NonSupervisedIsolatedCpuInvocationExecutor` remains a pre-supervisor transport
+sub-role rather than the target private `PluginInvocationExecutor`, whose
+composition through `PluginRuntimeSupervisor` belongs to #103.
+
+Every call uses a fresh `fork`/`execve` process with an empty environment and,
+besides stdio, only its fixed control/status descriptors retained. This gives
+process-crash containment and deterministic post-exit output adoption, but it
+is deliberately non-supervised: there is no authenticated supervisor, deadline,
+heartbeat, crash/hang/OOM classification, restart policy, sandbox, or
+enforceable resource policy, and a callback can hang indefinitely. Those
+remain Issues #103 and #104. The process-local callback seam neither calls nor
+migrates current operation ABI v2 or target-only operation ABI v1; it adds no
+compatibility wrapper, shim, ABI adapter, or dual loader. Cross-process
+GPU/native-handle support remains later work.
 
 The current Issue #99/#100 baseline is the source-private
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
@@ -1603,7 +1649,7 @@ Delivery remains allocated rather than absorbed by Issue #97:
 | [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota, durable artifacts, retry/checkpoint, and recovery semantics |
 | [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision, crash isolation, and bounded cancellation/shutdown |
 | [#101](https://github.com/kevin-zf1123/photospider/issues/101) | Accepted separately versioned pure-C operation-plugin ABI v1 decision; implementation remains a later breaking migration |
-| [#102](https://github.com/kevin-zf1123/photospider/issues/102) | Isolated CPU shared-memory/FD invocation and exact descriptor/stride/size/ownership validation |
+| [#102](https://github.com/kevin-zf1123/photospider/issues/102) | Implemented source-private Darwin/Linux isolated CPU shared-memory/FD invocation with exact descriptor/stride/size/ownership/content validation; authenticated supervision remains #103 |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | `PluginRuntimeSupervisor` heartbeat/deadline and crash/hang/OOM/bad-output containment |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature and enforceable resource policy |
 | [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata and bulk artifact data-plane separation |

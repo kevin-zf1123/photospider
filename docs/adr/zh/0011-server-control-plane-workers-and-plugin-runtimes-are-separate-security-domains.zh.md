@@ -27,6 +27,16 @@ multi-tenant authorization、独立部署的 WorkerManager、authenticated netwo
 standalone artifact data plane、syscall/device isolation 或 untrusted-plugin isolation。当前行为由
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)定义。
 
+Issue #102 现在也提供源码私有的 Darwin/Linux CPU invocation 切片。
+`NonSupervisedIsolatedCpuInvocationExecutor` 使用独立版本化、无指针的 request/response
+protocol、framed Unix stream、有序 `SCM_RIGHTS` descriptor 与已 unlink 的 POSIX shared
+memory。每次调用都会启动一个全新且 environment 为空的 runtime process；只有在进程正常以
+零状态退出，并且 descriptor/header 重新验证通过、结果被复制到全新 Host allocation，且该
+snapshot 的 content binding 在 seal 前验证通过后，Host 才会暴露 output。该切片尚不提供
+authenticated supervision、heartbeat、deadline、
+restart、sandboxing 或 resource enforcement；被调用的 callback 仍可能 hang。它既不是 Issue
+#103 的 supervisor，也不是 Issue #104 的 trust/resource-policy 交付。
+
 ## 背景
 
 仓库已经具有稳固的本地/进程基线，但它并不是 network service security model：
@@ -302,10 +312,27 @@ permission、byte size、descriptor/content binding、readiness、ownership、pl
 invocation identity、current worker lease 与 declared resource bound。返回的 descriptor、handle、
 offset、digest、status 与 diagnostic 均为 untrusted data，绝不 mint authority。
 
-Issue #101 拥有 pure-C operation ABI 决策。Issue #102 拥有首个 CPU shared-memory/FD
-invocation record。Issue #103 拥有 heartbeat、deadline 与 fault isolation。Issue #104 拥有
-allowlist/signature 与可执行 plugin resource policy。本 ADR 冻结其 authority 与 process
-boundary，但不预先决定 wire layout。Cross-process GPU handle/fence 留给后续决策。
+当前 Issue #102 切片已经实现首个 CPU shared-memory/FD record，但不迁移 operation ABI
+v2，也不实现仍为目标态的 operation ABI v1。其 callback seam 是 process-local runtime
+code；两个 ABI family 的 pointer-bearing record 都不会被序列化。该实现把 canonical request
+与每个已声明的 physical tensor range 绑定到 invocation identity，只授予声明方向的
+capability，并对 malformed 或已变更的 request、response、descriptor、header、FD 或 content
+state 进行 fail-closed 处理。One-shot process 与 RAII owner 在正常/错误路径提供精确
+retirement，但不会对永不返回的 callback 进行分类或时间约束。
+
+这些 source-private Issue #102 object 会编入 installable product archive，并由真实 exec
+fixture 从该 archive 加以验证。当前没有 `ExecutionService`、`WorkerManager`、embedded
+Host/CLI、`photospider-worker` 或其他 product composition root 会选择它们。Non-supervised
+adapter 是 pre-supervisor transport 子角色，而不是目标私有 `PluginInvocationExecutor`；#103
+仍负责通过 `PluginRuntimeSupervisor` 组合该角色。接入当前 ABI v2，或实现、shim 仍为目标态
+的 ABI v1，均不属于 #102。
+
+Issue #101 拥有 pure-C operation ABI 决策，Issue #102 现在拥有该首个 invocation record。
+Issue #103 拥有 authenticated supervision、heartbeat、deadline、fault classification、restart
+与有界 hang containment。Issue #104 拥有 allowlist/signature、sandbox/capability 与可执行
+plugin resource policy。本 ADR 冻结其 authority 与 process boundary；Issue #102 的
+protocol-v1 layout 是它自己的独立版本化实现决策。Cross-process GPU handle/fence 留给后续
+决策。
 
 ### Failure、Revocation 与 Replay
 

@@ -281,6 +281,20 @@ manager 默认的 64-entry 上限会释放 revision 最低的强 native/provider
 数量不是 device-byte 或 scratch admission。当前 source-private Metal 路径同时实现
 buffer-to-texture upload 与 texture-to-buffer download。
 
+Issue #102 保持该公共 `Value`/`BufferHandle` 契约与 `ImageBuffer` 不变。其源码私有
+isolated-CPU adapter 只接受 Ready、Host-visible、未量化的 NativeScalar Strided
+DenseTensor input，保留经检查的 read lease，并把精确 physical storage envelope 复制到一个
+invocation-local、只读的 shared-memory descriptor range。`BufferHandle`、
+`AllocationIdentity`、`ValueRevisionId`、pointer 与 lease 永远不会跨 wire。每个 output
+capability 只授予一个已规划、为正、经检查且互不重叠的 descriptor range。Host 会把每个
+physical input descriptor-range byte 纳入其 request content binding，在 child 正常退出后重新
+验证返回的 capability，通过 `ValueBuilder` 进行复制，并在 seal Host `Value` 前针对实际 fresh
+snapshot 验证 binding。Descriptor 可寻址的 padding 参与 content binding。Darwin 按 page
+取整的 POSIX
+shared-memory slack 位于所有 descriptor range 之外，但其精确 physical capability size 仍受
+header 与 resource declaration 绑定。该切片不引入 `ImageBuffer` adaptation，也不扩大公共
+memory contract。
+
 Issue #86 / V-9 在不修改 `ImageBuffer` 或公共 operation 与 Host 契约的前提下，新增
 source-private device resource accounting。唯一 service ledger 只为 fixed registry 中具有
 executor 的已配置非 CPU `DeviceId` 创建隔离的 memory/scratch account。Perlin 与

@@ -1147,6 +1147,24 @@ protocol carrying only bounded descriptors and shared-memory/file-descriptor
 capabilities; trusted Host code revalidates every returned descriptor and
 ownership claim. Pure C is a record-compatibility choice, not a sandbox.
 
+The current Issue #102 slice realizes the transport portion through a
+source-private Darwin/Linux protocol v1. It accepts only Ready, Host-visible,
+unquantized NativeScalar Strided DenseTensor values, scalar parameters, and
+checked dense-tensor output plans. A fresh one-call runtime receives no ABI
+pointer record, Host callback, allocator, Graph/Run owner, or resource token;
+its process-local callback seam does not call or migrate operation ABI v2 or
+the target-only operation ABI v1. This non-supervised slice does not by itself
+admit tenant code, authenticate a runtime, impose a deadline, sandbox syscalls,
+or enforce resource policy.
+
+Its adapter and runtime endpoint are compiled into the installable product
+archive and exercised by a product-linked real-exec fixture, but no current
+composition root selects them for end-user execution. In particular,
+`ExecutionService`, `WorkerManager`, the embedded Host/CLI, and
+`photospider-worker` have no caller. The deliberately narrower
+`NonSupervisedIsolatedCpuInvocationExecutor` name does not claim the target
+private `PluginInvocationExecutor`; #103 still owns its supervised composition.
+
 Shadow publication prevents partial operation-registry or policy-type-map
 visibility. DSO leases keep callback state and plugin-owned values or contexts
 inside the lifetime of their defining library. Matching operation restoration

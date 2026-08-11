@@ -344,6 +344,24 @@ pressure. This entry count is not device-byte or scratch admission. The current
 source-private Metal path implements both buffer-to-texture upload and
 texture-to-buffer download.
 
+Issue #102 leaves this public `Value`/`BufferHandle` contract and
+`ImageBuffer` unchanged. Its source-private isolated-CPU adapter accepts only
+Ready, Host-visible, unquantized NativeScalar Strided DenseTensor inputs,
+retains a checked read lease, and copies the exact physical storage envelope
+into one invocation-local read-only shared-memory descriptor range.
+`BufferHandle`, `AllocationIdentity`, `ValueRevisionId`, pointers, and leases
+never cross the wire. Each output capability grants only a planned, positive,
+checked, non-overlapping descriptor range. The Host binds every physical
+input descriptor-range byte into its request content binding, revalidates the
+returned capability after normal child exit, copies through `ValueBuilder`, and
+validates the binding over the actual fresh snapshot before sealing the Host
+`Value`. Descriptor-addressable padding participates in content binding.
+Darwin's page-rounded POSIX
+shared-memory slack remains outside every descriptor range, while its exact
+physical capability size is still bound by the header and resource
+declaration. No `ImageBuffer` adaptation or public memory-contract widening is
+introduced.
+
 Issue #86 / V-9 adds source-private device resource accounting without
 changing `ImageBuffer` or the public operation and Host contracts. The sole
 service ledger creates isolated memory/scratch accounts only for configured

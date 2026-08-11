@@ -1253,7 +1253,7 @@ CPU output，或保持在 Host-private adapter 后面。未来 native/async exec
 Publication 保留当前 shadow transaction、atomic immutable slot visibility、per-slot revision/
 predecessor restoration、middle-generation splice、reverse retirement，以及精确 callback/context
 DSO lease。永不返回的 callback 可以永久保留这些 owner；pure C 不提供 bounded termination。
-Issue #102 单独负责 pointer-free shared-memory/FD invocation record，Issue #103 负责
+Issue #102 现在已经实现其 pointer-free shared-memory/FD invocation record，Issue #103 负责
 authenticated supervision 与 crash/hang/OOM/bad-output containment，Issue #104 负责
 allowlist/signature 与 enforceable resource policy。
 
@@ -1262,6 +1262,45 @@ Integration、finding 已裁定的 fresh Codex exact-head review、zero unresolv
 与 Issue/Project 行政门禁时，Issue #101 作为 decision 即完成。归档该 decision 与关闭 #101
 不等待后续 header/loader/plugin 迁移或 v2 删除；v2 仍为 current、v1 仍为 target-only 时，
 这些工作仍属于一次独立 breaking implementation change。
+
+### Issue #102 当前 isolated CPU invocation 切片
+
+Issue #102 现在提供源码私有的 Darwin/Linux protocol-v1 CPU invocation adapter 与 one-call
+runtime endpoint。有界 framed Unix stream 承载 canonical request/response；有序
+`SCM_RIGHTS` descriptor 授予已 unlink 的 POSIX shared-memory capability。Wire 包含精确
+tenant/Job/attempt/worker-lease/plugin-generation/invocation identity tuple、operation key、
+immutable scalar parameter、capability/tensor descriptor、resource declaration、response status
+与有界 diagnostic。它不携带 pointer、`BufferHandle`、allocation/revision identity、lease、ABI
+record、Host callback、Graph/Run owner、credential、artifact capability 或 resource token。
+
+Host 与 runtime 都会独立执行 protocol/version/kind/count bound、canonical scalar
+representation、identity/operation binding、Ready Host-visible NativeScalar Strided DenseTensor
+input、经检查的 rank/extent/stride 与 descriptor range、定向 FD right、互不重叠的 output plan、
+精确 shared-memory type/physical size/header 以及 declared resource ceiling。Request content
+binding 覆盖 canonical descriptor 与每个 Ready input 中 descriptor 可寻址的 physical byte。
+收到 success response 后，Host
+首先要求进程正常以零状态退出，再重新验证全部 descriptor、capability 与 output plan，通过
+`ValueBuilder` 把每个 output 复制到全新 Host allocation，并在 seal 前针对这些实际 snapshot
+byte 验证 binding。Integration test 覆盖 success、zero input、
+failure/cancellation/exception response、abnormal exit、空
+environment 与 inherited-FD closure，以及重复调用下 descriptor/mapping/child 的精确
+retirement。
+
+Adapter 与 endpoint 会编入 installable product archive，该真实 exec integration test 会在
+两端链接 product archive。这是完整的 #102 product inclusion 纵向路径，不是已选择的终端用户
+路径：没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
+`photospider-worker` 或其他 composition root 会调用它。范围更窄的
+`NonSupervisedIsolatedCpuInvocationExecutor` 仍是 pre-supervisor transport 子角色，而不是
+目标私有 `PluginInvocationExecutor`；后者通过 `PluginRuntimeSupervisor` 的组合属于 #103。
+
+每次调用都使用全新的 `fork`/`execve` process，environment 为空，并且除 stdio 外只保留固定
+control/status descriptor。这样可提供 process-crash containment 与确定性的 post-exit output
+adoption，但该切片有意保持 non-supervised：它不包含 authenticated supervisor、deadline、
+heartbeat、crash/hang/OOM classification、restart policy、sandbox 或 enforceable resource
+policy，callback 可以无限期 hang。这些能力仍属于 Issues #103 和 #104。Process-local callback
+seam 既不调用也不迁移当前 operation ABI v2 或仍为目标态的 operation ABI v1；它不会新增 ABI
+compatibility wrapper、shim、adapter 或 dual loader。Cross-process GPU/native-handle support
+仍是后续工作。
 
 当前 Issue #99/#100 基线是源码私有的
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结
@@ -1294,7 +1333,7 @@ Issue #97 只做分配，不吸收后续交付：
 | [#99](https://github.com/kevin-zf1123/photospider/issues/99) | Tenant quota、durable artifact、retry/checkpoint 与 recovery semantics |
 | [#100](https://github.com/kevin-zf1123/photospider/issues/100) | WorkerManager/worker supervision、crash isolation 与 bounded cancellation/shutdown |
 | [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 已接受的独立版本化 pure-C operation-plugin ABI v1 决策；实现仍属于后续 breaking migration |
-| [#102](https://github.com/kevin-zf1123/photospider/issues/102) | 隔离 CPU shared-memory/FD invocation，以及精确 descriptor/stride/size/ownership validation |
+| [#102](https://github.com/kevin-zf1123/photospider/issues/102) | 已实现源码私有的 Darwin/Linux isolated CPU shared-memory/FD invocation，并具有精确 descriptor/stride/size/ownership/content validation；authenticated supervision 仍属于 #103 |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | `PluginRuntimeSupervisor` heartbeat/deadline 与 crash/hang/OOM/bad-output containment |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature 与可执行 resource policy |
 | [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata 与 bulk artifact data-plane separation |

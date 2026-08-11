@@ -41,8 +41,11 @@ the C++ ABI.
 ADR 0011 establishes a separate security-domain direction. Operator-trusted
 DSOs may execute in a Host process; tenant-supplied CPU code must eventually
 execute in an isolated plugin runtime. Pure C is necessary for explicit,
-validatable records, but it is not process isolation. Issues #102, #103, and
-#104 already own the wire protocol, supervision, and trust/resource policy.
+validatable records, but it is not process isolation. Issue #102 now implements
+a separately versioned source-private CPU wire/runtime slice without changing
+the current operation ABI v2 or implementing this ADR's target-only operation
+ABI v1. Issues #103 and #104 continue to own supervision and trust/resource
+policy.
 
 ## Decision
 
@@ -418,15 +421,22 @@ access, threads, crashes, hangs, OOM, forged callbacks, or Host corruption.
 
 Tenant-untrusted CPU code never uses pointer-bearing ABI records as IPC:
 
-- Issue #102 owns pointer-free shared-memory/FD invocation wire records,
-  serialization, and exact offset/range/ownership validation;
+- Issue #102 implements a source-private pointer-free protocol-v1 request and
+  response, `SCM_RIGHTS` POSIX-shared-memory capabilities, canonical
+  descriptor/content binding, strict offset/range/ownership validation, and a
+  one-shot process-local callback seam;
 - Issue #103 owns authenticated `PluginRuntimeSupervisor` lifecycle,
   heartbeat/deadline, crash/hang/OOM/bad-output containment, restart, and reap;
 - Issue #104 owns package allowlist/signature, sandbox/capability, and
   enforceable resource policy.
 
-This ADR preselects none of their frame, handle, authentication, or policy
-formats. Cross-process GPU/native-handle work remains a later decision.
+At acceptance, this ADR preselected none of their frame, handle,
+authentication, or policy formats. Issue #102 has since selected its own
+independently versioned protocol-v1 frame and capability layout. That protocol
+does not serialize operation ABI v2, the target operation ABI v1, or any ABI
+pointer record, and it introduces no migration wrapper, shim, adapter, or dual
+loader. Authentication and policy formats remain owned by Issues #103 and
+#104. Cross-process GPU/native-handle work remains a later decision.
 
 ### One complete breaking migration
 

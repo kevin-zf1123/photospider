@@ -440,10 +440,37 @@ publication lock is held while plugin code runs.
 An in-process callback can still ignore cancellation forever. The Host may
 make its result ineligible, but cannot fabricate return, reclaim its write
 grant, destroy its context, or unload its DSO safely. Operation v1 is therefore
-an operator-trusted compatibility boundary. Issue #102 owns pointer-free
-shared-memory/FD invocation records, Issue #103 owns bounded supervision, and
-Issue #104 owns trust/resource enforcement for tenant code; ABI pointer records
-are never their wire protocol.
+an operator-trusted compatibility boundary. Issue #102 now implements a
+source-private, pointer-free Darwin/Linux protocol-v1 invocation slice over a
+framed Unix stream, ordered `SCM_RIGHTS` descriptors, and unlinked POSIX shared
+memory. Issue #103 still owns bounded authenticated supervision, and Issue #104
+still owns trust/resource enforcement for tenant code; ABI pointer records are
+never their wire protocol.
+
+`NonSupervisedIsolatedCpuInvocationExecutor` validates the invocation identity,
+generation/operation binding, scalar parameters, resource declarations,
+readiness/ownership, descriptor geometry, access direction, ranges, and
+canonical descriptor/content digest before spawning. The one-call runtime
+performs the same independent checks before mapping a callback-local view. The
+Host waits for normal zero exit, then revalidates every FD, capability header,
+response, descriptor, and output range, snapshots output into a fresh Host
+allocation, and validates the binding over the actual copied bytes before
+sealing the `Value`. RAII owners close mappings, descriptors, channels, and
+reap the exact child on success or failure. This slice deliberately has no
+supervisor, authentication, deadline, heartbeat, restart, sandbox, or resource
+enforcement, so a callback that never returns remains unbounded.
+
+The adapter and runtime endpoint definitions are compiled into the installable
+product archive, and the real-exec integration test links those product objects.
+That is the complete Issue #102 product inclusion proof, not an end-user route:
+no `ExecutionService`, `WorkerManager`, embedded Host/CLI,
+`photospider-worker`, or other composition root selects them. The deliberately
+named `NonSupervisedIsolatedCpuInvocationExecutor` is therefore a
+pre-supervisor transport sub-role, not the target private
+`PluginInvocationExecutor`. Selecting that target through
+`PluginRuntimeSupervisor` remains #103; current operation ABI v2 cannot cross
+this wire, and target-only operation ABI v1 is neither implemented nor shimmed
+by this slice.
 
 ## Request Behavior
 

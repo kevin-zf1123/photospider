@@ -905,6 +905,20 @@ data-definition record。Tenant-supplied CPU operation code 改为跨越单独�
 重新校验每个返回 descriptor 与 ownership 声明。纯 C 是 record compatibility 选择，不是
 sandbox。
 
+当前 Issue #102 切片通过源码私有的 Darwin/Linux protocol v1 实现其中的 transport 部分。
+它只接受 Ready、Host-visible、未量化的 NativeScalar Strided DenseTensor value、scalar
+parameter 与经检查的 dense-tensor output plan。全新的 one-call runtime 不接收 ABI pointer
+record、Host callback、allocator、Graph/Run owner 或 resource token；其 process-local
+callback seam 不会调用或迁移 operation ABI v2，也不会调用或迁移仍为目标态的 operation ABI
+v1。该 non-supervised 切片本身不会准入 tenant code、认证 runtime、施加 deadline、sandbox
+syscall 或执行 resource policy。
+
+其 adapter 与 runtime endpoint 会编入 installable product archive，并由链接 product 的真实
+exec fixture 加以验证，但当前没有 composition root 会选择它们进行终端用户执行。具体而言，
+`ExecutionService`、`WorkerManager`、embedded Host/CLI 与 `photospider-worker` 均不存在
+caller。刻意收窄的 `NonSupervisedIsolatedCpuInvocationExecutor` 名称并不宣称目标私有
+`PluginInvocationExecutor`；#103 仍负责其受监督的组合。
+
 影子发布阻止操作注册表或策略类型 map 局部可见。DSO 租约让回调状态和插件拥有
 的值或上下文保持在其定义库的生命周期内。匹配的操作恢复 token 和策略绑定代次
 可防止已移除或替换的插件静默夺回当前所有权。

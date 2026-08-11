@@ -348,9 +348,30 @@ callback/configured context 在 validation、status normalization 与一次 dest
 
 进程内 callback 仍可永久忽略 cancellation。Host 可令其 result 失去资格，却不能虚构 return、
 回收 write grant、destroy context 或安全卸载 DSO。因此 operation v1 是 operator-trusted
-compatibility boundary。Issue #102 负责 pointer-free shared-memory/FD invocation record，
-Issue #103 负责 bounded supervision，Issue #104 负责 tenant code 的 trust/resource
-enforcement；ABI pointer record 永远不是其 wire protocol。
+compatibility boundary。Issue #102 现在实现一个源码私有、无指针的 Darwin/Linux
+protocol-v1 invocation 切片，它使用 framed Unix stream、有序 `SCM_RIGHTS` descriptor 与已
+unlink 的 POSIX shared memory。Issue #103 仍负责 bounded authenticated supervision，Issue
+#104 仍负责 tenant code 的 trust/resource enforcement；ABI pointer record 永远不是其 wire
+protocol。
+
+`NonSupervisedIsolatedCpuInvocationExecutor` 会在 spawn 前验证 invocation identity、
+generation/operation binding、scalar parameter、resource declaration、readiness/ownership、
+descriptor geometry、access direction、range 与 canonical descriptor/content digest。
+One-call runtime 会在映射 callback-local view 前独立执行同样检查。Host 等待进程正常以零状态
+退出，随后重新验证每个 FD、capability header、response、descriptor 与 output range，把
+output snapshot 复制到全新 Host allocation，并在 seal `Value` 前针对实际 copied byte 验证
+binding。RAII owner 会在成功或失败时关闭 mapping、descriptor、channel 并精确 reap child。
+该切片有意不包含 supervisor、authentication、deadline、heartbeat、
+restart、sandbox 或 resource enforcement，因此永不返回的 callback 仍无时间边界。
+
+Adapter 与 runtime endpoint 定义会编入 installable product archive，真实 exec integration
+test 会链接这些 product object。这是完整的 Issue #102 product inclusion 证明，不是终端用户
+路径：没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
+`photospider-worker` 或其他 composition root 会选择它们。因此，刻意如此命名的
+`NonSupervisedIsolatedCpuInvocationExecutor` 是 pre-supervisor transport 子角色，而不是目标
+私有 `PluginInvocationExecutor`。通过 `PluginRuntimeSupervisor` 选择该目标仍属于 #103；
+当前 operation ABI v2 无法跨越此 wire，仍为目标态的 operation ABI v1 也没有在本切片中
+实现或通过 shim 接入。
 
 ## 请求行为
 
