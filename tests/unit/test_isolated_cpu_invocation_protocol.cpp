@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -88,11 +89,11 @@ IsolatedCpuInvocationRequest test_request() {
   request.identity = test_identity();
   request.operation = "test.copy";
   IsolatedCpuScalarParameter enabled;
-  enabled.name = "enabled";
+  enabled.name = "alpha";
   enabled.kind = IsolatedCpuScalarKind::Boolean;
   enabled.boolean_value = true;
   IsolatedCpuScalarParameter scale;
-  scale.name = "scale";
+  scale.name = "bravo";
   scale.kind = IsolatedCpuScalarKind::UnsignedInteger;
   scale.unsigned_value = 2U;
   request.parameters = {enabled, scale};
@@ -141,19 +142,254 @@ IsolatedCpuInvocationResponse test_response(
   return response;
 }
 
+/**
+ * @brief Requires one readable byte range inside a test packet.
+ * @param packet Complete encoded packet.
+ * @param offset First requested byte.
+ * @param size Requested byte count.
+ * @return Nothing when the range is present.
+ * @throws std::runtime_error when the test fixture layout is inconsistent.
+ */
+void require_wire_range(const std::vector<std::byte>& packet,
+                        std::size_t offset, std::size_t size) {
+  if (offset > packet.size() || size > packet.size() - offset) {
+    throw std::runtime_error("isolated CPU test packet layout is truncated");
+  }
+}
+
+/**
+ * @brief Reads one test-only wire byte and advances a checked cursor.
+ * @param packet Complete encoded packet.
+ * @param cursor Non-null next-byte cursor.
+ * @return Exact byte value.
+ * @throws std::invalid_argument for a null cursor.
+ * @throws std::runtime_error when the fixture packet is truncated.
+ */
+std::uint8_t read_wire_u8(const std::vector<std::byte>& packet,
+                          std::size_t* cursor) {
+  if (cursor == nullptr) {
+    throw std::invalid_argument("isolated CPU test wire cursor is null");
+  }
+  require_wire_range(packet, *cursor, 1U);
+  return std::to_integer<std::uint8_t>(packet[(*cursor)++]);
+}
+
+/**
+ * @brief Reads one big-endian test-only uint32 and advances a checked cursor.
+ * @param packet Complete encoded packet.
+ * @param cursor Non-null next-byte cursor.
+ * @return Exact decoded value.
+ * @throws std::invalid_argument for a null cursor.
+ * @throws std::runtime_error when the fixture packet is truncated.
+ */
+std::uint32_t read_wire_u32(const std::vector<std::byte>& packet,
+                            std::size_t* cursor) {
+  std::uint32_t value = 0U;
+  for (std::size_t index = 0U; index < 4U; ++index) {
+    value = (value << 8U) | read_wire_u8(packet, cursor);
+  }
+  return value;
+}
+
+/**
+ * @brief Advances a checked test cursor over fixed wire bytes.
+ * @param packet Complete encoded packet.
+ * @param size Byte count to skip.
+ * @param cursor Non-null next-byte cursor.
+ * @return Nothing after advancing.
+ * @throws std::invalid_argument for a null cursor.
+ * @throws std::runtime_error when the fixture packet is truncated.
+ */
+void skip_wire_bytes(const std::vector<std::byte>& packet, std::size_t size,
+                     std::size_t* cursor) {
+  if (cursor == nullptr) {
+    throw std::invalid_argument("isolated CPU test wire cursor is null");
+  }
+  require_wire_range(packet, *cursor, size);
+  *cursor += size;
+}
+
+/**
+ * @brief Locates and skips one length-prefixed test wire string.
+ * @param packet Complete encoded packet.
+ * @param cursor Non-null next-byte cursor.
+ * @param length_out Optional exact decoded length output.
+ * @return Offset of the first string byte.
+ * @throws std::invalid_argument for a null cursor.
+ * @throws std::runtime_error when the fixture packet is truncated.
+ */
+std::size_t skip_wire_string(const std::vector<std::byte>& packet,
+                             std::size_t* cursor,
+                             std::uint32_t* length_out = nullptr) {
+  const std::uint32_t length = read_wire_u32(packet, cursor);
+  const std::size_t bytes_offset = *cursor;
+  skip_wire_bytes(packet, length, cursor);
+  if (length_out != nullptr) {
+    *length_out = length;
+  }
+  return bytes_offset;
+}
+
+/**
+ * @brief Mutable canonical-field offsets in the deterministic request packet.
+ * @throws std::bad_alloc when bounded offset vectors cannot allocate.
+ */
+struct RequestWireOffsets final {
+  /** @brief First byte of each parameter name. */
+  std::vector<std::size_t> parameter_name_offsets;
+  /** @brief Exact byte length of each parameter name. */
+  std::vector<std::uint32_t> parameter_name_lengths;
+  /** @brief Scalar-kind byte for each parameter. */
+  std::vector<std::size_t> parameter_kind_offsets;
+  /** @brief First byte of each capability id. */
+  std::vector<std::size_t> capability_id_offsets;
+  /** @brief Sign byte of the first tensor's first signed stride. */
+  std::size_t first_stride_sign_offset = 0U;
+};
+
+/**
+ * @brief Locates canonical request fields used by direct wire rejection tests.
+ * @param packet Canonical packet produced from `test_request()`.
+ * @return Checked offsets for parameter, capability, and stride mutations.
+ * @throws std::runtime_error when the deterministic fixture shape changes.
+ * @throws std::bad_alloc when bounded offset storage cannot allocate.
+ * @note This parser is test-only and intentionally follows protocol-v1 field
+ * order so mutations exercise the production top-level decoder.
+ */
+RequestWireOffsets locate_request_wire_offsets(
+    const std::vector<std::byte>& packet) {
+  constexpr std::size_t kEncodedIdentityBytes = 112U;
+  std::size_t cursor = kIsolatedCpuPacketHeaderBytes;
+  skip_wire_bytes(packet, kEncodedIdentityBytes, &cursor);
+  static_cast<void>(skip_wire_string(packet, &cursor));
+
+  RequestWireOffsets offsets;
+  const std::uint32_t parameter_count = read_wire_u32(packet, &cursor);
+  offsets.parameter_name_offsets.reserve(parameter_count);
+  offsets.parameter_name_lengths.reserve(parameter_count);
+  offsets.parameter_kind_offsets.reserve(parameter_count);
+  for (std::uint32_t index = 0U; index < parameter_count; ++index) {
+    std::uint32_t name_length = 0U;
+    offsets.parameter_name_offsets.push_back(
+        skip_wire_string(packet, &cursor, &name_length));
+    offsets.parameter_name_lengths.push_back(name_length);
+    offsets.parameter_kind_offsets.push_back(cursor);
+    const auto kind =
+        static_cast<IsolatedCpuScalarKind>(read_wire_u8(packet, &cursor));
+    switch (kind) {
+      case IsolatedCpuScalarKind::Boolean:
+        skip_wire_bytes(packet, 1U, &cursor);
+        break;
+      case IsolatedCpuScalarKind::SignedInteger:
+        skip_wire_bytes(packet, 9U, &cursor);
+        break;
+      case IsolatedCpuScalarKind::UnsignedInteger:
+      case IsolatedCpuScalarKind::FloatingPoint:
+        skip_wire_bytes(packet, 8U, &cursor);
+        break;
+      case IsolatedCpuScalarKind::String:
+        static_cast<void>(skip_wire_string(packet, &cursor));
+        break;
+      default:
+        throw std::runtime_error(
+            "isolated CPU test parameter kind unexpectedly changed");
+    }
+  }
+
+  const std::uint32_t capability_count = read_wire_u32(packet, &cursor);
+  offsets.capability_id_offsets.reserve(capability_count);
+  for (std::uint32_t index = 0U; index < capability_count; ++index) {
+    offsets.capability_id_offsets.push_back(cursor);
+    skip_wire_bytes(packet, 8U + 1U + 8U, &cursor);
+  }
+  static_cast<void>(read_wire_u32(packet, &cursor));
+  static_cast<void>(read_wire_u32(packet, &cursor));
+  const std::uint32_t tensor_count = read_wire_u32(packet, &cursor);
+  if (tensor_count == 0U) {
+    throw std::runtime_error("isolated CPU test request has no tensor");
+  }
+  skip_wire_bytes(packet, 2U + 5U + 8U + 8U + 8U + 1U + 1U + 4U, &cursor);
+  const std::uint32_t extent_count = read_wire_u32(packet, &cursor);
+  skip_wire_bytes(packet, static_cast<std::size_t>(extent_count) * 8U, &cursor);
+  const std::uint32_t stride_count = read_wire_u32(packet, &cursor);
+  if (stride_count == 0U) {
+    throw std::runtime_error("isolated CPU test tensor has no stride");
+  }
+  offsets.first_stride_sign_offset = cursor;
+  require_wire_range(packet, offsets.first_stride_sign_offset, 9U);
+  return offsets;
+}
+
 TEST(IsolatedCpuInvocationProtocol, RequestAndResponseRoundTripExactly) {
   const IsolatedCpuInvocationRequest request = test_request();
   const std::vector<std::byte> request_packet =
       encode_isolated_cpu_invocation_request(request, {});
-  EXPECT_EQ(decode_isolated_cpu_invocation_request(request_packet, {}),
-            request);
+  const IsolatedCpuInvocationRequest decoded_request =
+      decode_isolated_cpu_invocation_request(request_packet, {});
+  EXPECT_EQ(decoded_request, request);
+  EXPECT_EQ(encode_isolated_cpu_invocation_request(decoded_request, {}),
+            request_packet);
 
   const IsolatedCpuInvocationResponse response = test_response(request);
   const std::vector<std::byte> response_packet =
       encode_isolated_cpu_invocation_response(request, response, {});
-  EXPECT_EQ(
-      decode_isolated_cpu_invocation_response(request, response_packet, {}),
-      response);
+  const IsolatedCpuInvocationResponse decoded_response =
+      decode_isolated_cpu_invocation_response(request, response_packet, {});
+  EXPECT_EQ(decoded_response, response);
+  EXPECT_EQ(encode_isolated_cpu_invocation_response(decoded_request,
+                                                    decoded_response, {}),
+            response_packet);
+}
+
+TEST(IsolatedCpuInvocationProtocol,
+     WireDecodeRejectsDuplicateParametersCapabilitiesAndUnknownKind) {
+  const IsolatedCpuInvocationRequest request = test_request();
+  const std::vector<std::byte> valid =
+      encode_isolated_cpu_invocation_request(request, {});
+  const RequestWireOffsets offsets = locate_request_wire_offsets(valid);
+  ASSERT_EQ(offsets.parameter_name_offsets.size(), 2U);
+  ASSERT_EQ(offsets.parameter_name_lengths[0],
+            offsets.parameter_name_lengths[1]);
+  ASSERT_EQ(offsets.capability_id_offsets.size(), 2U);
+
+  std::vector<std::byte> duplicate_parameter = valid;
+  std::copy_n(
+      duplicate_parameter.begin() +
+          static_cast<std::ptrdiff_t>(offsets.parameter_name_offsets[0]),
+      offsets.parameter_name_lengths[0],
+      duplicate_parameter.begin() +
+          static_cast<std::ptrdiff_t>(offsets.parameter_name_offsets[1]));
+  EXPECT_THROW(decode_isolated_cpu_invocation_request(duplicate_parameter, {}),
+               IsolatedCpuProtocolError);
+
+  std::vector<std::byte> duplicate_capability = valid;
+  std::copy_n(
+      duplicate_capability.begin() +
+          static_cast<std::ptrdiff_t>(offsets.capability_id_offsets[0]),
+      8U,
+      duplicate_capability.begin() +
+          static_cast<std::ptrdiff_t>(offsets.capability_id_offsets[1]));
+  EXPECT_THROW(decode_isolated_cpu_invocation_request(duplicate_capability, {}),
+               IsolatedCpuProtocolError);
+
+  std::vector<std::byte> unknown_kind = valid;
+  unknown_kind[offsets.parameter_kind_offsets[0]] = std::byte{0xff};
+  EXPECT_THROW(decode_isolated_cpu_invocation_request(unknown_kind, {}),
+               IsolatedCpuProtocolError);
+}
+
+TEST(IsolatedCpuInvocationProtocol,
+     WireDecodeRejectsSignPlusMagnitudeNegativeZeroStride) {
+  const IsolatedCpuInvocationRequest request = test_request();
+  std::vector<std::byte> malformed =
+      encode_isolated_cpu_invocation_request(request, {});
+  const RequestWireOffsets offsets = locate_request_wire_offsets(malformed);
+  malformed[offsets.first_stride_sign_offset] = std::byte{1};
+  std::fill_n(malformed.begin() + static_cast<std::ptrdiff_t>(
+                                      offsets.first_stride_sign_offset + 1U),
+              8U, std::byte{0});
+  EXPECT_THROW(decode_isolated_cpu_invocation_request(malformed, {}),
+               IsolatedCpuProtocolError);
 }
 
 TEST(IsolatedCpuInvocationProtocol,
@@ -306,6 +542,24 @@ TEST(IsolatedCpuInvocationProtocol, EnforcesEndpointHardLimitsBeforeUse) {
   limits.maximum_descriptors = 0U;
   EXPECT_THROW(validate_isolated_cpu_invocation_limits(limits),
                std::invalid_argument);
+}
+
+TEST(IsolatedCpuInvocationProtocol,
+     AllowsZeroParameterLimitAndRejectsAnyParameter) {
+  IsolatedCpuInvocationLimits limits;
+  limits.maximum_parameters = 0U;
+  EXPECT_NO_THROW(validate_isolated_cpu_invocation_limits(limits));
+
+  IsolatedCpuInvocationRequest request = test_request();
+  request.parameters.clear();
+  EXPECT_NO_THROW(validate_isolated_cpu_invocation_request(request, limits));
+  const std::vector<std::byte> packet =
+      encode_isolated_cpu_invocation_request(request, limits);
+  EXPECT_EQ(decode_isolated_cpu_invocation_request(packet, limits), request);
+
+  request = test_request();
+  EXPECT_THROW(validate_isolated_cpu_invocation_request(request, limits),
+               IsolatedCpuProtocolError);
 }
 
 }  // namespace

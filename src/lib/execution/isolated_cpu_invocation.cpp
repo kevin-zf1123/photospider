@@ -36,6 +36,8 @@
 #include <utility>
 #include <vector>
 
+#include "execution/isolated_cpu_invocation_test_probe.hpp"  // NOLINT(build/include_subdir)
+
 namespace ps::execution {
 namespace {
 
@@ -337,6 +339,28 @@ struct ChildDescriptorClosurePlan final {
 
 /** @brief Monotonic process-local suffix for collision-resistant `O_EXCL`. */
 std::atomic<std::uint64_t> g_shared_memory_sequence{1U};
+/** @brief Monotonic Host attempts to enter capability materialization. */
+std::atomic<std::uint64_t> g_host_capability_materialization_attempts{0U};
+/** @brief Monotonic successful parent-side fresh child creations. */
+std::atomic<std::uint64_t> g_spawned_children{0U};
+/** @brief Monotonic exact child PIDs returned by blocking `waitpid`. */
+std::atomic<std::uint64_t> g_reaped_children{0U};
+/** @brief Most recent exactly reaped child PID, or -1 before any reap. */
+std::atomic<std::int64_t> g_last_reaped_child{-1};
+/** @brief Monotonic frames reaching their exact declared byte length. */
+std::atomic<std::uint64_t> g_exact_frames_received{0U};
+
+/**
+ * @brief Records one exact successful blocking child reap.
+ * @param pid Positive PID returned by `waitpid`.
+ * @return Nothing.
+ * @throws Nothing; relaxed atomic observation cannot affect ownership.
+ */
+void record_reaped_child(pid_t pid) noexcept {
+  g_last_reaped_child.store(static_cast<std::int64_t>(pid),
+                            std::memory_order_relaxed);
+  g_reaped_children.fetch_add(1U, std::memory_order_relaxed);
+}
 
 /**
  * @brief Sets close-on-exec on one newly owned descriptor.
@@ -654,6 +678,8 @@ MappedCapability prepare_capability(
     throw IsolatedCpuInvocationError(
         "isolated CPU capability preparation size is invalid");
   }
+  g_host_capability_materialization_attempts.fetch_add(
+      1U, std::memory_order_relaxed);
   auto [read_write, name] = create_shared_memory_object();
   if (capability.byte_size >
           static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) ||
@@ -717,11 +743,15 @@ MappedCapability prepare_capability(
  * @param socket Connected blocking Unix stream socket.
  * @param packet Nonempty canonical request or response packet.
  * @param descriptors Ordered descriptors installed with `SCM_RIGHTS`.
- * @return Nothing after the frame and rights are completely sent.
- * @throws IsolatedCpuInvocationError for a channel or zero-progress send.
+ * @return Nothing after the frame and rights are completely sent and the
+ * write half is closed as the authoritative frame terminator.
+ * @throws IsolatedCpuInvocationError for a channel, zero-progress send, or
+ * write-half shutdown failure.
  * @throws IsolatedCpuProtocolError when local packet/descriptor bounds fail.
  * @note Descriptor ownership remains with the caller; `SCM_RIGHTS` accompanies
  * only the first nonempty stream segment and later segments carry bytes only.
+ * Each endpoint sends exactly one packet, so write-half closure preserves the
+ * opposite response direction while making delayed tail detection complete.
  */
 void send_packet(int socket, const std::vector<std::byte>& packet,
                  const std::vector<int>& descriptors) {
@@ -777,18 +807,31 @@ void send_packet(int socket, const std::vector<std::byte>& packet,
     }
     offset += static_cast<std::size_t>(sent);
   }
+  int shutdown_result = -1;
+  do {
+    shutdown_result = ::shutdown(socket, SHUT_WR);
+  } while (shutdown_result < 0 && errno == EINTR);
+  if (shutdown_result != 0) {
+    throw IsolatedCpuInvocationError(
+        std::string("isolated CPU framed stream shutdown failed: ") +
+        std::strerror(errno));
+  }
 }
 
 /**
  * @brief Assembles one bounded stream frame and owns all installed FDs.
  * @param socket Connected blocking Unix stream socket.
  * @return Exact framed bytes and RAII-owned ancillary descriptors.
- * @throws IsolatedCpuInvocationError for EOF or a channel-system failure.
+ * @throws IsolatedCpuInvocationError for premature EOF or a channel-system
+ * failure.
  * @throws IsolatedCpuProtocolError for truncation, malformed control data, or
  * excessive packet/descriptor counts.
  * @throws std::bad_alloc only before `recvmsg` installs descriptor rights.
  * @note Storage is fully reserved before receiving, and `SCM_RIGHTS` is valid
  * only on the first nonempty stream segment. Later segments carry bytes only.
+ * A declared frame is accepted only when followed by peer write-half EOF;
+ * bytes or rights arriving after the exact length are rejected. This
+ * non-supervised vertical intentionally has no receive deadline.
  */
 ReceivedPacket receive_packet(int socket) {
   ReceivedPacket received;
@@ -803,7 +846,7 @@ ReceivedPacket receive_packet(int socket) {
   bool excessive_descriptors = false;
   std::size_t received_bytes = 0U;
   std::size_t expected_bytes = 0U;
-  while (expected_bytes == 0U || received_bytes < expected_bytes) {
+  for (;;) {
     union AncillaryBuffer {
       struct cmsghdr alignment;
       std::array<unsigned char,
@@ -825,6 +868,10 @@ ReceivedPacket receive_packet(int socket) {
       throw IsolatedCpuInvocationError(
           std::string("isolated CPU framed stream receive failed: ") +
           std::strerror(errno));
+    }
+    if (count == 0 && expected_bytes != 0U &&
+        received_bytes == expected_bytes) {
+      break;
     }
     if (count == 0) {
       throw IsolatedCpuInvocationError(
@@ -894,6 +941,9 @@ ReceivedPacket receive_packet(int socket) {
     if (expected_bytes != 0U && received_bytes > expected_bytes) {
       throw IsolatedCpuProtocolError(
           "isolated CPU stream carried bytes beyond one framed packet");
+    }
+    if (expected_bytes != 0U && received_bytes == expected_bytes) {
+      g_exact_frames_received.fetch_add(1U, std::memory_order_relaxed);
     }
   }
   if (malformed_control || excessive_descriptors) {
@@ -1223,6 +1273,7 @@ class ChildOwner final {
           std::string("isolated CPU child wait failed: ") +
           std::strerror(error));
     }
+    record_reaped_child(owned);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
       throw IsolatedCpuInvocationError(
           "isolated CPU child did not exit normally with status zero");
@@ -1245,6 +1296,9 @@ class ChildOwner final {
     do {
       waited = ::waitpid(owned, &status, 0);
     } while (waited < 0 && errno == EINTR);
+    if (waited == owned) {
+      record_reaped_child(owned);
+    }
   }
 
  private:
@@ -1352,6 +1406,8 @@ SpawnedChild spawn_runtime(const std::filesystem::path& runtime_executable) {
     ::execve(executable_pointer, arguments, empty_environment);
     child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, errno);
   }
+
+  g_spawned_children.fetch_add(1U, std::memory_order_relaxed);
 
   child_socket.reset();
   status_write.reset();
@@ -1496,33 +1552,83 @@ std::uint64_t complete_capability_size(std::size_t payload_bytes) {
 }
 
 /**
- * @brief Complete Host-side request and shared-memory owner set.
+ * @brief Side-effect-free Host plan retained before capability materialization.
+ * @throws Nothing for moves and destruction.
+ * @note Every vector is bounded by protocol-v1 endpoint limits.
+ */
+struct HostInvocationPreflight final {
+  /** @brief Fully validated canonical request before shared-memory creation. */
+  IsolatedCpuInvocationRequest request;
+  /** @brief Canonical packet proven to fit the complete wire byte bound. */
+  std::vector<std::byte> request_packet;
+  /** @brief Ready Host-visible input ranges retained through byte copying. */
+  std::vector<ReadLease> input_leases;
+};
+
+/**
+ * @brief Complete Host-side request and materialized shared-memory owner set.
  * @throws Nothing for moves and destruction.
  */
 struct PreparedHostInvocation final {
   /** @brief Validated canonical request retained for response comparison. */
   IsolatedCpuInvocationRequest request;
+  /** @brief Canonical request bytes encoded during side-effect-free preflight.
+   */
+  std::vector<std::byte> request_packet;
   /** @brief Ordered invocation-local FDs and mappings. */
   std::vector<MappedCapability> capabilities;
 };
 
 /**
- * @brief Converts and copies one high-level Host request into shared memory.
+ * @brief Adds one capability size to a checked Host preflight aggregate.
+ * @param byte_size Positive complete capability bytes.
+ * @param limits Retained endpoint hard limits.
+ * @param aggregate Non-null running checked aggregate.
+ * @return Nothing after exact bounded addition.
+ * @throws std::invalid_argument for a null aggregate.
+ * @throws IsolatedCpuProtocolError for overflow or a retained/hard-limit
+ * excess.
+ */
+void add_preflight_shared_bytes(std::uint64_t byte_size,
+                                const IsolatedCpuInvocationLimits& limits,
+                                std::uint64_t* aggregate) {
+  if (aggregate == nullptr) {
+    throw std::invalid_argument(
+        "isolated CPU preflight shared-byte aggregate is null");
+  }
+  if (*aggregate > std::numeric_limits<std::uint64_t>::max() - byte_size) {
+    throw IsolatedCpuProtocolError(
+        "isolated CPU aggregate shared-memory bytes overflow");
+  }
+  *aggregate += byte_size;
+  if (*aggregate > limits.maximum_shared_memory_bytes ||
+      *aggregate > kMaximumIsolatedCpuSharedBytes) {
+    throw IsolatedCpuProtocolError(
+        "isolated CPU aggregate shared-memory bytes exceed their bound");
+  }
+}
+
+/**
+ * @brief Validates and canonicalizes all Host-derived plan facts without OS
+ * effects.
  * @param invocation Host input Values and exact output plans.
  * @param limits Retained local hard limits.
- * @return Validated request plus sole local capability owners.
+ * @return Fully validated request and packet plus retained input read leases.
  * @throws IsolatedCpuProtocolError for unsupported or inconsistent state.
- * @throws IsolatedCpuInvocationError for shared-memory preparation failure.
  * @throws Value/readiness/access/allocation errors from public Value APIs.
- * @throws std::bad_alloc when bounded request or mapping storage cannot
+ * @throws std::bad_alloc when strictly bounded request/lease storage cannot
  * allocate.
- * @note BufferHandle and ReadLease identities remain local and are retired
- * immediately after each immutable input has been copied.
+ * @note Identity, operation/parameter text and canonical state, counts,
+ * readiness, Host visibility, descriptor geometry/layout/storage, checked
+ * aggregate resources, and complete encoded packet size are rejected before
+ * any shm/FD/mmap/fork effect.
  */
-PreparedHostInvocation prepare_host_invocation(
+HostInvocationPreflight preflight_host_invocation(
     const IsolatedCpuHostInvocation& invocation,
     const IsolatedCpuInvocationLimits& limits) {
   validate_isolated_cpu_invocation_limits(limits);
+  validate_isolated_cpu_invocation_metadata(
+      invocation.identity, invocation.operation, invocation.parameters, limits);
   if (invocation.outputs.empty()) {
     throw IsolatedCpuProtocolError(
         "isolated CPU invocation requires at least one output");
@@ -1534,14 +1640,13 @@ PreparedHostInvocation prepare_host_invocation(
       invocation.inputs.size() + invocation.outputs.size() >
           limits.maximum_descriptors ||
       invocation.inputs.size() + invocation.outputs.size() >
-          limits.maximum_capabilities ||
-      invocation.parameters.size() > limits.maximum_parameters) {
+          limits.maximum_capabilities) {
     throw IsolatedCpuProtocolError(
         "isolated CPU invocation tensor count exceeds its bound");
   }
 
-  PreparedHostInvocation prepared;
-  IsolatedCpuInvocationRequest& request = prepared.request;
+  HostInvocationPreflight preflight;
+  IsolatedCpuInvocationRequest& request = preflight.request;
   request.identity = invocation.identity;
   request.operation = invocation.operation;
   request.parameters = invocation.parameters;
@@ -1551,25 +1656,10 @@ PreparedHostInvocation prepare_host_invocation(
       invocation.inputs.size() + invocation.outputs.size();
   request.capabilities.reserve(total_count);
   request.tensors.reserve(total_count);
-  prepared.capabilities.reserve(total_count);
+  preflight.input_leases.reserve(invocation.inputs.size());
 
   std::uint64_t aggregate_shared_bytes = 0U;
   std::uint64_t next_capability_id = 1U;
-  const auto add_shared_bytes = [&aggregate_shared_bytes,
-                                 &limits](std::uint64_t byte_size) {
-    if (aggregate_shared_bytes >
-        std::numeric_limits<std::uint64_t>::max() - byte_size) {
-      throw IsolatedCpuProtocolError(
-          "isolated CPU aggregate shared-memory bytes overflow");
-    }
-    aggregate_shared_bytes += byte_size;
-    if (aggregate_shared_bytes > limits.maximum_shared_memory_bytes ||
-        aggregate_shared_bytes > kMaximumIsolatedCpuSharedBytes) {
-      throw IsolatedCpuProtocolError(
-          "isolated CPU aggregate shared-memory bytes exceed their bound");
-    }
-  };
-
   for (const Value& value : invocation.inputs) {
     if (!value.valid() ||
         value.representation_kind() != ValueRepresentationKind::DenseTensor ||
@@ -1577,9 +1667,8 @@ PreparedHostInvocation prepare_host_invocation(
       throw IsolatedCpuProtocolError(
           "isolated CPU input is not a Strided DenseTensor Value");
     }
-    DenseTensorView view(value);
     ReadLease lease = value.buffer_handle().acquire_read();
-    if (lease.size() != view.storage_size()) {
+    if (lease.size() != value.storage_size()) {
       throw IsolatedCpuProtocolError(
           "isolated CPU input Value range size is inconsistent");
     }
@@ -1587,25 +1676,23 @@ PreparedHostInvocation prepare_host_invocation(
     capability.capability_id = next_capability_id++;
     capability.access = IsolatedCpuCapabilityAccess::ReadOnly;
     capability.byte_size = complete_capability_size(lease.size());
+    add_preflight_shared_bytes(capability.byte_size, limits,
+                               &aggregate_shared_bytes);
 
-    IsolatedCpuTensorDescriptor tensor = to_wire_tensor_descriptor(
-        view.descriptor(), value.image_facet(), view.layout());
+    IsolatedCpuTensorDescriptor tensor =
+        to_wire_tensor_descriptor(value.dense_tensor_descriptor(),
+                                  value.image_facet(), value.strided_layout());
     tensor.access = IsolatedCpuTensorAccess::InputReadOnly;
     tensor.readiness = IsolatedCpuTensorReadiness::ReadyInput;
     tensor.ownership = IsolatedCpuTensorOwnership::HostInput;
     tensor.capability_id = capability.capability_id;
     tensor.capability_offset = kCapabilityHeaderBytes;
     tensor.capability_length = static_cast<std::uint64_t>(lease.size());
-
-    add_shared_bytes(capability.byte_size);
-    MappedCapability mapping = prepare_capability(request.identity, capability,
-                                                  lease.data(), lease.size());
     tensor.content_binding = compute_isolated_cpu_content_binding(
-        request.identity, tensor,
-        mapping.mapping.data() + kCapabilityHeaderBytes, lease.size());
+        request.identity, tensor, lease.data(), lease.size());
     request.capabilities.push_back(capability);
     request.tensors.push_back(std::move(tensor));
-    prepared.capabilities.push_back(std::move(mapping));
+    preflight.input_leases.push_back(std::move(lease));
   }
 
   for (const IsolatedCpuDenseTensorOutputPlan& plan : invocation.outputs) {
@@ -1613,6 +1700,8 @@ PreparedHostInvocation prepare_host_invocation(
     capability.capability_id = next_capability_id++;
     capability.access = IsolatedCpuCapabilityAccess::ReadWrite;
     capability.byte_size = complete_capability_size(plan.storage_size);
+    add_preflight_shared_bytes(capability.byte_size, limits,
+                               &aggregate_shared_bytes);
 
     IsolatedCpuTensorDescriptor tensor = to_wire_tensor_descriptor(
         plan.descriptor, plan.image_facet, plan.layout);
@@ -1622,13 +1711,8 @@ PreparedHostInvocation prepare_host_invocation(
     tensor.capability_id = capability.capability_id;
     tensor.capability_offset = kCapabilityHeaderBytes;
     tensor.capability_length = static_cast<std::uint64_t>(plan.storage_size);
-
-    add_shared_bytes(capability.byte_size);
-    MappedCapability mapping = prepare_capability(request.identity, capability,
-                                                  nullptr, plan.storage_size);
     request.capabilities.push_back(capability);
     request.tensors.push_back(std::move(tensor));
-    prepared.capabilities.push_back(std::move(mapping));
   }
 
   request.resources.shared_memory_bytes = aggregate_shared_bytes;
@@ -1636,7 +1720,97 @@ PreparedHostInvocation prepare_host_invocation(
       static_cast<std::uint32_t>(request.tensors.size());
   request.resources.cpu_slots = 1U;
   validate_isolated_cpu_invocation_request(request, limits);
+  try {
+    preflight.request_packet =
+        encode_isolated_cpu_invocation_request(request, limits);
+  } catch (const std::length_error& error) {
+    throw IsolatedCpuProtocolError(error.what());
+  }
+  return preflight;
+}
+
+/**
+ * @brief Copies one validated Host preflight into directional capabilities.
+ * @param preflight Fully validated request and retained Ready input ranges.
+ * @param limits Retained endpoint hard limits.
+ * @return Request plus sole local FD/mapping owners.
+ * @throws IsolatedCpuProtocolError for inconsistent retained state or copied
+ * input binding.
+ * @throws IsolatedCpuInvocationError for shm, FD, mmap, or protection failure.
+ * @throws std::bad_alloc when bounded capability-owner storage cannot allocate.
+ * @note No materializer is entered until the complete request validator has
+ * accepted every Host-derived plan fact. The full validator runs again after
+ * materialization as a defense-in-depth boundary.
+ */
+PreparedHostInvocation materialize_host_invocation(
+    HostInvocationPreflight preflight,
+    const IsolatedCpuInvocationLimits& limits) {
+  if (preflight.input_leases.size() != preflight.request.input_count ||
+      preflight.request.capabilities.size() !=
+          preflight.request.tensors.size()) {
+    throw IsolatedCpuProtocolError(
+        "isolated CPU Host preflight inventory is inconsistent");
+  }
+  PreparedHostInvocation prepared;
+  prepared.request = std::move(preflight.request);
+  prepared.request_packet = std::move(preflight.request_packet);
+  if (prepared.request_packet.empty()) {
+    throw IsolatedCpuProtocolError(
+        "isolated CPU Host preflight canonical packet is absent");
+  }
+  prepared.capabilities.reserve(prepared.request.capabilities.size());
+  for (std::size_t index = 0U; index < prepared.request.capabilities.size();
+       ++index) {
+    const IsolatedCpuCapability& capability =
+        prepared.request.capabilities[index];
+    const IsolatedCpuTensorDescriptor& tensor = prepared.request.tensors[index];
+    if (tensor.capability_length > std::numeric_limits<std::size_t>::max()) {
+      throw IsolatedCpuProtocolError(
+          "isolated CPU Host preflight range exceeds local size");
+    }
+    const std::size_t payload_size =
+        static_cast<std::size_t>(tensor.capability_length);
+    const std::byte* source = nullptr;
+    if (index < prepared.request.input_count) {
+      const ReadLease& lease = preflight.input_leases[index];
+      if (!lease.valid() || lease.size() != payload_size) {
+        throw IsolatedCpuProtocolError(
+            "isolated CPU Host input lease changed after preflight");
+      }
+      source = lease.data();
+    }
+    MappedCapability mapping = prepare_capability(
+        prepared.request.identity, capability, source, payload_size);
+    if (index < prepared.request.input_count) {
+      const ContentDigest copied_binding = compute_isolated_cpu_content_binding(
+          prepared.request.identity, tensor,
+          mapping.mapping.data() + tensor.capability_offset, payload_size);
+      if (!tensor.content_binding.has_value() ||
+          !(copied_binding == *tensor.content_binding)) {
+        throw IsolatedCpuProtocolError(
+            "isolated CPU copied input binding changed after preflight");
+      }
+    }
+    prepared.capabilities.push_back(std::move(mapping));
+  }
+  validate_isolated_cpu_invocation_request(prepared.request, limits);
   return prepared;
+}
+
+/**
+ * @brief Runs bounded Host preflight, then materializes the accepted request.
+ * @param invocation Host input Values and exact output plans.
+ * @param limits Retained local hard limits.
+ * @return Validated request plus sole local capability owners.
+ * @throws Preflight and materialization failures unchanged.
+ * @note BufferHandle and ReadLease identities remain local and retire after
+ * immutable bytes have been copied into invocation-local capabilities.
+ */
+PreparedHostInvocation prepare_host_invocation(
+    const IsolatedCpuHostInvocation& invocation,
+    const IsolatedCpuInvocationLimits& limits) {
+  return materialize_host_invocation(
+      preflight_host_invocation(invocation, limits), limits);
 }
 
 /**
@@ -1893,7 +2067,35 @@ std::vector<Value> publish_host_outputs(
 
 }  // namespace
 
+/** @copydoc IsolatedCpuInvocationTestProbe::snapshot */
+IsolatedCpuInvocationTestSnapshot
+IsolatedCpuInvocationTestProbe::snapshot() noexcept {
+  return IsolatedCpuInvocationTestSnapshot{
+      g_host_capability_materialization_attempts.load(
+          std::memory_order_relaxed),
+      g_spawned_children.load(std::memory_order_relaxed),
+      g_reaped_children.load(std::memory_order_relaxed),
+      g_last_reaped_child.load(std::memory_order_relaxed),
+      g_exact_frames_received.load(std::memory_order_relaxed)};
+}
+
+/** @copydoc IsolatedCpuInvocationTestProbe::receive_one_packet */
+void IsolatedCpuInvocationTestProbe::receive_one_packet(int socket) {
+  static_cast<void>(receive_packet(socket));
+}
+
 // NOLINTBEGIN(whitespace/indent_namespace)
+/**
+ * @brief Validates and retains the one-shot runtime path and protocol limits.
+ * @param runtime_executable Existing executable regular file launched later
+ * with an empty environment and fixed control descriptor.
+ * @param limits Protocol-v1 bounds; only the parameter limit may be zero.
+ * @throws std::invalid_argument for an invalid path or endpoint limit.
+ * @throws std::system_error when the process-wide SIGCHLD action cannot be
+ * queried.
+ * @throws std::bad_alloc when retained path storage cannot allocate.
+ * @note Construction mints no child, FD, mapping, or trust authority.
+ */
 NonSupervisedIsolatedCpuInvocationExecutor::
     NonSupervisedIsolatedCpuInvocationExecutor(
         std::filesystem::path runtime_executable,
@@ -1915,13 +2117,26 @@ NonSupervisedIsolatedCpuInvocationExecutor::
 }
 // NOLINTEND
 
+/**
+ * @brief Runs validated Host preflight, one fresh runtime, and post-exit output
+ * adoption synchronously.
+ * @param invocation Host-owned identity, scalar metadata, Ready inputs, and
+ * exact output plans.
+ * @return Typed callback result with fresh Host Values only after success.
+ * @throws IsolatedCpuProtocolError for invalid local, wire, or returned state.
+ * @throws IsolatedCpuInvocationError for capability, process, channel, or exit
+ * failure.
+ * @throws Value/readiness/access/allocation errors from input inspection or
+ * output publication.
+ * @note Complete preflight and canonical encoding precede every invocation-
+ * capability shm/FD/mmap/fork effect. Cleanup owns and reaps the exact child
+ * without a bounded deadline.
+ */
 IsolatedCpuHostInvocationResult
 NonSupervisedIsolatedCpuInvocationExecutor::invoke(
     const IsolatedCpuHostInvocation& invocation) const {
   PreparedHostInvocation prepared =
       prepare_host_invocation(invocation, limits_);
-  const std::vector<std::byte> request_packet =
-      encode_isolated_cpu_invocation_request(prepared.request, limits_);
   std::vector<int> descriptors;
   descriptors.reserve(prepared.capabilities.size());
   for (const MappedCapability& capability : prepared.capabilities) {
@@ -1929,7 +2144,7 @@ NonSupervisedIsolatedCpuInvocationExecutor::invoke(
   }
 
   SpawnedChild process = spawn_runtime(runtime_executable_);
-  send_packet(process.control.get(), request_packet, descriptors);
+  send_packet(process.control.get(), prepared.request_packet, descriptors);
   ReceivedPacket received = receive_packet(process.control.get());
   process.control.reset();
   process.child.wait_for_normal_exit();
@@ -1953,6 +2168,20 @@ NonSupervisedIsolatedCpuInvocationExecutor::invoke(
   return result;
 }
 
+/**
+ * @brief Receives one EOF-terminated request, executes one callback, and sends
+ * one EOF-terminated response.
+ * @param control_fd Connected framed Unix stream descriptor borrowed for this
+ * process lifetime.
+ * @param limits Runtime-local protocol bounds.
+ * @param callback Nonempty process-local CPU callback.
+ * @return Zero after a valid response send, two for invalid local arguments,
+ * and one for every contained request, mapping, callback-response, or channel
+ * failure.
+ * @throws Nothing; every exception is contained and converted to a status.
+ * @note Decode and mapping occur only after the exact request frame is followed
+ * by peer write-half EOF. This endpoint has no receive or callback deadline.
+ */
 int serve_non_supervised_isolated_cpu_invocation_once(
     int control_fd, const IsolatedCpuInvocationLimits& limits,
     const IsolatedCpuRuntimeCallback& callback) noexcept {

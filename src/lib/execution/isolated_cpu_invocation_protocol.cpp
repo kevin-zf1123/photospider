@@ -1692,7 +1692,28 @@ void validate_isolated_cpu_invocation_limits(
       limits.maximum_descriptors > kMaximumIsolatedCpuDescriptors ||
       limits.maximum_parameters > kMaximumIsolatedCpuParameters) {
     throw std::invalid_argument(
-        "isolated CPU invocation limits are zero or exceed protocol v1");
+        "isolated CPU required limit is zero or limit exceeds protocol v1");
+  }
+}
+
+/** @copydoc validate_isolated_cpu_invocation_metadata */
+void validate_isolated_cpu_invocation_metadata(
+    const IsolatedCpuInvocationIdentity& identity, const std::string& operation,
+    const std::vector<IsolatedCpuScalarParameter>& parameters,
+    const IsolatedCpuInvocationLimits& limits) {
+  validate_isolated_cpu_invocation_limits(limits);
+  validate_identity(identity);
+  validate_text(operation, kMaximumIsolatedCpuOperationBytes, "operation key");
+  if (parameters.size() > limits.maximum_parameters) {
+    fail("isolated CPU invocation parameter count exceeds its limit");
+  }
+  std::string_view previous_parameter;
+  for (const IsolatedCpuScalarParameter& parameter : parameters) {
+    validate_parameter(parameter);
+    if (!previous_parameter.empty() && previous_parameter >= parameter.name) {
+      fail("isolated CPU invocation parameters are not uniquely sorted");
+    }
+    previous_parameter = parameter.name;
   }
 }
 
@@ -1700,21 +1721,8 @@ void validate_isolated_cpu_invocation_limits(
 void validate_isolated_cpu_invocation_request(
     const IsolatedCpuInvocationRequest& request,
     const IsolatedCpuInvocationLimits& limits) {
-  validate_isolated_cpu_invocation_limits(limits);
-  validate_identity(request.identity);
-  validate_text(request.operation, kMaximumIsolatedCpuOperationBytes,
-                "operation key");
-  if (request.parameters.size() > limits.maximum_parameters) {
-    fail("isolated CPU invocation parameter count exceeds its limit");
-  }
-  std::string_view previous_parameter;
-  for (const IsolatedCpuScalarParameter& parameter : request.parameters) {
-    validate_parameter(parameter);
-    if (!previous_parameter.empty() && previous_parameter >= parameter.name) {
-      fail("isolated CPU invocation parameters are not uniquely sorted");
-    }
-    previous_parameter = parameter.name;
-  }
+  validate_isolated_cpu_invocation_metadata(request.identity, request.operation,
+                                            request.parameters, limits);
 
   if (request.capabilities.empty() ||
       request.capabilities.size() > limits.maximum_capabilities) {

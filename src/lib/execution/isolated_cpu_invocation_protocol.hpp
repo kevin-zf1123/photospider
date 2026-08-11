@@ -409,7 +409,7 @@ struct IsolatedCpuInvocationLimits final {
   /** @brief Maximum descriptor count at or below the protocol hard limit. */
   std::uint32_t maximum_descriptors =
       static_cast<std::uint32_t>(kMaximumIsolatedCpuDescriptors);
-  /** @brief Maximum parameter count at or below the protocol hard limit. */
+  /** @brief Maximum parameter count, including zero, at/below the hard max. */
   std::uint32_t maximum_parameters =
       static_cast<std::uint32_t>(kMaximumIsolatedCpuParameters);
 };
@@ -491,10 +491,31 @@ struct IsolatedCpuInvocationResponse final {
 /**
  * @brief Validates retained endpoint limits against protocol hard maxima.
  * @param limits Candidate runtime/Host limits.
- * @return Nothing when every limit is nonzero and bounded.
- * @throws std::invalid_argument for a zero or over-hard-limit field.
+ * @return Nothing when shared-byte, capability, and descriptor limits are
+ * nonzero, the parameter limit is zero or greater, and every value is at or
+ * below its protocol-v1 hard maximum.
+ * @throws std::invalid_argument when a required non-parameter limit is zero or
+ * any field exceeds its protocol-v1 hard maximum.
  */
 void validate_isolated_cpu_invocation_limits(
+    const IsolatedCpuInvocationLimits& limits);
+
+/**
+ * @brief Validates allocation-free request identity and scalar metadata.
+ * @param identity Complete comparison-only invocation identity.
+ * @param operation Borrowed operation key inspected without copying.
+ * @param parameters Borrowed scalar parameters inspected without copying.
+ * @param limits Retained endpoint hard limits.
+ * @return Nothing after text bounds, canonical inactive fields, finite values,
+ * strict name ordering, uniqueness, and count limits are valid.
+ * @throws IsolatedCpuProtocolError for malformed identity or scalar metadata.
+ * @throws std::invalid_argument for invalid endpoint limits.
+ * @note Successful validation performs no dynamic allocation and lets Host
+ * preflight reject unbounded caller metadata before request copying.
+ */
+void validate_isolated_cpu_invocation_metadata(
+    const IsolatedCpuInvocationIdentity& identity, const std::string& operation,
+    const std::vector<IsolatedCpuScalarParameter>& parameters,
     const IsolatedCpuInvocationLimits& limits);
 
 /**

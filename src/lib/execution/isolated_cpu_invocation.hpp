@@ -177,7 +177,9 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
    * @brief Validates and retains one runtime executable and local hard limits.
    * @param runtime_executable Existing regular executable launched with an
    * empty environment and fixed control descriptor 3.
-   * @param limits Nonzero limits at or below protocol-v1 maxima.
+   * @param limits Protocol-v1 bounds whose shared-memory, capability, and
+   * descriptor values are nonzero and whose parameter value may be zero; all
+   * values remain at or below their hard maxima.
    * @throws std::invalid_argument when the path or limits are invalid.
    * @throws std::system_error when `SIGCHLD` state cannot be queried.
    * @throws std::bad_alloc when retaining path state cannot allocate.
@@ -197,8 +199,10 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
    * channel, or child-exit failures.
    * @throws Value/readiness/access/allocation exceptions from Host input
    * preparation or fresh output publication.
-   * @note Local emergency cleanup may signal and synchronously reap the exact
-   * child but supplies no bounded deadline or hostile-code containment claim.
+   * @note The complete Host plan is validated before invocation-capability
+   * shm/FD/mmap/fork effects. Local emergency cleanup may signal and
+   * synchronously reap the exact child but supplies no bounded deadline or
+   * hostile-code containment claim.
    */
   IsolatedCpuHostInvocationResult invoke(
       const IsolatedCpuHostInvocation& invocation) const;
@@ -235,11 +239,12 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
  * @return Zero after one valid response is sent; nonzero after request,
  * descriptor, mapping, callback-response, or channel failure.
  * @throws Nothing; all exceptions are contained before process main returns.
- * @note This endpoint has no authentication, heartbeat, deadline, restart,
- * sandbox, or resource enforcement. The callback receives no wire pointer
- * record, FD, Host callback, Graph/Run owner, or cleanup token. It is compiled
- * into the product archive as a #102 runtime seam but no product composition
- * root launches it yet.
+ * @note The sender must close its write half after its exact request; decode
+ * waits for that EOF and can block forever. This endpoint has no
+ * authentication, heartbeat, deadline, restart, sandbox, or resource
+ * enforcement. The callback receives no wire pointer record, FD, Host callback,
+ * Graph/Run owner, or cleanup token. It is compiled into the product archive as
+ * a #102 runtime seam but no product composition root launches it yet.
  */
 int serve_non_supervised_isolated_cpu_invocation_once(
     int control_fd, const IsolatedCpuInvocationLimits& limits,

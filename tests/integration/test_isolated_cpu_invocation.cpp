@@ -5,23 +5,30 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <future>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "execution/isolated_cpu_invocation.hpp"  // NOLINT(build/include_subdir)
+#include "execution/isolated_cpu_invocation_test_probe.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_TEST_ISOLATED_CPU_FIXTURE_PATH
 #error "PS_TEST_ISOLATED_CPU_FIXTURE_PATH must name the process fixture"
@@ -64,6 +71,53 @@ class ScopedTestFd final {
 
  private:
   /** @brief Sole owned descriptor. */
+  int descriptor_ = -1;
+};
+
+/**
+ * @brief Ensures a borrowed test socket write half is shut before async join.
+ * @throws Nothing for construction, shutdown, and destruction.
+ * @note The socket descriptor remains owned by `ScopedTestFd`.
+ */
+class ScopedTestWriteHalf final {
+ public:
+  /**
+   * @brief Borrows one connected socket whose write half remains open.
+   * @param descriptor Valid socket descriptor.
+   * @throws Nothing.
+   */
+  explicit ScopedTestWriteHalf(int descriptor) noexcept
+      : descriptor_(descriptor) {}
+
+  /**
+   * @brief Best-effort shuts the still-borrowed write half.
+   * @throws Nothing; channel errors cannot replace the active test result.
+   */
+  ~ScopedTestWriteHalf() noexcept { finish(); }
+
+  /** @brief Prevents duplicate borrowed shutdown responsibility. */
+  ScopedTestWriteHalf(const ScopedTestWriteHalf&) = delete;
+  /** @brief Prevents duplicate borrowed shutdown assignment. */
+  ScopedTestWriteHalf& operator=(const ScopedTestWriteHalf&) = delete;
+
+  /**
+   * @brief Shuts the borrowed write half at most once.
+   * @return Nothing after clearing test shutdown responsibility.
+   * @throws Nothing; framing assertions observe production behavior separately.
+   */
+  void finish() noexcept {
+    const int descriptor = std::exchange(descriptor_, -1);
+    if (descriptor < 0) {
+      return;
+    }
+    int result = -1;
+    do {
+      result = ::shutdown(descriptor, SHUT_WR);
+    } while (result < 0 && errno == EINTR);
+  }
+
+ private:
+  /** @brief Borrowed socket awaiting write-half shutdown, or -1. */
   int descriptor_ = -1;
 };
 
@@ -166,6 +220,27 @@ IsolatedCpuDenseTensorOutputPlan one_byte_output_plan() {
 }
 
 /**
+ * @brief Creates one page-sized rank-one output for aggregate-bound tests.
+ * @return Positive-stride output whose payload is one local VM page.
+ * @throws std::system_error when the platform reports an invalid page size.
+ * @throws std::bad_alloc when descriptor/layout vectors cannot allocate.
+ */
+IsolatedCpuDenseTensorOutputPlan page_sized_output_plan() {
+  const int page_size = ::getpagesize();
+  if (page_size <= 0) {
+    throw std::system_error(EIO, std::generic_category(),
+                            "query invocation test page size");
+  }
+  DenseTensorDescriptor descriptor;
+  descriptor.shape = {static_cast<std::size_t>(page_size)};
+  descriptor.element_semantics = ElementSemantics::UnsignedInteger;
+  descriptor.storage_encoding = StorageEncoding{8U};
+  return IsolatedCpuDenseTensorOutputPlan{std::move(descriptor), std::nullopt,
+                                          StridedLayout{{1}, 0U},
+                                          static_cast<std::size_t>(page_size)};
+}
+
+/**
  * @brief Creates a Host invocation with one standard output plan.
  * @param operation Child fixture operation key.
  * @param domain Unique deterministic invocation-id domain.
@@ -241,12 +316,199 @@ std::size_t count_open_descriptors() {
 
 /**
  * @brief Creates an executor targeting the built test runtime fixture.
+ * @param limits Retained endpoint limits for the Host adapter.
  * @return Operability-validated non-supervised executor.
  * @throws Construction validation errors unchanged.
  */
-NonSupervisedIsolatedCpuInvocationExecutor integration_executor() {
+NonSupervisedIsolatedCpuInvocationExecutor integration_executor(
+    IsolatedCpuInvocationLimits limits = {}) {
   return NonSupervisedIsolatedCpuInvocationExecutor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH));
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), limits);
+}
+
+/**
+ * @brief Enables no-signal test sends on one private stream endpoint.
+ * @param socket Valid test socket.
+ * @return Nothing after platform configuration.
+ * @throws std::system_error when the platform option fails.
+ */
+void configure_test_sender(int socket) {
+#ifdef SO_NOSIGPIPE
+  int enabled = 1;
+  if (::setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &enabled,
+                   sizeof(enabled)) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "configure invocation test socket");
+  }
+#else
+  static_cast<void>(socket);
+#endif
+}
+
+/**
+ * @brief Sends one complete test frame without ancillary descriptors.
+ * @param socket Connected blocking stream endpoint.
+ * @param bytes First byte of a nonempty frame.
+ * @param size Positive frame size.
+ * @return Nothing after all bytes are sent.
+ * @throws std::invalid_argument for null or empty input.
+ * @throws std::system_error for a channel failure or zero progress.
+ */
+void send_test_frame(int socket, const std::byte* bytes, std::size_t size) {
+  if (bytes == nullptr || size == 0U) {
+    throw std::invalid_argument("invocation test frame is empty");
+  }
+  int flags = 0;
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+  std::size_t offset = 0U;
+  while (offset != size) {
+    ssize_t sent = -1;
+    do {
+      sent = ::send(socket, bytes + offset, size - offset, flags);
+    } while (sent < 0 && errno == EINTR);
+    if (sent <= 0) {
+      throw std::system_error(sent < 0 ? errno : EIO, std::generic_category(),
+                              "send invocation test frame");
+    }
+    offset += static_cast<std::size_t>(sent);
+  }
+}
+
+/**
+ * @brief Waits until the production receiver observes one exact frame length.
+ * @param prior_count Snapshot count before the receiver starts.
+ * @return True after the count advances, or false at the observation deadline.
+ * @throws Nothing.
+ * @note The bound controls only the test harness, not production invocation
+ * supervision or callback behavior.
+ */
+bool wait_for_exact_frame_observation(std::uint64_t prior_count) noexcept {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (IsolatedCpuInvocationTestProbe::snapshot().exact_frames_received ==
+         prior_count) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::yield();
+  }
+  return true;
+}
+
+/**
+ * @brief Sends one delayed trailing byte, optionally with one delayed FD.
+ * @param socket Connected test sender after the exact frame was consumed.
+ * @param with_descriptor Whether to attach one `/dev/null` descriptor.
+ * @return Nothing; peer-close errors are retained as the pre-fix observation.
+ * @throws std::system_error when opening the optional descriptor fails.
+ * @note A successful receiver must reject either form before returning.
+ */
+void send_delayed_tail(int socket, bool with_descriptor) {
+  const std::byte tail{0x7f};
+  int flags = 0;
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+  if (!with_descriptor) {
+    ssize_t sent = -1;
+    do {
+      sent = ::send(socket, &tail, 1U, flags);
+    } while (sent < 0 && errno == EINTR);
+    return;
+  }
+
+  ScopedTestFd descriptor(::open("/dev/null", O_RDONLY));
+  if (descriptor.get() < 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "open delayed invocation test descriptor");
+  }
+  union AncillaryBuffer {
+    struct cmsghdr alignment;
+    std::array<unsigned char, CMSG_SPACE(sizeof(int))> bytes;
+  } control{};
+  struct iovec data{const_cast<std::byte*>(&tail), 1U};
+  struct msghdr message{};
+  message.msg_iov = &data;
+  message.msg_iovlen = 1U;
+  message.msg_control = control.bytes.data();
+  message.msg_controllen = control.bytes.size();
+  struct cmsghdr* header = CMSG_FIRSTHDR(&message);
+  if (header == nullptr) {
+    throw std::runtime_error("construct delayed invocation ancillary header");
+  }
+  header->cmsg_level = SOL_SOCKET;
+  header->cmsg_type = SCM_RIGHTS;
+  header->cmsg_len = CMSG_LEN(sizeof(int));
+  const int raw_descriptor = descriptor.get();
+  std::memcpy(CMSG_DATA(header), &raw_descriptor, sizeof(raw_descriptor));
+  ssize_t sent = -1;
+  do {
+    sent = ::sendmsg(socket, &message, flags);
+  } while (sent < 0 && errno == EINTR);
+}
+
+/**
+ * @brief Exercises delayed trailing data against the production receiver.
+ * @param with_descriptor Whether the delayed byte carries `SCM_RIGHTS`.
+ * @return Nothing only when the receiver incorrectly accepts the exact frame.
+ * @throws IsolatedCpuProtocolError when the receiver rejects the delayed tail.
+ * @throws Invocation test setup/channel errors unchanged.
+ */
+void receive_frame_with_delayed_tail(bool with_descriptor) {
+  int sockets[2] = {-1, -1};
+  if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "create invocation framing test socketpair");
+  }
+  ScopedTestFd sender(sockets[0]);
+  ScopedTestFd receiver(sockets[1]);
+  configure_test_sender(sender.get());
+  const std::uint64_t prior_frames =
+      IsolatedCpuInvocationTestProbe::snapshot().exact_frames_received;
+  std::future<void> receive = std::async(std::launch::async, [&receiver]() {
+    IsolatedCpuInvocationTestProbe::receive_one_packet(receiver.get());
+  });
+  ScopedTestWriteHalf sender_write(sender.get());
+  std::array<std::byte, kIsolatedCpuPacketHeaderBytes> exact_frame{};
+  send_test_frame(sender.get(), exact_frame.data(), exact_frame.size());
+  if (!wait_for_exact_frame_observation(prior_frames)) {
+    sender_write.finish();
+    receive.get();
+    throw std::runtime_error(
+        "invocation test receiver did not observe the exact frame");
+  }
+  send_delayed_tail(sender.get(), with_descriptor);
+  sender_write.finish();
+  receive.get();
+}
+
+/**
+ * @brief Checks one synchronous call produced and exactly reaped one child.
+ * @param before Observation immediately before `invoke`.
+ * @param after Observation immediately after `invoke` returned.
+ * @return Nothing after GoogleTest assertions.
+ * @throws Nothing.
+ * @note The final `waitpid(WNOHANG)` runs only after production reported its
+ * exact blocking reap, so it observes `ECHILD` without competing for a child.
+ */
+void expect_one_child_reaped(
+    const IsolatedCpuInvocationTestSnapshot& before,
+    const IsolatedCpuInvocationTestSnapshot& after) noexcept {
+  EXPECT_EQ(after.spawned_children, before.spawned_children + 1U);
+  EXPECT_EQ(after.reaped_children, before.reaped_children + 1U);
+  EXPECT_GT(after.last_reaped_child, 0);
+  if (after.last_reaped_child <= 0 ||
+      after.last_reaped_child > std::numeric_limits<pid_t>::max()) {
+    return;
+  }
+  int status = 0;
+  errno = 0;
+  EXPECT_EQ(
+      ::waitpid(static_cast<pid_t>(after.last_reaped_child), &status, WNOHANG),
+      -1);
+  EXPECT_EQ(errno, ECHILD);
 }
 
 TEST(IsolatedCpuInvocation, CopiesThroughFreshProcessAndPublishesFreshValue) {
@@ -307,6 +569,95 @@ TEST(IsolatedCpuInvocation, PreservesTypedFailureCancellationAndException) {
             std::string::npos);
 }
 
+TEST(IsolatedCpuInvocation,
+     RejectsOversizedMetadataBeforeAnyHostMaterialization) {
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.fill_sequence", 169U);
+  invocation.operation.assign(kMaximumIsolatedCpuOperationBytes + 1U, 'x');
+  const std::size_t descriptors_before = count_open_descriptors();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_THROW(integration_executor().invoke(invocation),
+               IsolatedCpuProtocolError);
+
+  const IsolatedCpuInvocationTestSnapshot after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after.host_capability_materialization_attempts,
+            before.host_capability_materialization_attempts);
+  EXPECT_EQ(after.spawned_children, before.spawned_children);
+  EXPECT_EQ(count_open_descriptors(), descriptors_before);
+}
+
+TEST(IsolatedCpuInvocation,
+     RejectsAggregateMetadataPacketBeforeAnyHostMaterialization) {
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.fill_sequence", 169U);
+  for (char suffix = 'a'; suffix <= 'q'; ++suffix) {
+    IsolatedCpuScalarParameter parameter;
+    parameter.name = "parameter_";
+    parameter.name.push_back(suffix);
+    parameter.kind = IsolatedCpuScalarKind::String;
+    parameter.string_value.assign(kMaximumIsolatedCpuParameterStringBytes, 'x');
+    invocation.parameters.push_back(std::move(parameter));
+  }
+  const std::size_t descriptors_before = count_open_descriptors();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_THROW(integration_executor().invoke(invocation),
+               IsolatedCpuProtocolError);
+
+  const IsolatedCpuInvocationTestSnapshot after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after.host_capability_materialization_attempts,
+            before.host_capability_materialization_attempts);
+  EXPECT_EQ(after.spawned_children, before.spawned_children);
+  EXPECT_EQ(count_open_descriptors(), descriptors_before);
+}
+
+TEST(IsolatedCpuInvocation,
+     RejectsInvalidOutputLayoutBeforeAnyHostMaterialization) {
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.fill_sequence", 170U);
+  invocation.outputs[0].layout.byte_strides = {1, 1};
+  const std::size_t descriptors_before = count_open_descriptors();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_THROW(integration_executor().invoke(invocation),
+               IsolatedCpuProtocolError);
+
+  const IsolatedCpuInvocationTestSnapshot after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after.host_capability_materialization_attempts,
+            before.host_capability_materialization_attempts);
+  EXPECT_EQ(after.spawned_children, before.spawned_children);
+  EXPECT_EQ(count_open_descriptors(), descriptors_before);
+}
+
+TEST(IsolatedCpuInvocation, RejectsAggregatePlanBeforeAnyHostMaterialization) {
+  IsolatedCpuHostInvocation invocation =
+      integration_invocation("fixture.fill_sequence", 171U);
+  invocation.outputs.push_back(page_sized_output_plan());
+  IsolatedCpuInvocationLimits limits;
+  limits.maximum_shared_memory_bytes =
+      static_cast<std::uint64_t>(::getpagesize());
+  const std::size_t descriptors_before = count_open_descriptors();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_THROW(integration_executor(limits).invoke(invocation),
+               IsolatedCpuProtocolError);
+
+  const IsolatedCpuInvocationTestSnapshot after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after.host_capability_materialization_attempts,
+            before.host_capability_materialization_attempts);
+  EXPECT_EQ(after.spawned_children, before.spawned_children);
+  EXPECT_EQ(count_open_descriptors(), descriptors_before);
+}
+
 TEST(IsolatedCpuInvocation, RejectsAbnormalChildExitWithoutPublishingOutput) {
   EXPECT_THROW(integration_executor().invoke(
                    integration_invocation("fixture.crash", 177U)),
@@ -323,6 +674,19 @@ TEST(IsolatedCpuInvocation, RejectsRightsAfterFirstStreamSegmentWithoutFdLeak) {
     EXPECT_NE(std::string(error.what()).find("after the first stream segment"),
               std::string::npos);
   }
+  EXPECT_EQ(count_open_descriptors(), before);
+}
+
+TEST(IsolatedCpuInvocation, RejectsDelayedBytesAfterExactFrameWithoutFdLeak) {
+  const std::size_t before = count_open_descriptors();
+  EXPECT_THROW(receive_frame_with_delayed_tail(false),
+               IsolatedCpuProtocolError);
+  EXPECT_EQ(count_open_descriptors(), before);
+}
+
+TEST(IsolatedCpuInvocation, RejectsDelayedRightsAfterExactFrameWithoutFdLeak) {
+  const std::size_t before = count_open_descriptors();
+  EXPECT_THROW(receive_frame_with_delayed_tail(true), IsolatedCpuProtocolError);
   EXPECT_EQ(count_open_descriptors(), before);
 }
 
@@ -352,17 +716,38 @@ TEST(IsolatedCpuInvocation, FreshExecClearsEnvironmentAndUnrelatedDescriptors) {
   EXPECT_EQ(output.data()[0], std::byte{1});
 }
 
-TEST(IsolatedCpuInvocation, RepeatedCallsRetireEveryFdMapAndChildLease) {
+TEST(IsolatedCpuInvocation,
+     RepeatedOutcomesRetireEveryFdMapAndExactlyReapEachChild) {
   NonSupervisedIsolatedCpuInvocationExecutor executor = integration_executor();
-  const std::size_t before = count_open_descriptors();
+  const std::size_t descriptor_baseline = count_open_descriptors();
+  const std::array<const char*, 4U> operations{"fixture.fill_sequence",
+                                               "fixture.fail", "fixture.cancel",
+                                               "fixture.throw"};
+  const std::array<IsolatedCpuInvocationOutcome, 4U> expected_outcomes{
+      IsolatedCpuInvocationOutcome::Succeeded,
+      IsolatedCpuInvocationOutcome::PluginFailed,
+      IsolatedCpuInvocationOutcome::Cancelled,
+      IsolatedCpuInvocationOutcome::PluginFailed};
   for (std::uint8_t iteration = 0U; iteration < 20U; ++iteration) {
+    const std::size_t scenario = iteration % operations.size();
     IsolatedCpuHostInvocation invocation = integration_invocation(
-        "fixture.fill_sequence", static_cast<std::uint8_t>(201U + iteration));
+        operations[scenario], static_cast<std::uint8_t>(201U + iteration));
+    const IsolatedCpuInvocationTestSnapshot before =
+        IsolatedCpuInvocationTestProbe::snapshot();
     const IsolatedCpuHostInvocationResult result = executor.invoke(invocation);
-    ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
-    ASSERT_EQ(result.outputs.size(), 1U);
+    const IsolatedCpuInvocationTestSnapshot after =
+        IsolatedCpuInvocationTestProbe::snapshot();
+    ASSERT_EQ(result.outcome, expected_outcomes[scenario]);
+    if (result.outcome == IsolatedCpuInvocationOutcome::Succeeded) {
+      ASSERT_EQ(result.outputs.size(), 1U);
+    } else {
+      EXPECT_TRUE(result.outputs.empty());
+      EXPECT_FALSE(result.diagnostic.empty());
+    }
+    expect_one_child_reaped(before, after);
+    EXPECT_EQ(count_open_descriptors(), descriptor_baseline);
   }
-  EXPECT_EQ(count_open_descriptors(), before);
+  EXPECT_EQ(count_open_descriptors(), descriptor_baseline);
 }
 
 }  // namespace
