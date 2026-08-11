@@ -354,9 +354,18 @@ void forward_remaining_bytes(int source, int destination) {
  * @param spec Immutable JobSpec that bounds the report.
  * @param io_timeout Positive manager-selected write bound.
  * @return Nothing after the captured frame is forwarded in four pieces.
- * @throws Protocol, socket, allocation, or forwarding failures unchanged.
+ * @throws std::invalid_argument for an invalid report contract or I/O duration.
+ * @throws std::overflow_error for an unrepresentable deadline or report image
+ * size.
+ * @throws std::length_error when report encoding exceeds a private bound.
+ * @throws std::bad_alloc when validation or report encoding exhausts memory.
+ * @throws std::system_error when the capture socket pair cannot be created.
+ * @throws WorkerProtocolTimeout or WorkerChannelError when capture transport
+ * fails.
+ * @throws std::runtime_error when captured bytes cannot be forwarded exactly.
  * @note The 35-ms gaps exceed the manager's 20-ms read slice while the total
- * stays below the fixture heartbeat timeout.
+ * stays below the fixture heartbeat timeout. Both capture descriptors are
+ * fixture-owned and closed on success or exception; `fd` remains caller-owned.
  */
 void send_fragmented_report(int fd, const JobAttemptReport& report,
                             const JobSpec& spec,
@@ -392,7 +401,16 @@ void send_fragmented_report(int fd, const JobAttemptReport& report,
  * @param fd Connected manager socket.
  * @param identity Exact current attempt identity.
  * @param io_timeout Positive manager-selected write bound.
- * @throws Protocol I/O failures unchanged.
+ * @return Nothing after the complete Heartbeat frame is written.
+ * @throws std::invalid_argument for an invalid descriptor, identity, or I/O
+ * duration.
+ * @throws std::overflow_error if the captured base cannot represent the I/O
+ * deadline.
+ * @throws std::bad_alloc when deadline diagnostics or frame encoding exhaust
+ * memory.
+ * @throws WorkerProtocolTimeout or WorkerChannelError when bounded transport
+ * fails.
+ * @note The connected descriptor remains owned by the fixture control flow.
  */
 void send_heartbeat(int fd, const AttemptIdentity& identity,
                     std::chrono::milliseconds io_timeout) {
@@ -409,8 +427,18 @@ void send_heartbeat(int fd, const AttemptIdentity& identity,
  * @param io_timeout Positive manager-selected write bound.
  * @return Cooperative cancelled report when not ignoring; never returns in
  * ignore mode unless the manager closes or signals the process.
- * @throws Protocol failures unchanged.
- * @note One decoder retains partial Cancel bytes across heartbeat poll slices.
+ * @throws WorkerProtocolTimeout when a heartbeat write deadline expires.
+ * @throws WorkerProtocolError, WorkerProtocolEof, or WorkerChannelError for a
+ * malformed Cancel, fresh channel EOF, or channel failure.
+ * @throws std::invalid_argument for an invalid descriptor, identity, or
+ * deadline duration.
+ * @throws std::overflow_error if a captured base cannot represent a heartbeat
+ * or poll deadline.
+ * @throws std::bad_alloc when deadline diagnostics, frame processing, or report
+ * construction exhausts memory.
+ * @note One decoder retains partial Cancel bytes across heartbeat poll slices;
+ * read-slice timeouts are contained and retried. The descriptor is borrowed and
+ * remains open for the caller's report path.
  */
 JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
                                  bool ignore_cancel,
@@ -449,10 +477,19 @@ JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
  * @param assignment Exact current assignment.
  * @param io_timeout Positive manager-selected write bound.
  * @return Nothing after the cancel was validated and clean channel EOF arrived.
- * @throws Protocol/channel failures other than the expected final EOF.
+ * @throws WorkerProtocolTimeout when a heartbeat write deadline expires.
+ * @throws WorkerProtocolError or WorkerChannelError for malformed/early
+ * channel termination or another channel failure.
+ * @throws std::invalid_argument for an invalid descriptor, identity, or
+ * deadline duration.
+ * @throws std::overflow_error if a captured base cannot represent a heartbeat
+ * or poll deadline.
+ * @throws std::bad_alloc when deadline diagnostics or frame processing exhausts
+ * memory.
  * @note Heartbeats continue only until cancellation is observed. The final
  * return lets the fixture process reach normal `exit(0)` after channel
- * revocation, which the manager test seam can retain as a zombie.
+ * revocation, which the manager test seam can retain as a zombie. Read-slice
+ * timeouts and the expected post-cancel EOF are contained; `fd` is borrowed.
  */
 void wait_for_cancel_then_channel_close(int fd, const JobAssignment& assignment,
                                         std::chrono::milliseconds io_timeout) {
@@ -494,9 +531,20 @@ void wait_for_cancel_then_channel_close(int fd, const JobAssignment& assignment,
  * @param assignment Exact current assignment expected by the receiver.
  * @param io_timeout Positive manager-selected write bound.
  * @return Cooperative cancellation report after all fragments reassemble.
- * @throws Relay, protocol, socket, thread, or allocation failures unchanged.
+ * @throws WorkerProtocolTimeout when a receiver heartbeat write expires.
+ * @throws WorkerProtocolError, WorkerProtocolEof, or WorkerChannelError for a
+ * malformed Cancel, fresh relay EOF, or channel failure.
+ * @throws std::invalid_argument for an invalid identity or deadline duration.
+ * @throws std::overflow_error if a captured base cannot represent a heartbeat
+ * or poll deadline.
+ * @throws std::bad_alloc when relay, deadline, frame, or report state cannot be
+ * retained.
+ * @throws std::system_error when the relay socket or thread cannot be created.
+ * @throws std::runtime_error when exact fragment relay fails.
  * @note The relay owns only the manager-to-worker byte direction; the report
  * remains sent on `fd` so the supervisor exercises its normal receive path.
+ * Relay and receive exceptions are retained until the relay thread is joined;
+ * both local descriptors are then closed before rethrow. `fd` remains borrowed.
  */
 JobAttemptReport receive_fragmented_cancel(
     int fd, const JobAssignment& assignment,
@@ -553,9 +601,16 @@ JobAttemptReport receive_fragmented_cancel(
  * @param duration Total active duration.
  * @param io_timeout Positive manager-selected write bound.
  * @return Nothing after duration expiry.
- * @throws Protocol I/O failures unchanged.
- * @throws std::invalid_argument or std::overflow_error when the requested
- * duration cannot form a supported monotonic deadline.
+ * @throws WorkerProtocolTimeout or WorkerChannelError when a heartbeat write
+ * fails.
+ * @throws std::invalid_argument when the descriptor, active duration, I/O
+ * duration, or identity is invalid.
+ * @throws std::overflow_error when a captured base cannot represent the active
+ * or per-heartbeat I/O deadline.
+ * @throws std::bad_alloc when deadline diagnostics or heartbeat encoding
+ * exhausts memory.
+ * @note The total deadline is captured once; each heartbeat receives its own
+ * bounded write deadline. The connected descriptor remains caller-owned.
  */
 void heartbeat_for(int fd, const AttemptIdentity& identity,
                    std::chrono::milliseconds duration,
@@ -624,10 +679,27 @@ int run_filesystem_block_probe(const std::string& path) noexcept {
  * @brief Executes one graph-id-selected deterministic process behavior.
  * @param launch Exact validated manager-selected bootstrap policy.
  * @return Exact intended process exit code.
- * @throws Protocol/assignment failures unchanged.
+ * @throws WorkerProtocolError and its timeout, EOF, or channel subclasses for
+ * assignment, cancellation, acceptance, heartbeat, or report transport failure.
+ * @throws std::invalid_argument for an invalid control descriptor, malformed
+ * mode, identity/report contract, or deadline duration.
+ * @throws std::out_of_range when a descriptor-mode decimal is not
+ * representable.
+ * @throws std::overflow_error for an unrepresentable deadline, report image, or
+ * checkpoint-test dimension.
+ * @throws std::length_error when report encoding exceeds a private bound.
+ * @throws std::bad_alloc when deadline diagnostics, assignment, relay, report,
+ * or image state cannot be retained.
+ * @throws std::system_error when a relay socket or thread cannot be created.
+ * @throws std::runtime_error when deterministic relay or malformed-frame I/O
+ * fails.
  * @note Cancel-race modes retain all PID, self-signal, channel, and process
  * lifetime authority inside this fixture; the calling test only owns Job
- * submission, cancellation intent, and terminal observation.
+ * submission, cancellation intent, and terminal observation. The function first
+ * receives and accepts one assignment, then selects exactly one graph-id mode;
+ * deliberate signal/infinite-loop modes may not return. `launch.control_fd`
+ * remains owned by `main()` unless a selected fault mode closes it
+ * deliberately.
  */
 int run_fixture(const WorkerProcessLaunchOptions& launch) {
   PreparedWorkerAssignment prepared = receive_worker_assignment(

@@ -1225,9 +1225,12 @@ class WorkerManager::Impl final {
    * @param record Exact assignment record whose PID registry is updated.
    * @return Live child and private parent socket.
    * @throws ManagerFailure for setup, fork, resource-limit, or exec failure.
-   * @throws std::system_error for pre-fork descriptor setup failure.
+   * @throws std::system_error for pre-fork descriptor, platform-closure, or
+   * address-space-limit setup failure.
    * @throws std::overflow_error if the captured monotonic base cannot
    * represent the validated startup deadline.
+   * @throws std::bad_alloc when retaining the executable, bootstrap arguments,
+   * or a setup diagnostic exhausts memory.
    * @note The fork child performs only async-signal-safe descriptor, limit,
    * status-write, and exec operations using storage prepared before fork.
    * Darwin closes fd 5 through the kernel `kern.maxfilesperproc` ceiling;
@@ -1356,12 +1359,20 @@ class WorkerManager::Impl final {
    * @brief Runs the complete assignment/heartbeat/report/exit state machine.
    * @param record Exact immutable attempt record.
    * @return One report, failure, or forced-cancellation completion after reap.
-   * @throws ManagerFailure for spawn failures before a process state machine
-   * can classify locally. First completion construction never propagates and
-   * instead allocation-free fail-stops.
+   * @throws ManagerFailure for spawn or exact-cleanup failures that the outer
+   * supervision-thread classifier must publish.
+   * @throws std::system_error when pre-fork platform setup fails.
+   * @throws std::overflow_error when spawn or exact cleanup cannot represent a
+   * validated monotonic deadline.
+   * @throws std::bad_alloc when pre-fork path/bootstrap storage cannot be
+   * retained. First completion construction never propagates and instead
+   * allocation-free fail-stops.
    * @note The exact child PID is registered before prepared graph material is
    * copied. The non-virtual catalog lookup performs no trusted I/O; every later
-   * failure therefore has one signalable and reapable process owner.
+   * failure therefore has one signalable and reapable process owner. After
+   * spawn, standard exceptions from the ordinary protocol/monitor path are
+   * converted to typed failure only after exact reaping; test-only observation
+   * or cleanup exceptions still propagate to the thread-scope classifier.
    */
   WorkerManagerCompletion run_external_process(
       const std::shared_ptr<Record>& record) {
@@ -1462,8 +1473,12 @@ class WorkerManager::Impl final {
    * accepted cancellation for the outer classifier. Accepted-cancel channel
    * failures remain inside this bounded process/wait-status state machine.
    * @throws std::invalid_argument when `process` is null.
+   * @throws ManagerFailure when a deterministic test-only exit observation
+   * expires or observes an invalid zero-exit state.
    * @throws std::overflow_error if a captured monotonic base cannot represent
    * one of the validated lifecycle deadlines.
+   * @throws std::bad_alloc when bounded frame/report reconstruction exhausts
+   * memory.
    * @note Short read slices share one stateful frame decoder. Cancellation-send
    * failure starts the same cooperative deadline and keeps draining worker
    * report/EOF/exit truth. Every ordinary EOF or candidate-Report deadline is
@@ -2060,6 +2075,8 @@ class WorkerManager::Impl final {
    * revocation without matching signal death, or matched delivered owned
    * escalation.
    * @throws std::invalid_argument when `process` is null.
+   * @throws ManagerFailure when the test-only pre-signal observation expires or
+   * observes an abnormal exit.
    * @throws std::overflow_error if a captured monotonic base cannot represent
    * a validated termination or reap deadline.
    * @note Exact natural exit observed before revocation leaves `control` open

@@ -209,8 +209,12 @@ inline std::int64_t parse_positive_worker_launch_value(
  * @return Valid exact control descriptor and manager-selected durations.
  * @throws std::invalid_argument for a missing, extra, reordered, malformed, or
  * out-of-range value.
+ * @throws std::bad_alloc when retaining a parse or duration-rejection
+ * diagnostic exhausts memory.
  * @note No worker-local default exists: accepted duration values equal the
- * manager arguments exactly within the shared closed bound.
+ * manager arguments exactly within the shared closed bound. The argument
+ * vector and its strings are borrowed only for this call; the returned value
+ * owns every parsed scalar.
  */
 inline WorkerProcessLaunchOptions parse_worker_process_launch_options(
     int argc, char* const argv[]) {

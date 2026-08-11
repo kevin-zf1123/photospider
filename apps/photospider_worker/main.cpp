@@ -78,9 +78,18 @@ class PreparedGraphResolver final : public GraphArtifactResolver {
  * @param identity Exact process assignment identity.
  * @param io_timeout Positive manager-selected write bound.
  * @param write_mutex Non-null sole write serializer.
- * @throws Protocol timeout/channel failures unchanged.
+ * @return Nothing after the complete identity frame is written under the lock.
+ * @throws std::invalid_argument for a null mutex, invalid descriptor,
+ * identity/kind, or unsupported I/O duration.
  * @throws std::overflow_error if the captured monotonic base cannot represent
  * the validated I/O deadline.
+ * @throws std::bad_alloc when deadline diagnostics or frame encoding exhaust
+ * memory.
+ * @throws std::system_error when locking the serializer fails.
+ * @throws WorkerProtocolTimeout or WorkerChannelError when bounded frame
+ * transport fails.
+ * @note The descriptor, identity, and mutex remain caller-owned. All worker
+ * socket writers share `write_mutex`, so no two frames can interleave.
  */
 void send_identity_locked(int fd, WorkerMessageKind kind,
                           const AttemptIdentity& identity,
@@ -109,6 +118,9 @@ void send_identity_locked(int fd, WorkerMessageKind kind,
  * @throws Nothing; all failures set `control_failed` and request cancellation.
  * @note One decoder retains partial Cancel header/payload bytes across short
  * poll deadlines while heartbeat and completion observation stay responsive.
+ * The outer catch contains deadline validation/overflow/allocation, protocol,
+ * channel, and mutex failures, so none cross this `noexcept` thread boundary.
+ * All pointer arguments remain owned by `run_one_assignment()` until join.
  */
 void run_control_loop(int fd, const AttemptIdentity& identity,
                       std::chrono::milliseconds heartbeat_interval,
@@ -154,9 +166,21 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
  * @brief Executes one received assignment and emits at most one report.
  * @param launch Exact validated manager-selected bootstrap policy.
  * @return Process exit code: zero only after one report was sent cleanly.
- * @throws Assignment receive/validation and thread creation failures unchanged.
+ * @throws WorkerProtocolError and its timeout, EOF, or channel subclasses for
+ * assignment receipt, acceptance, or report transport failure.
+ * @throws std::invalid_argument for invalid assignment/report contracts or a
+ * deadline duration outside the shared worker bound.
  * @throws std::overflow_error if the captured monotonic base cannot represent
- * a validated launch deadline.
+ * a validated launch deadline or report image arithmetic overflows.
+ * @throws std::length_error when report encoding exceeds a private bound.
+ * @throws std::bad_alloc when assignment, worker, thread, or report state
+ * cannot be retained.
+ * @throws std::system_error when control-thread creation or mutex locking
+ * fails.
+ * @note The control thread contains its own exceptions and maps them to exit
+ * code 4. Any exception escaping resolver construction or Embedded Host
+ * execution propagates unchanged only after `done` is published and the
+ * control thread is joined.
  */
 int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   PreparedWorkerAssignment prepared = receive_worker_assignment(
