@@ -14,6 +14,7 @@ from textwrap import dedent
 
 from cmake_build_smoke_support import (
     producer_osx_architecture_arguments,
+    trusted_system_tmp_path_spellings,
 )
 
 
@@ -517,8 +518,10 @@ def configured_consumer_target_files(
     and path. Configured names must remain target-bound native spellings;
     paths must use canonical native spelling, resolve without a symlink inside
     the current consumer build, match the configured name exactly, and
-    identify an executable regular file. Only after the complete inventory
-    passes does the function return any runnable path.
+    identify an executable regular file. Darwin's one trusted logical/physical
+    system-tmp root pair is treated as equivalent without trusting any later
+    symlink. Only after the complete inventory passes does the function return
+    any runnable path.
 
     @param build Configured and built disposable consumer build directory.
     @param configuration Exact configuration selected by the consumer build.
@@ -530,8 +533,9 @@ def configured_consumer_target_files(
       unbuilt/non-file/non-executable target.
     @note The manifests are trusted only as products of this invocation's
       disposable configure/generate step. Exact cross-manifest identity,
-      build-root confinement, basename binding, and file checks prevent either
-      manifest from becoming a general-purpose executable input.
+      build-root confinement, basename binding, shared trusted-root spelling
+      checks, and file checks prevent either manifest from becoming a
+      general-purpose executable input.
     """
 
     build_root = build.resolve(strict=True)
@@ -673,7 +677,16 @@ def configured_consumer_target_files(
                 "dependency-disabled consumer target-file inventory references "
                 f"an unbuilt target {target_name!r}"
             ) from error
-        if executable != resolved_executable:
+        try:
+            trusted_executable_spellings = (
+                trusted_system_tmp_path_spellings(executable)
+            )
+        except (RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                "dependency-disabled consumer target-file inventory contains "
+                f"a noncanonical path for target {target_name!r}"
+            ) from error
+        if resolved_executable not in trusted_executable_spellings:
             raise RuntimeError(
                 "dependency-disabled consumer target-file inventory contains "
                 f"a noncanonical path for target {target_name!r}"
