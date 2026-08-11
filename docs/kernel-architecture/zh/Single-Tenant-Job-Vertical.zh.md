@@ -59,6 +59,14 @@ checkpoint。Worker 只获得只读 `ArtifactRecord`，永远不会获得 root/p
 authority。当前 Embedded CPU adapter 会校验该 provenance，但不声明恢复算法特定的
 runtime state。
 
+Checkpoint authorization 还必须证明下一次完整 Assignment 仍可编码。64-MiB frame-payload
+上限需要减去完整的最坏情况 Assignment payload envelope：全部 assignment 与 attempt
+identity、规范 JobSpec 与 digest、lease generation、graph material、cadence 字段、checkpoint
+presence，以及 checkpoint receipt 和 image metadata。由此得到的可复用 checkpoint payload
+上限是 `67,108,864 - 101,907 = 67,006,957` 字节。精确边界可以接受；更大的历史或测试生成
+artifact 会在 quota reservation 或 worker creation 前被拒绝，因此不会在之后表现为
+`WorkerStartup`。
+
 ## Tenant Quota Authority
 
 `TenantQuotaAuthority` 是该已配置 tenant 唯一的 server-side capacity authority。在一个
@@ -280,11 +288,15 @@ handle 或第二个 assignment。Worker 控制的 image dimension 会先经过 a
 output、staging 与 retention bound 校验，control plane 才分配精确紧密的 CPU storage。
 
 64-MiB maximum 适用于完整编码 Report，包括 identity、outcome/settlement/failure 字段、
-diagnostic、image-presence flag、image metadata 与 tight row bytes。在写入 metadata 或 row 前，
+diagnostic、image-presence flag、image metadata 与 tight row bytes。由于任何 successful
+output 后续都可能作为 checkpoint，successful candidate image 还会使用共享的
+`67,006,957` 字节可复用 checkpoint 上限。Report production 与 decoding、Assignment
+artifact codec 以及 checkpoint authorization 都执行同一上限。在写入 metadata 或 row 前，
 worker 会检查其精确剩余 aggregate capacity。当其他方面有效且已 settled 的 success image
-超过该 capacity 或其 Job output/staging/retention envelope 时，会变成一个保留 identity、
-已 settled 的 `Failed(Compute)` Report，携带固定有界 diagnostic 且没有 image；它不会作为
-encoder exception 逃逸，再被误判为 process 或 channel loss。
+超过任一上限或其 Job output/staging/retention envelope 时，会变成一个保留 identity、已
+settled 的 `Failed(Compute)` Report，携带固定有界 diagnostic 且没有 image；它不会作为
+encoder exception 逃逸，再被误判为 process 或 channel loss。此项收紧 accepted value domain，
+但不改变 private wire layout 或 protocol version。
 
 Manager 与 worker 的短 poll loop 都会为自己的 channel 保留一个 decoder：deadline 到期会保留
 partial header/payload byte 与精确 offset，而 clean EOF 只在 fresh frame boundary 上有效。
@@ -417,7 +429,10 @@ identity、crash/protocol/heartbeat/runtime isolation、FIFO-held fresh-retry st
 在首个 heartbeat rendezvous 与分支局部 bound 后验证 cooperative/forced cancellation、
 cancel-channel-versus-wait-status attribution、deadline-side
 natural-reap buffered-report drainage、candidate-Report-deadline-versus-wait-status attribution、
-在可变 identity/diagnostic 长度下完整 Report aggregate 精确边界/多一个字节的类型化、
+在可变 identity/diagnostic 长度下完整 Report aggregate accounting 与超界类型化行为、
+以最坏情况后续 Assignment 为约束的可复用 checkpoint 精确边界/多一个字节闭包、真实进程
+超界失败的 artifact/quota/process 零残留，以及 retry/restart/new-Job 对 checkpoint identity、
+digest、durability 与 quota truth 的保持、
 concurrent shutdown drainage、实际首次 completion/重建
 allocation fail-stop、completion callback 异常 fail-stop，
 以及真实 Embedded Host output/checkpoint/restart 行为。

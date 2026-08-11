@@ -66,6 +66,16 @@ The worker receives a read-only `ArtifactRecord`, never a root/path or commit
 authority. The current Embedded CPU adapter validates this provenance but does
 not claim algorithm-specific runtime-state restore.
 
+Checkpoint authorization also proves that the complete next Assignment remains
+encodable. The 64-MiB frame-payload maximum is reduced by the complete
+worst-case Assignment payload envelope: all assignment and attempt identities,
+canonical JobSpec and digest, lease generation, graph material, cadence fields,
+checkpoint presence, and the checkpoint receipt and image metadata. The
+resulting reusable checkpoint payload maximum is
+`67,108,864 - 101,907 = 67,006,957` bytes. The exact boundary is admissible; a
+larger legacy or test-produced artifact is rejected before quota reservation or
+worker creation, so it cannot surface later as `WorkerStartup`.
+
 ## Tenant Quota Authority
 
 `TenantQuotaAuthority` is the sole server-side capacity authority for the
@@ -345,12 +355,17 @@ the control plane allocates exact tight CPU storage.
 
 The 64-MiB maximum applies to the complete encoded Report, including identity,
 outcome/settlement/failure fields, diagnostic, image-presence flag, image
-metadata, and tight row bytes. Before writing metadata or rows, the worker
-checks their exact remaining aggregate capacity. An otherwise valid settled
-success whose image exceeds that capacity or its Job output/staging/retention
-envelope becomes one identity-preserving settled `Failed(Compute)` Report with
-a fixed bounded diagnostic and no image; it does not escape as an encoder
-exception that would later look like process or channel loss.
+metadata, and tight row bytes. Because any successful output may later be a
+checkpoint, successful candidate images additionally use the shared
+`67,006,957`-byte reusable-checkpoint maximum. Report production and decoding,
+the Assignment artifact codec, and checkpoint authorization all enforce that
+same bound. Before writing metadata or rows, the worker checks their exact
+remaining aggregate capacity. An otherwise valid settled success whose image
+exceeds either bound or its Job output/staging/retention envelope becomes one
+identity-preserving settled `Failed(Compute)` Report with a fixed bounded
+diagnostic and no image; it does not escape as an encoder exception that would
+later look like process or channel loss. This strengthens the accepted value
+domain without changing the private wire layout or protocol version.
 
 Manager and worker short-poll loops each retain one decoder for their channel:
 deadline expiry preserves partial header/payload bytes and exact offsets, while
@@ -517,8 +532,12 @@ runtime isolation, FIFO-held fresh-retry stale-lease rejection, cooperative/
 forced cancellation after a first-heartbeat rendezvous with branch-local
 bounds, cancel-channel-versus-wait-status attribution,
 deadline-side natural-reap buffered-report drainage, candidate-Report-deadline-
-versus-wait-status attribution, complete Report aggregate exact-boundary/one-
-byte-over typing across variable identity/diagnostic lengths,
+versus-wait-status attribution, complete Report aggregate accounting and
+typed over-bound behavior across variable identity/diagnostic lengths, reusable
+checkpoint exact-boundary/one-byte-over closure against a worst-case future
+Assignment, real-process over-bound failure with zero artifact/quota/process
+residue, and retry/restart/new-Job preservation of checkpoint identity, digest,
+durability, and quota truth,
 concurrent shutdown drainage, actual first completion/reconstruction allocation
 fail-stop, completion-callback exception fail-stop, and real Embedded Host
 output/checkpoint/restart behavior.
