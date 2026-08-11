@@ -779,17 +779,30 @@ TEST(IsolatedCpuInvocation, RejectsAbnormalChildExitWithoutPublishingOutput) {
                IsolatedCpuInvocationError);
 }
 
-TEST(IsolatedCpuInvocation, RejectsRightsAfterFirstStreamSegmentWithoutFdLeak) {
-  const std::size_t before = count_open_descriptors();
+TEST(IsolatedCpuInvocation,
+     RejectsRightsAfterEarlierResponseBytesWithoutResourceLeak) {
+  const std::size_t descriptors_before = count_open_descriptors();
+  const IsolatedCpuInvocationTestSnapshot state_before =
+      IsolatedCpuInvocationTestProbe::snapshot();
   try {
     static_cast<void>(integration_executor().invoke(
         integration_invocation("fixture.late_rights", 185U)));
     FAIL() << "late ancillary rights were accepted";
   } catch (const IsolatedCpuProtocolError& error) {
-    EXPECT_NE(std::string(error.what()).find("after the first stream segment"),
-              std::string::npos);
+    const std::string diagnostic = error.what();
+    const bool rejected_after_observed_segment =
+        diagnostic.find("after the first stream segment") != std::string::npos;
+    const bool rejected_by_response_inventory =
+        diagnostic.find("response unexpectedly carried descriptors") !=
+        std::string::npos;
+    EXPECT_TRUE(rejected_after_observed_segment ||
+                rejected_by_response_inventory)
+        << "unexpected response-rights classification: " << diagnostic;
   }
-  EXPECT_EQ(count_open_descriptors(), before);
+  const IsolatedCpuInvocationTestSnapshot state_after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  expect_one_child_reaped(state_before, state_after);
+  EXPECT_EQ(count_open_descriptors(), descriptors_before);
 }
 
 TEST(IsolatedCpuInvocation, RejectsDelayedBytesAfterExactFrameWithoutFdLeak) {

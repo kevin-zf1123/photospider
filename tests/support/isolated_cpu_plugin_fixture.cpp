@@ -26,8 +26,10 @@ namespace {
  * @return Never returns; the fixture exits after transferring the test frame.
  * @throws Nothing; syscall failures terminate the fixture with status 74.
  * @note The first byte is sent without ancillary data. The remaining bytes are
- * sent with one `SCM_RIGHTS` record, deliberately violating protocol v1 so the
- * Host receiver can prove fail-closed stream-segment handling.
+ * sent with one `SCM_RIGHTS` record, deliberately violating protocol v1.
+ * `SOCK_STREAM` may coalesce both sends into the first `recvmsg`; the Host must
+ * fail closed either at the observed-segment gate or at its response FD
+ * inventory gate.
  */
 [[noreturn]] void send_late_rights_response_and_exit() noexcept {
   std::array<std::byte, kIsolatedCpuPacketHeaderBytes> frame{};

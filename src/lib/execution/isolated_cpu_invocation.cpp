@@ -749,7 +749,8 @@ MappedCapability prepare_capability(
  * write-half shutdown failure.
  * @throws IsolatedCpuProtocolError when local packet/descriptor bounds fail.
  * @note Descriptor ownership remains with the caller; `SCM_RIGHTS` accompanies
- * only the first nonempty stream segment and later segments carry bytes only.
+ * only the first nonempty `sendmsg`, and later sends carry bytes only. Unix
+ * `SOCK_STREAM` receive calls do not expose these sender-call boundaries.
  * Each endpoint sends exactly one packet, so write-half closure preserves the
  * opposite response direction while making delayed tail detection complete.
  */
@@ -827,14 +828,18 @@ void send_packet(int socket, const std::vector<std::byte>& packet,
  * @throws IsolatedCpuProtocolError for truncation, malformed control data, or
  * excessive packet/descriptor counts.
  * @throws std::bad_alloc only before `recvmsg` installs descriptor rights.
- * @note Storage is fully reserved before receiving, and `SCM_RIGHTS` is valid
- * only on the first nonempty stream segment. Later segments carry bytes only.
- * A declared frame is accepted only when followed by peer write-half EOF;
- * bytes or rights arriving after the exact length are rejected. Every
- * `recvmsg` result is checked for truncation and its complete control records
- * are adopted before a zero byte count is interpreted as EOF, because Darwin
- * can install `SCM_RIGHTS` while returning zero payload bytes. This
- * non-supervised vertical intentionally has no receive deadline.
+ * @note Storage is fully reserved before receiving. `SCM_RIGHTS` is accepted
+ * only while no earlier `recvmsg` payload has been observed; later observed
+ * segments carry bytes only. Unix `SOCK_STREAM` can coalesce bytes from an
+ * earlier plain send with a later rights-bearing send into the first receive,
+ * so endpoint descriptor inventories remain the authoritative rejection gate
+ * for rights forbidden in that direction. A declared frame is accepted only
+ * when followed by peer write-half EOF; bytes or rights arriving after the
+ * exact length are rejected. Every `recvmsg` result is checked for truncation
+ * and its complete control records are adopted before a zero byte count is
+ * interpreted as EOF, because Darwin can install `SCM_RIGHTS` while returning
+ * zero payload bytes. This non-supervised vertical intentionally has no
+ * receive deadline.
  */
 ReceivedPacket receive_packet(int socket) {
   ReceivedPacket received;
