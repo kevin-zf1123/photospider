@@ -20,6 +20,7 @@ from unittest import mock
 import cmake_build_smoke_support as architecture_support
 import dependency_disabled_install_smoke as dependency_disabled
 import ipc_disabled_install_smoke as ipc_disabled
+import openexr_deep_provider_option_off_smoke as openexr_option_off
 import static_product_consumer_smoke as static_product
 
 
@@ -142,6 +143,24 @@ INSTALL_CONSUMER_CTEST_NAMES = tuple(
 )
 
 
+def darwin_architecture_arguments_for_test(
+    build: pathlib.Path,
+) -> tuple[str, ...]:
+    """@brief Derive producer architecture argv through a Darwin-only seam.
+
+    @param build Synthetic configured producer whose cache owns the value.
+    @return Exact production helper result for a Darwin child configure.
+    @throws OSError If an existing producer cache cannot be read.
+    @note Passing the platform directly to the architecture helper leaves
+      ``platform.system()`` host-native for trusted temporary-path discovery,
+      so a non-Darwin runner never inspects Darwin's ``/private/tmp`` root.
+    """
+
+    return architecture_support.producer_osx_architecture_arguments(
+        build, system_name="Darwin"
+    )
+
+
 def ctest_test_entry(
     name: str,
     command: list[str] | None,
@@ -254,7 +273,8 @@ def require_install_consumer_ctest_commands(
     name zero times. It then reuses the production build-smoke selector to
     reject missing labels, disabled state, and unusable commands. Each
     surviving argv must start with the configured Python launcher, immediately
-    followed by ``-B`` and the exact maintained driver.
+    followed by ``-B`` and the exact maintained driver. Only the driver path
+    may use either spelling of Darwin's verified system tmp-root alias.
 
     @param inventory Parsed production ``Inventory`` instance to validate.
     @param python_executable Exact CMake-selected Python launcher.
@@ -266,8 +286,16 @@ def require_install_consumer_ctest_commands(
       configuration-inactive maintained name is present; or an expected entry
       lacks the label, is disabled/commandless, or has a different command
       prefix.
+    @throws OSError If Darwin's trusted system roots cannot be inspected or
+      strictly resolved.
+    @throws RuntimeError If strict root resolution loops or the trusted mapping
+      cannot preserve the exact driver suffix inside both roots.
+    @throws ValueError If an internal expected driver path is relative or
+      contains parent traversal.
     @note The function inspects only immutable in-memory inventory. It neither
-      launches CTest nor executes any smoke command.
+      launches CTest nor executes any smoke command. Alias equivalence applies
+      only to argv index two; the launcher, ``-B``, basename, and repository
+      layout remain exact.
     """
 
     expected_install_consumer_ctest_entries(
@@ -295,20 +323,29 @@ def require_install_consumer_ctest_commands(
         if expected_count == 0:
             continue
         record = inventory.require_selected(test_name)
-        expected_prefix = (
-            python_executable,
-            "-B",
-            str(integration_directory / driver_name),
+        expected_driver_spellings = (
+            architecture_support.trusted_system_tmp_path_spellings(
+                integration_directory / driver_name
+            )
         )
-        if record.command is None or record.command[:3] != expected_prefix:
+        expected_prefixes = tuple(
+            (python_executable, "-B", str(driver_spelling))
+            for driver_spelling in expected_driver_spellings
+        )
+        if (
+            record.command is None
+            or record.command[:3] not in expected_prefixes
+        ):
             observed_prefix = (
                 None
                 if record.command is None
                 else list(record.command[:3])
             )
             raise ctest_inventory.InventoryError(
-                f"Install-consumer smoke {test_name!r} must start with "
-                f"{list(expected_prefix)!r}; observed {observed_prefix!r}."
+                f"Install-consumer smoke {test_name!r} must start with one "
+                "of "
+                f"{[list(prefix) for prefix in expected_prefixes]!r}; "
+                f"observed {observed_prefix!r}."
             )
 
 
@@ -762,6 +799,405 @@ class DependencyDisabledResidueClassifierTest(unittest.TestCase):
                 )
 
 
+class TrustedDarwinTemporaryAliasConsumerTest(unittest.TestCase):
+    """@brief Lock trusted Darwin tmp aliases at non-destructive consumers.
+
+    @throws OSError If disposable paths, manifests, or symlinks cannot be
+      created or inspected.
+    @throws AssertionError If trusted logical/physical spellings diverge,
+      arbitrary symlinks gain trust, or evidence scrubbing hides a real
+      optional-dependency marker.
+    @note Every mapping is synthetic and injected into the shared production
+      helper. The tests neither inspect nor replace the host's real ``/tmp``.
+    """
+
+    def test_shared_spellings_are_exact_and_bidirectional(self) -> None:
+        """@brief Map only matching logical and physical tmp descendants.
+
+        @return None after both trusted spellings yield the same two-path set
+          and an unrelated absolute path remains unchanged.
+        @throws AssertionError If spelling equivalence is one-way or widens
+          beyond the injected trusted roots.
+        @note The pure spelling helper receives synthetic absolute paths and
+          proves that user-selected aliases are not inferred from canonical
+          targets.
+        """
+
+        synthetic_root = (
+            pathlib.Path(tempfile.gettempdir()).resolve()
+            / "photospider-trusted-tmp-spelling-fixture"
+        )
+        logical_root = synthetic_root / "logical-tmp"
+        physical_root = synthetic_root / "physical-tmp"
+        logical_child = logical_root / "nested" / "artifact"
+        physical_child = physical_root / "nested" / "artifact"
+        unrelated = pathlib.Path("/synthetic/user-alias/artifact")
+        mapping = (logical_root, physical_root)
+
+        with mock.patch.object(
+            architecture_support,
+            "_trusted_system_tmp_mapping",
+            return_value=None,
+        ):
+            self.assertEqual(
+                architecture_support.trusted_system_tmp_path_spellings(
+                    logical_child
+                ),
+                (logical_child,),
+            )
+
+        with mock.patch.object(
+            architecture_support,
+            "_trusted_system_tmp_mapping",
+            return_value=mapping,
+        ):
+            self.assertEqual(
+                set(
+                    architecture_support.trusted_system_tmp_path_spellings(
+                        logical_child
+                    )
+                ),
+                {logical_child, physical_child},
+            )
+            self.assertEqual(
+                set(
+                    architecture_support.trusted_system_tmp_path_spellings(
+                        physical_child
+                    )
+                ),
+                {logical_child, physical_child},
+            )
+            self.assertEqual(
+                architecture_support.trusted_system_tmp_path_spellings(
+                    unrelated
+                ),
+                (unrelated,),
+            )
+
+    def test_manifest_accepts_trusted_alias_and_rejects_nested_symlink(
+        self,
+    ) -> None:
+        """@brief Accept the system alias but reject a later user symlink.
+
+        @return None after logical and physical manifest spellings bind to the
+          same executable while a symlinked configuration directory fails.
+        @throws OSError If fixture creation or executable inspection fails.
+        @throws AssertionError If the trusted root is rejected or a nested
+          arbitrary symlink reaches consumer execution.
+        @note The injected mapping models only Darwin's platform-owned alias;
+          both symlinks and every target live below a disposable sandbox.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-consumer-target-trusted-tmp-alias-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            logical_root = sandbox / "logical-tmp"
+            physical_root = sandbox / "physical-tmp"
+            physical_root.mkdir()
+            try:
+                logical_root.symlink_to(
+                    physical_root, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+            mapping = (logical_root, physical_root)
+            configuration = "RelWithDebInfo"
+            target_name = "consumer_safe"
+            build = physical_root / "consumer-build"
+            executable_by_target = write_consumer_target_inventory_fixture(
+                build,
+                configuration,
+                (target_name,),
+            )
+            physical_executable = executable_by_target[target_name]
+            logical_executable = logical_root / build.name / target_name
+            manifest = dependency_disabled.consumer_target_file_manifest_path(
+                build, configuration
+            )
+
+            def write_target_path(path: pathlib.Path) -> None:
+                """@brief Replace the test-owned target-file manifest path.
+
+                @param path Absolute executable spelling for this assertion.
+                @return None after serializing one valid target-file record.
+                @throws OSError If the disposable manifest cannot be written.
+                @note Target name and configured filename remain unchanged so
+                  only path equivalence varies between assertions.
+                """
+
+                write_exact_text(
+                    manifest,
+                    (
+                        dependency_disabled.CONSUMER_TARGET_FILE_MANIFEST_HEADER
+                        + "\n"
+                        + f"{target_name}\t{target_name}\t{path}\n"
+                    ),
+                )
+
+            with mock.patch.object(
+                architecture_support,
+                "_trusted_system_tmp_mapping",
+                return_value=mapping,
+            ):
+                for executable_spelling in (
+                    logical_executable,
+                    physical_executable,
+                ):
+                    with self.subTest(spelling=executable_spelling):
+                        write_target_path(executable_spelling)
+                        self.assertEqual(
+                            dependency_disabled.configured_consumer_target_files(
+                                build, configuration
+                            ),
+                            [(target_name, physical_executable)],
+                        )
+
+                real_configuration = build / "real-configuration"
+                real_configuration.mkdir()
+                relocated_executable = real_configuration / target_name
+                physical_executable.replace(relocated_executable)
+                configured_alias = build / configuration
+                configured_alias.symlink_to(
+                    real_configuration, target_is_directory=True
+                )
+                write_target_path(
+                    logical_root
+                    / build.name
+                    / configuration
+                    / target_name
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "noncanonical path"
+                ):
+                    dependency_disabled.configured_consumer_target_files(
+                        build, configuration
+                    )
+
+    def test_command_scrub_covers_aliases_but_preserves_real_markers(
+        self,
+    ) -> None:
+        """@brief Scrub trusted root names without hiding dependency leakage.
+
+        @return None after logical and physical work prefixes disappear while
+          a real OpenEXR library marker remains rejected.
+        @throws AssertionError If a trusted spelling survives or the marker
+          classifier is weakened.
+        @throws Nothing; the expected real-leak RuntimeError is asserted
+          locally.
+        @note The work basename intentionally contains both forbidden marker
+          spellings that caused the Darwin build-smoke false positive.
+        """
+
+        synthetic_root = (
+            pathlib.Path(tempfile.gettempdir()).resolve()
+            / "photospider-trusted-tmp-scrub-fixture"
+        )
+        logical_root = synthetic_root / "logical-tmp"
+        physical_root = synthetic_root / "physical-tmp"
+        work_name = "openexr_deep_provider_option_off_smoke"
+        logical_work = logical_root / work_name
+        physical_work = physical_root / work_name
+        command_surface = (
+            f"cc -c {logical_work}/consumer/main.c\n"
+            f"cmake -E chdir {physical_work}/consumer-build"
+        )
+        mapping = (logical_root, physical_root)
+
+        with mock.patch.object(
+            architecture_support,
+            "_trusted_system_tmp_mapping",
+            return_value=mapping,
+        ):
+            scrubbed = openexr_option_off.scrub_paths(
+                command_surface, [physical_work]
+            )
+            self.assertNotIn("openexr", scrubbed.lower())
+            openexr_option_off.reject_forbidden_surface(
+                scrubbed, "trusted alias command evidence"
+            )
+            leaked_surface = openexr_option_off.scrub_paths(
+                command_surface + "\n-lOpenEXR",
+                [physical_work],
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "openexr"):
+            openexr_option_off.reject_forbidden_surface(
+                leaked_surface, "real dependency evidence"
+            )
+
+    def test_native_audit_preserves_alias_spelled_library_markers(
+        self,
+    ) -> None:
+        """@brief Preserve library basenames across trusted-alias scrubbing.
+
+        @return None after logical and physical spellings of ``libImath`` and
+          ``libOpenEXR`` remain rejectable on symbol and dependency surfaces.
+        @throws AssertionError If native artifact auditing hides a qualified
+          library marker by scrubbing the artifact leaf as an audit root.
+        @throws Nothing; each expected native-leak RuntimeError is asserted
+          locally while inspector execution is replaced by bounded fixtures.
+        @note The physical artifact path models the file supplied to the native
+          inspector, while its evidence deliberately alternates both trusted
+          Darwin spellings without inspecting the host's real ``/tmp``.
+        """
+
+        synthetic_root = (
+            pathlib.Path(tempfile.gettempdir()).resolve()
+            / "photospider-trusted-tmp-native-audit-fixture"
+        )
+        logical_root = synthetic_root / "logical-tmp"
+        physical_root = synthetic_root / "physical-tmp"
+        work_name = "openexr_deep_provider_option_off_smoke"
+        logical_work = logical_root / work_name
+        physical_work = physical_root / work_name
+        mapping = (logical_root, physical_root)
+
+        with mock.patch.object(
+            architecture_support,
+            "_trusted_system_tmp_mapping",
+            return_value=mapping,
+        ):
+            for library_name, expected_marker in (
+                ("libImath.dylib", "libimath"),
+                ("libOpenEXR.dylib", "openexr"),
+            ):
+                artifact = physical_work / library_name
+                for evidence_root in (logical_work, physical_work):
+                    evidence_path = str(evidence_root / library_name)
+                    for surface_kind in ("symbols", "dependencies"):
+                        symbol_surface = (
+                            evidence_path
+                            if surface_kind == "symbols"
+                            else "_photospider_neutral_symbol"
+                        )
+                        dependency_surface = (
+                            evidence_path
+                            if surface_kind == "dependencies"
+                            else "/usr/lib/libSystem.B.dylib"
+                        )
+                        with self.subTest(
+                            library=library_name,
+                            spelling=evidence_root,
+                            surface=surface_kind,
+                        ), mock.patch.object(
+                            openexr_option_off,
+                            "symbol_surfaces",
+                            return_value=(symbol_surface, ""),
+                        ), mock.patch.object(
+                            openexr_option_off,
+                            "dependency_surface",
+                            return_value=dependency_surface,
+                        ):
+                            with self.assertRaisesRegex(
+                                RuntimeError, expected_marker
+                            ):
+                                openexr_option_off.validate_native_artifacts(
+                                    [artifact],
+                                    pathlib.Path("/synthetic/nm"),
+                                    "nm",
+                                    [physical_work],
+                                    "trusted-alias-native-audit",
+                                )
+
+    def test_enabled_provider_accepts_aliases_and_rejects_symlink_escape(
+        self,
+    ) -> None:
+        """@brief Confine the enabled provider across trusted tmp spellings.
+
+        @return None after logical/physical manifest spellings resolve to the
+          same physical provider while leaf, intermediate, and ``..`` escapes
+          are rejected.
+        @throws OSError If disposable directories, files, or symlinks cannot be
+          created or inspected.
+        @throws AssertionError If a trusted spelling is rejected or an
+          untrusted post-root path reaches the enabled consumer.
+        @note The synthetic logical root is the only trusted symlink. Every
+          later symlink and all files remain inside the disposable sandbox.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-enabled-provider-trusted-tmp-alias-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            logical_root = sandbox / "logical-tmp"
+            physical_root = sandbox / "physical-tmp"
+            physical_root.mkdir()
+            try:
+                logical_root.symlink_to(
+                    physical_root, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+
+            mapping = (logical_root, physical_root)
+            work_name = "openexr_deep_provider_install_consumer_smoke"
+            provider_relative = (
+                pathlib.Path("lib")
+                / "photospider"
+                / "providers"
+                / "libphotospider_openexr_deep_provider.so"
+            )
+            physical_prefix = physical_root / work_name / "prefix"
+            physical_provider = physical_prefix / provider_relative
+            physical_provider.parent.mkdir(parents=True)
+            write_exact_text(physical_provider, "provider fixture\n")
+            logical_provider = (
+                logical_root / work_name / "prefix" / provider_relative
+            )
+
+            outside_directory = physical_root / work_name / "outside"
+            outside_directory.mkdir()
+            outside_provider = outside_directory / physical_provider.name
+            write_exact_text(outside_provider, "outside provider fixture\n")
+            leaf_symlink = physical_prefix / "provider-link.so"
+            nested_symlink = physical_prefix / "linked-provider-directory"
+            try:
+                leaf_symlink.symlink_to(physical_provider)
+                nested_symlink.symlink_to(
+                    outside_directory, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"provider symlinks unavailable: {error}")
+
+            escaped_provider = (
+                physical_prefix
+                / ".."
+                / outside_directory.name
+                / outside_provider.name
+            )
+            invalid_paths = (
+                leaf_symlink,
+                nested_symlink / outside_provider.name,
+                escaped_provider,
+            )
+
+            with mock.patch.object(
+                architecture_support,
+                "_trusted_system_tmp_mapping",
+                return_value=mapping,
+            ):
+                for provider_spelling in (
+                    logical_provider,
+                    physical_provider,
+                ):
+                    with self.subTest(spelling=provider_spelling):
+                        self.assertEqual(
+                            openexr_option_off.validate_enabled_provider_path(
+                                provider_spelling, physical_prefix
+                            ),
+                            physical_provider,
+                        )
+                for invalid_path in invalid_paths:
+                    with self.subTest(invalid=invalid_path):
+                        with self.assertRaisesRegex(
+                            RuntimeError, "escaped its prefix"
+                        ):
+                            openexr_option_off.validate_enabled_provider_path(
+                                invalid_path, physical_prefix
+                            )
+
+
 class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
     """@brief Validate dynamic consumer discovery and fail-closed execution.
 
@@ -794,8 +1230,9 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
         @throws RuntimeError If producer or consumer inventory validation fails.
         @throws subprocess.CalledProcessError If the recorder injects a build or
           consumer execution failure.
-        @note Darwin is selected so the same invocation also retains the six
-          child-configure architecture propagation boundary.
+        @note Darwin is injected only at the producer-architecture helper, so
+          the same invocation retains the six child-configure propagation
+          boundary without changing host temporary-path discovery.
         """
 
         repo = sandbox / "repo"
@@ -843,7 +1280,11 @@ class DependencyDisabledConsumerTargetInventoryTest(unittest.TestCase):
                 "validate_no_optional_deep_codec_residue",
                 return_value=None,
             ),
-            mock.patch("platform.system", return_value="Darwin"),
+            mock.patch.object(
+                dependency_disabled,
+                "producer_osx_architecture_arguments",
+                side_effect=darwin_architecture_arguments_for_test,
+            ),
         ):
             return dependency_disabled.main()
 
@@ -2164,6 +2605,157 @@ class InstallConsumerCTestRegistrationTest(unittest.TestCase):
                 expected_test_names=INSTALL_CONSUMER_CTEST_NAMES[:2],
             )
 
+    def test_trusted_darwin_driver_spellings_are_accepted(self) -> None:
+        """@brief Accept both trusted spellings of each exact driver path.
+
+        @return None after logical and physical Darwin tmp-root spellings pass
+          without changing the launcher, flag, driver basename, or layout.
+        @throws AssertionError If either trusted spelling is rejected.
+        @note A synthetic mapping exercises the production spelling helper on
+          every platform without inspecting or replacing the host's ``/tmp``.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-ctest-command-trusted-tmp-alias-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            logical_root = sandbox / "logical-tmp"
+            physical_root = sandbox / "physical-tmp"
+            repository = physical_root / "repo"
+            mapping = (logical_root, physical_root)
+            python_executable = "/fixture/python3"
+            driver_by_name = dict(INSTALL_CONSUMER_CTEST_REGISTRATIONS)
+
+            with (
+                mock.patch.object(
+                    sys.modules[__name__],
+                    "REPOSITORY_ROOT",
+                    repository,
+                ),
+                mock.patch.object(
+                    architecture_support,
+                    "_trusted_system_tmp_mapping",
+                    return_value=mapping,
+                ),
+            ):
+                for spelling_root in (logical_root, physical_root):
+                    with self.subTest(spelling_root=spelling_root):
+                        entries = expected_install_consumer_ctest_entries(
+                            python_executable
+                        )
+                        for entry in entries:
+                            command = list(entry["command"])
+                            command[2] = str(
+                                spelling_root
+                                / "repo"
+                                / "tests"
+                                / "integration"
+                                / driver_by_name[str(entry["name"])]
+                            )
+                            entry["command"] = command
+                        inventory = ctest_inventory.parse_inventory(
+                            ctest_inventory_payload(entries)
+                        )
+                        require_install_consumer_ctest_commands(
+                            inventory,
+                            python_executable=python_executable,
+                        )
+
+    def test_untrusted_driver_aliases_and_path_drift_fail_closed(
+        self,
+    ) -> None:
+        """@brief Reject non-system aliases and lexical driver-path drift.
+
+        @return None after ordinary-root, intermediate, and leaf symlinks,
+          parent traversal, basename drift, and layout drift all fail.
+        @throws OSError If disposable files or symlinks cannot be created.
+        @throws AssertionError If any path outside the exact trusted root
+          spelling pair is accepted as a maintained driver.
+        @note Each symlink resolves to the expected disposable driver, proving
+          that canonical equality alone never widens the command contract.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-ctest-command-untrusted-alias-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary).resolve()
+            logical_root = sandbox / "logical-tmp"
+            physical_root = sandbox / "physical-tmp"
+            ordinary_root_alias = sandbox / "ordinary-tmp-alias"
+            repository = physical_root / "repo"
+            integration_directory = repository / "tests" / "integration"
+            integration_directory.mkdir(parents=True)
+            driver_name = INSTALL_CONSUMER_CTEST_REGISTRATIONS[0][1]
+            expected_driver = integration_directory / driver_name
+            write_exact_text(expected_driver, "# driver fixture\n")
+            intermediate_alias = repository / "tests" / "integration-alias"
+            leaf_alias = integration_directory / "driver-leaf-alias.py"
+            try:
+                logical_root.symlink_to(
+                    physical_root, target_is_directory=True
+                )
+                ordinary_root_alias.symlink_to(
+                    physical_root, target_is_directory=True
+                )
+                intermediate_alias.symlink_to(
+                    integration_directory, target_is_directory=True
+                )
+                leaf_alias.symlink_to(expected_driver)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+
+            mapping = (logical_root, physical_root)
+            invalid_paths = (
+                ordinary_root_alias
+                / "repo"
+                / "tests"
+                / "integration"
+                / driver_name,
+                intermediate_alias / driver_name,
+                leaf_alias,
+                logical_root
+                / os.pardir
+                / physical_root.name
+                / "repo"
+                / "tests"
+                / "integration"
+                / driver_name,
+                integration_directory / "not_the_install_driver.py",
+                repository / "tests" / "wrong-layout" / driver_name,
+            )
+            python_executable = "/fixture/python3"
+            with (
+                mock.patch.object(
+                    sys.modules[__name__],
+                    "REPOSITORY_ROOT",
+                    repository,
+                ),
+                mock.patch.object(
+                    architecture_support,
+                    "_trusted_system_tmp_mapping",
+                    return_value=mapping,
+                ),
+            ):
+                for invalid_path in invalid_paths:
+                    with self.subTest(invalid_path=invalid_path):
+                        entries = expected_install_consumer_ctest_entries(
+                            python_executable
+                        )
+                        command = list(entries[0]["command"])
+                        command[2] = str(invalid_path)
+                        entries[0]["command"] = command
+                        inventory = ctest_inventory.parse_inventory(
+                            ctest_inventory_payload(entries)
+                        )
+                        with self.assertRaisesRegex(
+                            ctest_inventory.InventoryError,
+                            "must start with",
+                        ):
+                            require_install_consumer_ctest_commands(
+                                inventory,
+                                python_executable=python_executable,
+                            )
+
     def test_missing_inactive_and_commented_entries_fail_closed(
         self,
     ) -> None:
@@ -3048,6 +3640,8 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
           architecture argument.
         @note The test exercises the real reusable-producer validator and
           ``main`` command construction while replacing subprocess execution.
+          Darwin is injected only at the producer-architecture helper, leaving
+          trusted temporary-path discovery scoped to the actual host.
         """
 
         with tempfile.TemporaryDirectory(
@@ -3107,8 +3701,10 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
                     "validate_no_optional_deep_codec_residue",
                     return_value=None,
                 ),
-                mock.patch(
-                    "platform.system", return_value="Darwin"
+                mock.patch.object(
+                    dependency_disabled,
+                    "producer_osx_architecture_arguments",
+                    side_effect=darwin_architecture_arguments_for_test,
                 ),
             ):
                 self.assertEqual(dependency_disabled.main(), 0)

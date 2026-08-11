@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from textwrap import dedent
 from cmake_build_smoke_support import (
     producer_osx_architecture_arguments,
     remove_work_tree,
+    trusted_system_tmp_path_spellings,
 )
 
 
@@ -413,18 +415,34 @@ def dynamic_artifact(path: Path) -> bool:
     return path.suffix.lower() in {".dylib", ".so", ".dll", ".exe"} or ".so." in name
 
 
-def scrub_paths(surface: str, roots: list[Path]) -> str:
+def scrub_paths(surface: str, directory_roots: list[Path]) -> str:
     """@brief Remove only known workspace prefixes from auditable tool text.
 
     @param surface Complete command/dependency/symbol output.
-    @param roots Exact work/build/install paths whose names are non-semantic.
-    @return Text with each exact native/POSIX path replaced by an audit token.
-    @throws Nothing under string replacement.
-    @note Header/library names below those roots remain visible and scannable.
+    @param directory_roots Exact work/build/install directory prefixes whose
+      names are non-semantic.
+    @return Text with each exact native/POSIX directory prefix replaced by an
+      audit token while descendant basenames remain visible.
+    @throws OSError If trusted Darwin system roots cannot be inspected or
+      strictly resolved.
+    @throws RuntimeError If trusted root resolution or mapping is invalid.
+    @throws ValueError If a supplied directory root is relative or contains
+      parent traversal.
+    @note Both spellings of Darwin's trusted ``/tmp``/``/private/tmp`` root are
+      scrubbed. No caller-controlled symlink is resolved. Leaf artifact and
+      evidence-file paths must not be supplied as roots, so header/library
+      names below the directory prefixes remain visible and scannable.
     """
 
     scrubbed = surface
-    for root in sorted(set(roots), key=lambda item: len(str(item)), reverse=True):
+    root_spellings = {
+        spelling
+        for directory_root in directory_roots
+        for spelling in trusted_system_tmp_path_spellings(directory_root)
+    }
+    for root in sorted(
+        root_spellings, key=lambda item: len(str(item)), reverse=True
+    ):
         scrubbed = scrubbed.replace(str(root), "<audit-root>")
         scrubbed = scrubbed.replace(root.as_posix(), "<audit-root>")
     return scrubbed
@@ -457,18 +475,20 @@ def validate_native_artifacts(
     @param artifacts Exact runtime/static/product/install artifact inventory.
     @param tool Resolved actual symbol inspector.
     @param tool_kind nm or dumpbin selection.
-    @param roots Known prefixes scrubbed before marker scans.
+    @param roots Known directory prefixes scrubbed before marker scans.
     @param category Stable evidence label printed into CTest output.
     @return None after every artifact passes.
     @throws OSError If an inspector cannot start.
     @throws RuntimeError For empty inventory, rejected tools, or codec residue.
+    @note Artifact leaf paths are deliberately excluded from scrub roots so
+      their basenames remain part of the audited symbol/dependency evidence.
     """
 
     if not artifacts:
         raise RuntimeError(f"{category} native artifact inventory is empty")
     for artifact in artifacts:
         defined, undefined = symbol_surfaces(tool, tool_kind, artifact)
-        symbol_text = scrub_paths(defined + "\n" + undefined, roots + [artifact])
+        symbol_text = scrub_paths(defined + "\n" + undefined, roots)
         reject_forbidden_surface(symbol_text, f"{category} symbols for {artifact.name}")
         defined_count = len([line for line in defined.splitlines() if line.strip()])
         undefined_count = len(
@@ -479,9 +499,7 @@ def validate_native_artifacts(
             f"defined={defined_count} undefined={undefined_count}"
         )
         if dynamic_artifact(artifact):
-            dependencies = scrub_paths(
-                dependency_surface(artifact), roots + [artifact]
-            )
+            dependencies = scrub_paths(dependency_surface(artifact), roots)
             reject_forbidden_surface(
                 dependencies, f"{category} dependencies for {artifact.name}"
             )
@@ -781,10 +799,13 @@ def validate_neutral_target_surface(
 
     @param build Configured and built neutral external-consumer directory.
     @param config Active single- or multi-config name.
-    @param roots Exact work/build/install prefixes whose names are non-semantic.
+    @param roots Exact work/build/install directory prefixes whose names are
+      non-semantic.
     @return None after one generated target surface passes.
     @throws OSError If generated evidence cannot be read.
     @throws RuntimeError If evidence is missing or contains codec residue.
+    @note The generated evidence-file basename remains visible to the scan;
+      only its containing audit directories may be scrubbed.
     """
 
     preferred = build / f"neutral-target-{config}.txt"
@@ -799,7 +820,7 @@ def validate_neutral_target_surface(
     if not surface.strip():
         raise RuntimeError("neutral imported-target surface is empty")
     reject_forbidden_surface(
-        scrub_paths(surface, roots + candidates),
+        scrub_paths(surface, roots),
         "neutral imported-target interfaces",
     )
     print(f"TARGET-AUDIT {candidates[0].name}: PASS")
@@ -910,6 +931,70 @@ def find_consumer_executable(build: Path, enabled: bool) -> Path:
     if len(candidates) != 1:
         raise RuntimeError(f"expected one consumer executable, found {candidates}")
     return candidates[0]
+
+
+def validate_enabled_provider_path(provider: Path, prefix: Path) -> Path:
+    """@brief Validate one enabled provider manifest path below its install.
+
+    @param provider Absolute imported-target path read from the generated
+      enabled-consumer manifest.
+    @param prefix Physical installed-package prefix owned by this smoke run.
+    @return Strictly resolved physical provider path below ``prefix``.
+    @throws RuntimeError If metadata cannot be read, the provider is absent or
+      outside the prefix, or any untrusted intermediate/leaf symlink follows
+      the trusted system tmp root.
+    @note Only the shared root-owned Darwin ``/tmp``/``/private/tmp`` mapping
+      may change the manifest spelling. No caller-controlled path is resolved
+      into the trusted set. The test-owned prefix is not concurrently mutated
+      while the component and strict-resolution checks run.
+    """
+
+    diagnostic = "enabled imported provider target escaped its prefix"
+    try:
+        prefix_root = prefix.resolve(strict=True)
+        provider_spellings = trusted_system_tmp_path_spellings(provider)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeError(diagnostic) from error
+    if not prefix_root.is_dir():
+        raise RuntimeError(diagnostic)
+
+    physical_candidates: list[Path] = []
+    for spelling in provider_spellings:
+        if (
+            prefix_root in spelling.parents
+            and spelling not in physical_candidates
+        ):
+            physical_candidates.append(spelling)
+    if len(physical_candidates) != 1:
+        raise RuntimeError(diagnostic)
+    physical_provider = physical_candidates[0]
+
+    try:
+        relative_provider = physical_provider.relative_to(prefix_root)
+    except ValueError as error:
+        raise RuntimeError(diagnostic) from error
+    if not relative_provider.parts or ".." in relative_provider.parts:
+        raise RuntimeError(diagnostic)
+
+    inspected = prefix_root
+    try:
+        for component in relative_provider.parts:
+            inspected /= component
+            if stat.S_ISLNK(inspected.lstat().st_mode):
+                raise RuntimeError(diagnostic)
+        resolved_provider = physical_provider.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(diagnostic) from error
+    try:
+        resolved_provider.relative_to(prefix_root)
+    except ValueError as error:
+        raise RuntimeError(diagnostic) from error
+    if (
+        resolved_provider != physical_provider
+        or not resolved_provider.is_file()
+    ):
+        raise RuntimeError(diagnostic)
+    return resolved_provider
 
 
 def main() -> int:
@@ -1105,9 +1190,9 @@ def main() -> int:
         executable = find_consumer_executable(consumer_build, enabled)
         if enabled:
             manifest = consumer_build / f"provider-{args.config}.txt"
-            provider = Path(manifest.read_text(encoding="utf-8"))
-            if not provider.is_file() or prefix not in provider.parents:
-                raise RuntimeError("enabled imported provider target escaped its prefix")
+            provider = validate_enabled_provider_path(
+                Path(manifest.read_text(encoding="utf-8")), prefix
+            )
             run([str(executable), str(provider)], work)
         else:
             command_evidence = collect_consumer_command_evidence(
@@ -1133,12 +1218,12 @@ def main() -> int:
                 [executable],
                 symbol_tool,
                 symbol_kind,
-                [work, build, prefix, consumer_build, executable],
+                consumer_audit_roots,
                 "OFF-neutral-consumer",
             )
             executable_dependencies = scrub_paths(
                 dependency_surface(executable),
-                [work, build, prefix, consumer_build, executable],
+                consumer_audit_roots,
             )
             reject_forbidden_surface(
                 executable_dependencies, "neutral consumer dependencies"

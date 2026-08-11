@@ -153,6 +153,84 @@ def _rewrite_trusted_system_alias_prefix(
     return rewritten_work
 
 
+def _trusted_system_alias_path_spellings(
+    absolute_path: Path,
+    mapping: tuple[Path, Path] | None,
+) -> tuple[Path, ...]:
+    """@brief Derive exact logical and physical spellings for a trusted path.
+
+    @param absolute_path Absolute lexical path supplied by one smoke boundary.
+    @param mapping Optional already-validated trusted logical/physical root
+      pair. Production obtains it only from ``_trusted_system_tmp_mapping``.
+    @return A stable tuple containing only ``absolute_path`` when it is outside
+      the mapping, otherwise the distinct caller, logical-root, and
+      physical-root spellings for the same lexical suffix.
+    @throws ValueError If ``absolute_path`` is relative or contains parent
+      traversal.
+    @throws RuntimeError If the mapping is invalid or a derived suffix escapes
+      its trusted root.
+    @note This pure helper never resolves ``absolute_path`` and therefore never
+      grants equivalence to an arbitrary intermediate or leaf symlink. Its
+      only equivalence comes from the caller-supplied trusted root pair.
+    """
+
+    if not absolute_path.is_absolute():
+        raise ValueError(
+            f"trusted system temporary path must be absolute: {absolute_path}"
+        )
+    if os.pardir in absolute_path.parts:
+        raise ValueError(
+            "trusted system temporary path contains parent traversal: "
+            f"{absolute_path}"
+        )
+
+    physical_path = _rewrite_trusted_system_alias_prefix(
+        absolute_path, mapping
+    )
+    if mapping is None:
+        return (absolute_path,)
+    logical_root, physical_root = mapping
+    try:
+        relative_path = physical_path.relative_to(physical_root)
+    except ValueError:
+        return (absolute_path,)
+    if os.pardir in relative_path.parts:
+        raise RuntimeError("trusted system temporary mapping escaped its root")
+    logical_path = logical_root / relative_path
+    spellings: list[Path] = []
+    for spelling in (absolute_path, logical_path, physical_path):
+        if spelling not in spellings:
+            spellings.append(spelling)
+    return tuple(spellings)
+
+
+def trusted_system_tmp_path_spellings(
+    absolute_path: Path,
+) -> tuple[Path, ...]:
+    """@brief Return trusted Darwin tmp aliases for one absolute path.
+
+    @param absolute_path Absolute lexical path used by a build-smoke manifest
+      or audit surface.
+    @return The input alone on ordinary platforms or outside the trusted root;
+      for a descendant of Darwin's trusted system tmp mapping, both exact
+      ``/tmp`` and ``/private/tmp`` spellings for the same suffix.
+    @throws OSError If Darwin system roots cannot be inspected or strictly
+      resolved.
+    @throws RuntimeError If canonical root resolution loops, the trusted
+      mapping is invalid, or a derived suffix escapes its root.
+    @throws ValueError If ``absolute_path`` is relative or contains parent
+      traversal.
+    @note Trust discovery is identical to destructive work-tree validation:
+      the function accepts only the root-owned platform alias. It performs no
+      canonical resolution of caller-controlled descendants, so ordinary
+      intermediate and leaf symlinks receive no equivalence.
+    """
+
+    return _trusted_system_alias_path_spellings(
+        absolute_path, _trusted_system_tmp_mapping()
+    )
+
+
 def resolve_work_directory(work: Path, repo: Path) -> Path:
     """@brief Validate a destructive nested-build directory and normalize only
     Darwin's trusted system temporary alias.
