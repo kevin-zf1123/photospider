@@ -476,13 +476,33 @@ The supervisor applies absolute monotonic startup, invocation, heartbeat-gap,
 response, graceful-termination, kill, and reap bounds. Complete request
 transfer receives one independent full invocation-duration window. It finishes
 only after every byte and descriptor right is sent, Host `SHUT_WR` succeeds,
-and the same absolute transfer deadline is observed again. A late successful
-shutdown is an invocation-deadline fault and cannot arm fresh callback or
-heartbeat budgets; a failed shutdown remains a channel fact. Only after that
-acceptance do the callback invocation and heartbeat-gap deadlines start, so a
-large bounded send cannot consume the callback-liveness budget;
+and the same absolute transfer deadline is observed again. The precise
+monotonic sample that passes that observation is `accepted_at`; both the
+callback invocation deadline and initial heartbeat-gap deadline derive
+directly from it. A late successful shutdown is an invocation-deadline fault
+and cannot arm fresh callback or heartbeat budgets; a failed shutdown remains
+a channel fact. Scheduling after acceptance consumes those two budgets, and a
+later caller clock sample cannot grant another window. A large bounded send
+still cannot consume the callback-liveness budget;
 the absolute invocation deadline still ends a callback that continues to emit
-heartbeats. Faults expose exact observable
+heartbeats. Construction validates every configured duration for positivity,
+the inclusive 24-hour cap, exact steady-clock representation, and heartbeat
+ordering before child ownership; that validation cannot prove any future
+time-point sum. Every actual startup, transfer, callback, heartbeat, response,
+termination, reap, observation, or restart-backoff derivation therefore checks
+the same captured base against `time_point::max() - duration` before adding. An
+exact fit is valid. Before ownership, one tick beyond it fails closed through a
+controlled exception. After ownership, a pre-cleanup lifecycle or short exact-
+status-observation overflow maps to the current phase-typed fault and exact
+cleanup; arithmetic failure while deriving a termination/reap-cleanup or
+restart-backoff deadline instead preserves an already established primary
+fault. That arithmetic rule does not weaken ownership priority: when the
+cleanup deadlines are representable but the exact PID is still not waitable at
+the final bound, sole ownership moves to the deferred reaper and the resulting
+`ReapPending` fault outranks the earlier phase fact. No path wraps, saturates,
+clamps, or samples a replacement clock. A real channel/status-observation
+syscall failure remains `Channel` when no stronger process or deadline fact is
+available. Faults expose exact observable
 deadline, lifecycle-protocol, channel, bad-output, natural exit, signal, and
 termination-stage facts. A matching `SIGKILL` is only marked
 memory-pressure-compatible; it does not prove an OOM cause. Failure closes both

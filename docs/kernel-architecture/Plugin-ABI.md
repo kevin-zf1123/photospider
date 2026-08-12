@@ -1169,10 +1169,28 @@ the exact execed PID. Startup, invocation, heartbeat-gap, response, TERM, KILL,
 and reap bounds use absolute monotonic deadlines. Complete request transfer
 receives one independent full invocation-duration window and finishes only
 after all bytes and descriptor rights are sent, Host `SHUT_WR` succeeds, and
-the same absolute transfer deadline is observed again. A late successful
-shutdown is an invocation-deadline fault and cannot arm fresh callback or
-heartbeat budgets; shutdown failure remains a channel fact. Callback
-invocation and heartbeat-gap deadlines are armed only after that acceptance.
+the same absolute transfer deadline is observed again. The precise monotonic
+sample that passes that observation is `accepted_at`; both the callback
+invocation deadline and initial heartbeat-gap deadline derive directly from
+it. A late successful shutdown is an invocation-deadline fault and cannot arm
+fresh callback or heartbeat budgets; shutdown failure remains a channel fact.
+Scheduling after acceptance consumes those budgets, and a later caller clock
+sample cannot grant another window. Construction validates every configured
+duration for positivity, the inclusive 24-hour cap, exact steady-clock
+representation, and heartbeat ordering before child ownership; it does not and
+cannot validate a future base sum. Every actual deadline derivation checks its
+same captured base against `time_point::max() - duration` before addition. An
+exact fit is accepted. Before ownership, one tick beyond it fails closed
+through a controlled exception. After ownership, a pre-cleanup lifecycle or
+short exact-status-observation overflow maps to the current phase-typed fault
+and exact cleanup; arithmetic failure while deriving a termination/reap-
+cleanup or restart-backoff deadline instead preserves an already established
+primary fault. If those cleanup deadlines are representable but the exact PID
+remains unobservable at the final bound, sole ownership moves to the deferred
+reaper and `ReapPending` deliberately outranks the earlier phase fact. The
+supervisor never wraps, saturates, clamps, or resamples a base to manufacture
+another window. A real channel/status-observation syscall failure remains
+`Channel` when no stronger process or deadline fact is available.
 The nonce proves only private launch/session binding and liveness; because the
 child learns it, the protocol does not attest plugin truth or make returned
 bytes trusted.

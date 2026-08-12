@@ -1629,9 +1629,22 @@ attestation, package trust, or output validation.
 Absolute monotonic bounds cover exec/startup, complete request transfer,
 invocation, heartbeat gap, exact response/EOF/exit reconciliation, graceful
 termination, kill, and reap. Complete request transfer receives its own full
-invocation-duration window; callback invocation and the heartbeat gap are
-armed only after transfer completes, while the absolute invocation deadline
-still prevents a live heartbeat thread from masking a hung callback. Observable
+invocation-duration window. Its successful same-deadline observation is the
+exact `accepted_at` base for both callback invocation and the initial heartbeat
+gap, so post-acceptance scheduling cannot grant fresh budgets. Construction
+validates configured duration shape, bounds, exact steady-clock representation,
+and relationships before child ownership; every runtime deadline derivation
+then checks its captured base against `time_point::max() - duration`. Exact fit
+is accepted and one-tick overflow fails closed without wrapping, saturation,
+clamping, or resampling. After child ownership, a pre-cleanup lifecycle or
+short exact-status-observation overflow maps through the current Startup/
+RequestTransfer/Invocation/Response phase and exact cleanup instead of
+degrading to `Channel`; a real channel/status-observation syscall failure
+remains `Channel` without a stronger fact. Cleanup/backoff deadline-arithmetic
+failure preserves an established primary fault, while a representable final
+reap bound that expires transfers sole PID ownership and returns
+`ReapPending`. The absolute invocation deadline still prevents a live
+heartbeat thread from masking a hung callback. Observable
 typed faults preserve deadline, lifecycle-protocol, channel, bad-output,
 natural exit, signal, and supervisor escalation facts. `SIGKILL` is marked only
 memory-pressure-compatible; no OOM cause is invented. The supervisor revokes

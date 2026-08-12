@@ -922,9 +922,21 @@ Host 选择的 heartbeat interval 与严格递增 event sequence 绑定到精确
 invocation、heartbeat-gap、response、TERM、KILL 与 reap bound 都使用绝对单调 deadline。完整
 request transfer 会获得一个独立、完整的 invocation-duration window；只有在全部 byte 与
 descriptor right 已发送、Host `SHUT_WR` 成功，并且再次观察同一绝对 transfer deadline 后，
-该传输才结束。迟到但成功的 shutdown 是 invocation-deadline fault，且不得启用全新 callback
-或 heartbeat budget；shutdown 失败仍是 channel 事实。Callback invocation 与 heartbeat-gap
-deadline 只在该验收之后启用。
+该传输才结束。通过该观察的精确单调时钟样本就是 `accepted_at`；callback invocation deadline
+与初始 heartbeat-gap deadline 都直接从它派生。迟到但成功的 shutdown 是 invocation-deadline
+fault，且不得启用全新 callback 或 heartbeat budget；shutdown 失败仍是 channel 事实。验收后
+的调度停顿会消耗这些 budget，后续 caller 重新读取时钟不得再赠送一个窗口。构造阶段会在取得
+child ownership 前，验证每个配置 duration 为正、未超过包含式 24 小时上限、可由 steady
+clock 精确表示，并满足 heartbeat 字段顺序；它不会也无法验证未来的 base 求和。每次实际派生
+deadline 都会在加法前以同一个已捕获 base 检查
+`base <= time_point::max() - duration`。精确贴合上界会被接受。取得 ownership 前超出一个
+tick 会通过受控异常 fail closed；取得 ownership 后，在 cleanup 前发生的 lifecycle 或短暂
+精确 status-observation 溢出会映射为当前按阶段类型化的 fault 并执行精确 cleanup，而
+派生 termination/reap-cleanup 或 restart-backoff deadline 时发生的算术失败会保留已经建立的
+primary fault。如果这些 cleanup deadline 可以表示，但精确 PID 在最终 bound 时仍不可观察，
+则唯一 ownership 会转移给 deferred reaper，`ReapPending` 会有意优先于更早的 phase fact。
+Supervisor 绝不回绕、饱和、截断，也不会重新采样 base 来制造另一个窗口。如果没有更强的
+process 或 deadline 事实，真实 channel/status-observation syscall failure 仍为 `Channel`。
 Nonce 只证明私有 launch/session binding 与 liveness；由于 child 会知道它，该 protocol 不会
 attest plugin truth，也不会让返回 byte 自动受信任。
 

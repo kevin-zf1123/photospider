@@ -1316,9 +1316,18 @@ attestation、package trust 或 output validation。
 
 绝对单调 bound 会覆盖 exec/startup、完整 request transfer、invocation、heartbeat gap、精确
 response/EOF/exit reconciliation、graceful termination、kill 与 reap。完整 request transfer
-会获得自己的完整 invocation-duration window；callback invocation 与 heartbeat gap 只在传输
-完成后启用，而绝对 invocation deadline 仍会防止存活的 heartbeat thread 掩盖
-hung callback。可观测 typed fault 会保留 deadline、lifecycle-protocol、channel、bad-output、
+会获得自己的完整 invocation-duration window。其成功的同 deadline 验收观察就是 callback
+invocation 与初始 heartbeat gap 共同使用的精确 `accepted_at` base，因此验收后的调度停顿不能
+再赠送全新 budget。构造阶段会在取得 child ownership 前，验证配置 duration 的形状、上限、
+steady-clock 精确可表示性与字段关系；每次运行期 deadline 派生随后都会以其已捕获 base 检查
+`base <= time_point::max() - duration`。精确贴合上界会被接受；超出一个 tick 则 fail closed，
+且不会回绕、饱和、截断或重新采样。取得 child ownership 后，在 cleanup 前发生的 lifecycle
+或短暂精确 status-observation 溢出会按当前 Startup/RequestTransfer/Invocation/Response phase
+映射并执行精确 cleanup，而不会退化为 `Channel`；没有更强事实时，真实 channel/status-
+observation syscall failure 仍为 `Channel`。cleanup/backoff deadline 算术失败会保留已经建立的
+primary fault；如果可表示的最终 reap bound 到期，则唯一 PID ownership 会转移并返回
+`ReapPending`。绝对 invocation deadline 仍会防止存活的 heartbeat thread 掩盖 hung callback。
+可观测 typed fault 会保留 deadline、lifecycle-protocol、channel、bad-output、
 natural exit、signal 与 supervisor escalation 事实。`SIGKILL` 只标记为
 memory-pressure-compatible，绝不虚构 OOM 因果。Supervisor 会撤销两条 channel，发送
 `SIGTERM`，必要时升级到 `SIGKILL`，并在有界 reap 或唯一 quarantined deferred reaper 完成前

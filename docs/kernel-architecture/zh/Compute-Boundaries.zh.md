@@ -376,11 +376,27 @@ plugin attestation 或 output truth。
 Supervisor 会强制绝对单调的 startup、invocation、heartbeat-gap、response、graceful-
 termination、kill 与 reap bound。完整 request transfer 会获得一个独立、完整的 invocation-
 duration window。只有在每个 byte 与 descriptor right 都已发送、Host `SHUT_WR` 成功，
-并且再次观察同一绝对 transfer deadline 后，该传输才结束。迟到但成功的 shutdown 是
-invocation-deadline fault，且不得启用全新 callback 或 heartbeat budget；失败的 shutdown
-仍是 channel 事实。只有在该验收之后才启动 callback invocation 与 heartbeat-gap deadline，
-因此有界的大 request send 不会消耗 callback-liveness budget；即使 callback 继续发送
-heartbeat，绝对 invocation deadline 仍会终止它。Fault 会暴露精确可观测的 deadline、
+并且再次观察同一绝对 transfer deadline 后，该传输才结束。通过该观察的精确单调时钟样本
+就是 `accepted_at`；callback invocation deadline 与初始 heartbeat-gap deadline 都直接从它
+派生。迟到但成功的 shutdown 是 invocation-deadline fault，且不得启用全新 callback 或
+heartbeat budget；失败的 shutdown 仍是 channel 事实。验收后的调度停顿会消耗这两个 budget，
+后续 caller 重新读取时钟不得再赠送一个窗口。有界的大 request send 仍不会消耗
+callback-liveness budget；即使 callback 继续发送
+heartbeat，绝对 invocation deadline 仍会终止它。构造阶段会在取得 child ownership 前，验证
+每个配置 duration 为正、未超过包含式 24 小时上限、可由 steady clock 精确表示，并满足
+heartbeat 字段顺序；这种验证无法证明任何未来 time-point 求和。因而，每次实际派生 startup、
+transfer、callback、heartbeat、response、termination、reap、observation 或 restart-backoff
+deadline 时，都会在加法前以同一个已捕获 base 检查
+`base <= time_point::max() - duration`。精确贴合上界有效。取得 ownership 前超出一个
+tick 会通过受控异常 fail closed；取得 ownership 后，在 cleanup 前发生的 lifecycle 或短暂
+精确 status-observation 溢出会映射为当前按阶段类型化的 fault 并执行精确 cleanup，而
+派生 termination/reap-cleanup 或 restart-backoff deadline 时发生的算术失败会保留已经建立的
+primary fault。这条算术规则不会削弱 ownership 优先级：如果 cleanup deadline 可以表示，但
+精确 PID 在最终 bound 时仍不可等待，则唯一 ownership 会转移给 deferred reaper，最终产生的
+`ReapPending` fault 优先于更早的 phase fact。任何路径都绝不回绕、饱和、截断，亦不重新采样
+时钟来替换 base。如果没有更强的 process 或 deadline 事实，真实 channel/status-observation
+syscall failure 仍为 `Channel`。Fault 会暴露精确可观测的
+deadline、
 lifecycle-protocol、channel、bad-output、natural exit、signal 与 termination-stage 事实。
 匹配的 `SIGKILL` 只会标记为 memory-pressure-compatible，不能证明 OOM 因果。Failure 会关闭两条 channel，必要时
 从 `SIGTERM` 升级到 `SIGKILL`，并在 reap 或 quarantined deferred-reaper integrity path 完成前
