@@ -69,8 +69,7 @@ compute 现在会捕获完整的 request-owned state，并在 graph-state 之外
 默认 32 个 CPU slot 覆盖已 admission 的 Run execution grant。固定 `ExecutionService` thread 与
 其私有 route machinery 属于基础设施。Ledger 不计算各自具有独立“每 Graph 一个
 worker”上限的 graph-state executor 或 compute-request executor，也不声称覆盖 operation 内部
-thread、daemon/frontend worker、全部 OS thread，或尚未声明的 device/I/O/plugin-process
-resource。
+thread、daemon/frontend worker、全部 OS thread，或尚未声明的 device/I/O resource。
 Issue #70 已完全移除旧的
 worker-only counter：`ExecutionService` 现在拥有唯一 Host 权威 ledger，在发布每个内建 CPU
 Run 前以一个 checked full-vector reservation 完成 admission，并要求 initial 与 dependent work
@@ -147,7 +146,7 @@ execution 发生在 `GraphModel` 独占变更边界之外，因此一个 `Comput
 私有 Run cancellation 与 commit arbitration 成为当前行为，Issue #74 则使 request-level grouping
 与 supersession generation 成为当前行为；Issue #75 使 policy generation、reserved start 与私有
 execution route 成为当前行为；Issue #76 使 lifecycle registry、close/shutdown 与 telemetry 成为
-当前行为。图中仍包含后续 device、I/O 与隔离 plugin 目标切片。
+当前行为。图中仍包含后续 device 与 I/O 目标切片。
 
 ## Run 与进程执行域契约
 
@@ -335,10 +334,11 @@ scratch 的事务性 vector。它还为每个已配置非 CPU `DeviceId` 拥有�
 memory/scratch limit。Native allocation plan 会原子提交两个 dimension，在 `allocatedSize`
 校准后归还未使用 byte，并把 actual ownership 拆分给 persistent native Value owner 与
 asynchronous completion scratch。Device queue depth/in-flight command limit 与 compute-I/O
-operation/byte 仍是未来维度，当前不会用虚假的零值 authority 表示。Issue #104 会向同一 ledger
+operation/byte 仍是未来维度，当前不会用虚假的零值 authority 表示。Issue #104 已经向同一 ledger
 增加显式 isolated-plugin vector：runtime-process slot、CPU slot、address-space byte、shared-memory
 byte 与 descriptor count。其一次性 token 绑定完整 invocation identity 与精确 vector，在 ledger
-生命周期内保留 replay tombstone，并在每条路径只结算一次 capacity。当前 success、failure、
+生命周期内保留 replay tombstone，并在每条路径只结算一次 capacity。该能力仍是没有当前最终用户
+route 的私有 direct/supervised runtime 组合。当前 success、failure、
 rejection、rollback、replacement、worker-exception、stale completion、eviction、cancellation 与
 close/shutdown path 都会恰好一次释放每份 active authority。Capacity exhaustion 与 checked
 overflow 会在无 partial reservation、overcommit、跨 device 借用或 silent clamping 的情况下失败。
@@ -1360,12 +1360,13 @@ Issue #104 新增一份由 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
 `PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与
 `PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY` 配置的进程不可变 Ed25519 policy。其 canonical 签名行会
 绑定封闭 operation/policy/isolated-runtime kind、package id、generation 与 SHA-256 内容摘要。
-重复 `(kind, digest)` 映射会被拒绝，因此内容与角色只会选择一个 package generation。当前
-operation/policy loader 会打开并 hash 不跟随 symlink 的普通候选，然后只加载复制后校验的私有
-snapshot：Linux 在通过 `/proc/self/fd/N` mapping 前 seal anonymous `memfd`；Darwin 重新打开并
-hash mode-0700 私有副本，立即 unlink 文件与目录，再通过 `/dev/fd/N` mapping anonymous
-descriptor。缺失、畸形、未签名、kind 错误、有歧义或内容已变更时默认拒绝；IPC caller 不能提供
-或修改 trust authority。
+重复 `(kind, digest)` 映射会被拒绝，因此内容与角色只会选择一个 package generation。在支持
+exact-object 的 profile 上，当前 operation/policy loader 会打开并 hash 不跟随 symlink 的普通
+候选，然后只加载复制后校验的私有 snapshot。Linux 在通过 `/proc/self/fd/N`
+mapping 前 seal anonymous `memfd`。Darwin 无法证明能够抵抗同 UID 预开写 descriptor 的无特权
+不可变 exact-object 边界，因此三个 native role 都会在候选访问前以
+`ExactObjectUnsupported` 失败。缺失、畸形、未签名、kind 错误、有歧义或内容已变更时默认拒绝；
+IPC caller 不能提供或修改 trust authority。
 
 对于两个长期维护的 isolated entry，无副作用 Host preflight 会导出一个精确
 `PluginResourceVector`，覆盖 runtime process、CPU slot、address-space byte、shared-memory byte 与
@@ -1382,8 +1383,8 @@ Linux 会把获批 runtime 复制到 sealed anonymous `memfd`，在 seal 后确�
 `RLIMIT_CORE`，获得空 environment 与封闭 inherited-descriptor set，并在 plugin code 运行前报告
 limit setup failure。
 
-这会完成私有 Linux runtime 组合的 package/resource admission、Darwin runtime 有类型的无副作用
-拒绝，以及当前 Darwin/Linux operation/policy loader 的签名 immutable-snapshot admission。它不
+这会完成私有 Linux runtime 组合的 package/resource admission、Linux operation/policy loader 的
+签名 immutable-snapshot admission，以及 Darwin 每个 native role 有类型的访问前拒绝。它不
 会选择最终用户 Graph operation、实现目标 operation ABI v1、隔离获批进程内
 DSO、提供通用 syscall/network sandbox，或从 `SIGKILL` 证明 OOM。
 

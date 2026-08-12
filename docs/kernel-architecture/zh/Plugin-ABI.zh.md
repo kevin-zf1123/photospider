@@ -171,13 +171,15 @@ SHA-256 内容摘要绑定起来。重复 `(kind, package id, generation)` 身�
 内容角色映射都会被拒绝，因此字节与角色只会选择一个 package generation。首次成功策略或默认拒绝的配置结果会在进程生命周期内保留；之后的
 environment 变化或 IPC value 都不能铸造或替换 trust authority。
 
-授权会在不跟随最后 symlink 的条件下打开普通文件，从候选 hash 有界 byte 并检查前后 metadata
-稳定，但绝不把该 mutable inode 作为权限返回。Linux 会把获批 byte 复制到 anonymous `memfd`，
+在支持 exact-object 的 profile 上，授权会在不跟随最后 symlink 的条件下打开普通文件，从候选
+hash 有界 byte 并检查前后 metadata 稳定，但绝不把该 mutable inode 作为权限返回。Linux 会把获批
+byte 复制到 anonymous `memfd`，
 应用 write/grow/shrink/seal 四种 seal，并在通过 `/proc/self/fd/N` mapping operation/policy 前于
-sealed descriptor 上确认 SHA-256。Darwin 会把获批 DSO 复制到 mode-0700 私有目录，sync 后重新
-打开并确认 SHA-256，立即 unlink 文件与目录，再只通过 `/dev/fd/N` mapping anonymous
-descriptor。因此 rename、symlink、pathname replacement、hard link 或 preopened writer 都不能
-替换后续 byte。当前 Windows 及其他所有不支持的 DSO profile 会默认拒绝，不回退 pathname。
+sealed descriptor 上确认 SHA-256。因此在 Linux 上，rename、symlink、pathname replacement、
+hard link 或 preopened writer 都不能替换后续 byte。Darwin 没有经过证明、能够抵抗同 UID 预开写
+descriptor 的无特权不可变 exact-object primitive，因此会对 operation、policy 与 isolated-runtime
+授权都在候选 path 访问前返回 `ExactObjectUnsupported`。当前 Windows 及其他所有不支持的 native
+profile 使用同样的默认拒绝边界，不回退 pathname。
 
 每个 `PluginTrustError`（包括 trust 配置缺失/不可读、候选无法打开、未签名、kind 错误或
 内容已变更）都会由 operation load report 或 policy Host surface 公开映射为
@@ -997,11 +999,10 @@ byte 与 descriptor count。Attempt-local `ResourceLedger` 会原子铸造 move-
 `RLIMIT_NOFILE` 与零 `RLIMIT_CORE`。Child 仍只获得空 environment、`/dev/null` 标准流、固定
 data/status/lifecycle descriptor、一个固定 executable descriptor 以及已声明 invocation
 capability；该封闭集合以上的 descriptor 会被移除。Linux 使用 `fexecve` 执行复制后校验的
-sealed descriptor。Darwin 没有受支持的 anonymous-
-descriptor runtime exec，因此 direct/supervised executor 构造期间授权会报告
-`ExactObjectUnsupported`，先于 token 发放、capability materialization、socket 创建或 fork；不会
-存在 runtime pathname snapshot。不支持的平台（包括当前 Windows runtime profile）同样默认拒绝，
-不会回退到未经校验的 path。
+sealed descriptor。Darwin 对任何 native role 都没有受支持的无特权不可变 exact-object 边界，
+因此 direct/supervised executor 构造期间会在候选访问、token 发放、capability materialization、
+socket 创建或 fork 前报告 `ExactObjectUnsupported`；不会存在 runtime pathname snapshot。不支持
+的平台（包括当前 Windows runtime profile）同样默认拒绝，不会回退到未经校验的 path。
 这些控制施加 package identity 与 resource ceiling；它们不是通用 syscall/network sandbox，
 观察到 `SIGKILL` 仍只表示 memory-pressure-compatible，不证明 OOM。
 

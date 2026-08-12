@@ -361,9 +361,10 @@ Issue #104 现在通过 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
 manifest 会绑定每个封闭 operation/policy/isolated-runtime role、package id、generation 与 SHA-256
 内容摘要。重复 `(kind, digest)` 映射会被拒绝，因此内容与角色只会选择一个 package
 generation。Linux 会把获批候选复制到具有四种 seal 的 anonymous `memfd`，并通过
-`/proc/self/fd/N` mapping operation/policy DSO。Darwin 会把获批 DSO 复制到 mode-0700 私有目录，
-重新打开并 hash，然后在通过 `/dev/fd/N` mapping 前立即 unlink 文件与目录。不支持 DSO 的平台
-（包括当前 Windows profile）会默认拒绝。
+`/proc/self/fd/N` mapping operation/policy DSO。Darwin 无法证明一个能够抵抗同 UID 预开写
+descriptor 的无特权不可变 exact-object 边界，因此 operation、policy 与 isolated-runtime 授权都
+会在候选 path 访问或 native 副作用前以 `ExactObjectUnsupported` 失败。当前 Windows 与其他所有
+不支持的 native profile 使用相同的默认拒绝边界。
 Trust rejection 会在当前 Host-facing plugin load result 中映射为 `GraphErrc::InvalidParameter`；
 成功 authorization 后发生的 native loader failure 仍为 `GraphErrc::Io`。
 
@@ -373,13 +374,11 @@ invocation identity 与精确 vector 的 move-only token。在 shared-memory、F
 fork 或 exec 副作用前，必须针对相同事实消费 token；lease 在每条路径只结算一次，replay
 tombstone 则保留到 ledger 生命周期结束。Trust material 与 token 都不会进入 IPC。
 
-Linux 使用 `fexecve` 执行复制后校验的 sealed runtime descriptor。Darwin 会在 executor 构造时
-以 `ExactObjectUnsupported` 拒绝 isolated-runtime 授权，先于 token 发放、capability
-materialization、socket 创建或 fork；不会保留 runtime pathname snapshot。当前 Windows 与其他
-每个不支持的 runtime profile 同样默认拒绝。Linux native exec 前，child 会应用已准入
-`RLIMIT_AS`、正
-`RLIMIT_CPU`、经过检查的 `RLIMIT_NOFILE` 与零 `RLIMIT_CORE`，同时保持空 environment 和封闭的
-capability-only descriptor set。
+Linux 使用 `fexecve` 执行复制后校验的 sealed runtime descriptor。Darwin 会在候选访问前拒绝每个
+native role，因此 direct/supervised runtime 构造会在 token 发放、capability materialization、
+socket 创建或 fork 前失败，也不会保留 runtime pathname snapshot。Linux native exec 前，child
+会应用已经准入的 `RLIMIT_AS`、正值 `RLIMIT_CPU`、经过检查的 `RLIMIT_NOFILE` 与零
+`RLIMIT_CORE`，同时保持空 environment 和封闭的 capability-only descriptor set。
 
 Issue #101 拥有 pure-C operation ABI 决策，Issue #102 拥有首个 invocation record，Issue #103
 拥有 authenticated private-session supervision，Issue #104 拥有当前签名 admission 与 resource-

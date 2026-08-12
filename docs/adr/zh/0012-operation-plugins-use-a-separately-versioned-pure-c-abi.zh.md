@@ -379,8 +379,8 @@ Tenant-untrusted CPU code 不把 pointer-bearing ABI record 用作 IPC：
   不能证明 OOM；
 - Issue #104 为保留的 operation/policy DSO 与 isolated-runtime 路径实现进程不可变的
   Ed25519 package admission、唯一 content-role manifest 映射、复制后校验的 Linux sealed
-  descriptor、anonymous Darwin DSO descriptor、五维一次性 resource token 与 Linux exec 前
-  rlimit；Darwin isolated runtime 与不支持的 profile 默认拒绝。它不提供通用
+  descriptor、五维一次性 resource token 与 Linux exec 前 rlimit；Darwin 与不支持的 profile
+  对每个 native role 都在候选访问前默认拒绝。它不提供通用
   syscall/network sandbox。
 
 本 ADR 被接受时并未预选其 frame、handle、authentication 或 policy format。Issue #102
@@ -391,9 +391,9 @@ lifecycle frame：它在专用 Unix datagram channel 上携带 OS 随机 nonce�
 identity、严格 sequence 与 Host 选择的 heartbeat interval。该 session binding 不是 plugin
 attestation 或 trust。Issue #104 随后为保留路径选择了 canonical signed-manifest format、
 exact-object admission profile 与 identity-bound one-use resource-token format；不支持
-exact-object 的 profile 会默认拒绝。Linux sealed descriptor 支持三个角色；Darwin anonymous
-descriptor 只支持 operation/policy DSO，并拒绝 isolated runtime；其他不支持的 profile 默认
-拒绝。通用 syscall/network sandbox 仍是后续决策。当前没有
+exact-object 的 profile 会默认拒绝。Linux sealed descriptor 支持三个角色；Darwin 与其他不支持
+的 profile 会在候选访问前拒绝全部 native role。通用 syscall/network sandbox 仍是后续决策。
+当前没有
 operation loader 会把 ABI v2 或仍为目标态的 ABI v1 映射到 supervised executor；最终用户选择
 仍属于完整 breaking ABI migration。Cross-process GPU/native-handle 工作仍是后续决策。
 

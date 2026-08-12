@@ -222,17 +222,19 @@ The first successful policy or fail-closed configuration result is retained for
 the process lifetime; neither a later environment change nor an IPC value can
 mint or replace trust authority.
 
-Authorization opens a non-followed regular file, hashes the bounded bytes from
-that candidate, and checks stable pre/post metadata, but never returns that
-mutable inode as authority. Linux copies approved bytes into an anonymous
+On a supported exact-object profile, authorization opens a non-followed regular
+file, hashes the bounded bytes from that candidate, and checks stable pre/post
+metadata, but never returns that mutable inode as authority. Linux copies
+approved bytes into an anonymous
 `memfd`, applies write/grow/shrink/seal seals, and confirms SHA-256 on the sealed
-descriptor before operation/policy mapping through `/proc/self/fd/N`. Darwin
-copies an approved DSO into a mode-0700 private directory, syncs and reopens it,
-confirms SHA-256, immediately unlinks the file and directory, and maps only the
-anonymous descriptor through `/dev/fd/N`. Consequently a rename, symlink,
-pathname replacement, hard link, or preopened writer cannot substitute later
-bytes. Current Windows and every other unsupported DSO profile fail closed
-instead of using a pathname fallback.
+descriptor before operation/policy mapping through `/proc/self/fd/N`.
+Consequently a rename, symlink, pathname replacement, hard link, or preopened
+writer cannot substitute later bytes on Linux. Darwin has no proven
+unprivileged immutable exact-object primitive that resists a same-UID
+preopened writer; it therefore rejects operation, policy, and isolated-runtime
+authorization with `ExactObjectUnsupported` before candidate path access.
+Current Windows and every other unsupported native profile use the same
+fail-closed boundary instead of a pathname fallback.
 
 Every `PluginTrustError`, including missing or unreadable trust configuration
 and an unopenable, unsigned, wrong-kind, or changed candidate, is exposed by
@@ -1277,12 +1279,12 @@ receives an empty environment, `/dev/null` standard streams, fixed data/status/
 lifecycle descriptors, one fixed executable descriptor, and only the declared
 invocation capabilities; descriptors above that closed set are removed. Linux
 executes the post-copy verified sealed descriptor with `fexecve`. Darwin has no
-supported anonymous-descriptor runtime exec, so authorization reports
-`ExactObjectUnsupported` during direct or supervised executor construction,
-before token issuance, capability materialization, socket creation, or fork;
-no runtime pathname snapshot exists. Unsupported platforms, including the
-current Windows runtime profile, also fail closed instead of falling back to an
-unverified path. These controls impose
+supported unprivileged immutable exact-object boundary for any native role, so
+authorization reports `ExactObjectUnsupported` before candidate access during
+direct or supervised executor construction, token issuance, capability
+materialization, socket creation, or fork; no runtime pathname snapshot exists.
+Unsupported platforms, including the current Windows runtime profile, also
+fail closed instead of falling back to an unverified path. These controls impose
 package identity and resource ceilings; they do not provide a general syscall
 or network sandbox, and a `SIGKILL` observation remains only
 memory-pressure-compatible rather than proof of OOM.

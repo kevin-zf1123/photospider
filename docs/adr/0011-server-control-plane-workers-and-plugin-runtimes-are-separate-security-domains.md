@@ -441,10 +441,12 @@ binds each closed operation/policy/isolated-runtime role, package id,
 generation, and SHA-256 content digest. Duplicate `(kind, digest)` mappings are
 rejected so content and role select one package generation. Linux copies an
 approved candidate into a four-seal anonymous `memfd` and maps operation/policy
-DSOs through `/proc/self/fd/N`. Darwin copies an approved DSO into a mode-0700
-private directory, reopens and rehashes it, then immediately unlinks the file
-and directory before `/dev/fd/N` mapping. Unsupported DSO platforms, including
-the current Windows profile, fail closed.
+DSOs through `/proc/self/fd/N`. Darwin cannot prove an unprivileged immutable
+exact-object boundary against a same-UID preopened writer, so operation,
+policy, and isolated-runtime authorization all fail with
+`ExactObjectUnsupported` before candidate path access or native effects.
+Current Windows and every other unsupported native profile use the same
+fail-closed boundary.
 Trust rejection reaches current Host-facing plugin load results as
 `GraphErrc::InvalidParameter`; a native loader failure after successful
 authorization remains `GraphErrc::Io`.
@@ -458,11 +460,10 @@ lease settles every path exactly once and the replay tombstone survives for the
 ledger lifetime. Neither trust material nor the token enters IPC.
 
 Linux executes the post-copy verified sealed runtime descriptor with `fexecve`.
-Darwin rejects isolated-runtime authorization with
-`ExactObjectUnsupported` during executor construction, before token issuance,
-capability materialization, socket creation, or fork; it retains no runtime
-pathname snapshot. Current Windows and every other unsupported runtime profile
-also fail closed. Before Linux native exec, the child applies admitted
+Darwin rejects every native role before candidate access; direct and
+supervised runtime construction therefore fails before token issuance,
+capability materialization, socket creation, or fork and retains no runtime
+pathname snapshot. Before Linux native exec, the child applies admitted
 `RLIMIT_AS`, positive `RLIMIT_CPU`, checked
 `RLIMIT_NOFILE`, and zero `RLIMIT_CORE`, while retaining the empty environment
 and closed capability-only descriptor set.

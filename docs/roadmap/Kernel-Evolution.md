@@ -86,7 +86,7 @@ The default 32 CPU slots cover admitted Run execution grants. Fixed
 The ledger does not count graph-state or compute-request executors, which each
 have a separate one-worker-per-Graph bound; nor does it claim
 operation-internal threads, daemon/frontend workers, all OS threads, or
-undeclared device/I/O/plugin-process resources. Issue #70 replaces the former
+undeclared device/I/O resources. Issue #70 replaces the former
 worker-only counter completely:
 `ExecutionService` now owns the sole Host-authoritative ledger, admits each
 built-in CPU Run with one checked full-vector reservation before publication,
@@ -178,7 +178,7 @@ cancellation and commit arbitration current, and Issue #74 makes request-level
 grouping plus supersession generation current. Issue #75 makes policy
 generation, reserved start, and private execution routes current. Issue #76
 makes lifecycle registry, close/shutdown, and telemetry current. The diagram
-still includes later device, I/O, and isolated-plugin target slices.
+still includes later device and I/O target slices.
 
 ## Run and Process Execution Domain Contract
 
@@ -416,11 +416,13 @@ unused bytes after `allocatedSize` reconciliation, and split actual ownership
 between persistent native Value owners and asynchronous completion scratch.
 Device queue depth/in-flight command limits and compute-I/O operations/bytes
 remain future dimensions and are not represented by fake zero-valued
-authority. Issue #104 adds an explicit isolated-plugin vector to the same
+authority. Issue #104 has added an explicit isolated-plugin vector to the same
 ledger: runtime-process slots, CPU slots, address-space bytes, shared-memory
 bytes, and descriptor count. Its one-use token binds the complete invocation
 identity and exact vector, retains a replay tombstone for the ledger lifetime,
-and settles capacity exactly once on every path. Current success, failure,
+and settles capacity exactly once on every path. This remains a private
+direct/supervised runtime composition with no current end-user route. Current
+success, failure,
 rejection, rollback, replacement, worker-exception, stale completion, eviction,
 cancellation, and close/shutdown paths release every active authority exactly
 once. Capacity exhaustion and checked overflow fail without partial
@@ -1691,12 +1693,13 @@ Issue #104 adds one process-immutable Ed25519 policy configured by
 operation/policy/isolated-runtime kind, package id, generation, and SHA-256
 content digest. Duplicate `(kind, digest)` mappings are rejected so content and
 role select one package generation. Current operation and policy loaders open
-and hash a non-followed regular candidate, then load only a post-copy verified
-private snapshot: Linux seals an anonymous `memfd` before `/proc/self/fd/N`
-mapping, while Darwin reopens and rehashes a mode-0700 private copy, immediately
-unlinks its file and directory, and maps the anonymous descriptor through
-`/dev/fd/N`. Missing, malformed, unsigned, wrong-kind, ambiguous, or changed
-content is default-deny; an IPC caller cannot supply or mutate trust authority.
+and hash a non-followed regular candidate on supported exact-object profiles,
+then load only a post-copy verified private snapshot. Linux seals an anonymous
+`memfd` before `/proc/self/fd/N` mapping. Darwin cannot prove an unprivileged
+immutable exact-object boundary against a same-UID preopened writer, so all
+three native roles fail with `ExactObjectUnsupported` before candidate access.
+Missing, malformed, unsigned, wrong-kind, ambiguous, or changed content is
+default-deny; an IPC caller cannot supply or mutate trust authority.
 
 For either maintained isolated entry, side-effect-free Host preflight derives
 one exact `PluginResourceVector` covering runtime processes, CPU slots,
@@ -1719,8 +1722,8 @@ closed inherited-descriptor set, and reports limit setup failure before plugin
 code executes.
 
 This completes package and resource admission for the private Linux runtime
-composition, typed pre-effect Darwin runtime rejection, and signed immutable-
-snapshot admission for current Darwin/Linux operation/policy loaders. It does
+composition, signed immutable-snapshot admission for Linux operation/policy
+loaders, and typed pre-access Darwin rejection for every native role. It does
 not select an end-user Graph operation, implement target operation ABI v1,
 isolate approved in-process DSOs, provide a general syscall/network sandbox,
 or prove OOM from `SIGKILL`.

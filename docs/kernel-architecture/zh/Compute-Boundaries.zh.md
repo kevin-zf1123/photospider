@@ -418,7 +418,7 @@ descriptor/PID 精确 retirement、无 fallback 与后续健康恢复。一项�
 `PluginRuntimeFault` 到达 request boundary，该 boundary 只把 owning Run 发布为 Failed，固定
 service worker 随后会执行无关 Run。
 
-Issue #104 会在两个长期维护的 Host entry materialize invocation 前执行无副作用 preflight。它
+Issue #104 已经在两个长期维护的 Host entry materialize invocation 前执行无副作用 preflight。它
 导出精确 shared-memory 与 descriptor demand，再与一个 runtime process、一个 CPU slot 和已配置
 address-space policy 合并。Attempt-local `ResourceLedger` 会原子预留该
 `PluginResourceVector`，并铸造 move-only token；该 token 绑定完整 tenant/Job/attempt/worker-
@@ -427,16 +427,21 @@ shared-memory、FD、mapping、socket、fork 或 exec 副作用前，针对相�
 消费 token，并把产生的 RAII lease 保留到 response validation 与 publication 结束。Token 或 lease
 只归还一次 vector；replay tombstone 会保持 spent，直到 ledger 销毁。
 
+同一份进程 trust policy 还会在 native mapping 前 gate operation 与 policy DSO。当前只有 Linux
+提供所需的不可逆 sealed-memfd exact-object 边界。Darwin、当前 Windows 与其他所有不支持的 native
+profile 都会对 operation、policy 与 isolated-runtime role 在候选 path 访问前返回
+`ExactObjectUnsupported`；该拒绝之后不会发生 initializer、ABI callback、token 或 OS invocation
+副作用。
+
 隔离 executable 构造还使用由 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
 `PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与
 `PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY` 配置的进程不可变 Ed25519 签名 manifest。获批 entry 会绑定
 `isolated-runtime`、package id、generation 与 SHA-256 byte。Linux 会把获批候选复制到 anonymous
 `memfd`，应用完整 immutable seal set，在 seal 后确认 digest，再通过 `fexecve` 执行该 descriptor。
-Darwin 会在 executor 构造时报告 `ExactObjectUnsupported`，先于 token 发放、capability
-materialization、socket 创建或 fork，并且不会创建 runtime pathname snapshot。当前 Windows 及
-其他每个不支持的 runtime profile 同样默认拒绝。
+Darwin 会在 executor 构造时报告 `ExactObjectUnsupported`，先于候选访问、token 发放、capability
+materialization、socket 创建或 fork，并且不会创建 runtime pathname snapshot。
 
-Native exec 前，child 会应用已准入 `RLIMIT_AS`、正 `RLIMIT_CPU`、经过检查的
+Native exec 前，child 会应用已经准入的 `RLIMIT_AS`、正值 `RLIMIT_CPU`、经过检查的
 `RLIMIT_NOFILE` 与零 `RLIMIT_CORE`；setup failure 会在 plugin code 运行前报告。Environment 仍为
 空，stdio 指向 `/dev/null`，只有固定 private channel 与已准入 invocation capability 会保留。
 Aggregate ledger admission 与 per-process rlimit 是独立 Host 检查；它们既不建立 syscall/network

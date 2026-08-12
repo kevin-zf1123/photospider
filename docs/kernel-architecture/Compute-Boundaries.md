@@ -543,6 +543,13 @@ exec effects and retains the resulting RAII lease through response validation
 and publication. A token or lease returns its vector exactly once; the replay
 tombstone remains spent until the ledger is destroyed.
 
+The same process trust policy gates operation and policy DSOs before native
+mapping. Linux alone currently supplies the required irreversible sealed-memfd
+exact-object boundary. Darwin, current Windows, and every other unsupported
+native profile reject operation, policy, and isolated-runtime roles with
+`ExactObjectUnsupported` before candidate path access; no initializer, ABI
+callback, token, or OS invocation effect can follow that rejection.
+
 Isolated executable construction also uses the process-immutable signed
 Ed25519 manifest configured by `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
 `PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE`, and
@@ -551,9 +558,9 @@ Ed25519 manifest configured by `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
 approved candidate into an anonymous `memfd`, applies the complete immutable
 seal set, confirms the digest after sealing, and executes that descriptor
 through `fexecve`. Darwin reports `ExactObjectUnsupported` during executor
-construction before token issuance, capability materialization, socket
-creation, or fork and creates no runtime pathname snapshot. Current Windows
-and every other unsupported runtime profile also fail closed.
+construction before candidate access, token issuance, capability
+materialization, socket creation, or fork and creates no runtime pathname
+snapshot.
 
 Before native exec, the child applies admitted `RLIMIT_AS`, positive
 `RLIMIT_CPU`, checked `RLIMIT_NOFILE`, and zero `RLIMIT_CORE`; setup failure is

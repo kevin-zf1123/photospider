@@ -427,8 +427,18 @@ The following dimensions remain later target behavior and are not guessed,
 reserved, or represented by fake nonzero values in the current ledger:
 
 - per-device queue-depth and in-flight-command capacity;
-- compute-I/O operations and bytes; and
-- plugin-process, invocation, IPC/shared-memory, and isolation capacity.
+- compute-I/O operations and bytes.
+
+Issue #104 now extends the same `ResourceLedger` root with a separate plugin
+subledger for runtime-process slots, CPU slots, address-space bytes,
+shared-memory bytes, and descriptor counts. Only trusted Host code can mint a
+move-only, one-use token bound to the complete invocation identity and exact
+five-dimensional vector; consumption transfers settlement to an RAII lease,
+and replay tombstones remain spent for the ledger lifetime. This private
+authority is exercised by the maintained direct and supervised isolated
+runtime composition only. No current end-user Graph operation, embedded
+Host/CLI, IPC request, worker route, policy, or plugin can mint a token or
+select that composition.
 
 Admission validates one checked resource vector transactionally and returns a
 complete Run reservation or nothing. Trusted service code suballocates
