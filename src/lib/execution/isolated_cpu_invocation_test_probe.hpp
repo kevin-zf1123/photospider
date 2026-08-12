@@ -27,7 +27,8 @@ enum class SupervisedLifecycleTestEvent : std::uint8_t {
  * @brief Process-local observations of invocation side effects.
  * @throws Nothing for ordinary value operations.
  * @note Counters are monotonic; the PID field is only the latest observation.
- * No field grants descriptor, PID, mapping, or cleanup authority.
+ * The hold field is transient test state rather than a counter. No field
+ * grants descriptor, PID, mapping, or cleanup authority.
  */
 struct IsolatedCpuInvocationTestSnapshot final {
   /**
@@ -42,6 +43,8 @@ struct IsolatedCpuInvocationTestSnapshot final {
   std::int64_t last_reaped_child = -1;
   /** @brief Frames whose exact declared byte length has been received. */
   std::uint64_t exact_frames_received = 0U;
+  /** @brief True only while the one-shot post-request exit hold is armed. */
+  bool invocation_monitor_exit_hold_armed = false;
 };
 
 /**
@@ -94,6 +97,22 @@ class IsolatedCpuInvocationTestProbe final {
    */
   static void delay_next_lifecycle_event_acceptance(
       SupervisedLifecycleTestEvent event, std::chrono::milliseconds delay);
+
+  /**
+   * @brief Holds the next post-request invocation monitor until child exit.
+   * @param enabled True to arm the one-shot hold, false to clear it.
+   * @return Nothing after publishing the process-local test state.
+   * @throws Nothing.
+   * @note When armed, the production owner uses `waitid(WNOWAIT)` after the
+   * complete request transfer and deadline construction. The hold ends only
+   * after the exact child has exited normally without consuming its wait
+   * status, so lifecycle and response bytes remain queued for the production
+   * monitor. This source-private seam is disabled by default and grants no
+   * PID, wait, descriptor, mapping, lifecycle, or response authority to test
+   * code.
+   */
+  static void hold_next_invocation_monitor_until_child_exit(
+      bool enabled) noexcept;
 
   /**
    * @brief Runs the production one-frame receiver and discards its payload.

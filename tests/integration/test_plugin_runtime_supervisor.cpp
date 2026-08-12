@@ -452,6 +452,70 @@ TEST(PluginRuntimeSupervisor, ExecutesThroughProductArchiveAndPublishesOutput) {
 }
 
 /**
+ * @brief Drains a queued authenticated completion before classifying the
+ * already exited child, then proves exact cleanup and fresh recovery.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ * @note The source-private hold waits for exact child exit without reaping it.
+ * Because the endpoint joins its heartbeat thread before sending completion
+ * and exits only after the complete response, release proves all child work is
+ * finished while both real socket payloads remain available to the Host.
+ */
+TEST(PluginRuntimeSupervisor,
+     DrainsQueuedCompletionBeforeClassifyingNormalExitAndRecovers) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.restart_backoff = std::chrono::milliseconds{1};
+  PluginInvocationExecutor executor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+  const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  ASSERT_FALSE(before.invocation_monitor_exit_hold_armed);
+
+  IsolatedCpuInvocationTestProbe::hold_next_invocation_monitor_until_child_exit(
+      true);
+  IsolatedCpuHostInvocationResult first;
+  try {
+    first = executor.invoke(
+        supervisor_test_invocation("fixture.fill_sequence", 101U));
+  } catch (...) {
+    IsolatedCpuInvocationTestProbe::
+        hold_next_invocation_monitor_until_child_exit(false);
+    throw;
+  }
+  IsolatedCpuInvocationTestProbe::hold_next_invocation_monitor_until_child_exit(
+      false);
+
+  ASSERT_EQ(first.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(first.outputs.size(), 1U);
+  const std::array<std::byte, 6U> expected{std::byte{0}, std::byte{1},
+                                           std::byte{2}, std::byte{3},
+                                           std::byte{4}, std::byte{5}};
+  EXPECT_EQ(supervisor_test_bytes(first.outputs[0]), expected);
+  const IsolatedCpuInvocationTestSnapshot after_first =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  expect_supervised_child_reaped(before, after_first);
+  EXPECT_EQ(after_first.exact_frames_received,
+            before.exact_frames_received + 1U);
+  EXPECT_FALSE(after_first.invocation_monitor_exit_hold_armed);
+  const std::int64_t first_reaped_pid = after_first.last_reaped_child;
+
+  const IsolatedCpuHostInvocationResult recovered = executor.invoke(
+      supervisor_test_invocation("fixture.fill_sequence", 102U));
+  ASSERT_EQ(recovered.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(recovered.outputs.size(), 1U);
+  EXPECT_EQ(supervisor_test_bytes(recovered.outputs[0]), expected);
+  const IsolatedCpuInvocationTestSnapshot after_recovery =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  expect_supervised_child_reaped(after_first, after_recovery);
+  EXPECT_EQ(after_recovery.exact_frames_received,
+            after_first.exact_frames_received + 1U);
+  EXPECT_NE(after_recovery.last_reaped_child, first_reaped_pid);
+  EXPECT_FALSE(after_recovery.invocation_monitor_exit_hold_armed);
+  EXPECT_EQ(supervisor_open_descriptor_count(), descriptor_baseline);
+}
+
+/**
  * @brief Proves bounded request transfer does not consume the callback's full
  * invocation-completion window.
  * @throws Standard fixture, transport, and assertion failures observed by

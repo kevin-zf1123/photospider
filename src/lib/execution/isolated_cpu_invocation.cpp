@@ -369,6 +369,8 @@ std::atomic<std::int64_t> g_next_runtime_started_acceptance_delay_ms{0};
 std::atomic<std::int64_t> g_next_runtime_heartbeat_acceptance_delay_ms{0};
 /** @brief One-shot post-receive InvocationCompleted acceptance test delay. */
 std::atomic<std::int64_t> g_next_invocation_completed_acceptance_delay_ms{0};
+/** @brief One-shot post-request exact-child-exit monitor hold for tests. */
+std::atomic<bool> g_next_invocation_monitor_exit_hold{false};
 
 /**
  * @brief Records one exact successful blocking child reap.
@@ -3411,6 +3413,64 @@ void validate_plugin_runtime_lifecycle_session(
 }
 
 /**
+ * @brief Holds one armed invocation monitor until exact child exit is visible.
+ * @param child Sole exact-PID owner, whose wait status remains unconsumed.
+ * @param deadline Absolute invocation bound limiting the source-private hold.
+ * @return Nothing when disabled or `waitid(WNOWAIT)` proves normal zero exit.
+ * @throws IsolatedCpuInvocationError for an absent child, `waitid`/poll
+ * failure, abnormal exit, or a hold that cannot observe exit before the
+ * invocation bound.
+ * @note The one-shot flag is consumed before any potentially throwing work.
+ * The helper neither reaps nor signals the child and exists only to model Host
+ * descheduling after request transfer while real lifecycle and response data
+ * become queued. Normal production behavior performs no extra syscall.
+ */
+void hold_invocation_monitor_until_child_exit_for_test(
+    SupervisedChildOwner* child, SupervisorDeadline deadline) {
+  if (!g_next_invocation_monitor_exit_hold.exchange(
+          false, std::memory_order_acq_rel)) {
+    return;
+  }
+  if (child == nullptr || !child->active()) {
+    throw IsolatedCpuInvocationError(
+        "plugin runtime invocation-monitor test hold has no active child");
+  }
+  const pid_t pid = child->pid();
+  for (;;) {
+    siginfo_t information{};
+    const int observed = ::waitid(P_PID, static_cast<id_t>(pid), &information,
+                                  WEXITED | WNOHANG | WNOWAIT);
+    if (observed == 0 && information.si_pid == pid) {
+      if (information.si_code != CLD_EXITED || information.si_status != 0) {
+        throw IsolatedCpuInvocationError(
+            "plugin runtime invocation-monitor test child did not exit "
+            "normally");
+      }
+      return;
+    }
+    if (observed < 0 && errno != EINTR) {
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime invocation-monitor test wait failed: ") +
+          std::strerror(errno));
+    }
+    if (SupervisorClock::now() >= deadline) {
+      throw IsolatedCpuInvocationError(
+          "plugin runtime invocation-monitor test hold timed out");
+    }
+    const int timeout = std::min(poll_timeout_until(deadline), 5);
+    int poll_result = -1;
+    do {
+      poll_result = ::poll(nullptr, 0U, timeout);
+    } while (poll_result < 0 && errno == EINTR);
+    if (poll_result < 0) {
+      throw IsolatedCpuInvocationError(
+          std::string("plugin runtime invocation-monitor test poll failed: ") +
+          std::strerror(errno));
+    }
+  }
+}
+
+/**
  * @brief Gives a just-closed lifecycle channel a short exact-status priority.
  * @param child Exact child owner.
  * @param enclosing_deadline Current absolute lifecycle bound.
@@ -3681,7 +3741,10 @@ SupervisorDeadline await_authenticated_runtime_started(
  * @throws IsolatedCpuInvocationError for exact wait failure.
  * @note Each allowed event is accepted at one post-validation monotonic
  * observation. Invocation deadline outranks heartbeat timeout when both are
- * reached there, and an expired event cannot refresh the heartbeat gap.
+ * reached there, and an expired event cannot refresh the heartbeat gap. When
+ * exact status is already reaped, the monitor drains every queued in-sequence
+ * event before classifying that status as exit without completion; a valid
+ * completion advances to response validation with the status still retained.
  */
 SupervisorDeadline await_authenticated_invocation_completed(
     SupervisedSpawnedChild* process, const PluginRuntimeSessionNonce& nonce,
@@ -3697,32 +3760,35 @@ SupervisorDeadline await_authenticated_invocation_completed(
     const SupervisorDeadline now = SupervisorClock::now();
     enforce_invocation_lifecycle_acceptance_deadlines(now, invocation_deadline,
                                                       heartbeat_deadline);
-    if (process->child.poll_reap()) {
-      throw plugin_runtime_fault_from_wait_status(*process->child.wait_status(),
-                                                  "plugin runtime invocation");
-    }
+    const bool child_reaped = process->child.poll_reap();
     const SupervisorDeadline next_deadline =
         std::min(invocation_deadline, heartbeat_deadline);
-    struct pollfd lifecycle_poll{
-        process->supervision.get(),
-        static_cast<std::int16_t>(POLLIN | POLLHUP | POLLERR), 0};
-    const int timeout = std::min(poll_timeout_until(next_deadline), 10);
-    const int result = ::poll(&lifecycle_poll, 1U, timeout);
-    if (result < 0) {
-      if (errno == EINTR) {
+    if (!child_reaped) {
+      struct pollfd lifecycle_poll{
+          process->supervision.get(),
+          static_cast<std::int16_t>(POLLIN | POLLHUP | POLLERR), 0};
+      const int timeout = std::min(poll_timeout_until(next_deadline), 10);
+      const int result = ::poll(&lifecycle_poll, 1U, timeout);
+      if (result < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        throw IsolatedCpuInvocationError(
+            std::string("plugin runtime invocation poll failed: ") +
+            std::strerror(errno));
+      }
+      if (result == 0) {
         continue;
       }
-      throw IsolatedCpuInvocationError(
-          std::string("plugin runtime invocation poll failed: ") +
-          std::strerror(errno));
-    }
-    if (result == 0) {
-      continue;
     }
     try {
       const auto event = receive_plugin_runtime_lifecycle_frame_nonblocking(
           process->supervision.get());
       if (!event.has_value()) {
+        if (child_reaped) {
+          throw plugin_runtime_fault_from_wait_status(
+              *process->child.wait_status(), "plugin runtime invocation");
+        }
         continue;
       }
       validate_plugin_runtime_lifecycle_session(*event, nonce, identity,
@@ -3832,6 +3898,8 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
     const SupervisorDeadline invocation_deadline =
         request_transferred_at + options.invocation_timeout;
     phase = SupervisedHostPhase::Invocation;
+    hold_invocation_monitor_until_child_exit_for_test(&process.child,
+                                                      invocation_deadline);
     const SupervisorDeadline completed_at =
         await_authenticated_invocation_completed(
             &process, nonce, prepared.request.identity,
@@ -3946,7 +4014,8 @@ IsolatedCpuInvocationTestProbe::snapshot() noexcept {
       g_spawned_children.load(std::memory_order_relaxed),
       g_reaped_children.load(std::memory_order_relaxed),
       g_last_reaped_child.load(std::memory_order_relaxed),
-      g_exact_frames_received.load(std::memory_order_relaxed)};
+      g_exact_frames_received.load(std::memory_order_relaxed),
+      g_next_invocation_monitor_exit_hold.load(std::memory_order_acquire)};
 }
 
 /** @copydoc IsolatedCpuInvocationTestProbe::delay_next_supervised_request_send
@@ -3987,6 +4056,16 @@ void IsolatedCpuInvocationTestProbe::delay_next_lifecycle_event_acceptance(
           "supervised lifecycle-acceptance test event is invalid");
   }
   delay_slot->store(delay.count(), std::memory_order_release);
+}
+
+/**
+ * @copydoc IsolatedCpuInvocationTestProbe::
+ * hold_next_invocation_monitor_until_child_exit
+ */
+void IsolatedCpuInvocationTestProbe::
+    hold_next_invocation_monitor_until_child_exit(  // NOLINT(whitespace/indent_namespace)
+        bool enabled) noexcept {
+  g_next_invocation_monitor_exit_hold.store(enabled, std::memory_order_release);
 }
 
 /** @copydoc IsolatedCpuInvocationTestProbe::receive_one_packet */
