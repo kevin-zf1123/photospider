@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -46,8 +47,29 @@ namespace {
 
 using ps::test::PolicyFixtureController;
 
+#if defined(__linux__)
 /** @brief Maximum time used by fixture-controlled synchronization tests. */
 constexpr std::chrono::seconds kFixtureWaitTimeout{5};
+#endif
+
+#if defined(__APPLE__)
+/**
+ * @brief Selects or clears the policy native-mapping sentinel path.
+ * @param path Nonempty observation path, or empty to clear the environment.
+ * @return Nothing after updating process environment state.
+ * @throws std::runtime_error when Darwin rejects the environment update.
+ * @note The value is test-only and never participates in trust admission.
+ */
+void set_policy_initializer_sentinel(const std::filesystem::path& path) {
+  const int result =
+      path.empty() ? ::unsetenv("PS_TEST_POLICY_PLUGIN_INITIALIZER_SENTINEL")
+                   : ::setenv("PS_TEST_POLICY_PLUGIN_INITIALIZER_SENTINEL",
+                              path.c_str(), 1);
+  if (result != 0) {
+    throw std::runtime_error("cannot configure policy initializer sentinel");
+  }
+}
+#endif
 
 /**
  * @brief Captures one expected `GraphError` code from a callable.
@@ -65,6 +87,7 @@ GraphErrc graph_error_code(const std::function<void()>& operation) {
   return GraphErrc::Unknown;
 }
 
+#if defined(__linux__)
 /**
  * @brief Synchronizes one fixture callback with its controlling test thread.
  * @note Every field except `registry` is protected by `mutex`.
@@ -151,6 +174,7 @@ std::uint32_t PS_POLICY_CALL throwing_hook(void*,
                                            ps_policy_fixture_hook_event) {
   throw std::runtime_error("fixture callback exception");
 }
+#endif
 
 /**
  * @brief Verifies the exact natural-layout C++17 ABI profile at compile time.
@@ -176,6 +200,7 @@ TEST(PolicyPluginAbi, MatchesFrozenNaturalLayoutAndCallbackProfile) {
   SUCCEED();
 }
 
+#if defined(__linux__)
 /**
  * @brief Builds one complete authority-free candidate for binding tests.
  * @param candidate_id Unique opaque ready-entry identity.
@@ -200,6 +225,7 @@ ps_policy_candidate_v1 make_candidate(std::uint64_t candidate_id,
   candidate.enqueue_sequence = enqueue_sequence;
   return candidate;
 }
+#endif
 
 /**
  * @brief Verifies immutable built-in registration and class support.
@@ -231,6 +257,47 @@ TEST(PolicyRegistry, StartsWithExactBuiltinsAndClassSpecificBindings) {
       GraphError);
 }
 
+#if defined(__APPLE__)
+/**
+ * @brief Proves Darwin policy admission rejects before dyld or callbacks.
+ * @throws Filesystem and environment setup failures unchanged.
+ * @note The signed fixture carries a native initializer. Absence of its
+ * sentinel proves no mapping occurred; builtin-only registry state proves no
+ * ABI, metadata, create, select, destroy, or publication side effect followed.
+ */
+TEST(PolicyRegistry, DarwinRejectsPolicyBeforeNativeMappingOrCallbacks) {
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() /
+      "photospider-darwin-policy-fail-closed-test";
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+  std::filesystem::create_directories(root);
+  const std::filesystem::path sentinel = root / "policy-mapped";
+  set_policy_initializer_sentinel(sentinel);
+
+  PolicyRegistry registry;
+  try {
+    EXPECT_EQ(graph_error_code(
+                  [&registry] { registry.load(PS_TEST_POLICY_PLUGIN_PATH); }),
+              GraphErrc::InvalidParameter);
+    set_policy_initializer_sentinel({});
+  } catch (...) {
+    set_policy_initializer_sentinel({});
+    std::filesystem::remove_all(root, ignored);
+    throw;
+  }
+
+  EXPECT_FALSE(std::filesystem::exists(sentinel));
+  EXPECT_EQ(registry.available_types(),
+            (std::vector<std::string>{"interactive", "throughput"}));
+  EXPECT_TRUE(registry.loaded_plugins().empty());
+  std::filesystem::remove_all(root);
+}
+#endif
+
+#if defined(__linux__)
+// Native policy execution requires the Linux exact-object profile. Darwin
+// retains the ABI/builtin and dedicated fail-closed cases above.
 /**
  * @brief Verifies pre-publication loader failures leave no visible residue.
  * @throws Standard allocation, filesystem, loader, or synchronization
@@ -825,6 +892,7 @@ TEST(PolicyRegistry, ParentWatchdogTerminatesNonreturningCallbackProcess) {
   control.reset();
 #endif
 }
+#endif
 
 }  // namespace
 }  // namespace ps::policy

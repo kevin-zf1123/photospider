@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import pathlib
+import platform
 import re
 import subprocess
 
@@ -383,6 +384,8 @@ def query_ctest_inventory(
 def validate_provider_disabled_inventory(
     inventory: dict[str, dict[str, object]],
     expected_sentinels: set[str],
+    *,
+    native_plugin_execution_supported: bool,
 ) -> None:
     """@brief Require the exact provider-disabled CTest surface.
 
@@ -390,6 +393,8 @@ def validate_provider_disabled_inventory(
       build.
     @param expected_sentinels Exact registered-but-unbuilt names derived from
       CMake's target inventory and the completed focused build closure.
+    @param native_plugin_execution_supported Whether the configured target
+      platform registers native operation-DSO execution tests.
     @return None when only the intended focused tests, install smoke, and
       CMake-derived registered-only sentinels exist.
     @throws RuntimeError If a focused test is missing, a sentinel is malformed
@@ -401,6 +406,9 @@ def validate_provider_disabled_inventory(
     @note The current V-13 closure deliberately leaves the compute-I/O and
       packed-FP4 behavior targets unbuilt. Their placeholders are observations
       derived from the configured target manifest, not hard-coded inputs.
+    @note Darwin builds the optional provider executable for compile coverage
+      but does not register its native operation-DSO execution case because
+      every native plugin role fails closed on that platform.
     """
 
     disk_cache_tests = {
@@ -634,13 +642,12 @@ def validate_provider_disabled_inventory(
             "provider-disabled expected sentinel inventory is malformed: "
             f"{malformed_sentinels}"
         )
-    expected = {
-        "DependencyDisabledInstallSmoke",
-        (
-            "OptionalOpenCvOperationProvider."
-            "ReplacementExecutesAndRestores"
-        ),
-    } | (
+    native_plugin_tests = set()
+    if native_plugin_execution_supported:
+        native_plugin_tests.add(
+            "OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores"
+        )
+    expected = {"DependencyDisabledInstallSmoke"} | native_plugin_tests | (
         disk_cache_tests
         | lifecycle_tests
         | dense_image_tests
@@ -791,7 +798,20 @@ def main() -> int:
     repo = args.repo.resolve()
     work = remove_work_tree(args.work, repo)
     configuration = args.config or "RelWithDebInfo"
+    native_plugin_execution_supported = platform.system() == "Linux"
 
+    focused_filter = (
+        "^(DiskCacheDiagnosticConcurrency\\..*|"
+        "CpuDenseTensorImageOperation\\..*|"
+        "KernelLifecycleConcurrency\\..*|"
+        "ValueIdentityAcrossDsos\\..*"
+    )
+    if native_plugin_execution_supported:
+        focused_filter += (
+            "|OptionalOpenCvOperationProvider\\."
+            "ReplacementExecutesAndRestores"
+        )
+    focused_filter += ")$"
     run(
         [
             args.cmake_executable,
@@ -832,6 +852,7 @@ def main() -> int:
     validate_provider_disabled_inventory(
         inventory,
         expected_registered_gtest_sentinels(work, configuration),
+        native_plugin_execution_supported=native_plugin_execution_supported,
     )
     run(
         [
@@ -842,14 +863,7 @@ def main() -> int:
             "-C",
             configuration,
             "-R",
-            (
-                "^(DiskCacheDiagnosticConcurrency\\..*|"
-                "CpuDenseTensorImageOperation\\..*|"
-                "KernelLifecycleConcurrency\\..*|"
-                "ValueIdentityAcrossDsos\\..*|"
-                "OptionalOpenCvOperationProvider\\."
-                "ReplacementExecutesAndRestores)$"
-            ),
+            focused_filter,
         ],
         repo,
     )

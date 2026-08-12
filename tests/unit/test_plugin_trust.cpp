@@ -16,7 +16,7 @@
 #include <type_traits>
 #include <vector>
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__linux__)
 #include <dlfcn.h>
 #include <fcntl.h>
 #endif
@@ -111,6 +111,7 @@ std::string sign_test_manifest(std::string_view manifest) {
   return result;
 }
 
+#if defined(__linux__)
 /**
  * @brief Hashes all bytes from one test artifact with SHA-256.
  * @param path Exact source path to read once.
@@ -146,7 +147,6 @@ PluginContentDigest hash_test_file(const std::filesystem::path& path) {
   return digest;
 }
 
-#if defined(__APPLE__) || defined(__linux__)
 /**
  * @brief Replaces all bytes of one already-open writable test artifact.
  * @param descriptor Writable descriptor opened before authorization.
@@ -282,12 +282,14 @@ void set_initializer_sentinel_environment(const std::filesystem::path& path) {
 }
 
 /**
- * @brief Proves a valid signed operation becomes a private snapshot capability.
- * @throws Nothing when signature, kind, digest, and descriptor path agree.
+ * @brief Proves Linux authorizes a signed operation and other hosts fail
+ * closed.
+ * @throws Nothing when the platform's exact-object profile is enforced.
  */
-TEST(PluginTrustPolicy, AuthorizesSignedOperationAsPrivateSnapshot) {
+TEST(PluginTrustPolicy, EnforcesPlatformProfileForSignedOperation) {
   const PluginTrustPolicy policy =
       PluginTrustPolicy::load(valid_configuration());
+#if defined(__linux__)
   AuthorizedPluginFile authorized = policy.authorize(
       PS_TEST_SIGNED_OPERATION_PLUGIN, PluginArtifactKind::Operation);
 
@@ -297,6 +299,15 @@ TEST(PluginTrustPolicy, AuthorizesSignedOperationAsPrivateSnapshot) {
             std::filesystem::absolute(PS_TEST_SIGNED_OPERATION_PLUGIN));
   EXPECT_FALSE(authorized.native_load_path().empty());
   EXPECT_GT(authorized.native_descriptor(), 2);
+#else
+  try {
+    static_cast<void>(policy.authorize(PS_TEST_SIGNED_OPERATION_PLUGIN,
+                                       PluginArtifactKind::Operation));
+    FAIL() << "unsupported hosts must not authorize native operation code";
+  } catch (const PluginTrustError& error) {
+    EXPECT_EQ(error.code(), PluginTrustErrorCode::ExactObjectUnsupported);
+  }
+#endif
 }
 
 /**
@@ -321,7 +332,11 @@ TEST(PluginTrustPolicy, RejectsBadSignatureAndWrongKind) {
                                        PluginArtifactKind::Policy));
     FAIL() << "an operation trust entry must not authorize policy code";
   } catch (const PluginTrustError& error) {
+#if defined(__linux__)
     EXPECT_EQ(error.code(), PluginTrustErrorCode::ArtifactNotApproved);
+#else
+    EXPECT_EQ(error.code(), PluginTrustErrorCode::ExactObjectUnsupported);
+#endif
   }
 }
 
@@ -337,7 +352,11 @@ TEST(PluginTrustPolicy, RejectsAbsentEntryAndRuntimePackageMismatch) {
                                        PluginArtifactKind::Operation));
     FAIL() << "an absent digest must not receive native loading authority";
   } catch (const PluginTrustError& error) {
+#if defined(__linux__)
     EXPECT_EQ(error.code(), PluginTrustErrorCode::ArtifactNotApproved);
+#else
+    EXPECT_EQ(error.code(), PluginTrustErrorCode::ExactObjectUnsupported);
+#endif
   }
 
   PluginPackageIdentity wrong_package;
@@ -349,10 +368,10 @@ TEST(PluginTrustPolicy, RejectsAbsentEntryAndRuntimePackageMismatch) {
                                        wrong_package));
     FAIL() << "a signed runtime must still reject a different package key";
   } catch (const PluginTrustError& error) {
-#if defined(__APPLE__)
-    EXPECT_EQ(error.code(), PluginTrustErrorCode::ExactObjectUnsupported);
-#else
+#if defined(__linux__)
     EXPECT_EQ(error.code(), PluginTrustErrorCode::PackageMismatch);
+#else
+    EXPECT_EQ(error.code(), PluginTrustErrorCode::ExactObjectUnsupported);
 #endif
   }
 }
@@ -397,10 +416,12 @@ TEST(PluginTrustPolicy, RejectsDuplicateContentRoleAcrossSignedGenerations) {
 }
 
 /**
- * @brief Proves an absent operation entry cannot run a native initializer.
+ * @brief Proves operation rejection cannot run a native DSO initializer.
  * @throws Filesystem, environment, and loader setup failures unchanged.
+ * @note Linux exercises an absent manifest entry. Darwin signs the fixture but
+ * still rejects it at the platform exact-object boundary.
  */
-TEST(PluginTrustPolicy, RejectsBeforeUntrustedOperationInitializerExecutes) {
+TEST(PluginTrustPolicy, RejectsOperationBeforeNativeInitializerExecutes) {
   const std::filesystem::path root = std::filesystem::temp_directory_path() /
                                      "photospider-untrusted-initializer-test";
   std::error_code ignored;
@@ -427,6 +448,7 @@ TEST(PluginTrustPolicy, RejectsBeforeUntrustedOperationInitializerExecutes) {
   EXPECT_EQ(result.attempted, 1);
   EXPECT_EQ(result.loaded, 0);
   ASSERT_EQ(result.errors.size(), 1U);
+  EXPECT_EQ(result.errors.front().code, GraphErrc::InvalidParameter);
   EXPECT_FALSE(std::filesystem::exists(sentinel));
   EXPECT_EQ(manager.loaded_plugin_count(), handles_before);
   std::filesystem::remove_all(root);
@@ -436,8 +458,8 @@ TEST(PluginTrustPolicy, RejectsBeforeUntrustedOperationInitializerExecutes) {
  * @brief Proves preopened source mutation cannot alter authorized policy code.
  * @throws Filesystem, hashing, and native policy loading failures unchanged.
  */
-TEST(PluginTrustPolicy, RetainsPrivatePolicySnapshotAfterSourceMutation) {
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__linux__)
+TEST(PluginTrustPolicy, LinuxRetainsPolicySnapshotAfterSourceMutation) {
   const std::filesystem::path root =
       std::filesystem::temp_directory_path() /
       "photospider-plugin-trust-source-mutation-test";
@@ -461,10 +483,39 @@ TEST(PluginTrustPolicy, RetainsPrivatePolicySnapshotAfterSourceMutation) {
   ScopedPolicyLibrary loaded(authorized.native_load_path());
   EXPECT_TRUE(loaded.exposes_compatible_policy_behavior());
   std::filesystem::remove_all(root);
-#else
-  GTEST_SKIP() << "descriptor-backed DSO snapshots are POSIX-only";
-#endif
 }
+#endif
+
+#if defined(__APPLE__)
+/**
+ * @brief Proves every Darwin native role fails before candidate path access.
+ * @throws Nothing when all roles return the closed platform error.
+ * @note The candidate deliberately does not exist. Any filesystem admission
+ * attempt would return an artifact error instead of the required platform
+ * decision.
+ */
+TEST(PluginTrustPolicy, DarwinRejectsEveryNativeRoleBeforeCandidateAccess) {
+  const PluginTrustPolicy policy =
+      PluginTrustPolicy::load(valid_configuration());
+  const std::filesystem::path absent =
+      std::filesystem::temp_directory_path() /
+      "photospider-darwin-native-role-must-not-be-opened";
+  std::error_code ignored;
+  std::filesystem::remove(absent, ignored);
+
+  for (const PluginArtifactKind kind :
+       {PluginArtifactKind::Operation, PluginArtifactKind::Policy,
+        PluginArtifactKind::IsolatedRuntime}) {
+    try {
+      static_cast<void>(policy.authorize(absent, kind));
+      FAIL() << "Darwin must reject every native plugin role";
+    } catch (const PluginTrustError& error) {
+      EXPECT_EQ(error.code(), PluginTrustErrorCode::ExactObjectUnsupported);
+    }
+  }
+  EXPECT_FALSE(std::filesystem::exists(absent));
+}
+#endif
 
 /**
  * @brief Proves a final symlink is rejected before digest-based admission.

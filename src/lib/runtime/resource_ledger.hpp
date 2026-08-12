@@ -556,10 +556,19 @@ class ResourceLedger final {
      */
     ~PluginResourceToken() noexcept;
 
-    /** @brief Prevents copying Host-minted authority. */
+    /**
+     * @brief Prevents copying Host-minted authority.
+     * @param other Source token that cannot be copied.
+     * @throws Nothing because this overload is deleted.
+     */
     PluginResourceToken(const PluginResourceToken& other) = delete;
 
-    /** @brief Prevents copy-assigning Host-minted authority. */
+    /**
+     * @brief Prevents copy-assigning Host-minted authority.
+     * @param other Source token that cannot be copied.
+     * @return No value because this overload is deleted.
+     * @throws Nothing because this overload is deleted.
+     */
     PluginResourceToken& operator=(const PluginResourceToken& other) = delete;
 
     /**
@@ -632,22 +641,50 @@ class ResourceLedger final {
    * The lease spans materialization, spawn, exec, callback, validation, and
    * publication. Destruction releases its exact vector once while the ledger's
    * replay tombstone remains immutable.
+   *
+   * @note Move and destruction must not race on the same lease object. Ledger
+   * settlement is internally serialized across independent leases.
    */
   class PluginResourceLease final {
    public:
-    /** @brief Transfers one consumed reservation. */
+    /**
+     * @brief Transfers one consumed reservation and settlement obligation.
+     * @param other Lease made inactive by the transfer.
+     * @throws Nothing.
+     * @note No ledger accounting changes; only unique local ownership moves.
+     */
     PluginResourceLease(PluginResourceLease&& other) noexcept;
 
-    /** @brief Replaces this lease after exactly settling prior ownership. */
+    /**
+     * @brief Replaces this lease after exactly settling prior ownership.
+     * @param other Lease made inactive by the transfer.
+     * @return Reference to this lease after transfer.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     * @note Self-move is a no-op. Otherwise this lease settles its old vector
+     * before taking the source lease's unique settlement obligation.
+     */
     PluginResourceLease& operator=(PluginResourceLease&& other) noexcept;
 
-    /** @brief Settles the exact consumed vector once. */
+    /**
+     * @brief Settles the exact consumed vector once.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     * @note The replay tombstone is retained by the ledger after settlement.
+     */
     ~PluginResourceLease() noexcept;
 
-    /** @brief Prevents copying consumed authority. */
+    /**
+     * @brief Prevents copying consumed authority.
+     * @param other Source lease that cannot be copied.
+     * @throws Nothing because this overload is deleted.
+     */
     PluginResourceLease(const PluginResourceLease& other) = delete;
 
-    /** @brief Prevents copy-assigning consumed authority. */
+    /**
+     * @brief Prevents copy-assigning consumed authority.
+     * @param other Source lease that cannot be copied.
+     * @return No value because this overload is deleted.
+     * @throws Nothing because this overload is deleted.
+     */
     PluginResourceLease& operator=(const PluginResourceLease& other) = delete;
 
     /**
@@ -667,11 +704,24 @@ class ResourceLedger final {
    private:
     friend class PluginResourceToken;
 
-    /** @brief Creates an active lease by ownership transfer from one token. */
+    /**
+     * @brief Creates an active lease by ownership transfer from one token.
+     * @param root Shared root containing the committed plugin subledger.
+     * @param resources Exact consumed vector to settle once.
+     * @throws Nothing.
+     * @note The caller has already spent the identity tombstone and detached
+     * token ownership; construction performs no admission or accounting.
+     */
     PluginResourceLease(std::shared_ptr<ResourceLedgerRootState> root,
                         PluginResourceVector resources) noexcept;
 
-    /** @brief Settles this exact vector and makes the lease inactive. */
+    /**
+     * @brief Settles this exact vector and makes the lease inactive.
+     * @return Nothing.
+     * @throws Nothing; invariant or synchronization failure terminates.
+     * @note Moves root ownership out before taking the internal ledger lock,
+     * so re-entry or repeated destruction cannot settle the vector twice.
+     */
     void reset() noexcept;
 
     /** @brief Shared ledger root retaining settlement authority. */

@@ -190,6 +190,7 @@ class ScopedRequestRouterRuntime final {
   UniqueFd lock_fd_;
 };
 
+#if defined(__linux__)
 /**
  * @brief Returns the active-build directory for the lifecycle operation DSO.
  * @return CMake-provided repository fixture output directory.
@@ -200,6 +201,7 @@ class ScopedRequestRouterRuntime final {
 std::filesystem::path lifecycle_operation_plugin_dir() {
   return std::filesystem::path(PS_TEST_OP_PLUGIN_DIR);
 }
+#endif
 
 /**
  * @brief Clears process-global operation plugins around a lifecycle test.
@@ -629,6 +631,7 @@ Json parse_response(const std::string& payload) {
   return std::move(parsed.value);
 }
 
+#if defined(__linux__)
 /**
  * @brief Routes one complete typed request through a borrowed router.
  * @param router Active router whose runtime has already started.
@@ -649,6 +652,7 @@ Json route_test_request(RequestRouter& router, const std::string& method,
       {"method", method},
       {"params", std::move(params)}}.dump()));
 }
+#endif
 
 /**
  * @brief Returns the exact JSON representation of one public pixel rectangle.
@@ -2728,6 +2732,8 @@ TEST_F(StableInspectionPagingProtocolTest,
   EXPECT_EQ(host_.call_count("policy.loaded_plugins"), 1U);
 }
 
+#if defined(__linux__)
+// This case is a Linux native-execution consumer, not an IPC codec contract.
 TEST(ProtocolOperationPlugins,
      RealFixtureRemainsProcessOwnedAcrossHostAndRouterLifetimes) {
   ScopedOperationPluginCleanup cleanup;
@@ -2820,6 +2826,7 @@ TEST(ProtocolOperationPlugins,
               0);
   }
 }
+#endif
 
 TEST_F(HostRoutedGraphStateProtocolTest,
        RoutesRemainingInspectionFamiliesWithCopiedPublicValues) {

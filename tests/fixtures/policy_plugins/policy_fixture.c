@@ -1,6 +1,10 @@
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
+#if defined(__APPLE__)
+#include <stdio.h>
+#include <stdlib.h>
+#endif
 
 #include "photospider/policy/policy_plugin_api.h"
 #include "policy_fixture_control.h"  // NOLINT(build/include_subdir)
@@ -27,6 +31,41 @@
 #define PS_POLICY_FIXTURE_MAYBE_UNUSED __attribute__((unused))
 #else
 #define PS_POLICY_FIXTURE_MAYBE_UNUSED
+#endif
+
+#if defined(__APPLE__)
+/**
+ * @brief Emits the Darwin native-mapping sentinel selected by the test.
+ * @return Nothing after a best-effort write, or immediately without a path.
+ * @throws Nothing; C environment and stdio failures are intentionally ignored.
+ * @note The environment value is observation-only and grants no trust or
+ * loading authority. Production authorization must prevent this function from
+ * running on Darwin.
+ */
+static void fixture_emit_native_mapping_sentinel(void) {
+  const char* path = getenv("PS_TEST_POLICY_PLUGIN_INITIALIZER_SENTINEL");
+  if (path == NULL || *path == '\0') {
+    return;
+  }
+  FILE* sentinel = fopen(path, "wb");
+  if (sentinel == NULL) {
+    return;
+  }
+  static const char kMessage[] = "policy fixture mapped\n";
+  (void)fwrite(kMessage, 1U, sizeof(kMessage) - 1U, sentinel);
+  (void)fclose(sentinel);
+}
+
+/**
+ * @brief Records Darwin native policy mapping before loader return.
+ * @return Nothing.
+ * @throws Nothing; the delegated best-effort probe contains every failure.
+ * @note A fail-closed `PolicyRegistry::load` must reject authorization before
+ * dyld can invoke this initializer or any policy ABI callback.
+ */
+__attribute__((constructor)) static void fixture_native_initializer(void) {
+  fixture_emit_native_mapping_sentinel();
+}
 #endif
 
 /**

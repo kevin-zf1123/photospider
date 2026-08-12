@@ -50,7 +50,14 @@ extern "C" int __stdcall DllMain(void* module, std::uint32_t reason,
   return 1;
 }
 #else
-/** @brief POSIX DSO initializer forwarding to the sentinel probe. */
+/**
+ * @brief Forwards POSIX DSO initialization to the sentinel probe.
+ * @return Nothing.
+ * @throws Nothing; the delegated probe contains every environment/I/O fault.
+ * @note The native loader calls this helper before returning from `dlopen`.
+ * Trust-gate tests require authorization rejection to prevent this helper and
+ * every later registration callback from executing.
+ */
 __attribute__((constructor)) void untrusted_initializer() noexcept {
   emit_untrusted_initializer_sentinel();
 }

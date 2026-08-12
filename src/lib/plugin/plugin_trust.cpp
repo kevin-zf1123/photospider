@@ -51,9 +51,6 @@ constexpr std::size_t kMaximumManifestBytes = 4U * 1024U * 1024U;
 constexpr std::size_t kSignatureHexBytes = 128U;
 /** @brief Maximum accepted public-key PEM bytes. */
 constexpr std::size_t kMaximumPublicKeyBytes = 64U * 1024U;
-/** @brief Maximum accepted native plugin artifact bytes. */
-constexpr std::uint64_t kMaximumPluginArtifactBytes = 1ULL << 30U;
-
 /**
  * @brief Complete immutable manifest entry sorted by signed identity.
  * @throws Nothing for moves; path-free scalar/vector values allocate nowhere.
@@ -457,7 +454,10 @@ void verify_manifest_signature(const std::vector<std::byte>& manifest,
   }
 }
 
-#ifndef _WIN32
+#if defined(__linux__)
+/** @brief Maximum accepted Linux native plugin artifact bytes. */
+constexpr std::uint64_t kMaximumPluginArtifactBytes = 1ULL << 30U;
+
 /**
  * @brief Unique owner for one POSIX artifact descriptor.
  * @throws Nothing for moves, reset, and destruction.
@@ -667,7 +667,7 @@ void copy_artifact_bytes(int source_descriptor, int destination_descriptor,
  * @param expected_digest Manifest-approved SHA-256 digest.
  * @return Nothing when type, size, and digest all match.
  * @throws PluginTrustError for type, size, or digest mismatch.
- * @note This check runs only after Linux sealing or Darwin close/reopen, so the
+ * @note This check runs only after irreversible Linux memfd sealing, so the
  * returned authorization never relies on the mutable candidate descriptor.
  */
 void confirm_private_snapshot(int descriptor, std::uint64_t expected_size,
@@ -787,109 +787,6 @@ UniquePosixFd create_linux_sealed_snapshot(
 }
 #endif
 
-#if defined(__APPLE__)
-/**
- * @brief Removes partial Darwin DSO snapshot namespace state.
- * @param snapshot_path Snapshot file path, possibly empty or already unlinked.
- * @param directory Private directory path, possibly empty.
- * @return Nothing after best-effort cleanup.
- * @throws Nothing.
- */
-void cleanup_darwin_snapshot_paths(
-    const std::filesystem::path& snapshot_path,
-    const std::filesystem::path& directory) noexcept {
-  if (!snapshot_path.empty()) {
-    static_cast<void>(::unlink(snapshot_path.c_str()));
-  }
-  if (!directory.empty()) {
-    static_cast<void>(::rmdir(directory.c_str()));
-  }
-}
-
-/**
- * @brief Copies approved DSO bytes into one anonymous Darwin descriptor.
- * @param source_descriptor Stable verified source descriptor.
- * @param source_size Exact positive source size from `fstat`.
- * @param expected_digest Manifest-approved source digest.
- * @return Read-only anonymous snapshot descriptor after digest confirmation.
- * @throws PluginTrustError for temporary namespace, copy, permission, sync,
- * reopen, type, size, or digest failure.
- * @throws std::bad_alloc when bounded path state cannot allocate.
- * @note The mode-0700 directory and snapshot pathname are unlinked immediately
- * after close/reopen and confirmation. Only the anonymous descriptor survives
- * for `/dev/fd/N` DSO loading; it is never usable for isolated runtime exec.
- */
-UniquePosixFd create_darwin_dso_snapshot(
-    int source_descriptor, std::uint64_t source_size,
-    const PluginContentDigest& expected_digest) {
-  std::filesystem::path directory;
-  std::filesystem::path snapshot_path;
-  try {
-    std::string directory_template = (std::filesystem::temp_directory_path() /
-                                      "photospider-plugin-dso.XXXXXX")
-                                         .string();
-    char* const created_directory = ::mkdtemp(directory_template.data());
-    if (created_directory == nullptr) {
-      throw PluginTrustError(
-          PluginTrustErrorCode::ExactObjectUnsupported,
-          std::string("Cannot create private Darwin DSO namespace: ") +
-              std::strerror(errno));
-    }
-    directory = created_directory;
-    if (::chmod(directory.c_str(), S_IRWXU) != 0) {
-      throw PluginTrustError(
-          PluginTrustErrorCode::ExactObjectUnsupported,
-          "Cannot protect private Darwin DSO snapshot namespace.");
-    }
-    snapshot_path = directory / "artifact";
-    int write_flags = O_WRONLY | O_CREAT | O_EXCL;
-#ifdef O_CLOEXEC
-    write_flags |= O_CLOEXEC;
-#endif
-#ifdef O_NOFOLLOW
-    write_flags |= O_NOFOLLOW;
-#endif
-    UniquePosixFd writable(
-        ::open(snapshot_path.c_str(), write_flags, S_IRUSR | S_IWUSR));
-    if (writable.get() < 0) {
-      throw PluginTrustError(PluginTrustErrorCode::ExactObjectUnsupported,
-                             "Cannot create private Darwin DSO snapshot.");
-    }
-    copy_artifact_bytes(source_descriptor, writable.get(), source_size);
-    if (::fsync(writable.get()) != 0 ||
-        ::fchmod(writable.get(), S_IRUSR) != 0) {
-      throw PluginTrustError(PluginTrustErrorCode::ExactObjectUnsupported,
-                             "Cannot finalize private Darwin DSO snapshot.");
-    }
-    writable.reset();
-    int read_flags = O_RDONLY;
-#ifdef O_CLOEXEC
-    read_flags |= O_CLOEXEC;
-#endif
-#ifdef O_NOFOLLOW
-    read_flags |= O_NOFOLLOW;
-#endif
-    UniquePosixFd retained(::open(snapshot_path.c_str(), read_flags));
-    if (retained.get() < 0) {
-      throw PluginTrustError(PluginTrustErrorCode::ExactObjectUnsupported,
-                             "Cannot reopen private Darwin DSO snapshot.");
-    }
-    normalize_private_snapshot_descriptor(&retained);
-    confirm_private_snapshot(retained.get(), source_size, expected_digest);
-    if (::unlink(snapshot_path.c_str()) != 0 ||
-        ::rmdir(directory.c_str()) != 0) {
-      throw PluginTrustError(PluginTrustErrorCode::ExactObjectUnsupported,
-                             "Cannot anonymize private Darwin DSO snapshot.");
-    }
-    snapshot_path.clear();
-    directory.clear();
-    return retained;
-  } catch (...) {
-    cleanup_darwin_snapshot_paths(snapshot_path, directory);
-    throw;
-  }
-}
-#endif
 #endif
 
 }  // namespace
@@ -979,12 +876,8 @@ std::string AuthorizedPluginFile::native_load_path() const {
     throw PluginTrustError(PluginTrustErrorCode::ArtifactInvalid,
                            "Authorized plugin file is inactive.");
   }
-#if defined(__APPLE__)
-  return "/dev/fd/" + std::to_string(native_owner_);
-#elif defined(__linux__)
+#if defined(__linux__)
   return "/proc/self/fd/" + std::to_string(native_owner_);
-#elif defined(_WIN32)
-  return original_path_.string();
 #else
   throw PluginTrustError(PluginTrustErrorCode::ExactObjectUnsupported,
                          "Exact-object DSO loading is unsupported here.");
@@ -1051,31 +944,28 @@ AuthorizedPluginFile PluginTrustPolicy::authorize(
     throw PluginTrustError(PluginTrustErrorCode::ConfigurationInvalid,
                            "Plugin trust policy is inactive.");
   }
+#if defined(__APPLE__)
+  static_cast<void>(candidate);
+  static_cast<void>(kind);
+  static_cast<void>(expected_package);
+  throw PluginTrustError(
+      PluginTrustErrorCode::ExactObjectUnsupported,
+      "Darwin has no unprivileged immutable exact-object boundary for native "
+      "plugin loading.");
+#elif !defined(__linux__)
+  static_cast<void>(candidate);
+  static_cast<void>(kind);
+  static_cast<void>(expected_package);
+  throw PluginTrustError(
+      PluginTrustErrorCode::ExactObjectUnsupported,
+      "Private immutable plugin snapshots are unsupported on this platform.");
+#else
   if (kind != PluginArtifactKind::IsolatedRuntime &&
       expected_package.has_value()) {
     throw PluginTrustError(
         PluginTrustErrorCode::ConfigurationInvalid,
         "Expected package identity is valid only for isolated-runtime trust.");
   }
-#if defined(__APPLE__)
-  if (kind == PluginArtifactKind::IsolatedRuntime) {
-    throw PluginTrustError(
-        PluginTrustErrorCode::ExactObjectUnsupported,
-        "Darwin cannot execute an anonymous authorized runtime descriptor.");
-  }
-#elif !defined(__linux__)
-  throw PluginTrustError(
-      PluginTrustErrorCode::ExactObjectUnsupported,
-      "Private immutable plugin snapshots are unsupported on this platform.");
-#endif
-#ifdef _WIN32
-  static_cast<void>(candidate);
-  static_cast<void>(kind);
-  static_cast<void>(expected_package);
-  throw PluginTrustError(
-      PluginTrustErrorCode::ExactObjectUnsupported,
-      "Private immutable plugin snapshots are unsupported on Windows.");
-#else
   const std::filesystem::path absolute = std::filesystem::absolute(candidate);
   int flags = O_RDONLY;
 #ifdef O_CLOEXEC
@@ -1122,21 +1012,8 @@ AuthorizedPluginFile PluginTrustPolicy::authorize(
     throw PluginTrustError(PluginTrustErrorCode::PackageMismatch,
                            "Plugin runtime package identity is not approved.");
   }
-  UniquePosixFd snapshot;
-#if defined(__linux__)
-  snapshot = create_linux_sealed_snapshot(
+  UniquePosixFd snapshot = create_linux_sealed_snapshot(
       source.get(), static_cast<std::uint64_t>(before.st_size), digest);
-#if defined(__APPLE__)
-#error "Linux and Darwin platform macros cannot both be active"
-#endif
-#elif defined(__APPLE__)
-  snapshot = create_darwin_dso_snapshot(
-      source.get(), static_cast<std::uint64_t>(before.st_size), digest);
-#else
-  throw PluginTrustError(
-      PluginTrustErrorCode::ExactObjectUnsupported,
-      "Private immutable plugin snapshots are unsupported here.");
-#endif
   source.reset();
   return AuthorizedPluginFile(absolute, kind, matching->package,
                               matching->digest, snapshot.release());

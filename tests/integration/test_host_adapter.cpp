@@ -4796,6 +4796,8 @@ TEST(EmbeddedHostAdapter, DirtySourceFailuresPreserveStatusCodes) {
             GraphErrc::InvalidParameter);
 }
 
+#if defined(__linux__)
+// Darwin native DSO behavior is covered by the dedicated trust/registry tests.
 TEST(EmbeddedHostAdapter, PolicyScanAndOperationPluginUseStatusValues) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_policy_test");
@@ -5042,6 +5044,7 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(fresh_sources.status.ok) << fresh_sources.status.message;
   EXPECT_EQ(fresh_sources.value.count("plugin_lifecycle:op"), 0u);
 }
+#endif
 
 }  // namespace
 }  // namespace ps

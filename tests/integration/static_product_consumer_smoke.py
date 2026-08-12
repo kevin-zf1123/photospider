@@ -611,6 +611,8 @@ def run_installed_policy_contract_probe(plugin: Path) -> int:
     @throws None Load and symbol failures are converted to status 127.
     @note The DSO contains no backend dependency. Its private probe exercises
       the same exact metadata/create/select/destroy table exported to the Host.
+      This is an SDK ABI probe that deliberately maps its input directly; it is
+      not a Host trust-admission or native-execution route.
     """
 
     try:
@@ -1150,13 +1152,33 @@ def write_consumer_projects(
                 "    return 1;",
                 "  }",
                 "  const auto policy_load = host->policy_load(argv[1]);",
+                "#if !defined(__linux__)",
+                "  if (policy_load.status.ok ||",
+                "      ps::checked_graph_error_code(policy_load.status) !=",
+                "          ps::GraphErrc::InvalidParameter) {",
+                "    return 2;",
+                "  }",
+                "#else",
                 "  if (!policy_load.status.ok) {",
                 "    std::cerr << policy_load.status.message << '\\n';",
                 "    return 2;",
                 "  }",
+                "#endif",
                 "  const std::filesystem::path operation_plugin(argv[2]);",
                 "  const auto operation_load = host->plugins_load_report(",
                 "      {operation_plugin.parent_path().string()});",
+                "#if !defined(__linux__)",
+                "  if (!operation_load.status.ok ||",
+                "      operation_load.value.attempted != 1 ||",
+                "      operation_load.value.loaded != 0 ||",
+                "      operation_load.value.errors.size() != 1 ||",
+                "      operation_load.value.errors.front().code !=",
+                "          ps::GraphErrc::InvalidParameter ||",
+                "      !operation_load.value.new_op_keys.empty()) {",
+                "    return 3;",
+                "  }",
+                "  return 0;",
+                "#else",
                 "  if (!operation_load.status.ok || operation_load.value.loaded != 1 ||",
                 "      !operation_load.value.errors.empty() ||",
                 "      std::find(operation_load.value.new_op_keys.begin(),",
@@ -1241,6 +1263,7 @@ def write_consumer_projects(
                 "    return 12;",
                 "  }",
                 "  return 0;",
+                "#endif",
                 "}",
                 "",
             ]

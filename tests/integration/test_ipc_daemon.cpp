@@ -65,8 +65,10 @@
 namespace ps::ipc {
 namespace {
 
+#if defined(__linux__)
 /** @brief Canonical type exported by the pure-C policy fixture. */
 constexpr const char* kFixturePolicyType = "fixture_policy";
+#endif
 
 /**
  * @brief Owns one protected unique temporary directory for daemon tests.
@@ -261,6 +263,7 @@ class ManualProcessClock final {
 
 std::uint64_t ScopedDaemonDirectory::sequence_ = 0;
 
+#if defined(__linux__)
 /**
  * @brief Returns the active-build lifecycle operation plugin directory.
  * @return CMake-provided target output directory.
@@ -282,6 +285,7 @@ std::filesystem::path lifecycle_operation_plugin_dir() {
 std::filesystem::path policy_fixture_plugin_path() {
   return std::filesystem::path(PS_TEST_POLICY_PLUGIN_PATH);
 }
+#endif
 
 /**
  * @brief Releases multiple forked daemon children from one shared start gate.
@@ -4084,6 +4088,8 @@ TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   EXPECT_FALSE(std::filesystem::exists(socket_path));
 }
 
+#if defined(__linux__)
+// Darwin's durable profile rejects native operation DSOs before daemon effects.
 TEST(IpcDaemonOperationPlugins,
      RealFixtureIsProcessGlobalAcrossShortLivedClientsUntilExplicitUnload) {
   ScopedDaemonDirectory temp("ps-plugin-daemon", true);
@@ -4253,6 +4259,7 @@ TEST(IpcDaemonOperationPlugins,
   EXPECT_TRUE(daemon.exited_successfully());
   EXPECT_FALSE(std::filesystem::exists(socket_path));
 }
+#endif
 
 /**
  * @brief Preserves execution defaults and one fixed pool across Graphs.
@@ -4375,6 +4382,8 @@ TEST(IpcDaemonExecution,
  * admission rejects an unopenable candidate before native loading and maps
  * that boundary failure to `invalid_parameter`.
  */
+#if defined(__linux__)
+// Darwin's durable profile rejects native policy DSOs before daemon effects.
 TEST(IpcDaemonPolicy,
      RealFixtureRoutesDiscoveryConfigurationReplacementAndScan) {
   ScopedDaemonDirectory temp("ps-policy-daemon", true);
@@ -4517,6 +4526,7 @@ TEST(IpcDaemonPolicy,
   daemon.stop();
   EXPECT_TRUE(daemon.exited_successfully());
 }
+#endif
 
 TEST(IpcOutputFixtureDaemon,
      EmptyImageSucceedsWithoutArtifactOrDeliveryMetadata) {

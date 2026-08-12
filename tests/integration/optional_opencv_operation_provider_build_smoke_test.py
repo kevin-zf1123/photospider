@@ -328,13 +328,18 @@ def ctest_json_test(
 
 def provider_disabled_ctest_payload(
     sentinels: tuple[str, ...] = PROVIDER_DISABLED_EXPECTED_SENTINELS,
+    *,
+    include_native_plugin_test: bool = True,
 ) -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
     @param sentinels Registered-but-unbuilt target names with no properties.
-    @return JSON payload containing two profile entries, 48 dense-image cases,
-      one Value-runtime case, three disk cases, two production lifecycle cases,
-      and the requested derived sentinels.
+    @param include_native_plugin_test Whether to include the native operation
+      provider execution case used by supported target platforms.
+    @return JSON payload containing the dependency profile entry, optional
+      native-provider case, 48 dense-image cases, one Value-runtime case,
+      three disk cases, two production lifecycle cases, and requested derived
+      sentinels.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
       60-second timeout. Both groups use the exact `kernel-concurrency` label;
@@ -343,13 +348,14 @@ def provider_disabled_ctest_payload(
 
     names = {
         DEPENDENCY_DISABLED_CTEST_NAME,
-        OPTIONAL_PROVIDER_CTEST_NAME,
         VALUE_RUNTIME_CTEST_NAME,
         *DISK_CACHE_CTEST_NAMES,
         *KERNEL_LIFECYCLE_CTEST_NAMES,
         *CPU_DENSE_IMAGE_CTEST_NAMES,
         *sentinels,
     }
+    if include_native_plugin_test:
+        names.add(OPTIONAL_PROVIDER_CTEST_NAME)
     return json.dumps(
         {
             "tests": [
@@ -1128,8 +1134,49 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         self.assertEqual(len(expected), 58)
         self.assertEqual(set(inventory), expected)
         subject.validate_provider_disabled_inventory(
-            inventory, set(PROVIDER_DISABLED_EXPECTED_SENTINELS)
+            inventory,
+            set(PROVIDER_DISABLED_EXPECTED_SENTINELS),
+            native_plugin_execution_supported=True,
         )
+
+    def test_accepts_darwin_inventory_without_native_execution(self) -> None:
+        """@brief Pin the Darwin provider-off compile-only registration.
+
+        @return None after the Darwin inventory omits exactly the native DSO
+          execution case and both cross-profile substitutions are rejected.
+        @throws AssertionError If platform registration profiles are confused.
+        @note The provider target is still part of the focused build tuple;
+          this test governs only its CTest execution registration.
+        """
+
+        sentinels = set(PROVIDER_DISABLED_EXPECTED_SENTINELS)
+        darwin_inventory = subject.parse_ctest_inventory(
+            provider_disabled_ctest_payload(
+                include_native_plugin_test=False
+            )
+        )
+        self.assertEqual(len(darwin_inventory), 57)
+        self.assertNotIn(OPTIONAL_PROVIDER_CTEST_NAME, darwin_inventory)
+        subject.validate_provider_disabled_inventory(
+            darwin_inventory,
+            sentinels,
+            native_plugin_execution_supported=False,
+        )
+        with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
+            subject.validate_provider_disabled_inventory(
+                darwin_inventory,
+                sentinels,
+                native_plugin_execution_supported=True,
+            )
+        supported_inventory = subject.parse_ctest_inventory(
+            provider_disabled_ctest_payload()
+        )
+        with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
+            subject.validate_provider_disabled_inventory(
+                supported_inventory,
+                sentinels,
+                native_plugin_execution_supported=False,
+            )
 
     def test_derives_registered_only_sentinels_from_target_manifest(
         self,
@@ -1194,7 +1241,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
                 provider_disabled_ctest_payload(tuple(sorted(sentinels)))
             )
             subject.validate_provider_disabled_inventory(
-                inventory, sentinels
+                inventory,
+                sentinels,
+                native_plugin_execution_supported=True,
             )
 
             malformed_payloads = {
@@ -1459,7 +1508,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
                     RuntimeError, "registered-only CTest property mismatch"
                 ):
                     subject.validate_provider_disabled_inventory(
-                        inventory, expected_sentinels
+                        inventory,
+                        expected_sentinels,
+                        native_plugin_execution_supported=True,
                     )
 
     def test_rejects_timed_derived_sentinels(self) -> None:
@@ -1483,7 +1534,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
                     RuntimeError, "registered-only CTest property mismatch"
                 ):
                     subject.validate_provider_disabled_inventory(
-                        inventory, expected_sentinels
+                        inventory,
+                        expected_sentinels,
+                        native_plugin_execution_supported=True,
                     )
 
     def test_rejects_malformed_broad_or_drifted_ctest_inventory(self) -> None:
@@ -1519,7 +1572,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
             subject.validate_provider_disabled_inventory(
-                old_full_only_inventory, expected_sentinels
+                old_full_only_inventory,
+                expected_sentinels,
+                native_plugin_execution_supported=True,
             )
 
         valid_inventory = subject.parse_ctest_inventory(
@@ -1535,7 +1590,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         ]
         with self.assertRaisesRegex(RuntimeError, "property mismatch"):
             subject.validate_provider_disabled_inventory(
-                drifted_inventory, expected_sentinels
+                drifted_inventory,
+                expected_sentinels,
+                native_plugin_execution_supported=True,
             )
 
         drifted_lifecycle_inventory = {
@@ -1547,7 +1604,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         ] = 20
         with self.assertRaisesRegex(RuntimeError, "property mismatch"):
             subject.validate_provider_disabled_inventory(
-                drifted_lifecycle_inventory, expected_sentinels
+                drifted_lifecycle_inventory,
+                expected_sentinels,
+                native_plugin_execution_supported=True,
             )
 
         broad_inventory = {
@@ -1557,7 +1616,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         broad_inventory["test_scheduler_NOT_BUILT"] = {}
         with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
             subject.validate_provider_disabled_inventory(
-                broad_inventory, expected_sentinels
+                broad_inventory,
+                expected_sentinels,
+                native_plugin_execution_supported=True,
             )
 
 

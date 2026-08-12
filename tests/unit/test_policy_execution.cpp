@@ -781,6 +781,8 @@ TEST(ExecutionServiceShutdown,
  * the Run completes and telemetry remains Accepting until control-thread
  * shutdown.
  */
+#if defined(__linux__)
+// These cases exercise a signed native policy callback; Darwin is fail-closed.
 TEST_F(PolicyExecutionFixture,
        SameServicePolicyCallbackRejectsShutdownBeforeMutation) {
   ExecutionService service(1U);
@@ -836,6 +838,7 @@ TEST_F(PolicyExecutionFixture,
   control_.set_hook(nullptr, nullptr);
   callback_owner.shutdown();
 }
+#endif
 
 /**
  * @brief Verifies route-aware device discovery has deterministic fallback.
@@ -898,7 +901,7 @@ TEST(PhysicalExecutionIntegration,
           .has_value();
 
   EXPECT_EQ(has_metal_account, has_metal_executor);
-#if !defined(__APPLE__)
+#if defined(__linux__)
   EXPECT_FALSE(has_metal_executor);
   EXPECT_FALSE(has_metal_account);
 #endif
@@ -1117,6 +1120,8 @@ TEST(PhysicalExecutionIntegration, SerialDebugIsWorkerZeroSingleFlight) {
 /**
  * @brief Verifies invalid decisions fault one generation until replacement.
  */
+#if defined(__linux__)
+// These cases exercise a signed native policy callback; Darwin is fail-closed.
 TEST_F(PolicyExecutionFixture,
        InvalidDecisionFaultIsStickyAndSameTypeReplacementRecovers) {
   ExecutionService service(1U);
@@ -1262,6 +1267,7 @@ TEST_F(PolicyExecutionFixture,
   EXPECT_EQ(control_.select_count(), 2U);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
+#endif
 
 /**
  * @brief Verifies evidence startability excludes an exhausted child grant.
@@ -1555,6 +1561,8 @@ TEST(ExecutionServiceStartObservation,
  * entry without charging dispatch, then select lower-priority independent Run
  * B. Releasing A must subsequently execute its retained dependent exactly once.
  */
+#if defined(__linux__)
+// These cases exercise a signed native policy callback on the Linux profile.
 TEST_F(PolicyExecutionFixture,
        GrantBlockedGpuCandidateDoesNotStarveIndependentRun) {
   ExecutionService service(ExecutionService::default_resource_limits(),
@@ -1766,6 +1774,7 @@ TEST_F(PolicyExecutionFixture,
       });
   EXPECT_NE(failure, page.records.end());
 }
+#endif
 
 /**
  * @brief Verifies child-grant rollback leaves the exact entry safely retryable.

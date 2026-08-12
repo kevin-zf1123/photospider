@@ -134,28 +134,57 @@ struct PluginTrustConfiguration final {
 /**
  * @brief Move-only retained capability for one authorized exact file object.
  *
- * The object owns an immutable private snapshot descriptor whose digest was
- * confirmed after copying. POSIX DSO loading uses `native_load_path()` while
- * the descriptor remains live; Linux isolated exec uses
- * `native_descriptor()` directly. Original path spelling is retained only for
- * diagnostics and never re-authorizes or executes replacement bytes.
+ * On Linux the object owns an immutable sealed-memfd snapshot whose digest was
+ * confirmed after copying. DSO loading uses `native_load_path()` while the
+ * descriptor remains live, and isolated exec uses `native_descriptor()`
+ * directly. Original path spelling is retained only for diagnostics and never
+ * re-authorizes or executes replacement bytes. Unsupported platforms cannot
+ * construct this authority through `PluginTrustPolicy`.
+ *
+ * @note Move and destruction must not race on the same object. Independent
+ * capabilities own independent descriptors and require no shared lock.
  */
 class AuthorizedPluginFile final {
  public:
-  /** @brief Transfers one retained exact-file capability. */
+  /**
+   * @brief Transfers one retained exact-file capability.
+   * @param other Capability whose descriptor and signed facts are transferred.
+   * @throws Nothing.
+   * @note `other` becomes inactive; its diagnostic role remains unspecified
+   * and must not be used as authority.
+   */
   AuthorizedPluginFile(AuthorizedPluginFile&& other) noexcept;
 
-  /** @brief Replaces this capability after closing prior exact-file ownership.
+  /**
+   * @brief Replaces this capability after closing prior exact-file ownership.
+   * @param other Capability whose descriptor and signed facts are transferred.
+   * @return Reference to this capability after transfer.
+   * @throws Nothing; descriptor close failure is intentionally ignored.
+   * @note Self-move is a no-op. Otherwise current ownership is retired before
+   * `other` becomes inactive, so exactly one object retains each descriptor.
    */
   AuthorizedPluginFile& operator=(AuthorizedPluginFile&& other) noexcept;
 
-  /** @brief Closes the retained descriptor/handle after native use retires. */
+  /**
+   * @brief Closes the retained descriptor after native use retires.
+   * @throws Nothing; descriptor close failure is intentionally ignored.
+   * @note Callers must destroy native library leases before this capability.
+   */
   ~AuthorizedPluginFile() noexcept;
 
-  /** @brief Prevents duplicating exact-file authorization. */
+  /**
+   * @brief Prevents duplicating exact-file authorization.
+   * @param other Source capability that cannot be copied.
+   * @throws Nothing because this overload is deleted.
+   */
   AuthorizedPluginFile(const AuthorizedPluginFile& other) = delete;
 
-  /** @brief Prevents copy-assigning exact-file authorization. */
+  /**
+   * @brief Prevents copy-assigning exact-file authorization.
+   * @param other Source capability that cannot be copied.
+   * @return No value because this overload is deleted.
+   * @throws Nothing because this overload is deleted.
+   */
   AuthorizedPluginFile& operator=(const AuthorizedPluginFile& other) = delete;
 
   /**
@@ -197,7 +226,7 @@ class AuthorizedPluginFile final {
 
   /**
    * @brief Returns the platform path that maps the retained exact DSO object.
-   * @return `/dev/fd/N` on Darwin or `/proc/self/fd/N` on Linux.
+   * @return `/proc/self/fd/N` for the retained Linux sealed memfd.
    * @throws std::bad_alloc if string construction cannot allocate.
    * @throws PluginTrustError if exact-object mapping is unsupported.
    * @note The returned value is valid only while this capability stays active.
@@ -220,14 +249,22 @@ class AuthorizedPluginFile final {
    * @param kind Exact signed artifact role.
    * @param package Exact signed package identity.
    * @param digest Exact verified content digest.
-   * @param native_owner Immutable private POSIX snapshot descriptor.
+   * @param native_owner Immutable private Linux snapshot descriptor.
    * @throws std::bad_alloc when path ownership cannot allocate.
+   * @note Called only after Linux sealing and post-copy digest confirmation;
+   * this constructor performs no further authorization or filesystem access.
    */
   AuthorizedPluginFile(std::filesystem::path original_path,
                        PluginArtifactKind kind, PluginPackageIdentity package,
                        PluginContentDigest digest, std::intptr_t native_owner);
 
-  /** @brief Closes current native ownership and clears all authority fields. */
+  /**
+   * @brief Closes current native ownership and clears active signed facts.
+   * @return Nothing.
+   * @throws Nothing; descriptor close failure is intentionally ignored.
+   * @note Package, digest, path, and descriptor state become inactive. `kind_`
+   * remains only as non-authoritative diagnostic state on moved-from objects.
+   */
   void reset() noexcept;
 
   /** @brief Absolute original spelling retained only for diagnostics. */
@@ -251,9 +288,13 @@ class AuthorizedPluginFile final {
  *
  * Loading validates bounded canonical bytes, Ed25519 signature, closed kinds,
  * sorted unique identities, unique content-role mappings, package ids,
- * generations, and digests. Candidate authorization opens and hashes a stable
- * regular file, matches it, copies it into a private immutable snapshot, and
- * confirms the signed digest on that snapshot before returning authority.
+ * generations, and digests. On Linux, candidate authorization opens and hashes
+ * a stable regular file, matches it, copies it into a private immutable
+ * snapshot, and confirms the signed digest on that snapshot before returning
+ * authority.
+ * Darwin, Windows, and other platforms fail closed before candidate path
+ * access because no supported unprivileged immutable exact-object primitive is
+ * available there.
  */
 class PluginTrustPolicy final {
  public:
@@ -278,9 +319,9 @@ class PluginTrustPolicy final {
    * @note An isolated-runtime constructor may omit `expected_package` to retain
    * the signed package identity for later invocation comparison. Operation and
    * policy roles reject a supplied package constraint so role checks cannot be
-   * confused. Linux supports sealed descriptor snapshots for all roles. Darwin
-   * supports anonymous descriptor snapshots only for operation/policy DSOs and
-   * rejects isolated runtimes. Windows and other platforms fail closed.
+   * confused. Linux supports sealed descriptor snapshots for all roles.
+   * Darwin, Windows, and other platforms fail closed with
+   * `ExactObjectUnsupported` before candidate path access for every role.
    */
   AuthorizedPluginFile authorize(const std::filesystem::path& candidate,
                                  PluginArtifactKind kind,

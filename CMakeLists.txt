@@ -1990,9 +1990,11 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         resize_replacement_op_plugin)
     photospider_enable_plugin_trust_test_environment(
         test_optional_opencv_operation_provider)
-    gtest_discover_tests(test_optional_opencv_operation_provider
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        PROPERTIES TIMEOUT 30)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        gtest_discover_tests(test_optional_opencv_operation_provider
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 30)
+    endif()
 
     if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
         add_ps_test(test_single_tenant_job_service
@@ -2832,18 +2834,21 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --out "${CMAKE_BINARY_DIR}/tests/graph_cli_option_bad_alloc"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(GraphCliOptionBadAlloc PROPERTIES RUN_SERIAL TRUE)
-    add_test(NAME GraphCliPluginComputeSmoke
-        COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/integration/graph_cli_plugin_compute_smoke.py"
-            --binary "$<TARGET_FILE:graph_cli>"
-            --operation-plugin-dir "$<TARGET_FILE_DIR:lifecycle_op_plugin>"
-            --policy-plugin "$<TARGET_FILE:test_policy_plugin>"
-            --work "${CMAKE_BINARY_DIR}/tests/graph_cli_plugin_compute_smoke"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    set_tests_properties(GraphCliPluginComputeSmoke PROPERTIES
-        ENVIRONMENT "${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT}"
-        RUN_SERIAL TRUE
-        TIMEOUT 60)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(NAME GraphCliPluginComputeSmoke
+            COMMAND ${Python3_EXECUTABLE}
+                "${PROJECT_SOURCE_DIR}/tests/integration/graph_cli_plugin_compute_smoke.py"
+                --binary "$<TARGET_FILE:graph_cli>"
+                --operation-plugin-dir "$<TARGET_FILE_DIR:lifecycle_op_plugin>"
+                --policy-plugin "$<TARGET_FILE:test_policy_plugin>"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/graph_cli_plugin_compute_smoke"
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        set_tests_properties(GraphCliPluginComputeSmoke PROPERTIES
+            ENVIRONMENT "${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT}"
+            RUN_SERIAL TRUE
+            TIMEOUT 60)
+    endif()
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target public_header_self_containment --config $<CONFIG>
@@ -2877,8 +2882,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     endif()
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     photospider_enable_plugin_trust_test_environment(test_plugin_manager)
-    gtest_discover_tests(test_plugin_manager
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        gtest_discover_tests(test_plugin_manager
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    endif()
     # test_propagation is intentionally a scriptable REPL/tool target rather
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
     # gtest discovery on it.
@@ -3072,6 +3079,19 @@ if(BUILD_TESTING)
                 "${PHOTOSPIDER_TEST_OPERATION_GENERATION} + 1")
         endif()
     endforeach()
+    # Darwin signs the initializer fixture so its production rejection proves
+    # the platform exact-object boundary, rather than only a missing manifest
+    # entry, still runs before native mapping and initializer execution.
+    if(APPLE AND TARGET untrusted_initializer_plugin)
+        list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS
+            --entry operation 11111111111111111111111111111111
+            ${PHOTOSPIDER_TEST_OPERATION_GENERATION}
+            "$<TARGET_FILE:untrusted_initializer_plugin>")
+        list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS
+            untrusted_initializer_plugin)
+        math(EXPR PHOTOSPIDER_TEST_OPERATION_GENERATION
+            "${PHOTOSPIDER_TEST_OPERATION_GENERATION} + 1")
+    endif()
     set(PHOTOSPIDER_TEST_POLICY_GENERATION 1)
     foreach(PHOTOSPIDER_TEST_POLICY_TARGET
             ${POLICY_PLUGIN_TARGETS}
