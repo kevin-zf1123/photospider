@@ -311,6 +311,66 @@ observe_runtime_fault_after_request_shutdown_acceptance_delay(
 }
 
 /**
+ * @brief Captures one failure after pausing Host continuation immediately
+ * after complete request-transfer acceptance.
+ * @param executor Supervised-only product executor.
+ * @param invocation Complete Host invocation plan.
+ * @param delay Nonnegative one-shot post-acceptance delay.
+ * @return Captured `PluginRuntimeFault` facts after resetting the test seam.
+ * @throws Failure-capture, invocation, or probe errors unchanged.
+ * @note The reset also runs when request validation, startup, transfer, or
+ * acceptance fails before consuming the armed delay, so no perturbation can
+ * reach another invocation.
+ */
+ObservedRuntimeFault
+observe_runtime_fault_after_request_transfer_post_acceptance_delay(
+    PluginInvocationExecutor* executor,
+    const IsolatedCpuHostInvocation& invocation,
+    std::chrono::milliseconds delay) {
+  IsolatedCpuInvocationTestProbe::
+      delay_next_supervised_request_transfer_post_acceptance(delay);
+  try {
+    ObservedRuntimeFault fault = observe_runtime_fault(executor, invocation);
+    IsolatedCpuInvocationTestProbe::
+        delay_next_supervised_request_transfer_post_acceptance(
+            std::chrono::milliseconds{0});
+    return fault;
+  } catch (...) {
+    IsolatedCpuInvocationTestProbe::
+        delay_next_supervised_request_transfer_post_acceptance(
+            std::chrono::milliseconds{0});
+    throw;
+  }
+}
+
+/**
+ * @brief Captures one post-ownership response-channel observation overflow.
+ * @param executor Supervised-only product executor.
+ * @param invocation Complete Host invocation plan that reaches response wait.
+ * @return Captured phase-typed `PluginRuntimeFault` facts after seam reset.
+ * @throws Failure-capture, invocation, or probe errors unchanged.
+ * @note Reset runs on every exit. The production seam is also consumed at the
+ * invocation entry, before an earlier exceptional path can leave it armed.
+ */
+ObservedRuntimeFault
+observe_runtime_fault_after_response_channel_observation_overflow(
+    PluginInvocationExecutor* executor,
+    const IsolatedCpuHostInvocation& invocation) {
+  IsolatedCpuInvocationTestProbe::
+      force_next_response_channel_observation_overflow(true);
+  try {
+    ObservedRuntimeFault fault = observe_runtime_fault(executor, invocation);
+    IsolatedCpuInvocationTestProbe::
+        force_next_response_channel_observation_overflow(false);
+    return fault;
+  } catch (...) {
+    IsolatedCpuInvocationTestProbe::
+        force_next_response_channel_observation_overflow(false);
+    throw;
+  }
+}
+
+/**
  * @brief Checks exactly one fresh child was spawned and reaped.
  * @param before Observation immediately before a call.
  * @param after Observation immediately after a call.
@@ -440,6 +500,35 @@ TEST(PluginRuntimeSupervisor, DefaultDeadlinesArePositiveAndOrdered) {
   EXPECT_GT(options.termination_grace.count(), 0);
   EXPECT_GT(options.kill_reap_timeout.count(), 0);
   EXPECT_GT(options.restart_backoff.count(), 0);
+}
+
+/**
+ * @brief Proves ordinary, exact-fit, and one-tick-overflow supervisor deadline
+ * arithmetic without depending on a real clock near its maximum.
+ * @throws Nothing; GoogleTest records assertion failures.
+ * @note The source-private probe delegates to the production helper used by
+ * every supervisor deadline derivation.
+ */
+TEST(PluginRuntimeSupervisor, CheckedDeadlineRejectsClockRangeOverflow) {
+  using Clock = std::chrono::steady_clock;
+  const auto one_millisecond =
+      std::chrono::duration_cast<Clock::duration>(std::chrono::milliseconds{1});
+  const Clock::time_point ordinary_base{Clock::duration{41}};
+  EXPECT_EQ(
+      IsolatedCpuInvocationTestProbe::checked_supervisor_deadline_for_test(
+          ordinary_base, std::chrono::milliseconds{1}),
+      ordinary_base + one_millisecond);
+
+  const Clock::time_point latest_base =
+      Clock::time_point::max() - one_millisecond;
+  EXPECT_EQ(
+      IsolatedCpuInvocationTestProbe::checked_supervisor_deadline_for_test(
+          latest_base, std::chrono::milliseconds{1}),
+      Clock::time_point::max());
+  EXPECT_THROW(
+      IsolatedCpuInvocationTestProbe::checked_supervisor_deadline_for_test(
+          latest_base + Clock::duration{1}, std::chrono::milliseconds{1}),
+      std::overflow_error);
 }
 
 /**
@@ -632,6 +721,63 @@ TEST(PluginRuntimeSupervisor,
             after_fault.exact_frames_received + 1U);
   EXPECT_NE(after_recovery.last_reaped_child, failed_reaped_pid);
   EXPECT_FALSE(after_recovery.request_shutdown_acceptance_delay_armed);
+  EXPECT_EQ(supervisor_open_descriptor_count(), descriptor_baseline);
+}
+
+/**
+ * @brief Proves a scheduler pause after exact request-transfer acceptance
+ * cannot grant fresh callback or heartbeat budgets, then verifies exact
+ * retirement and fresh-process recovery without output publication.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ * @note The deterministic pause exceeds both accepted-at-derived deadlines
+ * while the real child remains in callback work. Invocation deadline must
+ * retain priority over heartbeat timeout when the Host resumes.
+ */
+TEST(PluginRuntimeSupervisor,
+     PostAcceptancePauseCannotGrantFreshCallbackBudgetsAndRecovers) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.heartbeat_interval = std::chrono::milliseconds{20};
+  options.heartbeat_timeout = std::chrono::milliseconds{250};
+  options.invocation_timeout = std::chrono::milliseconds{350};
+  options.restart_backoff = std::chrono::milliseconds{1};
+  PluginInvocationExecutor executor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+  const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  ASSERT_FALSE(before.request_transfer_post_acceptance_delay_armed);
+
+  const ObservedRuntimeFault fault =
+      observe_runtime_fault_after_request_transfer_post_acceptance_delay(
+          &executor,
+          supervisor_test_invocation("fixture.delayed_fill_sequence", 111U),
+          std::chrono::milliseconds{400});
+  const IsolatedCpuInvocationTestSnapshot after_fault =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_EQ(fault.kind, PluginRuntimeFaultKind::InvocationDeadline);
+  EXPECT_NE(fault.diagnostic.find("invocation timed out"), std::string::npos);
+  expect_supervised_child_reaped(before, after_fault);
+  EXPECT_EQ(after_fault.exact_frames_received, before.exact_frames_received);
+  EXPECT_FALSE(after_fault.request_transfer_post_acceptance_delay_armed);
+  const std::int64_t failed_reaped_pid = after_fault.last_reaped_child;
+
+  const IsolatedCpuHostInvocationResult recovered = executor.invoke(
+      supervisor_test_invocation("fixture.fill_sequence", 112U));
+  ASSERT_EQ(recovered.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(recovered.outputs.size(), 1U);
+  const std::array<std::byte, 6U> expected{std::byte{0}, std::byte{1},
+                                           std::byte{2}, std::byte{3},
+                                           std::byte{4}, std::byte{5}};
+  EXPECT_EQ(supervisor_test_bytes(recovered.outputs[0]), expected);
+  const IsolatedCpuInvocationTestSnapshot after_recovery =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  expect_supervised_child_reaped(after_fault, after_recovery);
+  EXPECT_EQ(after_recovery.exact_frames_received,
+            after_fault.exact_frames_received + 1U);
+  EXPECT_NE(after_recovery.last_reaped_child, failed_reaped_pid);
+  EXPECT_FALSE(after_recovery.request_transfer_post_acceptance_delay_armed);
   EXPECT_EQ(supervisor_open_descriptor_count(), descriptor_baseline);
 }
 
@@ -923,6 +1069,81 @@ TEST(PluginRuntimeSupervisor,
   const IsolatedCpuInvocationTestSnapshot after_recovery =
       IsolatedCpuInvocationTestProbe::snapshot();
   expect_supervised_child_reaped(after_fault, after_recovery);
+  EXPECT_EQ(supervisor_open_descriptor_count(), descriptor_baseline);
+}
+
+/**
+ * @brief Maps an owned response-channel observation overflow by current phase,
+ * then proves exact retirement, cleared probe state, and fresh recovery.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ * @note The response-hang fixture authenticates completion and remains alive.
+ * The source-private seam then replaces the Host control socket with an owned
+ * regular descriptor so the real receiver reports `ENOTSOCK` before its short
+ * status-observation derivation is forced past the monotonic clock range. No
+ * response frame can be published. An initial invalid Host plan also proves
+ * invocation-entry consumption clears the seam before preflight can fail.
+ */
+TEST(PluginRuntimeSupervisor,
+     MapsOwnedResponseChannelObservationOverflowAndRecovers) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.restart_backoff = std::chrono::milliseconds{1};
+  PluginInvocationExecutor executor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+  const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  ASSERT_FALSE(before.response_channel_observation_overflow_armed);
+
+  IsolatedCpuHostInvocation invalid =
+      supervisor_test_invocation("fixture.fill_sequence", 239U);
+  invalid.outputs.clear();
+  IsolatedCpuInvocationTestProbe::
+      force_next_response_channel_observation_overflow(true);
+  ASSERT_TRUE(IsolatedCpuInvocationTestProbe::snapshot()
+                  .response_channel_observation_overflow_armed);
+  EXPECT_THROW(executor.invoke(invalid), IsolatedCpuProtocolError);
+  const IsolatedCpuInvocationTestSnapshot after_rejected_preflight =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after_rejected_preflight.spawned_children, before.spawned_children);
+  EXPECT_EQ(after_rejected_preflight.reaped_children, before.reaped_children);
+  EXPECT_EQ(after_rejected_preflight.exact_frames_received,
+            before.exact_frames_received);
+  EXPECT_FALSE(
+      after_rejected_preflight.response_channel_observation_overflow_armed);
+  EXPECT_EQ(supervisor_open_descriptor_count(), descriptor_baseline);
+
+  const ObservedRuntimeFault fault =
+      observe_runtime_fault_after_response_channel_observation_overflow(
+          &executor, supervisor_test_invocation("fixture.response_hang", 240U));
+  const IsolatedCpuInvocationTestSnapshot after_fault =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_EQ(fault.kind, PluginRuntimeFaultKind::ResponseDeadline);
+  EXPECT_NE(fault.kind, PluginRuntimeFaultKind::Channel);
+  EXPECT_NE(fault.diagnostic.find("deadline arithmetic failed"),
+            std::string::npos);
+  expect_supervised_child_reaped(after_rejected_preflight, after_fault);
+  EXPECT_EQ(after_fault.exact_frames_received,
+            after_rejected_preflight.exact_frames_received);
+  EXPECT_FALSE(after_fault.response_channel_observation_overflow_armed);
+  const std::int64_t failed_reaped_pid = after_fault.last_reaped_child;
+
+  const IsolatedCpuHostInvocationResult recovered = executor.invoke(
+      supervisor_test_invocation("fixture.fill_sequence", 245U));
+  ASSERT_EQ(recovered.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(recovered.outputs.size(), 1U);
+  const std::array<std::byte, 6U> expected{std::byte{0}, std::byte{1},
+                                           std::byte{2}, std::byte{3},
+                                           std::byte{4}, std::byte{5}};
+  EXPECT_EQ(supervisor_test_bytes(recovered.outputs[0]), expected);
+  const IsolatedCpuInvocationTestSnapshot after_recovery =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  expect_supervised_child_reaped(after_fault, after_recovery);
+  EXPECT_EQ(after_recovery.exact_frames_received,
+            after_fault.exact_frames_received + 1U);
+  EXPECT_NE(after_recovery.last_reaped_child, failed_reaped_pid);
+  EXPECT_FALSE(after_recovery.response_channel_observation_overflow_armed);
   EXPECT_EQ(supervisor_open_descriptor_count(), descriptor_baseline);
 }
 

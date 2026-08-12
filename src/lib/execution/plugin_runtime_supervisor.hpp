@@ -76,8 +76,9 @@ struct PluginRuntimeSupervisorOptions final {
   std::chrono::milliseconds heartbeat_timeout{500};
   /**
    * @brief Independent request-transfer and callback-completion bounds.
-   * @note The complete request send receives this full duration first. A new
-   * full-duration callback window starts only after that transfer completes.
+   * @note The complete request send receives this full duration first. The
+   * callback window derives from the transfer's exact accepted-at observation,
+   * without a later clock sample.
    */
   std::chrono::milliseconds invocation_timeout{5000};
   /** @brief Completion-through-validated-publication absolute bound. */
@@ -195,6 +196,9 @@ class PluginRuntimeSupervisor final {
    * @throws std::system_error when `SIGCHLD` state cannot be queried.
    * @throws std::bad_alloc when retained private state cannot allocate.
    * @note Path validation is operability only, not plugin trust admission.
+   * Construction proves duration positivity, bounds, exact clock conversion,
+   * and field relationships without sampling a future deadline base. Each
+   * runtime derivation separately rejects an unrepresentable exact sum.
    */
   explicit PluginRuntimeSupervisor(std::filesystem::path runtime_executable,
                                    PluginRuntimeSupervisorOptions options = {},
@@ -239,13 +243,16 @@ class PluginRuntimeSupervisor final {
    * @param invocation Host-owned request, inputs, and exact output plans.
    * @return Typed callback outcome with fresh Values only after full success.
    * @throws PluginRuntimeFault for supervised lifecycle/process/output faults.
+   * @throws std::overflow_error when the pre-spawn startup deadline cannot be
+   * represented by the monotonic clock.
    * @throws IsolatedCpuProtocolError for invalid Host preflight state before a
    * child is created.
    * @throws Value/readiness/access/allocation exceptions from Host preparation
    * or fresh output publication.
    * @note A failure never falls back to direct non-supervised invocation.
-   * Complete request transfer and callback completion each receive a fresh
-   * full `invocation_timeout` window.
+   * Complete request transfer and callback completion each receive a full
+   * `invocation_timeout` window, with every absolute deadline derived through
+   * checked arithmetic from its exact captured base.
    */
   IsolatedCpuHostInvocationResult invoke(
       const IsolatedCpuHostInvocation& invocation);

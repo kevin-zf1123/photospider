@@ -369,6 +369,20 @@ std::atomic<std::int64_t> g_next_supervised_request_send_delay_ms{0};
  * after successful `SHUT_WR` and grants no channel, deadline, or PID authority.
  */
 std::atomic<std::int64_t> g_next_request_shutdown_acceptance_delay_ms{0};
+/**
+ * @brief Owns the one-shot request-transfer post-acceptance test delay.
+ * @note Zero disables the seam. A positive value is atomically consumed only
+ * after the same-deadline transfer acceptance observation and grants no
+ * channel, deadline, lifecycle, or PID authority.
+ */
+std::atomic<std::int64_t> g_next_request_transfer_post_acceptance_delay_ms{0};
+/**
+ * @brief One-shot owned response-channel observation-overflow test seam.
+ * @note False is production behavior. The invocation entry consumes this
+ * state before fallible preparation, and the retained local value grants no
+ * authority outside that one synchronous call.
+ */
+std::atomic<bool> g_next_response_channel_observation_overflow{false};
 /** @brief One-shot post-receive RuntimeStarted acceptance test delay. */
 std::atomic<std::int64_t> g_next_runtime_started_acceptance_delay_ms{0};
 /** @brief One-shot post-receive Heartbeat acceptance test delay. */
@@ -770,6 +784,103 @@ MappedCapability prepare_capability(
 using SupervisorClock = std::chrono::steady_clock;
 /** @brief Absolute monotonic deadline used by bounded channel helpers. */
 using SupervisorDeadline = SupervisorClock::time_point;
+// NOLINTBEGIN(whitespace/indent_namespace)
+/** @brief Inclusive configured-duration cap for supervisor lifecycle policy. */
+constexpr std::chrono::milliseconds kMaximumSupervisorDuration =
+    std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::hours{24});
+/** @brief Exact monotonic-clock ticks in one millisecond. */
+constexpr auto kSupervisorClockTicksPerMillisecond =
+    std::chrono::duration_cast<SupervisorClock::duration>(
+        std::chrono::milliseconds{1})
+        .count();
+static_assert(
+    kSupervisorClockTicksPerMillisecond > 0 &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            SupervisorClock::duration{kSupervisorClockTicksPerMillisecond}) ==
+            std::chrono::milliseconds{1},
+    "supported plugin supervision clocks must exactly represent milliseconds");
+static_assert(std::numeric_limits<SupervisorClock::duration::rep>::is_integer,
+              "supported plugin supervision clocks must use integer ticks");
+static_assert(
+    kMaximumSupervisorDuration.count() <=
+        std::numeric_limits<SupervisorClock::duration::rep>::max() /
+            kSupervisorClockTicksPerMillisecond,
+    "the plugin supervision duration bound must fit the monotonic clock");
+// NOLINTEND
+
+/**
+ * @brief Identifies only a checked supervisor time-point range failure.
+ * @throws std::bad_alloc when fixed runtime-error storage cannot allocate.
+ * @note The private subtype lets the lifecycle owner map arithmetic failures
+ * without misclassifying an unrelated `std::overflow_error` from callback,
+ * publication, or protocol code.
+ */
+class SupervisorDeadlineOverflow final : public std::overflow_error {
+ public:
+  /**
+   * @brief Creates the fixed checked-deadline overflow diagnostic.
+   * @throws std::bad_alloc when runtime-error storage cannot allocate.
+   */
+  SupervisorDeadlineOverflow()
+      : std::overflow_error(
+            "plugin runtime supervisor deadline exceeds monotonic clock "
+            "range") {}
+};
+
+/**
+ * @brief Validates and exactly converts one supervisor lifecycle duration.
+ * @param duration Candidate positive millisecond duration.
+ * @return Exact monotonic-clock duration for safe deadline arithmetic.
+ * @throws std::invalid_argument when `duration` is outside the closed
+ * construction domain.
+ * @throws std::bad_alloc when constructing a rejection diagnostic exhausts
+ * memory.
+ * @note Validation precedes `duration_cast`; compile-time scale checks prove
+ * every admitted value converts without integer overflow or truncation on
+ * supported platforms. This validates duration shape, not a future base sum.
+ */
+SupervisorClock::duration validate_and_convert_supervisor_duration(
+    std::chrono::milliseconds duration) {
+  if (duration.count() <= 0 || duration > kMaximumSupervisorDuration) {
+    throw std::invalid_argument(
+        "plugin runtime supervisor duration must be between 1 and 86400000 "
+        "milliseconds");
+  }
+  const SupervisorClock::duration converted =
+      std::chrono::duration_cast<SupervisorClock::duration>(duration);
+  if (std::chrono::duration_cast<std::chrono::milliseconds>(converted) !=
+      duration) {
+    throw std::invalid_argument(
+        "plugin runtime supervisor duration is not exactly representable");
+  }
+  return converted;
+}
+
+/**
+ * @brief Adds one validated supervisor duration to one captured monotonic base.
+ * @param base Exact base captured once by the caller.
+ * @param duration Candidate positive supervisor duration within the shared cap.
+ * @return Exact absolute monotonic deadline, including an exact-fit maximum.
+ * @throws std::invalid_argument when `duration` is outside the construction
+ * domain.
+ * @throws std::overflow_error when the exact sum exceeds the clock range.
+ * @throws std::bad_alloc when constructing a rejection diagnostic exhausts
+ * memory.
+ * @note The range proof and addition use the same caller-provided base. Every
+ * production supervisor deadline derivation delegates here; the helper never
+ * wraps, saturates, clamps, or samples a replacement base.
+ */
+SupervisorDeadline checked_supervisor_deadline(
+    SupervisorDeadline base, std::chrono::milliseconds duration) {
+  const SupervisorClock::duration increment =
+      validate_and_convert_supervisor_duration(duration);
+  const SupervisorDeadline latest_base = SupervisorDeadline::max() - increment;
+  if (base > latest_base) {
+    throw SupervisorDeadlineOverflow();
+  }
+  return base + increment;
+}
 
 /**
  * @brief Internal signal that an absolute channel deadline was reached.
@@ -966,25 +1077,30 @@ void send_packet(int socket, const std::vector<std::byte>& packet,
  * @param packet Nonempty bounded canonical request packet.
  * @param descriptors Ordered borrowed capability descriptors.
  * @param deadline Absolute monotonic send/shutdown bound.
- * @return Nothing after exact send, successful write-half shutdown, and
- * post-shutdown deadline acceptance.
+ * @return Exact monotonic transfer-acceptance instant sampled for the final
+ * same-deadline observation after successful write-half shutdown.
  * @throws SupervisorDeadlineExpired when the bound is reached before complete
  * request-transfer acceptance.
  * @throws IsolatedCpuProtocolError for local packet or descriptor overflow.
  * @throws IsolatedCpuInvocationError for channel or shutdown failure.
  * @note Rights accompany only the first successfully sent byte segment;
  * ownership remains with the caller on every path.
- * A source-private one-shot delay can simulate bounded sender backpressure,
- * while a second one can simulate descheduling after successful shutdown but
- * before acceptance; neither grants channel or lifecycle authority. A failed
- * shutdown remains a channel fact because transfer never reached its success
- * acceptance point. After successful shutdown, the same absolute deadline is
- * observed before return, so a late transfer cannot arm a fresh invocation or
- * heartbeat window and later cleanup facts cannot replace its deadline cause.
+ * A source-private one-shot delay can simulate bounded sender backpressure, a
+ * second can simulate descheduling after successful shutdown but before
+ * acceptance, and a third can simulate descheduling after acceptance but
+ * before caller continuation; none grants channel or lifecycle authority. A
+ * failed shutdown remains a channel fact because transfer never reached its
+ * success acceptance point. After successful shutdown, the same absolute
+ * deadline is observed once and that exact successful observation is returned
+ * as the callback/heartbeat budget anchor. The post-acceptance test delay runs
+ * only after this timestamp is captured, so caller descheduling cannot arm a
+ * fresh window. A late transfer cannot arm invocation or heartbeat budgets,
+ * and later cleanup facts cannot replace its deadline cause.
  */
-void send_packet_until(int socket, const std::vector<std::byte>& packet,
-                       const std::vector<int>& descriptors,
-                       SupervisorDeadline deadline) {
+SupervisorDeadline send_packet_until(int socket,
+                                     const std::vector<std::byte>& packet,
+                                     const std::vector<int>& descriptors,
+                                     SupervisorDeadline deadline) {
   if (packet.empty() || packet.size() > kMaximumIsolatedCpuPacketBytes ||
       descriptors.size() > kMaximumIsolatedCpuCapabilities) {
     throw IsolatedCpuProtocolError(
@@ -1062,9 +1178,17 @@ void send_packet_until(int socket, const std::vector<std::byte>& packet,
   if (shutdown_acceptance_test_delay.count() > 0) {
     std::this_thread::sleep_for(shutdown_acceptance_test_delay);
   }
-  if (SupervisorClock::now() >= deadline) {
+  const SupervisorDeadline accepted_at = SupervisorClock::now();
+  if (accepted_at >= deadline) {
     throw SupervisorDeadlineExpired();
   }
+  const auto post_acceptance_test_delay = std::chrono::milliseconds{
+      g_next_request_transfer_post_acceptance_delay_ms.exchange(
+          0, std::memory_order_acq_rel)};
+  if (post_acceptance_test_delay.count() > 0) {
+    std::this_thread::sleep_for(post_acceptance_test_delay);
+  }
+  return accepted_at;
 }
 
 /**
@@ -2205,6 +2329,8 @@ class SupervisedChildOwner final {
    * @param options Validated termination and reap timing policy.
    * @return Exact wait/escalation result or deferred-reap ownership record.
    * @throws IsolatedCpuInvocationError for signal or exact wait failure.
+   * @throws std::overflow_error when an exact cleanup deadline cannot be
+   * represented by the monotonic clock.
    * @throws std::bad_alloc if completion-state allocation fails before PID
    * transfer.
    * @throws std::system_error if the deferred reaper thread cannot be created.
@@ -2232,7 +2358,8 @@ class SupervisedChildOwner final {
           std::string("plugin runtime SIGTERM failed: ") +
           std::strerror(errno));
     }
-    if (wait_until(SupervisorClock::now() + options.termination_grace)) {
+    if (wait_until(checked_supervisor_deadline(SupervisorClock::now(),
+                                               options.termination_grace))) {
       result.wait_status = wait_status_;
       return result;
     }
@@ -2245,7 +2372,8 @@ class SupervisedChildOwner final {
           std::string("plugin runtime SIGKILL failed: ") +
           std::strerror(errno));
     }
-    if (wait_until(SupervisorClock::now() + options.kill_reap_timeout)) {
+    if (wait_until(checked_supervisor_deadline(SupervisorClock::now(),
+                                               options.kill_reap_timeout))) {
       result.wait_status = wait_status_;
       return result;
     }
@@ -3269,44 +3397,41 @@ std::vector<Value> publish_host_outputs(
   return outputs;
 }
 
-/** @brief Maximum accepted lifecycle duration preventing clock overflow. */
-constexpr std::chrono::hours kMaximumSupervisorDuration{24};
-
 /**
  * @brief Validates every supervisor duration before child ownership begins.
  * @param options Candidate lifecycle timing policy.
- * @return Nothing for positive, ordered, exactly bounded durations.
- * @throws std::invalid_argument for non-positive, inverted, or excessive
+ * @return Nothing for positive, ordered, bounded, exactly representable
  * durations.
+ * @throws std::invalid_argument for a non-positive, inverted, excessive, or
+ * inexactly representable duration.
+ * @throws std::bad_alloc when constructing a rejection diagnostic exhausts
+ * memory.
+ * @note Construction validates duration shape and relationships only. Every
+ * later deadline derivation separately proves its captured base can accept the
+ * exact converted increment before any addition occurs.
  */
 void validate_plugin_runtime_supervisor_options(
     const PluginRuntimeSupervisorOptions& options) {
-  const auto positive_and_bounded = [](std::chrono::milliseconds value) {
-    return value.count() > 0 && value <= kMaximumSupervisorDuration;
-  };
-  if (!positive_and_bounded(options.startup_timeout) ||
-      !positive_and_bounded(options.heartbeat_interval) ||
-      !positive_and_bounded(options.heartbeat_timeout) ||
-      !positive_and_bounded(options.invocation_timeout) ||
-      !positive_and_bounded(options.response_timeout) ||
-      !positive_and_bounded(options.termination_grace) ||
-      !positive_and_bounded(options.kill_reap_timeout) ||
-      !positive_and_bounded(options.restart_backoff) ||
-      options.heartbeat_interval >= options.heartbeat_timeout) {
+  static_cast<void>(
+      validate_and_convert_supervisor_duration(options.startup_timeout));
+  static_cast<void>(
+      validate_and_convert_supervisor_duration(options.heartbeat_interval));
+  static_cast<void>(
+      validate_and_convert_supervisor_duration(options.heartbeat_timeout));
+  static_cast<void>(
+      validate_and_convert_supervisor_duration(options.invocation_timeout));
+  static_cast<void>(
+      validate_and_convert_supervisor_duration(options.response_timeout));
+  static_cast<void>(
+      validate_and_convert_supervisor_duration(options.termination_grace));
+  static_cast<void>(
+      validate_and_convert_supervisor_duration(options.kill_reap_timeout));
+  static_cast<void>(
+      validate_and_convert_supervisor_duration(options.restart_backoff));
+  if (options.heartbeat_interval >= options.heartbeat_timeout) {
     throw std::invalid_argument(
-        "plugin runtime supervisor durations are invalid or unbounded");
+        "plugin runtime heartbeat interval must be below its timeout");
   }
-}
-
-/**
- * @brief Constructs one future absolute deadline from validated duration.
- * @param duration Positive duration already validated below the safe cap.
- * @return Current steady time plus the exact duration.
- * @throws Nothing under the validated duration precondition.
- */
-SupervisorDeadline supervisor_deadline_after(
-    std::chrono::milliseconds duration) noexcept {
-  return SupervisorClock::now() + duration;
 }
 
 /**
@@ -3498,6 +3623,10 @@ void hold_invocation_monitor_until_child_exit_for_test(
  * @param enclosing_deadline Current absolute lifecycle bound.
  * @return Exact status when it becomes waitable in the bounded observation.
  * @throws IsolatedCpuInvocationError for exact wait failure.
+ * @throws std::overflow_error when the short exact observation deadline cannot
+ * be represented by the monotonic clock.
+ * @note The caller-supplied enclosing deadline is a limit, not permission to
+ * clamp an unrepresentable fresh derivation.
  */
 std::optional<int> observe_child_after_channel_close(
     SupervisedChildOwner* child, SupervisorDeadline enclosing_deadline) {
@@ -3506,7 +3635,8 @@ std::optional<int> observe_child_after_channel_close(
   }
   const SupervisorDeadline observation_deadline =
       std::min(enclosing_deadline,
-               SupervisorClock::now() + std::chrono::milliseconds{20});
+               checked_supervisor_deadline(SupervisorClock::now(),
+                                           std::chrono::milliseconds{20}));
   if (child->wait_until(observation_deadline)) {
     return child->wait_status();
   }
@@ -3521,6 +3651,10 @@ std::optional<int> observe_child_after_channel_close(
  * @param pending_reap Receives deferred exact-reap completion ownership.
  * @return Never returns; throws the enriched primary or reap-pending fault.
  * @throws PluginRuntimeFault after best-effort exact cleanup.
+ * @note Cleanup infrastructure failure before PID transfer appends its
+ * diagnostic and preserves the primary kind. A deliberate final-bound
+ * transfer instead publishes `ReapPending`, which outranks the earlier fact
+ * while the supervisor remains quarantined.
  */
 [[noreturn]] void throw_after_supervised_cleanup(
     const PluginRuntimeFault& fault, SupervisedSpawnedChild* process,
@@ -3756,11 +3890,14 @@ SupervisorDeadline await_authenticated_runtime_started(
  * @param heartbeat_interval_milliseconds Exact Host-selected interval.
  * @param invocation_deadline Absolute callback-completion deadline.
  * @param heartbeat_timeout Maximum gap from the latest valid event.
- * @param request_transferred_at Time the complete request transfer finished.
+ * @param request_transfer_accepted_at Exact same-deadline observation that
+ * accepted the complete request transfer.
  * @return Time of authenticated `InvocationCompleted` observation.
  * @throws PluginRuntimeFault for deadline, heartbeat, protocol, channel, or
  * natural process failure.
  * @throws IsolatedCpuInvocationError for exact wait failure.
+ * @throws std::overflow_error when a heartbeat deadline cannot be represented
+ * by the monotonic clock.
  * @note Each allowed event is accepted at one post-validation monotonic
  * observation. Invocation deadline outranks heartbeat timeout when both are
  * reached there, and an expired event cannot refresh the heartbeat gap. When
@@ -3774,10 +3911,10 @@ SupervisorDeadline await_authenticated_invocation_completed(
     std::uint64_t heartbeat_interval_milliseconds,
     SupervisorDeadline invocation_deadline,
     std::chrono::milliseconds heartbeat_timeout,
-    SupervisorDeadline request_transferred_at) {
+    SupervisorDeadline request_transfer_accepted_at) {
   std::uint64_t expected_sequence = 2U;
-  SupervisorDeadline heartbeat_deadline =
-      request_transferred_at + heartbeat_timeout;
+  SupervisorDeadline heartbeat_deadline = checked_supervisor_deadline(
+      request_transfer_accepted_at, heartbeat_timeout);
   for (;;) {
     const SupervisorDeadline now = SupervisorClock::now();
     enforce_invocation_lifecycle_acceptance_deadlines(now, invocation_deadline,
@@ -3827,7 +3964,8 @@ SupervisorDeadline await_authenticated_invocation_completed(
       enforce_invocation_lifecycle_acceptance_deadlines(
           accepted_at, invocation_deadline, heartbeat_deadline);
       if (event->kind == PluginRuntimeLifecycleKind::Heartbeat) {
-        heartbeat_deadline = accepted_at + heartbeat_timeout;
+        heartbeat_deadline =
+            checked_supervisor_deadline(accepted_at, heartbeat_timeout);
         continue;
       }
       return accepted_at;
@@ -3861,6 +3999,56 @@ enum class SupervisedHostPhase : std::uint8_t {
 };
 
 /**
+ * @brief Maps one owned supervisor phase to its authoritative deadline fact.
+ * @param phase Current closed Host lifecycle phase.
+ * @return Startup, invocation, or response deadline kind for that phase.
+ * @throws Nothing.
+ * @note Request transfer and callback monitoring intentionally share
+ * `InvocationDeadline`. The defensive fallback preserves startup fail-closed
+ * behavior for an impossible invalid enum representation.
+ */
+PluginRuntimeFaultKind supervised_deadline_fault_kind(
+    SupervisedHostPhase phase) noexcept {
+  switch (phase) {
+    case SupervisedHostPhase::Startup:
+      return PluginRuntimeFaultKind::StartupDeadline;
+    case SupervisedHostPhase::RequestTransfer:
+    case SupervisedHostPhase::Invocation:
+      return PluginRuntimeFaultKind::InvocationDeadline;
+    case SupervisedHostPhase::Response:
+      return PluginRuntimeFaultKind::ResponseDeadline;
+  }
+  return PluginRuntimeFaultKind::StartupDeadline;
+}
+
+/**
+ * @brief Converts one owned deadline overflow into a typed cleaned-up fault.
+ * @param phase Current lifecycle phase at the failed checked derivation.
+ * @param error Exact private deadline-arithmetic failure.
+ * @param process Exact child and invocation endpoints to retire.
+ * @param options Validated termination timing policy.
+ * @param pending_reap Receives quarantine completion if synchronous reap fails.
+ * @return Never returns; throws the phase-typed or reap-pending fault.
+ * @throws PluginRuntimeFault after exact best-effort cleanup.
+ * @note This is the sole phase-mapping path for a pre-cleanup deadline
+ * overflow after child ownership. `throw_after_supervised_cleanup` retains
+ * cleanup diagnostics and deliberately gives `ReapPending` ownership transfer
+ * priority over the phase fact.
+ */
+[[noreturn]] void throw_after_supervised_deadline_overflow_cleanup(
+    SupervisedHostPhase phase, const SupervisorDeadlineOverflow& error,
+    SupervisedSpawnedChild* process,
+    const PluginRuntimeSupervisorOptions& options,
+    std::shared_ptr<std::atomic<bool>>* pending_reap) {
+  throw_after_supervised_cleanup(
+      PluginRuntimeFault(
+          supervised_deadline_fault_kind(phase),
+          std::string("plugin runtime deadline arithmetic failed: ") +
+              error.what()),
+      process, options, pending_reap);
+}
+
+/**
  * @brief Executes one complete fresh supervised invocation.
  * @param runtime_executable Operability-validated runtime path.
  * @param options Validated lifecycle timing policy.
@@ -3871,10 +4059,20 @@ enum class SupervisedHostPhase : std::uint8_t {
  * @throws PluginRuntimeFault for every supervised lifecycle/process/output
  * fault.
  * @throws IsolatedCpuProtocolError for Host preflight failures before spawn.
+ * @throws std::overflow_error when the pre-spawn startup deadline cannot be
+ * represented by the monotonic clock.
  * @throws Value/readiness/access/allocation failures from Host preparation or
  * publication.
  * @note Every caught post-spawn fault revokes channels before bounded
- * escalation; no direct non-supervised retry exists.
+ * escalation; no direct non-supervised retry exists. Complete request
+ * transfer returns the exact same-deadline acceptance observation, and both
+ * callback invocation and initial heartbeat-gap deadlines derive from that
+ * timestamp without a later caller clock sample. Any checked lifecycle or
+ * short channel-status observation overflow reached while the child is owned
+ * and before cleanup begins is mapped by the current phase before that same
+ * exact cleanup path runs. Cleanup and restart-backoff arithmetic retain an
+ * already established primary fault; a deliberate final-bound PID transfer
+ * still publishes the higher-priority `ReapPending` ownership fact.
  */
 IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
     const std::filesystem::path& runtime_executable,
@@ -3882,6 +4080,10 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
     const IsolatedCpuInvocationLimits& limits,
     const IsolatedCpuHostInvocation& invocation,
     std::shared_ptr<std::atomic<bool>>* pending_reap) {
+  const bool force_response_channel_observation_overflow =
+      g_next_response_channel_observation_overflow.exchange(
+          false, std::memory_order_acq_rel);
+  bool response_channel_observation_overflow_ready = false;
   PreparedHostInvocation prepared = prepare_host_invocation(invocation, limits);
   std::vector<int> descriptors;
   descriptors.reserve(prepared.capabilities.size());
@@ -3891,8 +4093,8 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
   const PluginRuntimeSessionNonce nonce = generate_plugin_runtime_nonce();
 
   SupervisedSpawnedChild process{};
-  const SupervisorDeadline startup_deadline =
-      supervisor_deadline_after(options.startup_timeout);
+  const SupervisorDeadline startup_deadline = checked_supervisor_deadline(
+      SupervisorClock::now(), options.startup_timeout);
   try {
     process = spawn_supervised_runtime(runtime_executable);
   } catch (const IsolatedCpuInvocationError& error) {
@@ -3913,12 +4115,13 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
 
     phase = SupervisedHostPhase::RequestTransfer;
     const SupervisorDeadline request_transfer_deadline =
-        supervisor_deadline_after(options.invocation_timeout);
-    send_packet_until(process.control.get(), prepared.request_packet,
-                      descriptors, request_transfer_deadline);
-    const SupervisorDeadline request_transferred_at = SupervisorClock::now();
-    const SupervisorDeadline invocation_deadline =
-        request_transferred_at + options.invocation_timeout;
+        checked_supervisor_deadline(SupervisorClock::now(),
+                                    options.invocation_timeout);
+    const SupervisorDeadline request_transfer_accepted_at =
+        send_packet_until(process.control.get(), prepared.request_packet,
+                          descriptors, request_transfer_deadline);
+    const SupervisorDeadline invocation_deadline = checked_supervisor_deadline(
+        request_transfer_accepted_at, options.invocation_timeout);
     phase = SupervisedHostPhase::Invocation;
     hold_invocation_monitor_until_child_exit_for_test(&process.child,
                                                       invocation_deadline);
@@ -3926,11 +4129,27 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
         await_authenticated_invocation_completed(
             &process, nonce, prepared.request.identity,
             hello.heartbeat_interval_milliseconds, invocation_deadline,
-            options.heartbeat_timeout, request_transferred_at);
+            options.heartbeat_timeout, request_transfer_accepted_at);
 
     phase = SupervisedHostPhase::Response;
     const SupervisorDeadline response_deadline =
-        completed_at + options.response_timeout;
+        checked_supervisor_deadline(completed_at, options.response_timeout);
+    if (force_response_channel_observation_overflow) {
+      int regular_descriptor_flags = O_RDONLY;
+#ifdef O_CLOEXEC
+      regular_descriptor_flags |= O_CLOEXEC;
+#endif
+      const int regular_descriptor =
+          ::open("/dev/null", regular_descriptor_flags);
+      if (regular_descriptor < 0) {
+        throw IsolatedCpuInvocationError(
+            std::string("plugin runtime response-channel test replacement "
+                        "failed: ") +
+            std::strerror(errno));
+      }
+      process.control.reset(regular_descriptor);
+      response_channel_observation_overflow_ready = true;
+    }
     ReceivedPacket received =
         receive_packet(process.control.get(), response_deadline);
     process.control.reset();
@@ -3977,20 +4196,20 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
   } catch (const PluginRuntimeFault& fault) {
     throw_after_supervised_cleanup(fault, &process, options, pending_reap);
   } catch (const SupervisorDeadlineExpired&) {
-    PluginRuntimeFaultKind kind = PluginRuntimeFaultKind::StartupDeadline;
+    const PluginRuntimeFaultKind kind = supervised_deadline_fault_kind(phase);
     const char* message = "plugin runtime startup channel timed out";
     if (phase == SupervisedHostPhase::RequestTransfer) {
-      kind = PluginRuntimeFaultKind::InvocationDeadline;
       message = "plugin runtime request transfer timed out";
     } else if (phase == SupervisedHostPhase::Invocation) {
-      kind = PluginRuntimeFaultKind::InvocationDeadline;
       message = "plugin runtime invocation channel timed out";
     } else if (phase == SupervisedHostPhase::Response) {
-      kind = PluginRuntimeFaultKind::ResponseDeadline;
       message = "plugin runtime response transfer timed out";
     }
     throw_after_supervised_cleanup(PluginRuntimeFault(kind, message), &process,
                                    options, pending_reap);
+  } catch (const SupervisorDeadlineOverflow& error) {
+    throw_after_supervised_deadline_overflow_cleanup(phase, error, &process,
+                                                     options, pending_reap);
   } catch (const IsolatedCpuProtocolError& error) {
     const PluginRuntimeFaultKind kind =
         phase == SupervisedHostPhase::Response
@@ -4006,9 +4225,17 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
     std::optional<int> status = process.child.wait_status();
     if (!status.has_value()) {
       try {
+        const SupervisorDeadline observation_base =
+            response_channel_observation_overflow_ready
+                ? SupervisorDeadline::max()
+                : SupervisorClock::now();
         status = observe_child_after_channel_close(
             &process.child,
-            SupervisorClock::now() + std::chrono::milliseconds{20});
+            checked_supervisor_deadline(observation_base,
+                                        std::chrono::milliseconds{20}));
+      } catch (const SupervisorDeadlineOverflow& observation_error) {
+        throw_after_supervised_deadline_overflow_cleanup(
+            phase, observation_error, &process, options, pending_reap);
       } catch (...) {
         status = std::nullopt;
       }
@@ -4039,7 +4266,22 @@ IsolatedCpuInvocationTestProbe::snapshot() noexcept {
       g_exact_frames_received.load(std::memory_order_relaxed),
       g_next_request_shutdown_acceptance_delay_ms.load(
           std::memory_order_acquire) > 0,
+      g_next_request_transfer_post_acceptance_delay_ms.load(
+          std::memory_order_acquire) > 0,
+      g_next_response_channel_observation_overflow.load(
+          std::memory_order_acquire),
       g_next_invocation_monitor_exit_hold.load(std::memory_order_acquire)};
+}
+
+/**
+ * @copydoc IsolatedCpuInvocationTestProbe::
+ * checked_supervisor_deadline_for_test
+ */
+std::chrono::steady_clock::time_point
+IsolatedCpuInvocationTestProbe::checked_supervisor_deadline_for_test(
+    std::chrono::steady_clock::time_point base,
+    std::chrono::milliseconds duration) {
+  return checked_supervisor_deadline(base, duration);
 }
 
 /** @copydoc IsolatedCpuInvocationTestProbe::delay_next_supervised_request_send
@@ -4068,6 +4310,33 @@ void IsolatedCpuInvocationTestProbe::
   }
   g_next_request_shutdown_acceptance_delay_ms.store(delay.count(),
                                                     std::memory_order_release);
+}
+
+/**
+ * @copydoc IsolatedCpuInvocationTestProbe::
+ * delay_next_supervised_request_transfer_post_acceptance
+ */
+void IsolatedCpuInvocationTestProbe::
+    delay_next_supervised_request_transfer_post_acceptance(  // NOLINT(whitespace/indent_namespace)
+        std::chrono::milliseconds delay) {
+  if (delay.count() < 0) {
+    throw std::invalid_argument(
+        "supervised request-transfer post-acceptance test delay must be "
+        "nonnegative");
+  }
+  g_next_request_transfer_post_acceptance_delay_ms.store(
+      delay.count(), std::memory_order_release);
+}
+
+/**
+ * @copydoc IsolatedCpuInvocationTestProbe::
+ * force_next_response_channel_observation_overflow
+ */
+void IsolatedCpuInvocationTestProbe::
+    force_next_response_channel_observation_overflow(  // NOLINT(whitespace/indent_namespace)
+        bool enabled) noexcept {
+  g_next_response_channel_observation_overflow.store(enabled,
+                                                     std::memory_order_release);
 }
 
 /**
@@ -4214,6 +4483,8 @@ PluginRuntimeSupervisor::~PluginRuntimeSupervisor() noexcept = default;
  * @param invocation Host-owned identity, inputs, and exact output plans.
  * @return Complete callback outcome with fresh Values on success.
  * @throws PluginRuntimeFault for lifecycle/process/output or quarantine fault.
+ * @throws std::overflow_error when the pre-spawn startup deadline cannot be
+ * represented by the monotonic clock.
  * @throws IsolatedCpuProtocolError and public Value failures from Host
  * preflight/publication unchanged.
  * @note A classified failure arms only bounded restart backoff; no transport
@@ -4238,9 +4509,19 @@ IsolatedCpuHostInvocationResult PluginRuntimeSupervisor::invoke(
     return run_supervised_plugin_invocation(impl_->executable, impl_->options,
                                             impl_->limits, invocation,
                                             &impl_->pending_reap);
-  } catch (const PluginRuntimeFault&) {
-    impl_->next_launch_not_before =
-        SupervisorClock::now() + impl_->options.restart_backoff;
+  } catch (const PluginRuntimeFault& fault) {
+    try {
+      impl_->next_launch_not_before = checked_supervisor_deadline(
+          SupervisorClock::now(), impl_->options.restart_backoff);
+    } catch (const SupervisorDeadlineOverflow& error) {
+      throw PluginRuntimeFault(
+          fault.kind(),
+          std::string(fault.what()) +
+              "; plugin runtime restart-backoff deadline arithmetic failed: " +
+              error.what(),
+          fault.wait_status(), fault.exit_code(), fault.signal_number(),
+          fault.termination_stage(), fault.memory_pressure_compatible());
+    }
     throw;
   }
 }

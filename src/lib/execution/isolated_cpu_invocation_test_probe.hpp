@@ -50,6 +50,21 @@ struct IsolatedCpuInvocationTestSnapshot final {
    * channel, deadline, or process authority.
    */
   bool request_shutdown_acceptance_delay_armed = false;
+  /**
+   * @brief Reports whether a post-transfer-acceptance delay remains armed.
+   * @note False is the default and the successful transfer consumer clears
+   * the one-shot state before delaying. This observation grants no channel,
+   * deadline, lifecycle, or process authority.
+   */
+  bool request_transfer_post_acceptance_delay_armed = false;
+  /**
+   * @brief Reports whether a response-channel observation overflow is armed.
+   * @note False is the default. The next supervised invocation consumes the
+   * one-shot state before any fallible Host preparation, so an early failure
+   * cannot perturb a later invocation. This observation grants no channel,
+   * clock, deadline, PID, or cleanup authority.
+   */
+  bool response_channel_observation_overflow_armed = false;
   /** @brief True only while the one-shot post-request exit hold is armed. */
   bool invocation_monitor_exit_hold_armed = false;
 };
@@ -80,6 +95,26 @@ class IsolatedCpuInvocationTestProbe final {
   static IsolatedCpuInvocationTestSnapshot snapshot() noexcept;
 
   /**
+   * @brief Exercises the production checked supervisor-deadline derivation.
+   * @param base Exact synthetic monotonic base captured by the maintained test.
+   * @param duration Candidate positive bounded supervisor duration.
+   * @return Exact `base + duration` deadline when representable.
+   * @throws std::invalid_argument when `duration` is outside the construction
+   * domain.
+   * @throws std::overflow_error when the exact sum exceeds the monotonic clock
+   * range.
+   * @throws std::bad_alloc when constructing a rejection diagnostic exhausts
+   * memory.
+   * @note This source-private seam samples no real clock and delegates to the
+   * same helper used by every production supervisor deadline derivation. It
+   * grants no clock, deadline, child, descriptor, or lifecycle authority.
+   */
+  static std::chrono::steady_clock::time_point
+  checked_supervisor_deadline_for_test(
+      std::chrono::steady_clock::time_point base,
+      std::chrono::milliseconds duration);
+
+  /**
    * @brief Delays the next supervised request send exactly once.
    * @param delay Nonnegative process-local delay applied before send polling.
    * @return Nothing after publishing the next-send perturbation.
@@ -104,6 +139,39 @@ class IsolatedCpuInvocationTestProbe final {
    */
   static void delay_next_supervised_request_shutdown_acceptance(
       std::chrono::milliseconds delay);
+
+  /**
+   * @brief Delays Host continuation after the next accepted request transfer.
+   * @param delay Nonnegative process-local delay consumed exactly once after
+   * successful `SHUT_WR` and its same-deadline acceptance observation, but
+   * before the send helper returns to the supervisor caller.
+   * @return Nothing after publishing the next post-acceptance perturbation.
+   * @throws std::invalid_argument when `delay` is negative.
+   * @note This maintained deadline-test seam is disabled by default and
+   * deterministically models supervisor descheduling after the transfer
+   * acceptance linearization point. It grants no PID, descriptor, mapping,
+   * lifecycle, deadline, or clock authority. Callers must clear an unconsumed
+   * delay after an earlier exceptional path before starting another call.
+   */
+  static void delay_next_supervised_request_transfer_post_acceptance(
+      std::chrono::milliseconds delay);
+
+  /**
+   * @brief Forces one owned response-channel observation deadline to overflow.
+   * @param enabled True to arm the next invocation, false to clear the seam.
+   * @return Nothing after publishing the process-local one-shot state.
+   * @throws Nothing.
+   * @note When armed, the next invocation consumes the state before Host
+   * preparation. If it reaches the response phase, the production owner
+   * replaces its control socket with an owned `/dev/null` descriptor so the
+   * ordinary receiver observes a real `recvmsg` `ENOTSOCK`, then supplies
+   * `time_point::max()` as the captured base for that channel error's short
+   * exact-status observation. This source-private seam is disabled by default,
+   * is not installed, and grants no channel, clock, deadline, PID, wait, or
+   * cleanup authority.
+   */
+  static void force_next_response_channel_observation_overflow(
+      bool enabled) noexcept;
 
   /**
    * @brief Delays one selected lifecycle event immediately before acceptance.
