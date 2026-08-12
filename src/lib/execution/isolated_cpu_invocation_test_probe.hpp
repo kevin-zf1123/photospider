@@ -27,7 +27,7 @@ enum class SupervisedLifecycleTestEvent : std::uint8_t {
  * @brief Process-local observations of invocation side effects.
  * @throws Nothing for ordinary value operations.
  * @note Counters are monotonic; the PID field is only the latest observation.
- * The hold field is transient test state rather than a counter. No field
+ * The Boolean fields are transient test state rather than counters. No field
  * grants descriptor, PID, mapping, or cleanup authority.
  */
 struct IsolatedCpuInvocationTestSnapshot final {
@@ -43,6 +43,13 @@ struct IsolatedCpuInvocationTestSnapshot final {
   std::int64_t last_reaped_child = -1;
   /** @brief Frames whose exact declared byte length has been received. */
   std::uint64_t exact_frames_received = 0U;
+  /**
+   * @brief Reports whether a post-shutdown acceptance delay remains armed.
+   * @note False is the default and the post-successful-`SHUT_WR` consumer
+   * clears the one-shot state before delaying. This observation grants no
+   * channel, deadline, or process authority.
+   */
+  bool request_shutdown_acceptance_delay_armed = false;
   /** @brief True only while the one-shot post-request exit hold is armed. */
   bool invocation_monitor_exit_hold_armed = false;
 };
@@ -81,6 +88,21 @@ class IsolatedCpuInvocationTestProbe final {
    * already-started send, and grants no PID, descriptor, or mapping authority.
    */
   static void delay_next_supervised_request_send(
+      std::chrono::milliseconds delay);
+
+  /**
+   * @brief Delays the next successful request-shutdown acceptance once.
+   * @param delay Nonnegative process-local delay applied after successful
+   * `shutdown(SHUT_WR)` and before request-transfer deadline acceptance.
+   * @return Nothing after publishing the next-shutdown perturbation.
+   * @throws std::invalid_argument when `delay` is negative.
+   * @note This maintained deadline-test seam is disabled by default, affects
+   * no already-accepted shutdown, and grants no PID, descriptor, mapping,
+   * lifecycle, or clock authority. The production helper consumes it only
+   * after successful write-half shutdown; callers must clear an unconsumed
+   * delay after an earlier exceptional path before starting another call.
+   */
+  static void delay_next_supervised_request_shutdown_acceptance(
       std::chrono::milliseconds delay);
 
   /**

@@ -280,6 +280,37 @@ ObservedRuntimeFault observe_runtime_fault_after_lifecycle_acceptance_delay(
 }
 
 /**
+ * @brief Captures one failure after delaying successful request shutdown.
+ * @param executor Supervised-only product executor.
+ * @param invocation Complete Host invocation plan.
+ * @param delay Nonnegative one-shot post-shutdown acceptance delay.
+ * @return Captured `PluginRuntimeFault` facts after resetting the test seam.
+ * @throws Failure-capture, invocation, or probe errors unchanged.
+ * @note The reset also runs when request validation, startup, or send fails
+ * before successful `SHUT_WR`, so no unconsumed delay reaches another call.
+ */
+ObservedRuntimeFault
+observe_runtime_fault_after_request_shutdown_acceptance_delay(
+    PluginInvocationExecutor* executor,
+    const IsolatedCpuHostInvocation& invocation,
+    std::chrono::milliseconds delay) {
+  IsolatedCpuInvocationTestProbe::
+      delay_next_supervised_request_shutdown_acceptance(delay);
+  try {
+    ObservedRuntimeFault fault = observe_runtime_fault(executor, invocation);
+    IsolatedCpuInvocationTestProbe::
+        delay_next_supervised_request_shutdown_acceptance(
+            std::chrono::milliseconds{0});
+    return fault;
+  } catch (...) {
+    IsolatedCpuInvocationTestProbe::
+        delay_next_supervised_request_shutdown_acceptance(
+            std::chrono::milliseconds{0});
+    throw;
+  }
+}
+
+/**
  * @brief Checks exactly one fresh child was spawned and reaped.
  * @param before Observation immediately before a call.
  * @param after Observation immediately after a call.
@@ -549,6 +580,59 @@ TEST(PluginRuntimeSupervisor, RequestTransferDoesNotConsumeCallbackBudget) {
   EXPECT_EQ(supervisor_test_bytes(result.outputs[0]), expected);
   expect_supervised_child_reaped(before,
                                  IsolatedCpuInvocationTestProbe::snapshot());
+}
+
+/**
+ * @brief Rejects a complete request whose successful write-half shutdown is
+ * accepted only after the absolute request-transfer deadline, then proves
+ * exact retirement and fresh-process recovery without output publication.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ */
+TEST(PluginRuntimeSupervisor,
+     RejectsRequestShutdownAcceptedAfterTransferDeadlineAndRecovers) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.heartbeat_interval = std::chrono::milliseconds{20};
+  options.heartbeat_timeout = std::chrono::milliseconds{600};
+  options.invocation_timeout = std::chrono::milliseconds{120};
+  options.restart_backoff = std::chrono::milliseconds{1};
+  PluginInvocationExecutor executor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+  const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  ASSERT_FALSE(before.request_shutdown_acceptance_delay_armed);
+
+  const ObservedRuntimeFault fault =
+      observe_runtime_fault_after_request_shutdown_acceptance_delay(
+          &executor, supervisor_test_invocation("fixture.fill_sequence", 109U),
+          std::chrono::milliseconds{240});
+  const IsolatedCpuInvocationTestSnapshot after_fault =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_EQ(fault.kind, PluginRuntimeFaultKind::InvocationDeadline);
+  EXPECT_NE(fault.diagnostic.find("request transfer"), std::string::npos);
+  expect_supervised_child_reaped(before, after_fault);
+  EXPECT_EQ(after_fault.exact_frames_received, before.exact_frames_received);
+  EXPECT_FALSE(after_fault.request_shutdown_acceptance_delay_armed);
+  const std::int64_t failed_reaped_pid = after_fault.last_reaped_child;
+
+  const IsolatedCpuHostInvocationResult recovered = executor.invoke(
+      supervisor_test_invocation("fixture.fill_sequence", 110U));
+  ASSERT_EQ(recovered.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(recovered.outputs.size(), 1U);
+  const std::array<std::byte, 6U> expected{std::byte{0}, std::byte{1},
+                                           std::byte{2}, std::byte{3},
+                                           std::byte{4}, std::byte{5}};
+  EXPECT_EQ(supervisor_test_bytes(recovered.outputs[0]), expected);
+  const IsolatedCpuInvocationTestSnapshot after_recovery =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  expect_supervised_child_reaped(after_fault, after_recovery);
+  EXPECT_EQ(after_recovery.exact_frames_received,
+            after_fault.exact_frames_received + 1U);
+  EXPECT_NE(after_recovery.last_reaped_child, failed_reaped_pid);
+  EXPECT_FALSE(after_recovery.request_shutdown_acceptance_delay_armed);
+  EXPECT_EQ(supervisor_open_descriptor_count(), descriptor_baseline);
 }
 
 /**

@@ -363,6 +363,12 @@ std::atomic<std::int64_t> g_last_reaped_child{-1};
 std::atomic<std::uint64_t> g_exact_frames_received{0U};
 /** @brief One-shot supervised request-send delay used only by tests. */
 std::atomic<std::int64_t> g_next_supervised_request_send_delay_ms{0};
+/**
+ * @brief Owns the one-shot successful request-shutdown acceptance test delay.
+ * @note Zero disables the seam. A positive value is atomically consumed only
+ * after successful `SHUT_WR` and grants no channel, deadline, or PID authority.
+ */
+std::atomic<std::int64_t> g_next_request_shutdown_acceptance_delay_ms{0};
 /** @brief One-shot post-receive RuntimeStarted acceptance test delay. */
 std::atomic<std::int64_t> g_next_runtime_started_acceptance_delay_ms{0};
 /** @brief One-shot post-receive Heartbeat acceptance test delay. */
@@ -960,14 +966,21 @@ void send_packet(int socket, const std::vector<std::byte>& packet,
  * @param packet Nonempty bounded canonical request packet.
  * @param descriptors Ordered borrowed capability descriptors.
  * @param deadline Absolute monotonic send/shutdown bound.
- * @return Nothing after exact send and write-half shutdown.
- * @throws SupervisorDeadlineExpired when the bound is reached.
+ * @return Nothing after exact send, successful write-half shutdown, and
+ * post-shutdown deadline acceptance.
+ * @throws SupervisorDeadlineExpired when the bound is reached before complete
+ * request-transfer acceptance.
  * @throws IsolatedCpuProtocolError for local packet or descriptor overflow.
  * @throws IsolatedCpuInvocationError for channel or shutdown failure.
  * @note Rights accompany only the first successfully sent byte segment;
  * ownership remains with the caller on every path.
- * A source-private one-shot delay can simulate bounded sender backpressure for
- * maintained deadline tests; it grants no channel or lifecycle authority.
+ * A source-private one-shot delay can simulate bounded sender backpressure,
+ * while a second one can simulate descheduling after successful shutdown but
+ * before acceptance; neither grants channel or lifecycle authority. A failed
+ * shutdown remains a channel fact because transfer never reached its success
+ * acceptance point. After successful shutdown, the same absolute deadline is
+ * observed before return, so a late transfer cannot arm a fresh invocation or
+ * heartbeat window and later cleanup facts cannot replace its deadline cause.
  */
 void send_packet_until(int socket, const std::vector<std::byte>& packet,
                        const std::vector<int>& descriptors,
@@ -1042,6 +1055,15 @@ void send_packet_until(int socket, const std::vector<std::byte>& packet,
     throw IsolatedCpuInvocationError(
         std::string("isolated CPU supervised frame shutdown failed: ") +
         std::strerror(errno));
+  }
+  const auto shutdown_acceptance_test_delay = std::chrono::milliseconds{
+      g_next_request_shutdown_acceptance_delay_ms.exchange(
+          0, std::memory_order_acq_rel)};
+  if (shutdown_acceptance_test_delay.count() > 0) {
+    std::this_thread::sleep_for(shutdown_acceptance_test_delay);
+  }
+  if (SupervisorClock::now() >= deadline) {
+    throw SupervisorDeadlineExpired();
   }
 }
 
@@ -4015,6 +4037,8 @@ IsolatedCpuInvocationTestProbe::snapshot() noexcept {
       g_reaped_children.load(std::memory_order_relaxed),
       g_last_reaped_child.load(std::memory_order_relaxed),
       g_exact_frames_received.load(std::memory_order_relaxed),
+      g_next_request_shutdown_acceptance_delay_ms.load(
+          std::memory_order_acquire) > 0,
       g_next_invocation_monitor_exit_hold.load(std::memory_order_acquire)};
 }
 
@@ -4028,6 +4052,22 @@ void IsolatedCpuInvocationTestProbe::delay_next_supervised_request_send(
   }
   g_next_supervised_request_send_delay_ms.store(delay.count(),
                                                 std::memory_order_release);
+}
+
+/**
+ * @copydoc IsolatedCpuInvocationTestProbe::
+ * delay_next_supervised_request_shutdown_acceptance
+ */
+void IsolatedCpuInvocationTestProbe::
+    delay_next_supervised_request_shutdown_acceptance(  // NOLINT(whitespace/indent_namespace)
+        std::chrono::milliseconds delay) {
+  if (delay.count() < 0) {
+    throw std::invalid_argument(
+        "supervised request-shutdown acceptance test delay must be "
+        "nonnegative");
+  }
+  g_next_request_shutdown_acceptance_delay_ms.store(delay.count(),
+                                                    std::memory_order_release);
 }
 
 /**
