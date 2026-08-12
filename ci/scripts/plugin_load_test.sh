@@ -47,6 +47,9 @@ case "$runtime_contract" in
 esac
 run_logged validate_plugin_targets require_ci_targets "${plugin_targets[@]}"
 ensure_ci_targets build_plugin_targets "${plugin_targets[@]}"
+if [[ "$runtime_contract" == policy_execution ]]; then
+  export_ci_plugin_trust_environment
+fi
 
 find "$BUILD_DIR/plugins" -maxdepth 1 -type f | sort | tee "$CI_ARTIFACT_DIR/op_plugins.txt"
 find "$BUILD_DIR/test_plugins" -type f | sort | tee "$CI_ARTIFACT_DIR/test_op_plugins.txt"
