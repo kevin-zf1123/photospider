@@ -4781,8 +4781,14 @@ class PluginRuntimeSupervisor::Impl final {
  * @param options Positive, ordered lifecycle bounds.
  * @param limits Protocol-v1 endpoint bounds.
  * @throws std::invalid_argument for invalid path, options, or limits.
+ * @throws PluginTrustError when process trust initialization or exact-runtime
+ * admission rejects the executable before any child/resource side effect.
  * @throws std::system_error when `SIGCHLD` state cannot be queried.
- * @throws std::bad_alloc when private state cannot allocate.
+ * @throws std::filesystem::filesystem_error when Linux exact-object path
+ * normalization fails.
+ * @throws std::bad_alloc when path, trust, diagnostic, or private state cannot
+ * allocate.
+ * @throws Any other cached `PluginTrustPolicy::load` exception unchanged.
  * @note Construction authorizes and retains one immutable exact-runtime
  * capability and snapshot descriptor. It creates no child, session nonce,
  * invocation capability, or ledger token.
@@ -4896,7 +4902,16 @@ IsolatedCpuInvocationLimits PluginRuntimeSupervisor::limits() const noexcept {
  * @param resource_policy Positive admission and child-limit policy.
  * @param options Positive lifecycle timing policy.
  * @param limits Protocol-v1 endpoint bounds.
- * @throws Construction failures from `PluginRuntimeSupervisor` unchanged.
+ * @throws std::invalid_argument for invalid path, resource authority/policy,
+ * supervisor options, endpoint limits, or auto-reaping `SIGCHLD` state.
+ * @throws PluginTrustError from immutable process trust initialization or
+ * exact-runtime admission unchanged.
+ * @throws std::system_error when `SIGCHLD` state cannot be queried.
+ * @throws std::filesystem::filesystem_error from Linux exact-object path
+ * normalization unchanged.
+ * @throws std::bad_alloc from path, trust, diagnostic, or supervisor state
+ * allocation unchanged.
+ * @throws Any other cached `PluginTrustPolicy::load` exception unchanged.
  */
 PluginInvocationExecutor::PluginInvocationExecutor(
     std::filesystem::path runtime_executable,
@@ -4927,10 +4942,17 @@ IsolatedCpuHostInvocationResult PluginInvocationExecutor::invoke(
  * @param resource_ledger Attempt-local sole resource-token mint.
  * @param resource_policy Positive admission and child-limit policy.
  * @param limits Protocol-v1 bounds; only the parameter limit may be zero.
- * @throws std::invalid_argument for an invalid path or endpoint limit.
+ * @throws std::invalid_argument for invalid path, resource authority/policy,
+ * endpoint limits, or auto-reaping `SIGCHLD` state.
+ * @throws PluginTrustError when process trust initialization or exact-runtime
+ * admission rejects the executable before any child/resource side effect.
  * @throws std::system_error when the process-wide SIGCHLD action cannot be
  * queried.
- * @throws std::bad_alloc when retained path storage cannot allocate.
+ * @throws std::filesystem::filesystem_error when Linux exact-object path
+ * normalization fails.
+ * @throws std::bad_alloc when retained path, trust, or diagnostic storage
+ * cannot allocate.
+ * @throws Any other cached `PluginTrustPolicy::load` exception unchanged.
  * @note Construction authorizes and retains one immutable exact-runtime
  * capability and snapshot descriptor. It creates no child, invocation-data
  * descriptor or mapping, or ledger token.

@@ -100,6 +100,108 @@ using UniqueDigestContext =
     std::unique_ptr<EVP_MD_CTX, decltype(&free_digest_context)>;  // NOLINT
 
 /**
+ * @brief Move-only owner for one already-opened native DSO handle.
+ * @throws Nothing from ownership transfer or destruction.
+ * @note The retained close callback is source-private and has static lifetime.
+ */
+class NativeLibraryHandleOwner final {
+ public:
+  /**
+   * @brief Adopts one nonnull native library handle.
+   * @param native_handle Handle returned by the platform loader.
+   * @param close_native_library Static non-throwing platform closer.
+   * @throws Nothing.
+   */
+  NativeLibraryHandleOwner(
+      void* native_handle,
+      NativeLibraryCloseFunction& close_native_library) noexcept
+      : native_handle_(native_handle),
+        close_native_library_(&close_native_library) {}
+
+  /**
+   * @brief Transfers native handle ownership.
+   * @param other Owner made inactive by the transfer.
+   * @throws Nothing.
+   */
+  NativeLibraryHandleOwner(NativeLibraryHandleOwner&& other) noexcept
+      : native_handle_(other.native_handle_),
+        close_native_library_(other.close_native_library_) {
+    other.native_handle_ = nullptr;
+    other.close_native_library_ = nullptr;
+  }
+
+  /**
+   * @brief Closes the adopted native library when still active.
+   * @throws Nothing; the platform callback suppresses close failures.
+   */
+  ~NativeLibraryHandleOwner() noexcept {
+    if (native_handle_ != nullptr) {
+      (*close_native_library_)(native_handle_);
+    }
+  }
+
+  /** @brief Prevents duplicate native handle ownership. */
+  NativeLibraryHandleOwner(const NativeLibraryHandleOwner&) = delete;
+
+  /** @brief Prevents duplicate native handle assignment. */
+  NativeLibraryHandleOwner& operator=(const NativeLibraryHandleOwner&) = delete;
+
+  /** @brief Prevents replacing an active native handle owner. */
+  NativeLibraryHandleOwner& operator=(NativeLibraryHandleOwner&&) = delete;
+
+ private:
+  /** @brief Owned native library handle, or null after movement. */
+  void* native_handle_ = nullptr;
+
+  /** @brief Static non-throwing platform close callback. */
+  NativeLibraryCloseFunction* close_native_library_ = nullptr;
+};
+
+/**
+ * @brief Shared state coupling exact-object authority and native mapping.
+ * @throws Nothing from construction or destruction.
+ * @note Member order is the lifetime invariant: reverse destruction retires
+ * `native_library_` first and `authorized_file_` second. Consequently the
+ * sealed snapshot descriptor cannot be reused while this mapping is resident.
+ */
+class AuthorizedNativeLibraryLeaseState final {
+ public:
+  /**
+   * @brief Transfers capability and native handle ownership into one state.
+   * @param authorized_file Active exact-object capability.
+   * @param native_library Matching already-opened native handle owner.
+   * @throws Nothing because both inputs are moved.
+   */
+  AuthorizedNativeLibraryLeaseState(
+      AuthorizedPluginFile&& authorized_file,
+      NativeLibraryHandleOwner&& native_library) noexcept
+      : authorized_file_(std::move(authorized_file)),
+        native_library_(std::move(native_library)) {}
+
+  /**
+   * @brief Retires the native mapping before its exact-object capability.
+   * @throws Nothing.
+   * @note Default reverse member destruction enforces the documented order.
+   */
+  ~AuthorizedNativeLibraryLeaseState() noexcept = default;
+
+  /** @brief Prevents duplicating coupled ownership outside shared_ptr. */
+  AuthorizedNativeLibraryLeaseState(const AuthorizedNativeLibraryLeaseState&) =
+      delete;
+
+  /** @brief Prevents assigning coupled ownership. */
+  AuthorizedNativeLibraryLeaseState& operator=(
+      const AuthorizedNativeLibraryLeaseState&) = delete;
+
+ private:
+  /** @brief Capability declared first so its descriptor closes last. */
+  AuthorizedPluginFile authorized_file_;
+
+  /** @brief Native handle declared last so it closes first. */
+  NativeLibraryHandleOwner native_library_;
+};
+
+/**
  * @brief Returns whether one byte is lowercase hexadecimal ASCII.
  * @param value Candidate byte.
  * @return True for `0-9` or `a-f`.
@@ -907,6 +1009,24 @@ void AuthorizedPluginFile::reset() noexcept {
   package_ = {};
   digest_ = {};
   original_path_.clear();
+}
+
+/** @copydoc make_authorized_native_library_lease */
+std::shared_ptr<void> make_authorized_native_library_lease(
+    void* native_handle, AuthorizedPluginFile authorized_file,
+    NativeLibraryCloseFunction& close_native_library) {
+  if (native_handle == nullptr) {
+    throw std::invalid_argument(
+        "authorized native library lease requires a nonnull handle");
+  }
+  NativeLibraryHandleOwner native_library(native_handle, close_native_library);
+  if (!authorized_file.active()) {
+    throw std::invalid_argument(
+        "authorized native library lease requires an active capability");
+  }
+  auto state = std::make_shared<AuthorizedNativeLibraryLeaseState>(
+      std::move(authorized_file), std::move(native_library));
+  return std::shared_ptr<void>(state, native_handle);
 }
 
 /** @copydoc PluginTrustPolicy::PluginTrustPolicy */

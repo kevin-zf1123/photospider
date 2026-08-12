@@ -102,20 +102,21 @@ struct HostRegistrarContext {
   OpRegistry* registry = nullptr;
 
   /**
-   * @brief Candidate library lease captured by every registered callback.
+   * @brief Candidate handle/capability lease captured by every callback.
    *
    * The lease prevents explicit process-global unload from unmapping plugin
-   * code while an already copied callback is still executing.
+   * code or closing its sealed descriptor while a copied callback executes.
    */
   std::shared_ptr<void> library_lifetime;
 };
 
 /**
- * @brief Wraps a plugin callback with a shared dynamic-library lifetime lease.
+ * @brief Wraps a plugin callback with a shared handle/capability lease.
  *
  * @tparam Return Callback return type.
  * @tparam Args Callback parameter types, including reference qualifiers.
- * @param library_lifetime Shared owner for the candidate dynamic library.
+ * @param library_lifetime Shared owner for the candidate native handle and
+ *        exact-object capability.
  * @param callback Plugin-provided callback to invoke.
  * @param observe_device_retirement Whether BUILD_TESTING should observe final
  *        device-wrapper retirement against the real registry lock token.
@@ -124,7 +125,8 @@ struct HostRegistrarContext {
  *         fails.
  * @note State declares the lease before the callback, so reverse member
  *       destruction destroys plugin-owned callable state before releasing the
- *       last possible dynamic-library handle. Copied wrappers share the state,
+ *       last possible combined native-library lease. Copied wrappers share the
+ *       state,
  *       allowing explicit unload to remove registry visibility immediately
  *       while an in-flight invocation safely finishes. In test builds, a true
  *       `observe_device_retirement` uses a borrowed process-global observer;
@@ -148,7 +150,7 @@ std::function<Return(Args...)> retain_plugin_library(
     std::function<Return(Args...)> callback,
     bool observe_device_retirement = false) {
   /**
-   * @brief Shared callback and handle state owned by host wrapper copies.
+   * @brief Shared callback and combined lease state owned by host wrappers.
    * @throws Nothing directly; member destruction follows reverse declaration
    *         order.
    * @note Copies of the returned wrapper share one instance of this state.
@@ -178,7 +180,7 @@ std::function<Return(Args...)> retain_plugin_library(
 #endif
     }
 
-    /** @brief Library lease declared first so it is destroyed last. */
+    /** @brief Handle/capability lease declared first and destroyed last. */
     std::shared_ptr<void> library_lifetime;
     /** @brief Plugin callback destroyed before the library lease. */
     std::function<Return(Args...)> callback;
@@ -578,32 +580,18 @@ const char* platform_plugin_extension() noexcept {
 }
 
 /**
- * @brief Creates a shared lifetime wrapper around an opened dynamic library.
- *
- * The returned `shared_ptr` does not own an object allocation; it owns the
- * platform handle through a custom deleter. Copying the pointer keeps the
- * library mapped until the final holder releases it.
- *
- * @param handle Native `LoadLibrary` or `dlopen` handle. A null handle produces
- * an empty lifetime object with a no-op deleter path.
- * @return Shared lifetime object that closes the library at final release.
- * @throws std::bad_alloc if the shared control block cannot be allocated.
- * @note Registered operation callbacks must be removed from `OpRegistry` before
- * this lifetime object is destroyed.
+ * @brief Closes one operation plugin native handle.
+ * @param handle Nonnull `LoadLibrary` or `dlopen` result.
+ * @return Nothing after the platform close attempt.
+ * @throws Nothing; close failures are intentionally ignored during retirement.
+ * @note `make_authorized_native_library_lease()` invokes this before releasing
+ * the matching exact-object capability.
  */
-std::shared_ptr<void> make_library_lifetime(void* handle) {
+void close_operation_library(void* handle) noexcept {
 #ifdef _WIN32
-  return std::shared_ptr<void>(handle, [](void* ptr) {
-    if (ptr) {
-      FreeLibrary(static_cast<HMODULE>(ptr));
-    }
-  });
+  (void)FreeLibrary(static_cast<HMODULE>(handle));
 #else
-  return std::shared_ptr<void>(handle, [](void* ptr) {
-    if (ptr) {
-      dlclose(ptr);
-    }
-  });
+  (void)dlclose(handle);
 #endif
 }
 
@@ -623,23 +611,30 @@ class DynamicLibrary final {
    * @brief Opens a dynamic library and reports platform loader failures.
    *
    * @param authorized Retained candidate object already approved for the
-   * operation role. The descriptor remains live through native mapping.
+   * operation role. Success transfers it into the shared native-library lease.
    * @param error_message Output error text when opening fails.
    * @return A library wrapper on success, or `nullptr` on failure.
    * @throws std::bad_alloc if allocation of the wrapper or handle owner fails.
-   * @note The caller is responsible for adding `path` to structured load
-   * results; this function only returns the platform error detail.
+   * @throws PluginTrustError if the capability cannot expose an exact-object
+   * native path on the active platform.
+   * @throws std::invalid_argument if a successful platform handle is paired
+   * with an inactive capability, which is an internal invariant violation.
+   * @note The capability remains live through native mapping and then through
+   * every callback/record owner. On failure the handle closes before the local
+   * capability, and the caller remains responsible for structured path output.
    */
-  static std::unique_ptr<DynamicLibrary> open(
-      const AuthorizedPluginFile& authorized, std::string& error_message) {
+  static std::unique_ptr<DynamicLibrary> open(AuthorizedPluginFile authorized,
+                                              std::string& error_message) {
     const std::string load_path = authorized.native_load_path();
 #ifdef _WIN32
-    HMODULE handle = LoadLibrary(load_path.c_str());
+    HMODULE handle = LoadLibraryA(load_path.c_str());
     if (!handle) {
       error_message = "LoadLibrary failed";
       return nullptr;
     }
-    auto library_lifetime = make_library_lifetime(static_cast<void*>(handle));
+    auto library_lifetime = make_authorized_native_library_lease(
+        static_cast<void*>(handle), std::move(authorized),
+        close_operation_library);
     return std::unique_ptr<DynamicLibrary>(new DynamicLibrary(
         static_cast<void*>(handle), std::move(library_lifetime)));
 #else
@@ -649,7 +644,8 @@ class DynamicLibrary final {
       error_message = err ? err : "dlopen failed";
       return nullptr;
     }
-    auto library_lifetime = make_library_lifetime(handle);
+    auto library_lifetime = make_authorized_native_library_lease(
+        handle, std::move(authorized), close_operation_library);
     return std::unique_ptr<DynamicLibrary>(
         new DynamicLibrary(handle, std::move(library_lifetime)));
 #endif
@@ -690,9 +686,9 @@ class DynamicLibrary final {
   }
 
   /**
-   * @brief Returns the shared handle lifetime retained by plugin owners.
+   * @brief Returns the combined native-library lifetime retained by owners.
    *
-   * @return Shared native handle owner.
+   * @return Shared native handle and exact-object capability owner.
    * @throws Nothing.
    * @note Holding this object keeps the library loaded even after the local
    * `DynamicLibrary` wrapper goes out of scope.
@@ -701,13 +697,14 @@ class DynamicLibrary final {
 
  private:
   /**
-   * @brief Takes ownership of an already-opened native library handle.
+   * @brief Takes ownership of an already-opened combined native lease.
    *
    * @param handle Native platform handle returned by `LoadLibrary` or `dlopen`.
-   * @param library_lifetime Prebuilt shared owner for handle.
+   * @param library_lifetime Prebuilt shared owner for handle and capability.
    * @throws Nothing; the shared owner is moved into place.
    * @note The caller constructs library_lifetime before allocating this wrapper
-   * so wrapper allocation failure still releases the native handle.
+   * so wrapper allocation failure still closes the native handle before the
+   * exact-object capability.
    */
   explicit DynamicLibrary(void* handle,
                           std::shared_ptr<void> library_lifetime) noexcept
@@ -716,8 +713,8 @@ class DynamicLibrary final {
   /** @brief Native dynamic-library handle used for symbol lookup. */
   void* handle_ = nullptr;
   /**
-   * @brief Shared lifetime owner that unloads the native library after the last
-   * plugin handle releases it.
+   * @brief Shared owner that unloads the native library and then releases its
+   * exact-object capability after the last plugin handle releases it.
    */
   std::shared_ptr<void> library_;
 };
@@ -931,7 +928,7 @@ void swap_plugin_load_result(PluginLoadResult& left,
  *
  * Member declaration order is part of the safety proof: `library_lifetime_`
  * is declared first and therefore destroyed last. On every exceptional exit,
- * captured snapshots, staged results, copied/ candidate handles, source
+ * captured snapshots, staged results, copied/candidate leases, source
  * strings, and plugin callbacks in `staged_registry_` are destroyed while the
  * candidate library is still mapped.
  *
@@ -945,7 +942,7 @@ class OperationPluginLoadTransaction final {
   /**
    * @brief Copies all caller-owned state before entering plugin code.
    *
-   * @param library_lifetime Candidate library lifetime retained through
+   * @param library_lifetime Candidate handle/capability lease retained through
    * rollback destruction.
    * @param registry Current host registry copied into the shadow registry.
    * @param op_sources Current frontend-visible source map.
@@ -1030,7 +1027,7 @@ class OperationPluginLoadTransaction final {
   PluginLoadResult& result() noexcept { return staged_result_; }
 
   /**
-   * @brief Returns a shared candidate-library lifetime for the handle record.
+   * @brief Returns the shared candidate lease for the published record.
    *
    * @return Shared owner whose copy operation cannot allocate.
    * @throws Nothing.
@@ -1064,8 +1061,9 @@ class OperationPluginLoadTransaction final {
    * @param result Live accumulated scan result.
    * @return Nothing.
    * @throws Nothing.
-   * @note The handle map is published before the registry, while the local
-   * `DynamicLibrary` and this transaction still retain the candidate handle.
+   * @note The lease map is published before the registry, while the local
+   * `DynamicLibrary` and this transaction still retain the candidate handle
+   * and capability.
    * No observer can see a plugin callback whose library lacks an owner after
    * the final registry swap.
    */
@@ -1084,7 +1082,7 @@ class OperationPluginLoadTransaction final {
   }
 
  private:
-  /** @brief Candidate handle declared first so it is destroyed last. */
+  /** @brief Candidate combined lease declared first and destroyed last. */
   std::shared_ptr<void> library_lifetime_;
   /** @brief Registry copy receiving every registrar mutation. */
   OpRegistry staged_registry_;
@@ -1145,13 +1143,20 @@ void capture_plugin_registration(
  * @throws std::bad_alloc from result, shadow registry/source/handle copies,
  * registrar execution, or post-registration staging. Plugin-origin resource
  * exhaustion is rethrown as a fresh host-owned standard bad_alloc.
+ * @throws std::invalid_argument if a successful native open is paired with an
+ * inactive exact-object capability.
+ * @throws Any non-`PluginTrustError` exception cached by process trust-policy
+ * initialization unchanged.
  * @note Signed content/role authorization opens and hashes the candidate before
- * native mapping. The retained exact-file capability remains alive through
- * `dlopen`/`LoadLibrary`; trust rejection cannot run an initializer. The live
+ * native mapping. Successful mapping moves the retained exact-file capability
+ * into the same shared lease as the native handle, so its descriptor remains
+ * live through all callback and generation owners and closes only after final
+ * native unload. Trust rejection cannot run an initializer. The live
  * singleton, source map, accumulated result, and handle map are changed only
  * by a final no-throw swap phase. On later failure the transaction's shadow
- * callback state is destroyed before its candidate handle, so no throwing
- * rollback, leaked handle, dangling callback, or partial result is exposed.
+ * callback state is destroyed before its candidate lease, so no throwing
+ * rollback, leaked handle, dangling callback, identity mismatch, or partial
+ * result is exposed.
  */
 void load_one_plugin(const fs::path& path,
                      std::map<std::string, std::string>& op_sources,
@@ -1178,7 +1183,7 @@ void load_one_plugin(const fs::path& path,
   }
 
   std::string error_message;
-  auto library = DynamicLibrary::open(*authorized, error_message);
+  auto library = DynamicLibrary::open(std::move(*authorized), error_message);
   if (!library) {
     staged_result.errors.push_back(
         {absolute_path, GraphErrc::Io, std::move(error_message)});

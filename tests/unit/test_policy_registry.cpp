@@ -28,6 +28,7 @@
 #include "photospider/core/graph_error.hpp"
 #include "policy/policy_registry.hpp"
 #include "support/policy_fixture_controller.hpp"
+#include "support/scoped_descriptor_pressure.hpp"
 
 #ifndef PS_TEST_POLICY_PLUGIN_PATH
 #error "PS_TEST_POLICY_PLUGIN_PATH must identify the compatible policy fixture"
@@ -36,6 +37,11 @@
 #ifndef PS_TEST_MISSING_API_POLICY_PLUGIN_PATH
 #error \
     "PS_TEST_MISSING_API_POLICY_PLUGIN_PATH must identify the missing-API fixture"
+#endif
+
+#ifndef PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH
+#error \
+    "PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH must identify the alternate fixture"
 #endif
 
 #ifndef PS_TEST_MISMATCHED_ABI_POLICY_PLUGIN_PATH
@@ -373,6 +379,50 @@ TEST(PolicyRegistry, LoadsFixtureAndKeepsActiveBindingValidAfterUnload) {
   result = binding->select(candidates, 32U, 42U);
   EXPECT_EQ(result.kind, PolicyInvocationResult::Kind::Selected);
   EXPECT_EQ(result.candidate_id, 202U);
+}
+
+/**
+ * @brief Keeps two differently signed sealed policy DSOs behaviorally distinct.
+ *
+ * @throws Standard allocation, descriptor, trust, loader, callback, or
+ * synchronization exceptions from the real production consumer path.
+ * @note Descriptor pressure makes sequential authorization reuse the same
+ * lowest available snapshot descriptor in the historical implementation. Both
+ * bindings remain live across adjacent loads and registry unload, so observing
+ * last-candidate versus first-candidate behavior proves the loader did not
+ * substitute an already resident `/proc/self/fd/N` object.
+ */
+TEST(PolicyRegistry, RetainsDistinctSealedObjectsAcrossAdjacentSignedLoads) {
+  constexpr std::size_t kPressureDescriptorCount = 64U;
+  ps::test::ScopedDescriptorPressure descriptor_pressure(
+      kPressureDescriptorCount);
+  ASSERT_EQ(descriptor_pressure.size(), kPressureDescriptorCount);
+
+  PolicyFixtureController control(PS_TEST_POLICY_PLUGIN_PATH);
+  control.reset();
+  PolicyRegistry registry;
+  registry.load(PS_TEST_POLICY_PLUGIN_PATH);
+  const std::shared_ptr<PolicyBinding> original =
+      registry.create_binding("fixture_policy", PolicyClass::Throughput, 25U);
+
+  registry.load(PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH);
+  const std::shared_ptr<PolicyBinding> alternate = registry.create_binding(
+      "fixture_policy_alternate", PolicyClass::Throughput, 26U);
+
+  EXPECT_EQ(registry.description("fixture_policy"),
+            "Deterministic policy test fixture.");
+  EXPECT_EQ(registry.description("fixture_policy_alternate"),
+            "Alternate deterministic policy fixture.");
+  EXPECT_EQ(registry.loaded_plugins().size(), 2U);
+
+  const std::vector<ps_policy_candidate_v1> candidates = {
+      make_candidate(101U, 1U), make_candidate(202U, 2U)};
+  EXPECT_EQ(original->select(candidates, 1U, 1U).candidate_id, 202U);
+  EXPECT_EQ(alternate->select(candidates, 2U, 2U).candidate_id, 101U);
+
+  EXPECT_EQ(registry.unload_all_plugins(), 2U);
+  EXPECT_EQ(original->select(candidates, 3U, 3U).candidate_id, 202U);
+  EXPECT_EQ(alternate->select(candidates, 4U, 4U).candidate_id, 101U);
 }
 
 /**

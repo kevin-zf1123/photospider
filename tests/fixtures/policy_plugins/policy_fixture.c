@@ -17,13 +17,29 @@
  * The default fixture publishes one `fixture_policy` type supporting both
  * classes and selects the last candidate. Test-only control exports select
  * malformed/status/lifecycle/blocking behavior without changing the production
- * policy ABI. Compile definitions can still expose an ABI mismatch or omit the
- * API-table export so version-first symbol ordering remains independently
- * testable.
+ * policy ABI. Compile definitions can expose an ABI mismatch, omit the API
+ * table, or select a distinct valid type/behavior identity so exact-object
+ * native-library lease tests can keep two sealed DSOs live simultaneously.
  */
 
 #ifndef PHOTOSPIDER_POLICY_FIXTURE_ABI_VERSION
 #define PHOTOSPIDER_POLICY_FIXTURE_ABI_VERSION PS_POLICY_PLUGIN_ABI_VERSION
+#endif
+
+/** @brief Compile-selected canonical identity for the first policy row. */
+#ifndef PHOTOSPIDER_POLICY_FIXTURE_TYPE_NAME
+#define PHOTOSPIDER_POLICY_FIXTURE_TYPE_NAME "fixture_policy"
+#endif
+
+/** @brief Compile-selected reader description for exact-identity tests. */
+#ifndef PHOTOSPIDER_POLICY_FIXTURE_DESCRIPTION
+#define PHOTOSPIDER_POLICY_FIXTURE_DESCRIPTION \
+  "Deterministic policy test fixture."
+#endif
+
+/** @brief Compile-selected implementation version for exact-identity tests. */
+#ifndef PHOTOSPIDER_POLICY_FIXTURE_VERSION
+#define PHOTOSPIDER_POLICY_FIXTURE_VERSION "test-v1"
 #endif
 
 /** @brief Suppresses helper warnings in the intentional missing-API fixture. */
@@ -129,12 +145,12 @@ fixture_setup_status(uint32_t mode) {
 static PS_POLICY_FIXTURE_MAYBE_UNUSED ps_policy_status_v1 PS_POLICY_CALL
 fixture_get_metadata(uint32_t type_index,
                      ps_policy_type_metadata_v1* out_metadata) {
-  static const char kName[] = "fixture_policy";
+  static const char kName[] = PHOTOSPIDER_POLICY_FIXTURE_TYPE_NAME;
   static const char kSecondName[] = "fixture_policy_two";
   static const char kNoncanonicalName[] = "FixturePolicy";
   static const char kReservedName[] = "interactive";
-  static const char kDescription[] = "Deterministic policy test fixture.";
-  static const char kVersion[] = "test-v1";
+  static const char kDescription[] = PHOTOSPIDER_POLICY_FIXTURE_DESCRIPTION;
+  static const char kVersion[] = PHOTOSPIDER_POLICY_FIXTURE_VERSION;
   static const char kInvalidUtf8[] = {(char)0xC0, (char)0xAF};
   static const char kOversizedDescription[4097] = {'x'};
   const uint32_t mode = atomic_load_explicit(&g_policy_fixture_metadata_mode,
@@ -313,6 +329,12 @@ fixture_select(void* context, const ps_policy_selection_snapshot_v1* snapshot,
   out_decision->snapshot_generation = snapshot->snapshot_generation;
   out_decision->candidate_id =
       snapshot->candidates[snapshot->candidate_count - 1U].candidate_id;
+
+#if defined(PHOTOSPIDER_POLICY_FIXTURE_SELECTS_FIRST_BY_DEFAULT)
+  if (mode == PS_POLICY_FIXTURE_SELECT_LAST) {
+    out_decision->candidate_id = snapshot->candidates[0].candidate_id;
+  }
+#endif
 
   switch (mode) {
     case PS_POLICY_FIXTURE_SELECT_FIRST:

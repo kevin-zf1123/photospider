@@ -1511,6 +1511,12 @@ if(BUILD_TESTING)
     endfunction()
 
     add_policy_fixture(test_policy_plugin "${TEST_POLICY_PLUGIN_DIR}")
+    add_policy_fixture(alternate_policy_plugin
+        "${TEST_POLICY_PLUGIN_DIR}/alternate"
+        PHOTOSPIDER_POLICY_FIXTURE_TYPE_NAME="fixture_policy_alternate"
+        PHOTOSPIDER_POLICY_FIXTURE_DESCRIPTION="Alternate deterministic policy fixture."
+        PHOTOSPIDER_POLICY_FIXTURE_VERSION="test-v2"
+        PHOTOSPIDER_POLICY_FIXTURE_SELECTS_FIRST_BY_DEFAULT)
     add_policy_fixture(missing_api_policy_plugin
         "${TEST_POLICY_PLUGIN_DIR}/missing"
         PHOTOSPIDER_POLICY_FIXTURE_OMIT_API)
@@ -2563,10 +2569,12 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         photospider_policy_internal)
     target_compile_definitions(test_policy_registry PRIVATE
         PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
+        PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH="$<TARGET_FILE:alternate_policy_plugin>"
         PS_TEST_MISSING_API_POLICY_PLUGIN_PATH="$<TARGET_FILE:missing_api_policy_plugin>"
         PS_TEST_MISMATCHED_ABI_POLICY_PLUGIN_PATH="$<TARGET_FILE:mismatched_abi_policy_plugin>")
     target_link_libraries(test_policy_registry PRIVATE ${CMAKE_DL_LIBS})
     add_dependencies(test_policy_registry test_policy_plugin
+        alternate_policy_plugin
         missing_api_policy_plugin mismatched_abi_policy_plugin)
     add_ps_test(test_policy_execution tests/unit/test_policy_execution.cpp
         photospider_internal_test_product)
@@ -2646,10 +2654,13 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_compile_definitions(test_plugin_manager PRIVATE
         PS_STANDARD_OP_PLUGIN_DIR="${PLUGIN_OUTPUT_DIR}"
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
+        PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
+        PS_TEST_ALTERNATE_POLICY_PLUGIN_PATH="$<TARGET_FILE:alternate_policy_plugin>"
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
     )
     add_dependencies(test_plugin_manager lifecycle_op_plugin
-        override_lifecycle_op_plugin v1_only_op_plugin ${OP_PLUGIN_TARGETS})
+        override_lifecycle_op_plugin v1_only_op_plugin test_policy_plugin
+        alternate_policy_plugin ${OP_PLUGIN_TARGETS})
 
     set(PHOTOSPIDER_PUBLIC_HEADER_ROOT
         "${PROJECT_SOURCE_DIR}/include/photospider")
@@ -3096,6 +3107,7 @@ if(BUILD_TESTING)
     foreach(PHOTOSPIDER_TEST_POLICY_TARGET
             ${POLICY_PLUGIN_TARGETS}
             test_policy_plugin
+            alternate_policy_plugin
             missing_api_policy_plugin
             mismatched_abi_policy_plugin)
         if(TARGET ${PHOTOSPIDER_TEST_POLICY_TARGET})

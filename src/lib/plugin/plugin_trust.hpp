@@ -136,10 +136,13 @@ struct PluginTrustConfiguration final {
  *
  * On Linux the object owns an immutable sealed-memfd snapshot whose digest was
  * confirmed after copying. DSO loading uses `native_load_path()` while the
- * descriptor remains live, and isolated exec uses `native_descriptor()`
- * directly. Original path spelling is retained only for diagnostics and never
- * re-authorizes or executes replacement bytes. Unsupported platforms cannot
- * construct this authority through `PluginTrustPolicy`.
+ * descriptor remains live, and every successful DSO consumer moves the
+ * capability into the shared native-library lease returned by
+ * `make_authorized_native_library_lease()`. Isolated exec uses
+ * `native_descriptor()` directly. Original path spelling is retained only for
+ * diagnostics and never re-authorizes or executes replacement bytes.
+ * Unsupported platforms cannot construct this authority through
+ * `PluginTrustPolicy`.
  *
  * @note Move and destruction must not race on the same object. Independent
  * capabilities own independent descriptors and require no shared lock.
@@ -168,7 +171,10 @@ class AuthorizedPluginFile final {
   /**
    * @brief Closes the retained descriptor after native use retires.
    * @throws Nothing; descriptor close failure is intentionally ignored.
-   * @note Callers must destroy native library leases before this capability.
+   * @note A DSO consumer must move this capability into the same shared lease
+   * that owns its native handle. That lease closes the native library before
+   * destroying this capability, preventing reuse of a `/proc/self/fd/N` name
+   * while the corresponding mapping remains resident.
    */
   ~AuthorizedPluginFile() noexcept;
 
@@ -229,7 +235,8 @@ class AuthorizedPluginFile final {
    * @return `/proc/self/fd/N` for the retained Linux sealed memfd.
    * @throws std::bad_alloc if string construction cannot allocate.
    * @throws PluginTrustError if exact-object mapping is unsupported.
-   * @note The returned value is valid only while this capability stays active.
+   * @note The returned value is valid only while this capability stays active;
+   * its descriptor-number spelling is not an identity after descriptor close.
    */
   std::string native_load_path() const;
 
@@ -284,6 +291,42 @@ class AuthorizedPluginFile final {
 };
 
 /**
+ * @brief Non-throwing platform callback that closes one native DSO handle.
+ * @param native_handle Nonnull handle returned by the platform loader.
+ * @return Nothing after the close attempt.
+ * @throws Nothing; platform close failures are intentionally ignored.
+ */
+using NativeLibraryCloseFunction = void(void* native_handle) noexcept;
+
+/**
+ * @brief Couples one authorized exact object to its native DSO handle.
+ *
+ * The returned aliasing owner exposes `native_handle` through `get()` while a
+ * private shared control block owns both the handle and `authorized_file`.
+ * Every callback, transaction, record, or binding that can use native code
+ * must share this exact owner.
+ *
+ * @param native_handle Nonnull handle returned by `dlopen` or `LoadLibrary`.
+ * @param authorized_file Active capability used to map that exact handle.
+ * @param close_native_library Non-throwing platform handle closer retained by
+ * the shared state.
+ * @return Shared alias whose final release closes the native handle and only
+ * then destroys `authorized_file` and closes its snapshot descriptor.
+ * @throws std::invalid_argument if `native_handle` is null or
+ * `authorized_file` is inactive. A nonnull handle is still closed.
+ * @throws std::bad_alloc if the shared control block cannot allocate; the
+ * handle is closed before the capability is destroyed on this path as well.
+ * @note Construction transfers capability ownership. Copies are thread-safe as
+ * ordinary `shared_ptr` owners, and final release may close the DSO on any
+ * releasing thread. `close_native_library` must have static lifetime. Callers
+ * must still obey platform and consumer synchronization rules for symbol use
+ * and final native unload.
+ */
+std::shared_ptr<void> make_authorized_native_library_lease(
+    void* native_handle, AuthorizedPluginFile authorized_file,
+    NativeLibraryCloseFunction& close_native_library);
+
+/**
  * @brief Immutable verified native plugin trust manifest.
  *
  * Loading validates bounded canonical bytes, Ed25519 signature, closed kinds,
@@ -316,6 +359,8 @@ class PluginTrustPolicy final {
    * @return Move-only capability retaining a private immutable snapshot.
    * @throws PluginTrustError before native code execution for every rejection.
    * @throws std::bad_alloc when bounded path or diagnostic state cannot grow.
+   * @throws std::filesystem::filesystem_error when Linux absolute-path
+   * normalization cannot inspect the process filesystem context.
    * @note An isolated-runtime constructor may omit `expected_package` to retain
    * the signed package identity for later invocation comparison. Operation and
    * policy roles reject a supplied package constraint so role checks cannot be
@@ -351,6 +396,10 @@ class PluginTrustPolicy final {
  * @brief Returns the process-immutable environment-selected trust policy.
  * @return Verified policy from the first authorization attempt.
  * @throws PluginTrustError with the cached first failure for process lifetime.
+ * @throws std::bad_alloc by rethrowing the cached first allocation failure from
+ * environment/path retention or `PluginTrustPolicy::load` unchanged.
+ * @throws Any other exception emitted by the first `PluginTrustPolicy::load`
+ * unchanged on every call through the cached `std::exception_ptr`.
  * @note Reads exactly `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
  * `PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE`, and
  * `PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY` once. Later environment changes have no
@@ -365,6 +414,12 @@ const PluginTrustPolicy& process_plugin_trust_policy();
  * @param expected_package Required exact runtime package identity when used.
  * @return Move-only retained exact-file capability.
  * @throws PluginTrustError from immutable policy initialization or admission.
+ * @throws std::bad_alloc from cached policy initialization or candidate
+ * authorization unchanged.
+ * @throws std::filesystem::filesystem_error from Linux candidate path
+ * normalization unchanged.
+ * @throws Any other cached initialization exception from
+ * `process_plugin_trust_policy()` unchanged.
  */
 AuthorizedPluginFile authorize_process_plugin(
     const std::filesystem::path& candidate, PluginArtifactKind kind,
