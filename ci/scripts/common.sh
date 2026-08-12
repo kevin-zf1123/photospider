@@ -200,6 +200,32 @@ require_ci_reusable_build() {
   return 1
 }
 
+# @brief Export the repository test trust authority for direct CI consumers.
+# @return Zero after exporting a complete nonempty trust tuple, otherwise
+#   nonzero with a diagnostic.
+# @throws Nothing; missing, nonregular, or empty trust material returns
+#   nonzero before any consumer process starts.
+# @note Call this only after a policy-execution consumer target has generated
+#   the signed test bundle. The canonical build/source paths replace inherited
+#   values so direct shell entry points use the same fail-closed authority as
+#   CTest. No private signing key is exported.
+export_ci_plugin_trust_environment() {
+  local manifest="$BUILD_DIR/generated/plugin_trust/manifest.txt"
+  local signature="$BUILD_DIR/generated/plugin_trust/signature.hex"
+  local public_key=
+  public_key="$REPO_ROOT/tests/fixtures/trust/test_ed25519_public_key.pem"
+  local trust_file
+  for trust_file in "$manifest" "$signature" "$public_key"; do
+    if [[ ! -f "$trust_file" || ! -s "$trust_file" ]]; then
+      echo "Required plugin trust material is unavailable: $trust_file" >&2
+      return 1
+    fi
+  done
+  export PHOTOSPIDER_PLUGIN_TRUST_MANIFEST="$manifest"
+  export PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE="$signature"
+  export PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY="$public_key"
+}
+
 # @brief Configure a build tree or record strict reuse of its configuration.
 # @param $1 Log step name.
 # @return Zero on configuration/reuse success, otherwise nonzero.

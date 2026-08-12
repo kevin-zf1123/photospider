@@ -75,6 +75,7 @@ case "$runtime_contract" in
       graph_cli \
       fifo_policy
     ensure_ci_targets build_graph_cli graph_cli fifo_policy
+    export_ci_plugin_trust_environment
     ;;
 esac
 
