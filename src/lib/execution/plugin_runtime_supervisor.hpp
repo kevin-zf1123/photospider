@@ -199,7 +199,11 @@ class PluginRuntimeSupervisor final {
    * @throws PluginTrustError when the executable is not signed for the
    * isolated-runtime role.
    * @throws std::system_error when `SIGCHLD` state cannot be queried.
-   * @throws std::bad_alloc when retained private state cannot allocate.
+   * @throws std::filesystem::filesystem_error when Linux exact-object path
+   * normalization fails.
+   * @throws std::bad_alloc when path, trust, diagnostic, or retained private
+   * state cannot allocate.
+   * @throws Any other cached `PluginTrustPolicy::load` exception unchanged.
    * @note Construction retains an authorized private immutable runtime
    * snapshot and proves duration/resource positivity, bounds, exact clock
    * conversion, and field relationships without minting an invocation token

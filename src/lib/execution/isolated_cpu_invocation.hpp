@@ -216,7 +216,11 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
    * @throws PluginTrustError when the executable is not signed for the
    * isolated-runtime role.
    * @throws std::system_error when `SIGCHLD` state cannot be queried.
-   * @throws std::bad_alloc when retaining path state cannot allocate.
+   * @throws std::filesystem::filesystem_error when Linux exact-object path
+   * normalization fails.
+   * @throws std::bad_alloc when retained path, trust, or diagnostic storage
+   * cannot allocate.
+   * @throws Any other cached `PluginTrustPolicy::load` exception unchanged.
    * @note Construction authorizes and retains a private immutable runtime
    * snapshot; it creates no child, invocation capabilities, or ledger token.
    * Darwin and unsupported platforms fail with `ExactObjectUnsupported`

@@ -4780,7 +4780,8 @@ class PluginRuntimeSupervisor::Impl final {
  * @param resource_policy Positive admission and child-limit policy.
  * @param options Positive, ordered lifecycle bounds.
  * @param limits Protocol-v1 endpoint bounds.
- * @throws std::invalid_argument for invalid path, options, or limits.
+ * @throws std::invalid_argument for a null resource ledger, invalid resource
+ * policy, path, options, or limits.
  * @throws PluginTrustError when process trust initialization or exact-runtime
  * admission rejects the executable before any child/resource side effect.
  * @throws std::system_error when `SIGCHLD` state cannot be queried.
