@@ -159,11 +159,42 @@ forward ROI propagator。Registry 仍提供 identity compatibility fallback，�
 | `io:save` | HP monolithic 副作用 sink | 显式 pass-through planning metadata；执行阶段重写完整文件。 |
 | `image_generator:perlin_noise_metal` | HP monolithic Metal generator | 显式 generator-local pass-through ROI metadata；未启用 tiled Metal 执行。 |
 
+## 本地插件信任准入
+
+当前 operation-v2 与 policy-v1 DSO 的每次加载，都以一份共享、进程内不可变的 trust policy
+开始。第一次授权时，进程读取 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY` 指定的三个文件，三者缺一不可。严格 LF 结尾的
+canonical manifest 通过 OpenSSL EVP 使用 Ed25519 验证，并把每个已排序条目的封闭
+`operation`、`policy` 或 `isolated-runtime` kind、非零 128-bit package id、正 generation 与
+SHA-256 内容摘要绑定起来。重复 `(kind, package id, generation)` 身份与重复 `(kind, digest)`
+内容角色映射都会被拒绝，因此字节与角色只会选择一个 package generation。首次成功策略或默认拒绝的配置结果会在进程生命周期内保留；之后的
+environment 变化或 IPC value 都不能铸造或替换 trust authority。
+
+授权会在不跟随最后 symlink 的条件下打开普通文件，从候选 hash 有界 byte 并检查前后 metadata
+稳定，但绝不把该 mutable inode 作为权限返回。Linux 会把获批 byte 复制到 anonymous `memfd`，
+应用 write/grow/shrink/seal 四种 seal，并在通过 `/proc/self/fd/N` mapping operation/policy 前于
+sealed descriptor 上确认 SHA-256。Darwin 会把获批 DSO 复制到 mode-0700 私有目录，sync 后重新
+打开并确认 SHA-256，立即 unlink 文件与目录，再只通过 `/dev/fd/N` mapping anonymous
+descriptor。因此 rename、symlink、pathname replacement、hard link 或 preopened writer 都不能
+替换后续 byte。当前 Windows 及其他所有不支持的 DSO profile 会默认拒绝，不回退 pathname。
+
+每个 `PluginTrustError`（包括 trust 配置缺失/不可读、候选无法打开、未签名、kind 错误或
+内容已变更）都会由 operation load report 或 policy Host surface 公开映射为
+`GraphErrc::InvalidParameter`。成功 trust authorization 后发生的 native `dlopen` failure 仍映射
+为 `GraphErrc::Io`；缺少 ABI symbol 或 ABI 内容畸形仍为 `GraphErrc::InvalidParameter`。这样会把
+授权失败与“已经授权的本地对象无法映射”区分开来。
+
+批准并不会 sandbox 进程内 DSO。获批 operation/policy library 仍是 operator-trusted native
+code，照常可以阻塞、在 Host accounting 之外分配、发起 syscall 或破坏 Host process。下文独立的
+isolated-runtime trust/resource control 不会给这两个进程内 ABI 追加 containment。
+
 ## 操作插件加载事务
 
 加载单个 operation plugin 是覆盖 loader 全部可观察状态的强事务。在调用
-`register_photospider_ops_v2` 之前，loader 会为目标 `OpRegistry`、operation-source map、
-结构化 load result 和 retained-handle map 创建 staged copy。Host 提供的 registrar 指向 staged registry，
+`register_photospider_ops_v2` 或执行 native mapping 之前，loader 会先把精确已打开候选授权为
+签名 `operation` artifact。随后它会为目标 `OpRegistry`、operation-source map、结构化 load
+result 和 retained-handle map 创建 staged copy。Host 提供的 registrar 指向 staged registry，
 因此 plugin callback 在注册期间绝不会修改 active registry。Registration capture、previous-source
 计算、restoration snapshot、result 聚合和 handle 插入也都只修改 staged state。
 
@@ -508,9 +539,9 @@ diagnostic。Exception/foreign unwind 不跨 DSO；C++ wrapper 在 plugin 内映
 进程内 callback 永不返回时，可能永久保留 invocation、write grant、context、generation 与
 DSO。因此 operation ABI v1 只是 operator-trusted compatibility/validation boundary，绝非
 sandbox。Tenant-untrusted pointer-free wire record、runtime supervision、trust/resource
-enforcement 是分别版本化的独立边界，由 Issues #102、#103、#104 负责。Issue #103 现在已经
-实现源码私有的 supervision 组合；它不实现本 ABI、不选择最终用户 operation，也不吸收 Issue
-#104 policy。
+enforcement 是分别版本化的独立边界，由 Issues #102、#103、#104 交付。Issue #104 现在保护
+当前 operation-v2/policy-v1 native admission 与私有 isolated runtime 组合；它不实现本目标 ABI、
+不选择最终用户 operation，也不增加通用 syscall/network sandbox。
 
 后续 migration 先新增 v1，并迁移每个仓库 operation 与 installed consumer，然后在同一
 release 删除 v2。不保留 wrapper、alias、dual loader、forwarding header、v2-to-v1 adapter、
@@ -732,13 +763,14 @@ scheduler SDK target、`IScheduler` 基类、scheduler factory、工作线程数
 DSO 时按以下顺序执行：
 
 1. 拒绝空路径、含 NUL 的路径以及策略回调同线程发起的修改；
-2. 归一化绝对路径，并以 eager/local 方式打开；
-3. 只解析并调用 `ps_policy_plugin_get_abi_version`；
-4. 要求 ABI 精确相等，然后解析并调用
+2. 归一化绝对路径，把精确已打开对象授权为签名 `policy` artifact，并保留该 capability；
+3. 通过已授权 descriptor path 以 eager/local 方式打开；
+4. 只解析并调用 `ps_policy_plugin_get_abi_version`；
+5. 要求 ABI 精确相等，然后解析并调用
    `ps_policy_plugin_get_api_v1`；
-5. 校验完整且大小精确的 API 表；
-6. 将每条元数据复制并校验到私有 map；
-7. 在注册表锁内拒绝所有可见名称冲突，暂存完整的下一版类型/路径容器，并通过
+6. 校验完整且大小精确的 API 表；
+7. 将每条元数据复制并校验到私有 map；
+8. 在注册表锁内拒绝所有可见名称冲突，暂存完整的下一版类型/路径容器，并通过
    swap 同时发布两者。
 
 缺少符号、ABI 不匹配、API 字节格式错误、无效 UTF-8、无效边界/掩码、保留的
@@ -865,7 +897,8 @@ provider-v3 suite。Policy ABI v1 继续独立版本化。
 策略边界只使用固定宽度标量、不透明 `void *` 上下文、借用的不可变数组以及
 C 函数指针。精确布局断言和校验明确规定受支持 profile，但不能沙箱化恶意 DSO。
 插件仍在 Host 进程内执行受信任的原生代码，可能阻塞、破坏内存、在计账外分配
-或创建未申报线程；它只是无法通过 ABI 合法获得执行能力。
+或创建未申报线程。签名 immutable-snapshot admission 会限制哪些 byte 及 role 可以进入进程，但不会
+改变这些能力；插件只是无法通过 ABI 合法获得执行能力。
 
 Issue #93 不会改变上述三条 ABI 的 inventory 或 record layout。其 `I1Host`、
 `ComputeRunObservationSink`、accepted-boundary collector、inner-row evaluator 与精确 runner
@@ -912,8 +945,9 @@ sandbox。
 parameter 与经检查的 dense-tensor output plan。全新的 one-call runtime 不接收 ABI pointer
 record、Host callback、allocator、Graph/Run owner 或 resource token；其 process-local
 callback seam 不会调用或迁移 operation ABI v2，也不会调用或迁移仍为目标态的 operation ABI
-v1。该 non-supervised 切片本身不会准入 tenant code、认证 runtime、施加 deadline、sandbox
-syscall 或执行 resource policy。
+v1。直接使用仍保持 non-supervised，不提供 authentication、deadline、heartbeat、restart 或
+有界 hang recovery。Issue #104 现在为该直接入口增加签名 package admission、Host resource
+admission 与 exec 前 OS limit，但不提供通用 syscall/network sandbox。
 
 Issue #103 现在通过源码私有的 `PluginRuntimeSupervisor` 与
 `PluginInvocationExecutor` 实现受监督部分。专用 Unix datagram socket 上的定长 lifecycle
@@ -950,11 +984,33 @@ reap ownership，并且绝不回退到进程内执行。后续调用会等待有
 授权成功。测试还会把 executor 组合进 `ExecutionService` ready callback；request boundary
 只把 owning Run 发布为 Failed，固定 worker 随后会执行无关 Run。
 
+Issue #104 现在会围绕两个长期维护的 isolated entry 组合 package trust 与 Host resource
+authority。在 shared-memory、descriptor、socket、mapping 或 process 副作用前，无副作用 preflight
+会导出五维 `PluginResourceVector`：runtime process、CPU slot、address-space byte、shared-memory
+byte 与 descriptor count。Attempt-local `ResourceLedger` 会原子铸造 move-only token；该 token
+绑定完整 invocation identity 的 domain-separated digest 与精确 vector。针对相同事实消费后会
+生成一份 RAII lease；replay tombstone 在结算后仍保留到 ledger 生命周期结束，而未消费 token 或
+已消费 invocation 的每条 success/failure path 都只归还一次精确 capacity。Invocation wire 不会
+携带 token、trust root、manifest、signature 或 digest override。
+
+已准入 vector 会在 native exec 前驱动 `RLIMIT_AS`、正 `RLIMIT_CPU`、经过检查的
+`RLIMIT_NOFILE` 与零 `RLIMIT_CORE`。Child 仍只获得空 environment、`/dev/null` 标准流、固定
+data/status/lifecycle descriptor、一个固定 executable descriptor 以及已声明 invocation
+capability；该封闭集合以上的 descriptor 会被移除。Linux 使用 `fexecve` 执行复制后校验的
+sealed descriptor。Darwin 没有受支持的 anonymous-
+descriptor runtime exec，因此 direct/supervised executor 构造期间授权会报告
+`ExactObjectUnsupported`，先于 token 发放、capability materialization、socket 创建或 fork；不会
+存在 runtime pathname snapshot。不支持的平台（包括当前 Windows runtime profile）同样默认拒绝，
+不会回退到未经校验的 path。
+这些控制施加 package identity 与 resource ceiling；它们不是通用 syscall/network sandbox，
+观察到 `SIGKILL` 仍只表示 memory-pressure-compatible，不证明 OOM。
+
 Adapter、endpoint、supervisor 与 executor 都会编入 installable product archive，但当前没有
 operation loader 或 product composition root 会为最终用户 Graph operation 构造 isolated
 request。具体而言，`ExecutionService`、`WorkerManager`、embedded Host/CLI 与
 `photospider-worker` 均不存在 selection caller。Operation ABI v2 与仍为目标态的 v1 都不会
-进入该 wire；Issue #104 仍负责 allowlist/signature、sandbox/capability 与可执行 resource policy。
+进入该 wire。Atomic operation-ABI migration 与最终用户 selection、更强 platform sandbox
+profile、长期 fuzz/audit evidence 都仍属于分别拥有的后续工作。
 
 影子发布阻止操作注册表或策略类型 map 局部可见。DSO 租约让回调状态和插件拥有
 的值或上下文保持在其定义库的生命周期内。匹配的操作恢复 token 和策略绑定代次

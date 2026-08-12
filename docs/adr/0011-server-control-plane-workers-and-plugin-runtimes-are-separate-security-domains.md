@@ -62,13 +62,15 @@ new process after bounded backoff. Product-linked integration composes the
 executor inside the existing `ExecutionService` callback/request boundary and
 proves a failed Run does not kill its fixed worker or a later unrelated Run.
 
-This is authenticated private-session supervision, not hostile-child
-attestation, package trust, sandboxing, resource enforcement, or a selected
-end-user operation route. No current `ExecutionService`, `WorkerManager`,
+That #103 boundary is authenticated private-session supervision, not hostile-
+child attestation, package trust, sandboxing, resource enforcement, or a
+selected end-user operation route. Issue #104 now wraps the maintained direct
+and supervised entries with signed package admission, one-use Host resource
+admission, and process rlimits. No current `ExecutionService`, `WorkerManager`,
 embedded Host/CLI, `photospider-worker`, or operation loader constructs this
-path for an end-user Graph operation; Issue #104 still owns trust and enforceable
-resource policy, and the complete operation-ABI migration still owns final
-selection.
+path for an end-user Graph operation; the complete operation-ABI migration
+still owns final selection, and a general syscall/network sandbox remains
+separate.
 
 ## Context
 
@@ -372,16 +374,18 @@ digest, and runtime identities never substitute for `ArtifactId` or a receipt.
 Operation v2, data-definition-provider v3, and policy v1 DSOs are trusted
 native code whenever loaded in a Host process. Pure-C records and minimized
 legitimate authority do not sandbox native code. The server control plane and
-WorkerManager load none. A worker may load only operator-trusted generations
-accepted by configured allowlist/signature policy. Tenant-supplied CPU
-operation code always uses the isolated path. Policy and data-definition DSOs
-remain trusted/allowlisted until separately ratified isolation protocols exist.
+WorkerManager load none. Current operation and policy candidates require a
+process-immutable Ed25519-signed kind/package/generation/content decision before
+native mapping; approved DSOs remain fully trusted in-process. Data-definition
+loading is unchanged by #104. Tenant-supplied CPU operation code belongs on the
+isolated path once a separately owned end-user selection route exists.
 
-`ExecutionService` reaches isolated CPU operation code only through a private
-`PluginInvocationExecutor`. A trusted `PluginRuntimeSupervisor` in the general
-worker owns plugin-process creation, authenticated protocol, heartbeat,
-invocation deadline, termination/restart backoff, sandbox/capability policy,
-resource limits, and shared-memory/file-descriptor transport.
+The private isolated composition uses `PluginInvocationExecutor`. A trusted
+`PluginRuntimeSupervisor`, the executor, and attempt-local `ResourceLedger`
+together own plugin-process creation, authenticated protocol, heartbeat,
+invocation deadline, termination/restart backoff, signed package admission,
+resource limits, and shared-memory/file-descriptor transport. They do not
+provide a general syscall/network sandbox.
 
 Each invocation contains exact tenant/Job/attempt/worker-lease binding,
 `PluginInvocationId`, approved plugin package/generation, operation identity,
@@ -429,16 +433,49 @@ Run-failure composition proof, not an end-user route: no current
 Graph operation. Wiring current ABI v2 or implementing or shimming target-only
 ABI v1 remains outside #102 and #103.
 
-Issue #101 owns the pure-C operation ABI decision and Issue #102 now owns this
-first invocation record. Issue #103 now implements authenticated private-session
-supervision, heartbeat, deadlines, factual fault classification, fresh-process
-restart, and bounded maintained hang containment. Issue #104 still owns
-allowlist/signature, sandbox/capability, and enforceable plugin resource policy.
-Session authentication proves binding and liveness of the private launch; it
-does not prove plugin truth or trust. This ADR fixes their authority and process
-boundaries; the Issue #102 protocol-v1 layout and Issue #103 lifecycle frame are
-separately versioned private implementation decisions. Cross-process GPU
-handles/fences remain a later decision.
+Issue #104 now configures one process-immutable trust policy through
+`PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE`, and
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY`. The canonical Ed25519-signed manifest
+binds each closed operation/policy/isolated-runtime role, package id,
+generation, and SHA-256 content digest. Duplicate `(kind, digest)` mappings are
+rejected so content and role select one package generation. Linux copies an
+approved candidate into a four-seal anonymous `memfd` and maps operation/policy
+DSOs through `/proc/self/fd/N`. Darwin copies an approved DSO into a mode-0700
+private directory, reopens and rehashes it, then immediately unlinks the file
+and directory before `/dev/fd/N` mapping. Unsupported DSO platforms, including
+the current Windows profile, fail closed.
+Trust rejection reaches current Host-facing plugin load results as
+`GraphErrc::InvalidParameter`; a native loader failure after successful
+authorization remains `GraphErrc::Io`.
+
+For both maintained isolated Host entries, side-effect-free preflight derives
+one explicit runtime-process/CPU/address-space/shared-memory/descriptor vector.
+The attempt-local `ResourceLedger` atomically mints a move-only token bound to
+the complete invocation identity and exact vector. Equal-fact consumption
+happens before shared-memory, FD, mapping, socket, fork, or exec effects; the
+lease settles every path exactly once and the replay tombstone survives for the
+ledger lifetime. Neither trust material nor the token enters IPC.
+
+Linux executes the post-copy verified sealed runtime descriptor with `fexecve`.
+Darwin rejects isolated-runtime authorization with
+`ExactObjectUnsupported` during executor construction, before token issuance,
+capability materialization, socket creation, or fork; it retains no runtime
+pathname snapshot. Current Windows and every other unsupported runtime profile
+also fail closed. Before Linux native exec, the child applies admitted
+`RLIMIT_AS`, positive `RLIMIT_CPU`, checked
+`RLIMIT_NOFILE`, and zero `RLIMIT_CORE`, while retaining the empty environment
+and closed capability-only descriptor set.
+
+Issue #101 owns the pure-C operation ABI decision, Issue #102 owns the first
+invocation record, Issue #103 owns authenticated private-session supervision,
+and Issue #104 owns the current signed admission and resource-token
+composition. Session authentication proves binding and liveness of the private
+launch; signed content approval establishes package admission; neither proves
+returned output truth. This ADR fixes their authority and process boundaries.
+Atomic operation-ABI migration and end-user selection, a general syscall/
+network sandbox, cross-process GPU handles/fences, and long-lived fuzz/audit
+evidence remain later decisions.
 
 ### Failure, revocation, and replay
 
@@ -493,7 +530,7 @@ The downstream delivery ownership is fixed:
 | #101 | Separate pure-C operation-plugin ABI decision |
 | #102 | Isolated CPU invocation over shared memory/FD with exact descriptor/stride/size/ownership validation |
 | #103 | `PluginRuntimeSupervisor` heartbeat, deadline, crash/hang/OOM/bad-output containment |
-| #104 | Plugin allowlist/signature and enforceable resource quota/token policy |
+| #104 | Implemented signed operation/policy/runtime admission plus one-use isolated-resource tokens and pre-exec rlimits; no end-user route or general sandbox |
 | #105 | Network control metadata and bulk artifact data-plane separation |
 | #106 | Long-lived codec/descriptor fuzzing, security audit, and Session/Revision/Run/Task cross-layer trace |
 

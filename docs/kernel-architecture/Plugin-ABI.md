@@ -205,16 +205,60 @@ The standard example plugins follow this rule:
 | `io:save` | HP monolithic side-effect sink | Explicit pass-through planning metadata; execution rewrites the full file. |
 | `image_generator:perlin_noise_metal` | HP monolithic Metal generator | Explicit generator-local pass-through ROI metadata; tiled Metal execution is not enabled. |
 
+## Native Plugin Trust Admission
+
+Every current operation-v2 and policy-v1 DSO load begins with one shared,
+process-immutable trust policy. On first authorization, the process reads the
+files named by `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE`, and
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY`. All three are required. The canonical
+LF-terminated manifest is verified with Ed25519 through OpenSSL EVP and binds
+each sorted entry's closed `operation`, `policy`, or `isolated-runtime` kind,
+nonzero 128-bit package id, positive generation, and SHA-256 content digest.
+Duplicate `(kind, package id, generation)` identities and duplicate
+`(kind, digest)` content-role mappings are rejected, so bytes and role select
+one package generation.
+The first successful policy or fail-closed configuration result is retained for
+the process lifetime; neither a later environment change nor an IPC value can
+mint or replace trust authority.
+
+Authorization opens a non-followed regular file, hashes the bounded bytes from
+that candidate, and checks stable pre/post metadata, but never returns that
+mutable inode as authority. Linux copies approved bytes into an anonymous
+`memfd`, applies write/grow/shrink/seal seals, and confirms SHA-256 on the sealed
+descriptor before operation/policy mapping through `/proc/self/fd/N`. Darwin
+copies an approved DSO into a mode-0700 private directory, syncs and reopens it,
+confirms SHA-256, immediately unlinks the file and directory, and maps only the
+anonymous descriptor through `/dev/fd/N`. Consequently a rename, symlink,
+pathname replacement, hard link, or preopened writer cannot substitute later
+bytes. Current Windows and every other unsupported DSO profile fail closed
+instead of using a pathname fallback.
+
+Every `PluginTrustError`, including missing or unreadable trust configuration
+and an unopenable, unsigned, wrong-kind, or changed candidate, is exposed by
+the operation load report or policy Host surface as
+`GraphErrc::InvalidParameter`. A native `dlopen` failure after successful trust
+authorization remains `GraphErrc::Io`; missing ABI symbols or malformed ABI
+content remain `GraphErrc::InvalidParameter`. This keeps authorization failure
+distinct from failure to map an already authorized native object.
+
+Approval does not sandbox an in-process DSO. An approved operation or policy
+library remains operator-trusted native code with the ordinary ability to
+block, allocate outside Host accounting, issue syscalls, or corrupt its Host
+process. The separate isolated-runtime trust and resource controls below do not
+retrofit containment onto these two in-process ABIs.
+
 ## Operation Plugin Load Transaction
 
 Loading one operation plugin is a strong transaction over all observable
-loader state. Before invoking `register_photospider_ops_v2`, the loader creates
-staged copies of the target `OpRegistry`, operation-source map, structured load
-result, and retained-handle map. The host-provided registrar points at the
-staged registry, so plugin callbacks never mutate the active registry during
-registration. Registration capture, previous-source calculation, restoration
-snapshots, result aggregation, and handle insertion also mutate only staged
-state.
+loader state. Before native mapping or invoking
+`register_photospider_ops_v2`, the loader authorizes the exact opened candidate
+as a signed `operation` artifact. It then creates staged copies of the target
+`OpRegistry`, operation-source map, structured load result, and retained-handle
+map. The host-provided registrar points at the staged registry, so plugin
+callbacks never mutate the active registry during registration. Registration
+capture, previous-source calculation, restoration snapshots, result
+aggregation, and handle insertion also mutate only staged state.
 
 The process manager serializes the complete registry snapshot-to-publication
 interval. Direct registry registration therefore cannot land between a
@@ -655,10 +699,11 @@ An in-process callback that never returns may retain its invocation, write
 grants, contexts, generation, and DSO forever. Operation ABI v1 is therefore
 only an operator-trusted compatibility and validation boundary, never a
 sandbox. Tenant-untrusted pointer-free wire records, runtime supervision, and
-trust/resource enforcement are independently versioned boundaries owned by
-Issues #102, #103, and #104. Issue #103 now implements the source-private
-supervision composition; it does not implement this ABI, select an end-user
-operation, or absorb Issue #104 policy.
+trust/resource enforcement are independently versioned boundaries delivered by
+Issues #102, #103, and #104. Issue #104 now protects current operation-v2 and
+policy-v1 native admission and the private isolated runtime composition; it
+does not implement this target ABI, select an end-user operation, or add a
+general syscall/network sandbox.
 
 The later migration adds v1 and migrates every repository operation and
 installed consumer before deleting v2 in the same release. It leaves no
@@ -928,13 +973,15 @@ scheduler factory, worker-count create argument, or compatibility shim.
 records. Loading one DSO follows this order:
 
 1. reject empty/NUL-containing paths and same-thread policy-callback mutation;
-2. normalize the absolute path and open it eagerly and locally;
-3. resolve and call only `ps_policy_plugin_get_abi_version`;
-4. require exact ABI equality, then resolve and call
+2. normalize the absolute path, authorize the exact opened object as a signed
+   `policy` artifact, and retain that capability;
+3. open the authorized descriptor path eagerly and locally;
+4. resolve and call only `ps_policy_plugin_get_abi_version`;
+5. require exact ABI equality, then resolve and call
    `ps_policy_plugin_get_api_v1`;
-5. validate the complete exact-size API table;
-6. copy and validate every metadata row into a private map;
-7. under the registry lock, reject every visible-name conflict, stage the
+6. validate the complete exact-size API table;
+7. copy and validate every metadata row into a private map;
+8. under the registry lock, reject every visible-name conflict, stage the
    complete next type/path containers, and publish both by swap.
 
 Missing symbols, ABI mismatch, malformed API bytes, invalid UTF-8, invalid
@@ -1098,8 +1145,9 @@ borrowed immutable arrays, and C function pointers. Exact layout assertions and
 validation make the supported profile explicit, but do not sandbox a hostile
 DSO. A plugin still executes trusted native code in the Host process and can
 block, corrupt memory, allocate outside accounting, or create unreported
-threads. It simply receives no legitimate execution capability through the
-ABI.
+threads. Signed immutable-snapshot admission constrains which bytes and role may
+enter that process, but does not change those powers. The plugin simply
+receives no legitimate execution capability through the ABI.
 
 Issue #93 changes none of these three ABI inventories or record layouts. Its
 `I1Host`, `ComputeRunObservationSink`, accepted-boundary collector, inner-row
@@ -1156,9 +1204,11 @@ unquantized NativeScalar Strided DenseTensor values, scalar parameters, and
 checked dense-tensor output plans. A fresh one-call runtime receives no ABI
 pointer record, Host callback, allocator, Graph/Run owner, or resource token;
 its process-local callback seam does not call or migrate operation ABI v2 or
-the target-only operation ABI v1. This non-supervised slice does not by itself
-admit tenant code, authenticate a runtime, impose a deadline, sandbox syscalls,
-or enforce resource policy.
+the target-only operation ABI v1. Direct use remains non-supervised and offers
+no authentication, deadline, heartbeat, restart, or bounded hang recovery.
+Issue #104 now adds signed package admission, Host resource admission, and
+pre-exec OS limits to that direct entry, but not a general syscall/network
+sandbox.
 
 Issue #103 now realizes the supervised portion through source-private
 `PluginRuntimeSupervisor` and `PluginInvocationExecutor`. A dedicated fixed-
@@ -1209,13 +1259,42 @@ authorizes success. The tests also compose the executor inside an
 `ExecutionService` ready callback; the request boundary publishes only the
 owning Run as Failed and the fixed worker executes a later unrelated Run.
 
+Issue #104 now composes package trust and Host resource authority around both
+maintained isolated entries. Before shared-memory, descriptor, socket, mapping,
+or process effects, side-effect-free preflight derives a five-dimensional
+`PluginResourceVector`: runtime processes, CPU slots, address-space bytes,
+shared-memory bytes, and descriptor count. The attempt-local `ResourceLedger`
+atomically mints a move-only token bound to a domain-separated digest of the
+complete invocation identity and exact vector. Consumption against equal
+facts creates one RAII lease; replay tombstones survive settlement for the
+ledger lifetime, while every unconsumed token or consumed success/failure path
+returns the exact capacity once. No token, trust root, manifest, signature, or
+digest override enters the invocation wire.
+
+The admitted vector drives `RLIMIT_AS`, positive `RLIMIT_CPU`, checked
+`RLIMIT_NOFILE`, and zero `RLIMIT_CORE` before native exec. The child still
+receives an empty environment, `/dev/null` standard streams, fixed data/status/
+lifecycle descriptors, one fixed executable descriptor, and only the declared
+invocation capabilities; descriptors above that closed set are removed. Linux
+executes the post-copy verified sealed descriptor with `fexecve`. Darwin has no
+supported anonymous-descriptor runtime exec, so authorization reports
+`ExactObjectUnsupported` during direct or supervised executor construction,
+before token issuance, capability materialization, socket creation, or fork;
+no runtime pathname snapshot exists. Unsupported platforms, including the
+current Windows runtime profile, also fail closed instead of falling back to an
+unverified path. These controls impose
+package identity and resource ceilings; they do not provide a general syscall
+or network sandbox, and a `SIGKILL` observation remains only
+memory-pressure-compatible rather than proof of OOM.
+
 The adapter, endpoint, supervisor, and executor are compiled into the
 installable product archive, but no current operation loader or product
 composition root constructs an isolated request for an end-user Graph
 operation. In particular, `ExecutionService`, `WorkerManager`, the embedded
 Host/CLI, and `photospider-worker` have no selection caller. Operation ABI v2
-and target-only v1 remain absent from this wire, and Issue #104 still owns
-allowlist/signature, sandbox/capability, and enforceable resource policy.
+and target-only v1 remain absent from this wire. Atomic operation-ABI migration
+and end-user selection, stronger platform sandbox profiles, and long-lived
+fuzz/audit evidence remain separately owned work.
 
 Shadow publication prevents partial operation-registry or policy-type-map
 visibility. DSO leases keep callback state and plugin-owned values or contexts

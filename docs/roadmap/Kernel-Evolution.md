@@ -414,13 +414,17 @@ owns isolated immutable memory/scratch limits for each configured non-CPU
 `DeviceId`. Native allocation plans commit both dimensions atomically, return
 unused bytes after `allocatedSize` reconciliation, and split actual ownership
 between persistent native Value owners and asynchronous completion scratch.
-Device queue depth/in-flight command limits, compute-I/O operations/bytes, and
-plugin-process/invocation/IPC remain future dimensions and are not represented
-by fake zero-valued authority. Current success, failure, rejection, rollback,
-replacement, worker-exception, stale completion, eviction, cancellation, and
-close/shutdown paths release every authority exactly once. Capacity exhaustion
-and checked overflow fail without partial reservation, overcommit, cross-device
-borrowing, or silent clamping.
+Device queue depth/in-flight command limits and compute-I/O operations/bytes
+remain future dimensions and are not represented by fake zero-valued
+authority. Issue #104 adds an explicit isolated-plugin vector to the same
+ledger: runtime-process slots, CPU slots, address-space bytes, shared-memory
+bytes, and descriptor count. Its one-use token binds the complete invocation
+identity and exact vector, retains a replay tombstone for the ledger lifetime,
+and settles capacity exactly once on every path. Current success, failure,
+rejection, rollback, replacement, worker-exception, stale completion, eviction,
+cancellation, and close/shutdown paths release every active authority exactly
+once. Capacity exhaustion and checked overflow fail without partial
+reservation, overcommit, cross-device borrowing, or silent clamping.
 
 Each policy binding is a comparison seam, not a physical executor or resource
 authority. The current Interactive and Throughput bindings rank immutable
@@ -1497,18 +1501,24 @@ private stages remain artifact-authority cleanup.
 
 Every DSO loaded into a Host remains operator-trusted native code. The current
 operation C++ ABI, data-definition pure-C ABI, and policy pure-C ABI provide no
-sandbox, timeout, syscall, thread, or memory-corruption boundary. The control
-plane and WorkerManager load no DSO. Tenant-supplied CPU operation code reaches
-`ExecutionService` only through a private `PluginInvocationExecutor` and
-trusted `PluginRuntimeSupervisor`. The supervisor owns process lifecycle,
-authenticated IPC, heartbeat/deadline, sandbox/resource policy, restart
-backoff, and shared-memory/FD transport. An invocation carries bounded,
-versioned descriptors and checked ranges, not C++ objects, Host callbacks, raw
-pointers, native GPU handles, credentials, artifact capabilities, or resource
-tokens. Trusted Host code revalidates all returned descriptors, offsets,
-ownership, sizes, readiness, identities, and declared bounds before Run use.
-Pure C improves record compatibility; it does not make hostile native code
-safe in-process.
+sandbox, timeout, syscall, thread, or memory-corruption boundary. Current
+operation and policy DSO candidates first require process-immutable signed
+content/role admission, but approval does not reduce their in-process powers.
+The control plane and WorkerManager load no DSO.
+
+The private isolated CPU composition uses `PluginInvocationExecutor` and
+trusted `PluginRuntimeSupervisor`. Together with `ResourceLedger`, they own
+signed package admission, one-use Host resource admission, process lifecycle,
+authenticated IPC, heartbeat/deadline, process rlimits, restart backoff, and
+shared-memory/FD transport. An invocation carries bounded, versioned
+descriptors and checked ranges, not C++ objects, Host callbacks, raw pointers,
+native GPU handles, credentials, artifact capabilities, or resource tokens.
+Trusted Host code revalidates all returned descriptors, offsets, ownership,
+sizes, readiness, identities, and declared bounds before use. No current
+composition root selects an end-user Graph operation through this path, and the
+implemented controls are not a general syscall/network sandbox. Pure C
+improves record compatibility; it does not make hostile native code safe
+in-process.
 
 ### Issue #101 accepted operation ABI decision
 
@@ -1552,11 +1562,12 @@ visibility, per-slot revision/predecessor restoration, middle-generation
 splice, reverse retirement, and exact callback/context DSO leases. A callback
 that never returns may retain those owners forever; pure C does not add bounded
 termination. Issue #102 now implements its pointer-free shared-memory/FD
-invocation record, Issue #103 now implements authenticated private-session
+invocation record, Issue #103 implements authenticated private-session
 supervision and factual crash/hang/signal/bad-output containment, and Issue #104
-owns allowlist/signature, sandboxing, and enforceable resource policy. A
-`SIGKILL` observation is only memory-pressure-compatible and does not prove
-OOM.
+implements signed admission for current operation/policy DSOs plus package and
+resource admission for the private isolated runtime. These controls neither
+complete the operation-ABI migration nor add a general sandbox. A `SIGKILL`
+observation is only memory-pressure-compatible and does not prove OOM.
 
 Issue #101 is complete as a decision when these bilingual artifacts pass local
 validation, fresh independent diff review, authorized exact-head PR
@@ -1601,17 +1612,18 @@ the complete #102 product inclusion vertical, not a selected end-user path: no
 sub-role rather than the target private `PluginInvocationExecutor`, whose
 composition through `PluginRuntimeSupervisor` belongs to #103.
 
-Every call uses a fresh `fork`/`execve` process with an empty environment and,
-besides stdio, only its fixed control/status descriptors retained. This gives
-process-crash containment and deterministic post-exit output adoption, but it
-is deliberately non-supervised when called directly: there is no deadline,
-heartbeat, restart policy, sandbox, or enforceable resource policy, and a
-callback can hang indefinitely. Issue #103 now composes the separate supervised
-path described below; the non-supervised adapter is never its fallback. The
-process-local callback seam neither calls nor migrates current operation ABI v2
-or target-only operation ABI v1; it adds no compatibility wrapper, shim, ABI
-adapter, or dual loader. Cross-process GPU/native-handle support remains later
-work.
+Every call uses a fresh native exec with an empty environment and, besides
+stdio, only its fixed control/status/executable descriptors retained. Issue
+#104 requires signed package equality, Host ledger admission, and pre-exec
+address-space/CPU/descriptor/core limits for this direct entry. It still is
+deliberately non-supervised when called directly: there is no deadline,
+heartbeat, restart policy, bounded hang recovery, or general syscall/network
+sandbox, and a callback can hang indefinitely. Issue #103 composes the separate
+supervised path described below; the non-supervised adapter is never its
+fallback. The process-local callback seam neither calls nor migrates current
+operation ABI v2 or target-only operation ABI v1; it adds no compatibility
+wrapper, shim, ABI adapter, or dual loader. Cross-process GPU/native-handle
+support remains later work.
 
 ### Issue #103 current plugin runtime supervision slice
 
@@ -1663,11 +1675,55 @@ Failed, and the fixed service worker executes a later unrelated Run.
 This is not yet an end-user selected operation path. No current
 `ExecutionService`, `WorkerManager`, embedded Host/CLI, `photospider-worker`, or
 operation loader constructs the isolated invocation from a Graph operation.
-Operation ABI v2 cannot cross this wire, target-only ABI v1 is not implemented
-or shimmed, Issue #104 still owns package trust/sandbox/enforceable quota, Issue
-#105 owns the network/artifact planes, and Issue #106 owns long-lived fuzz,
-audit, and cross-layer trace. The I2 runner work tracked separately as Issue
-#125 is not part of this runtime-supervision slice.
+Operation ABI v2 cannot cross this wire and target-only ABI v1 is not
+implemented or shimmed. Issue #104 now supplies package trust and enforceable
+quota for this private composition; stronger sandbox profiles remain separate.
+Issue #105 owns the network/artifact planes, and Issue #106 owns long-lived
+fuzz, audit, and cross-layer trace. The I2 runner work tracked separately as
+Issue #125 is not part of this runtime-supervision slice.
+
+### Issue #104 current plugin trust and resource-admission slice
+
+Issue #104 adds one process-immutable Ed25519 policy configured by
+`PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE`, and
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY`. Its canonical signed rows bind a closed
+operation/policy/isolated-runtime kind, package id, generation, and SHA-256
+content digest. Duplicate `(kind, digest)` mappings are rejected so content and
+role select one package generation. Current operation and policy loaders open
+and hash a non-followed regular candidate, then load only a post-copy verified
+private snapshot: Linux seals an anonymous `memfd` before `/proc/self/fd/N`
+mapping, while Darwin reopens and rehashes a mode-0700 private copy, immediately
+unlinks its file and directory, and maps the anonymous descriptor through
+`/dev/fd/N`. Missing, malformed, unsigned, wrong-kind, ambiguous, or changed
+content is default-deny; an IPC caller cannot supply or mutate trust authority.
+
+For either maintained isolated entry, side-effect-free Host preflight derives
+one exact `PluginResourceVector` covering runtime processes, CPU slots,
+address-space bytes, shared-memory bytes, and descriptors. The attempt-local
+`ResourceLedger` atomically mints a move-only token bound to the complete
+invocation identity and exact vector. It is consumed before shared memory,
+descriptor, mapping, socket, fork, or exec effects; the resulting RAII lease
+settles exactly once, while the replay tombstone survives until ledger
+destruction. Token and trust material never enter IPC.
+
+Linux copies the approved runtime into a sealed anonymous `memfd`, confirms its
+digest after sealing, and executes that descriptor through `fexecve`. Darwin
+reports `ExactObjectUnsupported` during direct or supervised executor
+construction before token issuance, capability materialization, socket
+creation, or fork; it creates no runtime pathname snapshot. Current Windows
+and every other unsupported runtime profile also fail closed. On Linux the
+child applies admitted `RLIMIT_AS`, positive `RLIMIT_CPU`, checked
+`RLIMIT_NOFILE`, and zero `RLIMIT_CORE`, receives an empty environment and
+closed inherited-descriptor set, and reports limit setup failure before plugin
+code executes.
+
+This completes package and resource admission for the private Linux runtime
+composition, typed pre-effect Darwin runtime rejection, and signed immutable-
+snapshot admission for current Darwin/Linux operation/policy loaders. It does
+not select an end-user Graph operation, implement target operation ABI v1,
+isolate approved in-process DSOs, provide a general syscall/network sandbox,
+or prove OOM from `SIGKILL`.
 
 The current Issue #99/#100 baseline is the source-private
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
@@ -1710,7 +1766,7 @@ Delivery remains allocated rather than absorbed by Issue #97:
 | [#101](https://github.com/kevin-zf1123/photospider/issues/101) | Accepted separately versioned pure-C operation-plugin ABI v1 decision; implementation remains a later breaking migration |
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | Implemented source-private Darwin/Linux isolated CPU shared-memory/FD invocation with exact descriptor/stride/size/ownership/content validation; authenticated supervision remains #103 |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | Implemented source-private `PluginRuntimeSupervisor` heartbeat/deadline, factual crash/hang/signal/bad-output containment, fresh-process restart, and exact reap; no end-user route or OOM attribution |
-| [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature and enforceable resource policy |
+| [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Implemented process-immutable signed admission for operation/policy DSOs and private isolated runtime, plus one-use ledger tokens and pre-exec rlimits; no end-user route or general sandbox |
 | [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata and bulk artifact data-plane separation |
 | [#106](https://github.com/kevin-zf1123/photospider/issues/106) | Long-lived codec/descriptor fuzzing, security audit, and cross-layer identity trace |
 

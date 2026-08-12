@@ -432,8 +432,12 @@ Tenant-untrusted CPU code never uses pointer-bearing ABI records as IPC:
   crash/hang/bad-output containment, factual signal reporting,
   fresh-process restart, and exact reap; `SIGKILL` is only
   memory-pressure-compatible and does not prove OOM;
-- Issue #104 owns package allowlist/signature, sandbox/capability, and
-  enforceable resource policy.
+- Issue #104 implements process-immutable Ed25519 package admission for the
+  maintained operation/policy DSO and isolated-runtime paths, unique
+  content-role manifest mappings, post-copy verified Linux sealed descriptors,
+  anonymous Darwin DSO descriptors, five-dimensional one-use resource tokens,
+  and Linux pre-exec rlimits. Darwin isolated runtimes and unsupported profiles
+  fail closed. It does not provide a general syscall/network sandbox.
 
 At acceptance, this ADR preselected none of their frame, handle,
 authentication, or policy formats. Issue #102 has since selected its own
@@ -443,12 +447,16 @@ pointer record, and it introduces no migration wrapper, shim, adapter, or dual
 loader. Issue #103 has since selected a private fixed lifecycle frame with an
 OS-random nonce, complete invocation identity, strict sequence, and
 Host-selected heartbeat interval on a dedicated Unix datagram channel. That
-session binding is not plugin attestation or trust. Issue #104 still owns
-package admission, sandbox/capability, and enforceable resource-policy formats.
-No current operation loader maps ABI v2 or target-only ABI v1 into the
-supervised executor; final end-user selection remains part of the complete
-breaking ABI migration. Cross-process GPU/native-handle work remains a later
-decision.
+session binding is not plugin attestation or trust. Issue #104 has since
+selected a canonical signed-manifest format, exact-object admission profiles,
+and an identity-bound one-use resource-token format for the maintained paths.
+Linux sealed descriptors support all three roles; Darwin anonymous descriptors
+support only operation/policy DSOs, with isolated runtimes rejected; unsupported
+profiles fail closed. General syscall/network
+sandboxing remains a later decision. No current operation loader maps ABI v2
+or target-only ABI v1 into the supervised executor; final end-user selection
+remains part of the complete breaking ABI migration. Cross-process GPU/native-
+handle work remains a later decision.
 
 ### One complete breaking migration
 

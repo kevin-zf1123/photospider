@@ -49,11 +49,12 @@ quarantine，并且只在有界 backoff 后于新进程中启动后续 invocatio
 会把 executor 组合进既有 `ExecutionService` callback/request boundary，并证明失败 Run 不会
 终止其固定 worker 或后续无关 Run。
 
-这是经过认证的私有 session supervision，不是 hostile-child attestation、package trust、
-sandboxing、resource enforcement 或已选择的最终用户 operation route。当前没有
-`ExecutionService`、`WorkerManager`、embedded Host/CLI、`photospider-worker` 或 operation
-loader 会为最终用户 Graph operation 构造该路径；Issue #104 仍负责 trust 与可执行 resource
-policy，完整 operation-ABI migration 仍负责最终选择。
+上述 #103 boundary 是经过认证的私有 session supervision，不是 hostile-child attestation、
+package trust、sandboxing、resource enforcement 或已选择的最终用户 operation route。Issue #104
+现在会用签名 package admission、一次性 Host resource admission 与 process rlimit 包裹长期维护的
+直接/受监督入口。当前没有 `ExecutionService`、`WorkerManager`、embedded Host/CLI、
+`photospider-worker` 或 operation loader 会为最终用户 Graph operation 构造该路径；完整
+operation-ABI migration 仍负责最终选择，通用 syscall/network sandbox 仍是独立工作。
 
 ## 背景
 
@@ -308,15 +309,15 @@ byte/range limit、content/descriptor binding 与 expiry/revocation。
 
 Operation v2、data-definition-provider v3 与 policy v1 DSO 只要加载到 Host process，就属于
 trusted native code。Pure-C record 与最小化合法 authority 并不能 sandbox native code。
-Server control plane 与 WorkerManager 不加载任何 DSO。Worker 只可加载由配置的
-allowlist/signature policy 接受的 operator-trusted generation。Tenant-supplied CPU operation
-code 始终使用隔离路径。Policy 与 data-definition DSO 在另行批准隔离协议前，继续保持
-trusted/allowlisted。
+Server control plane 与 WorkerManager 不加载任何 DSO。当前 operation/policy 候选必须在 native
+mapping 前通过进程不可变的 Ed25519 签名 kind/package/generation/content 决定；获批 DSO 在进程内
+仍完全受信任。#104 不改变 data-definition loading。Tenant-supplied CPU operation code 只有在另行
+拥有的最终用户 selection route 存在后，才应进入 isolated path。
 
-`ExecutionService` 只能通过私有 `PluginInvocationExecutor` 到达隔离 CPU operation code。
-General worker 中的可信 `PluginRuntimeSupervisor` 拥有 plugin-process creation、authenticated
-protocol、heartbeat、invocation deadline、termination/restart backoff、sandbox/capability policy、
-resource limit 与 shared-memory/FD transport。
+私有 isolated 组合使用 `PluginInvocationExecutor`。可信 `PluginRuntimeSupervisor`、executor 与
+attempt-local `ResourceLedger` 一起拥有 plugin-process creation、authenticated protocol、
+heartbeat、invocation deadline、termination/restart backoff、签名 package admission、resource
+limit 与 shared-memory/FD transport。它们不提供通用 syscall/network sandbox。
 
 每次 invocation 都包含精确 tenant/Job/attempt/worker-lease binding、`PluginInvocationId`、
 approved plugin package/generation、operation identity、immutable scalar parameter、bounded
@@ -354,13 +355,38 @@ service worker 随后会执行无关 Run。这是链接产品的 Run-failure com
 `photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated request。接入当前
 ABI v2，或实现、shim 仍为目标态的 ABI v1，均不属于 #102 或 #103。
 
-Issue #101 拥有 pure-C operation ABI 决策，Issue #102 现在拥有该首个 invocation record。
-Issue #103 现在实现 authenticated private-session supervision、heartbeat、deadline、基于事实
-的 fault classification、fresh-process restart 与长期维护场景中的有界 hang containment。
-Issue #104 仍拥有 allowlist/signature、sandbox/capability 与可执行 plugin resource policy。
-Session authentication 只证明私有 launch 的 binding 与 liveness，不证明 plugin truth 或 trust。
-本 ADR 冻结其 authority 与 process boundary；Issue #102 protocol-v1 layout 与 Issue #103
-lifecycle frame 是分别版本化的私有实现决策。Cross-process GPU handle/fence 留给后续决策。
+Issue #104 现在通过 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY` 配置一份进程不可变 trust policy。Canonical Ed25519 签名
+manifest 会绑定每个封闭 operation/policy/isolated-runtime role、package id、generation 与 SHA-256
+内容摘要。重复 `(kind, digest)` 映射会被拒绝，因此内容与角色只会选择一个 package
+generation。Linux 会把获批候选复制到具有四种 seal 的 anonymous `memfd`，并通过
+`/proc/self/fd/N` mapping operation/policy DSO。Darwin 会把获批 DSO 复制到 mode-0700 私有目录，
+重新打开并 hash，然后在通过 `/dev/fd/N` mapping 前立即 unlink 文件与目录。不支持 DSO 的平台
+（包括当前 Windows profile）会默认拒绝。
+Trust rejection 会在当前 Host-facing plugin load result 中映射为 `GraphErrc::InvalidParameter`；
+成功 authorization 后发生的 native loader failure 仍为 `GraphErrc::Io`。
+
+两个长期维护的 isolated Host entry 都会先通过无副作用 preflight 导出显式 runtime-process/CPU/
+address-space/shared-memory/descriptor vector。Attempt-local `ResourceLedger` 会原子铸造绑定完整
+invocation identity 与精确 vector 的 move-only token。在 shared-memory、FD、mapping、socket、
+fork 或 exec 副作用前，必须针对相同事实消费 token；lease 在每条路径只结算一次，replay
+tombstone 则保留到 ledger 生命周期结束。Trust material 与 token 都不会进入 IPC。
+
+Linux 使用 `fexecve` 执行复制后校验的 sealed runtime descriptor。Darwin 会在 executor 构造时
+以 `ExactObjectUnsupported` 拒绝 isolated-runtime 授权，先于 token 发放、capability
+materialization、socket 创建或 fork；不会保留 runtime pathname snapshot。当前 Windows 与其他
+每个不支持的 runtime profile 同样默认拒绝。Linux native exec 前，child 会应用已准入
+`RLIMIT_AS`、正
+`RLIMIT_CPU`、经过检查的 `RLIMIT_NOFILE` 与零 `RLIMIT_CORE`，同时保持空 environment 和封闭的
+capability-only descriptor set。
+
+Issue #101 拥有 pure-C operation ABI 决策，Issue #102 拥有首个 invocation record，Issue #103
+拥有 authenticated private-session supervision，Issue #104 拥有当前签名 admission 与 resource-
+token 组合。Session authentication 证明私有 launch 的 binding/liveness；签名 content approval
+建立 package admission；二者都不证明 returned output truth。本 ADR 冻结这些 authority/process
+boundary。Atomic operation-ABI migration 与最终用户 selection、通用 syscall/network sandbox、
+cross-process GPU handle/fence、长期 fuzz/audit evidence 都留给后续决策。
 
 ### Failure、Revocation 与 Replay
 
@@ -408,7 +434,7 @@ identity/lease validation、current-attempt selection 或 quota。Issue #106 拥
 | #101 | 独立的 pure-C operation-plugin ABI 决策 |
 | #102 | 通过 shared memory/FD 的隔离 CPU invocation，以及精确 descriptor/stride/size/ownership validation |
 | #103 | `PluginRuntimeSupervisor` heartbeat、deadline、crash/hang/OOM/bad-output containment |
-| #104 | Plugin allowlist/signature 与可执行 resource quota/token policy |
+| #104 | 已实现签名 operation/policy/runtime admission、一次性 isolated-resource token 与 exec 前 rlimit；不包含最终用户 route 或通用 sandbox |
 | #105 | Network control metadata 与 bulk artifact data-plane separation |
 | #106 | 长期 codec/descriptor fuzzing、security audit，以及 Session/Revision/Run/Task cross-layer trace |
 

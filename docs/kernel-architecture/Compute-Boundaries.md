@@ -154,7 +154,7 @@ reserved-start transaction.
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
 | `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
-| `ResourceLedger` | Atomically reserve checked Host vectors and isolated per-`DeviceId` memory/scratch plans; reconcile native actual bytes; mint bounded Host grants and split device leases; release exact authority after its true owner ends; copy deterministic diagnostics | Worker creation, ordering policy, task dependencies, queue/in-flight/I/O/plugin guesses, residency eviction, or lifecycle admission |
+| `ResourceLedger` | Atomically reserve checked Host vectors, isolated per-`DeviceId` memory/scratch plans, and explicit plugin process/CPU/address-space/shared-memory/descriptor vectors; reconcile native actual bytes; mint bounded Host grants, split device leases, and one-use identity-bound plugin tokens; retain replay tombstones and release exact authority after its true owner ends; copy deterministic diagnostics | Worker creation, ordering policy, task dependencies, queue/in-flight/I/O guesses, residency eviction, or lifecycle admission |
 | `GraphRuntime::ExecutionRouteBinding` | Store one copied private route id and nonzero generation per intent | Physical route ownership, policy context, workers, queues, or reservations |
 
 Compute collaborators live under `src/lib/compute/`; the ledger and Graph route
@@ -444,9 +444,12 @@ an operator-trusted compatibility boundary. Issue #102 now implements a
 source-private, pointer-free Darwin/Linux protocol-v1 invocation slice over a
 framed Unix stream, ordered `SCM_RIGHTS` descriptors, and unlinked POSIX shared
 memory. Issue #103 now implements the source-private bounded supervision
-composition around that transport, while Issue #104 still owns trust,
-sandboxing, and enforceable resource policy for tenant code; ABI pointer
-records are never their wire protocol.
+composition around that transport. Issue #104 now adds signed immutable-
+snapshot admission and enforceable Host resource policy to the maintained
+direct and supervised entries. Linux supports those runtime entries through a
+sealed descriptor; Darwin rejects their construction before invocation
+effects. ABI pointer records and Host-minted resource tokens are never their
+wire protocol. A general syscall/network sandbox remains outside this slice.
 
 `NonSupervisedIsolatedCpuInvocationExecutor` validates the invocation identity,
 generation/operation binding, scalar parameters, resource declarations,
@@ -457,9 +460,11 @@ Host waits for normal zero exit, then revalidates every FD, capability header,
 response, descriptor, and output range, snapshots output into a fresh Host
 allocation, and validates the binding over the actual copied bytes before
 sealing the `Value`. RAII owners close mappings, descriptors, channels, and
-reap the exact child on success or failure. This slice deliberately has no
-supervisor, authentication, deadline, heartbeat, restart, sandbox, or resource
-enforcement, so a callback that never returns remains unbounded.
+reap the exact child on success or failure. Direct use deliberately has no
+supervisor, authentication, deadline, heartbeat, restart, or bounded hang
+recovery. It does receive #104 package trust, Host resource admission, and
+process rlimits, which do not turn that raw transport sub-role into supervised
+execution or a general sandbox.
 
 Issue #103 adds `PluginRuntimeSupervisor` and `PluginInvocationExecutor` to the
 same source-private product module without changing the #102 request/response
@@ -526,14 +531,46 @@ recovery. One test invokes the executor inside a production
 request boundary, that boundary publishes only the owning Run as Failed, and
 the fixed service worker executes a later unrelated Run.
 
+Issue #104 performs side-effect-free preflight before either maintained Host
+entry materializes an invocation. It derives exact shared-memory and descriptor
+demand and combines them with one runtime process, one CPU slot, and configured
+address-space policy. The attempt-local `ResourceLedger` atomically reserves
+that `PluginResourceVector` and mints a move-only token bound to a domain-
+separated SHA-256 digest of the complete tenant/Job/attempt/worker-lease/package-
+generation/invocation identity. The executor consumes the token against equal
+identity and resource facts before shared-memory, FD, mapping, socket, fork, or
+exec effects and retains the resulting RAII lease through response validation
+and publication. A token or lease returns its vector exactly once; the replay
+tombstone remains spent until the ledger is destroyed.
+
+Isolated executable construction also uses the process-immutable signed
+Ed25519 manifest configured by `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`,
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE`, and
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY`. The approved entry binds
+`isolated-runtime`, package id, generation, and SHA-256 bytes. Linux copies the
+approved candidate into an anonymous `memfd`, applies the complete immutable
+seal set, confirms the digest after sealing, and executes that descriptor
+through `fexecve`. Darwin reports `ExactObjectUnsupported` during executor
+construction before token issuance, capability materialization, socket
+creation, or fork and creates no runtime pathname snapshot. Current Windows
+and every other unsupported runtime profile also fail closed.
+
+Before native exec, the child applies admitted `RLIMIT_AS`, positive
+`RLIMIT_CPU`, checked `RLIMIT_NOFILE`, and zero `RLIMIT_CORE`; setup failure is
+reported before plugin code runs. The environment remains empty, stdio is
+`/dev/null`, and only fixed private channels plus admitted invocation
+capabilities survive. Aggregate ledger admission and per-process rlimits are
+independent Host checks. They neither establish a syscall/network sandbox nor
+turn `SIGKILL` into proof of OOM.
+
 The adapter, runtime endpoint, supervisor, and executor are compiled into the
 installable product archive, but this remains an internal composition proof,
 not an end-user route. No current `ExecutionService`, `WorkerManager`, embedded
 Host/CLI, `photospider-worker`, or operation loader constructs an isolated
 request from a Graph operation. Current operation ABI v2 cannot cross this
 wire, target-only operation ABI v1 is neither implemented nor shimmed here, and
-#104 still owns allowlist/signature, sandbox/capability, and enforceable
-resource policy.
+atomic operation-ABI migration and end-user selection, stronger platform
+sandbox profiles, and long-lived fuzz/audit evidence remain separate work.
 
 ## Request Behavior
 
@@ -1012,9 +1049,11 @@ same ledger/reserved-start boundary to all of them. Route replacement validates
 and publishes a fresh generation without constructing a per-Graph executor or
 reservation. Service composition validates candidate device limits and creates
 native memory/scratch accounts only for devices represented by the frozen
-executor registry. It invents no unregistered-device, I/O, or plugin
-utilization dimension, and keeps I/O/plugin dimensions outside ledger
-authority.
+executor registry. It invents no unregistered-device or I/O utilization
+dimension and keeps I/O outside ledger authority. Plugin dimensions enter the
+same ledger only through the explicit isolated-executor
+`PluginResourceVector`; they are never inferred from ready-store or ordinary
+operation utilization.
 
 The canonical inventory is route and registry aware: `cpu` and `serial_debug`
 expose CPU only; `gpu_pipeline` exposes Metal then CPU when a Metal executor is

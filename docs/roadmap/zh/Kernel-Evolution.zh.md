@@ -334,12 +334,14 @@ registry/lane lock cycle。
 scratch 的事务性 vector。它还为每个已配置非 CPU `DeviceId` 拥有隔离且 immutable 的
 memory/scratch limit。Native allocation plan 会原子提交两个 dimension，在 `allocatedSize`
 校准后归还未使用 byte，并把 actual ownership 拆分给 persistent native Value owner 与
-asynchronous completion scratch。Device queue depth/in-flight command limit、compute-I/O
-operation/byte，以及 plugin-process/invocation/IPC 仍是未来维度，当前不会用虚假的零值 authority
-表示。当前 success、failure、rejection、rollback、replacement、worker-exception、stale
-completion、eviction、cancellation 与 close/shutdown path 都会恰好一次释放每份 authority。
-Capacity exhaustion 与 checked overflow 会在无 partial reservation、overcommit、跨 device
-借用或 silent clamping 的情况下失败。
+asynchronous completion scratch。Device queue depth/in-flight command limit 与 compute-I/O
+operation/byte 仍是未来维度，当前不会用虚假的零值 authority 表示。Issue #104 会向同一 ledger
+增加显式 isolated-plugin vector：runtime-process slot、CPU slot、address-space byte、shared-memory
+byte 与 descriptor count。其一次性 token 绑定完整 invocation identity 与精确 vector，在 ledger
+生命周期内保留 replay tombstone，并在每条路径只结算一次 capacity。当前 success、failure、
+rejection、rollback、replacement、worker-exception、stale completion、eviction、cancellation 与
+close/shutdown path 都会恰好一次释放每份 active authority。Capacity exhaustion 与 checked
+overflow 会在无 partial reservation、overcommit、跨 device 借用或 silent clamping 的情况下失败。
 
 每个 policy binding 都是比较 seam，而不是物理 executor 或 resource authority。当前 Interactive
 与 Throughput binding 会排列 Host 编写的 immutable candidate descriptor；由 service 拥有的 store
@@ -1210,14 +1212,18 @@ runtime 只获得 invocation buffer。Committed receipt 在 worker/plugin failur
 
 凡是加载到 Host 的 DSO 都仍是 operator-trusted native code。当前 operation C++ ABI、
 data-definition pure-C ABI 与 policy pure-C ABI 都不提供 sandbox、timeout、syscall、thread 或
-memory-corruption boundary。Control plane 与 WorkerManager 不加载 DSO。Tenant-supplied CPU
-operation code 只能通过私有 `PluginInvocationExecutor` 和可信 `PluginRuntimeSupervisor` 到达
-`ExecutionService`。Supervisor 拥有 process lifecycle、authenticated IPC、heartbeat/deadline、
-sandbox/resource policy、restart backoff 与 shared-memory/FD transport。Invocation 携带有界且带版本
-descriptor 与 checked range，而不携带 C++ object、Host callback、raw pointer、native GPU handle、
-credential、artifact capability 或 resource token。可信 Host 代码会在 Run 使用前重新校验全部返回
-descriptor、offset、ownership、size、readiness、identity 与 declared bound。纯 C 能改善 record
-compatibility；它不能让恶意 native code 在进程内安全执行。
+memory-corruption boundary。当前 operation/policy DSO 候选必须先通过进程不可变的签名内容/role
+admission，但批准不会削弱其进程内能力。Control plane 与 WorkerManager 不加载 DSO。
+
+私有 isolated CPU 组合使用 `PluginInvocationExecutor` 与可信 `PluginRuntimeSupervisor`。它们与
+`ResourceLedger` 一起拥有签名 package admission、一次性 Host resource admission、process
+lifecycle、authenticated IPC、heartbeat/deadline、process rlimit、restart backoff 与 shared-
+memory/FD transport。Invocation 携带有界且带版本 descriptor 与 checked range，而不携带 C++
+object、Host callback、raw pointer、native GPU handle、credential、artifact capability 或 resource
+token。可信 Host 代码会在使用前重新校验全部返回 descriptor、offset、ownership、size、readiness、
+identity 与 declared bound。当前没有 composition root 通过这条路径选择最终用户 Graph operation，
+且已实现控制不是通用 syscall/network sandbox。纯 C 能改善 record compatibility；它不能让恶意
+native code 在进程内安全执行。
 
 ### Issue #101 已接受的 operation ABI 决策
 
@@ -1253,9 +1259,10 @@ CPU output，或保持在 Host-private adapter 后面。未来 native/async exec
 Publication 保留当前 shadow transaction、atomic immutable slot visibility、per-slot revision/
 predecessor restoration、middle-generation splice、reverse retirement，以及精确 callback/context
 DSO lease。永不返回的 callback 可以永久保留这些 owner；pure C 不提供 bounded termination。
-Issue #102 现在已经实现其 pointer-free shared-memory/FD invocation record，Issue #103 现在
-已经实现 authenticated private-session supervision 与基于事实的 crash/hang/signal/bad-output
-containment，Issue #104 负责 allowlist/signature、sandboxing 与 enforceable resource policy。
+Issue #102 现在已经实现其 pointer-free shared-memory/FD invocation record，Issue #103 已经实现
+authenticated private-session supervision 与基于事实的 crash/hang/signal/bad-output containment，
+Issue #104 已经为当前 operation/policy DSO 实现签名 admission，并为私有 isolated runtime 实现
+package/resource admission。这些控制既不完成 operation-ABI migration，也不增加通用 sandbox。
 `SIGKILL` observation 只表示 memory-pressure-compatible，不能证明 OOM。
 
 当这些中英文 artifact 通过本地验证、fresh 独立 diff 审核、经授权的 exact-head PR
@@ -1294,14 +1301,14 @@ Adapter 与 endpoint 会编入 installable product archive，该真实 exec inte
 `NonSupervisedIsolatedCpuInvocationExecutor` 仍是 pre-supervisor transport 子角色，而不是
 目标私有 `PluginInvocationExecutor`；后者通过 `PluginRuntimeSupervisor` 的组合属于 #103。
 
-每次调用都使用全新的 `fork`/`execve` process，environment 为空，并且除 stdio 外只保留固定
-control/status descriptor。这样可提供 process-crash containment 与确定性的 post-exit output
-adoption，但直接调用时该切片有意保持 non-supervised：它不包含 deadline、heartbeat、restart
-policy、sandbox 或 enforceable resource policy，callback 可以无限期 hang。Issue #103 现在会
-组合下文所述的独立 supervised path；non-supervised adapter 绝不作为其 fallback。Process-local
-callback seam 既不调用也不迁移当前 operation ABI v2 或仍为目标态的 operation ABI v1；它不会
-新增 ABI compatibility wrapper、shim、adapter 或 dual loader。Cross-process GPU/native-handle
-support 仍是后续工作。
+每次调用都使用全新的 native exec，environment 为空，并且除 stdio 外只保留固定 control/status/
+executable descriptor。Issue #104 要求该直接入口先满足签名 package equality、Host ledger
+admission 与 exec 前 address-space/CPU/descriptor/core limit。直接调用时它仍有意保持 non-
+supervised：不包含 deadline、heartbeat、restart policy、有界 hang recovery 或通用 syscall/network
+sandbox，callback 可以无限期 hang。Issue #103 会组合下文独立 supervised path；non-supervised
+adapter 绝不作为其 fallback。Process-local callback seam 既不调用也不迁移当前 operation ABI v2
+或仍为目标态的 operation ABI v1；它不会新增 ABI compatibility wrapper、shim、adapter 或 dual
+loader。Cross-process GPU/native-handle support 仍是后续工作。
 
 ### Issue #103 当前 plugin runtime supervision 切片
 
@@ -1343,9 +1350,42 @@ boundary。在该 boundary，原始 `PluginRuntimeFault` 到达 request owner，
 这尚不是最终用户选择的 operation path。当前没有 `ExecutionService`、`WorkerManager`、
 embedded Host/CLI、`photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated
 invocation。Operation ABI v2 无法跨越该 wire，仍为目标态的 ABI v1 既未实现也未通过 shim
-接入；Issue #104 仍负责 package trust/sandbox/enforceable quota，Issue #105 负责 network/
-artifact plane，Issue #106 负责长期 fuzz、audit 与 cross-layer trace。作为 Issue #125 单独
-跟踪的 I2 runner 工作不属于本 runtime-supervision 切片。
+接入。Issue #104 现在为该私有组合提供 package trust 与 enforceable quota；更强 sandbox profile
+仍是独立工作。Issue #105 负责 network/artifact plane，Issue #106 负责长期 fuzz、audit 与 cross-
+layer trace。作为 Issue #125 单独跟踪的 I2 runner 工作不属于本 runtime-supervision 切片。
+
+### Issue #104 当前插件信任与资源准入切片
+
+Issue #104 新增一份由 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY` 配置的进程不可变 Ed25519 policy。其 canonical 签名行会
+绑定封闭 operation/policy/isolated-runtime kind、package id、generation 与 SHA-256 内容摘要。
+重复 `(kind, digest)` 映射会被拒绝，因此内容与角色只会选择一个 package generation。当前
+operation/policy loader 会打开并 hash 不跟随 symlink 的普通候选，然后只加载复制后校验的私有
+snapshot：Linux 在通过 `/proc/self/fd/N` mapping 前 seal anonymous `memfd`；Darwin 重新打开并
+hash mode-0700 私有副本，立即 unlink 文件与目录，再通过 `/dev/fd/N` mapping anonymous
+descriptor。缺失、畸形、未签名、kind 错误、有歧义或内容已变更时默认拒绝；IPC caller 不能提供
+或修改 trust authority。
+
+对于两个长期维护的 isolated entry，无副作用 Host preflight 会导出一个精确
+`PluginResourceVector`，覆盖 runtime process、CPU slot、address-space byte、shared-memory byte 与
+descriptor。Attempt-local `ResourceLedger` 会原子铸造 move-only token，并把它绑定到完整 invocation
+identity 与精确 vector。该 token 在 shared memory、descriptor、mapping、socket、fork 或 exec
+副作用前消费；产生的 RAII lease 只结算一次，replay tombstone 则保留到 ledger 销毁。Token 与
+trust material 均不会进入 IPC。
+
+Linux 会把获批 runtime 复制到 sealed anonymous `memfd`，在 seal 后确认 digest，再通过
+`fexecve` 执行该 descriptor。Darwin 会在 direct/supervised executor 构造时报告
+`ExactObjectUnsupported`，先于 token 发放、capability materialization、socket 创建或 fork；不会
+创建 runtime pathname snapshot。当前 Windows 与其他每个不支持的 runtime profile 同样默认拒绝。
+在 Linux 上，child 会应用已准入 `RLIMIT_AS`、正 `RLIMIT_CPU`、经过检查的 `RLIMIT_NOFILE` 与零
+`RLIMIT_CORE`，获得空 environment 与封闭 inherited-descriptor set，并在 plugin code 运行前报告
+limit setup failure。
+
+这会完成私有 Linux runtime 组合的 package/resource admission、Darwin runtime 有类型的无副作用
+拒绝，以及当前 Darwin/Linux operation/policy loader 的签名 immutable-snapshot admission。它不
+会选择最终用户 Graph operation、实现目标 operation ABI v1、隔离获批进程内
+DSO、提供通用 syscall/network sandbox，或从 `SIGKILL` 证明 OOM。
 
 当前 Issue #99/#100 基线是源码私有的
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结
@@ -1380,7 +1420,7 @@ Issue #97 只做分配，不吸收后续交付：
 | [#101](https://github.com/kevin-zf1123/photospider/issues/101) | 已接受的独立版本化 pure-C operation-plugin ABI v1 决策；实现仍属于后续 breaking migration |
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | 已实现源码私有的 Darwin/Linux isolated CPU shared-memory/FD invocation，并具有精确 descriptor/stride/size/ownership/content validation；authenticated supervision 仍属于 #103 |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | 已实现源码私有的 `PluginRuntimeSupervisor` heartbeat/deadline、基于事实的 crash/hang/signal/bad-output containment、fresh-process restart 与精确 reap；不包含最终用户路径或 OOM 归因 |
-| [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Plugin allowlist/signature 与可执行 resource policy |
+| [#104](https://github.com/kevin-zf1123/photospider/issues/104) | 已实现 operation/policy DSO 与私有 isolated runtime 的进程不可变签名 admission，以及一次性 ledger token 和 exec 前 rlimit；不包含最终用户 route 或通用 sandbox |
 | [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata 与 bulk artifact data-plane separation |
 | [#106](https://github.com/kevin-zf1123/photospider/issues/106) | 长期 codec/descriptor fuzzing、security audit 与跨层 identity trace |
 

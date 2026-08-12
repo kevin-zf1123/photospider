@@ -129,7 +129,7 @@ Host-owned reserved-start transaction 提交的每个 Run 执行权。
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | execution trace 所有权 |
 | `PolicyRegistry` 与 policy binding | 验证 built-in/DSO policy type，拥有进程级 context 与 DSO lease，并为 Host-authored 不可变 candidate snapshot 排序 | worker、queue、resource grant、Run、Graph、completion 或 start authority |
-| `ResourceLedger` | 原子预留经过检查的 Host vector 与隔离的 per-`DeviceId` memory/scratch plan；校准 native actual byte；签发有界 Host grant 与拆分 device lease；在真实 owner 结束后释放精确 authority；复制确定性 diagnostic | worker 构造、ordering policy、task dependency、对 queue/in-flight/I/O/plugin 的猜测、residency eviction 或 lifecycle admission |
+| `ResourceLedger` | 原子预留经过检查的 Host vector、隔离的 per-`DeviceId` memory/scratch plan，以及显式 plugin process/CPU/address-space/shared-memory/descriptor vector；校准 native actual byte；签发有界 Host grant、拆分 device lease 与一次性 identity-bound plugin token；保留 replay tombstone，并在真实 owner 结束后释放精确 authority；复制确定性 diagnostic | worker 构造、ordering policy、task dependency、对 queue/in-flight/I/O 的猜测、residency eviction 或 lifecycle admission |
 | `GraphRuntime::ExecutionRouteBinding` | 按 intent 存储一个复制的私有 route id 与非零 generation | 物理 route 所有权、policy context、worker、queue 或 reservation |
 
 Compute collaborator 位于 `src/lib/compute/`；ledger 与 Graph route binding 位于
@@ -351,8 +351,10 @@ callback/configured context 在 validation、status normalization 与一次 dest
 compatibility boundary。Issue #102 现在实现一个源码私有、无指针的 Darwin/Linux
 protocol-v1 invocation 切片，它使用 framed Unix stream、有序 `SCM_RIGHTS` descriptor 与已
 unlink 的 POSIX shared memory。Issue #103 现在已经围绕该 transport 实现源码私有的有界
-supervision 组合，而 Issue #104 仍拥有 tenant code 的 trust、sandbox 与可执行 resource
-policy；ABI pointer record 永远不是其 wire protocol。
+supervision 组合。Issue #104 现在为长期维护的直接与受监督入口增加签名 immutable-snapshot
+admission 与可执行 Host resource policy。Linux 通过 sealed descriptor 支持这些 runtime 入口；
+Darwin 会在 invocation 副作用前拒绝构造。ABI pointer record 与 Host 铸造的 resource token 永远
+不是其 wire protocol。通用 syscall/network sandbox 仍在本切片之外。
 
 `NonSupervisedIsolatedCpuInvocationExecutor` 会在 spawn 前验证 invocation identity、
 generation/operation binding、scalar parameter、resource declaration、readiness/ownership、
@@ -361,8 +363,9 @@ One-call runtime 会在映射 callback-local view 前独立执行同样检查。
 退出，随后重新验证每个 FD、capability header、response、descriptor 与 output range，把
 output snapshot 复制到全新 Host allocation，并在 seal `Value` 前针对实际 copied byte 验证
 binding。RAII owner 会在成功或失败时关闭 mapping、descriptor、channel 并精确 reap child。
-该切片有意不包含 supervisor、authentication、deadline、heartbeat、
-restart、sandbox 或 resource enforcement，因此永不返回的 callback 仍无时间边界。
+直接使用仍有意不包含 supervisor、authentication、deadline、heartbeat、restart 或有界 hang
+recovery。它会获得 #104 package trust、Host resource admission 与 process rlimit，但这些能力
+不会把原始 transport 子角色变成受监督执行或通用 sandbox。
 
 Issue #103 在同一个源码私有 product module 中加入 `PluginRuntimeSupervisor` 与
 `PluginInvocationExecutor`，但不改变 #102 request/response wire。每次受监督调用都使用一个
@@ -415,12 +418,36 @@ descriptor/PID 精确 retirement、无 fallback 与后续健康恢复。一项�
 `PluginRuntimeFault` 到达 request boundary，该 boundary 只把 owning Run 发布为 Failed，固定
 service worker 随后会执行无关 Run。
 
+Issue #104 会在两个长期维护的 Host entry materialize invocation 前执行无副作用 preflight。它
+导出精确 shared-memory 与 descriptor demand，再与一个 runtime process、一个 CPU slot 和已配置
+address-space policy 合并。Attempt-local `ResourceLedger` 会原子预留该
+`PluginResourceVector`，并铸造 move-only token；该 token 绑定完整 tenant/Job/attempt/worker-
+lease/package-generation/invocation identity 的 domain-separated SHA-256 digest。Executor 会在
+shared-memory、FD、mapping、socket、fork 或 exec 副作用前，针对相同 identity/resource fact
+消费 token，并把产生的 RAII lease 保留到 response validation 与 publication 结束。Token 或 lease
+只归还一次 vector；replay tombstone 会保持 spent，直到 ledger 销毁。
+
+隔离 executable 构造还使用由 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
+`PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE` 与
+`PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY` 配置的进程不可变 Ed25519 签名 manifest。获批 entry 会绑定
+`isolated-runtime`、package id、generation 与 SHA-256 byte。Linux 会把获批候选复制到 anonymous
+`memfd`，应用完整 immutable seal set，在 seal 后确认 digest，再通过 `fexecve` 执行该 descriptor。
+Darwin 会在 executor 构造时报告 `ExactObjectUnsupported`，先于 token 发放、capability
+materialization、socket 创建或 fork，并且不会创建 runtime pathname snapshot。当前 Windows 及
+其他每个不支持的 runtime profile 同样默认拒绝。
+
+Native exec 前，child 会应用已准入 `RLIMIT_AS`、正 `RLIMIT_CPU`、经过检查的
+`RLIMIT_NOFILE` 与零 `RLIMIT_CORE`；setup failure 会在 plugin code 运行前报告。Environment 仍为
+空，stdio 指向 `/dev/null`，只有固定 private channel 与已准入 invocation capability 会保留。
+Aggregate ledger admission 与 per-process rlimit 是独立 Host 检查；它们既不建立 syscall/network
+sandbox，也不会把 `SIGKILL` 变成 OOM 证明。
+
 Adapter、runtime endpoint、supervisor 与 executor 都会编入 installable product archive，但
 这仍是内部 composition proof，不是终端用户路径。当前没有 `ExecutionService`、
 `WorkerManager`、embedded Host/CLI、`photospider-worker` 或 operation loader 会从 Graph
 operation 构造 isolated request。当前 operation ABI v2 无法跨越此 wire；仍为目标态的
-operation ABI v1 既未在此实现也未通过 shim 接入；#104 仍负责 allowlist/signature、
-sandbox/capability 与可执行 resource policy。
+operation ABI v1 既未在此实现也未通过 shim 接入；atomic operation-ABI migration 与最终用户
+selection、更强 platform sandbox profile、长期 fuzz/audit evidence 仍是独立工作。
 
 ## 请求行为
 
@@ -787,8 +814,9 @@ ready admission、只清除其 queued entry，并等待已经运行的 callback 
 `gpu_pipeline` 实现，并对三者应用相同的 ledger/reserved-start 边界。Route replacement 会验证
 并发布新的 generation，不构造 per-Graph executor 或 reservation。Service composition 会校验
 候选 device limit，并且只为 frozen executor registry 所表示的设备创建原生 memory/scratch
-account。它不会虚构未注册设备、I/O 或 plugin utilization dimension，I/O/plugin dimension
-仍不属于 ledger 权威。
+account。它不会虚构未注册设备或 I/O utilization dimension，I/O 仍不属于 ledger 权威。Plugin
+dimension 只会通过 isolated executor 显式的 `PluginResourceVector` 进入同一 ledger；不得从
+ready-store 或普通 operation utilization 推断。
 
 规范 inventory 同时感知 route 与 registry：`cpu` 和 `serial_debug` 只暴露 CPU；注册了 Metal
 executor 时，`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与
