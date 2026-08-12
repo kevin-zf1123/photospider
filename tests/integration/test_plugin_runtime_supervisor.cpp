@@ -250,6 +250,36 @@ ObservedRuntimeFault observe_runtime_fault(
 }
 
 /**
+ * @brief Captures one failure after deterministically delaying event
+ * acceptance.
+ * @param executor Supervised-only product executor.
+ * @param invocation Complete Host invocation plan.
+ * @param event Lifecycle event whose next acceptance is delayed.
+ * @param delay Nonnegative one-shot post-receive delay.
+ * @return Captured `PluginRuntimeFault` facts after resetting the test seam.
+ * @throws Failure-capture, invocation, or probe errors unchanged.
+ * @note The reset also runs when an earlier phase fails before consuming the
+ * armed event, so one test cannot perturb a later invocation.
+ */
+ObservedRuntimeFault observe_runtime_fault_after_lifecycle_acceptance_delay(
+    PluginInvocationExecutor* executor,
+    const IsolatedCpuHostInvocation& invocation,
+    SupervisedLifecycleTestEvent event, std::chrono::milliseconds delay) {
+  IsolatedCpuInvocationTestProbe::delay_next_lifecycle_event_acceptance(event,
+                                                                        delay);
+  try {
+    ObservedRuntimeFault fault = observe_runtime_fault(executor, invocation);
+    IsolatedCpuInvocationTestProbe::delay_next_lifecycle_event_acceptance(
+        event, std::chrono::milliseconds{0});
+    return fault;
+  } catch (...) {
+    IsolatedCpuInvocationTestProbe::delay_next_lifecycle_event_acceptance(
+        event, std::chrono::milliseconds{0});
+    throw;
+  }
+}
+
+/**
  * @brief Checks exactly one fresh child was spawned and reaped.
  * @param before Observation immediately before a call.
  * @param after Observation immediately after a call.
@@ -485,6 +515,116 @@ TEST(PluginRuntimeSupervisor, RejectsSilentAndWrongNonceStartup) {
 }
 
 /**
+ * @brief Rejects a valid queued startup event when acceptance occurs after the
+ * absolute startup deadline.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ */
+TEST(PluginRuntimeSupervisor, RejectsQueuedStartedAfterStartupDeadline) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.startup_timeout = std::chrono::milliseconds{200};
+  PluginInvocationExecutor executor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  const ObservedRuntimeFault fault =
+      observe_runtime_fault_after_lifecycle_acceptance_delay(
+          &executor, supervisor_test_invocation("fixture.fill_sequence", 137U),
+          SupervisedLifecycleTestEvent::RuntimeStarted,
+          std::chrono::milliseconds{400});
+
+  EXPECT_EQ(fault.kind, PluginRuntimeFaultKind::StartupDeadline);
+  EXPECT_NE(fault.termination_stage, PluginRuntimeTerminationStage::None);
+  expect_supervised_child_reaped(before,
+                                 IsolatedCpuInvocationTestProbe::snapshot());
+}
+
+/**
+ * @brief Rejects a queued heartbeat whose acceptance crosses the active gap
+ * deadline without waiting for the longer invocation bound.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ */
+TEST(PluginRuntimeSupervisor, RejectsQueuedHeartbeatAfterGapDeadline) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.heartbeat_interval = std::chrono::milliseconds{20};
+  options.heartbeat_timeout = std::chrono::milliseconds{120};
+  options.invocation_timeout = std::chrono::milliseconds{800};
+  PluginInvocationExecutor executor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  const ObservedRuntimeFault fault =
+      observe_runtime_fault_after_lifecycle_acceptance_delay(
+          &executor, supervisor_test_invocation("fixture.hang", 138U),
+          SupervisedLifecycleTestEvent::Heartbeat,
+          std::chrono::milliseconds{240});
+
+  EXPECT_EQ(fault.kind, PluginRuntimeFaultKind::HeartbeatTimeout);
+  EXPECT_NE(fault.termination_stage, PluginRuntimeTerminationStage::None);
+  expect_supervised_child_reaped(before,
+                                 IsolatedCpuInvocationTestProbe::snapshot());
+}
+
+/**
+ * @brief Rejects a queued completion after the absolute invocation deadline
+ * even though the heartbeat-gap deadline remains in the future.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ */
+TEST(PluginRuntimeSupervisor, RejectsQueuedCompletionAfterInvocationDeadline) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.heartbeat_interval = std::chrono::milliseconds{20};
+  options.heartbeat_timeout = std::chrono::milliseconds{600};
+  options.invocation_timeout = std::chrono::milliseconds{120};
+  PluginInvocationExecutor executor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  const ObservedRuntimeFault fault =
+      observe_runtime_fault_after_lifecycle_acceptance_delay(
+          &executor, supervisor_test_invocation("fixture.fill_sequence", 139U),
+          SupervisedLifecycleTestEvent::InvocationCompleted,
+          std::chrono::milliseconds{240});
+
+  EXPECT_EQ(fault.kind, PluginRuntimeFaultKind::InvocationDeadline);
+  expect_supervised_child_reaped(before,
+                                 IsolatedCpuInvocationTestProbe::snapshot());
+}
+
+/**
+ * @brief Preserves the absolute invocation deadline as the primary cause when
+ * both invocation and heartbeat bounds expire before queued completion is
+ * accepted.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ */
+TEST(PluginRuntimeSupervisor,
+     InvocationDeadlineOutranksHeartbeatAtQueuedCompletion) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.heartbeat_interval = std::chrono::milliseconds{20};
+  options.heartbeat_timeout = std::chrono::milliseconds{100};
+  options.invocation_timeout = std::chrono::milliseconds{140};
+  PluginInvocationExecutor executor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  const ObservedRuntimeFault fault =
+      observe_runtime_fault_after_lifecycle_acceptance_delay(
+          &executor, supervisor_test_invocation("fixture.fill_sequence", 140U),
+          SupervisedLifecycleTestEvent::InvocationCompleted,
+          std::chrono::milliseconds{240});
+
+  EXPECT_EQ(fault.kind, PluginRuntimeFaultKind::InvocationDeadline);
+  expect_supervised_child_reaped(before,
+                                 IsolatedCpuInvocationTestProbe::snapshot());
+}
+
+/**
  * @brief Confirms natural exit and signal termination remain separately
  * observable without inventing an out-of-memory cause.
  * @throws Standard fixture, transport, and assertion failures observed by
@@ -600,6 +740,42 @@ TEST(PluginRuntimeSupervisor, ClassifiesNormalMalformedOutputAsBadOutput) {
     EXPECT_EQ(fault.kind, PluginRuntimeFaultKind::BadOutput);
     EXPECT_EQ(fault.exit_code, 0);
   }
+}
+
+/**
+ * @brief Classifies definitive premature response EOF as bad output even while
+ * the child remains alive, then proves exact retirement and fresh recovery.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ */
+TEST(PluginRuntimeSupervisor,
+     ClassifiesLiveChildPrematureResponseEofAsBadOutputAndRecovers) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.restart_backoff = std::chrono::milliseconds{1};
+  PluginInvocationExecutor executor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+  const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  const ObservedRuntimeFault fault = observe_runtime_fault(
+      &executor, supervisor_test_invocation("fixture.truncated_hang", 237U));
+  const IsolatedCpuInvocationTestSnapshot after_fault =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  EXPECT_EQ(fault.kind, PluginRuntimeFaultKind::BadOutput);
+  EXPECT_EQ(fault.termination_stage, PluginRuntimeTerminationStage::Sigterm);
+  EXPECT_EQ(fault.signal_number, SIGTERM);
+  expect_supervised_child_reaped(before, after_fault);
+
+  const IsolatedCpuHostInvocationResult recovered = executor.invoke(
+      supervisor_test_invocation("fixture.fill_sequence", 238U));
+  ASSERT_EQ(recovered.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(recovered.outputs.size(), 1U);
+  const IsolatedCpuInvocationTestSnapshot after_recovery =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  expect_supervised_child_reaped(after_fault, after_recovery);
+  EXPECT_EQ(supervisor_open_descriptor_count(), descriptor_baseline);
 }
 
 /**

@@ -100,13 +100,13 @@ namespace {
 }
 
 /**
- * @brief Sends a deliberately truncated response prefix and exits normally.
- * @return Never returns; the process exits with status zero after the prefix.
- * @throws Nothing; syscall failure exits with status 74.
- * @note The Host must classify this normal-exit output as bad output rather
- * than process crash or a successful plugin result.
+ * @brief Sends the fixed deliberately truncated response prefix.
+ * @return Nothing after all four prefix bytes are transferred.
+ * @throws Nothing; syscall failure exits the fixture with status 74.
+ * @note The prefix is shorter than the protocol-v1 frame header and therefore
+ * can never become a complete response.
  */
-[[noreturn]] void send_truncated_response_and_exit() noexcept {
+void send_truncated_response_prefix() noexcept {
   const std::array<std::byte, 4U> prefix{std::byte{'B'}, std::byte{'A'},
                                          std::byte{'D'}, std::byte{'!'}};
   int flags = 0;
@@ -127,7 +127,41 @@ namespace {
     }
     _exit(74);
   }
+}
+
+/**
+ * @brief Sends a deliberately truncated response prefix and exits normally.
+ * @return Never returns; the process exits with status zero after the prefix.
+ * @throws Nothing; syscall failure exits with status 74.
+ * @note The Host must classify this normal-exit output as bad output rather
+ * than process crash or a successful plugin result.
+ */
+[[noreturn]] void send_truncated_response_and_exit() noexcept {
+  send_truncated_response_prefix();
   _exit(0);
+}
+
+/**
+ * @brief Sends a truncated response, closes only the write half, and stays
+ * alive.
+ * @return Never returns; the supervisor must terminate the paused fixture.
+ * @throws Nothing; send or shutdown failure exits with status 74.
+ * @note This deterministic mode supplies definitive premature framing EOF while
+ * remaining unconditionally alive beyond any fixed child-status observation
+ * window. It uses no timing sleep or unowned process synchronization.
+ */
+[[noreturn]] void send_truncated_response_and_hang() noexcept {
+  send_truncated_response_prefix();
+  int shutdown_result = -1;
+  do {
+    shutdown_result = ::shutdown(kIsolatedCpuRuntimeControlDescriptor, SHUT_WR);
+  } while (shutdown_result < 0 && errno == EINTR);
+  if (shutdown_result != 0) {
+    _exit(74);
+  }
+  for (;;) {
+    static_cast<void>(::pause());
+  }
 }
 
 /**
@@ -260,8 +294,8 @@ IsolatedCpuRuntimeCallbackResult run_fixture_operation(
  * @brief Applies deterministic callback-adjacent endpoint behavior.
  * @param point Exact supervised endpoint milestone.
  * @param invocation Fully validated callback-local invocation.
- * @return Nothing for ordinary operations; response-hang waits for supervisor
- * termination after authenticating callback completion.
+ * @return Nothing for ordinary operations; response-hang modes wait for
+ * supervisor termination after authenticating callback completion.
  * @throws Nothing.
  */
 void run_fixture_lifecycle_hook(
@@ -272,6 +306,10 @@ void run_fixture_lifecycle_hook(
     for (;;) {
       static_cast<void>(::pause());
     }
+  }
+  if (point == PluginRuntimeLifecyclePoint::BeforeResponse &&
+      invocation.operation == "fixture.truncated_hang") {
+    send_truncated_response_and_hang();
   }
 }
 

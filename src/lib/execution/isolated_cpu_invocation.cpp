@@ -363,6 +363,12 @@ std::atomic<std::int64_t> g_last_reaped_child{-1};
 std::atomic<std::uint64_t> g_exact_frames_received{0U};
 /** @brief One-shot supervised request-send delay used only by tests. */
 std::atomic<std::int64_t> g_next_supervised_request_send_delay_ms{0};
+/** @brief One-shot post-receive RuntimeStarted acceptance test delay. */
+std::atomic<std::int64_t> g_next_runtime_started_acceptance_delay_ms{0};
+/** @brief One-shot post-receive Heartbeat acceptance test delay. */
+std::atomic<std::int64_t> g_next_runtime_heartbeat_acceptance_delay_ms{0};
+/** @brief One-shot post-receive InvocationCompleted acceptance test delay. */
+std::atomic<std::int64_t> g_next_invocation_completed_acceptance_delay_ms{0};
 
 /**
  * @brief Records one exact successful blocking child reap.
@@ -772,6 +778,25 @@ class SupervisorDeadlineExpired final : public std::runtime_error {
 };
 
 /**
+ * @brief Distinguishes orderly premature framing EOF from a socket syscall
+ * failure.
+ * @throws std::bad_alloc when fixed diagnostic storage cannot allocate.
+ * @note Supervised response handling uses this definitive framing fact for
+ * deterministic bad-output classification while true `recvmsg` errors retain
+ * the generic channel-failure path.
+ */
+class PrematureFramedPacketEof final : public IsolatedCpuInvocationError {
+ public:
+  /**
+   * @brief Creates the fixed premature-framing diagnostic.
+   * @throws std::bad_alloc when runtime-error storage cannot allocate.
+   */
+  PrematureFramedPacketEof()
+      : IsolatedCpuInvocationError(
+            "isolated CPU channel closed before its framed packet completed") {}
+};
+
+/**
  * @brief Enables nonblocking I/O on one retained descriptor.
  * @param descriptor Valid descriptor.
  * @return Nothing after preserving existing status flags.
@@ -1025,8 +1050,9 @@ void send_packet_until(int socket, const std::vector<std::byte>& packet,
  * @param deadline Optional absolute monotonic receive bound. When present,
  * polling and would-block retries continue only through this deadline.
  * @return Exact framed bytes and RAII-owned ancillary descriptors.
- * @throws IsolatedCpuInvocationError for premature EOF or a channel-system
- * failure.
+ * @throws PrematureFramedPacketEof for orderly EOF before the declared frame
+ * is complete.
+ * @throws IsolatedCpuInvocationError for a channel-system failure.
  * @throws SupervisorDeadlineExpired when `deadline` is reached.
  * @throws IsolatedCpuProtocolError for truncation, malformed control data, or
  * excessive packet/descriptor counts.
@@ -1141,8 +1167,7 @@ ReceivedPacket receive_packet(
       break;
     }
     if (count == 0) {
-      throw IsolatedCpuInvocationError(
-          "isolated CPU channel closed before its framed packet completed");
+      throw PrematureFramedPacketEof();
     }
     received_bytes += static_cast<std::size_t>(count);
     if (received_bytes >= kIsolatedCpuPacketHeaderBytes &&
@@ -1676,6 +1701,38 @@ enum class PluginRuntimeLifecycleKind : std::uint16_t {
   /** @brief Child-to-parent callback/response-materialization completion. */
   InvocationCompleted = 4U,
 };
+
+/**
+ * @brief Applies one source-private post-receive lifecycle acceptance delay.
+ * @param kind Decoded and session-validated child lifecycle event kind.
+ * @return Nothing after consuming at most one matching test delay.
+ * @throws Nothing.
+ * @note Hello is parent-to-child and therefore has no acceptance perturbation.
+ * Production behavior is unchanged unless a maintained test explicitly arms a
+ * process-local one-shot delay.
+ */
+void apply_supervised_lifecycle_acceptance_test_delay(
+    PluginRuntimeLifecycleKind kind) noexcept {
+  std::atomic<std::int64_t>* delay_slot = nullptr;
+  switch (kind) {
+    case PluginRuntimeLifecycleKind::Hello:
+      return;
+    case PluginRuntimeLifecycleKind::RuntimeStarted:
+      delay_slot = &g_next_runtime_started_acceptance_delay_ms;
+      break;
+    case PluginRuntimeLifecycleKind::Heartbeat:
+      delay_slot = &g_next_runtime_heartbeat_acceptance_delay_ms;
+      break;
+    case PluginRuntimeLifecycleKind::InvocationCompleted:
+      delay_slot = &g_next_invocation_completed_acceptance_delay_ms;
+      break;
+  }
+  const auto delay = std::chrono::milliseconds{
+      delay_slot->exchange(0, std::memory_order_acq_rel)};
+  if (delay.count() > 0) {
+    std::this_thread::sleep_for(delay);
+  }
+}
 
 /** @brief Unpredictable per-launch session nonce. */
 using PluginRuntimeSessionNonce = std::array<std::byte, 16U>;
@@ -3265,6 +3322,69 @@ PluginRuntimeFault plugin_runtime_fault_from_wait_status(
 }
 
 /**
+ * @brief Classifies definitive premature response framing EOF without a
+ * scheduling grace period.
+ * @param error Exact orderly EOF fact raised by the framed response receiver.
+ * @param child Sole exact-PID owner for an optional nonblocking status sample.
+ * @return Bad output while the runtime is still live or after clean exit,
+ * stronger natural abnormal process status when already waitable, or channel
+ * failure when exact status sampling itself fails.
+ * @throws std::bad_alloc when diagnostic storage cannot allocate.
+ * @note Classification never waits for the child to become waitable. This
+ * keeps a live runtime's premature EOF deterministically `BadOutput` while
+ * preserving already observable signal/nonzero-exit facts and true `waitpid`
+ * failures.
+ */
+PluginRuntimeFault plugin_runtime_fault_from_premature_response_eof(
+    const PrematureFramedPacketEof& error, SupervisedChildOwner* child) {
+  if (child == nullptr) {
+    return PluginRuntimeFault(
+        PluginRuntimeFaultKind::Channel,
+        std::string(error.what()) +
+            "; plugin runtime exact child owner is absent");
+  }
+  try {
+    if (child->poll_reap()) {
+      return plugin_runtime_fault_from_wait_status(
+          *child->wait_status(), "plugin runtime response framing EOF");
+    }
+  } catch (const IsolatedCpuInvocationError& status_error) {
+    return PluginRuntimeFault(
+        PluginRuntimeFaultKind::Channel,
+        std::string(error.what()) +
+            "; plugin runtime exact status observation failed: " +
+            status_error.what());
+  }
+  return PluginRuntimeFault(PluginRuntimeFaultKind::BadOutput, error.what());
+}
+
+/**
+ * @brief Enforces callback and heartbeat bounds at one monotonic observation.
+ * @param accepted_at Observation instant; after complete event authentication
+ * this is the lifecycle acceptance linearization point.
+ * @param invocation_deadline Absolute callback-completion deadline.
+ * @param heartbeat_deadline Current absolute maximum heartbeat-gap deadline.
+ * @return Nothing when both applicable deadlines remain open.
+ * @throws PluginRuntimeFault with invocation-deadline priority when it is
+ * reached, otherwise heartbeat-timeout when only that deadline is reached.
+ * @note The monitor uses the same priority before waiting and after event
+ * authentication. Invocation deadline deliberately outranks heartbeat timeout
+ * when both are reached at one observation.
+ */
+void enforce_invocation_lifecycle_acceptance_deadlines(
+    SupervisorDeadline accepted_at, SupervisorDeadline invocation_deadline,
+    SupervisorDeadline heartbeat_deadline) {
+  if (accepted_at >= invocation_deadline) {
+    throw PluginRuntimeFault(PluginRuntimeFaultKind::InvocationDeadline,
+                             "plugin runtime invocation timed out");
+  }
+  if (accepted_at >= heartbeat_deadline) {
+    throw PluginRuntimeFault(PluginRuntimeFaultKind::HeartbeatTimeout,
+                             "plugin runtime heartbeat timed out");
+  }
+}
+
+/**
  * @brief Validates one child event against the retained private session.
  * @param event Decoded child event.
  * @param nonce Exact Host-generated nonce.
@@ -3388,6 +3508,8 @@ std::optional<int> observe_child_after_channel_close(
  * @return Nothing only after close-on-exec proves successful exec.
  * @throws PluginRuntimeFault for timeout, setup record, or natural child exit.
  * @throws IsolatedCpuInvocationError for poll/read/exact-wait failures.
+ * @note Close-on-exec EOF is accepted only after a final deadline observation,
+ * so scheduler delay after `poll`/`read` readiness cannot revive startup.
  */
 void await_supervised_exec(SupervisedSpawnedChild* process,
                            SupervisorDeadline deadline) {
@@ -3444,6 +3566,10 @@ void await_supervised_exec(SupervisedSpawnedChild* process,
               PluginRuntimeFaultKind::LifecycleProtocol,
               "plugin runtime exec-status record was truncated");
         }
+        if (SupervisorClock::now() >= deadline) {
+          throw PluginRuntimeFault(PluginRuntimeFaultKind::StartupDeadline,
+                                   "plugin runtime exec startup timed out");
+        }
         return;
       }
       if (errno == EINTR) {
@@ -3469,6 +3595,8 @@ void await_supervised_exec(SupervisedSpawnedChild* process,
  * @return Monotonic time of authenticated startup observation.
  * @throws PluginRuntimeFault for timeout, protocol/channel, or process fault.
  * @throws IsolatedCpuInvocationError for exact wait failure.
+ * @note A decoded `RuntimeStarted` is accepted only after one post-validation
+ * deadline observation; bytes queued before expiry do not extend startup.
  */
 SupervisorDeadline await_authenticated_runtime_started(
     SupervisedSpawnedChild* process, const PluginRuntimeSessionNonce& nonce,
@@ -3515,7 +3643,14 @@ SupervisorDeadline await_authenticated_runtime_started(
             PluginRuntimeFaultKind::LifecycleProtocol,
             "plugin runtime first child event was not RuntimeStarted");
       }
-      return SupervisorClock::now();
+      apply_supervised_lifecycle_acceptance_test_delay(event->kind);
+      const SupervisorDeadline accepted_at = SupervisorClock::now();
+      if (accepted_at >= deadline) {
+        throw PluginRuntimeFault(
+            PluginRuntimeFaultKind::StartupDeadline,
+            "plugin runtime authenticated startup timed out");
+      }
+      return accepted_at;
     } catch (const IsolatedCpuProtocolError& error) {
       throw PluginRuntimeFault(PluginRuntimeFaultKind::LifecycleProtocol,
                                error.what());
@@ -3544,6 +3679,9 @@ SupervisorDeadline await_authenticated_runtime_started(
  * @throws PluginRuntimeFault for deadline, heartbeat, protocol, channel, or
  * natural process failure.
  * @throws IsolatedCpuInvocationError for exact wait failure.
+ * @note Each allowed event is accepted at one post-validation monotonic
+ * observation. Invocation deadline outranks heartbeat timeout when both are
+ * reached there, and an expired event cannot refresh the heartbeat gap.
  */
 SupervisorDeadline await_authenticated_invocation_completed(
     SupervisedSpawnedChild* process, const PluginRuntimeSessionNonce& nonce,
@@ -3557,14 +3695,8 @@ SupervisorDeadline await_authenticated_invocation_completed(
       request_transferred_at + heartbeat_timeout;
   for (;;) {
     const SupervisorDeadline now = SupervisorClock::now();
-    if (now >= invocation_deadline) {
-      throw PluginRuntimeFault(PluginRuntimeFaultKind::InvocationDeadline,
-                               "plugin runtime invocation timed out");
-    }
-    if (now >= heartbeat_deadline) {
-      throw PluginRuntimeFault(PluginRuntimeFaultKind::HeartbeatTimeout,
-                               "plugin runtime heartbeat timed out");
-    }
+    enforce_invocation_lifecycle_acceptance_deadlines(now, invocation_deadline,
+                                                      heartbeat_deadline);
     if (process->child.poll_reap()) {
       throw plugin_runtime_fault_from_wait_status(*process->child.wait_status(),
                                                   "plugin runtime invocation");
@@ -3596,16 +3728,21 @@ SupervisorDeadline await_authenticated_invocation_completed(
       validate_plugin_runtime_lifecycle_session(*event, nonce, identity,
                                                 heartbeat_interval_milliseconds,
                                                 expected_sequence++);
+      if (event->kind != PluginRuntimeLifecycleKind::Heartbeat &&
+          event->kind != PluginRuntimeLifecycleKind::InvocationCompleted) {
+        throw PluginRuntimeFault(
+            PluginRuntimeFaultKind::LifecycleProtocol,
+            "plugin runtime emitted an unexpected invocation event");
+      }
+      apply_supervised_lifecycle_acceptance_test_delay(event->kind);
+      const SupervisorDeadline accepted_at = SupervisorClock::now();
+      enforce_invocation_lifecycle_acceptance_deadlines(
+          accepted_at, invocation_deadline, heartbeat_deadline);
       if (event->kind == PluginRuntimeLifecycleKind::Heartbeat) {
-        heartbeat_deadline = SupervisorClock::now() + heartbeat_timeout;
+        heartbeat_deadline = accepted_at + heartbeat_timeout;
         continue;
       }
-      if (event->kind == PluginRuntimeLifecycleKind::InvocationCompleted) {
-        return SupervisorClock::now();
-      }
-      throw PluginRuntimeFault(
-          PluginRuntimeFaultKind::LifecycleProtocol,
-          "plugin runtime emitted an unexpected invocation event");
+      return accepted_at;
     } catch (const IsolatedCpuProtocolError& error) {
       throw PluginRuntimeFault(PluginRuntimeFaultKind::LifecycleProtocol,
                                error.what());
@@ -3771,6 +3908,10 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
             : PluginRuntimeFaultKind::LifecycleProtocol;
     throw_after_supervised_cleanup(PluginRuntimeFault(kind, error.what()),
                                    &process, options, pending_reap);
+  } catch (const PrematureFramedPacketEof& error) {
+    throw_after_supervised_cleanup(
+        plugin_runtime_fault_from_premature_response_eof(error, &process.child),
+        &process, options, pending_reap);
   } catch (const IsolatedCpuInvocationError& error) {
     std::optional<int> status = process.child.wait_status();
     if (!status.has_value()) {
@@ -3818,6 +3959,34 @@ void IsolatedCpuInvocationTestProbe::delay_next_supervised_request_send(
   }
   g_next_supervised_request_send_delay_ms.store(delay.count(),
                                                 std::memory_order_release);
+}
+
+/**
+ * @copydoc IsolatedCpuInvocationTestProbe::
+ * delay_next_lifecycle_event_acceptance
+ */
+void IsolatedCpuInvocationTestProbe::delay_next_lifecycle_event_acceptance(
+    SupervisedLifecycleTestEvent event, std::chrono::milliseconds delay) {
+  if (delay.count() < 0) {
+    throw std::invalid_argument(
+        "supervised lifecycle-acceptance test delay must be nonnegative");
+  }
+  std::atomic<std::int64_t>* delay_slot = nullptr;
+  switch (event) {
+    case SupervisedLifecycleTestEvent::RuntimeStarted:
+      delay_slot = &g_next_runtime_started_acceptance_delay_ms;
+      break;
+    case SupervisedLifecycleTestEvent::Heartbeat:
+      delay_slot = &g_next_runtime_heartbeat_acceptance_delay_ms;
+      break;
+    case SupervisedLifecycleTestEvent::InvocationCompleted:
+      delay_slot = &g_next_invocation_completed_acceptance_delay_ms;
+      break;
+    default:
+      throw std::invalid_argument(
+          "supervised lifecycle-acceptance test event is invalid");
+  }
+  delay_slot->store(delay.count(), std::memory_order_release);
 }
 
 /** @copydoc IsolatedCpuInvocationTestProbe::receive_one_packet */

@@ -10,6 +10,20 @@
 namespace ps::execution {
 
 /**
+ * @brief Closed lifecycle acceptance points available to maintained tests.
+ * @note Values identify only source-private timing perturbations and carry no
+ * runtime protocol, session, or process authority.
+ */
+enum class SupervisedLifecycleTestEvent : std::uint8_t {
+  /** @brief Authenticated startup-event acceptance. */
+  RuntimeStarted = 0,
+  /** @brief Authenticated callback-heartbeat acceptance. */
+  Heartbeat = 1,
+  /** @brief Authenticated callback-completion acceptance. */
+  InvocationCompleted = 2,
+};
+
+/**
  * @brief Process-local observations of invocation side effects.
  * @throws Nothing for ordinary value operations.
  * @note Counters are monotonic; the PID field is only the latest observation.
@@ -34,8 +48,8 @@ struct IsolatedCpuInvocationTestSnapshot final {
  * @brief Source-private observation, timing, and framing seam for tests.
  * @throws Nothing for construction because the type has no instances.
  * @note This header is not installed. Snapshot access exposes no authority;
- * timing is a one-shot bounded-send perturbation, and framing borrows only the
- * caller-supplied test socket for one receive.
+ * timing perturbations are one-shot and process-local, and framing borrows only
+ * the caller-supplied test socket for one receive.
  */
 class IsolatedCpuInvocationTestProbe final {
  public:
@@ -65,6 +79,21 @@ class IsolatedCpuInvocationTestProbe final {
    */
   static void delay_next_supervised_request_send(
       std::chrono::milliseconds delay);
+
+  /**
+   * @brief Delays one selected lifecycle event immediately before acceptance.
+   * @param event Closed authenticated event whose next acceptance is delayed.
+   * @param delay Nonnegative process-local delay consumed exactly once.
+   * @return Nothing after publishing the selected one-shot perturbation.
+   * @throws std::invalid_argument when `delay` is negative or `event` is not a
+   * closed enumerator.
+   * @note The event has already been received and session-validated when the
+   * delay is consumed, so this seam deterministically models supervisor
+   * descheduling between receive and the acceptance linearization point. It is
+   * not installed and grants no PID, descriptor, mapping, or clock authority.
+   */
+  static void delay_next_lifecycle_event_acceptance(
+      SupervisedLifecycleTestEvent event, std::chrono::milliseconds delay);
 
   /**
    * @brief Runs the production one-frame receiver and discards its payload.
