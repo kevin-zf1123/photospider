@@ -929,9 +929,11 @@ Supervisor 会保留类型化可观测的 deadline、protocol、channel、bad-ou
 signal 与 escalation 事实。它不会根据 wait status 推断 OOM：`SIGKILL` 只表示
 memory-pressure-compatible。Fault 会关闭两条 channel，必要时升级精确 PID termination，保留
 reap ownership，并且绝不回退到进程内执行。后续调用会等待有界 restart backoff，再启动另一
-个全新进程。链接产品的真实 exec 测试会覆盖该 lifecycle，并把 executor 组合进
-`ExecutionService` ready callback；request boundary 只把 owning Run 发布为 Failed，固定 worker
-随后会执行无关 Run。
+个全新进程。链接产品的真实 exec 测试会覆盖该 lifecycle。如果在认证 completion 仍排队时
+精确 child status 已被回收，monitor 会先排空 lifecycle 队列，再把该 status 分类为未完成便
+退出，随后继续保留 status 以执行强制的 response/EOF/decode/publication 检查。只有零退出绝不
+授权成功。测试还会把 executor 组合进 `ExecutionService` ready callback；request boundary
+只把 owning Run 发布为 Failed，固定 worker 随后会执行无关 Run。
 
 Adapter、endpoint、supervisor 与 executor 都会编入 installable product archive，但当前没有
 operation loader 或 product composition root 会为最终用户 Graph operation 构造 isolated

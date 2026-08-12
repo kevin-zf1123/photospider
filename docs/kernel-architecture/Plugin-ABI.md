@@ -1179,9 +1179,13 @@ from wait status: `SIGKILL` is only memory-pressure-compatible. A fault closes
 both channels, escalates exact-PID termination when required, keeps reap
 ownership, and never falls back in-process. A later call waits bounded restart
 backoff and starts another fresh process. Product-linked real-exec tests cover
-that lifecycle and compose the executor inside an `ExecutionService` ready
-callback; the request boundary publishes only the owning Run as Failed and the
-fixed worker executes a later unrelated Run.
+that lifecycle. If exact child status is reaped while an authenticated
+completion remains queued, the monitor drains the lifecycle queue before
+classifying the status as exit without completion, then keeps the status for
+the mandatory response/EOF/decode/publication checks. Zero exit alone never
+authorizes success. The tests also compose the executor inside an
+`ExecutionService` ready callback; the request boundary publishes only the
+owning Run as Failed and the fixed worker executes a later unrelated Run.
 
 The adapter, endpoint, supervisor, and executor are compiled into the
 installable product archive, but no current operation loader or product

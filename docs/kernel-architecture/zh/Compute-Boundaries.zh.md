@@ -382,12 +382,17 @@ lifecycle-protocol、channel、bad-output、natural exit、signal 与 terminatio
 匹配的 `SIGKILL` 只会标记为 memory-pressure-compatible，不能证明 OOM 因果。Failure 会关闭两条 channel，必要时
 从 `SIGTERM` 升级到 `SIGKILL`，并在 reap 或 quarantined deferred-reaper integrity path 完成前
 保留精确 PID ownership。
+已经回收 child 并不能证明其 lifecycle datagram 队列为空：在把已保留 status 分类为
+callback 未完成便退出之前，monitor 会排空已经排队且序号连续的 event。经过认证的
+completion 会推进到未改变的 response/EOF/decode/publication 检查，同时已保留 wait
+status 仍可使用；缺少该 completion 与有效 response 的零退出仍是错误输出。
 
 `PluginInvocationExecutor` 绝不会回退到 in-process 或 non-supervised call。有界 restart
 backoff 后，下一次 invocation 会获得全新 PID、nonce、lifecycle channel 与 data channel。
-链接产品的真实 exec 测试会证明 success、startup authentication、各类 deadline、natural exit
-与 signal classification、malformed output、descriptor/PID 精确 retirement、无 fallback 与后续
-健康恢复。一项测试会在 production `ExecutionService` ready callback 中调用该 executor：原始
+链接产品的真实 exec 测试会证明 success、startup authentication、各类 deadline、排队
+completion 先于正常退出分类、natural exit 与 signal classification、malformed output、
+descriptor/PID 精确 retirement、无 fallback 与后续健康恢复。一项测试会在 production
+`ExecutionService` ready callback 中调用该 executor：原始
 `PluginRuntimeFault` 到达 request boundary，该 boundary 只把 owning Run 发布为 Failed，固定
 service worker 随后会执行无关 Run。
 

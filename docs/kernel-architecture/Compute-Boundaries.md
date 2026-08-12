@@ -484,13 +484,20 @@ termination-stage facts. A matching `SIGKILL` is only marked
 memory-pressure-compatible; it does not prove an OOM cause. Failure closes both
 channels, escalates `SIGTERM` to `SIGKILL` when necessary, and retains exact PID
 ownership through reap or the quarantined deferred-reaper integrity path.
+An already reaped child does not prove its lifecycle datagram queue is empty:
+before classifying retained status as exit without callback completion, the
+monitor drains queued in-sequence events. An authenticated completion advances
+to the unchanged response/EOF/decode/publication checks while the retained wait
+status remains available; a zero exit without that completion and a valid
+response remains bad output.
 
 `PluginInvocationExecutor` never falls back to an in-process or non-supervised
 call. After bounded restart backoff, the next invocation receives a fresh PID,
 nonce, lifecycle channel, and data channel. Product-linked real-exec tests prove
-success, startup authentication, each deadline class, natural exit and signal
-classification, malformed output, exact descriptor/PID retirement, no fallback,
-and later healthy recovery. One test invokes the executor inside a production
+success, startup authentication, each deadline class, queued completion before
+normal-exit classification, natural exit and signal classification, malformed
+output, exact descriptor/PID retirement, no fallback, and later healthy
+recovery. One test invokes the executor inside a production
 `ExecutionService` ready callback: the original `PluginRuntimeFault` reaches the
 request boundary, that boundary publishes only the owning Run as Failed, and
 the fixed service worker executes a later unrelated Run.
