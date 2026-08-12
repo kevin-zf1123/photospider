@@ -1167,11 +1167,15 @@ nonce, the complete invocation identity, worker/plugin generations, a
 Host-selected heartbeat interval, and strictly increasing event sequences to
 the exact execed PID. Startup, invocation, heartbeat-gap, response, TERM, KILL,
 and reap bounds use absolute monotonic deadlines. Complete request transfer
-receives one independent full invocation-duration window; callback invocation
-and heartbeat-gap deadlines are armed only after that transfer finishes. The
-nonce proves only private launch/session binding and liveness; because the child
-learns it, the protocol
-does not attest plugin truth or make returned bytes trusted.
+receives one independent full invocation-duration window and finishes only
+after all bytes and descriptor rights are sent, Host `SHUT_WR` succeeds, and
+the same absolute transfer deadline is observed again. A late successful
+shutdown is an invocation-deadline fault and cannot arm fresh callback or
+heartbeat budgets; shutdown failure remains a channel fact. Callback
+invocation and heartbeat-gap deadlines are armed only after that acceptance.
+The nonce proves only private launch/session binding and liveness; because the
+child learns it, the protocol does not attest plugin truth or make returned
+bytes trusted.
 
 The supervisor preserves typed observable deadline, protocol, channel,
 bad-output, natural-exit, signal, and escalation facts. It never attributes OOM

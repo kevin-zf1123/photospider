@@ -474,9 +474,13 @@ plugin attestation or output truth.
 
 The supervisor applies absolute monotonic startup, invocation, heartbeat-gap,
 response, graceful-termination, kill, and reap bounds. Complete request
-transfer receives one independent full invocation-duration window. Only after
-that transfer finishes do the callback invocation and heartbeat-gap deadlines
-start, so a large bounded send cannot consume the callback-liveness budget;
+transfer receives one independent full invocation-duration window. It finishes
+only after every byte and descriptor right is sent, Host `SHUT_WR` succeeds,
+and the same absolute transfer deadline is observed again. A late successful
+shutdown is an invocation-deadline fault and cannot arm fresh callback or
+heartbeat budgets; a failed shutdown remains a channel fact. Only after that
+acceptance do the callback invocation and heartbeat-gap deadlines start, so a
+large bounded send cannot consume the callback-liveness budget;
 the absolute invocation deadline still ends a callback that continues to emit
 heartbeats. Faults expose exact observable
 deadline, lifecycle-protocol, channel, bad-output, natural exit, signal, and

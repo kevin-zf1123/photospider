@@ -375,7 +375,10 @@ plugin attestation 或 output truth。
 
 Supervisor 会强制绝对单调的 startup、invocation、heartbeat-gap、response、graceful-
 termination、kill 与 reap bound。完整 request transfer 会获得一个独立、完整的 invocation-
-duration window。只有在该传输结束后才启动 callback invocation 与 heartbeat-gap deadline，
+duration window。只有在每个 byte 与 descriptor right 都已发送、Host `SHUT_WR` 成功，
+并且再次观察同一绝对 transfer deadline 后，该传输才结束。迟到但成功的 shutdown 是
+invocation-deadline fault，且不得启用全新 callback 或 heartbeat budget；失败的 shutdown
+仍是 channel 事实。只有在该验收之后才启动 callback invocation 与 heartbeat-gap deadline，
 因此有界的大 request send 不会消耗 callback-liveness budget；即使 callback 继续发送
 heartbeat，绝对 invocation deadline 仍会终止它。Fault 会暴露精确可观测的 deadline、
 lifecycle-protocol、channel、bad-output、natural exit、signal 与 termination-stage 事实。

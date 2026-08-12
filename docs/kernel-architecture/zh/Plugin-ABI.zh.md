@@ -920,8 +920,11 @@ Issue #103 现在通过源码私有的 `PluginRuntimeSupervisor` 与
 protocol 会把 OS 随机 128-bit nonce、完整 invocation identity、worker/plugin generation、
 Host 选择的 heartbeat interval 与严格递增 event sequence 绑定到精确 exec PID。Startup、
 invocation、heartbeat-gap、response、TERM、KILL 与 reap bound 都使用绝对单调 deadline。完整
-request transfer 会获得一个独立、完整的 invocation-duration window；callback invocation 与
-heartbeat-gap deadline 只在该传输结束后启用。
+request transfer 会获得一个独立、完整的 invocation-duration window；只有在全部 byte 与
+descriptor right 已发送、Host `SHUT_WR` 成功，并且再次观察同一绝对 transfer deadline 后，
+该传输才结束。迟到但成功的 shutdown 是 invocation-deadline fault，且不得启用全新 callback
+或 heartbeat budget；shutdown 失败仍是 channel 事实。Callback invocation 与 heartbeat-gap
+deadline 只在该验收之后启用。
 Nonce 只证明私有 launch/session binding 与 liveness；由于 child 会知道它，该 protocol 不会
 attest plugin truth，也不会让返回 byte 自动受信任。
 
