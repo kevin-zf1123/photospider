@@ -4371,7 +4371,9 @@ TEST(IpcDaemonExecution,
  * synchronization exceptions from the real product path.
  * @note Every raw call uses a fresh client connection, proving policy registry
  * and binding state are process-owned rather than connection-owned. A second
- * daemon process exercises directory scan from a clean registry.
+ * daemon process exercises directory scan from a clean registry. Trust
+ * admission rejects an unopenable candidate before native loading and maps
+ * that boundary failure to `invalid_parameter`.
  */
 TEST(IpcDaemonPolicy,
      RealFixtureRoutesDiscoveryConfigurationReplacementAndScan) {
@@ -4391,7 +4393,7 @@ TEST(IpcDaemonPolicy,
       "policy-missing-load");
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "graph");
-  EXPECT_EQ(response["error"]["name"], "io");
+  EXPECT_EQ(response["error"]["name"], "invalid_parameter");
 
   response = raw_daemon_call(
       load_socket, "policy.load",

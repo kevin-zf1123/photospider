@@ -18,9 +18,15 @@ from pathlib import Path, PurePosixPath
 from textwrap import dedent
 from typing import Any, Callable
 
+# Keep this standalone CTest driver able to reuse repository-owned test support
+# without relying on a caller-provided PYTHONPATH.
+TEST_SUPPORT_DIR = Path(__file__).resolve().parents[1] / "support"
+sys.path.insert(0, str(TEST_SUPPORT_DIR))
+
 from cmake_build_smoke_support import (
     producer_osx_architecture_arguments,
 )
+from generate_plugin_trust_bundle import write_plugin_trust_bundle
 
 
 STATIC_PRODUCT_ARCHIVE_NAMES = {
@@ -3380,6 +3386,7 @@ def main() -> int:
         help="CMake generator used for both producer and consumer configure",
     )
     parser.add_argument("--cmake-executable", default="cmake")
+    parser.add_argument("--openssl-executable", default="openssl")
     parser.add_argument("--configure-fresh-producer", action="store_true")
     parser.add_argument(
         "--producer-build-testing", choices=("ON", "OFF"), default="OFF"
@@ -3773,6 +3780,50 @@ def main() -> int:
         and operation_plugin is not None
         and operation_plugin.is_file()
     ):
+        trust_manifest = work / "installed-consumer-trust" / "manifest.txt"
+        trust_signature = work / "installed-consumer-trust" / "signature.hex"
+        write_plugin_trust_bundle(
+            openssl=args.openssl_executable,
+            private_key=(
+                repo
+                / "tests"
+                / "fixtures"
+                / "trust"
+                / "test_ed25519_private_key.pem"
+            ),
+            manifest=trust_manifest,
+            signature=trust_signature,
+            bad_signature=None,
+            trust_root="photospider-install-consumer-test-root",
+            entries=(
+                (
+                    "operation",
+                    "11111111111111111111111111111111",
+                    "1",
+                    str(operation_plugin),
+                ),
+                (
+                    "policy",
+                    "22222222222222222222222222222222",
+                    "1",
+                    str(cpp_policy_plugin),
+                ),
+            ),
+        )
+        trust_environment = os.environ.copy()
+        trust_environment.update(
+            {
+                "PHOTOSPIDER_PLUGIN_TRUST_MANIFEST": str(trust_manifest),
+                "PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE": str(trust_signature),
+                "PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY": str(
+                    repo
+                    / "tests"
+                    / "fixtures"
+                    / "trust"
+                    / "test_ed25519_public_key.pem"
+                ),
+            }
+        )
         run_code = run_command(
             [
                 str(executable),
@@ -3782,6 +3833,7 @@ def main() -> int:
                 str(extension_graph),
             ],
             repo,
+            env=trust_environment,
         )
     else:
         print(

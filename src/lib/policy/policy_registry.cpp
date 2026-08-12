@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "photospider/core/graph_error.hpp"
+#include "plugin/plugin_trust.hpp"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -334,11 +335,12 @@ using DestroyFunction = DestroyFunctionSignature*;
 
 /**
  * @brief Opens one DSO eagerly and locally under a shared native lease.
- * @param path Normalized candidate path.
+ * @param authorized Retained exact candidate already signed for policy use.
  * @return Shared native owner suitable for type/binding/invocation retention.
  * @throws GraphError with `Io` when the native loader rejects the candidate.
  */
-std::shared_ptr<void> open_library(const std::string& path) {
+std::shared_ptr<void> open_library(const AuthorizedPluginFile& authorized) {
+  const std::string path = authorized.native_load_path();
 #if defined(_WIN32)
   HMODULE handle = LoadLibraryA(path.c_str());
   if (handle == nullptr) {
@@ -813,7 +815,16 @@ void PolicyRegistry::load(const std::string& path) {
                          std::string(error.what()));
   }
 
-  std::shared_ptr<void> library = open_library(normalized_path);
+  std::optional<AuthorizedPluginFile> authorized;
+  try {
+    authorized.emplace(
+        authorize_process_plugin(normalized_path, PluginArtifactKind::Policy));
+  } catch (const PluginTrustError& error) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     std::string("Policy trust admission rejected '") +
+                         normalized_path + "': " + error.what());
+  }
+  std::shared_ptr<void> library = open_library(*authorized);
   const auto version = reinterpret_cast<PolicyVersionFunction>(
       required_symbol(library, "ps_policy_plugin_get_abi_version"));
   std::uint32_t abi_version = 0U;

@@ -18,6 +18,7 @@
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/plugin/plugin_api.hpp"
 #include "plugin/operation_host_adapter.hpp"
+#include "plugin/plugin_trust.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "core/op_registry_test_access.hpp"
@@ -621,17 +622,19 @@ class DynamicLibrary final {
   /**
    * @brief Opens a dynamic library and reports platform loader failures.
    *
-   * @param path Absolute or relative path to a candidate shared library.
+   * @param authorized Retained candidate object already approved for the
+   * operation role. The descriptor remains live through native mapping.
    * @param error_message Output error text when opening fails.
    * @return A library wrapper on success, or `nullptr` on failure.
    * @throws std::bad_alloc if allocation of the wrapper or handle owner fails.
    * @note The caller is responsible for adding `path` to structured load
    * results; this function only returns the platform error detail.
    */
-  static std::unique_ptr<DynamicLibrary> open(const fs::path& path,
-                                              std::string& error_message) {
+  static std::unique_ptr<DynamicLibrary> open(
+      const AuthorizedPluginFile& authorized, std::string& error_message) {
+    const std::string load_path = authorized.native_load_path();
 #ifdef _WIN32
-    HMODULE handle = LoadLibrary(path.string().c_str());
+    HMODULE handle = LoadLibrary(load_path.c_str());
     if (!handle) {
       error_message = "LoadLibrary failed";
       return nullptr;
@@ -640,7 +643,7 @@ class DynamicLibrary final {
     return std::unique_ptr<DynamicLibrary>(new DynamicLibrary(
         static_cast<void*>(handle), std::move(library_lifetime)));
 #else
-    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    void* handle = dlopen(load_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
       const char* err = dlerror();
       error_message = err ? err : "dlopen failed";
@@ -1142,11 +1145,13 @@ void capture_plugin_registration(
  * @throws std::bad_alloc from result, shadow registry/source/handle copies,
  * registrar execution, or post-registration staging. Plugin-origin resource
  * exhaustion is rethrown as a fresh host-owned standard bad_alloc.
- * @note The live singleton, source map, accumulated result, and handle map are
- * changed only by a final no-throw swap phase. On failure the transaction's
- * shadow callback state is destroyed before its candidate handle, so no
- * throwing rollback, leaked handle, dangling callback, or partial result is
- * exposed.
+ * @note Signed content/role authorization opens and hashes the candidate before
+ * native mapping. The retained exact-file capability remains alive through
+ * `dlopen`/`LoadLibrary`; trust rejection cannot run an initializer. The live
+ * singleton, source map, accumulated result, and handle map are changed only
+ * by a final no-throw swap phase. On later failure the transaction's shadow
+ * callback state is destroyed before its candidate handle, so no throwing
+ * rollback, leaked handle, dangling callback, or partial result is exposed.
  */
 void load_one_plugin(const fs::path& path,
                      std::map<std::string, std::string>& op_sources,
@@ -1161,8 +1166,19 @@ void load_one_plugin(const fs::path& path,
   PluginLoadResult staged_result = result;
   ++staged_result.attempted;
 
+  std::optional<AuthorizedPluginFile> authorized;
+  try {
+    authorized.emplace(
+        authorize_process_plugin(absolute_path, PluginArtifactKind::Operation));
+  } catch (const PluginTrustError& error) {
+    staged_result.errors.push_back(
+        {absolute_path, GraphErrc::InvalidParameter, error.what()});
+    swap_plugin_load_result(result, staged_result);
+    return;
+  }
+
   std::string error_message;
-  auto library = DynamicLibrary::open(path, error_message);
+  auto library = DynamicLibrary::open(*authorized, error_message);
   if (!library) {
     staged_result.errors.push_back(
         {absolute_path, GraphErrc::Io, std::move(error_message)});

@@ -369,7 +369,10 @@ if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
     endif()
 endif()
 find_package(CURL) 
-find_package(OpenSSL)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+if(BUILD_TESTING)
+    find_program(PHOTOSPIDER_OPENSSL_EXECUTABLE NAMES openssl REQUIRED)
+endif()
 if(PHOTOSPIDER_BUILD_IPC OR BUILD_TESTING)
     find_package(nlohmann_json 3.9 REQUIRED)
 endif()
@@ -625,6 +628,18 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
     endif()
 endif()
 
+# Module: shared process-native trust admission. This target remains private;
+# the complete installed archive compiles the same single source directly.
+set(PHOTOSPIDER_PLUGIN_TRUST_SOURCES
+    src/lib/plugin/plugin_trust.cpp)
+add_library(photospider_plugin_trust_internal STATIC
+    ${PHOTOSPIDER_PLUGIN_TRUST_SOURCES})
+target_compile_features(photospider_plugin_trust_internal PRIVATE cxx_std_17)
+target_include_directories(photospider_plugin_trust_internal PRIVATE
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+target_link_libraries(photospider_plugin_trust_internal PRIVATE
+    OpenSSL::Crypto)
+
 # Module: host-side operation plugin loading and lifetime ownership.
 set(PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES
     src/lib/plugin/plugin_manager.cpp
@@ -640,6 +655,7 @@ target_include_directories(photospider_plugin_host_internal PRIVATE
 target_link_libraries(photospider_plugin_host_internal PRIVATE
     photospider_core_internal
     photospider_graph_internal
+    photospider_plugin_trust_internal
     Photospider::operation_sdk
     ${CMAKE_DL_LIBS})
 if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
@@ -657,6 +673,7 @@ add_library(photospider_policy_internal STATIC
 target_include_directories(photospider_policy_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_policy_internal PRIVATE
+    photospider_plugin_trust_internal
     Photospider::policy_sdk
     ${CMAKE_DL_LIBS})
 
@@ -719,7 +736,9 @@ target_include_directories(photospider_execution_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_execution_internal PRIVATE
     photospider_core_internal
+    photospider_plugin_trust_internal
     Photospider::operation_runtime
+    OpenSSL::Crypto
     Threads::Threads
     ${PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES})
 target_link_libraries(photospider_graph_internal PRIVATE
@@ -856,6 +875,7 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_IMAGE_PROCESSING_SOURCES}
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES}
     ${PHOTOSPIDER_CONFIGURED_PERSISTENCE_SOURCES}
+    ${PHOTOSPIDER_PLUGIN_TRUST_SOURCES}
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES}
     ${PHOTOSPIDER_POLICY_INTERNAL_SOURCES}
     ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
@@ -908,6 +928,7 @@ function(configure_photospider_product_objects TARGET_NAME)
         Photospider::operation_sdk
         Photospider::operation_runtime
         Photospider::policy_sdk
+        OpenSSL::Crypto
         PkgConfig::UTF8PROC
         Threads::Threads
         ${CMAKE_DL_LIBS})
@@ -941,6 +962,7 @@ function(configure_photospider_product_archive TARGET_NAME)
         Photospider::operation_sdk
         Photospider::operation_runtime
         Photospider::policy_sdk
+        OpenSSL::Crypto
         Threads::Threads
         ${CMAKE_DL_LIBS}
         ${PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES})
@@ -1423,8 +1445,51 @@ endforeach()
 if(BUILD_TESTING)
     set(TEST_POLICY_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_policies)
     set(TEST_OP_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_plugins)
+    set(TEST_POLICY_FIXTURE_STATE_DIR
+        "${CMAKE_BINARY_DIR}/test_policy_fixture_support")
+    if(WIN32)
+        # Windows resolves dependent DLLs from the executable directory rather
+        # than a BUILD_RPATH. Keep the support DLL beside test executables and
+        # copy it beside product executables that host the policy fixture.
+        get_property(PHOTOSPIDER_IS_MULTI_CONFIG GLOBAL
+            PROPERTY GENERATOR_IS_MULTI_CONFIG)
+        if(PHOTOSPIDER_IS_MULTI_CONFIG)
+            set(TEST_POLICY_FIXTURE_STATE_DIR
+                "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
+            set(TEST_POLICY_FIXTURE_STATE_PRODUCT_DIR
+                "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>")
+        else()
+            set(TEST_POLICY_FIXTURE_STATE_DIR "${CMAKE_BINARY_DIR}/tests")
+            set(TEST_POLICY_FIXTURE_STATE_PRODUCT_DIR
+                "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+        endif()
+    endif()
     file(MAKE_DIRECTORY ${TEST_POLICY_PLUGIN_DIR})
     file(MAKE_DIRECTORY ${TEST_OP_PLUGIN_DIR})
+
+    add_library(test_policy_fixture_state SHARED
+        tests/fixtures/policy_plugins/policy_fixture_state.c)
+    set_target_properties(test_policy_fixture_state PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED YES
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
+        LIBRARY_OUTPUT_DIRECTORY "${TEST_POLICY_FIXTURE_STATE_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_POLICY_FIXTURE_STATE_DIR}")
+    if(APPLE)
+        set_target_properties(test_policy_fixture_state PROPERTIES
+            MACOSX_RPATH ON)
+    endif()
+    target_link_libraries(test_policy_fixture_state PRIVATE
+        Photospider::policy_sdk)
+    if(WIN32)
+        add_custom_command(TARGET test_policy_fixture_state POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${TEST_POLICY_FIXTURE_STATE_PRODUCT_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:test_policy_fixture_state>"
+                "${TEST_POLICY_FIXTURE_STATE_PRODUCT_DIR}/$<TARGET_FILE_NAME:test_policy_fixture_state>"
+            VERBATIM)
+    endif()
 
     function(add_policy_fixture TARGET_NAME OUTPUT_DIRECTORY)
         add_library(${TARGET_NAME} SHARED
@@ -1435,11 +1500,14 @@ if(BUILD_TESTING)
             C_STANDARD 11
             C_STANDARD_REQUIRED YES
             LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIRECTORY}"
-            RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIRECTORY}")
+            RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIRECTORY}"
+            BUILD_RPATH "${TEST_POLICY_FIXTURE_STATE_DIR}")
         if(APPLE)
             set_target_properties(${TARGET_NAME} PROPERTIES MACOSX_RPATH ON)
         endif()
-        target_link_libraries(${TARGET_NAME} PRIVATE Photospider::policy_sdk)
+        target_link_libraries(${TARGET_NAME} PRIVATE
+            Photospider::policy_sdk
+            test_policy_fixture_state)
     endfunction()
 
     add_policy_fixture(test_policy_plugin "${TEST_POLICY_PLUGIN_DIR}")
@@ -1461,6 +1529,15 @@ if(BUILD_TESTING)
         BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../../lib"
     )
+
+    add_library(untrusted_initializer_plugin SHARED
+        tests/fixtures/ops/untrusted_initializer_plugin.cpp)
+    target_compile_features(untrusted_initializer_plugin PRIVATE cxx_std_17)
+    set_target_properties(untrusted_initializer_plugin PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY
+            "${TEST_OP_PLUGIN_DIR}/untrusted_initializer"
+        RUNTIME_OUTPUT_DIRECTORY
+            "${TEST_OP_PLUGIN_DIR}/untrusted_initializer")
     if(APPLE)
         set_target_properties(lifecycle_op_plugin PROPERTIES
             MACOSX_RPATH ON
@@ -1616,6 +1693,39 @@ if(BUILD_TESTING)
     find_package(GTest REQUIRED)
     set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
     file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_DIR
+        "${CMAKE_BINARY_DIR}/generated/plugin_trust")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_MANIFEST
+        "${PHOTOSPIDER_TEST_PLUGIN_TRUST_DIR}/manifest.txt")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_SIGNATURE
+        "${PHOTOSPIDER_TEST_PLUGIN_TRUST_DIR}/signature.hex")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_BAD_SIGNATURE
+        "${PHOTOSPIDER_TEST_PLUGIN_TRUST_DIR}/bad-signature.hex")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT
+        "PHOTOSPIDER_PLUGIN_TRUST_MANIFEST=${PHOTOSPIDER_TEST_PLUGIN_TRUST_MANIFEST}"
+        "PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE=${PHOTOSPIDER_TEST_PLUGIN_TRUST_SIGNATURE}"
+        "PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY=${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_public_key.pem")
+
+    # GoogleTest's PROPERTIES list cannot portably carry a semicolon-delimited
+    # ENVIRONMENT property through both discovery parsing stages. Launch the
+    # selected test executables through `cmake -E env` instead so discovery and
+    # the registered test command receive the same complete trust tuple.
+    function(photospider_enable_plugin_trust_test_environment target_name)
+        set(plugin_trust_test_launcher
+            "${CMAKE_COMMAND}"
+            -E
+            env
+            ${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT})
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
+            set_property(TARGET ${target_name} PROPERTY TEST_LAUNCHER
+                ${plugin_trust_test_launcher})
+        else()
+            # GoogleTest used CROSSCOMPILING_EMULATOR as its portable launcher
+            # hook before TEST_LAUNCHER was introduced in CMake 3.29.
+            set_property(TARGET ${target_name} PROPERTY CROSSCOMPILING_EMULATOR
+                ${plugin_trust_test_launcher})
+        endif()
+    endfunction()
 
     # This production-chain integration target is dependency-neutral and must
     # remain buildable when both optional image/document capabilities are off.
@@ -1878,6 +1988,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     endif()
     add_dependencies(test_optional_opencv_operation_provider
         resize_replacement_op_plugin)
+    photospider_enable_plugin_trust_test_environment(
+        test_optional_opencv_operation_provider)
     gtest_discover_tests(test_optional_opencv_operation_provider
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -1957,11 +2069,28 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             PS_TEST_ISOLATED_CPU_FIXTURE_PATH="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>")
         add_dependencies(test_isolated_cpu_invocation
             test_isolated_cpu_plugin_fixture)
-        gtest_discover_tests(test_isolated_cpu_invocation
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-            PROPERTIES
-                LABELS execution
-                TIMEOUT 30)
+        photospider_enable_plugin_trust_test_environment(
+            test_isolated_cpu_invocation)
+        if(APPLE)
+            add_test(
+                NAME test_isolated_cpu_invocation_darwin_fail_closed
+                COMMAND ${CMAKE_COMMAND} -E env
+                    ${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT}
+                    $<TARGET_FILE:test_isolated_cpu_invocation>
+                    --gtest_filter=IsolatedCpuInvocation.DarwinRuntimeConstructionFailsBeforeSideEffects)
+            set_tests_properties(
+                test_isolated_cpu_invocation_darwin_fail_closed
+                PROPERTIES
+                    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                    LABELS execution
+                    TIMEOUT 30)
+        else()
+            gtest_discover_tests(test_isolated_cpu_invocation
+                WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                PROPERTIES
+                    LABELS execution
+                    TIMEOUT 30)
+        endif()
 
         add_ps_test(test_plugin_runtime_supervisor
             tests/integration/test_plugin_runtime_supervisor.cpp)
@@ -1973,11 +2102,28 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             test_isolated_cpu_plugin_fixture
             test_plugin_runtime_silent_fixture
             test_plugin_runtime_corrupt_fixture)
-        gtest_discover_tests(test_plugin_runtime_supervisor
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-            PROPERTIES
-                LABELS execution
-                TIMEOUT 30)
+        photospider_enable_plugin_trust_test_environment(
+            test_plugin_runtime_supervisor)
+        if(APPLE)
+            add_test(
+                NAME test_plugin_runtime_supervisor_darwin_fail_closed
+                COMMAND ${CMAKE_COMMAND} -E env
+                    ${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT}
+                    $<TARGET_FILE:test_plugin_runtime_supervisor>
+                    --gtest_filter=PluginRuntimeSupervisor.DarwinRuntimeConstructionFailsBeforeSideEffects)
+            set_tests_properties(
+                test_plugin_runtime_supervisor_darwin_fail_closed
+                PROPERTIES
+                    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                    LABELS execution
+                    TIMEOUT 30)
+        else()
+            gtest_discover_tests(test_plugin_runtime_supervisor
+                WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                PROPERTIES
+                    LABELS execution
+                    TIMEOUT 30)
+        endif()
     endif()
 
     if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
@@ -2352,6 +2498,23 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             ${OpenCV_LIBS})
     endif()
     add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
+    add_ps_test(test_plugin_resource_token
+        tests/unit/test_plugin_resource_token.cpp
+        photospider_execution_internal)
+    add_ps_test(test_plugin_trust
+        tests/unit/test_plugin_trust.cpp)
+    target_compile_definitions(test_plugin_trust PRIVATE
+        PS_TEST_PLUGIN_TRUST_MANIFEST="${CMAKE_BINARY_DIR}/generated/plugin_trust/manifest.txt"
+        PS_TEST_PLUGIN_TRUST_SIGNATURE="${CMAKE_BINARY_DIR}/generated/plugin_trust/signature.hex"
+        PS_TEST_PLUGIN_TRUST_BAD_SIGNATURE="${CMAKE_BINARY_DIR}/generated/plugin_trust/bad-signature.hex"
+        PS_TEST_PLUGIN_TRUST_PUBLIC_KEY="${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_public_key.pem"
+        PS_TEST_PLUGIN_TRUST_PRIVATE_KEY="${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_private_key.pem"
+        PS_TEST_SIGNED_OPERATION_PLUGIN="$<TARGET_FILE:lifecycle_op_plugin>"
+        PS_TEST_SIGNED_POLICY_PLUGIN="$<TARGET_FILE:test_policy_plugin>"
+        PS_TEST_WRONG_KIND_PLUGIN="$<TARGET_FILE:v1_only_op_plugin>"
+        PS_TEST_SIGNED_RUNTIME_PLUGIN="$<TARGET_FILE:test_isolated_cpu_plugin_fixture>"
+        PS_TEST_UNTRUSTED_INITIALIZER_PLUGIN="$<TARGET_FILE:untrusted_initializer_plugin>")
+    target_link_libraries(test_plugin_trust PRIVATE OpenSSL::Crypto)
     add_ps_test(test_i1_evidence tests/unit/test_i1_evidence.cpp)
     target_sources(test_i1_evidence PRIVATE
         tests/verification/i1_evidence_json.cpp
@@ -2586,6 +2749,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 --build "${CMAKE_BINARY_DIR}"
                 --work "${CMAKE_BINARY_DIR}/tests/static_product_consumer_smoke"
                 --cmake-executable "${CMAKE_COMMAND}"
+                --openssl-executable "${PHOTOSPIDER_OPENSSL_EXECUTABLE}"
                 --config $<CONFIG>
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         set_tests_properties(StaticProductConsumerSmoke PROPERTIES
@@ -2677,7 +2841,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --work "${CMAKE_BINARY_DIR}/tests/graph_cli_plugin_compute_smoke"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(GraphCliPluginComputeSmoke PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 60)
+        ENVIRONMENT "${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENVIRONMENT}"
+        RUN_SERIAL TRUE
+        TIMEOUT 60)
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target public_header_self_containment --config $<CONFIG>
@@ -2688,6 +2854,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         TIMEOUT 300)
 
     if(PHOTOSPIDER_BUILD_IPC)
+        photospider_enable_plugin_trust_test_environment(test_ipc_protocol)
         gtest_discover_tests(test_ipc_protocol
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
@@ -2703,12 +2870,15 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         gtest_discover_tests(test_output_store
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
+        photospider_enable_plugin_trust_test_environment(test_ipc_daemon)
         gtest_discover_tests(test_ipc_daemon
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 60)
     endif()
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_plugin_manager WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_enable_plugin_trust_test_environment(test_plugin_manager)
+    gtest_discover_tests(test_plugin_manager
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     # test_propagation is intentionally a scriptable REPL/tool target rather
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
     # gtest discovery on it.
@@ -2732,7 +2902,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_cli_policy_execution_config
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_host_adapter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    photospider_enable_plugin_trust_test_environment(test_host_adapter)
+    gtest_discover_tests(test_host_adapter
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_graph_document_errors
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -2753,6 +2925,17 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_resource_ledger
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_plugin_resource_token
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS security
+            TIMEOUT 30)
+    photospider_enable_plugin_trust_test_environment(test_plugin_trust)
+    gtest_discover_tests(test_plugin_trust
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS security
+            TIMEOUT 30)
     gtest_discover_tests(test_i1_evidence
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -2826,9 +3009,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PROPERTIES
             LABELS execution
             TIMEOUT 30)
+    photospider_enable_plugin_trust_test_environment(test_policy_registry)
     gtest_discover_tests(test_policy_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    photospider_enable_plugin_trust_test_environment(test_policy_execution)
     gtest_discover_tests(test_policy_execution
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -2861,6 +3046,107 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)
     gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+endif()
+
+# Every configured trust consumer receives a real signed bundle produced from
+# the fixture targets available in that build profile. The private key is
+# repository test data and is never installed or selected by production code.
+if(BUILD_TESTING)
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS "")
+    set(PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS "")
+    set(PHOTOSPIDER_TEST_OPERATION_GENERATION 1)
+    foreach(PHOTOSPIDER_TEST_OPERATION_TARGET
+            ${OP_PLUGIN_TARGETS}
+            lifecycle_op_plugin
+            override_lifecycle_op_plugin
+            resize_replacement_op_plugin
+            v1_only_op_plugin)
+        if(TARGET ${PHOTOSPIDER_TEST_OPERATION_TARGET})
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS
+                --entry operation 11111111111111111111111111111111
+                ${PHOTOSPIDER_TEST_OPERATION_GENERATION}
+                "$<TARGET_FILE:${PHOTOSPIDER_TEST_OPERATION_TARGET}>")
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS
+                ${PHOTOSPIDER_TEST_OPERATION_TARGET})
+            math(EXPR PHOTOSPIDER_TEST_OPERATION_GENERATION
+                "${PHOTOSPIDER_TEST_OPERATION_GENERATION} + 1")
+        endif()
+    endforeach()
+    set(PHOTOSPIDER_TEST_POLICY_GENERATION 1)
+    foreach(PHOTOSPIDER_TEST_POLICY_TARGET
+            ${POLICY_PLUGIN_TARGETS}
+            test_policy_plugin
+            missing_api_policy_plugin
+            mismatched_abi_policy_plugin)
+        if(TARGET ${PHOTOSPIDER_TEST_POLICY_TARGET})
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS
+                --entry policy 22222222222222222222222222222222
+                ${PHOTOSPIDER_TEST_POLICY_GENERATION}
+                "$<TARGET_FILE:${PHOTOSPIDER_TEST_POLICY_TARGET}>")
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS
+                ${PHOTOSPIDER_TEST_POLICY_TARGET})
+            math(EXPR PHOTOSPIDER_TEST_POLICY_GENERATION
+                "${PHOTOSPIDER_TEST_POLICY_GENERATION} + 1")
+        endif()
+    endforeach()
+    set(PHOTOSPIDER_TEST_ISOLATED_GENERATION 5)
+    foreach(PHOTOSPIDER_TEST_ISOLATED_TARGET
+            test_isolated_cpu_plugin_fixture
+            test_plugin_runtime_silent_fixture
+            test_plugin_runtime_corrupt_fixture)
+        if(TARGET ${PHOTOSPIDER_TEST_ISOLATED_TARGET})
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS
+                --entry isolated-runtime
+                4142434445464748494a4b4c4d4e4f50
+                ${PHOTOSPIDER_TEST_ISOLATED_GENERATION}
+                "$<TARGET_FILE:${PHOTOSPIDER_TEST_ISOLATED_TARGET}>")
+            list(APPEND PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS
+                ${PHOTOSPIDER_TEST_ISOLATED_TARGET})
+            math(EXPR PHOTOSPIDER_TEST_ISOLATED_GENERATION
+                "${PHOTOSPIDER_TEST_ISOLATED_GENERATION} + 1")
+        endif()
+    endforeach()
+    add_custom_target(test_plugin_trust_bundle
+        COMMAND ${Python3_EXECUTABLE} -B
+            "${PROJECT_SOURCE_DIR}/tests/support/generate_plugin_trust_bundle.py"
+            --openssl "${PHOTOSPIDER_OPENSSL_EXECUTABLE}"
+            --private-key
+                "${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_private_key.pem"
+            --manifest "${PHOTOSPIDER_TEST_PLUGIN_TRUST_MANIFEST}"
+            --signature "${PHOTOSPIDER_TEST_PLUGIN_TRUST_SIGNATURE}"
+            --bad-signature
+                "${PHOTOSPIDER_TEST_PLUGIN_TRUST_BAD_SIGNATURE}"
+            --trust-root photospider-maintained-test-root
+            ${PHOTOSPIDER_TEST_PLUGIN_TRUST_ENTRY_ARGUMENTS}
+        BYPRODUCTS
+            "${PHOTOSPIDER_TEST_PLUGIN_TRUST_MANIFEST}"
+            "${PHOTOSPIDER_TEST_PLUGIN_TRUST_SIGNATURE}"
+            "${PHOTOSPIDER_TEST_PLUGIN_TRUST_BAD_SIGNATURE}"
+        DEPENDS
+            "${PROJECT_SOURCE_DIR}/tests/support/generate_plugin_trust_bundle.py"
+            "${PROJECT_SOURCE_DIR}/tests/fixtures/trust/test_ed25519_private_key.pem"
+            ${PHOTOSPIDER_TEST_PLUGIN_TRUST_TARGETS}
+        VERBATIM)
+    foreach(PHOTOSPIDER_TEST_PLUGIN_TRUST_CONSUMER
+            graph_cli
+            test_isolated_cpu_invocation
+            test_plugin_runtime_supervisor
+            test_optional_opencv_operation_provider
+            test_plugin_manager
+            test_ipc_protocol
+            test_ipc_daemon
+            test_host_adapter
+            test_policy_registry
+            test_policy_execution
+            test_plugin_trust)
+        if(TARGET ${PHOTOSPIDER_TEST_PLUGIN_TRUST_CONSUMER})
+            add_dependencies(${PHOTOSPIDER_TEST_PLUGIN_TRUST_CONSUMER}
+                test_plugin_trust_bundle)
+        endif()
+    endforeach()
+    if(TARGET test_plugin_trust AND TARGET untrusted_initializer_plugin)
+        add_dependencies(test_plugin_trust untrusted_initializer_plugin)
+    endif()
 endif()
 
 # GoogleTest.cmake records each gtest_discover_tests registration in the

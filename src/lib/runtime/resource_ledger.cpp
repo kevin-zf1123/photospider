@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -92,6 +93,24 @@ DeviceResourceVector subtract_device_resources(
 }
 
 /**
+ * @brief Subtracts one known-fitting isolated-plugin resource vector.
+ * @param lhs Vector containing every `rhs` dimension.
+ * @param rhs Exact vector removed once.
+ * @return Component-wise difference.
+ * @throws Nothing.
+ */
+PluginResourceVector subtract_plugin_resources(
+    const PluginResourceVector& lhs, const PluginResourceVector& rhs) noexcept {
+  return PluginResourceVector{
+      lhs.runtime_processes - rhs.runtime_processes,
+      lhs.cpu_slots - rhs.cpu_slots,
+      lhs.address_space_bytes - rhs.address_space_bytes,
+      lhs.shared_memory_bytes - rhs.shared_memory_bytes,
+      lhs.descriptor_count - rhs.descriptor_count,
+  };
+}
+
+/**
  * @brief Selects the component-wise maximum of two Host resource vectors.
  * @param lhs First complete vector.
  * @param rhs Second complete vector.
@@ -123,6 +142,24 @@ DeviceResourceVector maximum_device_resources(
   return DeviceResourceVector{
       std::max(lhs.device_memory_bytes, rhs.device_memory_bytes),
       std::max(lhs.device_scratch_bytes, rhs.device_scratch_bytes),
+  };
+}
+
+/**
+ * @brief Selects the component-wise maximum of plugin resource vectors.
+ * @param lhs First complete vector.
+ * @param rhs Second complete vector.
+ * @return Independent maximum for every dimension.
+ * @throws Nothing.
+ */
+PluginResourceVector maximum_plugin_resources(
+    const PluginResourceVector& lhs, const PluginResourceVector& rhs) noexcept {
+  return PluginResourceVector{
+      std::max(lhs.runtime_processes, rhs.runtime_processes),
+      std::max(lhs.cpu_slots, rhs.cpu_slots),
+      std::max(lhs.address_space_bytes, rhs.address_space_bytes),
+      std::max(lhs.shared_memory_bytes, rhs.shared_memory_bytes),
+      std::max(lhs.descriptor_count, rhs.descriptor_count),
   };
 }
 
@@ -162,8 +199,9 @@ struct ResourceLedgerRootState final {
    */
   ResourceLedgerRootState(
       ResourceVector configured_limits,
-      const std::vector<DeviceResourceLimit>& configured_device_limits)
-      : limits(configured_limits) {
+      const std::vector<DeviceResourceLimit>& configured_device_limits,
+      PluginResourceVector configured_plugin_limits)
+      : limits(configured_limits), plugin_limits(configured_plugin_limits) {
     for (const DeviceResourceLimit& configured : configured_device_limits) {
       if (configured.device.backend() == DeviceBackend::CPU) {
         throw std::invalid_argument(
@@ -193,6 +231,18 @@ struct ResourceLedgerRootState final {
 
   /** @brief Deterministically ordered configured device accounts. */
   std::map<DeviceId, DeviceAccount> devices;
+
+  /** @brief Immutable aggregate isolated-plugin limits. */
+  const PluginResourceVector plugin_limits;
+
+  /** @brief Current token-issued or lease-consumed plugin commitment. */
+  PluginResourceVector plugin_reserved;
+
+  /** @brief Component-wise lifetime plugin commitment maximum. */
+  PluginResourceVector plugin_high_water;
+
+  /** @brief Attempt-lifetime replay tombstones ordered by digest bytes. */
+  std::set<PluginInvocationIdentityDigest> plugin_replay_identities;
 };
 
 /**
@@ -293,6 +343,29 @@ void release_root_resources(
     if (settlement_observer.valid()) {
       settlement_observer.on_settled(settlement_observer.context);
     }
+  } catch (...) {
+    std::terminate();
+  }
+}
+
+/**
+ * @brief Returns one exact plugin resource vector to its root account.
+ * @param root Matching ledger authority.
+ * @param resources Previously issued exact vector.
+ * @return Nothing.
+ * @throws Nothing; invariant or synchronization failure terminates.
+ * @note Replay tombstones are deliberately preserved for the root lifetime.
+ */
+void release_plugin_resources(
+    const std::shared_ptr<ResourceLedgerRootState>& root,
+    const PluginResourceVector& resources) noexcept {
+  try {
+    std::lock_guard<std::mutex> lock(root->mutex);
+    if (!plugin_resources_fit(resources, root->plugin_reserved)) {
+      std::terminate();
+    }
+    root->plugin_reserved =
+        subtract_plugin_resources(root->plugin_reserved, resources);
   } catch (...) {
     std::terminate();
   }
@@ -405,6 +478,57 @@ bool device_resources_fit(const DeviceResourceVector& requested,
   return requested.device_memory_bytes <= available.device_memory_bytes &&
          requested.device_scratch_bytes <= available.device_scratch_bytes;
 }
+
+/** @copydoc operator==(const PluginResourceVector&, const
+ * PluginResourceVector&) */
+bool operator==(const PluginResourceVector& lhs,
+                const PluginResourceVector& rhs) noexcept {
+  return lhs.runtime_processes == rhs.runtime_processes &&
+         lhs.cpu_slots == rhs.cpu_slots &&
+         lhs.address_space_bytes == rhs.address_space_bytes &&
+         lhs.shared_memory_bytes == rhs.shared_memory_bytes &&
+         lhs.descriptor_count == rhs.descriptor_count;
+}
+
+/** @copydoc operator!=(const PluginResourceVector&, const
+ * PluginResourceVector&) */
+bool operator!=(const PluginResourceVector& lhs,
+                const PluginResourceVector& rhs) noexcept {
+  return !(lhs == rhs);
+}
+
+/** @copydoc checked_add_plugin_resources */
+std::optional<PluginResourceVector> checked_add_plugin_resources(
+    const PluginResourceVector& lhs, const PluginResourceVector& rhs) noexcept {
+  PluginResourceVector sum;
+  if (!checked_add_dimension(lhs.runtime_processes, rhs.runtime_processes,
+                             &sum.runtime_processes) ||
+      !checked_add_dimension(lhs.cpu_slots, rhs.cpu_slots, &sum.cpu_slots) ||
+      !checked_add_dimension(lhs.address_space_bytes, rhs.address_space_bytes,
+                             &sum.address_space_bytes) ||
+      !checked_add_dimension(lhs.shared_memory_bytes, rhs.shared_memory_bytes,
+                             &sum.shared_memory_bytes) ||
+      !checked_add_dimension(lhs.descriptor_count, rhs.descriptor_count,
+                             &sum.descriptor_count)) {
+    return std::nullopt;
+  }
+  return sum;
+}
+
+/** @copydoc plugin_resources_fit */
+bool plugin_resources_fit(const PluginResourceVector& requested,
+                          const PluginResourceVector& available) noexcept {
+  return requested.runtime_processes <= available.runtime_processes &&
+         requested.cpu_slots <= available.cpu_slots &&
+         requested.address_space_bytes <= available.address_space_bytes &&
+         requested.shared_memory_bytes <= available.shared_memory_bytes &&
+         requested.descriptor_count <= available.descriptor_count;
+}
+
+/** @copydoc PluginResourceAdmissionError::PluginResourceAdmissionError */
+PluginResourceAdmissionError::PluginResourceAdmissionError(
+    PluginResourceAdmissionErrorCode code, std::string message)
+    : std::runtime_error(std::move(message)), code_(code) {}
 
 /** @copydoc DeviceResourceError::DeviceResourceError */
 DeviceResourceError::DeviceResourceError(DeviceResourceErrorCode code,
@@ -764,6 +888,152 @@ ResourceLedger::Grant::~Grant() noexcept {
   reset();
 }
 
+/** @copydoc ResourceLedger::PluginResourceToken::PluginResourceToken */
+ResourceLedger::PluginResourceToken::PluginResourceToken(
+    std::shared_ptr<ResourceLedgerRootState> root,
+    PluginInvocationIdentityDigest identity,
+    PluginResourceVector resources) noexcept
+    : root_(std::move(root)), identity_(identity), resources_(resources) {}
+
+/** @copydoc ResourceLedger::PluginResourceToken::PluginResourceToken */
+ResourceLedger::PluginResourceToken::PluginResourceToken(
+    PluginResourceToken&& other) noexcept
+    : root_(std::move(other.root_)),
+      identity_(other.identity_),
+      resources_(other.resources_) {
+  other.identity_ = {};
+  other.resources_ = {};
+}
+
+/** @copydoc ResourceLedger::PluginResourceToken::operator= */
+ResourceLedger::PluginResourceToken&
+ResourceLedger::PluginResourceToken::operator=(
+    PluginResourceToken&& other) noexcept {
+  if (this != &other) {
+    reset();
+    root_ = std::move(other.root_);
+    identity_ = other.identity_;
+    resources_ = other.resources_;
+    other.identity_ = {};
+    other.resources_ = {};
+  }
+  return *this;
+}
+
+/** @copydoc ResourceLedger::PluginResourceToken::~PluginResourceToken */
+ResourceLedger::PluginResourceToken::~PluginResourceToken() noexcept {
+  reset();
+}
+
+/** @copydoc ResourceLedger::PluginResourceToken::active */
+bool ResourceLedger::PluginResourceToken::active() const noexcept {
+  return root_ != nullptr;
+}
+
+/** @copydoc ResourceLedger::PluginResourceToken::identity_digest */
+PluginInvocationIdentityDigest
+ResourceLedger::PluginResourceToken::identity_digest() const noexcept {
+  return identity_;
+}
+
+/** @copydoc ResourceLedger::PluginResourceToken::resources */
+PluginResourceVector ResourceLedger::PluginResourceToken::resources()
+    const noexcept {
+  return resources_;
+}
+
+/** @copydoc ResourceLedger::PluginResourceToken::consume */
+ResourceLedger::PluginResourceLease
+ResourceLedger::PluginResourceToken::consume(
+    const PluginInvocationIdentityDigest& identity,
+    const PluginResourceVector& resources) && {
+  if (!root_) {
+    throw PluginResourceAdmissionError(
+        PluginResourceAdmissionErrorCode::InactiveToken,
+        "Cannot consume an inactive plugin resource token.");
+  }
+  if (identity != identity_) {
+    throw PluginResourceAdmissionError(
+        PluginResourceAdmissionErrorCode::IdentityMismatch,
+        "Plugin resource token identity does not match the invocation.");
+  }
+  if (resources != resources_) {
+    throw PluginResourceAdmissionError(
+        PluginResourceAdmissionErrorCode::ResourceMismatch,
+        "Plugin resource token vector does not match the invocation.");
+  }
+  std::shared_ptr<ResourceLedgerRootState> root = std::move(root_);
+  const PluginResourceVector consumed = resources_;
+  identity_ = {};
+  resources_ = {};
+  return PluginResourceLease(std::move(root), consumed);
+}
+
+/** @copydoc ResourceLedger::PluginResourceToken::reset */
+void ResourceLedger::PluginResourceToken::reset() noexcept {
+  if (!root_) {
+    return;
+  }
+  std::shared_ptr<ResourceLedgerRootState> root = std::move(root_);
+  const PluginResourceVector resources = resources_;
+  identity_ = {};
+  resources_ = {};
+  release_plugin_resources(root, resources);
+}
+
+/** @copydoc ResourceLedger::PluginResourceLease::PluginResourceLease */
+ResourceLedger::PluginResourceLease::PluginResourceLease(
+    std::shared_ptr<ResourceLedgerRootState> root,
+    PluginResourceVector resources) noexcept
+    : root_(std::move(root)), resources_(resources) {}
+
+/** @copydoc ResourceLedger::PluginResourceLease::PluginResourceLease */
+ResourceLedger::PluginResourceLease::PluginResourceLease(
+    PluginResourceLease&& other) noexcept
+    : root_(std::move(other.root_)), resources_(other.resources_) {
+  other.resources_ = {};
+}
+
+/** @copydoc ResourceLedger::PluginResourceLease::operator= */
+ResourceLedger::PluginResourceLease&
+ResourceLedger::PluginResourceLease::operator=(
+    PluginResourceLease&& other) noexcept {
+  if (this != &other) {
+    reset();
+    root_ = std::move(other.root_);
+    resources_ = other.resources_;
+    other.resources_ = {};
+  }
+  return *this;
+}
+
+/** @copydoc ResourceLedger::PluginResourceLease::~PluginResourceLease */
+ResourceLedger::PluginResourceLease::~PluginResourceLease() noexcept {
+  reset();
+}
+
+/** @copydoc ResourceLedger::PluginResourceLease::active */
+bool ResourceLedger::PluginResourceLease::active() const noexcept {
+  return root_ != nullptr;
+}
+
+/** @copydoc ResourceLedger::PluginResourceLease::resources */
+PluginResourceVector ResourceLedger::PluginResourceLease::resources()
+    const noexcept {
+  return resources_;
+}
+
+/** @copydoc ResourceLedger::PluginResourceLease::reset */
+void ResourceLedger::PluginResourceLease::reset() noexcept {
+  if (!root_) {
+    return;
+  }
+  std::shared_ptr<ResourceLedgerRootState> root = std::move(root_);
+  const PluginResourceVector resources = resources_;
+  resources_ = {};
+  release_plugin_resources(root, resources);
+}
+
 /** @copydoc ResourceLedger::Grant::active */
 bool ResourceLedger::Grant::active() const noexcept {
   return state_ != nullptr;
@@ -816,9 +1086,10 @@ void ResourceLedger::Grant::reset() noexcept {
 
 /** @copydoc ResourceLedger::ResourceLedger */
 ResourceLedger::ResourceLedger(ResourceVector limits,
-                               std::vector<DeviceResourceLimit> device_limits)
-    : state_(std::make_shared<ResourceLedgerRootState>(limits, device_limits)) {
-}
+                               std::vector<DeviceResourceLimit> device_limits,
+                               PluginResourceVector plugin_limits)
+    : state_(std::make_shared<ResourceLedgerRootState>(
+          limits, device_limits, plugin_limits)) {}  // NOLINT
 
 /** @copydoc ResourceLedger::~ResourceLedger */
 ResourceLedger::~ResourceLedger() noexcept = default;
@@ -888,10 +1159,50 @@ ResourceLedger::try_reserve_device(DeviceId device,
   return DeviceReservation(state_, device, planned);
 }
 
+/** @copydoc ResourceLedger::issue_plugin_invocation */
+ResourceLedger::PluginResourceToken ResourceLedger::issue_plugin_invocation(
+    const PluginInvocationIdentityDigest& identity,
+    const PluginResourceVector& requested) {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  if (state_->plugin_replay_identities.find(identity) !=
+      state_->plugin_replay_identities.end()) {
+    throw PluginResourceAdmissionError(
+        PluginResourceAdmissionErrorCode::Replay,
+        "Plugin invocation identity has already been issued.");
+  }
+  const std::optional<PluginResourceVector> next_reserved =
+      checked_add_plugin_resources(state_->plugin_reserved, requested);
+  if (!next_reserved.has_value() ||
+      !plugin_resources_fit(*next_reserved, state_->plugin_limits)) {
+    throw PluginResourceAdmissionError(
+        PluginResourceAdmissionErrorCode::QuotaExceeded,
+        "Plugin invocation resources exceed ledger capacity.");
+  }
+  const auto [unused, inserted] =
+      state_->plugin_replay_identities.insert(identity);
+  static_cast<void>(unused);
+  if (!inserted) {
+    throw PluginResourceAdmissionError(
+        PluginResourceAdmissionErrorCode::Replay,
+        "Plugin invocation identity has already been issued.");
+  }
+  state_->plugin_reserved = *next_reserved;
+  state_->plugin_high_water = maximum_plugin_resources(
+      state_->plugin_high_water, state_->plugin_reserved);
+  return PluginResourceToken(state_, identity, requested);
+}
+
 /** @copydoc ResourceLedger::snapshot */
 ResourceLedger::Snapshot ResourceLedger::snapshot() const {
   std::lock_guard<std::mutex> lock(state_->mutex);
   return Snapshot{state_->limits, state_->reserved, state_->high_water};
+}
+
+/** @copydoc ResourceLedger::plugin_snapshot */
+ResourceLedger::PluginSnapshot ResourceLedger::plugin_snapshot() const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  return PluginSnapshot{state_->plugin_limits, state_->plugin_reserved,
+                        state_->plugin_high_water};
 }
 
 /** @copydoc ResourceLedger::device_snapshot */

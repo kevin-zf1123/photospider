@@ -20,8 +20,10 @@
 #include <filesystem>
 #include <future>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -73,6 +75,42 @@ class ScopedTestFd final {
   /** @brief Sole owned descriptor. */
   int descriptor_ = -1;
 };
+
+#if defined(__linux__)
+/**
+ * @brief Replaces one preopened runtime source without changing its inode.
+ * @param descriptor Writable descriptor opened before executor construction.
+ * @return Nothing after truncation, replacement, and durable flush.
+ * @throws std::system_error when any exact mutation operation fails.
+ * @note Linux snapshot tests use this to retain a hostile writer across trust
+ * authorization and then challenge the retained execution object.
+ */
+void overwrite_runtime_source(int descriptor) {
+  if (::ftruncate(descriptor, 0) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "truncate direct runtime source");
+  }
+  constexpr std::string_view kReplacement = "not an executable runtime\n";
+  std::size_t offset = 0U;
+  while (offset < kReplacement.size()) {
+    const ssize_t written =
+        ::pwrite(descriptor, kReplacement.data() + offset,
+                 kReplacement.size() - offset, static_cast<off_t>(offset));
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
+    if (written <= 0) {
+      throw std::system_error(errno == 0 ? EIO : errno, std::generic_category(),
+                              "replace direct runtime source");
+    }
+    offset += static_cast<std::size_t>(written);
+  }
+  if (::fsync(descriptor) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "flush direct runtime source replacement");
+  }
+}
+#endif
 
 /**
  * @brief Ensures a borrowed test socket write half is shut before async join.
@@ -315,6 +353,37 @@ std::size_t count_open_descriptors() {
 }
 
 /**
+ * @brief Creates one bounded attempt-local ledger for direct runtime tests.
+ * @return Fresh Host resource authority with ample sequential-test capacity.
+ * @throws std::bad_alloc when ledger state cannot allocate.
+ * @note Replay tombstones intentionally live for the returned ledger lifetime;
+ * every invocation identity in this suite is unique.
+ */
+std::shared_ptr<ResourceLedger> integration_resource_ledger() {
+  return std::make_shared<ResourceLedger>(
+      ResourceVector{}, std::vector<DeviceResourceLimit>{},
+      PluginResourceVector{1U, 1U, 1ULL << 40U, 64ULL * 1024ULL * 1024ULL,
+                           4096U});
+}
+
+/**
+ * @brief Creates a direct executor with caller-observable resource authority.
+ * @param ledger Nonnull attempt-local test ledger.
+ * @param policy Positive admission and child-limit policy.
+ * @param limits Retained endpoint limits.
+ * @return Signed exact-object direct executor.
+ * @throws Construction validation and trust errors unchanged.
+ */
+NonSupervisedIsolatedCpuInvocationExecutor integration_executor_with_ledger(
+    std::shared_ptr<ResourceLedger> ledger,
+    PluginInvocationResourcePolicy policy = {},
+    IsolatedCpuInvocationLimits limits = {}) {
+  return NonSupervisedIsolatedCpuInvocationExecutor(
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      std::move(ledger), policy, limits);
+}
+
+/**
  * @brief Creates an executor targeting the built test runtime fixture.
  * @param limits Retained endpoint limits for the Host adapter.
  * @return Operability-validated non-supervised executor.
@@ -322,8 +391,8 @@ std::size_t count_open_descriptors() {
  */
 NonSupervisedIsolatedCpuInvocationExecutor integration_executor(
     IsolatedCpuInvocationLimits limits = {}) {
-  return NonSupervisedIsolatedCpuInvocationExecutor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), limits);
+  return integration_executor_with_ledger(integration_resource_ledger(), {},
+                                          limits);
 }
 
 /**
@@ -662,6 +731,77 @@ TEST(IsolatedCpuInvocation, SupportsZeroInputAndExactOutputPlan) {
   EXPECT_EQ(integration_bytes(result.outputs[0]), expected);
 }
 
+/**
+ * @brief Proves a Linux direct executor runs its sealed private runtime after
+ * an already-open writer destroys the original source bytes.
+ * @throws Filesystem, trust, process, and assertion failures unchanged.
+ */
+TEST(IsolatedCpuInvocation, LinuxRuntimeSnapshotSurvivesSourceMutation) {
+#if defined(__linux__)
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() /
+      "photospider-direct-runtime-source-mutation-test";
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+  std::filesystem::create_directories(root);
+  const std::filesystem::path candidate = root / "runtime";
+  std::filesystem::copy_file(PS_TEST_ISOLATED_CPU_FIXTURE_PATH, candidate);
+  ScopedTestFd writer(::open(candidate.c_str(), O_RDWR));
+  ASSERT_GE(writer.get(), 0);
+  auto ledger = integration_resource_ledger();
+  NonSupervisedIsolatedCpuInvocationExecutor executor(candidate, ledger);
+
+  overwrite_runtime_source(writer.get());
+  const IsolatedCpuHostInvocationResult result =
+      executor.invoke(integration_invocation("fixture.fill_sequence", 114U));
+
+  ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(result.outputs.size(), 1U);
+  const std::array<std::byte, 6U> expected{std::byte{0}, std::byte{1},
+                                           std::byte{2}, std::byte{3},
+                                           std::byte{4}, std::byte{5}};
+  EXPECT_EQ(integration_bytes(result.outputs[0]), expected);
+  EXPECT_EQ(ledger->plugin_snapshot().reserved, PluginResourceVector{});
+  std::filesystem::remove_all(root);
+#else
+  GTEST_SKIP() << "sealed runtime descriptor execution is Linux-only";
+#endif
+}
+
+/**
+ * @brief Proves Darwin rejects isolated runtime construction before any token,
+ * capability-materialization, or child-process side effect.
+ * @throws Standard construction and assertion failures unchanged.
+ */
+TEST(IsolatedCpuInvocation, DarwinRuntimeConstructionFailsBeforeSideEffects) {
+#if defined(__APPLE__)
+  auto ledger = integration_resource_ledger();
+  const ResourceLedger::PluginSnapshot ledger_before =
+      ledger->plugin_snapshot();
+  const IsolatedCpuInvocationTestSnapshot probe_before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  try {
+    NonSupervisedIsolatedCpuInvocationExecutor executor(
+        std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), ledger);
+    static_cast<void>(executor);
+    FAIL() << "Darwin isolated runtime construction must fail closed";
+  } catch (const PluginTrustError& error) {
+    EXPECT_EQ(error.code(), PluginTrustErrorCode::ExactObjectUnsupported);
+  }
+  const ResourceLedger::PluginSnapshot ledger_after = ledger->plugin_snapshot();
+  const IsolatedCpuInvocationTestSnapshot probe_after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(ledger_after.reserved, ledger_before.reserved);
+  EXPECT_EQ(ledger_after.high_water, ledger_before.high_water);
+  EXPECT_EQ(probe_after.host_capability_materialization_attempts,
+            probe_before.host_capability_materialization_attempts);
+  EXPECT_EQ(probe_after.spawned_children, probe_before.spawned_children);
+  EXPECT_EQ(probe_after.reaped_children, probe_before.reaped_children);
+#else
+  GTEST_SKIP() << "Darwin fail-closed construction is platform-specific";
+#endif
+}
+
 TEST(IsolatedCpuInvocation, PreservesTypedFailureCancellationAndException) {
   NonSupervisedIsolatedCpuInvocationExecutor executor = integration_executor();
   IsolatedCpuHostInvocationResult failed =
@@ -833,10 +973,14 @@ TEST(IsolatedCpuInvocation,
 TEST(IsolatedCpuInvocation, FreshExecClearsEnvironmentAndUnrelatedDescriptors) {
   ScopedTestFd lower_descriptor_one(::open("/dev/null", O_RDONLY));
   ScopedTestFd lower_descriptor_two(::open("/dev/null", O_RDONLY));
+  ScopedTestFd lower_descriptor_three(::open("/dev/null", O_RDONLY));
+  ScopedTestFd lower_descriptor_four(::open("/dev/null", O_RDONLY));
   ScopedTestFd inherited(::open("/dev/null", O_RDONLY));
   ASSERT_GE(lower_descriptor_one.get(), 0);
   ASSERT_GE(lower_descriptor_two.get(), 0);
-  ASSERT_GE(inherited.get(), 5);
+  ASSERT_GE(lower_descriptor_three.get(), 0);
+  ASSERT_GE(lower_descriptor_four.get(), 0);
+  ASSERT_GE(inherited.get(), 7);
   IsolatedCpuHostInvocation invocation;
   invocation.identity = integration_identity(193U);
   invocation.operation = "fixture.verify_isolation";
@@ -845,6 +989,38 @@ TEST(IsolatedCpuInvocation, FreshExecClearsEnvironmentAndUnrelatedDescriptors) {
   descriptor.kind = IsolatedCpuScalarKind::UnsignedInteger;
   descriptor.unsigned_value = static_cast<std::uint64_t>(inherited.get());
   invocation.parameters.push_back(std::move(descriptor));
+  invocation.outputs.push_back(one_byte_output_plan());
+
+  const IsolatedCpuHostInvocationResult result =
+      integration_executor().invoke(invocation);
+  ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(result.outputs.size(), 1U);
+  DenseTensorView output(result.outputs[0]);
+  ASSERT_EQ(output.storage_size(), 1U);
+  EXPECT_EQ(output.data()[0], std::byte{1});
+}
+
+/**
+ * @brief Observes exact AS, CPU, NOFILE, and core limits inside fresh exec.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ */
+TEST(IsolatedCpuInvocation, AppliesAdmittedResourceLimitsBeforeExec) {
+  const PluginInvocationResourcePolicy policy;
+  IsolatedCpuHostInvocation invocation;
+  invocation.identity = integration_identity(194U);
+  invocation.operation = "fixture.verify_resource_limits";
+  const std::array<std::pair<const char*, std::uint64_t>, 3U> parameters{
+      std::pair{"address_space_bytes", policy.address_space_bytes},
+      std::pair{"cpu_time_seconds", policy.cpu_time_seconds},
+      std::pair{"descriptor_count", policy.descriptor_overhead + 1U}};
+  for (const auto& [name, value] : parameters) {
+    IsolatedCpuScalarParameter parameter;
+    parameter.name = name;
+    parameter.kind = IsolatedCpuScalarKind::UnsignedInteger;
+    parameter.unsigned_value = value;
+    invocation.parameters.push_back(std::move(parameter));
+  }
   invocation.outputs.push_back(one_byte_output_plan());
 
   const IsolatedCpuHostInvocationResult result =
@@ -888,6 +1064,87 @@ TEST(IsolatedCpuInvocation,
     EXPECT_EQ(count_open_descriptors(), descriptor_baseline);
   }
   EXPECT_EQ(count_open_descriptors(), descriptor_baseline);
+}
+
+/**
+ * @brief Rejects aggregate quota before capability or process OS effects.
+ * @throws Standard construction and assertion failures observed by GoogleTest.
+ */
+TEST(IsolatedCpuInvocation, RejectsQuotaBeforeMaterializationOrSpawn) {
+  const PluginInvocationResourcePolicy policy;
+  auto ledger = std::make_shared<ResourceLedger>(
+      ResourceVector{}, std::vector<DeviceResourceLimit>{},
+      PluginResourceVector{1U, 1U, policy.address_space_bytes, 1U, 4096U});
+  auto executor = integration_executor_with_ledger(ledger, policy);
+  const IsolatedCpuInvocationTestSnapshot before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+
+  try {
+    static_cast<void>(
+        executor.invoke(integration_invocation("fixture.fill_sequence", 57U)));
+    FAIL() << "shared-memory demand above quota must fail closed";
+  } catch (const PluginResourceAdmissionError& error) {
+    EXPECT_EQ(error.code(), PluginResourceAdmissionErrorCode::QuotaExceeded);
+  }
+
+  const IsolatedCpuInvocationTestSnapshot after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after.host_capability_materialization_attempts,
+            before.host_capability_materialization_attempts);
+  EXPECT_EQ(after.spawned_children, before.spawned_children);
+  EXPECT_EQ(ledger->plugin_snapshot().reserved, PluginResourceVector{});
+}
+
+/**
+ * @brief Proves success, replay rejection, fault settlement, and recovery.
+ * @throws Standard fixture, transport, and assertion failures observed by
+ * GoogleTest.
+ */
+TEST(IsolatedCpuInvocation,
+     SettlesConsumedResourcesAcrossSuccessReplayAndPostSpawnFault) {
+  const PluginInvocationResourcePolicy policy;
+  auto ledger = std::make_shared<ResourceLedger>(
+      ResourceVector{}, std::vector<DeviceResourceLimit>{},
+      PluginResourceVector{1U, 1U, policy.address_space_bytes,
+                           64ULL * 1024ULL * 1024ULL, 4096U});
+  auto executor = integration_executor_with_ledger(ledger, policy);
+  const IsolatedCpuHostInvocation successful =
+      integration_invocation("fixture.fill_sequence", 58U);
+
+  const IsolatedCpuHostInvocationResult result = executor.invoke(successful);
+  ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  const ResourceLedger::PluginSnapshot after_success =
+      ledger->plugin_snapshot();
+  EXPECT_EQ(after_success.reserved, PluginResourceVector{});
+  EXPECT_EQ(after_success.high_water.runtime_processes, 1U);
+  EXPECT_EQ(after_success.high_water.cpu_slots, 1U);
+  EXPECT_EQ(after_success.high_water.address_space_bytes,
+            policy.address_space_bytes);
+  EXPECT_GT(after_success.high_water.shared_memory_bytes, 0U);
+  EXPECT_EQ(after_success.high_water.descriptor_count,
+            policy.descriptor_overhead + 1U);
+
+  const IsolatedCpuInvocationTestSnapshot before_replay =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  try {
+    static_cast<void>(executor.invoke(successful));
+    FAIL() << "a completed invocation identity must remain replay-spent";
+  } catch (const PluginResourceAdmissionError& error) {
+    EXPECT_EQ(error.code(), PluginResourceAdmissionErrorCode::Replay);
+  }
+  const IsolatedCpuInvocationTestSnapshot after_replay =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(after_replay.host_capability_materialization_attempts,
+            before_replay.host_capability_materialization_attempts);
+  EXPECT_EQ(after_replay.spawned_children, before_replay.spawned_children);
+
+  EXPECT_THROW(executor.invoke(integration_invocation("fixture.crash", 59U)),
+               IsolatedCpuInvocationError);
+  EXPECT_EQ(ledger->plugin_snapshot().reserved, PluginResourceVector{});
+  const IsolatedCpuHostInvocationResult recovered =
+      executor.invoke(integration_invocation("fixture.fill_sequence", 60U));
+  EXPECT_EQ(recovered.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  EXPECT_EQ(ledger->plugin_snapshot().reserved, PluginResourceVector{});
 }
 
 }  // namespace

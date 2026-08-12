@@ -3,6 +3,7 @@
  * @brief Verifies the product-linked isolated CPU runtime supervisor.
  */
 #include <dirent.h>
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -19,9 +20,11 @@
 #include <exception>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -67,6 +70,78 @@ struct ObservedRuntimeFault final {
   /** @brief Host-owned diagnostic text. */
   std::string diagnostic;
 };
+
+#if defined(__linux__)
+/**
+ * @brief Unique owner for one supervisor-test POSIX descriptor.
+ * @throws Nothing for construction and destruction.
+ */
+class ScopedSupervisorTestFd final {
+ public:
+  /**
+   * @brief Takes ownership of one descriptor or invalid sentinel.
+   * @param descriptor Descriptor to close at destruction.
+   * @throws Nothing.
+   */
+  explicit ScopedSupervisorTestFd(int descriptor) noexcept
+      : descriptor_(descriptor) {}
+
+  /** @brief Closes the retained descriptor once without throwing. */
+  ~ScopedSupervisorTestFd() noexcept {
+    if (descriptor_ >= 0) {
+      static_cast<void>(::close(descriptor_));
+    }
+  }
+
+  /** @brief Prevents duplicate descriptor ownership. */
+  ScopedSupervisorTestFd(const ScopedSupervisorTestFd&) = delete;
+  /** @brief Prevents duplicate descriptor assignment. */
+  ScopedSupervisorTestFd& operator=(const ScopedSupervisorTestFd&) = delete;
+
+  /**
+   * @brief Returns the retained descriptor.
+   * @return Descriptor or invalid sentinel.
+   * @throws Nothing.
+   */
+  int get() const noexcept { return descriptor_; }
+
+ private:
+  /** @brief Sole owned descriptor. */
+  int descriptor_ = -1;
+};
+
+/**
+ * @brief Replaces one preopened supervised runtime source in place.
+ * @param descriptor Writable descriptor opened before supervisor construction.
+ * @return Nothing after truncation, replacement, and durable flush.
+ * @throws std::system_error when any exact mutation operation fails.
+ */
+void overwrite_supervised_runtime_source(int descriptor) {
+  if (::ftruncate(descriptor, 0) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "truncate supervised runtime source");
+  }
+  constexpr std::string_view kReplacement = "not an executable runtime\n";
+  std::size_t offset = 0U;
+  while (offset < kReplacement.size()) {
+    const ssize_t written =
+        ::pwrite(descriptor, kReplacement.data() + offset,
+                 kReplacement.size() - offset, static_cast<off_t>(offset));
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
+    if (written <= 0) {
+      throw std::system_error(errno == 0 ? EIO : errno, std::generic_category(),
+                              "replace supervised runtime source");
+    }
+    offset += static_cast<std::size_t>(written);
+  }
+  if (::fsync(descriptor) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "flush supervised runtime source replacement");
+  }
+}
+#endif
 
 /**
  * @brief Creates one deterministic nonzero opaque id.
@@ -167,6 +242,20 @@ PluginRuntimeSupervisorOptions supervisor_test_options() noexcept {
   options.kill_reap_timeout = std::chrono::milliseconds{800};
   options.restart_backoff = std::chrono::milliseconds{5};
   return options;
+}
+
+/**
+ * @brief Creates one attempt-local resource authority for supervisor tests.
+ * @return Fresh ledger sized for one sequential 1-TiB-ceiling runtime.
+ * @throws std::bad_alloc when ledger state cannot allocate.
+ * @note Each executor owns a distinct ledger and every invocation identity
+ * within that executor is unique, including recovery calls after failures.
+ */
+std::shared_ptr<ResourceLedger> supervisor_resource_ledger() {
+  return std::make_shared<ResourceLedger>(
+      ResourceVector{}, std::vector<DeviceResourceLimit>{},
+      PluginResourceVector{1U, 1U, 1ULL << 40U, 64ULL * 1024ULL * 1024ULL,
+                           4096U});
 }
 
 /**
@@ -539,10 +628,10 @@ TEST(PluginRuntimeSupervisor, RejectsZeroRestartBackoffAtConstruction) {
   PluginRuntimeSupervisorOptions options = supervisor_test_options();
   options.restart_backoff = std::chrono::milliseconds{0};
 
-  EXPECT_THROW(
-      PluginRuntimeSupervisor(
-          std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options),
-      std::invalid_argument);
+  EXPECT_THROW(PluginRuntimeSupervisor(
+                   std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+                   supervisor_resource_ledger(), {}, options),
+               std::invalid_argument);
 }
 
 /**
@@ -554,7 +643,7 @@ TEST(PluginRuntimeSupervisor, RejectsZeroRestartBackoffAtConstruction) {
 TEST(PluginRuntimeSupervisor, ExecutesThroughProductArchiveAndPublishesOutput) {
   PluginInvocationExecutor executor(
       std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
-      supervisor_test_options());
+      supervisor_resource_ledger(), {}, supervisor_test_options());
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
 
@@ -572,6 +661,79 @@ TEST(PluginRuntimeSupervisor, ExecutesThroughProductArchiveAndPublishesOutput) {
 }
 
 /**
+ * @brief Proves a Linux supervisor runs its sealed private runtime after an
+ * already-open writer destroys the original source bytes.
+ * @throws Filesystem, trust, process, and assertion failures unchanged.
+ */
+TEST(PluginRuntimeSupervisor, LinuxRuntimeSnapshotSurvivesSourceMutation) {
+#if defined(__linux__)
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() /
+      "photospider-supervised-runtime-source-mutation-test";
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+  std::filesystem::create_directories(root);
+  const std::filesystem::path candidate = root / "runtime";
+  std::filesystem::copy_file(PS_TEST_ISOLATED_CPU_FIXTURE_PATH, candidate);
+  ScopedSupervisorTestFd writer(::open(candidate.c_str(), O_RDWR));
+  ASSERT_GE(writer.get(), 0);
+  auto ledger = supervisor_resource_ledger();
+  PluginInvocationExecutor executor(candidate, ledger, {},
+                                    supervisor_test_options());
+
+  overwrite_supervised_runtime_source(writer.get());
+  const IsolatedCpuHostInvocationResult result =
+      executor.invoke(supervisor_test_invocation("fixture.fill_sequence", 98U));
+
+  ASSERT_EQ(result.outcome, IsolatedCpuInvocationOutcome::Succeeded);
+  ASSERT_EQ(result.outputs.size(), 1U);
+  const std::array<std::byte, 6U> expected{std::byte{0}, std::byte{1},
+                                           std::byte{2}, std::byte{3},
+                                           std::byte{4}, std::byte{5}};
+  EXPECT_EQ(supervisor_test_bytes(result.outputs[0]), expected);
+  EXPECT_EQ(ledger->plugin_snapshot().reserved, PluginResourceVector{});
+  std::filesystem::remove_all(root);
+#else
+  GTEST_SKIP() << "sealed runtime descriptor execution is Linux-only";
+#endif
+}
+
+/**
+ * @brief Proves Darwin rejects supervisor construction before any token,
+ * capability-materialization, or child-process side effect.
+ * @throws Standard construction and assertion failures unchanged.
+ */
+TEST(PluginRuntimeSupervisor, DarwinRuntimeConstructionFailsBeforeSideEffects) {
+#if defined(__APPLE__)
+  auto ledger = supervisor_resource_ledger();
+  const ResourceLedger::PluginSnapshot ledger_before =
+      ledger->plugin_snapshot();
+  const IsolatedCpuInvocationTestSnapshot probe_before =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  try {
+    PluginInvocationExecutor executor(
+        std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), ledger, {},
+        supervisor_test_options());
+    static_cast<void>(executor);
+    FAIL() << "Darwin supervised runtime construction must fail closed";
+  } catch (const PluginTrustError& error) {
+    EXPECT_EQ(error.code(), PluginTrustErrorCode::ExactObjectUnsupported);
+  }
+  const ResourceLedger::PluginSnapshot ledger_after = ledger->plugin_snapshot();
+  const IsolatedCpuInvocationTestSnapshot probe_after =
+      IsolatedCpuInvocationTestProbe::snapshot();
+  EXPECT_EQ(ledger_after.reserved, ledger_before.reserved);
+  EXPECT_EQ(ledger_after.high_water, ledger_before.high_water);
+  EXPECT_EQ(probe_after.host_capability_materialization_attempts,
+            probe_before.host_capability_materialization_attempts);
+  EXPECT_EQ(probe_after.spawned_children, probe_before.spawned_children);
+  EXPECT_EQ(probe_after.reaped_children, probe_before.reaped_children);
+#else
+  GTEST_SKIP() << "Darwin fail-closed construction is platform-specific";
+#endif
+}
+
+/**
  * @brief Drains a queued authenticated completion before classifying the
  * already exited child, then proves exact cleanup and fresh recovery.
  * @throws Standard fixture, transport, and assertion failures observed by
@@ -586,7 +748,8 @@ TEST(PluginRuntimeSupervisor,
   PluginRuntimeSupervisorOptions options = supervisor_test_options();
   options.restart_backoff = std::chrono::milliseconds{1};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
@@ -645,7 +808,8 @@ TEST(PluginRuntimeSupervisor, RequestTransferDoesNotConsumeCallbackBudget) {
   PluginRuntimeSupervisorOptions options = supervisor_test_options();
   options.invocation_timeout = std::chrono::milliseconds{1000};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
 
@@ -686,7 +850,8 @@ TEST(PluginRuntimeSupervisor,
   options.invocation_timeout = std::chrono::milliseconds{120};
   options.restart_backoff = std::chrono::milliseconds{1};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
@@ -742,7 +907,8 @@ TEST(PluginRuntimeSupervisor,
   options.invocation_timeout = std::chrono::milliseconds{350};
   options.restart_backoff = std::chrono::milliseconds{1};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
@@ -792,18 +958,24 @@ TEST(PluginRuntimeSupervisor, RejectsSilentAndWrongNonceStartup) {
   options.startup_timeout = std::chrono::milliseconds{250};
   PluginInvocationExecutor silent(
       std::filesystem::path(PS_TEST_PLUGIN_RUNTIME_SILENT_FIXTURE_PATH),
-      options);
-  const ObservedRuntimeFault silent_fault = observe_runtime_fault(
-      &silent, supervisor_test_invocation("fixture.fill_sequence", 113U));
+      supervisor_resource_ledger(), {}, options);
+  IsolatedCpuHostInvocation silent_invocation =
+      supervisor_test_invocation("fixture.fill_sequence", 113U);
+  silent_invocation.identity.plugin_generation = 6U;
+  const ObservedRuntimeFault silent_fault =
+      observe_runtime_fault(&silent, silent_invocation);
   EXPECT_EQ(silent_fault.kind, PluginRuntimeFaultKind::StartupDeadline);
   EXPECT_NE(silent_fault.termination_stage,
             PluginRuntimeTerminationStage::None);
 
   PluginInvocationExecutor corrupt(
       std::filesystem::path(PS_TEST_PLUGIN_RUNTIME_CORRUPT_FIXTURE_PATH),
-      options);
-  const ObservedRuntimeFault corrupt_fault = observe_runtime_fault(
-      &corrupt, supervisor_test_invocation("fixture.fill_sequence", 129U));
+      supervisor_resource_ledger(), {}, options);
+  IsolatedCpuHostInvocation corrupt_invocation =
+      supervisor_test_invocation("fixture.fill_sequence", 129U);
+  corrupt_invocation.identity.plugin_generation = 7U;
+  const ObservedRuntimeFault corrupt_fault =
+      observe_runtime_fault(&corrupt, corrupt_invocation);
   EXPECT_EQ(corrupt_fault.kind, PluginRuntimeFaultKind::LifecycleProtocol);
   EXPECT_FALSE(corrupt_fault.diagnostic.empty());
 }
@@ -818,7 +990,8 @@ TEST(PluginRuntimeSupervisor, RejectsQueuedStartedAfterStartupDeadline) {
   PluginRuntimeSupervisorOptions options = supervisor_test_options();
   options.startup_timeout = std::chrono::milliseconds{200};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
 
@@ -846,7 +1019,8 @@ TEST(PluginRuntimeSupervisor, RejectsQueuedHeartbeatAfterGapDeadline) {
   options.heartbeat_timeout = std::chrono::milliseconds{120};
   options.invocation_timeout = std::chrono::milliseconds{800};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
 
@@ -874,7 +1048,8 @@ TEST(PluginRuntimeSupervisor, RejectsQueuedCompletionAfterInvocationDeadline) {
   options.heartbeat_timeout = std::chrono::milliseconds{600};
   options.invocation_timeout = std::chrono::milliseconds{120};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
 
@@ -903,7 +1078,8 @@ TEST(PluginRuntimeSupervisor,
   options.heartbeat_timeout = std::chrono::milliseconds{100};
   options.invocation_timeout = std::chrono::milliseconds{140};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
 
@@ -927,7 +1103,7 @@ TEST(PluginRuntimeSupervisor,
 TEST(PluginRuntimeSupervisor, ReportsNaturalExitAndSignalFacts) {
   PluginInvocationExecutor executor(
       std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
-      supervisor_test_options());
+      supervisor_resource_ledger(), {}, supervisor_test_options());
 
   const ObservedRuntimeFault exit_fault = observe_runtime_fault(
       &executor, supervisor_test_invocation("fixture.crash", 145U));
@@ -955,7 +1131,8 @@ TEST(PluginRuntimeSupervisor, SeparatesInvocationAndHeartbeatTimeouts) {
   options.invocation_timeout = std::chrono::milliseconds{450};
   options.heartbeat_timeout = std::chrono::milliseconds{180};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
 
   const ObservedRuntimeFault callback_hang = observe_runtime_fault(
       &executor, supervisor_test_invocation("fixture.hang", 177U));
@@ -979,7 +1156,8 @@ TEST(PluginRuntimeSupervisor, EscalatesIgnoredTerminationWithoutChangingCause) {
   PluginRuntimeSupervisorOptions options = supervisor_test_options();
   options.invocation_timeout = std::chrono::milliseconds{350};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
 
@@ -1005,7 +1183,8 @@ TEST(PluginRuntimeSupervisor, BoundsResponseAfterAuthenticatedCompletion) {
   PluginRuntimeSupervisorOptions options = supervisor_test_options();
   options.response_timeout = std::chrono::milliseconds{250};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
 
   const ObservedRuntimeFault fault = observe_runtime_fault(
       &executor, supervisor_test_invocation("fixture.response_hang", 225U));
@@ -1023,7 +1202,7 @@ TEST(PluginRuntimeSupervisor, BoundsResponseAfterAuthenticatedCompletion) {
 TEST(PluginRuntimeSupervisor, ClassifiesNormalMalformedOutputAsBadOutput) {
   PluginInvocationExecutor executor(
       std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
-      supervisor_test_options());
+      supervisor_resource_ledger(), {}, supervisor_test_options());
   const std::array<const char*, 2U> operations{"fixture.truncated",
                                                "fixture.late_rights"};
   for (std::size_t index = 0U; index < operations.size(); ++index) {
@@ -1047,7 +1226,8 @@ TEST(PluginRuntimeSupervisor,
   PluginRuntimeSupervisorOptions options = supervisor_test_options();
   options.restart_backoff = std::chrono::milliseconds{1};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
@@ -1089,7 +1269,8 @@ TEST(PluginRuntimeSupervisor,
   PluginRuntimeSupervisorOptions options = supervisor_test_options();
   options.restart_backoff = std::chrono::milliseconds{1};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
@@ -1157,7 +1338,8 @@ TEST(PluginRuntimeSupervisor, FailedInvocationDoesNotFallbackAndLaterRecovers) {
   PluginRuntimeSupervisorOptions options = supervisor_test_options();
   options.restart_backoff = std::chrono::milliseconds{1};
   PluginInvocationExecutor executor(
-      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options);
+      std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
+      supervisor_resource_ledger(), {}, options);
   const std::size_t descriptor_baseline = supervisor_open_descriptor_count();
   const IsolatedCpuInvocationTestSnapshot before =
       IsolatedCpuInvocationTestProbe::snapshot();
@@ -1186,7 +1368,7 @@ TEST(PluginRuntimeSupervisor, FailedInvocationDoesNotFallbackAndLaterRecovers) {
 TEST(PluginRuntimeSupervisor, RuntimeFaultRemainsRunLocalAndWorkerRecovers) {
   PluginInvocationExecutor executor(
       std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH),
-      supervisor_test_options());
+      supervisor_resource_ledger(), {}, supervisor_test_options());
   compute::ExecutionService service(1U);
   SupervisorExecutionHost host;
   std::atomic_int completed{0};

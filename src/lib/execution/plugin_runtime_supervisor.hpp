@@ -190,19 +190,28 @@ class PluginRuntimeSupervisor final {
   /**
    * @brief Validates and retains the runtime path, protocol limits, and bounds.
    * @param runtime_executable Existing executable regular file.
+   * @param resource_ledger Attempt-local Host resource authority; nonnull.
+   * @param resource_policy Positive admission and child rlimit policy.
    * @param options Positive monotonic lifecycle bounds.
    * @param limits Protocol-v1 request/response validation bounds.
-   * @throws std::invalid_argument for an invalid path, limit, or duration.
+   * @throws std::invalid_argument for invalid authority, policy, limit, or
+   * duration.
+   * @throws PluginTrustError when the executable is not signed for the
+   * isolated-runtime role.
    * @throws std::system_error when `SIGCHLD` state cannot be queried.
    * @throws std::bad_alloc when retained private state cannot allocate.
-   * @note Path validation is operability only, not plugin trust admission.
-   * Construction proves duration positivity, bounds, exact clock conversion,
-   * and field relationships without sampling a future deadline base. Each
-   * runtime derivation separately rejects an unrepresentable exact sum.
+   * @note Construction retains an authorized private immutable runtime
+   * snapshot and proves duration/resource positivity, bounds, exact clock
+   * conversion, and field relationships without minting an invocation token
+   * or child. Darwin and unsupported platforms fail with
+   * `ExactObjectUnsupported` at this boundary.
    */
-  explicit PluginRuntimeSupervisor(std::filesystem::path runtime_executable,
-                                   PluginRuntimeSupervisorOptions options = {},
-                                   IsolatedCpuInvocationLimits limits = {});
+  explicit PluginRuntimeSupervisor(
+      std::filesystem::path runtime_executable,
+      std::shared_ptr<ResourceLedger> resource_ledger,
+      PluginInvocationResourcePolicy resource_policy = {},
+      PluginRuntimeSupervisorOptions options = {},
+      IsolatedCpuInvocationLimits limits = {});
 
   /**
    * @brief Retires private state without an intentional unbounded caller wait.
@@ -242,6 +251,10 @@ class PluginRuntimeSupervisor final {
    * @brief Executes one authenticated, heartbeat-monitored invocation.
    * @param invocation Host-owned request, inputs, and exact output plans.
    * @return Typed callback outcome with fresh Values only after full success.
+   * @throws PluginTrustError when invocation package identity differs from the
+   * signed retained runtime.
+   * @throws PluginResourceAdmissionError for replay or aggregate quota
+   * rejection before capability materialization and child creation.
    * @throws PluginRuntimeFault for supervised lifecycle/process/output faults.
    * @throws std::overflow_error when the pre-spawn startup deadline cannot be
    * represented by the monotonic clock.
@@ -293,13 +306,18 @@ class PluginInvocationExecutor final {
   /**
    * @brief Constructs the one owned supervised execution route.
    * @param runtime_executable Existing executable regular file.
+   * @param resource_ledger Attempt-local Host resource authority; nonnull.
+   * @param resource_policy Positive admission and child rlimit policy.
    * @param options Positive lifecycle bounds.
    * @param limits Protocol-v1 endpoint bounds.
    * @throws Construction failures from `PluginRuntimeSupervisor` unchanged.
    */
-  explicit PluginInvocationExecutor(std::filesystem::path runtime_executable,
-                                    PluginRuntimeSupervisorOptions options = {},
-                                    IsolatedCpuInvocationLimits limits = {});
+  explicit PluginInvocationExecutor(
+      std::filesystem::path runtime_executable,
+      std::shared_ptr<ResourceLedger> resource_ledger,
+      PluginInvocationResourcePolicy resource_policy = {},
+      PluginRuntimeSupervisorOptions options = {},
+      IsolatedCpuInvocationLimits limits = {});
 
   /**
    * @brief Invokes only the owned supervised route.

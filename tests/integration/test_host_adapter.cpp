@@ -4811,7 +4811,10 @@ TEST(EmbeddedHostAdapter, PolicyScanAndOperationPluginUseStatusValues) {
   auto bad_load =
       host->policy_load((temp.root() / "missing_policy.so").string());
   EXPECT_FALSE(bad_load.status.ok);
-  EXPECT_EQ(checked_graph_error_code(bad_load.status), GraphErrc::Io);
+  EXPECT_EQ(checked_graph_error_code(bad_load.status),
+            GraphErrc::InvalidParameter);
+  EXPECT_NE(bad_load.status.message.find("Policy trust admission rejected"),
+            std::string::npos);
 
   auto loaded = host->policy_loaded_plugins();
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;

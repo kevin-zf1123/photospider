@@ -8,6 +8,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 
@@ -19,6 +20,7 @@
 #elif defined(__linux__)
 #include <sys/syscall.h>
 #endif
+#include <openssl/evp.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -51,10 +53,10 @@ namespace {
 
 /** @brief Fixed close-on-exec child setup-status descriptor. */
 constexpr int kIsolatedCpuRuntimeSetupDescriptor = 4;
-/** @brief First disposable descriptor for non-supervised child preparation. */
-constexpr int kFirstNonSupervisedChildDescriptor = 5;
-/** @brief First disposable descriptor after supervised fd 5 is installed. */
-constexpr int kFirstSupervisedChildDescriptor = 6;
+/** @brief Fixed retained executable descriptor used by `fexecve`. */
+constexpr int kPluginRuntimeExecutableDescriptor = 6;
+/** @brief First descriptor closed after every fixed runtime capability. */
+constexpr int kFirstPluginRuntimeClosedDescriptor = 7;
 /** @brief Fixed capability header width before one tensor payload range. */
 constexpr std::size_t kCapabilityHeaderBytes = 40U;
 /** @brief Capability header magic spelling ASCII `PSC1`. */
@@ -344,7 +346,7 @@ struct ReceivedPacket final {
  */
 struct ChildDescriptorClosurePlan final {
   /** @brief First inherited descriptor that must be closed. */
-  int first_closed_descriptor = kFirstNonSupervisedChildDescriptor;
+  int first_closed_descriptor = kFirstPluginRuntimeClosedDescriptor;
   /** @brief Darwin kernel-exclusive descriptor ceiling; unused on Linux. */
   int darwin_exclusive_maximum = 0;
 };
@@ -1540,8 +1542,8 @@ int close_child_descriptors(const ChildDescriptorClosurePlan& plan) noexcept {
  * @throws std::system_error when the platform query fails or is unsupported.
  */
 ChildDescriptorClosurePlan prepare_child_descriptor_closure(
-    int first_closed_descriptor = kFirstNonSupervisedChildDescriptor) {
-  if (first_closed_descriptor < kFirstNonSupervisedChildDescriptor) {
+    int first_closed_descriptor = kFirstPluginRuntimeClosedDescriptor) {
+  if (first_closed_descriptor < kPluginRuntimeExecutableDescriptor + 1) {
     throw std::invalid_argument(
         "isolated CPU first closed descriptor is below fixed endpoints");
   }
@@ -1565,6 +1567,70 @@ ChildDescriptorClosurePlan prepare_child_descriptor_closure(
 #else
   throw std::system_error(ENOSYS, std::generic_category(),
                           "isolated CPU descriptor closure is unsupported");
+#endif
+}
+
+/**
+ * @brief Installs one exact soft and hard child resource limit.
+ * @param resource POSIX rlimit selector.
+ * @param value Already range-checked finite limit.
+ * @return Zero after success, otherwise the captured positive errno.
+ * @throws Nothing; this helper is used only in the post-fork child.
+ */
+int set_child_resource_limit(int resource, std::uint64_t value) noexcept {
+  if (value > static_cast<std::uint64_t>(std::numeric_limits<rlim_t>::max())) {
+    return EOVERFLOW;
+  }
+  const rlim_t native_value = static_cast<rlim_t>(value);
+  const struct rlimit limit{native_value, native_value};
+  return ::setrlimit(resource, &limit) == 0 ? 0 : (errno == 0 ? EIO : errno);
+}
+
+/**
+ * @brief Applies all Host-authoritative limits before descriptor-based exec.
+ * @param resources Exact resource vector bound into the consumed token.
+ * @param policy Validated per-process CPU and address-space policy.
+ * @return Zero after every limit is active, otherwise first positive errno.
+ * @throws Nothing; this helper is used only in the post-fork child.
+ * @note Core dumps are disabled independently of the admitted vector.
+ */
+int apply_child_resource_limits(
+    const PluginResourceVector& resources,
+    const PluginInvocationResourcePolicy& policy) noexcept {
+  int error = set_child_resource_limit(RLIMIT_AS, policy.address_space_bytes);
+  if (error != 0) {
+    return error;
+  }
+  error = set_child_resource_limit(RLIMIT_CPU, policy.cpu_time_seconds);
+  if (error != 0) {
+    return error;
+  }
+  error = set_child_resource_limit(RLIMIT_NOFILE, resources.descriptor_count);
+  if (error != 0) {
+    return error;
+  }
+  return set_child_resource_limit(RLIMIT_CORE, 0U);
+}
+
+/**
+ * @brief Execs the sealed Linux runtime through fixed descriptor 6.
+ * @param arguments Null-terminated argv whose first value is diagnostic only.
+ * @param environment Null-terminated empty environment.
+ * @return Only returns -1 after a native exec failure with errno preserved.
+ * @throws Nothing; only async-signal-safe native exec is used after fork.
+ * @note Linux uses `fexecve` directly and never reopens candidate spelling.
+ * Every other platform reports `ENOSYS`; Darwin runtime authorization is
+ * rejected before construction can reach any fork or materialization effect.
+ */
+int exec_authorized_plugin_runtime(char* const arguments[],
+                                   char* const environment[]) noexcept {
+#if defined(__linux__)
+  return ::fexecve(kPluginRuntimeExecutableDescriptor, arguments, environment);
+#else
+  static_cast<void>(arguments);
+  static_cast<void>(environment);
+  errno = ENOSYS;
+  return -1;
 #endif
 }
 
@@ -1723,15 +1789,20 @@ struct SpawnedChild final {
 };
 
 /**
- * @brief Forks and execs one fresh runtime with fd 3 and an empty environment.
- * @param runtime_executable Operability-validated executable path.
+ * @brief Forks and descriptor-execs one retained exact runtime object.
+ * @param authorized_runtime Signed runtime capability kept live by the caller.
+ * @param resources Exact vector already consumed into an active lease.
+ * @param policy Validated per-process rlimit policy.
  * @return Sole child and parent socket owners after successful exec.
  * @throws IsolatedCpuInvocationError for socket, pipe, `/dev/null`, fork, or
  * child setup/exec failures.
  * @throws std::system_error from authoritative descriptor-ceiling inspection.
- * @note The child inherits no descriptor above fd 4 and no parent environment.
+ * @note The child inherits only fds 0 through 4 and executable fd 6; the
+ * supervised-only fd 5 gap and every descriptor above fd 6 are closed.
  */
-SpawnedChild spawn_runtime(const std::filesystem::path& runtime_executable) {
+SpawnedChild spawn_runtime(const AuthorizedPluginFile& authorized_runtime,
+                           const PluginResourceVector& resources,
+                           const PluginInvocationResourcePolicy& policy) {
   int sockets[2] = {-1, -1};
   if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
     throw IsolatedCpuInvocationError(
@@ -1765,8 +1836,15 @@ SpawnedChild spawn_runtime(const std::filesystem::path& runtime_executable) {
   }
   set_close_on_exec(null_device.get());
 
-  const ChildDescriptorClosurePlan closure = prepare_child_descriptor_closure();
-  const std::string executable = runtime_executable.string();
+  const ChildDescriptorClosurePlan closure =
+      prepare_child_descriptor_closure(kFirstPluginRuntimeClosedDescriptor);
+  const int executable_descriptor = authorized_runtime.native_descriptor();
+  if (executable_descriptor < 0) {
+    throw PluginTrustError(
+        PluginTrustErrorCode::ExactObjectUnsupported,
+        "Authorized plugin runtime has no descriptor-based exec capability.");
+  }
+  const std::string executable = authorized_runtime.original_path().string();
   const char* const executable_pointer = executable.c_str();
   char* const empty_environment[] = {nullptr};
 
@@ -1778,37 +1856,52 @@ SpawnedChild spawn_runtime(const std::filesystem::path& runtime_executable) {
   }
   if (pid == 0) {
     const int control_copy = ::fcntl(child_socket.get(), F_DUPFD_CLOEXEC,
-                                     kFirstNonSupervisedChildDescriptor);
+                                     kFirstPluginRuntimeClosedDescriptor);
     if (control_copy < 0) {
       child_setup_failed(status_write.get(), errno);
     }
     const int status_copy = ::fcntl(status_write.get(), F_DUPFD_CLOEXEC,
-                                    kFirstNonSupervisedChildDescriptor);
+                                    kFirstPluginRuntimeClosedDescriptor);
     if (status_copy < 0) {
       child_setup_failed(status_write.get(), errno);
     }
     const int null_copy = ::fcntl(null_device.get(), F_DUPFD_CLOEXEC,
-                                  kFirstNonSupervisedChildDescriptor);
+                                  kFirstPluginRuntimeClosedDescriptor);
     if (null_copy < 0) {
+      child_setup_failed(status_copy, errno);
+    }
+    const int executable_copy = ::fcntl(executable_descriptor, F_DUPFD_CLOEXEC,
+                                        kFirstPluginRuntimeClosedDescriptor);
+    if (executable_copy < 0) {
       child_setup_failed(status_copy, errno);
     }
     if (::dup2(null_copy, STDIN_FILENO) < 0 ||
         ::dup2(null_copy, STDOUT_FILENO) < 0 ||
         ::dup2(null_copy, STDERR_FILENO) < 0 ||
         ::dup2(control_copy, kIsolatedCpuRuntimeControlDescriptor) < 0 ||
-        ::dup2(status_copy, kIsolatedCpuRuntimeSetupDescriptor) < 0) {
+        ::dup2(status_copy, kIsolatedCpuRuntimeSetupDescriptor) < 0 ||
+        ::dup2(executable_copy, kPluginRuntimeExecutableDescriptor) < 0) {
       child_setup_failed(status_copy, errno);
     }
     if (::fcntl(kIsolatedCpuRuntimeControlDescriptor, F_SETFD, 0) < 0 ||
-        ::fcntl(kIsolatedCpuRuntimeSetupDescriptor, F_SETFD, FD_CLOEXEC) < 0) {
+        ::fcntl(kIsolatedCpuRuntimeSetupDescriptor, F_SETFD, FD_CLOEXEC) < 0 ||
+        ::fcntl(kPluginRuntimeExecutableDescriptor, F_SETFD, 0) < 0) {
+      child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, errno);
+    }
+    if (::close(kPluginRuntimeSupervisionDescriptor) != 0 && errno != EBADF) {
       child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, errno);
     }
     const int close_error = close_child_descriptors(closure);
     if (close_error != 0) {
       child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, close_error);
     }
+    const int limit_error = apply_child_resource_limits(resources, policy);
+    if (limit_error != 0) {
+      child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, limit_error);
+    }
     char* const arguments[] = {const_cast<char*>(executable_pointer), nullptr};
-    ::execve(executable_pointer, arguments, empty_environment);
+    static_cast<void>(
+        exec_authorized_plugin_runtime(arguments, empty_environment));
     child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, errno);
   }
 
@@ -2461,16 +2554,20 @@ struct SupervisedSpawnedChild final {
 };
 
 /**
- * @brief Forks one supervised runtime with fixed fds 3, 4, and 5.
- * @param runtime_executable Operability-validated executable path.
+ * @brief Forks one supervised runtime with fixed fds 3 through 6.
+ * @param authorized_runtime Signed runtime capability kept live by the caller.
+ * @param resources Exact vector already consumed into an active lease.
+ * @param policy Validated per-process rlimit policy.
  * @return Exact child and nonblocking parent endpoints before exec completes.
  * @throws IsolatedCpuInvocationError for socket, pipe, device, fork, or setup
  * preparation failure.
  * @throws std::system_error for descriptor-ceiling inspection failure.
- * @note The child receives an empty environment and no descriptor above fd 5.
+ * @note The child receives an empty environment and no descriptor above fd 6.
  */
 SupervisedSpawnedChild spawn_supervised_runtime(
-    const std::filesystem::path& runtime_executable) {
+    const AuthorizedPluginFile& authorized_runtime,
+    const PluginResourceVector& resources,
+    const PluginInvocationResourcePolicy& policy) {
   int control_sockets[2] = {-1, -1};
   if (::socketpair(AF_UNIX, SOCK_STREAM, 0, control_sockets) != 0) {
     throw IsolatedCpuInvocationError(
@@ -2517,8 +2614,14 @@ SupervisedSpawnedChild spawn_supervised_runtime(
   set_close_on_exec(null_device.get());
 
   const ChildDescriptorClosurePlan closure =
-      prepare_child_descriptor_closure(kFirstSupervisedChildDescriptor);
-  const std::string executable = runtime_executable.string();
+      prepare_child_descriptor_closure(kFirstPluginRuntimeClosedDescriptor);
+  const int executable_descriptor = authorized_runtime.native_descriptor();
+  if (executable_descriptor < 0) {
+    throw PluginTrustError(
+        PluginTrustErrorCode::ExactObjectUnsupported,
+        "Authorized plugin runtime has no descriptor-based exec capability.");
+  }
+  const std::string executable = authorized_runtime.original_path().string();
   const char* const executable_pointer = executable.c_str();
   char* const empty_environment[] = {nullptr};
 
@@ -2530,24 +2633,29 @@ SupervisedSpawnedChild spawn_supervised_runtime(
   }
   if (pid == 0) {
     const int control_copy = ::fcntl(child_control.get(), F_DUPFD_CLOEXEC,
-                                     kFirstSupervisedChildDescriptor);
+                                     kFirstPluginRuntimeClosedDescriptor);
     if (control_copy < 0) {
       child_setup_failed(status_write.get(), errno);
     }
     const int status_copy = ::fcntl(status_write.get(), F_DUPFD_CLOEXEC,
-                                    kFirstSupervisedChildDescriptor);
+                                    kFirstPluginRuntimeClosedDescriptor);
     if (status_copy < 0) {
       child_setup_failed(status_write.get(), errno);
     }
     const int supervision_copy =
         ::fcntl(child_supervision.get(), F_DUPFD_CLOEXEC,
-                kFirstSupervisedChildDescriptor);
+                kFirstPluginRuntimeClosedDescriptor);
     if (supervision_copy < 0) {
       child_setup_failed(status_copy, errno);
     }
     const int null_copy = ::fcntl(null_device.get(), F_DUPFD_CLOEXEC,
-                                  kFirstSupervisedChildDescriptor);
+                                  kFirstPluginRuntimeClosedDescriptor);
     if (null_copy < 0) {
+      child_setup_failed(status_copy, errno);
+    }
+    const int executable_copy = ::fcntl(executable_descriptor, F_DUPFD_CLOEXEC,
+                                        kFirstPluginRuntimeClosedDescriptor);
+    if (executable_copy < 0) {
       child_setup_failed(status_copy, errno);
     }
     if (::dup2(null_copy, STDIN_FILENO) < 0 ||
@@ -2555,20 +2663,27 @@ SupervisedSpawnedChild spawn_supervised_runtime(
         ::dup2(null_copy, STDERR_FILENO) < 0 ||
         ::dup2(control_copy, kIsolatedCpuRuntimeControlDescriptor) < 0 ||
         ::dup2(status_copy, kIsolatedCpuRuntimeSetupDescriptor) < 0 ||
-        ::dup2(supervision_copy, kPluginRuntimeSupervisionDescriptor) < 0) {
+        ::dup2(supervision_copy, kPluginRuntimeSupervisionDescriptor) < 0 ||
+        ::dup2(executable_copy, kPluginRuntimeExecutableDescriptor) < 0) {
       child_setup_failed(status_copy, errno);
     }
     if (::fcntl(kIsolatedCpuRuntimeControlDescriptor, F_SETFD, 0) < 0 ||
         ::fcntl(kIsolatedCpuRuntimeSetupDescriptor, F_SETFD, FD_CLOEXEC) < 0 ||
-        ::fcntl(kPluginRuntimeSupervisionDescriptor, F_SETFD, 0) < 0) {
+        ::fcntl(kPluginRuntimeSupervisionDescriptor, F_SETFD, 0) < 0 ||
+        ::fcntl(kPluginRuntimeExecutableDescriptor, F_SETFD, 0) < 0) {
       child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, errno);
     }
     const int close_error = close_child_descriptors(closure);
     if (close_error != 0) {
       child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, close_error);
     }
+    const int limit_error = apply_child_resource_limits(resources, policy);
+    if (limit_error != 0) {
+      child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, limit_error);
+    }
     char* const arguments[] = {const_cast<char*>(executable_pointer), nullptr};
-    ::execve(executable_pointer, arguments, empty_environment);
+    static_cast<void>(
+        exec_authorized_plugin_runtime(arguments, empty_environment));
     child_setup_failed(kIsolatedCpuRuntimeSetupDescriptor, errno);
   }
 
@@ -2898,6 +3013,120 @@ struct HostInvocationPreflight final {
 };
 
 /**
+ * @brief Converts the wire comparison package key into the signed trust type.
+ * @param identity Completely validated invocation identity.
+ * @return Exact package bytes and generation for trust comparison.
+ * @throws Nothing.
+ */
+PluginPackageIdentity invocation_package_identity(
+    const IsolatedCpuInvocationIdentity& identity) noexcept {
+  PluginPackageIdentity package;
+  for (std::size_t index = 0U; index < package.package_id.size(); ++index) {
+    package.package_id[index] =
+        std::to_integer<std::uint8_t>(identity.plugin_package_id.bytes[index]);
+  }
+  package.generation = identity.plugin_generation;
+  return package;
+}
+
+/**
+ * @brief Adds one uint64 in canonical big-endian form to an EVP digest.
+ * @param context Initialized SHA-256 digest context.
+ * @param value Exact scalar.
+ * @return Nothing after all eight bytes are incorporated.
+ * @throws std::runtime_error if OpenSSL rejects the update.
+ */
+void digest_identity_u64(EVP_MD_CTX* context, std::uint64_t value) {
+  std::array<unsigned char, 8U> bytes{};
+  for (std::size_t index = 0U; index < bytes.size(); ++index) {
+    bytes[index] = static_cast<unsigned char>(
+        (value >> ((bytes.size() - 1U - index) * 8U)) & 0xffU);
+  }
+  if (EVP_DigestUpdate(context, bytes.data(), bytes.size()) != 1) {
+    throw std::runtime_error(
+        "Cannot hash plugin invocation identity generation.");
+  }
+}
+
+/**
+ * @brief Derives the replay key from every complete invocation identity field.
+ * @param identity Validated tenant, Job, attempt, worker lease, package, and
+ * invocation tuple.
+ * @return Domain-separated SHA-256 digest used only by the Host ledger.
+ * @throws std::bad_alloc if the OpenSSL context cannot be allocated.
+ * @throws std::runtime_error if OpenSSL rejects digest operations.
+ * @note The domain includes a terminating zero byte so later textual suffixes
+ * cannot collide with this versioned identity namespace.
+ */
+PluginInvocationIdentityDigest plugin_invocation_identity_digest(
+    const IsolatedCpuInvocationIdentity& identity) {
+  constexpr std::array<unsigned char, 42U> kDomain{
+      'p', 'h', 'o', 't', 'o', 's', 'p', 'i', 'd', 'e', 'r', '-', 'p', 'l',
+      'u', 'g', 'i', 'n', '-', 'i', 'n', 'v', 'o', 'c', 'a', 't', 'i', 'o',
+      'n', '-', 'r', 'e', 's', 'o', 'u', 'r', 'c', 'e', '-', 'v', '1', '\0'};
+  EVP_MD_CTX* raw_context = EVP_MD_CTX_new();
+  if (raw_context == nullptr) {
+    throw std::bad_alloc();
+  }
+  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(
+      raw_context, &EVP_MD_CTX_free);
+  if (EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1 ||
+      EVP_DigestUpdate(context.get(), kDomain.data(), kDomain.size()) != 1) {
+    throw std::runtime_error(
+        "Cannot initialize plugin invocation identity hash.");
+  }
+  const std::array<const IsolatedCpuOpaqueId*, 6U> identifiers{
+      &identity.tenant_id,         &identity.job_id,
+      &identity.attempt_id,        &identity.worker_id,
+      &identity.plugin_package_id, &identity.invocation_id,
+  };
+  for (const IsolatedCpuOpaqueId* identifier : identifiers) {
+    if (EVP_DigestUpdate(context.get(), identifier->bytes.data(),
+                         identifier->bytes.size()) != 1) {
+      throw std::runtime_error("Cannot hash plugin invocation identity bytes.");
+    }
+  }
+  digest_identity_u64(context.get(), identity.worker_lease_generation);
+  digest_identity_u64(context.get(), identity.plugin_generation);
+  PluginInvocationIdentityDigest digest{};
+  unsigned int size = 0U;
+  if (EVP_DigestFinal_ex(context.get(), digest.data(), &size) != 1 ||
+      size != digest.size()) {
+    throw std::runtime_error(
+        "Cannot finalize plugin invocation identity hash.");
+  }
+  return digest;
+}
+
+/**
+ * @brief Derives the complete Host-authoritative resource vector from
+ * preflight.
+ * @param preflight Fully validated request without invocation OS effects.
+ * @param policy Validated composition resource policy.
+ * @return Exact aggregate and per-process resource demand.
+ * @throws PluginResourceAdmissionError if descriptor addition overflows.
+ */
+PluginResourceVector plugin_resource_demand(
+    const HostInvocationPreflight& preflight,
+    const PluginInvocationResourcePolicy& policy) {
+  const std::uint64_t capabilities =
+      preflight.request.resources.descriptor_count;
+  if (capabilities >
+      std::numeric_limits<std::uint64_t>::max() - policy.descriptor_overhead) {
+    throw PluginResourceAdmissionError(
+        PluginResourceAdmissionErrorCode::QuotaExceeded,
+        "Plugin invocation descriptor demand overflows uint64.");
+  }
+  return PluginResourceVector{
+      1U,
+      preflight.request.resources.cpu_slots,
+      policy.address_space_bytes,
+      preflight.request.resources.shared_memory_bytes,
+      capabilities + policy.descriptor_overhead,
+  };
+}
+
+/**
  * @brief Complete Host-side request and materialized shared-memory owner set.
  * @throws Nothing for moves and destruction.
  */
@@ -3130,19 +3359,46 @@ PreparedHostInvocation materialize_host_invocation(
 }
 
 /**
- * @brief Runs bounded Host preflight, then materializes the accepted request.
- * @param invocation Host input Values and exact output plans.
- * @param limits Retained local hard limits.
- * @return Validated request plus sole local capability owners.
- * @throws Preflight and materialization failures unchanged.
- * @note BufferHandle and ReadLease identities remain local and retire after
- * immutable bytes have been copied into invocation-local capabilities.
+ * @brief Authorizes resources and materializes capabilities in strict order.
+ * @param invocation Host-owned invocation plan.
+ * @param limits Validated protocol-v1 bounds.
+ * @param authorized_runtime Retained signed runtime package.
+ * @param ledger Attempt-local sole Host resource mint.
+ * @param policy Validated composition resource policy.
+ * @param lease Receives consumed exact authority before materialization.
+ * @return Materialized request and capabilities.
+ * @throws Trust, protocol, resource, Value, and materialization failures
+ * unchanged.
+ * @note Complete side-effect-free preflight and signed package equality precede
+ * atomic token issuance. Successful token consumption precedes every
+ * invocation-owned shm, descriptor, socket, mapping, fork, or exec effect.
  */
-PreparedHostInvocation prepare_host_invocation(
+PreparedHostInvocation admit_and_materialize_host_invocation(
     const IsolatedCpuHostInvocation& invocation,
-    const IsolatedCpuInvocationLimits& limits) {
-  return materialize_host_invocation(
-      preflight_host_invocation(invocation, limits), limits);
+    const IsolatedCpuInvocationLimits& limits,
+    const AuthorizedPluginFile& authorized_runtime, ResourceLedger& ledger,
+    const PluginInvocationResourcePolicy& policy,
+    std::optional<ResourceLedger::PluginResourceLease>* lease) {
+  if (lease == nullptr || lease->has_value()) {
+    throw std::invalid_argument(
+        "Plugin invocation lease output is null or already active.");
+  }
+  HostInvocationPreflight preflight =
+      preflight_host_invocation(invocation, limits);
+  if (invocation_package_identity(invocation.identity) !=
+      authorized_runtime.package_identity()) {
+    throw PluginTrustError(
+        PluginTrustErrorCode::PackageMismatch,
+        "Plugin invocation package identity differs from signed runtime.");
+  }
+  const PluginResourceVector resources =
+      plugin_resource_demand(preflight, policy);
+  const PluginInvocationIdentityDigest identity =
+      plugin_invocation_identity_digest(invocation.identity);
+  ResourceLedger::PluginResourceToken token =
+      ledger.issue_plugin_invocation(identity, resources);
+  lease->emplace(std::move(token).consume(identity, resources));
+  return materialize_host_invocation(std::move(preflight), limits);
 }
 
 /**
@@ -3395,6 +3651,63 @@ std::vector<Value> publish_host_outputs(
     outputs.push_back(builder.seal());
   }
   return outputs;
+}
+
+/**
+ * @brief Validates Host resource accounting and child-limit composition.
+ * @param policy Candidate address-space, CPU-time, and descriptor policy.
+ * @return Nothing when every field is positive and representable by rlimit.
+ * @throws std::invalid_argument for a zero, undersized, or unrepresentable
+ * field.
+ * @note The descriptor overhead must cover standard streams, control/setup,
+ * optional supervision, the executable capability, and loader working space.
+ */
+void validate_plugin_invocation_resource_policy(
+    const PluginInvocationResourcePolicy& policy) {
+  constexpr std::uint64_t kMinimumDescriptorOverhead = 16U;
+  const std::uint64_t native_limit_maximum =
+      static_cast<std::uint64_t>(std::numeric_limits<rlim_t>::max());
+  if (policy.address_space_bytes == 0U ||
+      policy.address_space_bytes > native_limit_maximum) {
+    throw std::invalid_argument(
+        "plugin runtime address-space limit is zero or unrepresentable");
+  }
+  if (policy.cpu_time_seconds == 0U ||
+      policy.cpu_time_seconds > native_limit_maximum) {
+    throw std::invalid_argument(
+        "plugin runtime CPU-time limit is zero or unrepresentable");
+  }
+  if (policy.descriptor_overhead < kMinimumDescriptorOverhead ||
+      policy.descriptor_overhead > native_limit_maximum) {
+    throw std::invalid_argument(
+        "plugin runtime descriptor overhead is unsafe or unrepresentable");
+  }
+}
+
+/**
+ * @brief Validates and transfers one required ledger during member init.
+ * @param ledger Candidate attempt-local Host authority.
+ * @return Same nonnull shared owner.
+ * @throws std::invalid_argument when no ledger was supplied.
+ */
+std::shared_ptr<ResourceLedger> require_plugin_resource_ledger(
+    std::shared_ptr<ResourceLedger> ledger) {
+  if (!ledger) {
+    throw std::invalid_argument("plugin runtime resource ledger is null");
+  }
+  return ledger;
+}
+
+/**
+ * @brief Validates and copies one policy during immutable member init.
+ * @param policy Candidate plugin resource policy.
+ * @return Same policy after complete validation.
+ * @throws std::invalid_argument from policy validation unchanged.
+ */
+PluginInvocationResourcePolicy require_plugin_invocation_resource_policy(
+    PluginInvocationResourcePolicy policy) {
+  validate_plugin_invocation_resource_policy(policy);
+  return policy;
 }
 
 /**
@@ -4050,7 +4363,9 @@ PluginRuntimeFaultKind supervised_deadline_fault_kind(
 
 /**
  * @brief Executes one complete fresh supervised invocation.
- * @param runtime_executable Operability-validated runtime path.
+ * @param authorized_runtime Retained signed exact runtime object.
+ * @param resource_ledger Attempt-local sole resource-token mint.
+ * @param resource_policy Validated admission and child-limit policy.
  * @param options Validated lifecycle timing policy.
  * @param limits Retained protocol-v1 bounds.
  * @param invocation Host-owned invocation plan.
@@ -4075,7 +4390,9 @@ PluginRuntimeFaultKind supervised_deadline_fault_kind(
  * still publishes the higher-priority `ReapPending` ownership fact.
  */
 IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
-    const std::filesystem::path& runtime_executable,
+    const AuthorizedPluginFile& authorized_runtime,
+    ResourceLedger& resource_ledger,
+    const PluginInvocationResourcePolicy& resource_policy,
     const PluginRuntimeSupervisorOptions& options,
     const IsolatedCpuInvocationLimits& limits,
     const IsolatedCpuHostInvocation& invocation,
@@ -4084,7 +4401,10 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
       g_next_response_channel_observation_overflow.exchange(
           false, std::memory_order_acq_rel);
   bool response_channel_observation_overflow_ready = false;
-  PreparedHostInvocation prepared = prepare_host_invocation(invocation, limits);
+  std::optional<ResourceLedger::PluginResourceLease> resource_lease;
+  PreparedHostInvocation prepared = admit_and_materialize_host_invocation(
+      invocation, limits, authorized_runtime, resource_ledger, resource_policy,
+      &resource_lease);
   std::vector<int> descriptors;
   descriptors.reserve(prepared.capabilities.size());
   for (const MappedCapability& capability : prepared.capabilities) {
@@ -4096,7 +4416,8 @@ IsolatedCpuHostInvocationResult run_supervised_plugin_invocation(
   const SupervisorDeadline startup_deadline = checked_supervisor_deadline(
       SupervisorClock::now(), options.startup_timeout);
   try {
-    process = spawn_supervised_runtime(runtime_executable);
+    process = spawn_supervised_runtime(
+        authorized_runtime, resource_lease->resources(), resource_policy);
   } catch (const IsolatedCpuInvocationError& error) {
     throw PluginRuntimeFault(PluginRuntimeFaultKind::Channel, error.what());
   }
@@ -4409,20 +4730,35 @@ class PluginRuntimeSupervisor::Impl final {
  public:
   /**
    * @brief Retains already validated immutable construction state.
-   * @param runtime_executable Operability-validated runtime path.
+   * @param runtime_executable Absolute diagnostic runtime path.
+   * @param authorized_file Retained signed exact runtime capability.
+   * @param ledger Attempt-local sole plugin resource authority.
+   * @param invocation_resource_policy Validated admission/rlimit policy.
    * @param supervisor_options Validated lifecycle timing policy.
    * @param invocation_limits Validated protocol-v1 bounds.
    * @throws std::bad_alloc when retained path storage cannot allocate.
    */
   Impl(std::filesystem::path runtime_executable,
+       AuthorizedPluginFile authorized_file,
+       std::shared_ptr<ResourceLedger> ledger,
+       PluginInvocationResourcePolicy invocation_resource_policy,
        PluginRuntimeSupervisorOptions supervisor_options,
        IsolatedCpuInvocationLimits invocation_limits)
       : executable(std::move(runtime_executable)),
+        authorized_runtime(std::move(authorized_file)),
+        resource_ledger(std::move(ledger)),
+        resource_policy(invocation_resource_policy),
         options(supervisor_options),
         limits(invocation_limits) {}
 
-  /** @brief Immutable operability-validated runtime path. */
+  /** @brief Immutable absolute runtime path for diagnostics and argv[0]. */
   std::filesystem::path executable;
+  /** @brief Immutable signed exact executable retained through every exec. */
+  AuthorizedPluginFile authorized_runtime;
+  /** @brief Attempt-local sole resource mint retained for every invocation. */
+  std::shared_ptr<ResourceLedger> resource_ledger;
+  /** @brief Immutable validated admission and child-limit policy. */
+  PluginInvocationResourcePolicy resource_policy;
   /** @brief Immutable positive bounded lifecycle timing policy. */
   PluginRuntimeSupervisorOptions options;
   /** @brief Immutable protocol-v1 endpoint bounds. */
@@ -4440,18 +4776,28 @@ class PluginRuntimeSupervisor::Impl final {
 /**
  * @brief Validates and retains one bounded fresh-runtime supervision route.
  * @param runtime_executable Existing executable regular file.
+ * @param resource_ledger Attempt-local sole resource-token mint.
+ * @param resource_policy Positive admission and child-limit policy.
  * @param options Positive, ordered lifecycle bounds.
  * @param limits Protocol-v1 endpoint bounds.
  * @throws std::invalid_argument for invalid path, options, or limits.
  * @throws std::system_error when `SIGCHLD` state cannot be queried.
  * @throws std::bad_alloc when private state cannot allocate.
- * @note Construction creates no child, session nonce, descriptor, or trust
- * authority.
+ * @note Construction authorizes and retains one immutable exact-runtime
+ * capability and snapshot descriptor. It creates no child, session nonce,
+ * invocation capability, or ledger token.
  */
 PluginRuntimeSupervisor::PluginRuntimeSupervisor(
     std::filesystem::path runtime_executable,
+    std::shared_ptr<ResourceLedger> resource_ledger,
+    PluginInvocationResourcePolicy resource_policy,
     PluginRuntimeSupervisorOptions options,
     IsolatedCpuInvocationLimits limits) {
+  if (!resource_ledger) {
+    throw std::invalid_argument(
+        "plugin runtime resource ledger must not be null");
+  }
+  validate_plugin_invocation_resource_policy(resource_policy);
   validate_plugin_runtime_supervisor_options(options);
   validate_isolated_cpu_invocation_limits(limits);
   const std::string executable = runtime_executable.string();
@@ -4459,15 +4805,13 @@ PluginRuntimeSupervisor::PluginRuntimeSupervisor(
     throw std::invalid_argument(
         "plugin runtime executable path is empty or malformed");
   }
-  struct stat status{};
-  if (::stat(executable.c_str(), &status) != 0 || !S_ISREG(status.st_mode) ||
-      ::access(executable.c_str(), X_OK) != 0) {
-    throw std::invalid_argument(
-        "plugin runtime path is not an executable regular file");
-  }
+  AuthorizedPluginFile authorized_runtime = authorize_process_plugin(
+      runtime_executable, PluginArtifactKind::IsolatedRuntime);
+  runtime_executable = authorized_runtime.original_path();
   validate_sigchld_reaping_configuration();
-  impl_ =
-      std::make_unique<Impl>(std::move(runtime_executable), options, limits);
+  impl_ = std::make_unique<Impl>(
+      std::move(runtime_executable), std::move(authorized_runtime),
+      std::move(resource_ledger), resource_policy, options, limits);
 }
 // NOLINTEND
 
@@ -4506,9 +4850,10 @@ IsolatedCpuHostInvocationResult PluginRuntimeSupervisor::invoke(
     std::this_thread::sleep_until(impl_->next_launch_not_before);
   }
   try {
-    return run_supervised_plugin_invocation(impl_->executable, impl_->options,
-                                            impl_->limits, invocation,
-                                            &impl_->pending_reap);
+    return run_supervised_plugin_invocation(
+        impl_->authorized_runtime, *impl_->resource_ledger,
+        impl_->resource_policy, impl_->options, impl_->limits, invocation,
+        &impl_->pending_reap);
   } catch (const PluginRuntimeFault& fault) {
     try {
       impl_->next_launch_not_before = checked_supervisor_deadline(
@@ -4547,14 +4892,19 @@ IsolatedCpuInvocationLimits PluginRuntimeSupervisor::limits() const noexcept {
 /**
  * @brief Constructs the sole supervised route selected by this executor.
  * @param runtime_executable Existing executable regular file.
+ * @param resource_ledger Attempt-local sole resource-token mint.
+ * @param resource_policy Positive admission and child-limit policy.
  * @param options Positive lifecycle timing policy.
  * @param limits Protocol-v1 endpoint bounds.
  * @throws Construction failures from `PluginRuntimeSupervisor` unchanged.
  */
 PluginInvocationExecutor::PluginInvocationExecutor(
     std::filesystem::path runtime_executable,
+    std::shared_ptr<ResourceLedger> resource_ledger,
+    PluginInvocationResourcePolicy resource_policy,
     PluginRuntimeSupervisorOptions options, IsolatedCpuInvocationLimits limits)
-    : supervisor_(std::move(runtime_executable), options, limits) {}
+    : supervisor_(std::move(runtime_executable), std::move(resource_ledger),
+                  resource_policy, options, limits) {}
 // NOLINTEND
 
 /**
@@ -4574,30 +4924,38 @@ IsolatedCpuHostInvocationResult PluginInvocationExecutor::invoke(
  * @brief Validates and retains the one-shot runtime path and protocol limits.
  * @param runtime_executable Existing executable regular file launched later
  * with an empty environment and fixed control descriptor.
+ * @param resource_ledger Attempt-local sole resource-token mint.
+ * @param resource_policy Positive admission and child-limit policy.
  * @param limits Protocol-v1 bounds; only the parameter limit may be zero.
  * @throws std::invalid_argument for an invalid path or endpoint limit.
  * @throws std::system_error when the process-wide SIGCHLD action cannot be
  * queried.
  * @throws std::bad_alloc when retained path storage cannot allocate.
- * @note Construction mints no child, FD, mapping, or trust authority.
+ * @note Construction authorizes and retains one immutable exact-runtime
+ * capability and snapshot descriptor. It creates no child, invocation-data
+ * descriptor or mapping, or ledger token.
  */
 NonSupervisedIsolatedCpuInvocationExecutor::
     NonSupervisedIsolatedCpuInvocationExecutor(
         std::filesystem::path runtime_executable,
+        std::shared_ptr<ResourceLedger> resource_ledger,
+        PluginInvocationResourcePolicy resource_policy,
         IsolatedCpuInvocationLimits limits)
-    : runtime_executable_(std::move(runtime_executable)), limits_(limits) {
+    : runtime_executable_(std::move(runtime_executable)),
+      resource_ledger_(
+          require_plugin_resource_ledger(std::move(resource_ledger))),
+      resource_policy_(
+          require_plugin_invocation_resource_policy(resource_policy)),
+      authorized_runtime_(authorize_process_plugin(
+          runtime_executable_, PluginArtifactKind::IsolatedRuntime)),
+      limits_(limits) {
   validate_isolated_cpu_invocation_limits(limits_);
   const std::string executable = runtime_executable_.string();
   if (executable.empty() || executable.find('\0') != std::string::npos) {
     throw std::invalid_argument(
         "isolated CPU runtime executable path is empty or malformed");
   }
-  struct stat status{};
-  if (::stat(executable.c_str(), &status) != 0 || !S_ISREG(status.st_mode) ||
-      ::access(executable.c_str(), X_OK) != 0) {
-    throw std::invalid_argument(
-        "isolated CPU runtime path is not an executable regular file");
-  }
+  runtime_executable_ = authorized_runtime_.original_path();
   validate_sigchld_reaping_configuration();
 }
 // NOLINTEND
@@ -4620,15 +4978,18 @@ NonSupervisedIsolatedCpuInvocationExecutor::
 IsolatedCpuHostInvocationResult
 NonSupervisedIsolatedCpuInvocationExecutor::invoke(
     const IsolatedCpuHostInvocation& invocation) const {
-  PreparedHostInvocation prepared =
-      prepare_host_invocation(invocation, limits_);
+  std::optional<ResourceLedger::PluginResourceLease> resource_lease;
+  PreparedHostInvocation prepared = admit_and_materialize_host_invocation(
+      invocation, limits_, authorized_runtime_, *resource_ledger_,
+      resource_policy_, &resource_lease);
   std::vector<int> descriptors;
   descriptors.reserve(prepared.capabilities.size());
   for (const MappedCapability& capability : prepared.capabilities) {
     descriptors.push_back(capability.descriptor.get());
   }
 
-  SpawnedChild process = spawn_runtime(runtime_executable_);
+  SpawnedChild process = spawn_runtime(
+      authorized_runtime_, resource_lease->resources(), resource_policy_);
   send_packet(process.control.get(), prepared.request_packet, descriptors);
   ReceivedPacket received = receive_packet(process.control.get());
   process.control.reset();

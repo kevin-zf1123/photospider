@@ -83,6 +83,7 @@ if(_Photospider_need_opencv_core)
 endif()
 
 if(_Photospider_need_embedded)
+  find_dependency(OpenSSL COMPONENTS Crypto)
   if(NOT Photospider_FIND_COMPONENTS OR
      Photospider_FIND_REQUIRED_embedded)
     if(Photospider_opencv_enabled)

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -15,6 +16,8 @@
 
 #include "execution/isolated_cpu_invocation_protocol.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/value.hpp"
+#include "plugin/plugin_trust.hpp"      // NOLINT(build/include_subdir)
+#include "runtime/resource_ledger.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::execution {
 
@@ -91,6 +94,29 @@ struct IsolatedCpuHostInvocationResult final {
 };
 
 /**
+ * @brief Host-composition policy driving aggregate admission and child rlimits.
+ *
+ * The address-space ceiling and CPU seconds are applied before descriptor exec.
+ * `descriptor_overhead` accounts for fixed control, supervision, setup,
+ * executable, standard-stream, and dynamic-loader working descriptors in
+ * addition to invocation capability descriptors.
+ *
+ * @throws Nothing for aggregate value operations.
+ * @note This policy carries no resource authority; only the injected
+ * `ResourceLedger` can mint one-use invocation tokens.
+ */
+struct PluginInvocationResourcePolicy final {
+  /** @brief Positive per-process address-space ceiling in bytes. */
+  std::uint64_t address_space_bytes = 1ULL << 40U;
+
+  /** @brief Positive per-process CPU-time ceiling in whole seconds. */
+  std::uint64_t cpu_time_seconds = 30U;
+
+  /** @brief Fixed Host descriptor overhead added with checked arithmetic. */
+  std::uint64_t descriptor_overhead = 16U;
+};
+
+/**
  * @brief Child-process-local mapped tensor view for one callback.
  * @throws std::bad_alloc when copied descriptor vectors allocate.
  * @note Pointers are created only after wire/FD validation and never cross the
@@ -160,10 +186,10 @@ using IsolatedCpuRuntimeCallback = std::function<
  * Each call creates a new process, sends one canonical request plus invocation
  * FDs, waits for one response and normal exit, validates output again, and
  * retires every local capability. There is deliberately no authentication,
- * heartbeat, deadline, pool, restart, sandbox, or enforceable resource policy.
- * A callback that never returns can block the caller forever;
- * `PluginRuntimeSupervisor` supplies bounded supervision while Issue #104 owns
- * trust/resource enforcement.
+ * heartbeat, deadline, pool, restart, or general sandbox. A callback that
+ * never returns can block the caller forever; `PluginRuntimeSupervisor`
+ * supplies bounded lifecycle supervision. This direct route still requires a
+ * signed sealed Linux runtime, one-use resource admission, and child rlimits.
  * This Issue #102 transport sub-role is compiled into the product archive but
  * is not selected by `ExecutionService`, `WorkerManager`, an embedded Host/CLI,
  * or another end-user route. It deliberately does not claim the target private
@@ -178,16 +204,28 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
    * @brief Validates and retains one runtime executable and local hard limits.
    * @param runtime_executable Existing regular executable launched with an
    * empty environment and fixed control descriptor 3.
+   * @param resource_ledger Attempt-local Host authority that exclusively mints
+   * one-use plugin resource tokens and must be nonnull.
+   * @param resource_policy Positive address-space, CPU-time, and descriptor
+   * bounds applied before descriptor-based exec.
    * @param limits Protocol-v1 bounds whose shared-memory, capability, and
    * descriptor values are nonzero and whose parameter value may be zero; all
    * values remain at or below their hard maxima.
-   * @throws std::invalid_argument when the path or limits are invalid.
+   * @throws std::invalid_argument when authority, policy, path, or limits are
+   * invalid.
+   * @throws PluginTrustError when the executable is not signed for the
+   * isolated-runtime role.
    * @throws std::system_error when `SIGCHLD` state cannot be queried.
    * @throws std::bad_alloc when retaining path state cannot allocate.
-   * @note Path validation is operability only, not #104 trust admission.
+   * @note Construction authorizes and retains a private immutable runtime
+   * snapshot; it creates no child, invocation capabilities, or ledger token.
+   * Darwin and unsupported platforms fail with `ExactObjectUnsupported`
+   * during this construction boundary.
    */
   explicit NonSupervisedIsolatedCpuInvocationExecutor(
       std::filesystem::path runtime_executable,
+      std::shared_ptr<ResourceLedger> resource_ledger,
+      PluginInvocationResourcePolicy resource_policy = {},
       IsolatedCpuInvocationLimits limits = {});
 
   /**
@@ -196,6 +234,10 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
    * scalar parameters.
    * @return Typed callback outcome with fresh Values only on success.
    * @throws IsolatedCpuProtocolError for invalid local or returned content.
+   * @throws PluginTrustError when invocation package identity differs from the
+   * signed retained runtime.
+   * @throws PluginResourceAdmissionError for replay or aggregate quota
+   * rejection before materialization.
    * @throws IsolatedCpuInvocationError for shared-memory, FD, spawn, exec,
    * channel, or child-exit failures.
    * @throws Value/readiness/access/allocation exceptions from Host input
@@ -225,9 +267,19 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
   IsolatedCpuInvocationLimits limits() const noexcept { return limits_; }
 
  private:
-  /** @brief Operability-validated runtime path; no trust-admission meaning. */
+  /** @brief Absolute runtime path retained only for diagnostics/argv[0]. */
   std::filesystem::path runtime_executable_;
-  /** @brief Retained local validation bounds; no ledger-token meaning. */
+
+  /** @brief Attempt-local Host authority retained for every token lifecycle. */
+  std::shared_ptr<ResourceLedger> resource_ledger_;
+
+  /** @brief Validated immutable admission and child-limit policy. */
+  PluginInvocationResourcePolicy resource_policy_;
+
+  /** @brief Signed exact executable descriptor retained across invocations. */
+  AuthorizedPluginFile authorized_runtime_;
+
+  /** @brief Retained local protocol-v1 validation bounds. */
   IsolatedCpuInvocationLimits limits_;
 };
 
@@ -241,11 +293,13 @@ class NonSupervisedIsolatedCpuInvocationExecutor final {
  * descriptor, mapping, callback-response, or channel failure.
  * @throws Nothing; all exceptions are contained before process main returns.
  * @note The sender must close its write half after its exact request; decode
- * waits for that EOF and can block forever. This endpoint has no
- * authentication, heartbeat, deadline, restart, sandbox, or resource
- * enforcement. The callback receives no wire pointer record, FD, Host callback,
- * Graph/Run owner, or cleanup token. It is compiled into the product archive as
- * a #102 runtime seam but no product composition root launches it yet.
+ * waits for that EOF and can block forever. This endpoint itself has no
+ * authentication, heartbeat, deadline, restart, general sandbox, or
+ * resource-mint authority; the Host validates trust/admission and applies
+ * child rlimits before exec. The callback receives no wire pointer record, FD,
+ * Host callback, Graph/Run owner, or cleanup token. It is compiled into the
+ * product archive as a #102 runtime seam but no product composition root
+ * launches it yet.
  */
 int serve_non_supervised_isolated_cpu_invocation_once(
     int control_fd, const IsolatedCpuInvocationLimits& limits,

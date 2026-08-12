@@ -4,6 +4,7 @@
  */
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -279,6 +280,50 @@ IsolatedCpuRuntimeCallbackResult run_fixture_operation(
       return IsolatedCpuRuntimeCallbackResult{
           IsolatedCpuInvocationOutcome::PluginFailed,
           "fixture observed inherited authority across exec"};
+    }
+    invocation.outputs[0].output_data[0] = std::byte{1};
+    return IsolatedCpuRuntimeCallbackResult{
+        IsolatedCpuInvocationOutcome::Succeeded,
+        {}};
+  }
+  if (invocation.operation == "fixture.verify_resource_limits") {
+    if (!invocation.inputs.empty() || invocation.outputs.size() != 1U ||
+        invocation.outputs[0].size != 1U ||
+        invocation.parameters.size() != 3U ||
+        invocation.parameters[0].name != "address_space_bytes" ||
+        invocation.parameters[1].name != "cpu_time_seconds" ||
+        invocation.parameters[2].name != "descriptor_count" ||
+        invocation.parameters[0].kind !=
+            IsolatedCpuScalarKind::UnsignedInteger ||
+        invocation.parameters[1].kind !=
+            IsolatedCpuScalarKind::UnsignedInteger ||
+        invocation.parameters[2].kind !=
+            IsolatedCpuScalarKind::UnsignedInteger) {
+      return IsolatedCpuRuntimeCallbackResult{
+          IsolatedCpuInvocationOutcome::PluginFailed,
+          "fixture resource-limit request is invalid"};
+    }
+    struct rlimit address_space{};
+    struct rlimit cpu_time{};
+    struct rlimit descriptors{};
+    struct rlimit core_dump{};
+    const bool queried = ::getrlimit(RLIMIT_AS, &address_space) == 0 &&
+                         ::getrlimit(RLIMIT_CPU, &cpu_time) == 0 &&
+                         ::getrlimit(RLIMIT_NOFILE, &descriptors) == 0 &&
+                         ::getrlimit(RLIMIT_CORE, &core_dump) == 0;
+    const auto exact_limit = [](const struct rlimit& limit,
+                                std::uint64_t expected) noexcept {
+      return limit.rlim_cur == static_cast<rlim_t>(expected) &&
+             limit.rlim_max == static_cast<rlim_t>(expected);
+    };
+    if (!queried ||
+        !exact_limit(address_space, invocation.parameters[0].unsigned_value) ||
+        !exact_limit(cpu_time, invocation.parameters[1].unsigned_value) ||
+        !exact_limit(descriptors, invocation.parameters[2].unsigned_value) ||
+        !exact_limit(core_dump, 0U)) {
+      return IsolatedCpuRuntimeCallbackResult{
+          IsolatedCpuInvocationOutcome::PluginFailed,
+          "fixture observed missing or changed child resource limit"};
     }
     invocation.outputs[0].output_data[0] = std::byte{1};
     return IsolatedCpuRuntimeCallbackResult{
