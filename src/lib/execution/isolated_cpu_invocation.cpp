@@ -843,8 +843,9 @@ int poll_descriptor_until(int descriptor, int events,
 
 /**
  * @brief Streams one bounded frame and its ordered descriptor capabilities.
- * @param socket Connected Unix stream socket; it may be nonblocking.
- * @param deadline Optional absolute monotonic receive bound.
+ * @param socket Connected blocking Unix stream socket. A would-block result
+ * is reported as a channel failure because this helper has no deadline-driven
+ * retry path.
  * @param packet Nonempty canonical request or response packet.
  * @param descriptors Ordered descriptors installed with `SCM_RIGHTS`.
  * @return Nothing after the frame and rights are completely sent and the
@@ -853,10 +854,13 @@ int poll_descriptor_until(int descriptor, int events,
  * write-half shutdown failure.
  * @throws IsolatedCpuProtocolError when local packet/descriptor bounds fail.
  * @note Descriptor ownership remains with the caller; `SCM_RIGHTS` accompanies
- * only the first nonempty `sendmsg`, and later sends carry bytes only. Unix
- * `SOCK_STREAM` receive calls do not expose these sender-call boundaries.
- * Each endpoint sends exactly one packet, so write-half closure preserves the
- * opposite response direction while making delayed tail detection complete.
+ * only the first nonempty `sendmsg`, and later sends carry bytes only. This
+ * blocking helper serves the non-supervised Host path and the blocking runtime
+ * endpoints; the supervised Host request path uses `send_packet_until` on its
+ * nonblocking descriptor. Unix `SOCK_STREAM` receive calls do not expose
+ * sender-call boundaries. Each endpoint sends exactly one packet, so
+ * write-half closure preserves the opposite response direction while making
+ * delayed tail detection complete.
  */
 void send_packet(int socket, const std::vector<std::byte>& packet,
                  const std::vector<int>& descriptors) {
@@ -1016,7 +1020,10 @@ void send_packet_until(int socket, const std::vector<std::byte>& packet,
 
 /**
  * @brief Assembles one bounded stream frame and owns all installed FDs.
- * @param socket Connected blocking Unix stream socket.
+ * @param socket Connected Unix stream socket. It must be blocking when no
+ * deadline is supplied and may be nonblocking for the deadline-driven path.
+ * @param deadline Optional absolute monotonic receive bound. When present,
+ * polling and would-block retries continue only through this deadline.
  * @return Exact framed bytes and RAII-owned ancillary descriptors.
  * @throws IsolatedCpuInvocationError for premature EOF or a channel-system
  * failure.
@@ -1034,8 +1041,10 @@ void send_packet_until(int socket, const std::vector<std::byte>& packet,
  * exact length are rejected. Every `recvmsg` result is checked for truncation
  * and its complete control records are adopted before a zero byte count is
  * interpreted as EOF, because Darwin can install `SCM_RIGHTS` while returning
- * zero payload bytes. This non-supervised vertical intentionally has no
- * receive deadline when `deadline` is absent.
+ * zero payload bytes. The supervised Host response path supplies a deadline
+ * for its nonblocking descriptor. Runtime endpoints and the non-supervised
+ * Host omit it and may block until the exact frame is followed by peer
+ * write-half EOF.
  */
 ReceivedPacket receive_packet(
     int socket, std::optional<SupervisorDeadline> deadline = std::nullopt) {
@@ -3201,8 +3210,7 @@ void validate_plugin_runtime_supervisor_options(
       !positive_and_bounded(options.response_timeout) ||
       !positive_and_bounded(options.termination_grace) ||
       !positive_and_bounded(options.kill_reap_timeout) ||
-      options.restart_backoff.count() < 0 ||
-      options.restart_backoff > kMaximumSupervisorDuration ||
+      !positive_and_bounded(options.restart_backoff) ||
       options.heartbeat_interval >= options.heartbeat_timeout) {
     throw std::invalid_argument(
         "plugin runtime supervisor durations are invalid or unbounded");

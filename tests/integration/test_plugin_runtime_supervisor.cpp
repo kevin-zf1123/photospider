@@ -378,7 +378,21 @@ TEST(PluginRuntimeSupervisor, DefaultDeadlinesArePositiveAndOrdered) {
   EXPECT_GT(options.response_timeout.count(), 0);
   EXPECT_GT(options.termination_grace.count(), 0);
   EXPECT_GT(options.kill_reap_timeout.count(), 0);
-  EXPECT_GE(options.restart_backoff.count(), 0);
+  EXPECT_GT(options.restart_backoff.count(), 0);
+}
+
+/**
+ * @brief Rejects zero restart backoff before any child ownership can begin.
+ * @throws Nothing; GoogleTest records assertion failures.
+ */
+TEST(PluginRuntimeSupervisor, RejectsZeroRestartBackoffAtConstruction) {
+  PluginRuntimeSupervisorOptions options = supervisor_test_options();
+  options.restart_backoff = std::chrono::milliseconds{0};
+
+  EXPECT_THROW(
+      PluginRuntimeSupervisor(
+          std::filesystem::path(PS_TEST_ISOLATED_CPU_FIXTURE_PATH), options),
+      std::invalid_argument);
 }
 
 /**
