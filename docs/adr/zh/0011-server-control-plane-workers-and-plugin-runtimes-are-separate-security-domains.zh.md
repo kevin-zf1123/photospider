@@ -361,8 +361,11 @@ Issue #104 现在通过 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
 manifest 会绑定每个封闭 operation/policy/isolated-runtime role、package id、generation 与 SHA-256
 内容摘要。重复 `(kind, digest)` 映射会被拒绝，因此内容与角色只会选择一个 package
 generation。Linux 会把获批候选复制到具有四种 seal 的 anonymous `memfd`，并通过
-`/proc/self/fd/N` mapping operation/policy DSO。Darwin 无法证明一个能够抵抗同 UID 预开写
-descriptor 的无特权不可变 exact-object 边界，因此 operation、policy 与 isolated-runtime 授权都
+`/proc/self/fd/N` mapping operation/policy DSO。由于该 descriptor 编号拼写可能被复用，每次
+mapping 成功后，都会把精确授权 capability 与 native handle 组合进一份共享 lease，并由 operation
+callback/generation 或 policy record/binding 保留。最后一个 owner 会先 unmap DSO，再关闭 sealed
+descriptor；native open 后的所有失败路径保持相同顺序，且不会引入永久的全局 capability cache。
+Darwin 无法证明一个能够抵抗同 UID 预开写 descriptor 的无特权不可变 exact-object 边界，因此 operation、policy 与 isolated-runtime 授权都
 会在候选 path 访问或 native 副作用前以 `ExactObjectUnsupported` 失败。当前 Windows 与其他所有
 不支持的 native profile 使用相同的默认拒绝边界。
 Trust rejection 会在当前 Host-facing plugin load result 中映射为 `GraphErrc::InvalidParameter`；

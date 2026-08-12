@@ -128,7 +128,7 @@ Host-owned reserved-start transaction 提交的每个 Run 执行权。
 | `ExecutionService` | 一个 Host-owned 固定 CPU pool、一个由 service 拥有的 Metal lane、一个带 process-owned native resource 与共享精确 `ResidencyManager` 的固定 `DeviceExecutorRegistry`、私有 `serial_debug`/`gpu_pipeline` route、一个 Host/device 权威 `ResourceLedger`、一个 process-domain operation gate、一个私有 lifecycle-admission registry、policy-aware 有界 ready storage、Run-scoped ReadyFence continuation routing、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority、visible commit、access-plan selection、residency eviction 或 resource ordering/fairness |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | execution trace 所有权 |
-| `PolicyRegistry` 与 policy binding | 验证 built-in/DSO policy type，拥有进程级 context 与 DSO lease，并为 Host-authored 不可变 candidate snapshot 排序 | worker、queue、resource grant、Run、Graph、completion 或 start authority |
+| `PolicyRegistry` 与 policy binding | 验证 built-in/DSO policy type，拥有进程级 context 与组合 native-handle/精确-capability lease，并为 Host-authored 不可变 candidate snapshot 排序 | worker、queue、resource grant、Run、Graph、completion 或 start authority |
 | `ResourceLedger` | 原子预留经过检查的 Host vector、隔离的 per-`DeviceId` memory/scratch plan，以及显式 plugin process/CPU/address-space/shared-memory/descriptor vector；校准 native actual byte；签发有界 Host grant、拆分 device lease 与一次性 identity-bound plugin token；保留 replay tombstone，并在真实 owner 结束后释放精确 authority；复制确定性 diagnostic | worker 构造、ordering policy、task dependency、对 queue/in-flight/I/O 的猜测、residency eviction 或 lifecycle admission |
 | `GraphRuntime::ExecutionRouteBinding` | 按 intent 存储一个复制的私有 route id 与非零 generation | 物理 route 所有权、policy context、worker、queue 或 reservation |
 
@@ -428,8 +428,11 @@ shared-memory、FD、mapping、socket、fork 或 exec 副作用前，针对相�
 只归还一次 vector；replay tombstone 会保持 spent，直到 ledger 销毁。
 
 同一份进程 trust policy 还会在 native mapping 前 gate operation 与 policy DSO。当前只有 Linux
-提供所需的不可逆 sealed-memfd exact-object 边界。Darwin、当前 Windows 与其他所有不支持的 native
-profile 都会对 operation、policy 与 isolated-runtime role 在候选 path 访问前返回
+提供所需的不可逆 sealed-memfd exact-object 边界。进程内 mapping 成功后，会把这份精确 capability
+与 native handle 放在同一共享 lease 中，并保留到最后一个 operation callback/generation 或 policy
+record/binding owner 退役；最终释放会先 unmap DSO，再关闭 sealed descriptor，因此复用某个
+`/proc/self/fd/N` 编号也不能改变 resident 对象的授权身份。Darwin、当前 Windows 与其他所有不支持的
+native profile 都会对 operation、policy 与 isolated-runtime role 在候选 path 访问前返回
 `ExactObjectUnsupported`；该拒绝之后不会发生 initializer、ABI callback、token 或 OS invocation
 副作用。
 

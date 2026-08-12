@@ -236,6 +236,18 @@ authorization with `ExactObjectUnsupported` before candidate path access.
 Current Windows and every other unsupported native profile use the same
 fail-closed boundary instead of a pathname fallback.
 
+The `/proc/self/fd/N` spelling is not an object identity after descriptor `N`
+closes: a later authorization may reuse that number while the first DSO remains
+mapped. Every successful operation or policy mapping therefore moves its exact
+`AuthorizedPluginFile` capability into the same shared native-library lease as
+the `dlopen` handle. Callbacks, transaction records, policy type records, and
+active bindings retain that combined lease. Final release destroys plugin-owned
+callback/context state, calls `dlclose`, and only then closes the sealed snapshot
+descriptor. Mapping, ABI, symbol, staging, publication, replacement, and
+allocation failures preserve the same handle-before-capability retirement order;
+the Host neither closes the descriptor after initial mapping nor retains it in a
+permanent global cache.
+
 Every `PluginTrustError`, including missing or unreadable trust configuration
 and an unopenable, unsigned, wrong-kind, or changed candidate, is exposed by
 the operation load report or policy Host surface as
@@ -389,18 +401,20 @@ visibility for every Host.
 A successful load records the absolute plugin path, operation keys registered
 or replaced through the host-provided registrar, the exact per-slot revisions
 owned by that plugin, pruned previous registry/source state, preallocated empty
-callback-retirement slots, and a retained RAII library handle. It also records a
-monotonic successful-load sequence. The production low-level loader requires an
+callback-retirement slots, and a retained RAII lease coupling the native handle
+to the exact authorization capability. It also records a monotonic
+successful-load sequence. The production low-level loader requires an
 unforgeable process-owner token, so a caller cannot publish into the global
 registry with a second source/handle/restoration map. `PluginManager` is the
 only production loading surface; there is no legacy wrapper that accepts a
 caller source map or copies manager state after a completed load transaction.
 
-Every registrar callback is wrapped with a shared dynamic-library lease. A
-resolved callback snapshot therefore remains callable after explicit global
-unload removes its registry entry. Monolithic callback results also attach the
-same lease to the host-private `NodeOutput` after public-value conversion. The
-lease is the first-declared and last-destroyed
+Every registrar callback is wrapped with the shared combined native-library
+lease. A resolved callback snapshot therefore remains callable after explicit
+global unload removes its registry entry without releasing either the mapping
+or its sealed exact-object descriptor. Monolithic callback results also attach
+the same lease to the host-private `NodeOutput` after public-value conversion.
+The lease is the first-declared and last-destroyed
 member. Copy construction retains it before copying payload state; move
 construction transfers the complete state through a no-throw swap. Copy and move
 assignment first stage a complete replacement, swap it into place, and let the
@@ -409,7 +423,8 @@ the old lease. A failed copy leaves the destination unchanged. Consequently,
 plugin-defined image/context deleters remain mapped even when a cached output is
 copied, moved, or overwritten after explicit global unload. These leases contain
 no reference back to the manager or registry and therefore form no ownership
-cycle.
+cycle. Once the last callback/value/generation owner retires, native unload runs
+before the matching capability closes its sealed descriptor.
 
 Unload consumes only preallocated keys, ownership tokens, snapshots, and
 retirement slots. For each scalar or device element, it compares the active
@@ -977,7 +992,8 @@ records. Loading one DSO follows this order:
 1. reject empty/NUL-containing paths and same-thread policy-callback mutation;
 2. normalize the absolute path, authorize the exact opened object as a signed
    `policy` artifact, and retain that capability;
-3. open the authorized descriptor path eagerly and locally;
+3. open the authorized descriptor path eagerly and locally, then move the
+   capability into the resulting shared native-library lease;
 4. resolve and call only `ps_policy_plugin_get_abi_version`;
 5. require exact ABI equality, then resolve and call
    `ps_policy_plugin_get_api_v1`;
@@ -988,10 +1004,11 @@ records. Loading one DSO follows this order:
 
 Missing symbols, ABI mismatch, malformed API bytes, invalid UTF-8, invalid
 bounds/masks, reserved built-in names, duplicate rows, or visible conflicts
-publish no type and no path for that DSO. The candidate DSO lease remains live
-while its callbacks and borrowed metadata are inspected and while staged
-records are destroyed. Only completely copied Host-owned metadata becomes
-observable.
+publish no type and no path for that DSO. The candidate combined handle and
+exact-capability lease remains live while its callbacks and borrowed metadata
+are inspected and while staged records are destroyed. Only completely copied
+Host-owned metadata becomes observable. Any rejection after native open closes
+the handle before releasing the capability.
 
 The registry calls no DSO callback while holding its mutex. The version, API,
 metadata, create, select, and destroy boundaries are all marked as policy
@@ -1007,11 +1024,12 @@ DSO remains published if a later filesystem or load operation fails.
 ## Policy Binding and Library Lifetime
 
 A visible type record owns copied metadata, the validated API table, its
-zero-based row index, and a shared DSO lease. Binding preparation copies that
-record under the registry lock, releases the lock, invokes `create`, and
-constructs one immutable class/generation/context owner before service
-publication. Built-ins use the same binding, generation, first-fault, and
-decision-validation interfaces without a DSO callback.
+zero-based row index, and a shared DSO lease coupling the native handle to the
+exact authorization capability. Binding preparation copies that record under
+the registry lock, releases the lock, invokes `create`, and constructs one
+immutable class/generation/context owner before service publication. Built-ins
+use the same binding, generation, first-fault, and decision-validation
+interfaces without a DSO callback.
 
 Interactive and Throughput bindings are distinct contexts with independent
 nonzero generations. Replacement prepares the candidate outside the service
@@ -1035,7 +1053,8 @@ preserving the two built-ins. Existing bindings retain their type records,
 callback table, contexts, and DSO leases and therefore remain valid until their
 last invocation and binding owner retire. This unload primitive is reserved for
 tests and process cleanup; it is not a public Host lifecycle command. The
-process registry itself intentionally has process lifetime.
+process registry itself intentionally has process lifetime. Final lease release
+unmaps the DSO before closing the exact sealed descriptor.
 
 An honest in-process callback that never returns can indefinitely retain its
 binding and DSO lease. The Host provides no timeout, forced unwind, destroy, or
@@ -1299,10 +1318,12 @@ and end-user selection, stronger platform sandbox profiles, and long-lived
 fuzz/audit evidence remain separately owned work.
 
 Shadow publication prevents partial operation-registry or policy-type-map
-visibility. DSO leases keep callback state and plugin-owned values or contexts
-inside the lifetime of their defining library. Matching operation restoration
-tokens and policy binding generations prevent a removed or replaced plugin from
-silently reclaiming current ownership.
+visibility. Combined DSO leases keep callback state and plugin-owned values or
+contexts inside the lifetime of their defining library while retaining the
+exact authorization capability for as long as that mapping is resident. Final
+release unmaps the DSO before closing the sealed descriptor. Matching operation
+restoration tokens and policy binding generations prevent a removed or replaced
+plugin from silently reclaiming current ownership.
 
 [ADR 0003](../adr/0003-process-owned-execution-resources.md) records the
 process-owned execution direction. [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)

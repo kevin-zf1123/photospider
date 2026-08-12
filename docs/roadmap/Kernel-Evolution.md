@@ -1695,7 +1695,13 @@ content digest. Duplicate `(kind, digest)` mappings are rejected so content and
 role select one package generation. Current operation and policy loaders open
 and hash a non-followed regular candidate on supported exact-object profiles,
 then load only a post-copy verified private snapshot. Linux seals an anonymous
-`memfd` before `/proc/self/fd/N` mapping. Darwin cannot prove an unprivileged
+`memfd` before `/proc/self/fd/N` mapping. Because a closed descriptor number can
+be reused while an earlier DSO remains mapped, operation callbacks/generations
+and policy records/bindings retain one combined lease containing both the
+native handle and its exact authorization capability. The final lease owner
+unmaps the DSO before closing the sealed descriptor, including post-open
+failure paths; this requires neither pathname respelling nor permanent global
+retention. Darwin cannot prove an unprivileged
 immutable exact-object boundary against a same-UID preopened writer, so all
 three native roles fail with `ExactObjectUnsupported` before candidate access.
 Missing, malformed, unsigned, wrong-kind, ambiguous, or changed content is
@@ -1722,8 +1728,9 @@ closed inherited-descriptor set, and reports limit setup failure before plugin
 code executes.
 
 This completes package and resource admission for the private Linux runtime
-composition, signed immutable-snapshot admission for Linux operation/policy
-loaders, and typed pre-access Darwin rejection for every native role. It does
+composition, signed immutable-snapshot admission plus mapping/capability
+lifetime consistency for Linux operation/policy loaders, and typed pre-access
+Darwin rejection for every native role. It does
 not select an end-user Graph operation, implement target operation ABI v1,
 isolate approved in-process DSOs, provide a general syscall/network sandbox,
 or prove OOM from `SIGKILL`.

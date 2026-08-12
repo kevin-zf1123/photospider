@@ -441,8 +441,14 @@ binds each closed operation/policy/isolated-runtime role, package id,
 generation, and SHA-256 content digest. Duplicate `(kind, digest)` mappings are
 rejected so content and role select one package generation. Linux copies an
 approved candidate into a four-seal anonymous `memfd` and maps operation/policy
-DSOs through `/proc/self/fd/N`. Darwin cannot prove an unprivileged immutable
-exact-object boundary against a same-UID preopened writer, so operation,
+DSOs through `/proc/self/fd/N`. Because that descriptor-number spelling can be
+reused, each successful mapping couples the exact authorization capability to
+the native handle in one shared lease retained by operation callbacks/
+generations or policy records/bindings. The final owner unmaps the DSO before
+closing the sealed descriptor; all post-open failure paths preserve the same
+order, and no permanent global capability cache is introduced. Darwin cannot
+prove an unprivileged immutable exact-object boundary against a same-UID
+preopened writer, so operation,
 policy, and isolated-runtime authorization all fail with
 `ExactObjectUnsupported` before candidate path access or native effects.
 Current Windows and every other unsupported native profile use the same

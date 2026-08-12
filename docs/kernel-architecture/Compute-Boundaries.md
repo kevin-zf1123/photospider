@@ -153,7 +153,7 @@ reserved-start transaction.
 | `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources and shared exact `ResidencyManager`, private `serial_debug` and `gpu_pipeline` routes, one Host/device-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, Run-scoped ReadyFence continuation routing, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, access-plan selection, residency eviction, or resource ordering/fairness |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
-| `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
+| `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and combined native-handle/exact-capability leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
 | `ResourceLedger` | Atomically reserve checked Host vectors, isolated per-`DeviceId` memory/scratch plans, and explicit plugin process/CPU/address-space/shared-memory/descriptor vectors; reconcile native actual bytes; mint bounded Host grants, split device leases, and one-use identity-bound plugin tokens; retain replay tombstones and release exact authority after its true owner ends; copy deterministic diagnostics | Worker creation, ordering policy, task dependencies, queue/in-flight/I/O guesses, residency eviction, or lifecycle admission |
 | `GraphRuntime::ExecutionRouteBinding` | Store one copied private route id and nonzero generation per intent | Physical route ownership, policy context, workers, queues, or reservations |
 
@@ -545,8 +545,13 @@ tombstone remains spent until the ledger is destroyed.
 
 The same process trust policy gates operation and policy DSOs before native
 mapping. Linux alone currently supplies the required irreversible sealed-memfd
-exact-object boundary. Darwin, current Windows, and every other unsupported
-native profile reject operation, policy, and isolated-runtime roles with
+exact-object boundary. A successful in-process mapping retains that exact
+capability in the same shared lease as the native handle through the final
+operation callback/generation or policy record/binding owner; final release
+unmaps the DSO before closing the sealed descriptor, so reuse of a
+`/proc/self/fd/N` number cannot change the resident object's authorized
+identity. Darwin, current Windows, and every other unsupported native profile
+reject operation, policy, and isolated-runtime roles with
 `ExactObjectUnsupported` before candidate path access; no initializer, ABI
 callback, token, or OS invocation effect can follow that rejection.
 

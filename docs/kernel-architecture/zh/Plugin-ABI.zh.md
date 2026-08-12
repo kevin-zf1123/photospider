@@ -181,6 +181,15 @@ descriptor 的无特权不可变 exact-object primitive，因此会对 operation
 授权都在候选 path 访问前返回 `ExactObjectUnsupported`。当前 Windows 及其他所有不支持的 native
 profile 使用同样的默认拒绝边界，不回退 pathname。
 
+描述符 `N` 关闭后，`/proc/self/fd/N` 这一拼写不再是对象身份：第一份 DSO 仍保持映射时，
+后续授权可能复用同一个编号。因而，每次 operation 或 policy 映射成功后，都会把它的精确
+`AuthorizedPluginFile` capability 移入与 `dlopen` handle 相同的共享 native-library lease。
+Callback、事务记录、policy type record 和活动 binding 都会保留这份组合 lease。最终释放会先
+销毁插件拥有的 callback/context state，再调用 `dlclose`，最后才关闭 sealed snapshot
+descriptor。Mapping、ABI、symbol、staging、publication、replacement 或 allocation 失败同样
+保持“handle 先于 capability 退役”的顺序；Host 既不会在首次 mapping 后立即关闭 descriptor，
+也不会把它永久保留在全局 cache 中。
+
 每个 `PluginTrustError`（包括 trust 配置缺失/不可读、候选无法打开、未签名、kind 错误或
 内容已变更）都会由 operation load report 或 policy Host surface 公开映射为
 `GraphErrc::InvalidParameter`。成功 trust authorization 后发生的 native `dlopen` failure 仍映射
@@ -287,20 +296,21 @@ active resize slot，通过 public `ImageBuffer` value 在不使用 OpenCV 的�
 
 一次成功加载会记录插件绝对路径、通过 host-provided registrar 注册或替换的 operation key、该 plugin
 实际拥有的精确 per-slot revision、裁剪后的先前 registry/source state、预分配的空 callback-retirement
-slot、RAII dynamic-library handle，以及单调递增的成功加载序号。生产低层 loader
+slot、把 native handle 与精确授权 capability 组合起来的 RAII lease，以及单调递增的成功加载序号。生产低层 loader
 要求不可伪造的 process-owner token，因此 caller 无法用第二套 source/handle/restoration map 向全局
 registry 发布 callback。`PluginManager` 是唯一生产加载入口；不存在接收 caller source map 或在加载事务
 提交后复制 manager state 的 legacy wrapper。
 
-每个 registrar callback 都由共享 dynamic-library lease 包装。因而，已解析 callback snapshot 在显式
-全局 unload 移除 registry entry 后仍可安全调用。Monolithic callback 的 public value 转成 host-private
-`NodeOutput` 后也会附着同一个 lease。该 lease 是第一个声明、最后销毁的 member；copy construction
+每个 registrar callback 都由共享的组合 native-library lease 包装。因而，已解析 callback snapshot 在显式
+全局 unload 移除 registry entry 后仍可安全调用，同时 mapping 及其 sealed exact-object descriptor 都保持
+存活。Monolithic callback 的 public value 转成 host-private `NodeOutput` 后也会附着同一个 lease。该 lease 是第一个声明、最后销毁的 member；copy construction
 会先保留 lease，再复制 payload
 state；move construction 会通过 no-throw swap 转移完整 state。Copy/move assignment 会先暂存完整
 replacement，再 swap 到位，并由 temporary 在释放旧 lease 前依次销毁旧
 image/ParameterValue/spatial/debug state；copy 失败时 destination 保持不变。因此，即使在显式全局 unload 后
 复制、移动或覆盖 cached output，plugin 定义的 image/context deleter 执行时仍保持 library mapped。
-这些 lease 不反向引用 manager 或 registry，因此不会形成 ownership cycle。
+这些 lease 不反向引用 manager 或 registry，因此不会形成 ownership cycle。当最后一个
+callback/value/generation owner 退役时，会先执行 native unload，再由匹配的 capability 关闭 sealed descriptor。
 
 卸载只消费预先分配的 key、ownership token、snapshot 与 retirement slot。对于每个 scalar 或 device
 element，它会比较 active revision 与 plugin publication token。匹配的 slot 从裁剪后的 predecessor
@@ -766,7 +776,8 @@ DSO 时按以下顺序执行：
 
 1. 拒绝空路径、含 NUL 的路径以及策略回调同线程发起的修改；
 2. 归一化绝对路径，把精确已打开对象授权为签名 `policy` artifact，并保留该 capability；
-3. 通过已授权 descriptor path 以 eager/local 方式打开；
+3. 通过已授权 descriptor path 以 eager/local 方式打开，然后把 capability 移入由此得到的
+   共享 native-library lease；
 4. 只解析并调用 `ps_policy_plugin_get_abi_version`；
 5. 要求 ABI 精确相等，然后解析并调用
    `ps_policy_plugin_get_api_v1`；
@@ -777,8 +788,9 @@ DSO 时按以下顺序执行：
 
 缺少符号、ABI 不匹配、API 字节格式错误、无效 UTF-8、无效边界/掩码、保留的
 内建名称、重复条目或可见名称冲突，都不会为该 DSO 发布任何类型或路径。检查
-回调和借用元数据时，以及销毁暂存记录时，候选 DSO 租约始终存活。最终只有
-完整复制到 Host 所有权的元数据可被观察。
+回调和借用元数据时，以及销毁暂存记录时，候选的组合 handle 与精确 capability 租约始终存活。
+最终只有完整复制到 Host 所有权的元数据可被观察。Native open 后发生任何拒绝时，都会先关闭
+handle，再释放 capability。
 
 注册表不会在持有 mutex 时调用 DSO 回调。版本、API、元数据、create、select
 和 destroy 边界都标记为策略回调区间。回调可以重入只读注册表观察；同线程的
@@ -791,8 +803,8 @@ load、scan、unload、binding creation 或服务级策略修改，会在等待�
 
 ## 策略绑定与库生命周期
 
-可见类型记录拥有复制的元数据、已校验 API 表、从零开始的条目索引以及共享 DSO
-租约。绑定准备阶段在注册表锁内复制该记录，释放锁后调用 `create`，并在服务
+可见类型记录拥有复制的元数据、已校验 API 表、从零开始的条目索引，以及把 native handle 与
+精确授权 capability 组合起来的共享 DSO 租约。绑定准备阶段在注册表锁内复制该记录，释放锁后调用 `create`，并在服务
 发布前构造一个不可变的类别/代次/上下文所有者。内建策略使用同一套绑定、代次、
 首故障和决策校验接口，但不调用 DSO。
 
@@ -812,6 +824,7 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 绑定继续保留其类型记录、回调表、上下文和 DSO 租约，因此在最后一次调用和最后
 一个绑定所有者退役前一直有效。该卸载原语只用于测试和进程清理，不是公共 Host
 生命周期命令。进程注册表本身有意具有进程生命周期。
+最终 lease 释放会先 unmap DSO，再关闭精确 sealed descriptor。
 
 诚实但永不返回的进程内回调可以无限期保留绑定和 DSO 租约。Host 不承诺跨该
 边界提供超时、强制展开、销毁或卸载进度。进程隔离的插件监管属于单独的架构
@@ -1013,9 +1026,10 @@ request。具体而言，`ExecutionService`、`WorkerManager`、embedded Host/CL
 进入该 wire。Atomic operation-ABI migration 与最终用户 selection、更强 platform sandbox
 profile、长期 fuzz/audit evidence 都仍属于分别拥有的后续工作。
 
-影子发布阻止操作注册表或策略类型 map 局部可见。DSO 租约让回调状态和插件拥有
-的值或上下文保持在其定义库的生命周期内。匹配的操作恢复 token 和策略绑定代次
-可防止已移除或替换的插件静默夺回当前所有权。
+影子发布阻止操作注册表或策略类型 map 局部可见。组合 DSO 租约让回调状态和插件拥有
+的值或上下文保持在其定义库的生命周期内，同时在 mapping 保持 resident 的整个期间保留精确授权
+capability。最终释放会先 unmap DSO，再关闭 sealed descriptor。匹配的操作恢复 token 和策略绑定
+代次可防止已移除或替换的插件静默夺回当前所有权。
 
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)记录
 进程级执行方向。[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)

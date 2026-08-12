@@ -1363,7 +1363,11 @@ Issue #104 新增一份由 `PHOTOSPIDER_PLUGIN_TRUST_MANIFEST`、
 重复 `(kind, digest)` 映射会被拒绝，因此内容与角色只会选择一个 package generation。在支持
 exact-object 的 profile 上，当前 operation/policy loader 会打开并 hash 不跟随 symlink 的普通
 候选，然后只加载复制后校验的私有 snapshot。Linux 在通过 `/proc/self/fd/N`
-mapping 前 seal anonymous `memfd`。Darwin 无法证明能够抵抗同 UID 预开写 descriptor 的无特权
+mapping 前 seal anonymous `memfd`。由于先前 DSO 仍保持 mapping 时，已关闭的 descriptor 编号
+可能被复用，operation callback/generation 与 policy record/binding 会保留一份同时包含 native
+handle 和精确授权 capability 的组合 lease。最后一个 lease owner 会先 unmap DSO，再关闭 sealed
+descriptor；native open 后的失败路径也遵循该顺序，不需要改写 pathname 或永久全局保留。
+Darwin 无法证明能够抵抗同 UID 预开写 descriptor 的无特权
 不可变 exact-object 边界，因此三个 native role 都会在候选访问前以
 `ExactObjectUnsupported` 失败。缺失、畸形、未签名、kind 错误、有歧义或内容已变更时默认拒绝；
 IPC caller 不能提供或修改 trust authority。
@@ -1384,7 +1388,8 @@ Linux 会把获批 runtime 复制到 sealed anonymous `memfd`，在 seal 后确�
 limit setup failure。
 
 这会完成私有 Linux runtime 组合的 package/resource admission、Linux operation/policy loader 的
-签名 immutable-snapshot admission，以及 Darwin 每个 native role 有类型的访问前拒绝。它不
+签名 immutable-snapshot admission 与 mapping/capability 生命周期一致性，以及 Darwin 每个 native
+role 有类型的访问前拒绝。它不
 会选择最终用户 Graph operation、实现目标 operation ABI v1、隔离获批进程内
 DSO、提供通用 syscall/network sandbox，或从 `SIGKILL` 证明 OOM。
 
