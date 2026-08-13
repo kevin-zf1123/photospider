@@ -200,6 +200,50 @@ require_ci_reusable_build() {
   return 1
 }
 
+# @brief Export test trust only when the configured build exposes its bundle.
+# @return Zero after an exact capability no-op or complete tuple export;
+#   nonzero when inventory or required material cannot prove a safe export.
+# @throws Nothing; malformed inventory and missing, nonregular, symlinked, or
+#   empty trust material return nonzero before any consumer process starts.
+# @note The exact test_plugin_trust_bundle target distinguishes pre-trust builds
+#   from trust-enabled builds independently of the broader runtime profile. A
+#   valid inventory without that target preserves inherited values as a legacy
+#   no-op. When present, canonical build/source paths replace all inherited
+#   values so direct entry points match CTest. No private key is exported.
+export_ci_plugin_trust_environment() {
+  local capability_status
+  local manifest="$BUILD_DIR/generated/plugin_trust/manifest.txt"
+  local signature="$BUILD_DIR/generated/plugin_trust/signature.hex"
+  local public_key=
+  public_key="$REPO_ROOT/tests/fixtures/trust/test_ed25519_public_key.pem"
+  local trust_file
+
+  if ci_target_exists test_plugin_trust_bundle; then
+    capability_status=0
+  else
+    capability_status=$?
+  fi
+  case "$capability_status" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      echo "Cannot determine plugin trust bundle capability from target" \
+        "inventory: $CI_TARGET_INVENTORY_FILE" >&2
+      return 2
+      ;;
+  esac
+
+  for trust_file in "$manifest" "$signature" "$public_key"; do
+    if [[ ! -f "$trust_file" || -L "$trust_file" || ! -s "$trust_file" ]]; then
+      echo "Required plugin trust material is unavailable: $trust_file" >&2
+      return 1
+    fi
+  done
+  export PHOTOSPIDER_PLUGIN_TRUST_MANIFEST="$manifest"
+  export PHOTOSPIDER_PLUGIN_TRUST_SIGNATURE="$signature"
+  export PHOTOSPIDER_PLUGIN_TRUST_PUBLIC_KEY="$public_key"
+}
+
 # @brief Configure a build tree or record strict reuse of its configuration.
 # @param $1 Log step name.
 # @return Zero on configuration/reuse success, otherwise nonzero.
@@ -256,33 +300,72 @@ capture_ci_target_inventory() {
     cmake --build "$BUILD_DIR" --target help
 }
 
-# @brief Check one exact target in the captured CMake target inventory.
+# @brief Check one exact target in a valid captured CMake target inventory.
 # @param $1 Exact CMake target name.
-# @return Zero when present, one when absent, or two without an inventory.
-# @throws Nothing; malformed or missing input is represented by status.
-# @note Both Makefile `... target` and Ninja `target: rule` help forms are
-#   accepted without interpreting the target as a regular expression.
+# @return Zero when present, one when absent, or two when the inventory is
+#   missing, nonregular, empty, unreadable, or structurally malformed.
+# @throws Nothing; invalid input is diagnosed and represented by status two.
+# @note Makefile `... target` and Ninja `target: rule` help forms are accepted
+#   without interpreting the target as a regular expression. Command/header
+#   records emitted by run_logged and either generator are ignored, while any
+#   other nonempty record makes absence unprovable and therefore fail-closed.
 ci_target_exists() {
   local target=$1
-  if [[ ! -f "$CI_TARGET_INVENTORY_FILE" ]]; then
-    echo "CMake target inventory is missing: $CI_TARGET_INVENTORY_FILE" >&2
+  local status
+  if [[ ! -f "$CI_TARGET_INVENTORY_FILE" || \
+        -L "$CI_TARGET_INVENTORY_FILE" || \
+        ! -s "$CI_TARGET_INVENTORY_FILE" ]]; then
+    echo "CMake target inventory is unavailable: $CI_TARGET_INVENTORY_FILE" \
+      >&2
     return 2
   fi
-  awk -v expected="$target" '
+
+  if awk -v expected="$target" '
     {
-      candidate = $1
-      if (candidate == "...") {
+      if ($0 ~ /^[[:space:]]*\$[[:space:]]/ ||
+          $0 == "The following are some of the valid targets for this Makefile:" ||
+          $0 ~ /^\[[0-9]+\/[0-9]+\][[:space:]]+All primary targets available:$/ ||
+          NF == 0) {
+        next
+      }
+      if ($1 == "...") {
+        if (NF < 2) {
+          malformed = 1
+          next
+        }
         candidate = $2
+      } else if ($1 ~ /:$/) {
+        candidate = $1
+      } else {
+        malformed = 1
+        next
       }
       sub(/:$/, "", candidate)
+      if (candidate == "") {
+        malformed = 1
+        next
+      }
+      target_count++
       if (candidate == expected) {
         found = 1
       }
     }
     END {
+      if (malformed || target_count == 0) {
+        exit 2
+      }
       exit found ? 0 : 1
     }
-  ' "$CI_TARGET_INVENTORY_FILE"
+  ' "$CI_TARGET_INVENTORY_FILE"; then
+    return 0
+  else
+    status=$?
+  fi
+  if ((status == 1)); then
+    return 1
+  fi
+  echo "CMake target inventory is malformed: $CI_TARGET_INVENTORY_FILE" >&2
+  return 2
 }
 
 # @brief Require every supplied CMake target to exist in the captured inventory.
@@ -308,7 +391,8 @@ require_ci_targets() {
 
 # @brief Classify the configured runtime validation contract.
 # @return Prints `legacy_scheduler` or `policy_execution` for one exact profile.
-# @throws Nothing; partial, mixed, or absent capability markers return nonzero.
+# @throws Nothing; partial, mixed, absent, or structurally invalid capability
+#   inventories return nonzero.
 # @note The markers identify complete test/plugin surfaces. They do not restore
 #   removed scheduler products or translate configuration across architectures.
 ci_runtime_contract() {

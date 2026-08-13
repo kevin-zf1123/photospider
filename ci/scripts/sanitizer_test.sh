@@ -59,6 +59,7 @@ case "$runtime_contract" in
       test_resource_admission \
       test_compute_service_split \
       test_propagation_contracts
+    export_ci_plugin_trust_environment
 
     run_gtest_checked "sanitizer_policy_execution_$SANITIZER" \
       "$BUILD_DIR/tests/test_policy_execution" \

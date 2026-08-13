@@ -59,6 +59,7 @@ case "$runtime_contract" in
       test_policy_execution \
       test_compute_run \
       test_resource_admission
+    export_ci_plugin_trust_environment
 
     run_gtest_checked policy_registry_repeat \
       "$BUILD_DIR/tests/test_policy_registry" "" \
