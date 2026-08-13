@@ -7,23 +7,21 @@
 #include <unistd.h>
 
 #include <array>
-#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
+#include <exception>
 #include <limits>
 #include <memory>
-#include <new>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
-#include "server/worker_artifact_data_plane_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
 
@@ -129,82 +127,6 @@ class ScopedSocketPair final {
   /** @brief Sole two descriptor owners. */
   std::array<int, 2U> descriptors_{{-1, -1}};
 };
-
-/**
- * @brief Owns one unique empty directory for temporary-occurrence tests.
- * @throws std::filesystem::filesystem_error when path discovery or cleanup
- * cannot be represented.
- * @throws std::runtime_error when the unique directory cannot be created.
- * @note Destruction removes only the exact test-owned path and is best effort.
- */
-class ScopedDataPlaneTestDirectory final {
- public:
-  /**
-   * @brief Creates one unique empty directory below the process temp root.
-   * @throws std::filesystem::filesystem_error when path discovery or creation
-   * fails.
-   * @throws std::runtime_error when `create_directory` reports no creation.
-   */
-  ScopedDataPlaneTestDirectory() {
-    static std::atomic<std::uint64_t> sequence{0U};
-    const auto ticks =
-        std::chrono::steady_clock::now().time_since_epoch().count();
-    path_ = std::filesystem::temp_directory_path() /
-            ("photospider-data-plane-cleanup-" + std::to_string(ticks) + "-" +
-             std::to_string(sequence.fetch_add(1U)));
-    if (!std::filesystem::create_directory(path_)) {
-      throw std::runtime_error("failed to create data-plane test directory");
-    }
-  }
-
-  /**
-   * @brief Best-effort removes the exact test-owned directory.
-   * @throws Nothing; filesystem cleanup errors are retained only locally.
-   */
-  ~ScopedDataPlaneTestDirectory() noexcept {
-    std::error_code error;
-    std::filesystem::remove_all(path_, error);
-  }
-
-  /**
-   * @brief Prevents duplicate directory ownership.
-   * @param other Existing owner that remains unchanged.
-   * @throws Nothing because the operation is deleted.
-   */
-  ScopedDataPlaneTestDirectory(const ScopedDataPlaneTestDirectory& other) =
-      delete;
-
-  /**
-   * @brief Prevents duplicate directory assignment.
-   * @param other Existing owner that remains unchanged.
-   * @return No assignment result because the operation is deleted.
-   * @throws Nothing because the operation is deleted.
-   */
-  ScopedDataPlaneTestDirectory& operator=(
-      const ScopedDataPlaneTestDirectory& other) = delete;
-
-  /**
-   * @brief Returns the exact existing test directory.
-   * @return Borrowed path valid for this owner lifetime.
-   * @throws Nothing.
-   */
-  const std::filesystem::path& path() const noexcept { return path_; }
-
- private:
-  /** @brief Sole recursively cleaned test directory. */
-  std::filesystem::path path_;
-};
-
-TEST(WorkerArtifactDataPlane,
-     PostMkstempAllocationFailureLeavesNoTemporaryName) {
-  ScopedDataPlaneTestDirectory directory;
-
-  EXPECT_THROW(
-      WorkerArtifactDataPlaneTestAccess::throw_after_private_temporary_creation(
-          directory.path()),
-      std::bad_alloc);
-  EXPECT_TRUE(std::filesystem::is_empty(directory.path()));
-}
 
 /**
  * @brief Builds one complete bounded Job resource request.
@@ -341,8 +263,7 @@ ArtifactRecord maximum_assignment_checkpoint(const JobSpec& spec,
  * @brief Builds the maximum declared Assignment metadata with one-byte bulk.
  * @return Complete Assignment whose every bounded text/resource/receipt field
  * reaches its declared maximum while artifact bytes remain external.
- * @throws Contract, data-plane, filesystem, hash, or allocation failures
- * unchanged.
+ * @throws Contract, stream-setup, hash, or allocation failures unchanged.
  */
 PreparedWorkerAssignment maximum_metadata_assignment() {
   const ArtifactId checkpoint_id(
@@ -378,10 +299,9 @@ PreparedWorkerAssignment maximum_metadata_assignment() {
  * @param spec Immutable JobSpec retained by the assignment.
  * @param checkpoint Optional authorized checkpoint retained by the assignment.
  * @return Pair containing prepared control metadata and live descriptor owner.
- * @throws Data-plane, contract, filesystem, hash, or allocation failures
- * unchanged.
- * @note The returned owner must remain alive while its metadata or staged
- * occurrence is used by a test.
+ * @throws Data-plane, contract, socket, hash, or allocation failures unchanged.
+ * @note The returned owner must remain alive while its metadata or directional
+ * stream lane is used by a test.
  */
 std::pair<PreparedWorkerAssignment, WorkerArtifactDataPlane>
 prepared_assignment_with_data_plane(
@@ -451,6 +371,144 @@ JobAttemptReport frame_bound_success_report(AttemptIdentity identity,
  */
 std::chrono::steady_clock::time_point protocol_deadline() noexcept {
   return std::chrono::steady_clock::now() + std::chrono::seconds(2);
+}
+
+/**
+ * @brief Result of one concurrently staged unit-test candidate.
+ * @throws Nothing for default construction; retained values may allocate.
+ */
+struct CollectedWorkerOutput final {
+  /** @brief Metadata emitted by the worker-side staging operation. */
+  std::optional<WorkerOutputDataReference> reference;
+  /** @brief Exact bytes drained from the manager-side lane. */
+  std::vector<std::byte> payload;
+  /** @brief Independently accumulated digest of the drained bytes. */
+  ArtifactContentDigest digest;
+};
+
+/**
+ * @brief Stages worker output while concurrently draining its bounded lane.
+ * @param data_plane Non-null exact two-ended test owner.
+ * @param spec Immutable assignment JobSpec.
+ * @param output_stage Exact manager-derived output stage metadata.
+ * @param report Non-null report mutated by worker-side staging.
+ * @return Candidate metadata plus exact manager-received bytes.
+ * @throws Worker staging, stream, deadline, allocation, or thread failures
+ * unchanged.
+ * @note The sender thread represents only the killable worker side for this
+ * unit boundary; production lifecycle coverage uses a real execed fixture.
+ */
+CollectedWorkerOutput stage_and_collect_output(
+    WorkerArtifactDataPlane* data_plane, const JobSpec& spec,
+    const WorkerOutputStageReference& output_stage, JobAttemptReport* report) {
+  if (data_plane == nullptr || report == nullptr) {
+    throw std::invalid_argument("worker output test state is incomplete");
+  }
+  CollectedWorkerOutput collected;
+  ArtifactContentHasher hasher;
+  std::exception_ptr sender_failure;
+  std::thread sender([&] {
+    try {
+      collected.reference = stage_worker_output(
+          data_plane->worker_output_descriptor(), spec, output_stage, report);
+      data_plane->close_worker_descriptors();
+    } catch (...) {
+      sender_failure = std::current_exception();
+      data_plane->close_worker_descriptors();
+    }
+  });
+  try {
+    bool eof = false;
+    const auto deadline = protocol_deadline();
+    while (!eof) {
+      const std::size_t prior_size = collected.payload.size();
+      const WorkerDataPlaneIoStatus status =
+          data_plane->receive_output_chunk(&collected.payload);
+      if (status == WorkerDataPlaneIoStatus::Progress) {
+        hasher.update(collected.payload.data() + prior_size,
+                      collected.payload.size() - prior_size);
+      }
+      if (status == WorkerDataPlaneIoStatus::EndOfStream) {
+        eof = true;
+        collected.digest = hasher.finish();
+        data_plane->close_manager_output_descriptor();
+      } else if (status == WorkerDataPlaneIoStatus::WouldBlock) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+          throw std::runtime_error("worker output test drain timed out");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
+  } catch (...) {
+    data_plane->close_manager_output_descriptor();
+    sender.join();
+    throw;
+  }
+  sender.join();
+  if (sender_failure != nullptr) {
+    std::rethrow_exception(sender_failure);
+  }
+  return collected;
+}
+
+/**
+ * @brief Transfers and materializes one checkpoint across the stream pair.
+ * @param data_plane Non-null exact two-ended test owner.
+ * @param assignment Metadata-only worker assignment to hydrate.
+ * @param metadata Exact decoded checkpoint/output references.
+ * @param payload Trusted manager-side checkpoint bytes.
+ * @return Null for no checkpoint, otherwise the validated independent record.
+ * @throws Stream, validation, allocation, deadline, or thread failures
+ * unchanged.
+ */
+std::shared_ptr<const ArtifactRecord> transfer_checkpoint_for_test(
+    WorkerArtifactDataPlane* data_plane, const JobAssignment& assignment,
+    const WorkerDataPlaneAssignment& metadata,
+    const std::vector<std::byte>& payload) {
+  if (data_plane == nullptr) {
+    throw std::invalid_argument("worker checkpoint test plane is null");
+  }
+  std::exception_ptr sender_failure;
+  std::thread sender([&] {
+    try {
+      std::size_t offset = 0U;
+      const auto deadline = protocol_deadline();
+      while (offset != payload.size()) {
+        const WorkerDataPlaneIoStatus status =
+            data_plane->send_checkpoint_chunk(payload, &offset);
+        if (status == WorkerDataPlaneIoStatus::EndOfStream) {
+          throw std::runtime_error("worker checkpoint test peer closed");
+        }
+        if (status == WorkerDataPlaneIoStatus::WouldBlock) {
+          if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("worker checkpoint test send timed out");
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+      data_plane->close_manager_checkpoint_descriptor();
+    } catch (...) {
+      sender_failure = std::current_exception();
+      data_plane->close_manager_checkpoint_descriptor();
+    }
+  });
+  std::shared_ptr<const ArtifactRecord> checkpoint;
+  std::exception_ptr receiver_failure;
+  try {
+    checkpoint = materialize_worker_checkpoint(
+        data_plane->worker_checkpoint_descriptor(), assignment, metadata);
+  } catch (...) {
+    receiver_failure = std::current_exception();
+  }
+  data_plane->close_worker_descriptors();
+  sender.join();
+  if (sender_failure != nullptr) {
+    std::rethrow_exception(sender_failure);
+  }
+  if (receiver_failure != nullptr) {
+    std::rethrow_exception(receiver_failure);
+  }
+  return checkpoint;
 }
 
 /**
@@ -578,9 +636,10 @@ TEST(WorkerProtocol, ReportControlPayloadIsIndependentOfCandidateBytes) {
   JobAttemptReport report =
       frame_bound_success_report(assignment_and_plane.first.assignment.identity,
                                  "candidate staged outside control", 1U << 20U);
-  const std::optional<WorkerOutputDataReference> output = stage_worker_output(
-      assignment_and_plane.second.worker_output_descriptor(), *spec,
+  const CollectedWorkerOutput staged = stage_and_collect_output(
+      &assignment_and_plane.second, *spec,
       assignment_and_plane.first.data_plane.output, &report);
+  const std::optional<WorkerOutputDataReference>& output = staged.reference;
   const PreparedWorkerReport prepared{std::move(report), output};
 
   const WorkerProtocolFrame frame = encode_worker_report(
@@ -705,6 +764,22 @@ TEST(WorkerProtocol, StatefulDecoderPreservesHeaderAndPayloadAcrossTimeouts) {
   EXPECT_EQ(frame.payload, expected);
 }
 
+TEST(WorkerProtocol, RoundTripsCompletionReadyAcknowledgementIdentity) {
+  ScopedSocketPair sockets;
+  const JobSpec spec(GraphArtifactId("graph.protocol"), 7,
+                     OutputSlotId("image.final"), protocol_resources());
+  const AttemptIdentity identity = protocol_identity(spec);
+
+  send_worker_identity(sockets.at(0U), WorkerMessageKind::CompletionReady,
+                       identity, protocol_deadline());
+  const WorkerProtocolFrame frame =
+      read_worker_frame(sockets.at(1U), protocol_deadline());
+
+  EXPECT_EQ(frame.kind, WorkerMessageKind::CompletionReady);
+  EXPECT_EQ(decode_worker_identity(frame, WorkerMessageKind::CompletionReady),
+            identity);
+}
+
 TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
   ScopedSocketPair sockets;
   auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.protocol"),
@@ -726,10 +801,10 @@ TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
     }
   }
 
-  const std::optional<WorkerOutputDataReference> output = stage_worker_output(
-      assignment_and_plane.second.worker_output_descriptor(), *spec,
+  CollectedWorkerOutput staged = stage_and_collect_output(
+      &assignment_and_plane.second, *spec,
       assignment_and_plane.first.data_plane.output, &sent);
-  assignment_and_plane.second.close_worker_descriptors();
+  const std::optional<WorkerOutputDataReference>& output = staged.reference;
   const PreparedWorkerReport prepared{sent, output};
   send_worker_report(sockets.at(0U), prepared, *spec,
                      assignment_and_plane.first.data_plane.output,
@@ -740,7 +815,8 @@ TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
       frame, *spec, assignment_and_plane.first.data_plane.output);
   const JobAttemptReport received =
       assignment_and_plane.second.materialize_report(
-          std::move(received_metadata.report), received_metadata.output);
+          std::move(received_metadata.report), received_metadata.output,
+          std::move(staged.payload), staged.digest);
 
   ASSERT_TRUE(received.image.has_value());
   EXPECT_NE(received.image->data.get(), source.data.get());
@@ -773,9 +849,9 @@ TEST(WorkerProtocol, MaterializesCheckpointLargerThanControlBound) {
   PreparedWorkerAssignment decoded =
       receive_worker_assignment(sockets.at(1U), protocol_deadline());
   ASSERT_EQ(decoded.assignment.checkpoint, nullptr);
-  decoded.assignment.checkpoint = materialize_worker_checkpoint(
-      assignment_and_plane.second.worker_checkpoint_descriptor(),
-      decoded.assignment, decoded.data_plane);
+  decoded.assignment.checkpoint = transfer_checkpoint_for_test(
+      &assignment_and_plane.second, decoded.assignment, decoded.data_plane,
+      assignment_and_plane.first.assignment.checkpoint->payload);
 
   ASSERT_NE(decoded.assignment.checkpoint, nullptr);
   EXPECT_EQ(decoded.assignment.checkpoint->payload.size(), kCheckpointBytes);
@@ -811,9 +887,10 @@ TEST(WorkerProtocol, SuccessfulCandidateAboveResourcesBecomesTypedFailure) {
   JobAttemptReport report = frame_bound_success_report(
       assignment_and_plane.first.assignment.identity, "candidate computed", 2U);
 
-  const std::optional<WorkerOutputDataReference> output = stage_worker_output(
-      assignment_and_plane.second.worker_output_descriptor(), *spec,
+  const CollectedWorkerOutput staged = stage_and_collect_output(
+      &assignment_and_plane.second, *spec,
       assignment_and_plane.first.data_plane.output, &report);
+  const std::optional<WorkerOutputDataReference>& output = staged.reference;
   const PreparedWorkerReport prepared{report, output};
   const WorkerProtocolFrame frame = encode_worker_report(
       prepared, *spec, assignment_and_plane.first.data_plane.output);
@@ -838,16 +915,120 @@ TEST(WorkerProtocol, RejectsOutputDigestThatDoesNotMatchStagedBytes) {
   auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
   JobAttemptReport report = frame_bound_success_report(
       assignment_and_plane.first.assignment.identity, "candidate computed", 8U);
-  std::optional<WorkerOutputDataReference> output = stage_worker_output(
-      assignment_and_plane.second.worker_output_descriptor(), *spec,
+  CollectedWorkerOutput staged = stage_and_collect_output(
+      &assignment_and_plane.second, *spec,
       assignment_and_plane.first.data_plane.output, &report);
+  std::optional<WorkerOutputDataReference> output = staged.reference;
   ASSERT_TRUE(output.has_value());
   output->content_digest.bytes.at(0U) ^= std::byte{0x01};
-  assignment_and_plane.second.close_worker_descriptors();
 
   EXPECT_THROW(
-      assignment_and_plane.second.materialize_report(std::move(report), output),
+      assignment_and_plane.second.materialize_report(
+          std::move(report), output, std::move(staged.payload), staged.digest),
       WorkerArtifactDataPlaneError);
+}
+
+TEST(WorkerProtocol, RejectsRealCheckpointReferenceMismatchBeforeLaneRead) {
+  const ArtifactId checkpoint_id("artifact.protocol.reference-checkpoint");
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.checkpoint-reference-mismatch"), 7,
+      OutputSlotId("image.final"), protocol_resources(), checkpoint_id);
+  auto assignment_and_plane = prepared_assignment_with_data_plane(
+      spec, std::make_shared<const ArtifactRecord>(
+                maximum_assignment_checkpoint(*spec, 32U)));
+  JobAssignment worker_assignment = assignment_and_plane.first.assignment;
+  worker_assignment.checkpoint.reset();
+  WorkerDataPlaneAssignment mismatched = assignment_and_plane.first.data_plane;
+  ASSERT_TRUE(mismatched.checkpoint.has_value());
+  mismatched.checkpoint->reference_id.append(".stale");
+
+  try {
+    static_cast<void>(materialize_worker_checkpoint(
+        assignment_and_plane.second.worker_checkpoint_descriptor(),
+        worker_assignment, mismatched));
+    FAIL() << "checkpoint reference mismatch was accepted";
+  } catch (const WorkerArtifactDataPlaneError& error) {
+    EXPECT_NE(
+        std::string(error.what()).find("worker checkpoint metadata is invalid"),
+        std::string::npos);
+  }
+}
+
+TEST(WorkerProtocol,
+     RejectsRealCheckpointContentMismatchOnlyInsideKillableLaneReader) {
+  const ArtifactId checkpoint_id("artifact.protocol.content-checkpoint");
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.checkpoint-content-mismatch"), 7,
+      OutputSlotId("image.final"), protocol_resources(), checkpoint_id);
+  auto checkpoint = std::make_shared<ArtifactRecord>(
+      maximum_assignment_checkpoint(*spec, 32U));
+  auto assignment_and_plane =
+      prepared_assignment_with_data_plane(spec, checkpoint);
+  checkpoint->payload.at(0U) ^= std::byte{0x01};
+
+  EXPECT_NO_THROW(encode_worker_assignment(assignment_and_plane.first));
+  JobAssignment worker_assignment = assignment_and_plane.first.assignment;
+  worker_assignment.checkpoint.reset();
+  try {
+    static_cast<void>(transfer_checkpoint_for_test(
+        &assignment_and_plane.second, worker_assignment,
+        assignment_and_plane.first.data_plane, checkpoint->payload));
+    FAIL() << "checkpoint content mismatch was accepted";
+  } catch (const WorkerArtifactDataPlaneError& error) {
+    EXPECT_EQ(std::string(error.what()),
+              "worker checkpoint content digest is inconsistent");
+  }
+}
+
+TEST(WorkerProtocol, RejectsRealOutputReferenceMismatchAtExactStageJoin) {
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.output-reference-mismatch"), 7,
+      OutputSlotId("image.final"), protocol_resources());
+  auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
+  JobAttemptReport report =
+      frame_bound_success_report(assignment_and_plane.first.assignment.identity,
+                                 "candidate computed", 32U);
+  CollectedWorkerOutput staged = stage_and_collect_output(
+      &assignment_and_plane.second, *spec,
+      assignment_and_plane.first.data_plane.output, &report);
+  ASSERT_TRUE(staged.reference.has_value());
+  staged.reference->reference_id.append(".stale");
+
+  try {
+    static_cast<void>(assignment_and_plane.second.materialize_report(
+        std::move(report), staged.reference, std::move(staged.payload),
+        staged.digest));
+    FAIL() << "output reference mismatch was accepted";
+  } catch (const WorkerArtifactDataPlaneError& error) {
+    EXPECT_EQ(std::string(error.what()),
+              "worker output metadata does not join its assigned stage");
+  }
+}
+
+TEST(WorkerProtocol, RejectsRealOutputDescriptorMismatchAfterReferenceJoin) {
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.output-descriptor-mismatch"), 7,
+      OutputSlotId("image.final"), protocol_resources());
+  auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
+  JobAttemptReport report =
+      frame_bound_success_report(assignment_and_plane.first.assignment.identity,
+                                 "candidate computed", 32U);
+  CollectedWorkerOutput staged = stage_and_collect_output(
+      &assignment_and_plane.second, *spec,
+      assignment_and_plane.first.data_plane.output, &report);
+  ASSERT_TRUE(staged.reference.has_value());
+  ++staged.reference->descriptor.width;
+
+  try {
+    static_cast<void>(assignment_and_plane.second.materialize_report(
+        std::move(report), staged.reference, std::move(staged.payload),
+        staged.digest));
+    FAIL() << "output descriptor mismatch was accepted";
+  } catch (const WorkerArtifactDataPlaneError& error) {
+    EXPECT_NE(
+        std::string(error.what()).find("worker output descriptor is invalid"),
+        std::string::npos);
+  }
 }
 
 TEST(WorkerProtocol, RejectsUnsupportedVersionBeforePayloadAllocation) {
@@ -884,9 +1065,10 @@ TEST(WorkerProtocol, RejectsWorkerControlledImageShapeBeyondJobBounds) {
   sent.settled = true;
   sent.failure = JobAttemptFailure::None;
   sent.image = make_aligned_cpu_image_buffer(1, 1, 1, DataType::UINT8, 64U);
-  const std::optional<WorkerOutputDataReference> output = stage_worker_output(
-      assignment_and_plane.second.worker_output_descriptor(), *spec,
+  const CollectedWorkerOutput staged = stage_and_collect_output(
+      &assignment_and_plane.second, *spec,
       assignment_and_plane.first.data_plane.output, &sent);
+  const std::optional<WorkerOutputDataReference>& output = staged.reference;
   ASSERT_TRUE(output.has_value());
   const PreparedWorkerReport prepared{sent, output};
   send_worker_report(sockets.at(0U), prepared, *spec,

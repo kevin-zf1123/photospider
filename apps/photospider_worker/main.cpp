@@ -178,6 +178,7 @@ void send_identity_locked(int fd, WorkerMessageKind kind,
  * @param cancellation_requested Non-null monotonic cancellation output.
  * @param control_failed Non-null monotonic protocol/channel failure output.
  * @param write_mutex Non-null sole socket-write serializer.
+ * @param frame_decoder Non-null decoder retained through completion readiness.
  * @return Nothing when `done` becomes true or control fails.
  * @throws Nothing; all failures set `control_failed` and request cancellation.
  * @note One decoder retains partial Cancel header/payload bytes across short
@@ -192,11 +193,14 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
                       const std::atomic<bool>* done,
                       std::atomic<bool>* cancellation_requested,
                       std::atomic<bool>* control_failed,
-                      std::mutex* write_mutex) noexcept {
+                      std::mutex* write_mutex,
+                      WorkerFrameDecoder* frame_decoder) noexcept {
   try {
+    if (frame_decoder == nullptr) {
+      throw std::invalid_argument("worker control decoder is null");
+    }
     auto next_heartbeat = checked_worker_deadline(
         std::chrono::steady_clock::now(), heartbeat_interval);
-    WorkerFrameDecoder frame_decoder;
     while (!done->load(std::memory_order_acquire)) {
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_heartbeat) {
@@ -206,7 +210,7 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
             std::chrono::steady_clock::now(), heartbeat_interval);
       }
       try {
-        WorkerProtocolFrame frame = frame_decoder.read_frame(
+        WorkerProtocolFrame frame = frame_decoder->read_frame(
             fd, std::min(next_heartbeat, checked_worker_deadline(
                                              std::chrono::steady_clock::now(),
                                              kControlPollInterval)));
@@ -227,9 +231,53 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
 }
 
 /**
+ * @brief Waits for manager completion readiness after one terminal Report.
+ * @param fd Connected manager control socket.
+ * @param identity Exact current worker lease.
+ * @param deadline Absolute report/acknowledgement deadline.
+ * @param decoder Non-null stateful decoder retained from the control loop.
+ * @return Nothing after one exact `CompletionReady` identity.
+ * @throws Worker protocol timeout, EOF, channel, malformed-kind, or identity
+ * failures unchanged.
+ * @note A late exact Cancel may race the stopped heartbeat/control loop. It is
+ * consumed without rewriting the already settled Report; all other kinds fail
+ * closed. The worker stays signalable throughout this bounded wait.
+ */
+void await_completion_ready(int fd, const AttemptIdentity& identity,
+                            std::chrono::steady_clock::time_point deadline,
+                            WorkerFrameDecoder* decoder) {
+  if (decoder == nullptr) {
+    throw std::invalid_argument("worker completion decoder is null");
+  }
+  for (;;) {
+    const WorkerProtocolFrame frame = decoder->read_frame(fd, deadline);
+    if (frame.kind == WorkerMessageKind::CompletionReady) {
+      if (decode_worker_identity(frame, WorkerMessageKind::CompletionReady) !=
+          identity) {
+        throw WorkerProtocolError(
+            "worker completion acknowledgement identity does not match its "
+            "lease");
+      }
+      return;
+    }
+    if (frame.kind == WorkerMessageKind::Cancel) {
+      if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
+          identity) {
+        throw WorkerProtocolError(
+            "late worker cancel identity does not match its lease");
+      }
+      continue;
+    }
+    throw WorkerProtocolError(
+        "worker received an invalid frame while awaiting completion");
+  }
+}
+
+/**
  * @brief Executes one received assignment and emits at most one report.
  * @param launch Exact validated manager-selected bootstrap policy.
- * @return Process exit code: zero only after one report was sent cleanly.
+ * @return Process exit code: zero only after one report was sent cleanly and
+ * the manager acknowledged its exact completed metadata/data-plane join.
  * @throws WorkerProtocolError and its timeout, EOF, or channel subclasses for
  * assignment receipt, acceptance, or report transport failure.
  * @throws std::invalid_argument for invalid assignment/report contracts or a
@@ -245,7 +293,9 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
  * @note The control thread contains its own exceptions and maps them to exit
  * code 4. Any exception escaping resolver construction or Embedded Host
  * execution propagates unchanged only after `done` is published and the
- * control thread is joined.
+ * control thread is joined. The worker remains alive and
+ * manager-terminable while synchronously awaiting `CompletionReady` under the
+ * same absolute report-I/O deadline.
  */
 int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   WorkerDataDescriptor checkpoint_data(launch.checkpoint_data_fd);
@@ -271,10 +321,11 @@ int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   std::atomic<bool> done{false};
   std::atomic<bool> cancellation_requested{false};
   std::atomic<bool> control_failed{false};
+  WorkerFrameDecoder control_decoder;
   std::thread control(run_control_loop, launch.control_fd,
                       prepared.assignment.identity, prepared.heartbeat_interval,
                       launch.io_timeout, &done, &cancellation_requested,
-                      &control_failed, &write_mutex);
+                      &control_failed, &write_mutex, &control_decoder);
 
   JobAttemptReport report;
   try {
@@ -306,15 +357,18 @@ int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   if (control_failed.load(std::memory_order_acquire)) {
     return 4;
   }
+  const auto completion_deadline = checked_worker_deadline(
+      std::chrono::steady_clock::now(), launch.io_timeout);
   {
     std::lock_guard<std::mutex> lock(write_mutex);
     PreparedWorkerReport prepared_report{std::move(report),
                                          std::move(output_reference)};
     send_worker_report(launch.control_fd, prepared_report,
                        *prepared.assignment.spec, prepared.data_plane.output,
-                       checked_worker_deadline(std::chrono::steady_clock::now(),
-                                               launch.io_timeout));
+                       completion_deadline);
   }
+  await_completion_ready(launch.control_fd, prepared.assignment.identity,
+                         completion_deadline, &control_decoder);
   static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
   return 0;
 }

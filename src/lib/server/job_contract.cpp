@@ -29,192 +29,152 @@ constexpr std::uint32_t rotate_right(std::uint32_t value,
   return (value >> bits) | (value << (32U - bits));
 }
 
-/**
- * @brief Dependency-neutral incremental SHA-256 calculator.
- *
- * @throws Nothing for construction; update/finalization validate lifecycle and
- * length bounds.
- * @note The instance is single-threaded and single-use after `finish()`.
- */
-class Sha256 final {
- public:
-  /**
-   * @brief Creates the standard SHA-256 initial state with no input bytes.
-   * @throws Nothing.
-   * @note The new instance accepts `update()` calls until one `finish()`.
-   */
-  Sha256() noexcept
-      : state_{0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
-               0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U} {}
+}  // namespace
 
-  /**
-   * @brief Appends raw bytes to the digest input.
-   * @param data Borrowed bytes, null only when `size` is zero.
-   * @param size Number of bytes to append.
-   * @return Nothing.
-   * @throws std::invalid_argument for null nonempty input or post-finish use.
-   * @throws std::overflow_error when the encoded bit length would overflow.
-   */
-  void update(const std::byte* data, std::size_t size) {
-    if (finished_) {
-      throw std::invalid_argument("SHA-256 is already finalized");
-    }
-    if (size != 0U && data == nullptr) {
-      throw std::invalid_argument("SHA-256 input is null and nonempty");
-    }
-    if (size >
-        (std::numeric_limits<std::uint64_t>::max() / 8U) - total_bytes_) {
-      throw std::overflow_error("SHA-256 bit length overflowed");
-    }
-    total_bytes_ += static_cast<std::uint64_t>(size);
-    while (size != 0U) {
-      const std::size_t copied = std::min(size, buffer_.size() - buffered_);
-      std::memcpy(buffer_.data() + buffered_, data, copied);
-      buffered_ += copied;
-      data += copied;
-      size -= copied;
-      if (buffered_ == buffer_.size()) {
-        compress(buffer_.data());
-        buffered_ = 0U;
-      }
-    }
+/** @copydoc ps::server::ArtifactContentHasher::ArtifactContentHasher */
+ArtifactContentHasher::ArtifactContentHasher() noexcept
+    : state_{0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+             0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U} {
+}  // NOLINT(whitespace/indent_namespace)
+
+/** @copydoc ps::server::ArtifactContentHasher::update */
+void ArtifactContentHasher::update(const std::byte* data, std::size_t size) {
+  if (finished_) {
+    throw std::invalid_argument("SHA-256 is already finalized");
   }
-
-  /**
-   * @brief Finalizes the exact SHA-256 value.
-   * @return Thirty-two bytes in network/display order.
-   * @throws std::logic_error when called more than once.
-   */
-  std::array<std::byte, 32U> finish() {
-    if (finished_) {
-      throw std::logic_error("SHA-256 was finalized more than once");
-    }
-    finished_ = true;
-    const std::uint64_t bit_length = total_bytes_ * 8U;
-    buffer_[buffered_++] = std::byte{0x80};
-    if (buffered_ > 56U) {
-      std::fill(buffer_.begin() + static_cast<std::ptrdiff_t>(buffered_),
-                buffer_.end(), std::byte{0});
+  if (size != 0U && data == nullptr) {
+    throw std::invalid_argument("SHA-256 input is null and nonempty");
+  }
+  if (size > (std::numeric_limits<std::uint64_t>::max() / 8U) - total_bytes_) {
+    throw std::overflow_error("SHA-256 bit length overflowed");
+  }
+  total_bytes_ += static_cast<std::uint64_t>(size);
+  while (size != 0U) {
+    const std::size_t copied = std::min(size, buffer_.size() - buffered_);
+    std::memcpy(buffer_.data() + buffered_, data, copied);
+    buffered_ += copied;
+    data += copied;
+    size -= copied;
+    if (buffered_ == buffer_.size()) {
       compress(buffer_.data());
       buffered_ = 0U;
     }
+  }
+}
+
+/** @copydoc ps::server::ArtifactContentHasher::finish */
+ArtifactContentDigest ArtifactContentHasher::finish() {
+  if (finished_) {
+    throw std::logic_error("SHA-256 was finalized more than once");
+  }
+  finished_ = true;
+  const std::uint64_t bit_length = total_bytes_ * 8U;
+  buffer_[buffered_++] = std::byte{0x80};
+  if (buffered_ > 56U) {
     std::fill(buffer_.begin() + static_cast<std::ptrdiff_t>(buffered_),
-              buffer_.begin() + 56, std::byte{0});
-    for (std::size_t index = 0U; index < 8U; ++index) {
-      buffer_[56U + index] =
-          static_cast<std::byte>((bit_length >> ((7U - index) * 8U)) & 0xffU);
-    }
+              buffer_.end(), std::byte{0});
     compress(buffer_.data());
+    buffered_ = 0U;
+  }
+  std::fill(buffer_.begin() + static_cast<std::ptrdiff_t>(buffered_),
+            buffer_.begin() + 56, std::byte{0});
+  for (std::size_t index = 0U; index < 8U; ++index) {
+    buffer_[56U + index] =
+        static_cast<std::byte>((bit_length >> ((7U - index) * 8U)) & 0xffU);
+  }
+  compress(buffer_.data());
 
-    std::array<std::byte, 32U> digest{};
-    for (std::size_t word = 0U; word < state_.size(); ++word) {
-      for (std::size_t octet = 0U; octet < 4U; ++octet) {
-        digest[word * 4U + octet] = static_cast<std::byte>(
-            (state_[word] >> ((3U - octet) * 8U)) & 0xffU);
-      }
+  ArtifactContentDigest digest;
+  for (std::size_t word = 0U; word < state_.size(); ++word) {
+    for (std::size_t octet = 0U; octet < 4U; ++octet) {
+      digest.bytes[word * 4U + octet] =
+          static_cast<std::byte>((state_[word] >> ((3U - octet) * 8U)) & 0xffU);
     }
-    return digest;
+  }
+  return digest;
+}
+
+/** @copydoc ps::server::ArtifactContentHasher::compress */
+void ArtifactContentHasher::compress(const std::byte* block) noexcept {
+  static constexpr std::array<std::uint32_t, 64U> kRoundConstants{
+      0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU,
+      0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U, 0xd807aa98U, 0x12835b01U,
+      0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U,
+      0xc19bf174U, 0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU,
+      0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU, 0x983e5152U,
+      0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U,
+      0x06ca6351U, 0x14292967U, 0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU,
+      0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
+      0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U, 0xd192e819U,
+      0xd6990624U, 0xf40e3585U, 0x106aa070U, 0x19a4c116U, 0x1e376c08U,
+      0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU,
+      0x682e6ff3U, 0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
+      0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U};
+
+  std::array<std::uint32_t, 64U> schedule{};
+  for (std::size_t index = 0U; index < 16U; ++index) {
+    schedule[index] =
+        (static_cast<std::uint32_t>(
+             std::to_integer<std::uint8_t>(block[index * 4U]))
+         << 24U) |
+        (static_cast<std::uint32_t>(
+             std::to_integer<std::uint8_t>(block[index * 4U + 1U]))
+         << 16U) |
+        (static_cast<std::uint32_t>(
+             std::to_integer<std::uint8_t>(block[index * 4U + 2U]))
+         << 8U) |
+        static_cast<std::uint32_t>(
+            std::to_integer<std::uint8_t>(block[index * 4U + 3U]));
+  }
+  for (std::size_t index = 16U; index < schedule.size(); ++index) {
+    const std::uint32_t before15 = schedule[index - 15U];
+    const std::uint32_t before2 = schedule[index - 2U];
+    const std::uint32_t sigma0 = rotate_right(before15, 7U) ^
+                                 rotate_right(before15, 18U) ^ (before15 >> 3U);
+    const std::uint32_t sigma1 = rotate_right(before2, 17U) ^
+                                 rotate_right(before2, 19U) ^ (before2 >> 10U);
+    schedule[index] =
+        schedule[index - 16U] + sigma0 + schedule[index - 7U] + sigma1;
   }
 
- private:
-  /**
-   * @brief Compresses one complete SHA-256 block into the current state.
-   * @param block Non-null 64-byte input block.
-   * @return Nothing.
-   * @throws Nothing.
-   */
-  void compress(const std::byte* block) noexcept {
-    static constexpr std::array<std::uint32_t, 64U> kRoundConstants{
-        0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU,
-        0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U, 0xd807aa98U, 0x12835b01U,
-        0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U,
-        0xc19bf174U, 0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU,
-        0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU, 0x983e5152U,
-        0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U,
-        0x06ca6351U, 0x14292967U, 0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU,
-        0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
-        0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U, 0xd192e819U,
-        0xd6990624U, 0xf40e3585U, 0x106aa070U, 0x19a4c116U, 0x1e376c08U,
-        0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU,
-        0x682e6ff3U, 0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
-        0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U};
-
-    std::array<std::uint32_t, 64U> schedule{};
-    for (std::size_t index = 0U; index < 16U; ++index) {
-      schedule[index] =
-          (static_cast<std::uint32_t>(
-               std::to_integer<std::uint8_t>(block[index * 4U]))
-           << 24U) |
-          (static_cast<std::uint32_t>(
-               std::to_integer<std::uint8_t>(block[index * 4U + 1U]))
-           << 16U) |
-          (static_cast<std::uint32_t>(
-               std::to_integer<std::uint8_t>(block[index * 4U + 2U]))
-           << 8U) |
-          static_cast<std::uint32_t>(
-              std::to_integer<std::uint8_t>(block[index * 4U + 3U]));
-    }
-    for (std::size_t index = 16U; index < schedule.size(); ++index) {
-      const std::uint32_t before15 = schedule[index - 15U];
-      const std::uint32_t before2 = schedule[index - 2U];
-      const std::uint32_t sigma0 = rotate_right(before15, 7U) ^
-                                   rotate_right(before15, 18U) ^
-                                   (before15 >> 3U);
-      const std::uint32_t sigma1 = rotate_right(before2, 17U) ^
-                                   rotate_right(before2, 19U) ^
-                                   (before2 >> 10U);
-      schedule[index] =
-          schedule[index - 16U] + sigma0 + schedule[index - 7U] + sigma1;
-    }
-
-    std::uint32_t a = state_[0U];
-    std::uint32_t b = state_[1U];
-    std::uint32_t c = state_[2U];
-    std::uint32_t d = state_[3U];
-    std::uint32_t e = state_[4U];
-    std::uint32_t f = state_[5U];
-    std::uint32_t g = state_[6U];
-    std::uint32_t h = state_[7U];
-    for (std::size_t index = 0U; index < schedule.size(); ++index) {
-      const std::uint32_t sum1 =
-          rotate_right(e, 6U) ^ rotate_right(e, 11U) ^ rotate_right(e, 25U);
-      const std::uint32_t choose = (e & f) ^ ((~e) & g);
-      const std::uint32_t temporary1 =
-          h + sum1 + choose + kRoundConstants[index] + schedule[index];
-      const std::uint32_t sum0 =
-          rotate_right(a, 2U) ^ rotate_right(a, 13U) ^ rotate_right(a, 22U);
-      const std::uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-      const std::uint32_t temporary2 = sum0 + majority;
-      h = g;
-      g = f;
-      f = e;
-      e = d + temporary1;
-      d = c;
-      c = b;
-      b = a;
-      a = temporary1 + temporary2;
-    }
-    state_[0U] += a;
-    state_[1U] += b;
-    state_[2U] += c;
-    state_[3U] += d;
-    state_[4U] += e;
-    state_[5U] += f;
-    state_[6U] += g;
-    state_[7U] += h;
+  std::uint32_t a = state_[0U];
+  std::uint32_t b = state_[1U];
+  std::uint32_t c = state_[2U];
+  std::uint32_t d = state_[3U];
+  std::uint32_t e = state_[4U];
+  std::uint32_t f = state_[5U];
+  std::uint32_t g = state_[6U];
+  std::uint32_t h = state_[7U];
+  for (std::size_t index = 0U; index < schedule.size(); ++index) {
+    const std::uint32_t sum1 =
+        rotate_right(e, 6U) ^ rotate_right(e, 11U) ^ rotate_right(e, 25U);
+    const std::uint32_t choose = (e & f) ^ ((~e) & g);
+    const std::uint32_t temporary1 =
+        h + sum1 + choose + kRoundConstants[index] + schedule[index];
+    const std::uint32_t sum0 =
+        rotate_right(a, 2U) ^ rotate_right(a, 13U) ^ rotate_right(a, 22U);
+    const std::uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+    const std::uint32_t temporary2 = sum0 + majority;
+    h = g;
+    g = f;
+    f = e;
+    e = d + temporary1;
+    d = c;
+    c = b;
+    b = a;
+    a = temporary1 + temporary2;
   }
+  state_[0U] += a;
+  state_[1U] += b;
+  state_[2U] += c;
+  state_[3U] += d;
+  state_[4U] += e;
+  state_[5U] += f;
+  state_[6U] += g;
+  state_[7U] += h;
+}
 
-  /** @brief Eight SHA-256 chaining words. */
-  std::array<std::uint32_t, 8U> state_{};
-  /** @brief Incomplete final input block. */
-  std::array<std::byte, 64U> buffer_{};
-  /** @brief Number of bytes currently stored in `buffer_`. */
-  std::size_t buffered_ = 0U;
-  /** @brief Complete input byte count before padding. */
-  std::uint64_t total_bytes_ = 0U;
-  /** @brief Whether `finish()` already consumed this instance. */
-  bool finished_ = false;
-};
+namespace {
 
 /**
  * @brief Returns the exact canonical execution-profile token.
@@ -345,9 +305,9 @@ bool valid_device_id(std::string_view text) noexcept {
  * @throws std::logic_error if the internal single-use lifecycle is violated.
  */
 std::array<std::byte, 32U> sha256(const std::byte* bytes, std::size_t size) {
-  Sha256 hash;
+  ArtifactContentHasher hash;
   hash.update(bytes, size);
-  return hash.finish();
+  return hash.finish().bytes;
 }
 
 }  // namespace
@@ -418,13 +378,11 @@ ArtifactContentDigest hash_image_artifact_content(const ImageBuffer& image) {
                       static_cast<std::size_t>(image.height)) {
     throw std::overflow_error("artifact image hash size overflowed");
   }
-  Sha256 hash;
+  ArtifactContentHasher hash;
   for (int row = 0; row < image.height; ++row) {
     hash.update(image_buffer_row_data(image, row), row_bytes);
   }
-  ArtifactContentDigest digest;
-  digest.bytes = hash.finish();
-  return digest;
+  return hash.finish();
 }
 
 /** @copydoc ps::server::validate_attempt_identity */

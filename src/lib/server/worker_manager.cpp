@@ -40,6 +40,7 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_artifact_data_plane.hpp"  // NOLINT(build/include_subdir)
@@ -54,9 +55,9 @@ namespace {
 constexpr int kWorkerControlDescriptor = 3;
 /** @brief Fixed close-on-exec child setup-status descriptor. */
 constexpr int kWorkerExecStatusDescriptor = 4;
-/** @brief Fixed read-only checkpoint artifact data-plane descriptor. */
+/** @brief Fixed receive-only checkpoint artifact data-plane descriptor. */
 constexpr int kWorkerCheckpointDataDescriptor = 5;
-/** @brief Fixed write-only output-stage artifact data-plane descriptor. */
+/** @brief Fixed send-only output-stage artifact data-plane descriptor. */
 constexpr int kWorkerOutputDataDescriptor = 6;
 /** @brief Supervisor poll cadence for cancel, exit, and deadline checks. */
 constexpr std::chrono::milliseconds kSupervisorPollInterval{20};
@@ -344,9 +345,10 @@ struct ChildProcess final {
    */
   UniqueFd control;
   /**
-   * @brief Anonymous direction-scoped artifact data-plane occurrences.
+   * @brief Direction-reduced attempt-local artifact stream lanes.
    * @note Child-facing originals are closed in the manager immediately after
-   * fork; the manager read side remains until report hydration or cleanup.
+   * fork. Nonblocking manager endpoints remain only through checkpoint commit,
+   * candidate EOF/join, or revocation cleanup; no pathname is created.
    */
   WorkerArtifactDataPlane data_plane;
   /** @brief Whether exact `waitpid` already completed. */
@@ -948,7 +950,7 @@ class WorkerManager::Impl final {
     AttemptIdentity identity;
     /** @brief Exact immutable assignment retained through supervision. */
     JobAssignment assignment;
-    /** @brief Pre-thread attempt-local artifact data-plane ownership. */
+    /** @brief Supervisor-created attempt-local stream data-plane ownership. */
     WorkerArtifactDataPlane data_plane;
     /** @brief Sole joinable supervision-thread handle. */
     std::thread supervisor;
@@ -996,9 +998,6 @@ class WorkerManager::Impl final {
     validate_job_spec(*assignment.spec);
     auto record = std::make_shared<Record>(
         std::move(assignment), options_.fail_record_construction_for_test);
-    if (!in_process_test_mode_) {
-      record->data_plane = WorkerArtifactDataPlane::create(record->assignment);
-    }
     const std::string key = record->identity.attempt_id.value();
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutting_down_) {
@@ -1439,6 +1438,133 @@ class WorkerManager::Impl final {
   }
 
   /**
+   * @brief Pumps checkpoint bytes while the exact startup child is killable.
+   * @param record Exact retained assignment and cancellation owner.
+   * @param process Non-null live child and checkpoint-stream owner.
+   * @param deadline Absolute assignment-startup deadline shared with accept.
+   * @return Empty after exact bytes plus EOF commit; otherwise one terminal
+   * cancellation/failure completion after exact process reaping.
+   * @throws std::invalid_argument when `process` is null.
+   * @throws ManagerFailure for timeout, poll, or premature stream closure.
+   * @throws std::overflow_error through bounded termination deadlines.
+   * @note The manager endpoint is nonblocking. Every transfer slice revisits
+   * shutdown/cancellation and the absolute deadline; only the worker performs
+   * blocking data-plane receive and can therefore be terminated and reaped.
+   */
+  std::optional<WorkerManagerCompletion> transfer_checkpoint(
+      const std::shared_ptr<Record>& record, ChildProcess* process,
+      std::chrono::steady_clock::time_point deadline) {
+    if (process == nullptr) {
+      throw std::invalid_argument("worker checkpoint process is null");
+    }
+    static const std::vector<std::byte> kEmptyPayload;
+    const std::vector<std::byte>& payload =
+        record->assignment.checkpoint == nullptr
+            ? kEmptyPayload
+            : record->assignment.checkpoint->payload;
+    std::size_t offset = 0U;
+    while (offset != payload.size()) {
+      if (cancellation_requested(record)) {
+        const TerminateAndReapResult termination =
+            terminate_and_reap(record, process);
+        process->data_plane.close_manager_checkpoint_descriptor();
+        if (termination == TerminateAndReapResult::EscalationMatched) {
+          return forced_cancellation_completion(
+              record->identity,
+              "manager cancelled checkpoint transfer and reaped the worker");
+        }
+        process->control.reset();
+        return failure_completion(
+            record->identity, JobAttemptFailure::WorkerStartup,
+            "worker exited during cancelled checkpoint transfer");
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) {
+        throw ManagerFailure(JobAttemptFailure::WorkerStartup,
+                             "worker checkpoint transfer deadline expired");
+      }
+      if (options_.defer_checkpoint_transfer_for_test != nullptr &&
+          options_.defer_checkpoint_transfer_for_test->load(
+              std::memory_order_acquire)) {
+        if (options_.checkpoint_transfer_paused_for_test != nullptr) {
+          options_.checkpoint_transfer_paused_for_test->store(
+              true, std::memory_order_release);
+        }
+        std::this_thread::sleep_until(std::min(
+            deadline, checked_worker_deadline(now, kSupervisorPollInterval)));
+        continue;
+      }
+      const WorkerDataPlaneIoStatus status =
+          process->data_plane.send_checkpoint_chunk(payload, &offset);
+      if (status == WorkerDataPlaneIoStatus::Progress) {
+        continue;
+      }
+      if (status == WorkerDataPlaneIoStatus::EndOfStream) {
+        throw ManagerFailure(
+            JobAttemptFailure::WorkerStartup,
+            "worker checkpoint stream closed before exact transfer");
+      }
+      const auto slice_deadline = std::min(
+          deadline, checked_worker_deadline(now, kSupervisorPollInterval));
+      auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          slice_deadline - now);
+      if (remaining.count() <= 0) {
+        remaining = std::chrono::milliseconds(1);
+      }
+      pollfd descriptor{process->data_plane.manager_checkpoint_descriptor(),
+                        POLLOUT, 0};
+      const int polled =
+          ::poll(&descriptor, 1U, static_cast<int>(remaining.count()));
+      if (polled < 0 && errno != EINTR) {
+        throw ManagerFailure(JobAttemptFailure::WorkerStartup,
+                             std::string("worker checkpoint poll failed: ") +
+                                 std::strerror(errno));
+      }
+    }
+    process->data_plane.close_manager_checkpoint_descriptor();
+    return std::nullopt;
+  }
+
+  /**
+   * @brief Drains a bounded number of ready output chunks without waiting.
+   * @param process Non-null child/data-plane owner.
+   * @param payload Non-null attempt-bounded candidate accumulation.
+   * @param hasher Non-null allocation-free incremental integrity owner.
+   * @param output_eof Non-null monotonic EOF observation.
+   * @param output_digest Non-null finalized digest destination.
+   * @return Nothing after readiness exhaustion, EOF, or sixteen chunks.
+   * @throws Data-plane validation, socket, or allocation failures unchanged.
+   * @note Capping one call preserves frequent runtime/cancel/shutdown/deadline
+   * checks even when the worker continuously produces a large candidate.
+   */
+  void drain_output(ChildProcess* process, std::vector<std::byte>* payload,
+                    ArtifactContentHasher* hasher, bool* output_eof,
+                    std::optional<ArtifactContentDigest>* output_digest) {
+    if (process == nullptr || payload == nullptr || hasher == nullptr ||
+        output_eof == nullptr || output_digest == nullptr) {
+      throw std::invalid_argument("worker output drain state is incomplete");
+    }
+    constexpr std::size_t kMaximumChunksPerSlice = 16U;
+    for (std::size_t chunk = 0U; chunk < kMaximumChunksPerSlice && !*output_eof;
+         ++chunk) {
+      const std::size_t prior_size = payload->size();
+      const WorkerDataPlaneIoStatus status =
+          process->data_plane.receive_output_chunk(payload);
+      if (status == WorkerDataPlaneIoStatus::Progress) {
+        hasher->update(payload->data() + prior_size,
+                       payload->size() - prior_size);
+        continue;
+      }
+      if (status == WorkerDataPlaneIoStatus::EndOfStream) {
+        *output_eof = true;
+        *output_digest = hasher->finish();
+        process->data_plane.close_manager_output_descriptor();
+      }
+      return;
+    }
+  }
+
+  /**
    * @brief Runs the complete assignment/heartbeat/report/exit state machine.
    * @param record Exact immutable attempt record.
    * @return One report, failure, or forced-cancellation completion after reap.
@@ -1459,6 +1585,7 @@ class WorkerManager::Impl final {
    */
   WorkerManagerCompletion run_external_process(
       const std::shared_ptr<Record>& record) {
+    record->data_plane = WorkerArtifactDataPlane::create(record->assignment);
     ChildProcess process = spawn_process(record);
     bool accepted = false;
     try {
@@ -1474,6 +1601,11 @@ class WorkerManager::Impl final {
           std::min(startup_deadline,
                    checked_worker_deadline(std::chrono::steady_clock::now(),
                                            options_.io_timeout)));
+      std::optional<WorkerManagerCompletion> checkpoint_completion =
+          transfer_checkpoint(record, &process, startup_deadline);
+      if (checkpoint_completion.has_value()) {
+        return std::move(*checkpoint_completion);
+      }
       const WorkerProtocolFrame acceptance =
           read_worker_frame(process.control.get(), startup_deadline);
       if (decode_worker_identity(acceptance,
@@ -1577,6 +1709,12 @@ class WorkerManager::Impl final {
    * A source-private observation flag may record the first exact external
    * heartbeat for deterministic test rendezvous. It changes no deadline and
    * grants no process, channel, cancellation, or completion authority.
+   * A worker waits for one identity-only `CompletionReady`
+   * acknowledgement. The manager sends it only after nonblocking EOF, bounded
+   * hashing, reference/descriptor/resource joins, and image reconstruction;
+   * an already unavailable cancellation channel skips the impossible reply but
+   * does not erase a completely joined worker fact. Once exact reap is
+   * observed, this monitor never reads the bulk lane.
    * Every first `Report`, `Failure`, or `ForcedCancellation` construction is
    * locally fail-stop protected after exact reaping and cannot be reclassified
    * by the outer catch boundary.
@@ -1597,13 +1735,72 @@ class WorkerManager::Impl final {
     std::optional<std::chrono::steady_clock::time_point>
         post_reap_drain_deadline;
     std::optional<PreparedWorkerReport> candidate_report;
+    std::optional<JobAttemptReport> materialized_report;
+    std::vector<std::byte> output_payload;
+    ArtifactContentHasher output_hasher;
+    std::optional<ArtifactContentDigest> output_digest;
     bool cancel_attempted = false;
     bool cancel_delivery_failed = false;
     bool cancel_channel_failed = false;
     bool channel_eof = false;
+    bool output_eof = false;
     WorkerFrameDecoder frame_decoder;
 
     for (;;) {
+      bool output_progress = false;
+      if (!process->reaped && !output_eof) {
+        const bool defer_output =
+            options_.defer_output_drain_for_test != nullptr &&
+            options_.defer_output_drain_for_test->load(
+                std::memory_order_acquire);
+        if (defer_output) {
+          pollfd descriptor{process->data_plane.manager_output_descriptor(),
+                            POLLIN, 0};
+          const int polled = ::poll(&descriptor, 1U, 0);
+          if (polled > 0 && (descriptor.revents & POLLIN) != 0 &&
+              options_.output_transfer_paused_for_test != nullptr) {
+            options_.output_transfer_paused_for_test->store(
+                true, std::memory_order_release);
+          }
+        } else {
+          const std::size_t payload_size_before_drain = output_payload.size();
+          drain_output(process, &output_payload, &output_hasher, &output_eof,
+                       &output_digest);
+          if (output_payload.size() != payload_size_before_drain) {
+            output_progress = true;
+            heartbeat_deadline = checked_worker_deadline(
+                std::chrono::steady_clock::now(), options_.heartbeat_timeout);
+          }
+        }
+      }
+      if (output_eof && candidate_report.has_value() &&
+          !materialized_report.has_value() &&
+          (!process->reaped || !candidate_report->output.has_value())) {
+        materialized_report = process->data_plane.materialize_report(
+            std::move(candidate_report->report), candidate_report->output,
+            std::move(output_payload), *output_digest);
+        if (!process->reaped && !cancel_delivery_failed &&
+            !cancel_channel_failed) {
+          auto acknowledgement_deadline = checked_worker_deadline(
+              std::chrono::steady_clock::now(), options_.io_timeout);
+          acknowledgement_deadline =
+              std::min(acknowledgement_deadline, runtime_deadline);
+          if (report_deadline.has_value()) {
+            acknowledgement_deadline =
+                std::min(acknowledgement_deadline, *report_deadline);
+          }
+          try {
+            send_worker_identity(process->control.get(),
+                                 WorkerMessageKind::CompletionReady,
+                                 record->identity, acknowledgement_deadline);
+          } catch (const WorkerProtocolTimeout&) {
+            throw ManagerFailure(
+                JobAttemptFailure::WorkerProtocol,
+                "worker completion acknowledgement deadline expired");
+          }
+        }
+        candidate_report.reset();
+      }
       observe_exit(record, process);
       const auto now = std::chrono::steady_clock::now();
       if (process->reaped && !channel_eof &&
@@ -1635,6 +1832,10 @@ class WorkerManager::Impl final {
               process->pid,
               checked_worker_deadline(std::chrono::steady_clock::now(),
                                       options_.terminate_timeout));
+          if (!output_eof) {
+            drain_output(process, &output_payload, &output_hasher, &output_eof,
+                         &output_digest);
+          }
         }
         const TerminateAndReapResult termination =
             terminate_and_reap(record, process);
@@ -1663,7 +1864,8 @@ class WorkerManager::Impl final {
                                   JobAttemptFailure::WorkerRuntimeTimeout,
                                   "worker exceeded attempt runtime bound");
       }
-      if (!cancel && !candidate_report.has_value() && !process->reaped &&
+      if (!cancel && !candidate_report.has_value() &&
+          !materialized_report.has_value() && !process->reaped &&
           now >= heartbeat_deadline) {
         terminate_and_reap(record, process);
         return failure_completion(record->identity,
@@ -1692,7 +1894,8 @@ class WorkerManager::Impl final {
         }
         if (channel_eof) {
           process->control.reset();
-          if (!candidate_report.has_value()) {
+          if (!candidate_report.has_value() &&
+              !materialized_report.has_value()) {
             return failure_completion(
                 record->identity, JobAttemptFailure::WorkerChannel,
                 cancel_channel_failed
@@ -1700,11 +1903,13 @@ class WorkerManager::Impl final {
                       "report"
                     : "worker exited cleanly without one report");
           }
-          JobAttemptReport materialized =
-              process->data_plane.materialize_report(
-                  std::move(candidate_report->report),
-                  candidate_report->output);
-          return report_completion(record->identity, std::move(materialized));
+          if (!materialized_report.has_value()) {
+            return failure_completion(
+                record->identity, JobAttemptFailure::WorkerChannel,
+                "worker output stream did not commit before clean exit");
+          }
+          return report_completion(record->identity,
+                                   std::move(*materialized_report));
         }
         if (post_reap_drain_deadline.has_value() &&
             now >= *post_reap_drain_deadline) {
@@ -1716,7 +1921,7 @@ class WorkerManager::Impl final {
       }
 
       if (channel_eof) {
-        if (!candidate_report.has_value()) {
+        if (!candidate_report.has_value() && !materialized_report.has_value()) {
           const auto terminal_channel_deadline =
               subordinate_ordinary_deadline(eof_deadline, cancel_deadline);
           if (terminal_channel_deadline.has_value() &&
@@ -1733,10 +1938,15 @@ class WorkerManager::Impl final {
         continue;
       }
 
+      if (output_progress && !output_eof) {
+        continue;
+      }
+
       auto read_deadline = checked_worker_deadline(
           std::chrono::steady_clock::now(), kSupervisorPollInterval);
       if (!process->reaped) {
-        if (!cancel && !candidate_report.has_value()) {
+        if (!cancel && !candidate_report.has_value() &&
+            !materialized_report.has_value()) {
           read_deadline = std::min(read_deadline, heartbeat_deadline);
         }
         read_deadline = std::min(read_deadline, runtime_deadline);
@@ -1758,7 +1968,7 @@ class WorkerManager::Impl final {
         }
         WorkerProtocolFrame frame =
             frame_decoder.read_frame(process->control.get(), read_deadline);
-        if (candidate_report.has_value()) {
+        if (candidate_report.has_value() || materialized_report.has_value()) {
           throw WorkerProtocolError(
               "worker sent an extra frame after its terminal report");
         }

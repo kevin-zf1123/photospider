@@ -255,6 +255,64 @@ struct ArtifactContentDigestDomain final {};
 using ArtifactContentDigest = Sha256Digest<ArtifactContentDigestDomain>;
 
 /**
+ * @brief Incrementally computes one exact artifact-content SHA-256 digest.
+ *
+ * The fixed-size state performs no allocation and lets bounded data-plane
+ * receivers hash each small transfer slice before revisiting their absolute
+ * deadline. Instances are single-threaded and single-use after `finish()`.
+ *
+ * @throws Nothing for construction; update/finalization validate lifecycle
+ * and length bounds.
+ */
+class ArtifactContentHasher final {
+ public:
+  /**
+   * @brief Creates the standard SHA-256 initial state with no input bytes.
+   * @throws Nothing.
+   */
+  ArtifactContentHasher() noexcept;
+
+  /**
+   * @brief Appends one exact artifact-content byte range.
+   * @param data Borrowed bytes, null only when `size` is zero.
+   * @param size Number of bytes to append.
+   * @return Nothing.
+   * @throws std::invalid_argument for null nonempty input or post-finish use.
+   * @throws std::overflow_error when SHA-256 bit length would overflow.
+   * @note Callers bound each range and may check cancellation/deadline between
+   * calls; this method performs no allocation or I/O.
+   */
+  void update(const std::byte* data, std::size_t size);
+
+  /**
+   * @brief Finalizes the exact accumulated artifact digest.
+   * @return SHA-256 in the artifact-content domain.
+   * @throws std::logic_error when called more than once.
+   */
+  ArtifactContentDigest finish();
+
+ private:
+  /**
+   * @brief Compresses one complete SHA-256 block into current state.
+   * @param block Non-null 64-byte input block.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void compress(const std::byte* block) noexcept;
+
+  /** @brief Eight SHA-256 chaining words. */
+  std::array<std::uint32_t, 8U> state_{};
+  /** @brief Incomplete final input block. */
+  std::array<std::byte, 64U> buffer_{};
+  /** @brief Number of bytes currently stored in `buffer_`. */
+  std::size_t buffered_ = 0U;
+  /** @brief Complete input byte count before padding. */
+  std::uint64_t total_bytes_ = 0U;
+  /** @brief Whether `finish()` already consumed this instance. */
+  bool finished_ = false;
+};
+
+/**
  * @brief Closed execution profile supported by the Issue #99 vertical.
  * @throws Nothing for value operations.
  */

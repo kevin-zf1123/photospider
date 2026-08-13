@@ -1166,6 +1166,104 @@ TEST(WorkerSupervisor,
 }
 
 TEST(WorkerSupervisor,
+     PausedCheckpointTransferLeavesServiceMutexResponsiveAndCancellable) {
+  ScopedSupervisorRoot root;
+  auto defer_checkpoint = std::make_shared<std::atomic<bool>>(false);
+  auto checkpoint_paused = std::make_shared<std::atomic<bool>>(false);
+  WorkerManagerOptions options = supervisor_options();
+  options.defer_checkpoint_transfer_for_test = defer_checkpoint;
+  options.checkpoint_transfer_paused_for_test = checkpoint_paused;
+  auto service = make_service(root.path(), std::move(options));
+
+  const JobSubmission source =
+      service->submit(fixture_spec("fixture.checkpoint-source"));
+  const JobSnapshot source_terminal = wait_terminal(*service, source.job_id);
+  ASSERT_EQ(source_terminal.state, JobState::Succeeded)
+      << source_terminal.message;
+  ASSERT_TRUE(source_terminal.output_receipt.has_value());
+  const ArtifactId checkpoint_id = source_terminal.output_receipt->artifact_id;
+  defer_checkpoint->store(true, std::memory_order_release);
+
+  const auto submit_started = std::chrono::steady_clock::now();
+  const JobSubmission consumer =
+      service->submit(fixture_spec("fixture.checkpoint", checkpoint_id));
+  const auto submit_elapsed = std::chrono::steady_clock::now() - submit_started;
+  EXPECT_LT(submit_elapsed, 500ms);
+  ASSERT_TRUE(wait_until(
+      [&] { return checkpoint_paused->load(std::memory_order_acquire); }, 2s));
+
+  const auto query_started = std::chrono::steady_clock::now();
+  const std::optional<JobSnapshot> running = service->query(consumer.job_id);
+  const auto query_elapsed = std::chrono::steady_clock::now() - query_started;
+  ASSERT_TRUE(running.has_value());
+  EXPECT_FALSE(is_terminal_job_state(running->state));
+  EXPECT_LT(query_elapsed, 200ms);
+  ASSERT_TRUE(service->cancel(consumer.job_id));
+  const JobSnapshot cancelled = wait_terminal(*service, consumer.job_id);
+
+  EXPECT_EQ(cancelled.state, JobState::Cancelled) << cancelled.message;
+  EXPECT_EQ(cancelled.failure, JobAttemptFailure::WorkerCancellationForced);
+  EXPECT_FALSE(cancelled.output_receipt.has_value());
+  EXPECT_EQ(service->find_artifact(cancelled.output_artifact_id), nullptr);
+  EXPECT_NE(service->find_artifact(checkpoint_id), nullptr);
+  const TenantQuotaSnapshot quota = service->quota_snapshot();
+  EXPECT_EQ(quota.active_attempts, 0U);
+  EXPECT_EQ(quota.retained_artifacts, 1U);
+  EXPECT_EQ(quota.retention_bytes,
+            source_terminal.output_receipt->descriptor.payload_bytes);
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+      0U);
+}
+
+TEST(WorkerSupervisor,
+     PausedOutputTransferCannotMakeServiceDestructionUnboundedOrPublish) {
+  ScopedSupervisorRoot root;
+  auto defer_output = std::make_shared<std::atomic<bool>>(true);
+  auto output_paused = std::make_shared<std::atomic<bool>>(false);
+  WorkerManagerOptions options = supervisor_options();
+  options.heartbeat_timeout = 3s;
+  options.attempt_runtime_timeout = 10s;
+  options.defer_output_drain_for_test = defer_output;
+  options.output_transfer_paused_for_test = output_paused;
+  auto service = make_service(root.path(), std::move(options), nullptr,
+                              bulk_data_plane_quota());
+  const JobSpec spec(GraphArtifactId("fixture.former-control-bound-output"), 0,
+                     OutputSlotId("image.final"), bulk_data_plane_resources());
+  const JobSubmission submitted = service->submit(spec);
+  ASSERT_TRUE(wait_until(
+      [&] { return output_paused->load(std::memory_order_acquire); }, 3s));
+  const std::optional<JobSnapshot> active = service->query(submitted.job_id);
+  ASSERT_TRUE(active.has_value());
+  const ArtifactId candidate_artifact_id = active->output_artifact_id;
+
+  const auto shutdown_started = std::chrono::steady_clock::now();
+  service.reset();
+  const auto shutdown_elapsed =
+      std::chrono::steady_clock::now() - shutdown_started;
+  EXPECT_LT(shutdown_elapsed, 2s);
+
+  auto recovered = make_service(root.path(), supervisor_options(), nullptr,
+                                bulk_data_plane_quota());
+  const std::optional<JobSnapshot> terminal =
+      recovered->query(submitted.job_id);
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_EQ(terminal->state, JobState::Cancelled) << terminal->message;
+  EXPECT_EQ(terminal->failure, JobAttemptFailure::WorkerCancellationForced);
+  EXPECT_FALSE(terminal->output_receipt.has_value());
+  EXPECT_EQ(recovered->find_artifact(candidate_artifact_id), nullptr);
+  const TenantQuotaSnapshot quota = recovered->quota_snapshot();
+  EXPECT_EQ(quota.active_attempts, 0U);
+  EXPECT_EQ(quota.retained_artifacts, 0U);
+  EXPECT_EQ(quota.retention_bytes, 0U);
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(*recovered),
+      0U);
+}
+
+TEST(WorkerSupervisor,
      UnlimitedNoFileLimitClosesHighDescriptorAndExecsPromptly) {
   rlimit descriptor_limit{};
   ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &descriptor_limit), 0);
@@ -1242,6 +1340,52 @@ TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
   }
   EXPECT_EQ(wait_terminal(*service, unrelated.job_id).state,
             JobState::Succeeded);
+}
+
+TEST(WorkerSupervisor,
+     DataPlaneJoinMismatchesFailWithoutWorkerQuotaOrArtifactResidue) {
+  constexpr std::array<std::pair<std::string_view, std::string_view>, 3U> cases{
+      {
+          {"fixture.data.reference-mismatch",
+           "worker report output metadata exceeds its assigned stage"},
+          {"fixture.data.descriptor-mismatch",
+           "worker output-stage size exceeds or differs from metadata"},
+          {"fixture.data.stale-attempt",
+           "worker report identity does not match its exact lease"},
+      }};
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(std::string(test_case.first));
+    ScopedSupervisorRoot root;
+    auto service = make_service(root.path(), supervisor_options());
+    const JobSubmission submitted =
+        service->submit(fixture_spec(std::string(test_case.first)));
+    const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+    EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+    EXPECT_TRUE(terminal.attempt_settled);
+    EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+    EXPECT_EQ(terminal.failure, JobAttemptFailure::WorkerProtocol);
+    EXPECT_NE(terminal.message.find(test_case.second), std::string::npos)
+        << terminal.message;
+    EXPECT_FALSE(terminal.output_receipt.has_value());
+    EXPECT_EQ(service->find_artifact(terminal.output_artifact_id), nullptr);
+    EXPECT_TRUE(
+        SingleTenantJobServiceTestAccess::
+            wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+    EXPECT_EQ(
+        SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+        0U);
+    const TenantQuotaSnapshot quota = service->quota_snapshot();
+    EXPECT_EQ(quota.active_attempts, 0U);
+    EXPECT_EQ(quota.cpu_slots, 0U);
+    EXPECT_EQ(quota.host_memory_bytes, 0U);
+    EXPECT_EQ(quota.output_bytes, 0U);
+    EXPECT_EQ(quota.staging_bytes, 0U);
+    EXPECT_EQ(quota.retention_bytes, 0U);
+    EXPECT_EQ(quota.retained_artifacts, 0U);
+    EXPECT_TRUE(quota.device_bytes.empty());
+  }
 }
 
 TEST(WorkerSupervisor, ReassemblesReportAcrossMultiplePollSlices) {

@@ -64,6 +64,9 @@ enum class WorkerMessageKind : std::uint16_t {
   Cancel = 4U,
   /** @brief Worker-to-manager sole terminal attempt report. */
   Report = 5U,
+  /** @brief Manager-to-worker acknowledgement that completion data was joined.
+   */
+  CompletionReady = 6U,
 };
 
 /**
@@ -138,12 +141,12 @@ class WorkerFrameDecoder final {
  * @brief Complete immutable metadata assigned to one external worker.
  * @throws Nothing for default construction; contained values may allocate.
  * @note The manager-side `JobAssignment` may still retain an authorized
- * checkpoint record so data-plane setup can prepopulate its anonymous file;
+ * checkpoint record so the registered supervisor can pump its exact bytes;
  * the encoder emits only `data_plane.checkpoint` receipt/reference metadata.
  * A decoded worker-side value leaves `assignment.checkpoint` null until the
- * separate read descriptor is materialized. No control field contains artifact
- * bytes, a server root, quota owner, publication capability, credential,
- * native handle, or process-local runtime identity.
+ * worker receives and revalidates the separate checkpoint stream. No control
+ * field contains artifact bytes, a server root, quota owner, publication
+ * capability, credential, native handle, or process-local runtime identity.
  */
 struct PreparedWorkerAssignment final {
   /** @brief Exact current Job identity/spec and endpoint-local checkpoint. */
@@ -161,8 +164,11 @@ struct PreparedWorkerAssignment final {
  * @throws Nothing for default construction; retained values may allocate.
  * @note `report.image` MUST be empty. A successful worker stages bytes through
  * its separate output descriptor, then carries only descriptor/digest/size and
- * the exact assigned reference in `output`. WorkerManager materializes an
- * independent image only after clean process reaping and data validation.
+ * the exact assigned reference in `output`. WorkerManager nonblockingly drains,
+ * incrementally hashes, and joins those bytes before replying with one exact
+ * `CompletionReady` acknowledgement. The worker remains alive and killable
+ * until that acknowledgement; clean reap performs no data access or filesystem
+ * I/O.
  */
 struct PreparedWorkerReport final {
   /** @brief Exact attempt outcome/settlement/failure facts without bytes. */
@@ -274,7 +280,10 @@ WorkerProtocolFrame read_worker_frame(
  * failures. An oversized graph text field raises `std::length_error`.
  * @note This source-private seam lets protocol tests prove the exact aggregate
  * Assignment boundary and byte independence without blocking on a socket.
- * `send_worker_assignment` is the sole transport wrapper.
+ * It validates checkpoint receipt identity and exact length but performs no
+ * manager-side bulk hash; the killable worker verifies the received stream
+ * against the authoritative receipt digest. `send_worker_assignment` is the
+ * sole transport wrapper.
  */
 WorkerProtocolFrame encode_worker_assignment(
     const PreparedWorkerAssignment& assignment);
@@ -283,7 +292,7 @@ WorkerProtocolFrame encode_worker_assignment(
  * @brief Sends one complete immutable external worker assignment.
  * @param fd Connected worker socket.
  * @param assignment Complete bounded metadata; checkpoint bytes remain in the
- * separate data-plane occurrence.
+ * separate manager-to-worker stream lane.
  * @param deadline Absolute monotonic I/O deadline.
  * @return Nothing after the assignment frame is written.
  * @throws Contract, allocation, protocol-bound, timeout, or channel failures.
@@ -306,9 +315,9 @@ PreparedWorkerAssignment receive_worker_assignment(
     int fd, std::chrono::steady_clock::time_point deadline);
 
 /**
- * @brief Sends one identity-only acceptance, heartbeat, or cancel frame.
+ * @brief Sends one identity-only lifecycle frame.
  * @param fd Connected worker socket.
- * @param kind AssignmentAccepted, Heartbeat, or Cancel.
+ * @param kind AssignmentAccepted, Heartbeat, Cancel, or CompletionReady.
  * @param identity Complete exact lease identity.
  * @param deadline Absolute monotonic I/O deadline.
  * @return Nothing after the exact frame is written.
@@ -321,7 +330,8 @@ void send_worker_identity(int fd, WorkerMessageKind kind,
 /**
  * @brief Decodes one identity-only frame and verifies its expected kind.
  * @param frame Valid bounded frame.
- * @param expected_kind AssignmentAccepted, Heartbeat, or Cancel.
+ * @param expected_kind AssignmentAccepted, Heartbeat, Cancel, or
+ * CompletionReady.
  * @return Complete validated identity tuple.
  * @throws WorkerProtocolError for wrong kind, malformed bytes, or trailing
  * fields.
@@ -337,8 +347,8 @@ AttemptIdentity decode_worker_identity(const WorkerProtocolFrame& frame,
  * @param output_stage Exact Assignment output reference and byte maximum.
  * @return Complete private Report control frame ready for bounded transport.
  * @throws Contract, metadata, allocation, or control-bound failures.
- * @note Image bytes must already have been staged through the separate data
- * plane. The encoder rejects rather than serializes an `ImageBuffer` or a
+ * @note Image bytes must already have been sent through the separate data-plane
+ * lane. The encoder rejects rather than serializes an `ImageBuffer` or a
  * mismatched output reference. `send_worker_report()` is the sole wrapper.
  */
 WorkerProtocolFrame encode_worker_report(
@@ -369,8 +379,9 @@ void send_worker_report(int fd, const PreparedWorkerReport& report,
  * @throws WorkerProtocolError for malformed, inconsistent, oversized, or
  * trailing metadata, or for any encoded image-bearing report shape.
  * @throws std::bad_alloc when bounded metadata reconstruction exhausts memory.
- * @note WorkerManager separately reads and validates its retained anonymous
- * output occurrence only after exact clean process reaping.
+ * @note WorkerManager separately drains the nonblocking output lane under the
+ * attempt's absolute lifecycle deadlines, incrementally hashes bounded chunks,
+ * and completes the metadata join before clean-reap completion handoff.
  */
 PreparedWorkerReport decode_worker_report(
     const WorkerProtocolFrame& frame, const JobSpec& spec,

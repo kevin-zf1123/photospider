@@ -381,6 +381,7 @@ WorkerMessageKind parse_message_kind(std::uint16_t value) {
     case WorkerMessageKind::Heartbeat:
     case WorkerMessageKind::Cancel:
     case WorkerMessageKind::Report:
+    case WorkerMessageKind::CompletionReady:
       return static_cast<WorkerMessageKind>(value);
   }
   throw WorkerProtocolError("worker protocol message kind is invalid");
@@ -1188,12 +1189,9 @@ WorkerProtocolFrame encode_worker_assignment(
         assignment.data_plane.checkpoint->receipt;
     if (!artifact_receipts_equal(checkpoint.receipt, metadata) ||
         checkpoint.receipt.descriptor.payload_bytes !=
-            checkpoint.payload.size() ||
-        checkpoint.receipt.content_digest !=
-            hash_artifact_content(checkpoint.payload.data(),
-                                  checkpoint.payload.size())) {
+            checkpoint.payload.size()) {
       throw std::invalid_argument(
-          "prepared worker checkpoint bytes differ from metadata");
+          "prepared worker checkpoint metadata or size is inconsistent");
     }
   }
   validate_worker_assignment_graph_transport(assignment.graph);
@@ -1265,7 +1263,8 @@ void send_worker_identity(int fd, WorkerMessageKind kind,
                           std::chrono::steady_clock::time_point deadline) {
   if (kind != WorkerMessageKind::AssignmentAccepted &&
       kind != WorkerMessageKind::Heartbeat &&
-      kind != WorkerMessageKind::Cancel) {
+      kind != WorkerMessageKind::Cancel &&
+      kind != WorkerMessageKind::CompletionReady) {
     throw std::invalid_argument("worker identity frame kind is invalid");
   }
   ByteWriter writer;
@@ -1279,7 +1278,8 @@ AttemptIdentity decode_worker_identity(const WorkerProtocolFrame& frame,
   return decode_checked([&] {
     if ((expected_kind != WorkerMessageKind::AssignmentAccepted &&
          expected_kind != WorkerMessageKind::Heartbeat &&
-         expected_kind != WorkerMessageKind::Cancel) ||
+         expected_kind != WorkerMessageKind::Cancel &&
+         expected_kind != WorkerMessageKind::CompletionReady) ||
         frame.kind != expected_kind) {
       throw WorkerProtocolError("worker identity frame kind is unexpected");
     }

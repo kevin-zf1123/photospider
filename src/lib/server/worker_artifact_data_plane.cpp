@@ -5,25 +5,25 @@
 #include "server/worker_artifact_data_plane.hpp"
 
 #include <fcntl.h>
-#include <sys/stat.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstdint>
-#include <filesystem>
 #include <limits>
 #include <memory>
-#include <new>
 #include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
 
-#include "server/worker_artifact_data_plane_test_access.hpp"  // NOLINT(build/include_subdir)
-
 namespace ps::server {
 namespace {
+
+/** @brief Maximum bytes moved by one manager-side nonblocking operation. */
+constexpr std::size_t kDataPlaneChunkBytes = 64U << 10U;
 
 /**
  * @brief Clears descriptor ownership before one non-retried close attempt.
@@ -44,8 +44,6 @@ void close_once(int* descriptor) noexcept {
 /**
  * @brief Small move-only descriptor owner for throwing setup paths.
  * @throws Nothing for construction, moves, release, and destruction.
- * @note The owner clears its numeric descriptor before exactly one close
- * attempt, so an interrupted close cannot target later descriptor reuse.
  */
 class ScopedDescriptor final {
  public:
@@ -56,36 +54,34 @@ class ScopedDescriptor final {
   ScopedDescriptor() noexcept = default;
 
   /**
-   * @brief Takes ownership of one descriptor or invalid sentinel.
-   * @param descriptor Exact descriptor to retain.
+   * @brief Takes ownership of one descriptor.
+   * @param descriptor Exact descriptor or invalid sentinel.
    * @throws Nothing.
    */
   explicit ScopedDescriptor(int descriptor) noexcept
       : descriptor_(descriptor) {}
 
   /**
-   * @brief Closes any retained descriptor exactly once at scope exit.
-   * @throws Nothing; close errors are ignored without retry.
+   * @brief Closes any retained descriptor exactly once.
+   * @throws Nothing; close failures are ignored without numeric retry.
    */
   ~ScopedDescriptor() noexcept { close_once(&descriptor_); }
 
   /**
    * @brief Prevents duplicate descriptor ownership.
    * @param other Existing owner that remains unchanged.
-   * @throws Nothing because the operation is deleted.
    */
   ScopedDescriptor(const ScopedDescriptor& other) = delete;
   /**
    * @brief Prevents duplicate descriptor assignment.
    * @param other Existing owner that remains unchanged.
    * @return No assignment result because the operation is deleted.
-   * @throws Nothing because the operation is deleted.
    */
   ScopedDescriptor& operator=(const ScopedDescriptor& other) = delete;
 
   /**
-   * @brief Transfers one exact descriptor owner.
-   * @param other Source owner cleared by the move.
+   * @brief Transfers one descriptor owner.
+   * @param other Source cleared by the move.
    * @throws Nothing.
    */
   ScopedDescriptor(ScopedDescriptor&& other) noexcept
@@ -93,7 +89,7 @@ class ScopedDescriptor final {
 
   /**
    * @brief Replaces ownership from another descriptor owner.
-   * @param other Source owner cleared by the move.
+   * @param other Source cleared by the move.
    * @return This owner.
    * @throws Nothing.
    */
@@ -125,463 +121,220 @@ class ScopedDescriptor final {
 };
 
 /**
- * @brief Owns one private temporary occurrence and its mutable path buffer.
- *
- * Path storage is fully allocated before `mkstemp`. Once creation succeeds,
- * `adopt_created_descriptor()` arms both descriptor and pathname cleanup using
- * only non-throwing scalar/descriptor operations. All later setup exceptions
- * therefore remove the name during stack unwinding.
- *
- * @throws Nothing for construction after argument preparation, moves,
- * descriptor access, explicit creation-descriptor closure, and destruction.
- * @note The temporary name is never placed in protocol metadata. It remains
- * valid only for this owner's lifetime and is unlinked before delegation.
+ * @brief Owns both endpoints while one directional lane is configured.
+ * @throws Nothing for value operations.
+ * @note Setup helpers release each endpoint only into one complete
+ * `WorkerArtifactDataPlane`; otherwise member destruction closes both.
  */
-class ScopedTemporaryOccurrence final {
- public:
-  /**
-   * @brief Retains one preallocated mutable `mkstemp` pathname template.
-   * @param mutable_path Null-terminated template ending in six `X` bytes.
-   * @throws Nothing after argument construction.
-   */
-  explicit ScopedTemporaryOccurrence(std::vector<char> mutable_path) noexcept
-      : mutable_path_(std::move(mutable_path)) {}
-
-  /**
-   * @brief Best-effort removes a retained name and closes its descriptor.
-   * @throws Nothing; cleanup failures are ignored during stack unwinding.
-   * @note The destructor body unlinks before the descriptor member closes.
-   */
-  ~ScopedTemporaryOccurrence() noexcept {
-    if (owns_name_ && !mutable_path_.empty()) {
-      static_cast<void>(::unlink(mutable_path_.data()));
-    }
-  }
-
-  /**
-   * @brief Prevents duplicate occurrence ownership.
-   * @param other Existing owner that remains unchanged.
-   * @throws Nothing because the operation is deleted.
-   */
-  ScopedTemporaryOccurrence(const ScopedTemporaryOccurrence& other) = delete;
-
-  /**
-   * @brief Prevents duplicate occurrence assignment.
-   * @param other Existing owner that remains unchanged.
-   * @return No assignment result because the operation is deleted.
-   * @throws Nothing because the operation is deleted.
-   */
-  ScopedTemporaryOccurrence& operator=(const ScopedTemporaryOccurrence& other) =
-      delete;
-
-  /**
-   * @brief Transfers the exact occurrence and all cleanup obligations.
-   * @param other Source owner disarmed by the move.
-   * @throws Nothing.
-   */
-  ScopedTemporaryOccurrence(ScopedTemporaryOccurrence&& other) noexcept
-      : mutable_path_(std::move(other.mutable_path_)),
-        creation_(std::move(other.creation_)),
-        owns_name_(std::exchange(other.owns_name_, false)) {}
-
-  /**
-   * @brief Prevents replacing a live occurrence owner through assignment.
-   * @param other Source owner that remains unchanged.
-   * @return No assignment result because the operation is deleted.
-   * @throws Nothing because the operation is deleted.
-   */
-  ScopedTemporaryOccurrence& operator=(ScopedTemporaryOccurrence&& other) =
-      delete;
-
-  /**
-   * @brief Returns mutable storage for the single `mkstemp` call.
-   * @return Non-null null-terminated template storage.
-   * @throws Nothing.
-   * @note The returned pointer is invalidated only when this owner dies or
-   * moves; no mutation may resize the retained vector after construction.
-   */
-  char* mutable_path() noexcept { return mutable_path_.data(); }
-
-  /**
-   * @brief Arms cleanup immediately after `mkstemp` succeeds.
-   * @param descriptor Exact nonnegative creation descriptor.
-   * @return Nothing.
-   * @throws Nothing.
-   * @note Callers invoke this before any operation that can throw.
-   */
-  void adopt_created_descriptor(int descriptor) noexcept {
-    creation_ = ScopedDescriptor(descriptor);
-    owns_name_ = true;
-  }
-
-  /**
-   * @brief Returns the exact retained name for direction-specific reopen.
-   * @return Borrowed null-terminated path valid for this owner lifetime.
-   * @throws Nothing.
-   */
-  const char* path() const noexcept { return mutable_path_.data(); }
-
-  /**
-   * @brief Returns the original read/write creation descriptor.
-   * @return Exact retained descriptor or -1.
-   * @throws Nothing.
-   */
-  int creation_descriptor() const noexcept { return creation_.get(); }
-
-  /**
-   * @brief Unlinks the exact temporary name before any descriptor delegation.
-   * @return Nothing after successful unlink and ownership transition.
-   * @throws std::system_error when unlink fails.
-   */
-  void unlink_now() {
-    if (owns_name_ && ::unlink(mutable_path_.data()) != 0) {
-      throw std::system_error(errno, std::generic_category(),
-                              "unlink worker artifact data-plane occurrence");
-    }
-    owns_name_ = false;
-  }
-
-  /**
-   * @brief Closes the original read/write descriptor after directional reopen.
-   * @return Nothing.
-   * @throws Nothing; close errors are ignored without retry.
-   */
-  void close_creation_descriptor() noexcept { creation_ = ScopedDescriptor(); }
-
- private:
-  /** @brief Preallocated mutable pathname, never placed in control metadata. */
-  std::vector<char> mutable_path_;
-  /** @brief Sole original read/write creation descriptor owner. */
-  ScopedDescriptor creation_;
-  /** @brief Whether destruction still owes pathname removal. */
-  bool owns_name_ = false;
+struct StreamLane final {
+  /** @brief Worker-side blocking endpoint delegated through fixed exec fd. */
+  ScopedDescriptor worker;
+  /** @brief Manager-side nonblocking endpoint retained by the supervisor. */
+  ScopedDescriptor manager;
 };
 
 /**
- * @brief Builds one null-terminated private `mkstemp` pathname template.
- * @param directory Existing trusted directory selected by the caller.
- * @return Fully allocated mutable template storage.
- * @throws std::invalid_argument when `directory` is empty.
- * @throws std::filesystem::filesystem_error when path conversion fails.
- * @throws std::bad_alloc when template storage cannot be retained.
- * @note Every allocation completes before a filesystem name is created.
+ * @brief Sets close-on-exec and optional nonblocking status on one endpoint.
+ * @param descriptor Valid stream descriptor.
+ * @param nonblocking Whether manager-side operations must return on EAGAIN.
+ * @return Nothing after both requested flags are installed.
+ * @throws std::system_error when descriptor flags cannot be read or changed.
  */
-std::vector<char> private_temporary_template(
-    const std::filesystem::path& directory) {
-  if (directory.empty()) {
-    throw std::invalid_argument("worker temporary directory is empty");
-  }
-  const std::filesystem::path template_path =
-      directory / "photospider-worker-artifact-XXXXXX";
-  const std::string template_text = template_path.string();
-  std::vector<char> mutable_template(template_text.begin(),
-                                     template_text.end());
-  mutable_template.push_back('\0');
-  return mutable_template;
-}
-
-/**
- * @brief Sets close-on-exec on one manager-owned setup descriptor.
- * @param descriptor Valid descriptor created before fork.
- * @return Nothing after `FD_CLOEXEC` is present.
- * @throws std::system_error when descriptor flag access or mutation fails.
- */
-void set_close_on_exec(int descriptor) {
-  const int flags = ::fcntl(descriptor, F_GETFD);
-  if (flags < 0 || ::fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) != 0) {
+void configure_stream_descriptor(int descriptor, bool nonblocking) {
+  const int descriptor_flags = ::fcntl(descriptor, F_GETFD);
+  if (descriptor_flags < 0 ||
+      ::fcntl(descriptor, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0) {
     throw std::system_error(errno, std::generic_category(),
-                            "configure worker artifact descriptor");
+                            "configure worker data-plane close-on-exec");
+  }
+  if (!nonblocking) {
+    return;
+  }
+  const int status_flags = ::fcntl(descriptor, F_GETFL);
+  if (status_flags < 0 ||
+      ::fcntl(descriptor, F_SETFL, status_flags | O_NONBLOCK) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "configure worker data-plane nonblocking mode");
   }
 }
 
 /**
- * @brief Creates one privately owned mode-0600 temporary regular file.
- * @param directory Existing trusted directory for the temporary occurrence.
- * @param inject_failure_after_creation Whether to throw immediately after
- * `mkstemp` arms its allocation-free cleanup owner.
- * @return Move-only occurrence with its read/write creation descriptor.
- * @throws std::invalid_argument when `directory` is empty.
- * @throws std::filesystem::filesystem_error when its template cannot be built.
- * @throws std::system_error for creation, permission, or flag failure.
- * @throws std::bad_alloc when path-template storage exhausts memory.
- * @note Cleanup is armed without allocation immediately after `mkstemp`; any
- * later allocation or setup exception therefore removes the exact name. The
- * injection is reachable only through the source-private test-access method.
+ * @brief Suppresses process-wide SIGPIPE for one exact sending endpoint.
+ * @param descriptor Valid AF_UNIX stream endpoint used for sending.
+ * @return Nothing after platform-specific local suppression is installed.
+ * @throws std::system_error when Darwin rejects `SO_NOSIGPIPE`.
+ * @note Linux uses `MSG_NOSIGNAL` on every send and needs no socket option.
  */
-ScopedTemporaryOccurrence create_private_temporary(
-    const std::filesystem::path& directory,
-    bool inject_failure_after_creation) {
-  ScopedTemporaryOccurrence occurrence(private_temporary_template(directory));
-  const int descriptor = ::mkstemp(occurrence.mutable_path());
-  if (descriptor < 0) {
+void configure_no_sigpipe(int descriptor) {
+#ifdef SO_NOSIGPIPE
+  int enabled = 1;
+  if (::setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled,
+                   sizeof(enabled)) != 0) {
     throw std::system_error(errno, std::generic_category(),
-                            "create worker artifact data-plane occurrence");
+                            "configure worker data-plane SIGPIPE suppression");
   }
-  occurrence.adopt_created_descriptor(descriptor);
-  if (inject_failure_after_creation) {
-    throw std::bad_alloc();
-  }
-  if (::fchmod(occurrence.creation_descriptor(), S_IRUSR | S_IWUSR) != 0) {
-    throw std::system_error(errno, std::generic_category(),
-                            "protect worker artifact data-plane occurrence");
-  }
-  set_close_on_exec(occurrence.creation_descriptor());
-  return occurrence;
+#else
+  static_cast<void>(descriptor);
+#endif
 }
 
 /**
- * @brief Creates one private occurrence in the process temporary directory.
- * @return Move-only occurrence with its read/write creation descriptor.
- * @throws Temporary-directory, setup, filesystem, and allocation failures
- * unchanged.
- * @note The directory and complete path buffer are resolved before `mkstemp`.
+ * @brief Creates one AF_UNIX stream pair and configures retained flags.
+ * @return Two close-on-exec endpoints; manager endpoint is nonblocking.
+ * @throws std::system_error for socket creation or flag failure.
  */
-ScopedTemporaryOccurrence create_private_temporary() {
-  return create_private_temporary(std::filesystem::temp_directory_path(),
-                                  false);
+StreamLane create_stream_lane() {
+  int descriptors[2] = {-1, -1};
+  if (::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "create worker artifact stream lane");
+  }
+  StreamLane lane{ScopedDescriptor(descriptors[0]),
+                  ScopedDescriptor(descriptors[1])};
+  configure_stream_descriptor(lane.worker.get(), false);
+  configure_stream_descriptor(lane.manager.get(), true);
+  return lane;
 }
 
 /**
- * @brief Opens one exact direction-scoped descriptor with close-on-exec.
- * @param path Non-null existing manager-owned private temporary path.
- * @param flags `O_RDONLY` or `O_WRONLY`.
- * @return Sole new descriptor owner.
- * @throws std::invalid_argument for unsupported access flags.
- * @throws std::system_error for open or flag configuration failure.
+ * @brief Creates the manager-send/worker-receive checkpoint lane.
+ * @return Direction-reduced stream endpoints.
+ * @throws std::system_error for socket, shutdown, flag, or option failure.
  */
-ScopedDescriptor open_directional(const char* path, int flags) {
-  if (flags != O_RDONLY && flags != O_WRONLY) {
-    throw std::invalid_argument("worker artifact access direction is invalid");
-  }
-  const int descriptor = ::open(path, flags | O_CLOEXEC);
-  if (descriptor < 0) {
+StreamLane create_checkpoint_lane() {
+  StreamLane lane = create_stream_lane();
+  if (::shutdown(lane.worker.get(), SHUT_WR) != 0) {
     throw std::system_error(errno, std::generic_category(),
-                            "open worker artifact data-plane occurrence");
+                            "reduce worker checkpoint stream direction");
   }
-  ScopedDescriptor owner(descriptor);
-  set_close_on_exec(owner.get());
-  return owner;
+  configure_no_sigpipe(lane.manager.get());
+  return lane;
 }
 
 /**
- * @brief Requires a reopened descriptor to name the exact private occurrence.
- * @param creation Original manager-owned `mkstemp` descriptor.
- * @param reopened Direction-scoped descriptor opened through its temporary
- * name before unlink.
- * @return Nothing when device/inode, owner, mode, link count, and regular-file
- * type all match the original private occurrence.
- * @throws std::system_error when either descriptor cannot be inspected.
- * @throws WorkerArtifactDataPlaneError when the path was replaced, linked,
- * repermissioned, or does not name the original private regular file.
- * @note This closes the pathname-reopen race before the name is unlinked and
- * before any descriptor is delegated across `fork`.
+ * @brief Creates the worker-send/manager-receive candidate lane.
+ * @return Direction-reduced stream endpoints.
+ * @throws std::system_error for socket, shutdown, flag, or option failure.
  */
-void require_same_private_occurrence(int creation, int reopened) {
-  struct stat original{};
-  struct stat candidate{};
-  if (::fstat(creation, &original) != 0 || ::fstat(reopened, &candidate) != 0) {
+StreamLane create_output_lane() {
+  StreamLane lane = create_stream_lane();
+  if (::shutdown(lane.manager.get(), SHUT_WR) != 0) {
     throw std::system_error(errno, std::generic_category(),
-                            "inspect private worker artifact occurrence");
+                            "reduce worker output stream direction");
   }
-  constexpr mode_t kPermissionMask = S_IRWXU | S_IRWXG | S_IRWXO;
-  constexpr mode_t kPrivatePermissions = S_IRUSR | S_IWUSR;
-  if (!S_ISREG(original.st_mode) || !S_ISREG(candidate.st_mode) ||
-      original.st_dev != candidate.st_dev ||
-      original.st_ino != candidate.st_ino || original.st_uid != ::geteuid() ||
-      candidate.st_uid != ::geteuid() ||
-      (original.st_mode & kPermissionMask) != kPrivatePermissions ||
-      (candidate.st_mode & kPermissionMask) != kPrivatePermissions ||
-      original.st_nlink != 1 || candidate.st_nlink != 1) {
+  configure_no_sigpipe(lane.worker.get());
+  return lane;
+}
+
+/**
+ * @brief Requires one descriptor to be a connected stream socket.
+ * @param descriptor Candidate inherited data-plane descriptor.
+ * @return Nothing for `SOCK_STREAM`.
+ * @throws std::system_error when socket type cannot be queried.
+ * @throws WorkerArtifactDataPlaneError for another descriptor type.
+ */
+void require_stream_socket(int descriptor) {
+  int type = 0;
+  socklen_t size = sizeof(type);
+  if (::getsockopt(descriptor, SOL_SOCKET, SO_TYPE, &type, &size) != 0) {
+    throw std::system_error(errno, std::generic_category(),
+                            "inspect worker artifact stream descriptor");
+  }
+  if (size != sizeof(type) || type != SOCK_STREAM) {
     throw WorkerArtifactDataPlaneError(
-        "worker artifact temporary occurrence identity changed before unlink");
+        "worker artifact descriptor is not a stream lane");
   }
 }
 
 /**
- * @brief Writes one complete byte range at fixed file offsets.
- * @param descriptor Valid writable regular-file descriptor.
- * @param bytes Borrowed input, null only when size is zero.
+ * @brief Sends one complete byte range from the killable worker.
+ * @param descriptor Valid worker-side output stream.
+ * @param bytes Borrowed input, null only for an empty range.
  * @param size Exact byte count.
- * @param initial_offset First file byte to replace.
- * @return Nothing after all bytes are visible in the occurrence.
+ * @return Nothing after every byte is accepted by the stream.
  * @throws std::invalid_argument for null nonempty input.
- * @throws std::overflow_error when offsets cannot fit `off_t`.
- * @throws std::system_error for a non-interruption `pwrite` failure.
+ * @throws std::system_error for a non-interruption send failure.
+ * @note Blocking is intentional here: WorkerManager owns, signals, and exactly
+ * reaps this process under its absolute lifecycle deadlines.
  */
-void write_complete_at(int descriptor, const std::byte* bytes, std::size_t size,
-                       std::size_t initial_offset = 0U) {
+void send_complete_from_worker(int descriptor, const std::byte* bytes,
+                               std::size_t size) {
   if (size != 0U && bytes == nullptr) {
-    throw std::invalid_argument("worker artifact write input is null");
+    throw std::invalid_argument("worker artifact stream input is null");
   }
-  if (initial_offset > std::numeric_limits<std::size_t>::max() - size) {
-    throw std::overflow_error("worker artifact write range overflowed");
-  }
-  std::size_t consumed = 0U;
-  while (consumed != size) {
-    const std::size_t offset = initial_offset + consumed;
-    if (offset > static_cast<std::size_t>(std::numeric_limits<off_t>::max())) {
-      throw std::overflow_error("worker artifact write offset overflowed");
-    }
-    const std::size_t remaining = size - consumed;
+  std::size_t offset = 0U;
+  while (offset != size) {
     const std::size_t chunk =
-        std::min(remaining,
+        std::min(size - offset,
                  static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
-    const ssize_t written = ::pwrite(descriptor, bytes + consumed, chunk,
-                                     static_cast<off_t>(offset));
-    if (written < 0 && errno == EINTR) {
+#ifdef MSG_NOSIGNAL
+    constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+    constexpr int kSendFlags = 0;
+#endif
+    const ssize_t sent = ::send(descriptor, bytes + offset, chunk, kSendFlags);
+    if (sent < 0 && errno == EINTR) {
       continue;
     }
-    if (written <= 0) {
-      throw std::system_error(errno == 0 ? EIO : errno, std::generic_category(),
-                              "write worker artifact data-plane occurrence");
+    if (sent <= 0) {
+      throw std::system_error(errno == 0 ? EPIPE : errno,
+                              std::generic_category(),
+                              "send worker artifact stream bytes");
     }
-    consumed += static_cast<std::size_t>(written);
+    offset += static_cast<std::size_t>(sent);
   }
 }
 
 /**
- * @brief Reads one complete exact-sized byte range at fixed file offsets.
- * @param descriptor Valid readable regular-file descriptor.
- * @param size Exact expected payload size.
- * @return Independently owned bytes.
- * @throws std::overflow_error when offsets cannot fit `off_t`.
- * @throws std::system_error for a non-interruption `pread` failure.
- * @throws WorkerArtifactDataPlaneError for premature EOF.
- * @throws std::bad_alloc when bounded allocation exhausts memory.
+ * @brief Receives an exact range and then requires the manager's EOF marker.
+ * @param descriptor Valid worker-side checkpoint stream.
+ * @param size Exact receipt-declared payload size.
+ * @return Independently owned exact bytes.
+ * @throws std::system_error for a non-interruption receive failure.
+ * @throws WorkerArtifactDataPlaneError for premature EOF or extra bytes.
+ * @throws std::bad_alloc when bounded allocation fails.
+ * @note Blocking is intentional inside the killable worker process.
  */
-std::vector<std::byte> read_complete_at(int descriptor, std::size_t size) {
+std::vector<std::byte> receive_exact_checkpoint(int descriptor,
+                                                std::size_t size) {
   std::vector<std::byte> bytes(size);
   std::size_t offset = 0U;
   while (offset != size) {
-    if (offset > static_cast<std::size_t>(std::numeric_limits<off_t>::max())) {
-      throw std::overflow_error("worker artifact read offset overflowed");
-    }
-    const std::size_t remaining = size - offset;
     const std::size_t chunk =
-        std::min(remaining,
+        std::min(size - offset,
                  static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
-    const ssize_t received = ::pread(descriptor, bytes.data() + offset, chunk,
-                                     static_cast<off_t>(offset));
+    const ssize_t received =
+        ::recv(descriptor, bytes.data() + offset, chunk, 0);
     if (received < 0 && errno == EINTR) {
       continue;
     }
     if (received < 0) {
       throw std::system_error(errno, std::generic_category(),
-                              "read worker artifact data-plane occurrence");
+                              "receive worker checkpoint stream bytes");
     }
     if (received == 0) {
       throw WorkerArtifactDataPlaneError(
-          "worker artifact data-plane occurrence is truncated");
+          "worker checkpoint stream ended before its receipt size");
     }
     offset += static_cast<std::size_t>(received);
   }
-  return bytes;
-}
-
-/**
- * @brief Reads one exact range into caller-owned storage at fixed offsets.
- * @param descriptor Valid readable regular-file descriptor.
- * @param destination Writable range, null only when `size` is zero.
- * @param size Exact number of bytes to read.
- * @param initial_offset First file byte to consume.
- * @return Nothing after the entire requested range is populated.
- * @throws std::invalid_argument for null nonempty output.
- * @throws std::overflow_error when the requested range cannot fit `off_t`.
- * @throws std::system_error for a non-interruption `pread` failure.
- * @throws WorkerArtifactDataPlaneError for premature EOF.
- * @note The caller owns allocation and must bound `size` before calling.
- */
-void read_complete_at_into(int descriptor, std::byte* destination,
-                           std::size_t size, std::size_t initial_offset) {
-  if (size != 0U && destination == nullptr) {
-    throw std::invalid_argument("worker artifact read output is null");
-  }
-  if (initial_offset > std::numeric_limits<std::size_t>::max() - size) {
-    throw std::overflow_error("worker artifact read range overflowed");
-  }
-  std::size_t consumed = 0U;
-  while (consumed != size) {
-    const std::size_t offset = initial_offset + consumed;
-    if (offset > static_cast<std::size_t>(std::numeric_limits<off_t>::max())) {
-      throw std::overflow_error("worker artifact read offset overflowed");
-    }
-    const std::size_t remaining = size - consumed;
-    const std::size_t chunk =
-        std::min(remaining,
-                 static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
-    const ssize_t received = ::pread(descriptor, destination + consumed, chunk,
-                                     static_cast<off_t>(offset));
+  std::byte extra{};
+  for (;;) {
+    const ssize_t received = ::recv(descriptor, &extra, sizeof(extra), 0);
     if (received < 0 && errno == EINTR) {
       continue;
     }
     if (received < 0) {
       throw std::system_error(errno, std::generic_category(),
-                              "read worker artifact data-plane occurrence");
+                              "receive worker checkpoint stream commit");
     }
-    if (received == 0) {
+    if (received != 0) {
       throw WorkerArtifactDataPlaneError(
-          "worker artifact data-plane occurrence is truncated");
+          "worker checkpoint stream exceeds its receipt size");
     }
-    consumed += static_cast<std::size_t>(received);
+    break;
   }
-}
-
-/**
- * @brief Returns the size of one exact anonymous private occurrence.
- * @param descriptor Valid descriptor for one anonymous occurrence.
- * @return Nonnegative size exactly representable by `std::size_t`.
- * @throws std::system_error when `fstat` fails.
- * @throws WorkerArtifactDataPlaneError for a non-regular, linked,
- * repermissioned, foreign-owned, negative-sized, or unsupported occurrence.
- * @note Every call happens after manager-owned name unlink. Revalidating link,
- * owner, and mode after worker reap prevents worker mutation from promoting a
- * private stage into path authority.
- */
-std::size_t private_anonymous_file_size(int descriptor) {
-  struct stat status{};
-  if (::fstat(descriptor, &status) != 0) {
-    throw std::system_error(errno, std::generic_category(),
-                            "inspect worker artifact data-plane occurrence");
-  }
-  constexpr mode_t kPermissionMask = S_IRWXU | S_IRWXG | S_IRWXO;
-  constexpr mode_t kPrivatePermissions = S_IRUSR | S_IWUSR;
-  if (!S_ISREG(status.st_mode) || status.st_nlink != 0 ||
-      status.st_uid != ::geteuid() ||
-      (status.st_mode & kPermissionMask) != kPrivatePermissions ||
-      status.st_size < 0) {
-    throw WorkerArtifactDataPlaneError(
-        "worker artifact data-plane occurrence is not anonymous and private");
-  }
-  const auto unsigned_size = static_cast<std::uintmax_t>(status.st_size);
-  if (unsigned_size > std::numeric_limits<std::size_t>::max()) {
-    throw WorkerArtifactDataPlaneError(
-        "worker artifact data-plane occurrence size is unsupported");
-  }
-  return static_cast<std::size_t>(unsigned_size);
-}
-
-/**
- * @brief Requires one descriptor to have an exact access direction.
- * @param descriptor Valid descriptor.
- * @param expected_access `O_RDONLY` or `O_WRONLY`.
- * @return Nothing when `F_GETFL` reports exactly the expected direction.
- * @throws std::invalid_argument for an unsupported expected access value.
- * @throws std::system_error when descriptor flags cannot be read.
- * @throws WorkerArtifactDataPlaneError when actual direction differs.
- */
-void require_access_direction(int descriptor, int expected_access) {
-  if (expected_access != O_RDONLY && expected_access != O_WRONLY) {
-    throw std::invalid_argument("worker artifact expected access is invalid");
-  }
-  const int flags = ::fcntl(descriptor, F_GETFL);
-  if (flags < 0) {
-    throw std::system_error(errno, std::generic_category(),
-                            "inspect worker artifact descriptor access");
-  }
-  if ((flags & O_ACCMODE) != expected_access) {
-    throw WorkerArtifactDataPlaneError(
-        "worker artifact descriptor access direction is invalid");
-  }
+  return bytes;
 }
 
 /**
@@ -604,19 +357,18 @@ std::size_t resource_size(std::uint64_t value) {
  * @throws std::overflow_error when the platform cannot represent the minimum.
  */
 std::size_t output_payload_maximum(const JobResourceRequest& resources) {
-  const std::uint64_t maximum =
+  return resource_size(
       std::min({resources.output_bytes, resources.staging_bytes,
-                resources.retention_bytes});
-  return resource_size(maximum);
+                resources.retention_bytes}));
 }
 
 /**
  * @brief Derives one fixed-width non-authorizing reference from exact fields.
  * @param identity Complete current assignment identity.
- * @param direction Stable `checkpoint-read` or `output-stage` token.
+ * @param direction Stable checkpoint-read or output-stage token.
  * @param resource Exact ArtifactId or output-slot value.
- * @return `worker-data-v1.` plus 64 lowercase SHA-256 hexadecimal bytes.
- * @throws Contract, allocation, or hash overflow failures unchanged.
+ * @return Versioned SHA-256 reference text.
+ * @throws Contract, allocation, or hash failures unchanged.
  */
 std::string data_plane_reference(const AttemptIdentity& identity,
                                  const std::string& direction,
@@ -640,13 +392,11 @@ std::string data_plane_reference(const AttemptIdentity& identity,
   canonical.append(resource);
   const JobSpecDigest digest = hash_job_spec_bytes(
       reinterpret_cast<const std::byte*>(canonical.data()), canonical.size());
-  std::string reference = "worker-data-v1.";
-  reference.append(digest.hex());
-  return reference;
+  return "worker-data-v1." + digest.hex();
 }
 
 /**
- * @brief Validates one tight artifact image descriptor without allocation.
+ * @brief Validates one tight artifact descriptor without allocation.
  * @param descriptor Candidate descriptor.
  * @return Nothing when dimensions, type, row bytes, and payload agree.
  * @throws std::invalid_argument for invalid shape or checked overflow.
@@ -675,14 +425,10 @@ void validate_tight_descriptor(const ArtifactImageDescriptor& descriptor) {
 }
 
 /**
- * @brief Validates every typed field in one durable artifact receipt.
+ * @brief Validates typed metadata in one durable artifact receipt.
  * @param receipt Candidate metadata-only checkpoint receipt.
- * @return Nothing when provenance identity, typed ids, descriptor, and
- * durability are complete and valid.
- * @throws std::invalid_argument for incomplete or invalid receipt metadata.
- * @throws std::overflow_error for impossible descriptor arithmetic.
- * @note Content bytes and digest agreement are checked separately at the
- * manager and worker data-plane boundaries.
+ * @return Nothing when identity, descriptor, digest, and durability are valid.
+ * @throws std::invalid_argument for incomplete receipt metadata.
  */
 void validate_artifact_receipt_metadata(const OutputCommitReceipt& receipt) {
   validate_attempt_identity(receipt.attempt);
@@ -696,10 +442,12 @@ void validate_artifact_receipt_metadata(const OutputCommitReceipt& receipt) {
 }
 
 /**
- * @brief Builds one exact Assignment metadata contract.
+ * @brief Builds one exact bounded Assignment metadata contract.
  * @param assignment Valid manager-owned assignment and optional checkpoint.
  * @return Complete deterministic references and output bound.
- * @throws Validation, allocation, and hashing failures unchanged.
+ * @throws Validation, allocation, and bounded metadata hashing failures.
+ * @note Durable checkpoint payload bytes are not copied or hashed here. The
+ * killable worker verifies them while receiving the checkpoint stream.
  */
 WorkerDataPlaneAssignment make_assignment_metadata(
     const JobAssignment& assignment) {
@@ -722,20 +470,15 @@ WorkerDataPlaneAssignment make_assignment_metadata(
   WorkerDataPlaneAssignment metadata;
   if (assignment.checkpoint != nullptr) {
     const ArtifactRecord& checkpoint = *assignment.checkpoint;
-    validate_tight_descriptor(checkpoint.receipt.descriptor);
+    validate_artifact_receipt_metadata(checkpoint.receipt);
     if (checkpoint.receipt.attempt.tenant_id != assignment.identity.tenant_id ||
         checkpoint.receipt.artifact_id !=
             *assignment.spec->checkpoint_artifact_id() ||
-        checkpoint.receipt.achieved_durability !=
-            ArtifactDurability::CrashDurable ||
         checkpoint.receipt.descriptor.payload_bytes !=
             checkpoint.payload.size() ||
         checkpoint.payload.size() >
             resource_size(
-                assignment.spec->resource_request().host_memory_bytes) ||
-        checkpoint.receipt.content_digest !=
-            hash_artifact_content(checkpoint.payload.data(),
-                                  checkpoint.payload.size())) {
+                assignment.spec->resource_request().host_memory_bytes)) {
       throw std::invalid_argument(
           "worker data-plane checkpoint does not match durable authority");
     }
@@ -757,66 +500,7 @@ WorkerDataPlaneAssignment make_assignment_metadata(
   return metadata;
 }
 
-/**
- * @brief Opens an anonymous read-only occurrence containing exact bytes.
- * @param bytes Immutable checkpoint bytes to prepopulate.
- * @return Sole read-only descriptor owner after name unlink.
- * @throws Setup, write, truncation, and cleanup failures unchanged.
- */
-ScopedDescriptor create_checkpoint_occurrence(
-    const std::vector<std::byte>& bytes) {
-  ScopedTemporaryOccurrence occurrence = create_private_temporary();
-  write_complete_at(occurrence.creation_descriptor(), bytes.data(),
-                    bytes.size());
-  if (bytes.size() >
-      static_cast<std::size_t>(std::numeric_limits<off_t>::max())) {
-    throw std::overflow_error("worker checkpoint size exceeds off_t");
-  }
-  if (::ftruncate(occurrence.creation_descriptor(),
-                  static_cast<off_t>(bytes.size())) != 0) {
-    throw std::system_error(errno, std::generic_category(),
-                            "truncate worker checkpoint occurrence");
-  }
-  ScopedDescriptor reader = open_directional(occurrence.path(), O_RDONLY);
-  require_same_private_occurrence(occurrence.creation_descriptor(),
-                                  reader.get());
-  occurrence.unlink_now();
-  occurrence.close_creation_descriptor();
-  return reader;
-}
-
-/**
- * @brief Opens one empty anonymous output occurrence in opposite directions.
- * @param reader Non-null output receiving manager read descriptor ownership.
- * @param writer Non-null output receiving worker write descriptor ownership.
- * @return Nothing after name unlink and creation-descriptor closure.
- * @throws std::invalid_argument for null outputs.
- * @throws Setup and cleanup failures unchanged.
- */
-void create_output_occurrence(ScopedDescriptor* reader,
-                              ScopedDescriptor* writer) {
-  if (reader == nullptr || writer == nullptr) {
-    throw std::invalid_argument("worker output occurrence outputs are null");
-  }
-  ScopedTemporaryOccurrence occurrence = create_private_temporary();
-  *reader = open_directional(occurrence.path(), O_RDONLY);
-  *writer = open_directional(occurrence.path(), O_WRONLY);
-  require_same_private_occurrence(occurrence.creation_descriptor(),
-                                  reader->get());
-  require_same_private_occurrence(occurrence.creation_descriptor(),
-                                  writer->get());
-  occurrence.unlink_now();
-  occurrence.close_creation_descriptor();
-}
-
 }  // namespace
-
-/** @copydoc
- * WorkerArtifactDataPlaneTestAccess::throw_after_private_temporary_creation */
-void WorkerArtifactDataPlaneTestAccess::throw_after_private_temporary_creation(
-    const std::filesystem::path& directory) {
-  static_cast<void>(create_private_temporary(directory, true));
-}
 
 /** @copydoc ps::server::validate_worker_data_plane_assignment */
 void validate_worker_data_plane_assignment(
@@ -860,7 +544,6 @@ void validate_worker_data_plane_assignment(
       checkpoint.reference_id.size() > kMaximumWorkerDataPlaneReferenceBytes ||
       receipt.attempt.tenant_id != identity.tenant_id ||
       receipt.artifact_id != *spec.checkpoint_artifact_id() ||
-      receipt.achieved_durability != ArtifactDurability::CrashDurable ||
       receipt.descriptor.payload_bytes >
           resource_size(spec.resource_request().host_memory_bytes)) {
     throw std::invalid_argument(
@@ -870,9 +553,11 @@ void validate_worker_data_plane_assignment(
 
 /** @copydoc ps::server::WorkerArtifactDataPlane::WorkerArtifactDataPlane */
 WorkerArtifactDataPlane::WorkerArtifactDataPlane(
-    int checkpoint_descriptor, int output_descriptor,
-    int output_reader_descriptor, WorkerDataPlaneAssignment metadata) noexcept
+    int checkpoint_descriptor, int checkpoint_sender_descriptor,
+    int output_descriptor, int output_reader_descriptor,
+    WorkerDataPlaneAssignment metadata) noexcept
     : worker_checkpoint_descriptor_(checkpoint_descriptor),
+      manager_checkpoint_descriptor_(checkpoint_sender_descriptor),
       worker_output_descriptor_(output_descriptor),
       manager_output_descriptor_(output_reader_descriptor),
       assignment_metadata_(std::move(metadata)) {
@@ -882,21 +567,18 @@ WorkerArtifactDataPlane::WorkerArtifactDataPlane(
 WorkerArtifactDataPlane WorkerArtifactDataPlane::create(
     const JobAssignment& assignment) {
   WorkerDataPlaneAssignment metadata = make_assignment_metadata(assignment);
-  const std::vector<std::byte> empty;
-  ScopedDescriptor checkpoint = create_checkpoint_occurrence(
-      assignment.checkpoint == nullptr ? empty
-                                       : assignment.checkpoint->payload);
-  ScopedDescriptor output_reader;
-  ScopedDescriptor output_writer;
-  create_output_occurrence(&output_reader, &output_writer);
-  return WorkerArtifactDataPlane(checkpoint.release(), output_writer.release(),
-                                 output_reader.release(), std::move(metadata));
+  StreamLane checkpoint = create_checkpoint_lane();
+  StreamLane output = create_output_lane();
+  return WorkerArtifactDataPlane(
+      checkpoint.worker.release(), checkpoint.manager.release(),
+      output.worker.release(), output.manager.release(), std::move(metadata));
 }
 
 /** @copydoc ps::server::WorkerArtifactDataPlane::~WorkerArtifactDataPlane */
 WorkerArtifactDataPlane::~WorkerArtifactDataPlane() noexcept {
   close_worker_descriptors();
-  close_once(&manager_output_descriptor_);
+  close_manager_checkpoint_descriptor();
+  close_manager_output_descriptor();
 }
 
 /** @copydoc ps::server::WorkerArtifactDataPlane::WorkerArtifactDataPlane */
@@ -904,6 +586,8 @@ WorkerArtifactDataPlane::WorkerArtifactDataPlane(
     WorkerArtifactDataPlane&& other) noexcept
     : worker_checkpoint_descriptor_(
           std::exchange(other.worker_checkpoint_descriptor_, -1)),
+      manager_checkpoint_descriptor_(
+          std::exchange(other.manager_checkpoint_descriptor_, -1)),
       worker_output_descriptor_(
           std::exchange(other.worker_output_descriptor_, -1)),
       manager_output_descriptor_(
@@ -916,9 +600,12 @@ WorkerArtifactDataPlane& WorkerArtifactDataPlane::operator=(
     WorkerArtifactDataPlane&& other) noexcept {
   if (this != &other) {
     close_worker_descriptors();
-    close_once(&manager_output_descriptor_);
+    close_manager_checkpoint_descriptor();
+    close_manager_output_descriptor();
     worker_checkpoint_descriptor_ =
         std::exchange(other.worker_checkpoint_descriptor_, -1);
+    manager_checkpoint_descriptor_ =
+        std::exchange(other.manager_checkpoint_descriptor_, -1);
     worker_output_descriptor_ =
         std::exchange(other.worker_output_descriptor_, -1);
     manager_output_descriptor_ =
@@ -934,17 +621,90 @@ void WorkerArtifactDataPlane::close_worker_descriptors() noexcept {
   close_once(&worker_output_descriptor_);
 }
 
+/** @copydoc ps::server::WorkerArtifactDataPlane::send_checkpoint_chunk */
+WorkerDataPlaneIoStatus WorkerArtifactDataPlane::send_checkpoint_chunk(
+    const std::vector<std::byte>& payload, std::size_t* offset) {
+  if (offset == nullptr || *offset > payload.size()) {
+    throw std::invalid_argument("worker checkpoint stream offset is invalid");
+  }
+  if (*offset == payload.size()) {
+    return WorkerDataPlaneIoStatus::Progress;
+  }
+  const std::size_t size =
+      std::min(kDataPlaneChunkBytes, payload.size() - *offset);
+#ifdef MSG_NOSIGNAL
+  constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+  constexpr int kSendFlags = 0;
+#endif
+  const ssize_t sent = ::send(manager_checkpoint_descriptor_,
+                              payload.data() + *offset, size, kSendFlags);
+  if (sent > 0) {
+    *offset += static_cast<std::size_t>(sent);
+    return WorkerDataPlaneIoStatus::Progress;
+  }
+  if (sent == 0 || errno == EPIPE || errno == ECONNRESET) {
+    return WorkerDataPlaneIoStatus::EndOfStream;
+  }
+  if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+    return WorkerDataPlaneIoStatus::WouldBlock;
+  }
+  throw std::system_error(errno, std::generic_category(),
+                          "send manager checkpoint stream chunk");
+}
+
+/** @copydoc
+ * ps::server::WorkerArtifactDataPlane::close_manager_checkpoint_descriptor */
+void WorkerArtifactDataPlane::close_manager_checkpoint_descriptor() noexcept {
+  close_once(&manager_checkpoint_descriptor_);
+}
+
+/** @copydoc ps::server::WorkerArtifactDataPlane::receive_output_chunk */
+WorkerDataPlaneIoStatus WorkerArtifactDataPlane::receive_output_chunk(
+    std::vector<std::byte>* payload) {
+  if (payload == nullptr) {
+    throw std::invalid_argument("worker output stream destination is null");
+  }
+  std::array<std::byte, kDataPlaneChunkBytes> chunk{};
+  const ssize_t received =
+      ::recv(manager_output_descriptor_, chunk.data(), chunk.size(), 0);
+  if (received > 0) {
+    const std::size_t size = static_cast<std::size_t>(received);
+    const std::size_t maximum =
+        assignment_metadata_.output.maximum_payload_bytes;
+    if (payload->size() > maximum || size > maximum - payload->size()) {
+      throw WorkerArtifactDataPlaneError(
+          "worker output stream exceeds its assigned stage");
+    }
+    payload->insert(payload->end(), chunk.begin(), chunk.begin() + received);
+    return WorkerDataPlaneIoStatus::Progress;
+  }
+  if (received == 0) {
+    return WorkerDataPlaneIoStatus::EndOfStream;
+  }
+  if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+    return WorkerDataPlaneIoStatus::WouldBlock;
+  }
+  throw std::system_error(errno, std::generic_category(),
+                          "receive manager output stream chunk");
+}
+
+/** @copydoc
+ * ps::server::WorkerArtifactDataPlane::close_manager_output_descriptor */
+void WorkerArtifactDataPlane::close_manager_output_descriptor() noexcept {
+  close_once(&manager_output_descriptor_);
+}
+
 /** @copydoc ps::server::WorkerArtifactDataPlane::materialize_report */
 JobAttemptReport WorkerArtifactDataPlane::materialize_report(
     JobAttemptReport report,
-    const std::optional<WorkerOutputDataReference>& output) const {
-  require_access_direction(manager_output_descriptor_, O_RDONLY);
-  const std::size_t file_size =
-      private_anonymous_file_size(manager_output_descriptor_);
+    const std::optional<WorkerOutputDataReference>& output,
+    std::vector<std::byte> payload,
+    const ArtifactContentDigest& payload_digest) const {
   if (!output.has_value()) {
-    if (file_size != 0U) {
+    if (!payload.empty()) {
       throw WorkerArtifactDataPlaneError(
-          "image-free worker report left output-stage bytes");
+          "image-free worker report sent output-stage bytes");
     }
     return report;
   }
@@ -964,25 +724,23 @@ JobAttemptReport WorkerArtifactDataPlane::materialize_report(
   }
   if (output->descriptor.payload_bytes >
           assignment_metadata_.output.maximum_payload_bytes ||
-      output->descriptor.payload_bytes != file_size) {
+      output->descriptor.payload_bytes != payload.size()) {
     throw WorkerArtifactDataPlaneError(
         "worker output-stage size exceeds or differs from metadata");
   }
-  ImageBuffer image = make_aligned_cpu_image_buffer(
-      output->descriptor.width, output->descriptor.height,
-      output->descriptor.channels, output->descriptor.type, 64U);
-  std::size_t offset = 0U;
-  for (int row = 0; row < output->descriptor.height; ++row) {
-    read_complete_at_into(manager_output_descriptor_,
-                          static_cast<std::byte*>(image.data.get()) +
-                              static_cast<std::size_t>(row) * image.step,
-                          output->descriptor.row_bytes, offset);
-    offset += output->descriptor.row_bytes;
-  }
-  if (hash_image_artifact_content(image) != output->content_digest) {
+  if (payload_digest != output->content_digest) {
     throw WorkerArtifactDataPlaneError(
         "worker output-stage content digest is inconsistent");
   }
+  auto owner = std::make_shared<std::vector<std::byte>>(std::move(payload));
+  ImageBuffer image;
+  image.width = output->descriptor.width;
+  image.height = output->descriptor.height;
+  image.channels = output->descriptor.channels;
+  image.type = output->descriptor.type;
+  image.device = Device::CPU;
+  image.step = output->descriptor.row_bytes;
+  image.data = std::shared_ptr<void>(owner, owner->data());
   report.image = std::move(image);
   return report;
 }
@@ -1002,23 +760,17 @@ std::shared_ptr<const ArtifactRecord> materialize_worker_checkpoint(
     throw WorkerArtifactDataPlaneError(
         std::string("worker checkpoint metadata is invalid: ") + error.what());
   }
-  require_access_direction(checkpoint_descriptor, O_RDONLY);
-  const std::size_t file_size =
-      private_anonymous_file_size(checkpoint_descriptor);
+  require_stream_socket(checkpoint_descriptor);
+  const std::size_t expected_size =
+      data_plane.checkpoint.has_value()
+          ? data_plane.checkpoint->receipt.descriptor.payload_bytes
+          : 0U;
+  std::vector<std::byte> payload =
+      receive_exact_checkpoint(checkpoint_descriptor, expected_size);
   if (!data_plane.checkpoint.has_value()) {
-    if (file_size != 0U) {
-      throw WorkerArtifactDataPlaneError(
-          "checkpoint-free assignment received data-plane bytes");
-    }
     return nullptr;
   }
   const OutputCommitReceipt& receipt = data_plane.checkpoint->receipt;
-  if (file_size != receipt.descriptor.payload_bytes) {
-    throw WorkerArtifactDataPlaneError(
-        "worker checkpoint file size differs from receipt");
-  }
-  std::vector<std::byte> payload =
-      read_complete_at(checkpoint_descriptor, file_size);
   if (hash_artifact_content(payload.data(), payload.size()) !=
       receipt.content_digest) {
     throw WorkerArtifactDataPlaneError(
@@ -1048,14 +800,8 @@ std::optional<WorkerOutputDataReference> stage_worker_output(
           output_payload_maximum(spec.resource_request())) {
     throw std::invalid_argument("worker output stage does not join assignment");
   }
-  require_access_direction(output_descriptor, O_WRONLY);
-  static_cast<void>(private_anonymous_file_size(output_descriptor));
-
+  require_stream_socket(output_descriptor);
   if (!report->image.has_value()) {
-    if (::ftruncate(output_descriptor, 0) != 0) {
-      throw std::system_error(errno, std::generic_category(),
-                              "clear image-free worker output stage");
-    }
     return std::nullopt;
   }
   if (report->outcome != JobAttemptOutcome::Succeeded || !report->settled ||
@@ -1077,10 +823,6 @@ std::optional<WorkerOutputDataReference> stage_worker_output(
   const std::size_t payload_bytes =
       row_bytes * static_cast<std::size_t>(image.height);
   if (payload_bytes > output_stage.maximum_payload_bytes) {
-    if (::ftruncate(output_descriptor, 0) != 0) {
-      throw std::system_error(errno, std::generic_category(),
-                              "clear oversized worker output stage");
-    }
     report->outcome = JobAttemptOutcome::Failed;
     report->settled = true;
     report->failure = JobAttemptFailure::Compute;
@@ -1088,24 +830,6 @@ std::optional<WorkerOutputDataReference> stage_worker_output(
         "worker candidate image exceeds accepted artifact data-plane bounds";
     report->image.reset();
     return std::nullopt;
-  }
-  if (payload_bytes >
-      static_cast<std::size_t>(std::numeric_limits<off_t>::max())) {
-    throw std::overflow_error("worker output stage size exceeds off_t");
-  }
-  if (::ftruncate(output_descriptor, 0) != 0) {
-    throw std::system_error(errno, std::generic_category(),
-                            "reset worker output stage");
-  }
-  std::size_t offset = 0U;
-  for (int row = 0; row < image.height; ++row) {
-    write_complete_at(output_descriptor, image_buffer_row_data(image, row),
-                      row_bytes, offset);
-    offset += row_bytes;
-  }
-  if (::ftruncate(output_descriptor, static_cast<off_t>(payload_bytes)) != 0) {
-    throw std::system_error(errno, std::generic_category(),
-                            "finalize worker output stage size");
   }
 
   WorkerOutputDataReference output;
@@ -1118,6 +842,10 @@ std::optional<WorkerOutputDataReference> stage_worker_output(
   output.descriptor.row_bytes = row_bytes;
   output.descriptor.payload_bytes = payload_bytes;
   output.content_digest = hash_image_artifact_content(image);
+  for (int row = 0; row < image.height; ++row) {
+    send_complete_from_worker(output_descriptor,
+                              image_buffer_row_data(image, row), row_bytes);
+  }
   report->image.reset();
   return output;
 }

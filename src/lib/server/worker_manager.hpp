@@ -114,14 +114,17 @@ struct WorkerManagerOwnershipSnapshot final {
  * @brief Sole source-private owner of worker assignment and process lifecycle.
  *
  * One move-only record and supervision thread owns each exact attempt. Product
- * records prepare one assignment, fork/exec one fresh process, join every
- * message to the complete identity, escalate cancellation, preserve bounded
- * buffered report/EOF drainage when natural exit wins the deadline-side reap,
- * and prevent either an ordinary EOF or candidate-Report deadline from
- * preempting an active cooperative cancellation deadline. It classifies exit
- * and clears/reaps the PID before delivering one completion. The explicit test
- * mode executes a marked factory in its supervision thread and makes no
- * process-isolation or bounded-termination claim.
+ * records prepare one assignment, create direction-reduced artifact streams,
+ * fork/exec one fresh process, join every message to the complete identity,
+ * and pump bulk bytes through nonblocking manager endpoints under the same
+ * absolute startup/runtime/cancel/shutdown deadlines. Blocking data-plane I/O
+ * remains in the killable worker. The manager escalates cancellation,
+ * preserves bounded buffered report/EOF drainage when natural exit wins the
+ * deadline-side reap, and prevents either an ordinary EOF or candidate-Report
+ * deadline from preempting an active cooperative cancellation deadline. It
+ * classifies exit and clears/reaps the PID before delivering one completion.
+ * The explicit test mode executes a marked factory in its supervision thread
+ * and makes no process-isolation or bounded-termination claim.
  *
  * @throws Construction validates factory, callbacks, bounds, product
  * executable access, a waitable product `SIGCHLD` disposition, and creates one
@@ -167,17 +170,14 @@ class WorkerManager final {
    * @return Nothing after one unique joinable supervision handle is retained.
    * @throws std::invalid_argument for invalid/shutdown input.
    * @throws std::logic_error for an attempt-identity collision.
-   * @throws std::system_error when anonymous data-plane setup or
-   * supervision-thread creation fails.
-   * @throws std::overflow_error when data-plane size/hash arithmetic cannot be
-   * represented.
+   * @throws std::system_error when supervision-thread creation fails.
    * @throws std::bad_alloc when record/thread storage allocation fails.
-   * @note Record identity retention and anonymous data-plane creation precede
-   * registry insertion and thread construction; all precede child spawn. Any
-   * exception closes/unlinks the attempt-local occurrences and leaves no live
-   * child or unowned transient state: failed insertion retains no record,
-   * while thread failure erases the exact inserted record before propagating
-   * so the caller can roll back admission authority.
+   * @note Record identity retention precedes registry insertion and thread
+   * construction. Directional stream creation and all data transfer occur only
+   * in that registered supervisor after the service admission lock has been
+   * released. Failed insertion retains no record; thread failure erases the
+   * exact inserted record before propagating so the caller can roll back
+   * admission authority.
    */
   void start(JobAssignment assignment);
 

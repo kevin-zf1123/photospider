@@ -258,8 +258,8 @@ class FixtureDataDescriptor final {
  * @throws std::invalid_argument for null ownership or invalid report metadata.
  * @throws WorkerArtifactDataPlaneError and system/allocation/overflow failures
  * from bounded staging unchanged.
- * @note The write descriptor is closed before returning, preventing fixture
- * code from mutating the staged occurrence after control metadata is formed.
+ * @note The send descriptor is closed before returning, making EOF the exact
+ * candidate-lane commit marker before control metadata is formed.
  */
 PreparedWorkerReport stage_fixture_report(
     FixtureDataDescriptor* output_data, JobAttemptReport report,
@@ -274,6 +274,71 @@ PreparedWorkerReport stage_fixture_report(
 }
 
 /**
+ * @brief Awaits the manager's exact completion-ready acknowledgement.
+ * @param fd Connected manager control socket.
+ * @param prepared Exact report already sent through `fd`.
+ * @param deadline Absolute acknowledgement deadline.
+ * @return Nothing after the exact acknowledgement.
+ * @throws Protocol timeout, EOF, channel, identity, or allocation failures
+ * unchanged.
+ * @note Fixtures remain alive and manager-terminable until the manager proves
+ * any output join and finishes metadata reconstruction. The acknowledgement
+ * grants no durable publication or Job authority.
+ */
+void await_fixture_completion_ready(
+    int fd, const PreparedWorkerReport& prepared,
+    std::chrono::steady_clock::time_point deadline) {
+  WorkerFrameDecoder decoder;
+  for (;;) {
+    const WorkerProtocolFrame frame = decoder.read_frame(fd, deadline);
+    if (frame.kind == WorkerMessageKind::CompletionReady) {
+      if (decode_worker_identity(frame, WorkerMessageKind::CompletionReady) !=
+          prepared.report.identity) {
+        throw WorkerProtocolError(
+            "fixture completion acknowledgement identity does not match "
+            "report");
+      }
+      return;
+    }
+    if (frame.kind == WorkerMessageKind::Cancel) {
+      if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
+          prepared.report.identity) {
+        throw WorkerProtocolError(
+            "fixture late cancel identity does not match report");
+      }
+      continue;
+    }
+    throw WorkerProtocolError(
+        "fixture received an invalid frame while awaiting completion");
+  }
+}
+
+/**
+ * @brief Sends prepared metadata and awaits completion readiness when enabled.
+ * @param fd Connected manager control socket.
+ * @param prepared Complete image-free report and optional output reference.
+ * @param spec Exact immutable assignment JobSpec.
+ * @param output_stage Exact stage metadata expected by the encoder.
+ * @param io_timeout Positive shared send/acknowledgement bound.
+ * @param await_completion Whether this fixture keeps its control read side for
+ * the manager acknowledgement; false only for the cancel-send-failure seam.
+ * @return Nothing after the report and any required acknowledgement.
+ * @throws Protocol, deadline, channel, contract, and allocation failures
+ * unchanged.
+ */
+void send_prepared_fixture_report(
+    int fd, const PreparedWorkerReport& prepared, const JobSpec& spec,
+    const WorkerOutputStageReference& output_stage,
+    std::chrono::milliseconds io_timeout, bool await_completion = true) {
+  const auto deadline =
+      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout);
+  send_worker_report(fd, prepared, spec, output_stage, deadline);
+  if (await_completion) {
+    await_fixture_completion_ready(fd, prepared, deadline);
+  }
+}
+
+/**
  * @brief Stages and sends one fixture report over metadata-only control.
  * @param fd Connected manager control socket.
  * @param output_data Non-null exact inherited output-stage owner.
@@ -281,19 +346,22 @@ PreparedWorkerReport stage_fixture_report(
  * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact manager-assigned private stage metadata.
  * @param io_timeout Positive manager-selected write bound.
- * @return Nothing after stage closure and complete Report-frame transport.
+ * @param await_completion Whether to await manager completion readiness; false
+ * only after the fixture deliberately closes its control read side.
+ * @return Nothing after stage closure, Report transport, and any required
+ * completion-ready acknowledgement.
  * @throws Staging, encoding, deadline, and channel failures unchanged.
  * @note Bulk bytes never enter `fd`; only the returned data reference does.
  */
 void send_fixture_report(int fd, FixtureDataDescriptor* output_data,
                          JobAttemptReport report, const JobSpec& spec,
                          const WorkerOutputStageReference& output_stage,
-                         std::chrono::milliseconds io_timeout) {
+                         std::chrono::milliseconds io_timeout,
+                         bool await_completion = true) {
   const PreparedWorkerReport prepared =
       stage_fixture_report(output_data, std::move(report), spec, output_stage);
-  send_worker_report(
-      fd, prepared, spec, output_stage,
-      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
+  send_prepared_fixture_report(fd, prepared, spec, output_stage, io_timeout,
+                               await_completion);
 }
 
 /**
@@ -906,7 +974,7 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     JobAttemptReport report = failed_report(assignment);
     send_fixture_report(launch.control_fd, &output_data, std::move(report),
                         *assignment.spec, prepared.data_plane.output,
-                        launch.io_timeout);
+                        launch.io_timeout, false);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
@@ -968,6 +1036,10 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
                              prepared.data_plane.output);
     send_fragmented_report(launch.control_fd, prepared_report, *assignment.spec,
                            prepared.data_plane.output, launch.io_timeout);
+    await_fixture_completion_ready(
+        launch.control_fd, prepared_report,
+        checked_worker_deadline(std::chrono::steady_clock::now(),
+                                launch.io_timeout));
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
@@ -992,10 +1064,55 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
       return 38;
     }
     prepared_report.output->content_digest.bytes.at(0U) ^= std::byte{0x01};
-    send_worker_report(launch.control_fd, prepared_report, *assignment.spec,
-                       prepared.data_plane.output,
-                       checked_worker_deadline(std::chrono::steady_clock::now(),
-                                               launch.io_timeout));
+    send_prepared_fixture_report(launch.control_fd, prepared_report,
+                                 *assignment.spec, prepared.data_plane.output,
+                                 launch.io_timeout);
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
+    return 0;
+  }
+  if (mode == "fixture.data.reference-mismatch") {
+    JobAttemptReport report = success_report(assignment);
+    PreparedWorkerReport prepared_report =
+        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
+                             prepared.data_plane.output);
+    if (!prepared_report.output.has_value()) {
+      return 39;
+    }
+    WorkerOutputStageReference forged_stage = prepared.data_plane.output;
+    forged_stage.reference_id.push_back('x');
+    prepared_report.output->reference_id = forged_stage.reference_id;
+    send_prepared_fixture_report(launch.control_fd, prepared_report,
+                                 *assignment.spec, forged_stage,
+                                 launch.io_timeout);
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
+    return 0;
+  }
+  if (mode == "fixture.data.descriptor-mismatch") {
+    JobAttemptReport report = success_report(assignment);
+    PreparedWorkerReport prepared_report =
+        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
+                             prepared.data_plane.output);
+    if (!prepared_report.output.has_value()) {
+      return 40;
+    }
+    prepared_report.output->descriptor.width = 2;
+    prepared_report.output->descriptor.row_bytes = 8U;
+    prepared_report.output->descriptor.payload_bytes = 8U;
+    send_prepared_fixture_report(launch.control_fd, prepared_report,
+                                 *assignment.spec, prepared.data_plane.output,
+                                 launch.io_timeout);
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
+    return 0;
+  }
+  if (mode == "fixture.data.stale-attempt") {
+    JobAttemptReport report = success_report(assignment);
+    PreparedWorkerReport prepared_report =
+        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
+                             prepared.data_plane.output);
+    ++prepared_report.report.identity.worker_lease_generation.value;
+    send_prepared_fixture_report(launch.control_fd, prepared_report,
+                                 *assignment.spec, prepared.data_plane.output,
+                                 launch.io_timeout);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }

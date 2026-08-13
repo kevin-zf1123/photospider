@@ -389,14 +389,44 @@ struct WorkerManagerOptions final {
    */
   std::shared_ptr<std::atomic<bool>> first_external_heartbeat_observed_for_test;
   /**
+   * @brief Optional gate pausing manager checkpoint sends in real-process
+   * tests.
+   * @note Null in product construction. While true, a nonempty checkpoint lane
+   * remains open without transferring bytes; normal absolute startup,
+   * cancellation, shutdown, owned signalling, and exact reaping remain active.
+   * This exposes no payload, descriptor, PID, or artifact authority.
+   */
+  std::shared_ptr<std::atomic<bool>> defer_checkpoint_transfer_for_test;
+  /**
+   * @brief Optional observation that a nonempty checkpoint transfer is paused.
+   * @note Null in product construction. The supervisor stores true only after
+   * the exact child and lane exist under its registered ownership.
+   */
+  std::shared_ptr<std::atomic<bool>> checkpoint_transfer_paused_for_test;
+  /**
+   * @brief Optional gate pausing manager output drain in real-process tests.
+   * @note Null in product construction. While true, the worker may block on
+   * ordinary stream backpressure and remains governed by runtime,
+   * cancellation, shutdown, signal, and exact-reap bounds.
+   */
+  std::shared_ptr<std::atomic<bool>> defer_output_drain_for_test;
+  /**
+   * @brief Optional observation that paused output bytes became readable.
+   * @note Null in product construction. A release-stored true value grants no
+   * access to bytes, descriptors, process identity, or completion authority.
+   */
+  std::shared_ptr<std::atomic<bool>> output_transfer_paused_for_test;
+  /**
    * @brief Holds one cancel-deadline escalation until clean zero exit in tests.
    * @note False in product construction. When true, `WorkerManager` first
    * completes the monitor loop's ordinary `waitpid(WNOHANG)` observation and
    * reaches the expired cooperative-cancellation deadline, then uses
    * `waitid(WNOWAIT)` to preserve a zero-exit zombie before the real
-   * termination path performs its second exact `waitpid` observation. The
-   * worker channel remains untouched during this wait so a complete report
-   * already written to the socket is available to the production decoder.
+   * termination path performs its second exact `waitpid` observation. One
+   * bounded nonblocking candidate-lane observation records empty-output EOF
+   * before that exact reap; the control channel remains untouched so a
+   * complete report already written to the socket is available to the
+   * production decoder.
    * This deterministic seam neither reaps the child nor transfers PID,
    * channel, signal, or completion authority to test code.
    */
