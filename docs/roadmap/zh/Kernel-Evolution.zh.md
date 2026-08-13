@@ -1210,6 +1210,17 @@ immutable-read capability 和私有 output-stage/commit capability，绝不获�
 runtime 只获得 invocation buffer。Committed receipt 在 worker/plugin failure 或 Job cancellation 后
 仍具权威；未提交私有 stage 仍由 artifact authority 清理。
 
+Issue #105 现在为源码私有 WorkerManager/worker boundary 的该分离提供本地可执行证据。Private
+worker protocol v2 使用 128-KiB metadata-only control bound，且没有 v1/bulk fallback。Manager
+创建的 mode-0600、已 unlink occurrence 通过 read-only/write-only 继承 descriptor 传输 checkpoint
+与 candidate byte；reference 绑定 current tenant/Job/spec/attempt/worker/lease 以及精确 checkpoint
+或 output slot，但脱离 occurrence capability 不授予 authority。Worker 不能选择 path、quota、稳定
+ArtifactId、OutputCommitId 或 publication result。Manager 只有在 clean reap/writer closure，并对
+owner/mode/link、descriptor、size、resource 与 SHA-256 做精确复核后才暴露 candidate；既有 service
+与 durable store 仍拥有 current-attempt selection、retry、quota、manifest-last publication、
+idempotency、cancellation 与 recovery。这个同机 adapter 不是目标 authenticated network control
+plane、standalone artifact service、remote capability transport 或 multi-tenant authorization boundary。
+
 凡是加载到 Host 的 DSO 都仍是 operator-trusted native code。当前 operation C++ ABI、
 data-definition pure-C ABI 与 policy pure-C ABI 都不提供 sandbox、timeout、syscall、thread 或
 memory-corruption boundary。当前 operation/policy DSO 候选必须先通过进程不可变的签名内容/role
@@ -1393,7 +1404,7 @@ role 有类型的访问前拒绝。它不
 会选择最终用户 Graph operation、实现目标 operation ABI v1、隔离获批进程内
 DSO、提供通用 syscall/network sandbox，或从 `SIGKILL` 证明 OOM。
 
-当前 Issue #99/#100 基线是源码私有的
+当前 Issue #99/#100/#105 基线是源码私有的
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)。它冻结
 `jobspec-v2`，原子核算完整 tenant resource envelope，在一个 locked root 下持久化 Job record 与
 manifest-last image artifact，支持经过授权的 checkpoint identity 以及 stable-Job/fresh-attempt
@@ -1401,7 +1412,10 @@ manifest-last image artifact，支持经过授权的 checkpoint identity 以及 
 运行一个全新 exec 的 Embedded Host worker process，强制 reserved CPU parallelism 与 POSIX
 `RLIMIT_AS`，并使用带一个 bounded private protocol、精确 assignment/lease/PID fencing、
 heartbeat/runtime deadline、cancellation escalation、精确 reaping 与持续 supervision-handle
-drainage 的同进程 WorkerManager。Report 只有在 clean process exit 与 reap 后才具备资格；
+drainage 的同进程 WorkerManager。其 protocol v2 control socket 只传输有界 attempt/Job/receipt/
+reference/descriptor/digest metadata；checkpoint 与 output byte 通过独立的 attempt-local anonymous-
+file descriptor 传输。Candidate 只有在 writer closure 与 manager 精确复核后才对 service 可见。
+Report 只有在 clean process exit 与 reap 后才具备资格；
 startup、exit、signal、channel、protocol、heartbeat、runtime 与 forced-cancellation failure 只
 影响拥有它的 attempt。Control plane 仍在 crash-durable artifact commit 与取消之间建立顺序，
 并要求 settlement、retained-quota conversion 和一份完整回执后 Job 才能成功。
@@ -1413,8 +1427,8 @@ compute，则 cancellation 仍先于合成的 missing-output failure。真实 Em
 cancellation，随后通过 cooperative cancel、`SIGTERM`、`SIGKILL` 与 reap 排空并发 worker。
 Configured device capacity 仍仅用于 admission，`RLIMIT_AS` 也不是 RSS、syscall、device 或
 hostile-plugin isolation。本地 WorkerManager 不是目标中的独立 manager process。该切片不实现
-network authentication/multi-tenancy、standalone artifact data plane 或 untrusted-plugin
-boundary。Issues #101 至 #106 不得从这条可执行切片推导各自的 process/security 性质。
+network authentication/multi-tenancy、standalone artifact service/remote data plane 或
+untrusted-plugin boundary。后续切片不得从这条可执行证据推导这些 process/security 性质。
 
 Issue #97 只做分配，不吸收后续交付：
 
@@ -1427,7 +1441,7 @@ Issue #97 只做分配，不吸收后续交付：
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | 已实现源码私有的 Darwin/Linux isolated CPU shared-memory/FD invocation，并具有精确 descriptor/stride/size/ownership/content validation；authenticated supervision 仍属于 #103 |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | 已实现源码私有的 `PluginRuntimeSupervisor` heartbeat/deadline、基于事实的 crash/hang/signal/bad-output containment、fresh-process restart 与精确 reap；不包含最终用户路径或 OOM 归因 |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | 已实现 operation/policy DSO 与私有 isolated runtime 的进程不可变签名 admission，以及一次性 ledger token 和 exec 前 rlimit；不包含最终用户 route 或通用 sandbox |
-| [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata 与 bulk artifact data-plane separation |
+| [#105](https://github.com/kevin-zf1123/photospider/issues/105) | 已实现本地 worker metadata-control/bulk-data 分离；authenticated network control 与 standalone artifact-service composition 仍属后续 |
 | [#106](https://github.com/kevin-zf1123/photospider/issues/106) | 长期 codec/descriptor fuzzing、security audit 与跨层 identity trace |
 
 每个切片只能声明自身实际实现的 profile。Single-tenant Job vertical 不是 multi-tenant server；没有

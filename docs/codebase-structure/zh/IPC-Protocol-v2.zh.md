@@ -25,11 +25,16 @@ transport、identity、authentication/authorization、isolation 与 lifecycle �
 `OutputStore` 解释成 server authentication、tenant authority、durable Job identity 或
 durable artifact authority。
 
-Issue #99 现在通过独立的源码私有
+Issues #99、#100 与 #105 现在通过独立的源码私有
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)
-实现 canonical JobSpec、tenant quota、durable Job/artifact recovery、显式 retry 与
-checkpoint identity。它只通过 internal CMake target 链接，没有 wire codec 或 daemon route，
-也不组合进 `photospiderd`。其 `TenantId`、`JobId`、`JobAttemptId`、
+实现 canonical JobSpec、tenant quota、durable Job/artifact recovery、显式 retry/checkpoint
+identity、每 attempt 一个全新 process，以及分离的 worker control/data transport。它只通过
+internal CMake target 链接，没有 daemon route 或 installed codec，也不组合进
+`photospiderd`。其 private worker protocol v2 与本 local IPC v2 不同：128-KiB control socket
+只传 attempt/Job/receipt/reference/descriptor/digest metadata，而 checkpoint 与 candidate image
+byte 通过 direction-scoped inherited descriptor 使用 manager-created mode-0600、已 unlink
+occurrence。这是本地可执行分离，不是 authenticated network protocol 或 standalone artifact
+service。其 `TenantId`、`JobId`、`JobAttemptId`、
 `WorkerInstanceId`、`ArtifactId`、quota reservation、checkpoint 与 commit receipt 都是
 独立的源码私有类型；protocol-v2 compute id、`OutputArtifactId`、delivery id、session name
 与 output lease 既不序列化也不授权这些身份。因此下文精确的 60-method inventory 保持不变。

@@ -9,8 +9,8 @@ worker-manager, standalone artifact data plane, sandbox, or isolated-plugin
 target is current software behavior. Live delivery status remains in the linked
 Issue and Project.
 
-The current `photospiderd` and plugin loaders remain unchanged. Issues #99 and
-#100 now implement a source-private local JobSpec vertical with complete-
+The current `photospiderd` and plugin loaders remain unchanged. Issues #99,
+#100, and #105 now implement a source-private local JobSpec vertical with complete-
 envelope tenant quota accounting, durable Job/image artifact recovery,
 explicit retry/checkpoint identity, and one freshly execed Embedded Host worker
 process per attempt. One same-process `WorkerManager` object owns the private
@@ -19,7 +19,12 @@ handle; the control-plane Job service remains the sole durable/quota/artifact/
 retry authority. Host memory is enforced as POSIX `RLIMIT_AS`; configured device
 capacity remains admission-only. The private closed protocol and exact lease
 fencing isolate startup, exit, signal, channel, protocol, heartbeat, runtime,
-and forced-cancellation failures to the owning attempt.
+and forced-cancellation failures to the owning attempt. Private worker protocol
+v2 limits control frames to 128 KiB of attempt/Job/artifact-reference metadata.
+Checkpoint and candidate image bytes instead use manager-created mode-0600,
+immediately unlinked, direction-scoped local file descriptors; manager
+acceptance waits for clean reap/writer closure and exact reference, owner/mode/
+link, descriptor, size, resource, and SHA-256 revalidation.
 
 That local slice preserves this decision's identity and authority ordering and
 provides real quota admission, crash durability, process-crash containment, and
@@ -297,10 +302,11 @@ protocol, or channel loss fails only the current JobAttempt. WorkerManager
 revokes and reconciles its assignment without trusting a final worker report;
 the control plane alone applies retry policy.
 
-The current Issue #100 subset instantiates this lifecycle inside the local
-single-tenant authority rather than as the target separate WorkerManager
-process. It uses one private socket pair, a fixed bounded protocol, fresh
-`fork`/`exec`, `RLIMIT_AS`, cooperative cancel followed by `SIGTERM`/`SIGKILL`,
+Before Issue #105, the Issue #100 baseline instantiated this lifecycle inside
+the local single-tenant authority rather than as the target separate
+WorkerManager process. It used one private socket pair, a fixed bounded
+protocol, fresh `fork`/`exec`, `RLIMIT_AS`, cooperative cancel followed by
+`SIGTERM`/`SIGKILL`,
 and exact `waitpid`. A report is eligible only after clean exit and reap. This
 includes the deadline-side race where a second exact observation reaps natural
 exit before channel revocation: the manager keeps the parent socket and
@@ -310,13 +316,17 @@ for the trusted Embedded worker composition; it is not network peer
 authentication, a syscall sandbox, device isolation, or the isolated tenant-
 plugin runtime assigned to Issues #101-#104.
 
-That private protocol applies its 64-MiB bound to the complete encoded Report,
-including identity, diagnostic, flags, image metadata, and tight image bytes.
-An otherwise valid settled success that cannot fit the remaining frame or Job
-output/staging/retention envelope becomes one bounded identity-preserving
-`Failed/Compute` Report with no image, so an untransportable candidate is typed
-worker truth rather than an uncaught write exception later inferred as process
-or channel loss. After cancellation delivery has been attempted, a socket-
+Issue #105 replaces that historical bulk-control transport with private
+protocol v2. Every complete Report is bounded to 128 KiB of identity, outcome,
+diagnostic, image-descriptor, reference, size, and digest metadata; it contains
+no tight image bytes. Checkpoint and candidate bytes move only through exact
+manager-created, mode-0600, immediately unlinked, direction-scoped local file
+descriptors. A candidate above the accepted output/staging/retention envelope
+becomes one bounded identity-preserving `Failed/Compute` Report with no image,
+while a finite hard `RLIMIT_FSIZE` below the accepted output-stage maximum
+fails the owning attempt as `WorkerStartup` before `fork` instead of silently
+narrowing that envelope. There is no 64-MiB compatibility or transport-size
+fallback. After cancellation delivery has been attempted, a socket-
 system error likewise remains inside the bounded monitor: decoding stops, but
 exact process ownership and reap deadlines continue so signal/nonzero wait
 status or an already decoded Report outranks the weaker channel fact. While
@@ -356,6 +366,17 @@ The control plane retains authorized artifact references and verified receipt
 facts, not bulk bytes. Target control messages carry bounded authentication,
 tenant, Job, quota, ArtifactId, receipt, and capability metadata. Bulk input,
 output, and checkpoint bytes move through the data plane.
+
+The current #105 executable evidence applies this separation only to the
+source-private same-host WorkerManager/worker boundary. Its control reference
+is a non-authorizing join key bound to the complete current attempt/worker/
+lease and exact checkpoint or output slot; inherited descriptors provide the
+local occurrence access. The worker receives no path, artifact root, stable
+ArtifactId/OutputCommitId mint, quota release, or publication capability.
+Anonymous stages disappear on descriptor closure, while only the existing
+`DurableServerState` manifest-last transaction can publish crash-durable
+artifact truth. This is not the target standalone artifact service, remote
+transport, bearer capability, authentication, or multi-tenant authorization.
 
 A worker receives immutable-read capabilities for exact inputs and private
 stage/commit capabilities for exact output slots. It receives no artifact root,
@@ -538,7 +559,7 @@ The downstream delivery ownership is fixed:
 | #102 | Isolated CPU invocation over shared memory/FD with exact descriptor/stride/size/ownership validation |
 | #103 | `PluginRuntimeSupervisor` heartbeat, deadline, crash/hang/OOM/bad-output containment |
 | #104 | Implemented signed operation/policy/runtime admission plus one-use isolated-resource tokens and pre-exec rlimits; no end-user route or general sandbox |
-| #105 | Network control metadata and bulk artifact data-plane separation |
+| #105 | Implemented local executable metadata-control/bulk-data separation for the source-private worker boundary; standalone network/artifact-service delivery remains downstream |
 | #106 | Long-lived codec/descriptor fuzzing, security audit, and Session/Revision/Run/Task cross-layer trace |
 
 An earlier slice advertises only the narrower profile it actually implements.

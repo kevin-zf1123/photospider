@@ -1267,10 +1267,12 @@ particular:
 - an image daemon job becomes terminal after Host compute and protected
   artifact publication, but that artifact is process-scoped and lease/TTL
   retained rather than crash durable; and
-- the source-private Issue #99 Job becomes `Succeeded` only after its fresh
-  Embedded Host closes, the separate artifact authority returns a fully bound
-  crash-durable receipt, retained quota is settled, and durable Job truth is
-  published; this receipt is neither daemon delivery nor cache persistence; and
+- the source-private Issue #99/#105 Job becomes `Succeeded` only after its
+  fresh Embedded Host closes, its metadata-only worker Report and separate
+  attempt-local output stage are revalidated after exact reap, the durable
+  artifact authority returns a fully bound crash-durable receipt, retained
+  quota is settled, and durable Job truth is published; this receipt is neither
+  daemon delivery nor cache persistence; and
 - Graph-document save is a different graph-state operation and never a Run
   phase.
 
@@ -1370,7 +1372,14 @@ attempt runs in one fresh, never-reused `photospider-worker` process that owns
 one attempt-local instance of the process execution domain described here.
 WorkerManager owns its private bounded protocol, heartbeat/runtime deadlines,
 exact lease/PID fencing, cooperative cancellation, TERM/KILL escalation, and
-exact nonblocking `waitpid` reaping. Partial protocol headers and payloads are
+exact nonblocking `waitpid` reaping. Issue #105 makes that private protocol v2
+metadata-only under a 128-KiB control bound: checkpoint and candidate bytes use
+separate manager-created mode-0600 unlinked occurrences exposed through
+attempt-scoped direction-specific descriptors. The manager accepts no output
+until clean reap/writer closure and exact reference, slot, owner/mode/link,
+descriptor, size, resource, and SHA-256 validation. The worker receives no
+artifact root, stable output transaction, quota, retry, or publication
+authority. Partial protocol headers and payloads are
 retained across short poll deadlines; cancellation-send failure is drained to
 the worker report/EOF/exit deadline rather than treated as forced cancellation.
 Product construction rejects `SIGCHLD=SIG_IGN` and `SA_NOCLDWAIT` before the
@@ -1400,7 +1409,7 @@ the supported POSIX address space; configured-device bytes remain server
 admission accounting rather than an OS/device sandbox. The control plane still
 owns durable Job truth, the artifact service owns durable bytes and receipts,
 and this slice does not add a network endpoint, multi-tenant authorization,
-standalone artifact data plane, syscall/device sandbox, or untrusted-plugin
+standalone artifact service/remote data plane, syscall/device sandbox, or untrusted-plugin
 profile planned by Issues #101-#106.
 
 ## Boundary Rationale

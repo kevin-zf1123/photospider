@@ -1,10 +1,10 @@
 # 单租户 Job 纵向路径
 
-本文定义 `src/lib/server/` 下当前源码私有的 Issue #99/#100 Job 行为。ADR 0011
+本文定义 `src/lib/server/` 下当前源码私有的 Issue #99/#100/#105 Job 行为。ADR 0011
 仍是更广泛的目标安全域决策，server roadmap 负责分配后续交付切片。当前模块是面向一个
-已配置 tenant、带全新 exec attempt process 的真实本地纵向路径；它不是 network server、
-multi-tenant authorization boundary、独立 WorkerManager service 或 untrusted-plugin
-sandbox。
+已配置 tenant、带全新 exec attempt process 与 attempt-scoped anonymous-file artifact
+data plane 的真实本地纵向路径；它不是 network server、multi-tenant authorization
+boundary、独立 WorkerManager/artifact service、remote data plane 或 untrusted-plugin sandbox。
 
 ## 当前剖面与身份
 
@@ -55,17 +55,16 @@ durable record。
 JobSpec 不包含 Host path、descriptor、pointer、runtime handle、credential、IPC id、
 plugin DSO、mutable store location、quota token 或 artifact mutation capability。Quota
 admission 之前，control plane 只能通过同 tenant 已校验的 durable artifact index 解析可选
-checkpoint。Worker 只获得只读 `ArtifactRecord`，永远不会获得 root/path 或 commit
-authority。当前 Embedded CPU adapter 会校验该 provenance，但不声明恢复算法特定的
-runtime state。
+checkpoint。Worker 通过 control 只获得 receipt、descriptor、digest、size 与一个不授权的 join
+reference，随后只从继承的 checkpoint data descriptor 重建只读 `ArtifactRecord`。它永远不会
+获得 root、path、quota token、稳定 output transaction 或 commit authority。当前 Embedded CPU
+adapter 会校验该 provenance，但不声明恢复算法特定的 runtime state。
 
-Checkpoint authorization 还必须证明下一次完整 Assignment 仍可编码。64-MiB frame-payload
-上限需要减去完整的最坏情况 Assignment payload envelope：全部 assignment 与 attempt
-identity、规范 JobSpec 与 digest、lease generation、graph material、cadence 字段、checkpoint
-presence，以及 checkpoint receipt 和 image metadata。由此得到的可复用 checkpoint payload
-上限是 `67,108,864 - 101,907 = 67,006,957` 字节。精确边界可以接受；更大的历史或测试生成
-artifact 会在 quota reservation 或 worker creation 前被拒绝，因此不会在之后表现为
-`WorkerStartup`。
+Checkpoint authorization 与 control-frame capacity 无关。精确 durable bytes 与 receipt 必须和
+已配置 tenant 及 JobSpec `ArtifactId` 完整连接，payload 还必须适配已接受的 host-memory
+envelope。Worker-side materialization 会在 Graph construction 前重新校验 anonymous private-file
+identity、精确 size、descriptor 与 SHA-256。任何不匹配都会被拒绝，且不能从该 data occurrence
+推导出 quota、Job、retry 或 artifact authority。
 
 ## Tenant Quota Authority
 
@@ -95,7 +94,10 @@ process-local active reservation、重建 durable Job/artifact truth，并清除
 CPU slot 同时限制 Embedded Host `maximum_parallelism`。WorkerManager 会在 `exec` 前把已
 接受的 host memory 应用为 worker 的 POSIX `RLIMIT_AS` soft bound；它限制 total virtual
 address space 而非实测 RSS，因此 executable 及其 runtime mapping 必须容纳于请求的
-envelope。Configured device 值仍是 admission declaration，不是 device isolation。两者都
+envelope。对于 output staging，WorkerManager 会准备一个与 accepted output/staging/retention
+最小值精确相等的 `RLIMIT_FSIZE` soft bound。若继承的有限 hard limit 更低，所属 attempt 会在
+`fork` 前以 `WorkerStartup` 失败；它绝不会静默缩窄已经从 JobSpec 派生出的 data-plane
+maximum。Configured device 值仍是 admission declaration，不是 device isolation。两者都
 不替代 worker-local `ResourceLedger`；当前不存在 syscall filter、cgroup/container、GPU
 memory enforcement 或 hostile-plugin sandbox。
 
@@ -255,18 +257,27 @@ supervision-thread、channel 或 process ownership。失败 constructor 不暴�
 变成之后的 `WorkerStartup` fact。WorkerManager 创建 private socket pair，fork/exec 一个不安装的
 `photospider-worker`，先登记其精确 PID，再通过不可覆写的内存 catalog lookup 把 material
 复制进精确一个 immutable assignment。Supervision thread 不调用 resolver，也不执行 filesystem
-I/O。Fork child 只执行 descriptor setup、`RLIMIT_AS`、descriptor closure 与 `exec`；全新 exec
-的 worker 会校验 assignment、JobSpec digest 与 optional checkpoint，创建并 seed 一个全新的
-Embedded Host，打开并加载 attempt-local Graph，在已预留 CPU parallelism 内 compute，校验一个
-非空 CPU image，关闭 Graph，销毁 Host ownership，最后只返回 typed attempt fact 与 candidate
-image。
+graph/path I/O。在 record insertion 与 supervision-thread creation 前，WorkerManager 会同步创建
+mode-0600 checkpoint 与 output occurrence，打开 direction-scoped descriptor，校验精确
+device/inode/owner/mode identity，并立即 unlink 两个名称。任何 setup、registry 或 thread-
+construction 失败都会在 admission rollback 前关闭这些 occurrence。每个完整 mutable pathname
+都在 `mkstemp` 前完成 allocation，创建成功后则立即 arm 一个无需 allocation 的
+descriptor/name owner；因此即使创建后发生 allocation 或 setup 异常，也不会留下具名临时文件。
+Fork child 只执行 descriptor
+setup、`RLIMIT_AS`、`RLIMIT_FSIZE`、descriptor closure 与 `exec`；全新 exec 的 worker 会校验
+Assignment metadata 与 JobSpec digest，通过 fd 5 materialize optional checkpoint，创建并 seed
+一个全新的 Embedded Host，打开并加载 attempt-local Graph，在已预留 CPU parallelism 内
+compute，通过 fd 6 写入紧密 candidate row，关闭 Graph，销毁 Host ownership，最后只返回 typed
+attempt 与 staged-output metadata。
 
 Exec 前的 descriptor ownership 是精确的：fd 0-2 是标准 stream，fd 3 是 private control
 socket，close-on-exec fd 4 用于向 parent 传递 setup `errno`。Darwin parent 在 `fork` 前查询
-内核 `kern.maxfilesperproc` 上界，且不分配内存的 child 关闭 `[5, 上界)` 中每个 slot，只把
+内核 `kern.maxfilesperproc` 上界。Fd 5 是 worker 的 read-only checkpoint occurrence，fd 6 是
+write-only output stage；manager 只保留后者的 read view。不分配内存的 child 关闭 `[7, 上界)`
+中每个 slot，只把
 `EBADF` 视为未使用 slot。当前 soft `RLIMIT_NOFILE` 不是安全边界，因为已经打开的高位
 descriptor 会在限制随后降低后继续存在。Linux child 使用 raw
-`close_range(5, UINT_MAX, 0)`；包括旧内核不提供 syscall 在内的任何错误都会通过 fd 4 报告，
+`close_range(7, UINT_MAX, 0)`；包括旧内核不提供 syscall 在内的任何错误都会通过 fd 4 报告，
 并令 startup 失败。这里不存在任意有限 fallback 或从 `RLIM_INFINITY` 到 `INT_MAX` 的
 userspace 扫描。长期进程回归会在隔离 authority 中保持一个高位 non-close-on-exec
 sentinel，同时覆盖 infinite soft limit 与把 soft limit 降到既有 sentinel 以下两种情况，
@@ -278,11 +289,12 @@ Parent-side WorkerManager descriptor 使用与 fork-child closure sweep 不同�
 关闭另一个 thread 新取得的 descriptor。一个 source-private callback 回归会强制形成这种
 release/reuse 顺序，并证明不会有第二次 close 消耗复用后的 descriptor。
 
-Worker exec bootstrap 要求 `--control-fd`、`--startup-timeout-ms` 与
-`--io-timeout-ms`。WorkerManager 在 fork 前准备这些 string。worker 把精确 configured startup
-duration 用于初始 assignment receive，并把精确 I/O duration 用于 acceptance、heartbeat 与
-report write；worker 本地默认值或 cap 无法缩短 manager policy。Startup 不进入 assignment
-payload，因为 worker 在收到第一帧 protocol 前已经需要该 deadline。
+Worker exec bootstrap 要求 `--control-fd`、`--checkpoint-data-fd`、
+`--output-data-fd`、`--startup-timeout-ms` 与 `--io-timeout-ms`。WorkerManager 在 fork 前准备
+这些 string。worker 把精确 configured startup duration 用于初始 Assignment receive/checkpoint
+materialization，并把精确 I/O duration 用于 acceptance、heartbeat 与 Report write；worker
+本地默认值或 cap 无法缩短 manager policy。Bootstrap descriptor 与 startup 不进入 control
+payload，因为它们是在第一帧可用前就需要的 process capability/policy。
 
 源码私有 duration 域会在取得 durable ownership 前封闭。九个 `WorkerManagerOptions` 字段都
 为正，且不大于包含式共享上限 `4,294,967,295 ms`。`heartbeat_interval` 采用更窄的包含式
@@ -294,28 +306,33 @@ payload，因为 worker 在收到第一帧 protocol 前已经需要该 deadline�
 `std::overflow_error`，而不求值一个溢出的 sum。因此 `milliseconds::max()` 无法进入 conversion
 或 deadline arithmetic，validation 也不会相对于之后的时钟观察变得陈旧。
 
-Private bounded protocol 具有固定 magic、唯一支持的 version、封闭 message kind、64-MiB
-frame-payload 上限、deadline-aware partial I/O，以及严格的 trailing-byte、enum、identity、
-digest、image-shape 与 Job-resource 校验。唯一的 source-private
-`kMaximumWorkerTextFieldBytes` 常量在 catalog admission、Assignment/Report encoding 与 decoding
-中统一约束五个 prepared graph string 及 Report diagnostic。精确上限是包含式的；本地 prepared
-value 超界是 `std::length_error`，wire content 超界则是 `WorkerProtocolError`。协议传输一个
-Assignment、精确的 AssignmentAccepted/Heartbeat/Cancel identity message，以及至多一个 Report。
-它不传输 state root、quota reservation、artifact-commit capability、credential、network
-listener、native handle 或第二个 assignment。Worker 控制的 image dimension 会先经过
-arithmetic、frame、output、staging 与 retention bound 校验，control plane 才分配精确紧密的
-CPU storage。
+Private bounded protocol 现在具有固定 magic、唯一支持的 version 2、封闭 message kind、
+128-KiB control-payload 上限、deadline-aware partial I/O，以及严格的 trailing-byte、enum、
+identity、digest、descriptor 与 Job-resource 校验。Version 1 会被拒绝，没有 compatibility
+decoder 或 bulk fallback。唯一的 source-private `kMaximumWorkerTextFieldBytes` 常量在 catalog
+admission、Assignment/Report encoding 与 decoding 中统一约束五个 prepared graph string 及
+Report diagnostic。精确上限是包含式的；本地 prepared value 超界是 `std::length_error`，wire
+content 超界则是 `WorkerProtocolError`。
 
-64-MiB maximum 适用于完整编码 Report，包括 identity、outcome/settlement/failure 字段、
-diagnostic、image-presence flag、image metadata 与 tight row bytes。由于任何 successful
-output 后续都可能作为 checkpoint，successful candidate image 还会使用共享的
-`67,006,957` 字节可复用 checkpoint 上限。Report production 与 decoding、Assignment
-artifact codec 以及 checkpoint authorization 都执行同一上限。在写入 metadata 或 row 前，
-worker 会检查其精确剩余 aggregate capacity。当其他方面有效且已 settled 的 success image
-超过任一上限或其 Job output/staging/retention envelope 时，会变成一个保留 identity、已
-settled 的 `Failed(Compute)` Report，携带固定有界 diagnostic 且没有 image；它不会作为
-encoder exception 逃逸，再被误判为 process 或 channel loss。此项收紧 accepted value domain，
-但不改变 private wire layout 或 protocol version。
+Assignment 传输完整 attempt/JobSpec 与有界 graph metadata、optional checkpoint receipt/
+descriptor/digest/size/reference、output-stage reference/maximum 与 cadence。Report 传输 outcome
+fact，并且只在 settled success 时传输 output reference/slot/descriptor/size/digest。两者都不能
+编码 checkpoint bytes、candidate row、`ImageBuffer`、blob、`Value`、path 或 raw file
+descriptor。完整声明的最大 metadata envelope 能放入 control 上限。只要符合已接受的
+output/staging/retention
+与 file-size envelope，超过原 64-MiB aggregate frame 上限的 candidate 仍然有效。file-size
+limit 会与 accepted maximum 精确匹配；若继承的有限 hard limit 更低，则会在 fork 前成为
+`WorkerStartup`，而不是一个更小的 runtime envelope。超过 resource envelope 会变成一个保留
+identity、已 settled 的 `Failed(Compute)` metadata Report，携带固定
+有界 diagnostic 与空 stage；不存在 transport-size fallback。
+
+WorkerManager 只有在收到 current-identity Report、clean zero exit、精确 reap、channel EOF 与
+writer closure 后才接受 staged output。其保留的 read descriptor 必须仍指向 mode-0600、已
+unlink、同 owner 的 regular occurrence，并且 reference、slot、tight descriptor、精确 file
+size、accepted maximum 与 manager 重新计算的 SHA-256 必须全部匹配，之后才会重建独立 CPU
+image。不匹配会成为 worker-protocol failure，不能生成 receipt 或 Job/quota/retry truth。只有
+既有 service 与 `DurableServerState` 才能通过 manifest-last durable transaction 发布稳定
+ArtifactId/OutputCommitId truth。
 
 Manager 与 worker 的短 poll loop 都会为自己的 channel 保留一个 decoder：deadline 到期会保留
 partial header/payload byte 与精确 offset，而 clean EOF 只在 fresh frame boundary 上有效。
@@ -400,13 +417,14 @@ child 的策略。
   Embedded product-path coverage 默认只存在于 Darwin 与 Linux。独立的
   `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate 在其他系统默认关闭，拒绝在不支持的系统显式
   启用；CMake 会同时断言 enabled 与 disabled profile 的 target inventory。
-- `photospiderd` 与 protocol v2 保持不变，不序列化这些 Job、quota、checkpoint 或 durable
-  artifact contract。
+- `photospiderd` 与 local IPC protocol v2 保持不变，不序列化这些 Job、quota、checkpoint 或
+  durable artifact contract；private worker protocol v2 是另一个源码私有 wire。
 - 配置的 `TenantId` 是可信配置，不是 authentication。
 - 此纵向路径中的可信仓库 CPU operation 在 attempt process 内运行。Tenant plugin
   ABI/network security、syscall isolation 与 isolated hostile-plugin runtime 仍不存在。
-- 当前 artifact format 只是一个必需的紧密 CPU `ImageBuffer`，不是通用 runtime
-  Value/checkpoint format 或 bulk data plane。
+- 当前 artifact format 是一个必需的紧密 CPU `ImageBuffer`。本地 anonymous-file adapter 是
+  针对该 format 的 attempt-scoped bulk data plane，不是通用 runtime `Value` format、remote
+  transport、object store 或 standalone artifact service。
 
 长期维护入口包括：
 
@@ -416,7 +434,8 @@ child 的策略。
 - control plane：`src/lib/server/single_tenant_job_service.{hpp,cpp}`；
 - Embedded adapter：`src/lib/server/embedded_job_worker.{hpp,cpp}`；
 - private worker transport 与 lifecycle：
-  `src/lib/server/worker_protocol.{hpp,cpp}` 和
+  `src/lib/server/worker_protocol.{hpp,cpp}`、
+  `src/lib/server/worker_artifact_data_plane.{hpp,cpp}` 和
   `src/lib/server/worker_manager.{hpp,cpp}`；
 - 单 assignment composition root：`apps/photospider_worker/main.cpp`；
 - focused authority/lifecycle test：
@@ -450,18 +469,20 @@ fresh-retry stale-lease rejection、
 在首个 heartbeat rendezvous 与分支局部 bound 后验证 cooperative/forced cancellation、
 cancel-channel-versus-wait-status attribution、deadline-side
 natural-reap buffered-report drainage、candidate-Report-deadline-versus-wait-status attribution、
-在可变 identity/diagnostic 长度下完整 Report aggregate accounting 与超界类型化行为、
-以最坏情况后续 Assignment 为约束的可复用 checkpoint 精确边界/多一个字节闭包、真实进程
+最大声明 metadata-envelope accounting、protocol-v1 rejection、control metadata 与 bulk size
+独立性、digest/descriptor/reference fail-closed 校验、checkpoint 与 candidate 跨越原 aggregate
+control bound 的 data-plane 传输、真实进程
 中五个 prepared graph 字段达到共享精确边界、在 service ownership 前针对具体字段同步拒绝
 多一个字节且不留下 durable-root/Job/quota/thread/process residue 或 `WorkerStartup`、真实进程
-超界失败的 artifact/quota/process 零残留，以及 retry/restart/new-Job 对 checkpoint identity、
-digest、durability 与 quota truth 的保持、
+resource 超界 typed failure、确定性的 post-`mkstemp` 异常清理且不留下具名路径、在隔离进程中
+拒绝 finite-hard-`RLIMIT_FSIZE` 且不留下 process/quota/artifact residue，以及
+retry/restart/new-Job 对 checkpoint identity、digest、durability 与 quota truth 的保持、
 concurrent shutdown drainage、实际首次 completion/重建
 allocation fail-stop、completion callback 异常 fail-stop，
 以及真实 Embedded Host output/checkpoint/restart 行为。
 
-这一本地 Issue #100 可执行子集不新增 network/multi-tenant control plane、独立部署的
-WorkerManager、artifact data plane、untrusted plugin sandbox，或 Issues #101-#106 分配的
-工作。这些更广泛边界仍由
+这一本地 Issue #99/#100/#105 可执行子集不新增 network/multi-tenant control plane、独立部署的
+WorkerManager 或 artifact service、remote/authenticated data-plane capability、untrusted plugin
+sandbox、Issue #106 audit/fuzz/trace 工作或 Issue #125 Metal 工作。这些更广泛边界仍由
 [ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
 和 [server roadmap](../../roadmap/zh/Kernel-Evolution.zh.md#服务器与插件隔离)治理。

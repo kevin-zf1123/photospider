@@ -29,12 +29,18 @@ its same-UID path protection, session names, opaque ids, process-global plugin
 methods, or private `OutputStore` into server authentication, tenant authority,
 durable Job identity, or durable artifact authority.
 
-Issue #99 now provides a separate source-private
+Issues #99, #100, and #105 now provide a separate source-private
 [single-tenant Job vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md)
 for canonical JobSpec, tenant quota, durable Job/artifact recovery, explicit
-retry, and checkpoint identity. It is linked only through an internal CMake
-target, has no wire codec or daemon route, and is not composed into
-`photospiderd`. Its `TenantId`, `JobId`, `JobAttemptId`,
+retry/checkpoint identity, one fresh process per attempt, and separated worker
+control/data transport. It is linked only through an internal CMake target,
+has no daemon route or installed codec, and is not composed into
+`photospiderd`. Its private worker protocol v2 is distinct from this local IPC
+v2: a 128-KiB control socket carries only attempt/Job/receipt/reference/
+descriptor/digest metadata, while checkpoint and candidate image bytes use
+manager-created mode-0600 unlinked occurrences through direction-scoped
+inherited descriptors. This is local executable separation, not an
+authenticated network protocol or standalone artifact service. Its `TenantId`, `JobId`, `JobAttemptId`,
 `WorkerInstanceId`, `ArtifactId`, quota reservation, checkpoint, and commit
 receipt are independent source-private types; protocol-v2 compute ids,
 `OutputArtifactId`, delivery ids, session names, and output leases neither

@@ -1,11 +1,12 @@
 # Single-Tenant Job Vertical
 
-This document defines the current source-private Issue #99/#100 Job behavior
+This document defines the current source-private Issue #99/#100/#105 Job behavior
 under `src/lib/server/`. ADR 0011 remains the broader target security-domain
 decision and the server roadmap allocates later delivery slices. The current
 module is a real local vertical for one configured tenant with freshly execed
-attempt processes; it is not a network server, multi-tenant authorization
-boundary, separate WorkerManager service, or untrusted-plugin sandbox.
+attempt processes and an attempt-scoped anonymous-file artifact data plane. It
+is not a network server, multi-tenant authorization boundary, separate
+WorkerManager/artifact service, remote data plane, or untrusted-plugin sandbox.
 
 ## Current Profile and Identity
 
@@ -62,19 +63,20 @@ JobSpec contains no Host path, descriptor, pointer, runtime handle, credential,
 IPC id, plugin DSO, mutable store location, quota token, or artifact mutation
 capability. Before quota admission, the control plane resolves an optional
 checkpoint only through the same tenant's validated durable artifact index.
-The worker receives a read-only `ArtifactRecord`, never a root/path or commit
-authority. The current Embedded CPU adapter validates this provenance but does
-not claim algorithm-specific runtime-state restore.
+The worker receives the receipt, descriptor, digest, size, and a non-authorizing
+join reference over control, then reconstructs a read-only `ArtifactRecord`
+only from its inherited checkpoint data descriptor. It never receives a root,
+path, quota token, stable-output transaction, or commit authority. The current
+Embedded CPU adapter validates this provenance but does not claim algorithm-
+specific runtime-state restore.
 
-Checkpoint authorization also proves that the complete next Assignment remains
-encodable. The 64-MiB frame-payload maximum is reduced by the complete
-worst-case Assignment payload envelope: all assignment and attempt identities,
-canonical JobSpec and digest, lease generation, graph material, cadence fields,
-checkpoint presence, and the checkpoint receipt and image metadata. The
-resulting reusable checkpoint payload maximum is
-`67,108,864 - 101,907 = 67,006,957` bytes. The exact boundary is admissible; a
-larger legacy or test-produced artifact is rejected before quota reservation or
-worker creation, so it cannot surface later as `WorkerStartup`.
+Checkpoint authorization is independent of control-frame capacity. The exact
+durable bytes and receipt must join the configured tenant and JobSpec
+`ArtifactId`, and the payload must fit the accepted host-memory envelope.
+Worker-side materialization revalidates anonymous private-file identity, exact
+size, descriptor, and SHA-256 before Graph construction. A mismatch is rejected
+without quota, Job, retry, or artifact authority being inferred from the data
+occurrence.
 
 ## Tenant Quota Authority
 
@@ -111,6 +113,10 @@ CPU slots also cap Embedded Host `maximum_parallelism`. WorkerManager applies
 accepted host memory as the worker's POSIX `RLIMIT_AS` soft bound before
 `exec`; this constrains total virtual address space rather than measured RSS,
 so the executable and its runtime mappings must fit the requested envelope.
+For output staging, WorkerManager prepares an `RLIMIT_FSIZE` soft bound exactly
+equal to the accepted output/staging/retention minimum. A lower finite inherited
+hard limit fails the owning attempt as `WorkerStartup` before `fork`; it never
+silently narrows the data-plane maximum already derived from the JobSpec.
 Configured device values remain admission declarations, not device isolation.
 Neither dimension replaces the worker-local `ResourceLedger`; there is no
 current syscall filter, cgroup/container, GPU-memory enforcement, or hostile-
@@ -312,21 +318,32 @@ late `WorkerStartup` fact. WorkerManager creates a private socket pair,
 forks/execs one non-installed `photospider-worker`, and registers its exact PID
 before a non-virtual in-memory catalog lookup copies material into exactly one
 immutable assignment. The supervision thread invokes no resolver and performs
-no filesystem I/O. The fork child performs only descriptor setup, `RLIMIT_AS`,
-descriptor closure, and `exec`; the freshly execed worker validates the
-assignment, JobSpec digest, and optional checkpoint, creates and seeds a fresh
-Embedded Host, opens and loads an attempt-local Graph, computes within reserved
-CPU parallelism, validates one nonempty CPU image, closes the Graph, destroys
-Host ownership, and returns only typed attempt facts plus a candidate image.
+no graph/path filesystem I/O. Before record insertion and supervision-thread
+creation, WorkerManager synchronously creates mode-0600 checkpoint and output
+occurrences, opens direction-scoped descriptors, verifies their exact
+device/inode/owner/mode identity, and unlinks both names. Any setup, registry,
+or thread-construction failure closes those occurrences before admission
+rollback. Each complete mutable pathname is allocated before `mkstemp`, and
+successful creation immediately arms a non-allocating descriptor/name owner;
+therefore even an allocation or setup exception after creation leaves no named
+temporary file. The fork child performs only descriptor setup, `RLIMIT_AS`,
+`RLIMIT_FSIZE`, descriptor closure, and `exec`; the freshly execed worker
+validates Assignment metadata and JobSpec digest, materializes any checkpoint
+through fd 5, creates and seeds a fresh Embedded Host, opens and loads an
+attempt-local Graph, computes within reserved CPU parallelism, writes tight
+candidate rows through fd 6, closes the Graph, destroys Host ownership, and
+returns only typed attempt and staged-output metadata.
 
 Pre-exec descriptor ownership is exact: fd 0-2 are standard streams, fd 3 is
 the private control socket, and close-on-exec fd 4 carries setup `errno` to the
-parent. On Darwin, the parent queries the kernel `kern.maxfilesperproc` ceiling
-before `fork` and the allocation-free child closes every slot in
-`[5, ceiling)`, treating only `EBADF` as an unused slot. The current soft
+parent. Fd 5 is the worker's read-only checkpoint occurrence and fd 6 is its
+write-only output stage; the manager retains only a read view of the latter.
+On Darwin, the parent queries the kernel `kern.maxfilesperproc` ceiling before
+`fork` and the allocation-free child closes every slot in `[7, ceiling)`,
+treating only `EBADF` as an unused slot. The current soft
 `RLIMIT_NOFILE` is not a safe boundary because an already-open high descriptor
 survives a later limit decrease. On Linux, the child uses raw
-`close_range(5, UINT_MAX, 0)`; any error, including an unavailable syscall on
+`close_range(7, UINT_MAX, 0)`; any error, including an unavailable syscall on
 an older kernel, is reported through fd 4 and fails startup. There is no
 arbitrary finite fallback or `RLIM_INFINITY`-to-`INT_MAX` userspace scan. The
 maintained process regressions hold a high non-close-on-exec sentinel in an
@@ -342,13 +359,14 @@ interrupted close, so a retry could close another thread's newly acquired
 descriptor. A source-private callback regression forces that release/reuse
 ordering and proves no second close consumes the reused descriptor.
 
-The worker exec bootstrap requires `--control-fd`,
-`--startup-timeout-ms`, and `--io-timeout-ms`. WorkerManager prepares those
-strings before fork. The worker applies the exact configured startup duration
-to its initial assignment receive and the exact I/O duration to acceptance,
-heartbeat, and report writes; no worker-local default or cap can shorten the
-manager policy. Startup remains outside the assignment payload because the
-worker needs that deadline before receiving the first protocol frame.
+The worker exec bootstrap requires `--control-fd`, `--checkpoint-data-fd`,
+`--output-data-fd`, `--startup-timeout-ms`, and `--io-timeout-ms`.
+WorkerManager prepares those strings before fork. The worker applies the exact
+configured startup duration to its initial Assignment receive/checkpoint
+materialization and the exact I/O duration to acceptance, heartbeat, and
+Report writes; no worker-local default or cap can shorten the manager policy.
+Bootstrap descriptors and startup remain outside control payloads because they
+are process capabilities/policy needed before the first frame is available.
 
 The source-private duration domain is closed before durable ownership. Each of
 the nine `WorkerManagerOptions` fields is positive and at most the inclusive
@@ -365,34 +383,39 @@ overflowing sum. Consequently `milliseconds::max()` cannot enter conversion or
 deadline arithmetic, and validation cannot become stale against a later clock
 observation.
 
-The private bounded protocol has fixed magic, one supported version, closed
-message kinds, a 64-MiB frame-payload maximum, deadline-aware partial I/O, and
-strict trailing-byte, enum, identity, digest, image-shape, and Job-resource
-validation. One source-private `kMaximumWorkerTextFieldBytes` constant governs
-all five prepared graph strings plus Report diagnostics in catalog admission,
-Assignment/Report encoding, and decoding. The exact limit is inclusive; local
-prepared-value excess is `std::length_error`, while oversized wire content is
-`WorkerProtocolError`. The protocol carries one Assignment, exact
-AssignmentAccepted/Heartbeat/Cancel identity messages, and at most one Report.
-It carries no state root, quota reservation, artifact-commit capability,
-credential, network listener, native handle, or second assignment. Worker-
-controlled image dimensions are checked against arithmetic, frame, output,
-staging, and retention bounds before the control plane allocates exact tight
-CPU storage.
+The private bounded protocol now has fixed magic, sole supported version 2,
+closed message kinds, a 128-KiB control-payload maximum, deadline-aware partial
+I/O, and strict trailing-byte, enum, identity, digest, descriptor, and Job-
+resource validation. Version 1 is rejected without a compatibility decoder or
+bulk fallback. One source-private `kMaximumWorkerTextFieldBytes` constant
+governs all five prepared graph strings plus Report diagnostics in catalog
+admission, Assignment/Report encoding, and decoding. The exact limit is
+inclusive; local prepared-value excess is `std::length_error`, while oversized
+wire content is `WorkerProtocolError`.
 
-The 64-MiB maximum applies to the complete encoded Report, including identity,
-outcome/settlement/failure fields, diagnostic, image-presence flag, image
-metadata, and tight row bytes. Because any successful output may later be a
-checkpoint, successful candidate images additionally use the shared
-`67,006,957`-byte reusable-checkpoint maximum. Report production and decoding,
-the Assignment artifact codec, and checkpoint authorization all enforce that
-same bound. Before writing metadata or rows, the worker checks their exact
-remaining aggregate capacity. An otherwise valid settled success whose image
-exceeds either bound or its Job output/staging/retention envelope becomes one
-identity-preserving settled `Failed(Compute)` Report with a fixed bounded
-diagnostic and no image; it does not escape as an encoder exception that would
-later look like process or channel loss. This strengthens the accepted value
-domain without changing the private wire layout or protocol version.
+Assignment carries complete attempt/JobSpec and bounded graph metadata,
+optional checkpoint receipt/descriptor/digest/size/reference, output-stage
+reference/maximum, and cadence. Report carries outcome facts and, only for a
+settled success, output reference/slot/descriptor/size/digest. Neither message
+can encode checkpoint bytes, candidate rows, an `ImageBuffer`, blob, `Value`,
+path, or raw file descriptor. The fully declared maximum metadata envelope fits
+the control bound. A candidate above the former 64-MiB aggregate frame limit is
+valid when it fits the accepted output/staging/retention and file-size
+envelopes. The file-size limit exactly matches that accepted maximum; a lower
+finite inherited hard limit is a pre-fork `WorkerStartup`, not a smaller
+runtime envelope. A resource-envelope excess becomes one identity-preserving
+settled `Failed(Compute)` metadata Report with a fixed bounded diagnostic and
+an empty stage; there is no transport-size fallback.
+
+WorkerManager accepts staged output only after one current-identity Report,
+clean zero exit, exact reap, channel EOF, and writer closure. Its retained read
+descriptor must still name a mode-0600 unlinked same-owner regular occurrence,
+and reference, slot, tight descriptor, exact file size, accepted maximum, and
+manager-recomputed SHA-256 must all match before an independent CPU image is
+reconstructed. A mismatch becomes a worker-protocol failure and cannot mint a
+receipt or Job/quota/retry truth. Only the existing service and
+`DurableServerState` may then publish stable ArtifactId/OutputCommitId truth
+through the manifest-last durable transaction.
 
 Manager and worker short-poll loops each retain one decoder for their channel:
 deadline expiry preserves partial header/payload bytes and exact offsets, while
@@ -505,14 +528,17 @@ product process configured to auto-reap `SIGCHLD` children.
   `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate defaults off elsewhere, rejects an
   explicit enable on unsupported systems, and CMake asserts the target
   inventory in both enabled and disabled profiles.
-- `photospiderd` and protocol v2 are unchanged and do not serialize these Job,
-  quota, checkpoint, or durable-artifact contracts.
+- `photospiderd` and local IPC protocol v2 are unchanged and do not serialize
+  these Job, quota, checkpoint, or durable-artifact contracts; private worker
+  protocol v2 is a distinct source-private wire.
 - The configured `TenantId` is trusted configuration, not authentication.
 - Trusted repository CPU operations for this vertical run in the attempt
   process. Tenant plugin ABI/network security, syscall isolation, and isolated
   hostile-plugin runtime remain absent.
-- The current artifact format is one required tight CPU `ImageBuffer`, not a
-  general runtime Value/checkpoint format or bulk data plane.
+- The current artifact format is one required tight CPU `ImageBuffer`. The
+  local anonymous-file adapter is an attempt-scoped bulk data plane for that
+  format, not a general runtime `Value` format, remote transport, object store,
+  or standalone artifact service.
 
 Long-lived entry points are:
 
@@ -522,7 +548,8 @@ Long-lived entry points are:
 - control plane: `src/lib/server/single_tenant_job_service.{hpp,cpp}`;
 - Embedded adapter: `src/lib/server/embedded_job_worker.{hpp,cpp}`;
 - private worker transport and lifecycle:
-  `src/lib/server/worker_protocol.{hpp,cpp}` and
+  `src/lib/server/worker_protocol.{hpp,cpp}`,
+  `src/lib/server/worker_artifact_data_plane.{hpp,cpp}`, and
   `src/lib/server/worker_manager.{hpp,cpp}`;
 - one-assignment composition root: `apps/photospider_worker/main.cpp`;
 - focused authority/lifecycle tests:
@@ -562,22 +589,26 @@ cooperative/
 forced cancellation after a first-heartbeat rendezvous with branch-local
 bounds, cancel-channel-versus-wait-status attribution,
 deadline-side natural-reap buffered-report drainage, candidate-Report-deadline-
-versus-wait-status attribution, complete Report aggregate accounting and
-typed over-bound behavior across variable identity/diagnostic lengths, reusable
-checkpoint exact-boundary/one-byte-over closure against a worst-case future
-Assignment, all five prepared graph fields at the exact shared boundary through
+versus-wait-status attribution, maximum-declared metadata-envelope accounting,
+protocol-v1 rejection, metadata-only control independence from bulk size,
+digest/descriptor/reference fail-closed checks, checkpoint and candidate
+transfer above the former aggregate control bound, all five prepared graph
+fields at the exact shared boundary through
 a real process, field-specific one-byte-over catalog rejection before service
 ownership with no durable-root/Job/quota/thread/process residue or
-`WorkerStartup`, real-process over-bound failure with zero artifact/quota/
-process residue, and retry/restart/new-Job preservation of checkpoint identity,
-digest, durability, and quota truth,
+`WorkerStartup`, resource-over-bound typed failure, deterministic post-
+`mkstemp` exception cleanup without a named path, isolated finite-hard-
+`RLIMIT_FSIZE` pre-fork rejection without process/quota/artifact residue, and
+retry/restart/new-Job preservation of checkpoint identity, digest, durability,
+and quota truth,
 concurrent shutdown drainage, actual first completion/reconstruction allocation
 fail-stop, completion-callback exception fail-stop, and real Embedded Host
 output/checkpoint/restart behavior.
 
-This local Issue #100 executable subset does not add the network/multi-tenant
-control plane, a separately deployed WorkerManager, artifact data plane,
-untrusted plugin sandbox, or the work assigned to Issues #101-#106. Those
+This local Issue #99/#100/#105 executable subset does not add the network/
+multi-tenant control plane, a separately deployed WorkerManager or artifact
+service, remote/authenticated data-plane capabilities, untrusted plugin
+sandbox, Issue #106 audit/fuzz/trace work, or Issue #125 Metal work. Those
 broader boundaries remain governed by
 [ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
 and the [server roadmap](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation).

@@ -975,9 +975,10 @@ daemon job terminal state、result delivery、cache save、Graph 文档保存与
 - 协议 v2 `compute.submit` 只报告已接受 queued work；
 - image daemon job 在 Host compute 与受保护 artifact publication 后终态，但该 artifact
   由进程级 lease/TTL 保留，而不是 crash durable；以及
-- 源码私有 Issue #99 Job 只有在新的 Embedded Host 关闭、独立 artifact authority 返回
-  完整绑定的 crash-durable receipt、retained quota 完成结算且 durable Job truth 已发布后，
-  才成为 `Succeeded`；该 receipt 既不是 daemon delivery，也不是 cache persistence；以及
+- 源码私有 Issue #99/#105 Job 只有在新的 Embedded Host 关闭、metadata-only worker Report 与
+  独立 attempt-local output stage 在精确 reap 后完成复核、durable artifact authority 返回完整
+  绑定的 crash-durable receipt、retained quota 完成结算且 durable Job truth 已发布后，才成为
+  `Succeeded`；该 receipt 既不是 daemon delivery，也不是 cache persistence；以及
 - Graph 文档保存是不同的 graph-state operation，绝不是 Run phase。
 
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
@@ -1051,7 +1052,12 @@ Issue #99 的 durable Job/quota/artifact/retry authority，以及 Issue #100 的
 WorkerManager。每个产品 attempt 都在一个全新、绝不复用的 `photospider-worker` 进程中运行；
 该进程拥有本文所述 process execution domain 的一个 attempt-local instance。WorkerManager
 拥有其私有有界协议、heartbeat/runtime deadline、精确 lease/PID fencing、cooperative
-cancellation、TERM/KILL escalation 与精确非阻塞 `waitpid` reaping。短 poll deadline 之间会
+cancellation、TERM/KILL escalation 与精确非阻塞 `waitpid` reaping。Issue #105 使该 private
+protocol v2 在 128-KiB control bound 下只传 metadata：checkpoint 与 candidate byte 使用独立的
+manager-created mode-0600、已 unlink occurrence，并通过 attempt-scoped、direction-specific
+descriptor 暴露。Manager 只有在 clean reap/writer closure，并对 reference、slot、owner/mode/
+link、descriptor、size、resource 与 SHA-256 做精确复核后才接受 output。Worker 不获得 artifact
+root、稳定 output transaction、quota、retry 或 publication authority。短 poll deadline 之间会
 保留部分 protocol header 与 payload；cancellation 发送失败会继续有界排空 worker
 report/EOF/exit truth，而不会直接视为 forced cancellation。产品构造会在打开 durable root 前
 拒绝 `SIGCHLD=SIG_IGN` 与 `SA_NOCLDWAIT`，WorkerManager 还会在每次 `fork` 前立即重新校验
@@ -1073,7 +1079,7 @@ cancellation 必须由精确 `WIFSIGNALED` 状态证明，且该状态必须匹�
 address space；configured-device bytes 仍只是 server admission accounting，而不是 OS/device
 sandbox。Control plane 继续拥有 durable Job truth，artifact service 继续拥有 durable byte 与
 receipt；本切片不增加 Issues #101-#106 规划的 network endpoint、multi-tenant authorization、
-standalone artifact data plane、syscall/device sandbox 或 untrusted-plugin profile。
+standalone artifact service/remote data plane、syscall/device sandbox 或 untrusted-plugin profile。
 
 ## 边界原理
 

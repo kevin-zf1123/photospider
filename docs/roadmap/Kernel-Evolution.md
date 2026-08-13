@@ -1501,6 +1501,22 @@ runtime receives invocation buffers only. Committed receipts remain
 authoritative after worker/plugin failure or Job cancellation; uncommitted
 private stages remain artifact-authority cleanup.
 
+Issue #105 now provides the local executable evidence for this split at the
+source-private WorkerManager/worker boundary. Private worker protocol v2 has a
+128-KiB metadata-only control bound and no v1/bulk fallback. Manager-created
+mode-0600 unlinked occurrences carry checkpoint and candidate bytes through
+read-only/write-only inherited descriptors; references bind the current
+tenant/Job/spec/attempt/worker/lease plus exact checkpoint or output slot but
+grant no authority without the occurrence capability. The worker cannot choose
+a path, quota, stable ArtifactId, OutputCommitId, or publication result. The
+manager exposes a candidate only after clean reap/writer closure and exact
+owner/mode/link, descriptor, size, resource, and SHA-256 validation; the
+existing service and durable store still own current-attempt selection, retry,
+quota, manifest-last publication, idempotency, cancellation, and recovery.
+This same-host adapter is not the target authenticated network control plane,
+standalone artifact service, remote capability transport, or multi-tenant
+authorization boundary.
+
 Every DSO loaded into a Host remains operator-trusted native code. The current
 operation C++ ABI, data-definition pure-C ABI, and policy pure-C ABI provide no
 sandbox, timeout, syscall, thread, or memory-corruption boundary. Current
@@ -1735,7 +1751,7 @@ not select an end-user Graph operation, implement target operation ABI v1,
 isolate approved in-process DSOs, provide a general syscall/network sandbox,
 or prove OOM from `SIGKILL`.
 
-The current Issue #99/#100 baseline is the source-private
+The current Issue #99/#100/#105 baseline is the source-private
 [Single-Tenant Job Vertical](../kernel-architecture/Single-Tenant-Job-Vertical.md).
 It freezes `jobspec-v2`, atomically accounts complete tenant resource envelopes,
 persists Job records and manifest-last image artifacts under one locked root,
@@ -1746,7 +1762,11 @@ reserved CPU parallelism and POSIX `RLIMIT_AS`, and uses a same-process
 WorkerManager with one bounded private protocol, exact assignment/lease/PID
 fencing, heartbeat/runtime deadlines, cancellation escalation, exact reaping,
 and ongoing supervision-handle drainage. A report becomes eligible only after
-clean process exit and reap; startup, exit, signal, channel, protocol,
+clean process exit and reap. Its protocol v2 control socket carries only
+bounded attempt/Job/receipt/reference/descriptor/digest metadata; checkpoint
+and output bytes cross separate attempt-local anonymous-file descriptors. A
+candidate becomes visible to the service only after writer closure plus exact
+manager revalidation. Startup, exit, signal, channel, protocol,
 heartbeat, runtime, and forced-cancellation failures affect only the owning
 attempt. The control plane still orders cancellation against crash-durable
 artifact commit and gates Job success on settlement, retained-quota conversion,
@@ -1763,8 +1783,8 @@ Job mutex, then drains concurrent workers through cooperative cancel,
 only, and `RLIMIT_AS` is not RSS, syscall, device, or hostile-plugin isolation.
 The local WorkerManager is not the target separate manager process. This slice
 does not implement network authentication/multi-tenancy, a standalone artifact
-data plane, or an untrusted-plugin boundary. Issues #101 through #106 must not
-infer their process/security properties from this executable slice.
+service or remote data plane, or an untrusted-plugin boundary. Later slices
+must not infer those process/security properties from this executable evidence.
 
 Delivery remains allocated rather than absorbed by Issue #97:
 
@@ -1777,7 +1797,7 @@ Delivery remains allocated rather than absorbed by Issue #97:
 | [#102](https://github.com/kevin-zf1123/photospider/issues/102) | Implemented source-private Darwin/Linux isolated CPU shared-memory/FD invocation with exact descriptor/stride/size/ownership/content validation; authenticated supervision remains #103 |
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | Implemented source-private `PluginRuntimeSupervisor` heartbeat/deadline, factual crash/hang/signal/bad-output containment, fresh-process restart, and exact reap; no end-user route or OOM attribution |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Implemented process-immutable signed admission for operation/policy DSOs and private isolated runtime, plus one-use ledger tokens and pre-exec rlimits; no end-user route or general sandbox |
-| [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Network control metadata and bulk artifact data-plane separation |
+| [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Implemented local worker metadata-control/bulk-data separation; authenticated network control and standalone artifact-service composition remain downstream |
 | [#106](https://github.com/kevin-zf1123/photospider/issues/106) | Long-lived codec/descriptor fuzzing, security audit, and cross-layer identity trace |
 
 Each slice advertises only the profile it actually implements. A single-tenant

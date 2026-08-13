@@ -7,7 +7,7 @@ tenant、Job、authentication、quota、artifact、worker 与 plugin 边界。�
 server、worker-manager、独立 artifact data plane、sandbox 或 isolated-plugin 目标已是当前软件行为。
 实时交付状态仍由所链接的 Issue 与 Project 维护。
 
-当前 `photospiderd` 与 plugin loader 均保持不变。Issues #99 和 #100 现在实现了源码私有的
+当前 `photospiderd` 与 plugin loader 均保持不变。Issues #99、#100 和 #105 现在实现了源码私有的
 本地 JobSpec 纵向路径，其中包含 complete-envelope tenant quota accounting、durable
 Job/image artifact recovery、显式 retry/checkpoint identity，以及每个 attempt 一个全新 exec
 的 Embedded Host worker process。一个同进程 `WorkerManager` object 拥有 private socket、
@@ -16,6 +16,10 @@ Job service 仍是唯一 durable/quota/artifact/retry authority。Host memory �
 `RLIMIT_AS` 执行；configured device capacity 仍仅用于 admission。Private closed protocol 与
 精确 lease fencing 会把 startup、exit、signal、channel、protocol、heartbeat、runtime 与
 forced-cancellation failure 隔离到拥有它的 attempt。
+Private worker protocol v2 把 control frame 限制为 128 KiB 的 attempt/Job/artifact-reference
+metadata。Checkpoint 与 candidate image bytes 改用 manager 创建的 mode-0600、立即 unlink、
+direction-scoped 本地 file descriptor；manager 只有在 clean reap/writer closure，并对 reference、
+owner/mode/link、descriptor、size、resource 与 SHA-256 做精确复核后才接受 candidate。
 
 该本地切片保留本决策的身份与权威顺序，并提供真实的 quota admission、crash durability、
 process-crash containment 与 bounded cancellation/shutdown。它保留共享的
@@ -249,9 +253,10 @@ OOM、signal death、malformed protocol 或 channel loss 只使 current JobAttem
 WorkerManager 不依赖最终 worker report 便可 revoke 并 reconcile assignment；只有 control
 plane 应用 retry policy。
 
-当前 Issue #100 子集在本地 single-tenant authority 内实例化这一 lifecycle，而不是目标中的
-独立 WorkerManager process。它使用一个 private socket pair、固定 bounded protocol、全新
-`fork`/`exec`、`RLIMIT_AS`、cooperative cancel 后的 `SIGTERM`/`SIGKILL`，以及精确
+在 Issue #105 之前，Issue #100 基线在本地 single-tenant authority 内实例化这一 lifecycle，
+而不是目标中的独立 WorkerManager process。它使用一个 private socket pair、固定 bounded
+protocol、全新 `fork`/`exec`、`RLIMIT_AS`、cooperative cancel 后的
+`SIGTERM`/`SIGKILL`，以及精确
 `waitpid`。Report 只有在 clean exit 与 reap 后才具备资格。这也包括 deadline-side 竞态：第二次
 精确观察在 channel 撤销前 reap 了自然退出时，manager 会为一次有界的 post-reap Report/EOF
 drain 保留 parent socket 与 stateful decoder，而不是虚构 channel loss 或 forced cancellation。
@@ -259,11 +264,14 @@ drain 保留 parent socket 与 stateful decoder，而不是虚构 channel loss �
 authentication、syscall sandbox、device isolation，也不是 Issues #101-#104 分配的 isolated
 tenant-plugin runtime。
 
-该 private protocol 把 64-MiB bound 应用于完整编码 Report，包括 identity、diagnostic、flag、
-image metadata 与 tight image bytes。当其他方面有效且已 settled 的 success 无法装入剩余 frame
-或 Job output/staging/retention envelope 时，会变成一个有界、保留 identity 且没有 image 的
-`Failed/Compute` Report，因此不可传输 candidate 是 typed worker truth，而不是未捕获的 write
-exception 再被推断为 process 或 channel loss。在已经尝试 cancellation delivery 后发生
+Issue #105 以 private protocol v2 取代了上述历史 bulk-control transport。每份完整 Report
+都限制为不超过 128 KiB 的 identity、outcome、diagnostic、image descriptor、reference、size
+与 digest metadata，并且不包含 tight image bytes。Checkpoint 与 candidate bytes 只经
+manager 创建的 mode-0600、立即 unlink、direction-scoped 本地 file descriptor 传输。超过
+accepted output/staging/retention envelope 的 candidate 会变成一个有界、保留 identity 且没有
+image 的 `Failed/Compute` Report；若有限 hard `RLIMIT_FSIZE` 低于 accepted output-stage
+maximum，则所属 attempt 会在 `fork` 前以 `WorkerStartup` 失败，而不是静默缩窄该 envelope。
+不存在 64-MiB compatibility 或 transport-size fallback。在已经尝试 cancellation delivery 后发生
 socket-system error 时，同样会让错误留在有界 monitor 内：decode 停止，但精确 process
 ownership 与 reap deadline 继续，因此 signal/nonzero wait status 或已经 decode 的 Report
 优先于较弱 channel fact。当 cooperative cancellation deadline 仍然有效时，普通 EOF/post-
@@ -294,6 +302,14 @@ no-replace、identity-revalidated、capability-aware transaction。
 Control plane 只保留 authorized artifact reference 与 verified receipt fact，不保留 bulk byte。
 目标 control message 只携带有界 authentication、tenant、Job、quota、ArtifactId、receipt 与
 capability metadata。Bulk input、output 与 checkpoint byte 通过 data plane 传输。
+
+当前 #105 可执行证据只在源码私有的同机 WorkerManager/worker boundary 上落实该分离。其 control
+reference 是绑定完整 current attempt/worker/lease 以及精确 checkpoint 或 output slot 的不授权
+join key；继承 descriptor 才提供本地 occurrence access。Worker 不获得 path、artifact root、稳定
+ArtifactId/OutputCommitId mint、quota release 或 publication capability。Anonymous stage 会在
+descriptor closure 时消失，只有既有 `DurableServerState` manifest-last transaction 才能发布
+crash-durable artifact truth。这不是目标 standalone artifact service、remote transport、bearer
+capability、authentication 或 multi-tenant authorization。
 
 Worker 获得 exact input 的 immutable-read capability，以及 exact output slot 的私有
 stage/commit capability。它不获得 artifact root、unrestricted namespace listing、其他 tenant
@@ -437,7 +453,7 @@ identity/lease validation、current-attempt selection 或 quota。Issue #106 拥
 | #102 | 通过 shared memory/FD 的隔离 CPU invocation，以及精确 descriptor/stride/size/ownership validation |
 | #103 | `PluginRuntimeSupervisor` heartbeat、deadline、crash/hang/OOM/bad-output containment |
 | #104 | 已实现签名 operation/policy/runtime admission、一次性 isolated-resource token 与 exec 前 rlimit；不包含最终用户 route 或通用 sandbox |
-| #105 | Network control metadata 与 bulk artifact data-plane separation |
+| #105 | 已实现源码私有 worker boundary 的本地 metadata-control/bulk-data 分离；standalone network/artifact-service 交付仍属后续 |
 | #106 | 长期 codec/descriptor fuzzing、security audit，以及 Session/Revision/Run/Task cross-layer trace |
 
 较早切片只能声明其实际实现的较窄 profile。Single-tenant Job vertical 不是 multi-tenant server。
