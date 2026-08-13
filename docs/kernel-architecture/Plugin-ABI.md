@@ -1313,9 +1313,14 @@ installable product archive, but no current operation loader or product
 composition root constructs an isolated request for an end-user Graph
 operation. In particular, `ExecutionService`, `WorkerManager`, the embedded
 Host/CLI, and `photospider-worker` have no selection caller. Operation ABI v2
-and target-only v1 remain absent from this wire. Atomic operation-ABI migration
-and end-user selection, stronger platform sandbox profiles, and long-lived
-fuzz/audit evidence remain separately owned work.
+and target-only v1 remain absent from this wire. Atomic operation-ABI migration,
+end-user selection, and stronger platform sandbox profiles remain separately
+owned work. Issue #106 now supplies narrow long-lived evidence at the existing
+codec boundary: an opt-in manual Clang/libFuzzer target calls the production
+isolated request/response decoders and descriptor validators, while registered
+deterministic tests own canonical round trips and representative malformed
+descriptor behavior. This evidence opens no mapping, descriptor, callback, or
+plugin process and is not an end-user route or general sandbox claim.
 
 Shadow publication prevents partial operation-registry or policy-type-map
 visibility. Combined DSO leases keep callback state and plugin-owned values or

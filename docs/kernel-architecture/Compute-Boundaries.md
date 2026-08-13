@@ -581,8 +581,13 @@ not an end-user route. No current `ExecutionService`, `WorkerManager`, embedded
 Host/CLI, `photospider-worker`, or operation loader constructs an isolated
 request from a Graph operation. Current operation ABI v2 cannot cross this
 wire, target-only operation ABI v1 is neither implemented nor shimmed here, and
-atomic operation-ABI migration and end-user selection, stronger platform
-sandbox profiles, and long-lived fuzz/audit evidence remain separate work.
+atomic operation-ABI migration, end-user selection, and stronger platform
+sandbox profiles remain separate work. Issue #106 now owns narrow long-lived
+codec evidence through two manual opt-in production-decoder harnesses and owns
+the execution observation join `(page session, GraphRevision, RunId,
+RunLocalTaskId)`. The tuple is optional per event, fixed-size, copied from a
+validated ready submission, and never participates in scheduling, cache reuse,
+cancellation, retry choice, settlement, quota, artifact, or commit authority.
 
 ## Request Behavior
 

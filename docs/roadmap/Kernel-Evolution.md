@@ -1717,9 +1717,15 @@ operation loader constructs the isolated invocation from a Graph operation.
 Operation ABI v2 cannot cross this wire and target-only ABI v1 is not
 implemented or shimmed. Issue #104 now supplies package trust and enforceable
 quota for this private composition; stronger sandbox profiles remain separate.
-Issue #105 owns the network/artifact planes, and Issue #106 owns long-lived
-fuzz, audit, and cross-layer trace. The I2 runner work tracked separately as
-Issue #125 is not part of this runtime-supervision slice.
+Issue #105 owns the network/artifact planes. Issue #106 now maintains two
+manual opt-in production-decoder harnesses for bounded worker metadata and
+isolated invocation packets/descriptors, plus deterministic registered codec
+regressions. It also carries an observation-only
+`(GraphSessionId, GraphRevision, RunId, RunLocalTaskId)` join through the
+execution ring, Host page, and exact daemon IPC schema. These values grant no
+session, Graph, Run, task, process, quota, artifact, retry, or commit authority.
+The I2 runner work tracked separately as Issue #125 is not part of this
+runtime-supervision slice.
 
 ### Issue #104 current plugin trust and resource-admission slice
 
@@ -1825,7 +1831,7 @@ Delivery remains allocated rather than absorbed by Issue #97:
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | Implemented source-private `PluginRuntimeSupervisor` heartbeat/deadline, factual crash/hang/signal/bad-output containment, fresh-process restart, and exact reap; no end-user route or OOM attribution |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | Implemented process-immutable signed admission for operation/policy DSOs and private isolated runtime, plus one-use ledger tokens and pre-exec rlimits; no end-user route or general sandbox |
 | [#105](https://github.com/kevin-zf1123/photospider/issues/105) | Implemented local worker metadata-control/bulk-data separation; authenticated network control and standalone artifact-service composition remain downstream |
-| [#106](https://github.com/kevin-zf1123/photospider/issues/106) | Long-lived codec/descriptor fuzzing, security audit, and cross-layer identity trace |
+| [#106](https://github.com/kevin-zf1123/photospider/issues/106) | Implemented manual opt-in production codec/descriptor harnesses, deterministic regressions, and page/session-bound execution identity trace; no general sandbox or authority expansion |
 
 Each slice advertises only the profile it actually implements. A single-tenant
 Job vertical is not a multi-tenant server; a pure-C ABI without process

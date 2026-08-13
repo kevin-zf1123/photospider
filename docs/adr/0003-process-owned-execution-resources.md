@@ -45,6 +45,16 @@ completion, settles cancellation and shutdown exactly once, and rejects
 synchronous completion waits from CPU compute workers. The first migrated
 vertical is staged HP cache save: graph-state policy still chooses the cache
 operation and waits before the existing visible publication point.
+Issue #106 adds a fixed observation-only task identity to this process-owned
+execution path. A task-backed trace copies the validated nonzero Graph revision
+and Run id plus the Run-local task id; runtime-wide events keep that identity
+absent, and the Host binds the resolved session once on each returned page.
+These scalars cannot acquire a Run lease, select a live task, cancel work,
+reserve resources, publish cache or artifact state, or alter retry policy.
+Issue #106 also maintains two opt-in manual Clang/libFuzzer targets around the
+production worker-assignment and isolated-CPU invocation decoders. They remain
+outside default builds, CTest, CI, install, and export ownership and establish
+no process, plugin, filesystem, network, quota, or artifact authority.
 Public Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes this ADR only
 as the detailed
 ownership and lifecycle contract; the high-level process ownership decision

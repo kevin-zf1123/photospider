@@ -738,7 +738,12 @@ the router invokes `Host::execution_trace` exactly once and returns:
       "node_id": -1,
       "worker_id": -1,
       "action": "rethrow_exception",
-      "timestamp_us": 1234
+      "timestamp_us": 1234,
+      "task_identity": {
+        "graph_revision": 7,
+        "run_id": 3,
+        "run_local_task_id": 0
+      }
     }
   ],
   "next_sequence": 9,
@@ -762,6 +767,20 @@ specific node or worker applies. `-1` is the sole sentinel for no specific
 node or worker; any value below `-1` is malformed Host output. The router
 rejects the complete response as daemon `internal_error` after that one Host
 call and never retries the observation.
+
+Every event has a required `task_identity` member. A submitted task uses an
+exact three-field object containing nonzero unsigned `graph_revision`, nonzero
+unsigned `run_id`, and unsigned `run_local_task_id`, where zero is valid. A
+runtime-wide event with no task source uses explicit JSON `null`; the daemon
+and client never infer a tuple from epoch, node, worker, or page session. The
+embedded Host binds its private `GraphSessionId` once on the page. Before
+encoding, the router verifies that this value matches the session admitted by
+the registry, then exposes only the caller's opaque daemon `session_id`. The
+client verifies that outer echo and rejects an omitted, partial, extra,
+mistyped, zero revision/Run, or otherwise malformed identity with no fallback
+to the former identity-free schema and no retry through another route. The page
+session and event tuple are copied observation keys only; they grant no Graph,
+Run, task, cancellation, retry, process, quota, artifact, or commit authority.
 
 There is no `max_entries` field in either method. Unknown fields remain
 forward-compatible but cannot replace a missing or invalid known `limit`.

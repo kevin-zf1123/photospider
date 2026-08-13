@@ -1023,8 +1023,12 @@ Adapter、endpoint、supervisor 与 executor 都会编入 installable product ar
 operation loader 或 product composition root 会为最终用户 Graph operation 构造 isolated
 request。具体而言，`ExecutionService`、`WorkerManager`、embedded Host/CLI 与
 `photospider-worker` 均不存在 selection caller。Operation ABI v2 与仍为目标态的 v1 都不会
-进入该 wire。Atomic operation-ABI migration 与最终用户 selection、更强 platform sandbox
-profile、长期 fuzz/audit evidence 都仍属于分别拥有的后续工作。
+进入该 wire。Atomic operation-ABI migration、最终用户 selection 与更强 platform sandbox
+profile 仍属于分别拥有的后续工作。Issue #106 现在会在既有 codec boundary 提供范围收窄的长期
+evidence：一个手工 opt-in 的 Clang/libFuzzer target 会调用生产 isolated request/response
+decoder 与 descriptor validator，而已注册的确定性测试负责 canonical roundtrip 和代表性的
+malformed descriptor 行为。该证据不会打开 mapping、descriptor、callback 或 plugin process，
+也不构成最终用户 route 或通用 sandbox 声明。
 
 影子发布阻止操作注册表或策略类型 map 局部可见。组合 DSO 租约让回调状态和插件拥有
 的值或上下文保持在其定义库的生命周期内，同时在 mapping 保持 resident 的整个期间保留精确授权

@@ -1378,8 +1378,13 @@ boundary。在该 boundary，原始 `PluginRuntimeFault` 到达 request owner，
 embedded Host/CLI、`photospider-worker` 或 operation loader 会从 Graph operation 构造 isolated
 invocation。Operation ABI v2 无法跨越该 wire，仍为目标态的 ABI v1 既未实现也未通过 shim
 接入。Issue #104 现在为该私有组合提供 package trust 与 enforceable quota；更强 sandbox profile
-仍是独立工作。Issue #105 负责 network/artifact plane，Issue #106 负责长期 fuzz、audit 与 cross-
-layer trace。作为 Issue #125 单独跟踪的 I2 runner 工作不属于本 runtime-supervision 切片。
+仍是独立工作。Issue #105 负责 network/artifact plane。Issue #106 现在维护两个手工 opt-in、
+调用生产 decoder 的 harness，分别覆盖有界 worker metadata 与 isolated invocation
+packet/descriptor，并维护已注册的确定性 codec regression。它还会让只用于观察的
+`(GraphSessionId, GraphRevision, RunId, RunLocalTaskId)` join 贯通 execution ring、Host page
+与精确 daemon IPC schema。这些值不授予 session、Graph、Run、task、process、quota、artifact、
+retry 或 commit authority。作为 Issue #125 单独跟踪的 I2 runner 工作不属于本
+runtime-supervision 切片。
 
 ### Issue #104 当前插件信任与资源准入切片
 
@@ -1463,7 +1468,7 @@ Issue #97 只做分配，不吸收后续交付：
 | [#103](https://github.com/kevin-zf1123/photospider/issues/103) | 已实现源码私有的 `PluginRuntimeSupervisor` heartbeat/deadline、基于事实的 crash/hang/signal/bad-output containment、fresh-process restart 与精确 reap；不包含最终用户路径或 OOM 归因 |
 | [#104](https://github.com/kevin-zf1123/photospider/issues/104) | 已实现 operation/policy DSO 与私有 isolated runtime 的进程不可变签名 admission，以及一次性 ledger token 和 exec 前 rlimit；不包含最终用户 route 或通用 sandbox |
 | [#105](https://github.com/kevin-zf1123/photospider/issues/105) | 已实现本地 worker metadata-control/bulk-data 分离；authenticated network control 与 standalone artifact-service composition 仍属后续 |
-| [#106](https://github.com/kevin-zf1123/photospider/issues/106) | 长期 codec/descriptor fuzzing、security audit 与跨层 identity trace |
+| [#106](https://github.com/kevin-zf1123/photospider/issues/106) | 已实现手工 opt-in 的生产 codec/descriptor harness、确定性 regression 与绑定 page/session 的 execution identity trace；不新增通用 sandbox 或 authority |
 
 每个切片只能声明自身实际实现的 profile。Single-tenant Job vertical 不是 multi-tenant server；没有
 process isolation 的 pure-C ABI 也不是 untrusted-plugin profile。完整 network/multi-tenant 与

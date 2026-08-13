@@ -2434,6 +2434,50 @@ row/bundle，被 exact-once 插入本地 validation corpus。Portable storage ob
 只属于 harness smoke；本文不声明已经执行精确
 timed replicate 或 three-replicate machine corpus。
 
+## 手工 codec 稳健性 harness
+
+Issue #106 维护两个调用真实产品 decoder 的本地 parser robustness harness：
+
+- `fuzz_worker_protocol_codec` 覆盖有界 worker Assignment 与 Report metadata，包括纯
+  Assignment semantic decoder；
+- `fuzz_isolated_cpu_invocation_codec` 覆盖 isolated request/response packet 与生产 descriptor
+  validator。
+
+它们属于手工 developer mode，不属于 product-test inventory。CMake option
+`PHOTOSPIDER_BUILD_FUZZERS` 默认是 `OFF`；启用后，configuration 要求 Darwin 或 Linux、
+Clang-family compiler，并要求 libFuzzer、AddressSanitizer 与 UndefinedBehaviorSanitizer 通过真实
+compile/link 加有界 native-run probe。缺失或初始化不兼容的 runtime 因而会在 configuration 阶段
+失败。与全局 `USE_ASAN` 或 `USE_TSAN` mode 冲突时会默认拒绝。两个 executable 都是
+`EXCLUDE_FROM_ALL`，且没有 `add_test()`、install、export、package 或 CI ownership。
+
+必须显式构建并运行有界本地 campaign：
+
+```bash
+cmake -S . -B build-fuzz -DPHOTOSPIDER_BUILD_FUZZERS=ON
+cmake --build build-fuzz \
+  --target fuzz_worker_protocol_codec \
+           fuzz_isolated_cpu_invocation_codec -j
+mkdir -p out/fuzz/worker/{corpus,artifacts} \
+  out/fuzz/isolated/{corpus,artifacts}
+./build-fuzz/fuzzers/fuzz_worker_protocol_codec \
+  -runs=1000 -artifact_prefix=out/fuzz/worker/artifacts/ \
+  out/fuzz/worker/corpus
+./build-fuzz/fuzzers/fuzz_isolated_cpu_invocation_codec \
+  -runs=1000 -artifact_prefix=out/fuzz/isolated/artifacts/ \
+  out/fuzz/isolated/corpus
+```
+
+Harness 内建深层 canonical seed，也接受上面的未跟踪本地 corpus directory。Corpus addition、
+生成 finding、log 与 build tree 必须留在已忽略的 `out/`/`build-*` storage 下；不得提交，也不得把
+result orchestration 注册到 CTest 或 CI。Finding 只是 parser evidence，不是 session、process、
+plugin、quota、artifact、retry 或 publication capability。
+
+确定性且已注册的 GoogleTest 继续负责 canonical re-encoding、严格 prefix/truncation、trailing
+byte、worker identity/digest/data-plane/heartbeat validation、isolated enum/count/rank/extent/stride/
+range/overflow/phase/overlap validation、optional task identity、page reuse、failure/cancellation/retry/
+concurrent Run 行为，以及精确 IPC schema。手工 target 用于探索额外有界输入，绝不能取代这些稳定
+regression assertion。
+
 ## CTest 注册
 
 所有预期 GoogleTest 二进制都应注册到 CTest。这包括当前可能低置信度的里程碑测试和 `test_propagation_contracts`。

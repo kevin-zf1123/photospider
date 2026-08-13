@@ -33,6 +33,13 @@ Issue #88 在同一 process service 中新增唯一 source-private `ComputeIoExe
 typed completion，对 cancellation 与 shutdown 执行恰好一次 settlement，并拒绝 CPU compute
 worker 同步等待 completion。首条迁移的垂直路径是 staged HP cache save：graph-state policy
 仍选择 cache operation，并在既有 visible publication point 之前等待。
+Issue #106 为这条进程级执行路径增加固定且只用于观察的 task identity。Task-backed trace 会复制
+已经校验的非零 Graph revision、非零 Run id 与 Run-local task id；runtime-wide event 会让该
+identity 保持缺省，Host 则在每个返回 page 上只绑定一次已解析的 session。这些标量不能取得 Run
+lease、选择 live task、取消工作、预留资源、发布 cache/artifact 状态或改变 retry policy。
+Issue #106 还围绕生产 worker-assignment decoder 与 isolated-CPU invocation decoder 维护两个
+手工 opt-in 的 Clang/libFuzzer target。它们不属于默认 build、CTest、CI、install 或 export
+ownership，也不建立 process、plugin、filesystem、network、quota 或 artifact authority。
 Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详细所有权与生命周期契约上
 取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
 

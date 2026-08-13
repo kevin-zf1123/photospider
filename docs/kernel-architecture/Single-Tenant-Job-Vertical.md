@@ -668,10 +668,19 @@ concurrent shutdown drainage, actual first completion/reconstruction allocation
 fail-stop, completion-callback exception fail-stop, and real Embedded Host
 output/checkpoint/restart behavior.
 
-This local Issue #99/#100/#105 executable subset does not add the network/
-multi-tenant control plane, a separately deployed WorkerManager or artifact
-service, remote/authenticated data-plane capabilities, untrusted plugin
-sandbox, Issue #106 audit/fuzz/trace work, or Issue #125 Metal work. Those
-broader boundaries remain governed by
+Issue #106 adds a pure product `decode_worker_assignment` boundary and a manual
+opt-in local parser robustness harness for bounded worker control metadata.
+Successful decoding must re-encode to the same canonical frame; the socket
+receiver delegates to that decoder and retains its absolute acceptance
+deadline. The harness transfers no artifact bytes and creates no descriptor,
+worker, process, quota, receipt, or publication authority. Registered tests,
+not the manual harness, own deterministic canonical, prefix, truncation,
+trailing-byte, identity, digest, descriptor, and heartbeat behavior.
+
+This local Issue #99/#100/#105 executable subset plus the Issue #106 validation
+and observation layer does not add the network/multi-tenant control plane, a
+separately deployed WorkerManager or artifact service, remote/authenticated
+data-plane capabilities, an untrusted plugin sandbox, or Issue #125 Metal work.
+Those broader boundaries remain governed by
 [ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
 and the [server roadmap](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation).

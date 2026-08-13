@@ -2979,6 +2979,57 @@ objects validate. Building it or running `--help` is only a
 harness smoke; this document does not claim that an exact timed replicate or
 three-replicate machine corpus has been executed.
 
+## Manual codec robustness harnesses
+
+Issue #106 maintains two local parser robustness harnesses that call the real
+product decoders:
+
+- `fuzz_worker_protocol_codec` covers bounded worker Assignment and Report
+  metadata, including the pure Assignment semantic decoder;
+- `fuzz_isolated_cpu_invocation_codec` covers isolated request/response packets
+  and the production descriptor validators.
+
+They are a manual developer mode, not a product-test inventory. The CMake
+option `PHOTOSPIDER_BUILD_FUZZERS` defaults to `OFF`; when enabled, configuration
+requires Darwin or Linux, a Clang-family compiler, and an actual successful
+compile/link plus bounded native-run probe for libFuzzer, AddressSanitizer, and
+UndefinedBehaviorSanitizer. A missing or initialization-incompatible runtime
+therefore fails during configuration. Conflicting global `USE_ASAN` or
+`USE_TSAN` modes fail closed. Both executables are `EXCLUDE_FROM_ALL` and have
+no `add_test()`, install, export, package, or CI ownership.
+
+Build and run a bounded local campaign explicitly:
+
+```bash
+cmake -S . -B build-fuzz -DPHOTOSPIDER_BUILD_FUZZERS=ON
+cmake --build build-fuzz \
+  --target fuzz_worker_protocol_codec \
+           fuzz_isolated_cpu_invocation_codec -j
+mkdir -p out/fuzz/worker/{corpus,artifacts} \
+  out/fuzz/isolated/{corpus,artifacts}
+./build-fuzz/fuzzers/fuzz_worker_protocol_codec \
+  -runs=1000 -artifact_prefix=out/fuzz/worker/artifacts/ \
+  out/fuzz/worker/corpus
+./build-fuzz/fuzzers/fuzz_isolated_cpu_invocation_codec \
+  -runs=1000 -artifact_prefix=out/fuzz/isolated/artifacts/ \
+  out/fuzz/isolated/corpus
+```
+
+The harnesses embed deep canonical seeds and also accept the untracked local
+corpus directories above. Keep corpus additions, generated findings, logs, and
+build trees under ignored `out/`/`build-*` storage; do not commit them or
+register result orchestration with CTest or CI. A finding is parser evidence,
+not a session, process, plugin, quota, artifact, retry, or publication
+capability.
+
+Deterministic registered GoogleTests remain the authority for canonical
+re-encoding, strict prefixes and truncation, trailing bytes, worker identity/
+digest/data-plane/heartbeat validation, isolated enum/count/rank/extent/stride/
+range/overflow/phase/overlap validation, optional task identity, page reuse,
+failure/cancellation/retry/concurrent Run behavior, and exact IPC schema. Use
+the manual targets to explore additional bounded inputs, never to replace those
+stable regression assertions.
+
 ## CTest Registration
 
 All intended GoogleTest binaries should be registered with CTest. This includes

@@ -641,7 +641,12 @@ integer `limit`。Zero 从 oldest retained trace 开始；router 会恰好调用
       "node_id": -1,
       "worker_id": -1,
       "action": "rethrow_exception",
-      "timestamp_us": 1234
+      "timestamp_us": 1234,
+      "task_identity": {
+        "graph_revision": 7,
+        "run_id": 3,
+        "run_local_task_id": 0
+      }
     }
   ],
   "next_sequence": 9,
@@ -661,6 +666,17 @@ retained page；通过 `next_sequence` 前进不会丢失或重复 retained even
 非负值。`-1` 是表示没有具体 node 或 worker 的唯一 sentinel；任何小于 `-1` 的值都是 malformed
 Host output。Router 会在这一次 Host call 后把整个 response 拒绝为 daemon `internal_error`，且
 绝不重试该 observation。
+
+每个 event 都有一个必需的 `task_identity` member。Submitted task 使用精确的 three-field
+object，其中包含非零 unsigned `graph_revision`、非零 unsigned `run_id` 与 unsigned
+`run_local_task_id`，后者允许为零。没有 task source 的 runtime-wide event 使用显式 JSON
+`null`；daemon 与 client 绝不会根据 epoch、node、worker 或 page session 推导 tuple。Embedded
+Host 会在 page 上只绑定一次私有 `GraphSessionId`。编码前，router 会验证该值匹配 registry 已
+准入的 session，随后只暴露 caller 的 opaque daemon `session_id`。Client 会验证这份 outer echo，
+并拒绝 omitted、partial、extra、mistyped、revision/Run 为零或其他 malformed identity；它不会
+回退到旧的 identity-free schema，也不会通过另一条 route 重试。Page session 与 event tuple 只是
+复制的 observation key，不授予 Graph、Run、task、cancellation、retry、process、quota、artifact
+或 commit authority。
 
 这两个 method 都没有 `max_entries` field。Unknown field 保持 forward-compatible，但不能替代
 缺失或非法的 known `limit`。两个 route 都直接使用 Host 的 bounded observation API，绝不 reserve

@@ -525,8 +525,16 @@ concurrent shutdown drainage、实际首次 completion/重建
 allocation fail-stop、completion callback 异常 fail-stop，
 以及真实 Embedded Host output/checkpoint/restart 行为。
 
-这一本地 Issue #99/#100/#105 可执行子集不新增 network/multi-tenant control plane、独立部署的
-WorkerManager 或 artifact service、remote/authenticated data-plane capability、untrusted plugin
-sandbox、Issue #106 audit/fuzz/trace 工作或 Issue #125 Metal 工作。这些更广泛边界仍由
+Issue #106 新增一个纯产品 `decode_worker_assignment` boundary，以及一个针对有界 worker
+control metadata、手工 opt-in 的本地 parser robustness harness。成功 decode 必须重新编码为同一
+canonical frame；socket receiver 会委托给该 decoder，并保留绝对 acceptance deadline。Harness
+不会传输 artifact byte，也不会创建 descriptor、worker、process、quota、receipt 或 publication
+authority。确定性的 canonical、prefix、truncation、trailing-byte、identity、digest、descriptor
+与 heartbeat 行为由已注册测试负责，而不是由手工 harness 负责。
+
+这一本地 Issue #99/#100/#105 可执行子集，加上 Issue #106 validation 与 observation layer，不会
+新增 network/multi-tenant control plane、独立部署的 WorkerManager 或 artifact service、
+remote/authenticated data-plane capability、untrusted plugin sandbox 或 Issue #125 Metal 工作。
+这些更广泛边界仍由
 [ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
 和 [server roadmap](../../roadmap/zh/Kernel-Evolution.zh.md#服务器与插件隔离)治理。

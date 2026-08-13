@@ -455,7 +455,11 @@ Adapter、runtime endpoint、supervisor 与 executor 都会编入 installable pr
 `WorkerManager`、embedded Host/CLI、`photospider-worker` 或 operation loader 会从 Graph
 operation 构造 isolated request。当前 operation ABI v2 无法跨越此 wire；仍为目标态的
 operation ABI v1 既未在此实现也未通过 shim 接入；atomic operation-ABI migration 与最终用户
-selection、更强 platform sandbox profile、长期 fuzz/audit evidence 仍是独立工作。
+selection、更强 platform sandbox profile 仍是独立工作。Issue #106 现在通过两个手工 opt-in、
+调用生产 decoder 的 harness 负责范围收窄的长期 codec evidence，并负责 execution observation
+join `(page session, GraphRevision, RunId, RunLocalTaskId)`。该 tuple 在每个 event 上可缺省、大小
+固定，并从已校验的 ready submission 复制；它绝不参与 scheduling、cache reuse、cancellation、
+retry choice、settlement、quota、artifact 或 commit authority。
 
 ## 请求行为
 
