@@ -1,25 +1,29 @@
 /**
  * @file test_worker_protocol.cpp
- * @brief Verifies bounded Issue #100 worker protocol reconstruction.
+ * @brief Verifies Issue #105 metadata control and artifact data separation.
  */
 #include <gtest/gtest.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
 
+#include "server/worker_artifact_data_plane_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
 
@@ -27,12 +31,16 @@ namespace ps::server {
 namespace {
 
 TEST(WorkerProcessLaunch, RoundTripsManagerDeadlinesWithoutLegacyCaps) {
-  const WorkerProcessLaunchOptions expected{3, std::chrono::milliseconds(12345),
+  const WorkerProcessLaunchOptions expected{3, 5, 6,
+                                            std::chrono::milliseconds(12345),
                                             std::chrono::milliseconds(4321)};
   WorkerProcessLaunchArguments arguments =
       make_worker_process_launch_arguments(expected);
   std::string executable = "photospider-worker";
-  std::array<char*, 4U> argv{executable.data(), arguments.control_fd.data(),
+  std::array<char*, 6U> argv{executable.data(),
+                             arguments.control_fd.data(),
+                             arguments.checkpoint_data_fd.data(),
+                             arguments.output_data_fd.data(),
                              arguments.startup_timeout.data(),
                              arguments.io_timeout.data()};
 
@@ -40,6 +48,8 @@ TEST(WorkerProcessLaunch, RoundTripsManagerDeadlinesWithoutLegacyCaps) {
       static_cast<int>(argv.size()), argv.data());
 
   EXPECT_EQ(parsed.control_fd, expected.control_fd);
+  EXPECT_EQ(parsed.checkpoint_data_fd, expected.checkpoint_data_fd);
+  EXPECT_EQ(parsed.output_data_fd, expected.output_data_fd);
   EXPECT_EQ(parsed.startup_timeout, expected.startup_timeout);
   EXPECT_EQ(parsed.io_timeout, expected.io_timeout);
 }
@@ -48,24 +58,32 @@ TEST(WorkerProcessLaunch,
      RejectsMissingReorderedMalformedOrNonPositiveArguments) {
   std::string executable = "photospider-worker";
   std::string control = "--control-fd=3";
+  std::string checkpoint = "--checkpoint-data-fd=5";
+  std::string output = "--output-data-fd=6";
   std::string startup = "--startup-timeout-ms=12000";
   std::string io = "--io-timeout-ms=3500";
-  std::array<char*, 4U> complete{executable.data(), control.data(),
-                                 startup.data(), io.data()};
+  std::array<char*, 6U> complete{executable.data(), control.data(),
+                                 checkpoint.data(), output.data(),
+                                 startup.data(),    io.data()};
 
   EXPECT_THROW(parse_worker_process_launch_options(2, complete.data()),
                std::invalid_argument);
-  std::swap(complete[2], complete[3]);
+  std::swap(complete[4], complete[5]);
   EXPECT_THROW(parse_worker_process_launch_options(
                    static_cast<int>(complete.size()), complete.data()),
                std::invalid_argument);
-  std::swap(complete[2], complete[3]);
+  std::swap(complete[4], complete[5]);
   startup = "--startup-timeout-ms=0";
   EXPECT_THROW(parse_worker_process_launch_options(
                    static_cast<int>(complete.size()), complete.data()),
                std::invalid_argument);
   startup = "--startup-timeout-ms=12000";
   io = "--io-timeout-ms=3500ms";
+  EXPECT_THROW(parse_worker_process_launch_options(
+                   static_cast<int>(complete.size()), complete.data()),
+               std::invalid_argument);
+  io = "--io-timeout-ms=3500";
+  output = "--output-data-fd=5";
   EXPECT_THROW(parse_worker_process_launch_options(
                    static_cast<int>(complete.size()), complete.data()),
                std::invalid_argument);
@@ -111,6 +129,82 @@ class ScopedSocketPair final {
   /** @brief Sole two descriptor owners. */
   std::array<int, 2U> descriptors_{{-1, -1}};
 };
+
+/**
+ * @brief Owns one unique empty directory for temporary-occurrence tests.
+ * @throws std::filesystem::filesystem_error when path discovery or cleanup
+ * cannot be represented.
+ * @throws std::runtime_error when the unique directory cannot be created.
+ * @note Destruction removes only the exact test-owned path and is best effort.
+ */
+class ScopedDataPlaneTestDirectory final {
+ public:
+  /**
+   * @brief Creates one unique empty directory below the process temp root.
+   * @throws std::filesystem::filesystem_error when path discovery or creation
+   * fails.
+   * @throws std::runtime_error when `create_directory` reports no creation.
+   */
+  ScopedDataPlaneTestDirectory() {
+    static std::atomic<std::uint64_t> sequence{0U};
+    const auto ticks =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    path_ = std::filesystem::temp_directory_path() /
+            ("photospider-data-plane-cleanup-" + std::to_string(ticks) + "-" +
+             std::to_string(sequence.fetch_add(1U)));
+    if (!std::filesystem::create_directory(path_)) {
+      throw std::runtime_error("failed to create data-plane test directory");
+    }
+  }
+
+  /**
+   * @brief Best-effort removes the exact test-owned directory.
+   * @throws Nothing; filesystem cleanup errors are retained only locally.
+   */
+  ~ScopedDataPlaneTestDirectory() noexcept {
+    std::error_code error;
+    std::filesystem::remove_all(path_, error);
+  }
+
+  /**
+   * @brief Prevents duplicate directory ownership.
+   * @param other Existing owner that remains unchanged.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedDataPlaneTestDirectory(const ScopedDataPlaneTestDirectory& other) =
+      delete;
+
+  /**
+   * @brief Prevents duplicate directory assignment.
+   * @param other Existing owner that remains unchanged.
+   * @return No assignment result because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedDataPlaneTestDirectory& operator=(
+      const ScopedDataPlaneTestDirectory& other) = delete;
+
+  /**
+   * @brief Returns the exact existing test directory.
+   * @return Borrowed path valid for this owner lifetime.
+   * @throws Nothing.
+   */
+  const std::filesystem::path& path() const noexcept { return path_; }
+
+ private:
+  /** @brief Sole recursively cleaned test directory. */
+  std::filesystem::path path_;
+};
+
+TEST(WorkerArtifactDataPlane,
+     PostMkstempAllocationFailureLeavesNoTemporaryName) {
+  ScopedDataPlaneTestDirectory directory;
+
+  EXPECT_THROW(
+      WorkerArtifactDataPlaneTestAccess::throw_after_private_temporary_creation(
+          directory.path()),
+      std::bad_alloc);
+  EXPECT_TRUE(std::filesystem::is_empty(directory.path()));
+}
 
 /**
  * @brief Builds one complete bounded Job resource request.
@@ -161,7 +255,7 @@ std::string maximum_opaque_field(std::string prefix, char padding) {
 }
 
 /**
- * @brief Builds the largest encoded valid Job resource/device vector shape.
+ * @brief Builds the largest valid encoded resource/device metadata shape.
  * @return Positive resources with 128 sorted maximum-length device labels.
  * @throws Contract or allocation failures unchanged.
  */
@@ -179,6 +273,14 @@ JobResourceRequest maximum_assignment_resources() {
   }
   return resources;
 }
+
+/**
+ * @brief Builds one valid identity joined to a supplied immutable JobSpec.
+ * @param spec Exact JobSpec whose digest enters the tuple.
+ * @return Complete valid attempt identity.
+ * @throws Identity allocation failures unchanged.
+ */
+AttemptIdentity protocol_identity(const JobSpec& spec);
 
 /**
  * @brief Builds one maximum-encoded-width identity joined to a JobSpec.
@@ -217,6 +319,7 @@ ArtifactRecord maximum_assignment_checkpoint(const JobSpec& spec,
   ArtifactRecord artifact;
   artifact.payload.assign(payload_bytes, std::byte{0x5a});
   artifact.receipt.attempt = maximum_assignment_identity(spec, 'r');
+  artifact.receipt.attempt.tenant_id = TenantId("tenant.protocol");
   artifact.receipt.output_slot_id =
       OutputSlotId(maximum_opaque_field("checkpoint-slot-", 's'));
   artifact.receipt.artifact_id = *spec.checkpoint_artifact_id();
@@ -235,13 +338,13 @@ ArtifactRecord maximum_assignment_checkpoint(const JobSpec& spec,
 }
 
 /**
- * @brief Builds an Assignment with every variable envelope field at maximum.
- * @param checkpoint_payload_bytes Positive tight checkpoint payload size.
- * @return Complete valid assignment with maximum encoded non-payload fields.
- * @throws Contract, allocation, or hashing failures unchanged.
+ * @brief Builds the maximum declared Assignment metadata with one-byte bulk.
+ * @return Complete Assignment whose every bounded text/resource/receipt field
+ * reaches its declared maximum while artifact bytes remain external.
+ * @throws Contract, data-plane, filesystem, hash, or allocation failures
+ * unchanged.
  */
-PreparedWorkerAssignment maximum_field_assignment(
-    std::size_t checkpoint_payload_bytes) {
+PreparedWorkerAssignment maximum_metadata_assignment() {
   const ArtifactId checkpoint_id(
       maximum_opaque_field("checkpoint-artifact-", 'k'));
   auto spec = std::make_shared<const JobSpec>(
@@ -252,8 +355,13 @@ PreparedWorkerAssignment maximum_field_assignment(
   PreparedWorkerAssignment prepared;
   prepared.assignment.identity = maximum_assignment_identity(*spec, 'a');
   prepared.assignment.spec = spec;
-  prepared.assignment.checkpoint = std::make_shared<const ArtifactRecord>(
-      maximum_assignment_checkpoint(*spec, checkpoint_payload_bytes));
+  ArtifactRecord checkpoint = maximum_assignment_checkpoint(*spec, 1U);
+  checkpoint.receipt.attempt.tenant_id = prepared.assignment.identity.tenant_id;
+  prepared.assignment.checkpoint =
+      std::make_shared<const ArtifactRecord>(std::move(checkpoint));
+  WorkerArtifactDataPlane data_plane =
+      WorkerArtifactDataPlane::create(prepared.assignment);
+  prepared.data_plane = data_plane.assignment_metadata();
   prepared.graph.ok = true;
   prepared.graph.root_dir.assign(kMaximumWorkerTextFieldBytes, 'r');
   prepared.graph.yaml_path.assign(kMaximumWorkerTextFieldBytes, 'y');
@@ -263,6 +371,33 @@ PreparedWorkerAssignment maximum_field_assignment(
   prepared.heartbeat_interval =
       std::chrono::milliseconds(std::numeric_limits<std::uint32_t>::max());
   return prepared;
+}
+
+/**
+ * @brief Builds one valid manager Assignment and its local data-plane owner.
+ * @param spec Immutable JobSpec retained by the assignment.
+ * @param checkpoint Optional authorized checkpoint retained by the assignment.
+ * @return Pair containing prepared control metadata and live descriptor owner.
+ * @throws Data-plane, contract, filesystem, hash, or allocation failures
+ * unchanged.
+ * @note The returned owner must remain alive while its metadata or staged
+ * occurrence is used by a test.
+ */
+std::pair<PreparedWorkerAssignment, WorkerArtifactDataPlane>
+prepared_assignment_with_data_plane(
+    std::shared_ptr<const JobSpec> spec,
+    std::shared_ptr<const ArtifactRecord> checkpoint = nullptr) {
+  PreparedWorkerAssignment prepared;
+  prepared.assignment.identity = protocol_identity(*spec);
+  prepared.assignment.spec = std::move(spec);
+  prepared.assignment.checkpoint = std::move(checkpoint);
+  WorkerArtifactDataPlane data_plane =
+      WorkerArtifactDataPlane::create(prepared.assignment);
+  prepared.data_plane = data_plane.assignment_metadata();
+  prepared.graph.ok = true;
+  prepared.graph.yaml_path = "/trusted/graph.yaml";
+  prepared.heartbeat_interval = std::chrono::milliseconds(125);
+  return {std::move(prepared), std::move(data_plane)};
 }
 
 /**
@@ -279,25 +414,6 @@ AttemptIdentity protocol_identity(const JobSpec& spec) {
   identity.attempt_id = JobAttemptId("attempt.protocol.1");
   identity.worker_instance_id = WorkerInstanceId("worker.protocol.1");
   identity.worker_lease_generation = WorkerLeaseGeneration{1U};
-  return identity;
-}
-
-/**
- * @brief Builds one valid identity with caller-selected encoded field lengths.
- * @param spec Exact JobSpec whose digest enters the tuple.
- * @param padding Number of safe suffix bytes added to every opaque text id.
- * @return Complete valid attempt identity.
- * @throws Identity allocation or validation failures unchanged.
- */
-AttemptIdentity padded_protocol_identity(const JobSpec& spec,
-                                         std::size_t padding) {
-  AttemptIdentity identity = protocol_identity(spec);
-  identity.tenant_id = TenantId("tenant.frame." + std::string(padding, 't'));
-  identity.job_id = JobId("job.frame." + std::string(padding, 'j'));
-  identity.attempt_id =
-      JobAttemptId("attempt.frame." + std::string(padding, 'a'));
-  identity.worker_instance_id =
-      WorkerInstanceId("worker.frame." + std::string(padding, 'w'));
   return identity;
 }
 
@@ -400,9 +516,8 @@ TEST(WorkerProtocol, RoundTripsCompleteAssignmentAndExactLease) {
   auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.protocol"),
                                               7, OutputSlotId("image.final"),
                                               protocol_resources());
-  PreparedWorkerAssignment sent;
-  sent.assignment.identity = protocol_identity(*spec);
-  sent.assignment.spec = spec;
+  auto prepared = prepared_assignment_with_data_plane(spec);
+  PreparedWorkerAssignment& sent = prepared.first;
   sent.graph.ok = true;
   sent.graph.root_dir = "/trusted/root";
   sent.graph.yaml_path = "/trusted/root/graph.yaml";
@@ -419,8 +534,59 @@ TEST(WorkerProtocol, RoundTripsCompleteAssignmentAndExactLease) {
   EXPECT_EQ(received.assignment.spec->canonical_bytes(),
             spec->canonical_bytes());
   EXPECT_EQ(received.assignment.spec->digest(), spec->digest());
+  EXPECT_EQ(received.assignment.checkpoint, nullptr);
+  EXPECT_EQ(received.data_plane.output.reference_id,
+            sent.data_plane.output.reference_id);
+  EXPECT_EQ(received.data_plane.output.output_slot_id,
+            sent.data_plane.output.output_slot_id);
+  EXPECT_EQ(received.data_plane.output.maximum_payload_bytes,
+            sent.data_plane.output.maximum_payload_bytes);
   EXPECT_EQ(received.graph.yaml_path, sent.graph.yaml_path);
   EXPECT_EQ(received.heartbeat_interval, sent.heartbeat_interval);
+}
+
+TEST(WorkerProtocol, AssignmentControlPayloadIsIndependentOfCheckpointBytes) {
+  constexpr std::size_t kMetadataControlMaximum = 128U << 10U;
+  const ArtifactId checkpoint_id("artifact.protocol.metadata-checkpoint");
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.metadata-assignment"), 7,
+      OutputSlotId("image.final"), frame_bound_resources(), checkpoint_id);
+  auto assignment_and_plane = prepared_assignment_with_data_plane(
+      spec, std::make_shared<const ArtifactRecord>(
+                maximum_assignment_checkpoint(*spec, 1U << 20U)));
+  PreparedWorkerAssignment& prepared = assignment_and_plane.first;
+
+  const WorkerProtocolFrame frame = encode_worker_assignment(prepared);
+
+  EXPECT_LT(frame.payload.size(), kMetadataControlMaximum);
+}
+
+TEST(WorkerProtocol, MaximumDeclaredAssignmentMetadataFitsControlBound) {
+  const WorkerProtocolFrame frame =
+      encode_worker_assignment(maximum_metadata_assignment());
+
+  EXPECT_EQ(frame.kind, WorkerMessageKind::Assignment);
+  EXPECT_LE(frame.payload.size(), kMaximumWorkerControlPayloadBytes);
+}
+
+TEST(WorkerProtocol, ReportControlPayloadIsIndependentOfCandidateBytes) {
+  constexpr std::size_t kMetadataControlMaximum = 128U << 10U;
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.metadata-report"), 7,
+      OutputSlotId("image.final"), frame_bound_resources());
+  auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
+  JobAttemptReport report =
+      frame_bound_success_report(assignment_and_plane.first.assignment.identity,
+                                 "candidate staged outside control", 1U << 20U);
+  const std::optional<WorkerOutputDataReference> output = stage_worker_output(
+      assignment_and_plane.second.worker_output_descriptor(), *spec,
+      assignment_and_plane.first.data_plane.output, &report);
+  const PreparedWorkerReport prepared{std::move(report), output};
+
+  const WorkerProtocolFrame frame = encode_worker_report(
+      prepared, *spec, assignment_and_plane.first.data_plane.output);
+
+  EXPECT_LT(frame.payload.size(), kMetadataControlMaximum);
 }
 
 TEST(WorkerProtocol, PreparedGraphTextFieldsShareExactCatalogAndEncoderBounds) {
@@ -461,6 +627,9 @@ TEST(WorkerProtocol, PreparedGraphTextFieldsShareExactCatalogAndEncoderBounds) {
     PreparedWorkerAssignment exact_assignment;
     exact_assignment.assignment.identity = protocol_identity(*spec);
     exact_assignment.assignment.spec = spec;
+    WorkerArtifactDataPlane data_plane =
+        WorkerArtifactDataPlane::create(exact_assignment.assignment);
+    exact_assignment.data_plane = data_plane.assignment_metadata();
     exact_assignment.graph = exact_graph;
     exact_assignment.heartbeat_interval = std::chrono::milliseconds(125);
     EXPECT_NO_THROW(encode_worker_assignment(exact_assignment))
@@ -496,6 +665,7 @@ TEST(WorkerProtocol, PreparedGraphTextFieldsShareExactCatalogAndEncoderBounds) {
     PreparedWorkerAssignment oversized_assignment;
     oversized_assignment.assignment.identity = protocol_identity(*spec);
     oversized_assignment.assignment.spec = spec;
+    oversized_assignment.data_plane = data_plane.assignment_metadata();
     oversized_assignment.graph = std::move(oversized_graph);
     oversized_assignment.heartbeat_interval = std::chrono::milliseconds(125);
     EXPECT_THROW(encode_worker_assignment(oversized_assignment),
@@ -508,7 +678,7 @@ TEST(WorkerProtocol, StatefulDecoderPreservesHeaderAndPayloadAcrossTimeouts) {
   ScopedSocketPair sockets;
   const std::array<std::byte, 18U> frame_bytes{
       std::byte{0x50}, std::byte{0x53}, std::byte{0x57}, std::byte{0x31},
-      std::byte{0x00}, std::byte{0x01}, std::byte{0x00}, std::byte{0x03},
+      std::byte{0x00}, std::byte{0x02}, std::byte{0x00}, std::byte{0x03},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x06},
       std::byte{0x10}, std::byte{0x20}, std::byte{0x30}, std::byte{0x40},
       std::byte{0x50}, std::byte{0x60}};
@@ -537,14 +707,17 @@ TEST(WorkerProtocol, StatefulDecoderPreservesHeaderAndPayloadAcrossTimeouts) {
 
 TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
   ScopedSocketPair sockets;
-  const JobSpec spec(GraphArtifactId("graph.protocol"), 7,
-                     OutputSlotId("image.final"), protocol_resources());
+  auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.protocol"),
+                                              7, OutputSlotId("image.final"),
+                                              protocol_resources());
+  auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
   JobAttemptReport sent;
-  sent.identity = protocol_identity(spec);
+  sent.identity = assignment_and_plane.first.assignment.identity;
   sent.outcome = JobAttemptOutcome::Succeeded;
   sent.settled = true;
   sent.failure = JobAttemptFailure::None;
   sent.image = make_aligned_cpu_image_buffer(2, 2, 3, DataType::UINT8, 64U);
+  const ImageBuffer source = *sent.image;
   auto* sent_bytes = static_cast<std::byte*>(sent.image->data.get());
   for (std::size_t row = 0U; row < 2U; ++row) {
     for (std::size_t column = 0U; column < 6U; ++column) {
@@ -553,175 +726,135 @@ TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
     }
   }
 
-  send_worker_report(sockets.at(0U), sent, spec, protocol_deadline());
+  const std::optional<WorkerOutputDataReference> output = stage_worker_output(
+      assignment_and_plane.second.worker_output_descriptor(), *spec,
+      assignment_and_plane.first.data_plane.output, &sent);
+  assignment_and_plane.second.close_worker_descriptors();
+  const PreparedWorkerReport prepared{sent, output};
+  send_worker_report(sockets.at(0U), prepared, *spec,
+                     assignment_and_plane.first.data_plane.output,
+                     protocol_deadline());
   const WorkerProtocolFrame frame =
       read_worker_frame(sockets.at(1U), protocol_deadline());
-  const JobAttemptReport received = decode_worker_report(frame, spec);
+  PreparedWorkerReport received_metadata = decode_worker_report(
+      frame, *spec, assignment_and_plane.first.data_plane.output);
+  const JobAttemptReport received =
+      assignment_and_plane.second.materialize_report(
+          std::move(received_metadata.report), received_metadata.output);
 
   ASSERT_TRUE(received.image.has_value());
-  EXPECT_NE(received.image->data.get(), sent.image->data.get());
+  EXPECT_NE(received.image->data.get(), source.data.get());
   EXPECT_EQ(image_buffer_row_bytes(*received.image), 6U);
   for (std::size_t row = 0U; row < 2U; ++row) {
-    EXPECT_EQ(
-        std::memcmp(
-            image_buffer_row_data(*received.image, static_cast<int>(row)),
-            image_buffer_row_data(*sent.image, static_cast<int>(row)), 6U),
-        0);
+    EXPECT_EQ(std::memcmp(
+                  image_buffer_row_data(*received.image, static_cast<int>(row)),
+                  image_buffer_row_data(source, static_cast<int>(row)), 6U),
+              0);
   }
 }
 
-TEST(WorkerProtocol,
-     CompleteReportAccountingTypesUnsafeCheckpointAcrossVariableFields) {
-  /**
-   * @brief Variable identity and diagnostic sizes for aggregate accounting.
-   * @throws Nothing for aggregate initialization and value operations.
-   */
-  struct FrameProfile final {
-    /** @brief Suffix bytes added to every opaque identity field. */
-    std::size_t identity_padding;
-    /** @brief Success diagnostic retained in the boundary-size calculation. */
-    std::string diagnostic;
-  };
-  const std::array<FrameProfile, 2U> profiles{{
-      {0U, ""},
-      {73U, std::string(777U, 'd')},
-  }};
-  const JobSpec spec(GraphArtifactId("graph.protocol.frame-bound"), 7,
-                     OutputSlotId("image.final"), frame_bound_resources());
+TEST(WorkerProtocol, MaterializesCheckpointLargerThanControlBound) {
+  ScopedSocketPair sockets;
+  constexpr std::size_t kCheckpointBytes =
+      kMaximumWorkerControlPayloadBytes * 2U;
+  const ArtifactId checkpoint_id("artifact.protocol.bulk-checkpoint");
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.bulk-checkpoint"), 7,
+      OutputSlotId("image.final"), frame_bound_resources(), checkpoint_id);
+  auto assignment_and_plane = prepared_assignment_with_data_plane(
+      spec, std::make_shared<const ArtifactRecord>(
+                maximum_assignment_checkpoint(*spec, kCheckpointBytes)));
+  const WorkerProtocolFrame frame =
+      encode_worker_assignment(assignment_and_plane.first);
+  ASSERT_LT(frame.payload.size(), kMaximumWorkerControlPayloadBytes);
 
-  for (const FrameProfile& profile : profiles) {
-    JobAttemptReport probe = frame_bound_success_report(
-        padded_protocol_identity(spec, profile.identity_padding),
-        profile.diagnostic, 1U);
-    const WorkerProtocolFrame probe_frame = encode_worker_report(probe, spec);
-    ASSERT_GT(probe_frame.payload.size(), 1U);
-    const std::size_t report_overhead = probe_frame.payload.size() - 1U;
-    ASSERT_LT(report_overhead, kMaximumWorkerFramePayloadBytes);
-    const std::size_t exact_image_bytes =
-        kMaximumWorkerFramePayloadBytes - report_overhead;
-    ASSERT_GT(exact_image_bytes, maximum_worker_checkpoint_payload_bytes());
+  send_worker_assignment(sockets.at(0U), assignment_and_plane.first,
+                         protocol_deadline());
+  PreparedWorkerAssignment decoded =
+      receive_worker_assignment(sockets.at(1U), protocol_deadline());
+  ASSERT_EQ(decoded.assignment.checkpoint, nullptr);
+  decoded.assignment.checkpoint = materialize_worker_checkpoint(
+      assignment_and_plane.second.worker_checkpoint_descriptor(),
+      decoded.assignment, decoded.data_plane);
 
-    {
-      JobAttemptReport exact = frame_bound_success_report(
-          padded_protocol_identity(spec, profile.identity_padding),
-          profile.diagnostic, exact_image_bytes);
-      WorkerProtocolFrame exact_frame = encode_worker_report(exact, spec);
-      exact.image.reset();
-      const JobAttemptReport exact_decoded =
-          decode_worker_report(exact_frame, spec);
-      EXPECT_EQ(exact_decoded.identity, exact.identity);
-      EXPECT_EQ(exact_decoded.outcome, JobAttemptOutcome::Failed);
-      EXPECT_TRUE(exact_decoded.settled);
-      EXPECT_EQ(exact_decoded.failure, JobAttemptFailure::Compute);
-      EXPECT_FALSE(exact_decoded.image.has_value());
-      EXPECT_EQ(exact_decoded.message,
-                "worker candidate image exceeds private checkpoint transport "
-                "bounds");
-    }
-
-    JobAttemptReport oversized = frame_bound_success_report(
-        padded_protocol_identity(spec, profile.identity_padding),
-        profile.diagnostic, exact_image_bytes + 1U);
-    const WorkerProtocolFrame oversized_frame =
-        encode_worker_report(oversized, spec);
-    const JobAttemptReport oversized_decoded =
-        decode_worker_report(oversized_frame, spec);
-    EXPECT_EQ(oversized_decoded.identity, oversized.identity);
-    EXPECT_EQ(oversized_decoded.outcome, JobAttemptOutcome::Failed);
-    EXPECT_TRUE(oversized_decoded.settled);
-    EXPECT_EQ(oversized_decoded.failure, JobAttemptFailure::Compute);
-    EXPECT_FALSE(oversized_decoded.image.has_value());
-    EXPECT_EQ(oversized_decoded.message,
-              "worker candidate image exceeds private checkpoint transport "
-              "bounds");
-  }
+  ASSERT_NE(decoded.assignment.checkpoint, nullptr);
+  EXPECT_EQ(decoded.assignment.checkpoint->payload.size(), kCheckpointBytes);
+  EXPECT_EQ(
+      decoded.assignment.checkpoint->receipt.content_digest,
+      assignment_and_plane.first.assignment.checkpoint->receipt.content_digest);
 }
 
-TEST(WorkerProtocol,
-     ReusableCheckpointBoundAcceptsExactAndTypesOneByteOverSuccess) {
-  const std::size_t checkpoint_boundary =
-      maximum_worker_checkpoint_payload_bytes();
-  ASSERT_GT(checkpoint_boundary, 0U);
-  EXPECT_EQ(checkpoint_boundary, 67006957U);
+TEST(WorkerProtocol, RejectsImageBytesAtControlEncoder) {
+  const JobSpec spec(GraphArtifactId("graph.protocol.image-rejected"), 7,
+                     OutputSlotId("image.final"), protocol_resources());
+  JobAttemptReport report = frame_bound_success_report(protocol_identity(spec),
+                                                       "must stage first", 8U);
+  PreparedWorkerReport prepared{std::move(report), std::nullopt};
+  WorkerOutputStageReference output_stage;
+  output_stage.reference_id = "worker-data-v1.test";
+  output_stage.output_slot_id = spec.output_slot_id();
+  output_stage.maximum_payload_bytes = protocol_resources().output_bytes;
 
-  const JobSpec report_spec(GraphArtifactId("graph.protocol.checkpoint-bound"),
-                            7, OutputSlotId("image.final"),
-                            frame_bound_resources());
-  {
-    JobAttemptReport report = frame_bound_success_report(
-        maximum_assignment_identity(report_spec, 'q'),
-        std::string(kMaximumWorkerTextFieldBytes, 'd'), checkpoint_boundary);
-    WorkerProtocolFrame report_frame =
-        encode_worker_report(report, report_spec);
-    EXPECT_LT(report_frame.payload.size(), kMaximumWorkerFramePayloadBytes);
-    report.image.reset();
-    const JobAttemptReport decoded =
-        decode_worker_report(report_frame, report_spec);
-    EXPECT_EQ(decoded.outcome, JobAttemptOutcome::Succeeded);
-    EXPECT_TRUE(decoded.settled);
-    EXPECT_EQ(decoded.failure, JobAttemptFailure::None);
-    ASSERT_TRUE(decoded.image.has_value());
-    EXPECT_EQ(image_buffer_row_bytes(*decoded.image), checkpoint_boundary);
-  }
-
-  {
-    const WorkerProtocolFrame exact =
-        encode_worker_assignment(maximum_field_assignment(checkpoint_boundary));
-    EXPECT_EQ(exact.kind, WorkerMessageKind::Assignment);
-    EXPECT_EQ(exact.payload.size(), kMaximumWorkerFramePayloadBytes);
-  }
-
-  {
-    EXPECT_THROW(encode_worker_assignment(
-                     maximum_field_assignment(checkpoint_boundary + 1U)),
-                 std::length_error);
-  }
-
-  JobAttemptReport report = frame_bound_success_report(
-      maximum_assignment_identity(report_spec, 'q'),
-      std::string(kMaximumWorkerTextFieldBytes, 'd'), checkpoint_boundary + 1U);
-  WorkerProtocolFrame report_frame = encode_worker_report(report, report_spec);
-  report.image.reset();
-  const JobAttemptReport decoded =
-      decode_worker_report(report_frame, report_spec);
-
-  EXPECT_EQ(decoded.outcome, JobAttemptOutcome::Failed);
-  EXPECT_TRUE(decoded.settled);
-  EXPECT_EQ(decoded.failure, JobAttemptFailure::Compute);
-  EXPECT_FALSE(decoded.image.has_value());
-  EXPECT_EQ(decoded.message,
-            "worker candidate image exceeds private checkpoint transport "
-            "bounds");
+  EXPECT_THROW(encode_worker_report(prepared, spec, output_stage),
+               std::invalid_argument);
 }
 
-TEST(WorkerProtocol, SuccessfulCandidateAboveJobResourcesBecomesTypedFailure) {
+TEST(WorkerProtocol, SuccessfulCandidateAboveResourcesBecomesTypedFailure) {
   JobResourceRequest resources = protocol_resources();
   resources.output_bytes = 1U;
   resources.staging_bytes = 1U;
   resources.retention_bytes = 1U;
-  const JobSpec spec(GraphArtifactId("graph.protocol.resource-bound"), 7,
-                     OutputSlotId("image.final"), resources);
-  const JobAttemptReport report = frame_bound_success_report(
-      protocol_identity(spec), "candidate computed", 2U);
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.resource-bound"), 7,
+      OutputSlotId("image.final"), resources);
+  auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
+  JobAttemptReport report = frame_bound_success_report(
+      assignment_and_plane.first.assignment.identity, "candidate computed", 2U);
 
-  const WorkerProtocolFrame frame = encode_worker_report(report, spec);
-  const JobAttemptReport decoded = decode_worker_report(frame, spec);
+  const std::optional<WorkerOutputDataReference> output = stage_worker_output(
+      assignment_and_plane.second.worker_output_descriptor(), *spec,
+      assignment_and_plane.first.data_plane.output, &report);
+  const PreparedWorkerReport prepared{report, output};
+  const WorkerProtocolFrame frame = encode_worker_report(
+      prepared, *spec, assignment_and_plane.first.data_plane.output);
+  const PreparedWorkerReport decoded = decode_worker_report(
+      frame, *spec, assignment_and_plane.first.data_plane.output);
 
-  EXPECT_EQ(decoded.identity, report.identity);
-  EXPECT_EQ(decoded.outcome, JobAttemptOutcome::Failed);
-  EXPECT_TRUE(decoded.settled);
-  EXPECT_EQ(decoded.failure, JobAttemptFailure::Compute);
-  EXPECT_EQ(decoded.message,
-            "worker candidate image exceeds private checkpoint transport "
+  EXPECT_EQ(decoded.report.identity, report.identity);
+  EXPECT_EQ(decoded.report.outcome, JobAttemptOutcome::Failed);
+  EXPECT_TRUE(decoded.report.settled);
+  EXPECT_EQ(decoded.report.failure, JobAttemptFailure::Compute);
+  EXPECT_EQ(decoded.report.message,
+            "worker candidate image exceeds accepted artifact data-plane "
             "bounds");
-  EXPECT_FALSE(decoded.image.has_value());
+  EXPECT_FALSE(decoded.report.image.has_value());
+  EXPECT_FALSE(decoded.output.has_value());
+}
+
+TEST(WorkerProtocol, RejectsOutputDigestThatDoesNotMatchStagedBytes) {
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.digest-mismatch"), 7,
+      OutputSlotId("image.final"), protocol_resources());
+  auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
+  JobAttemptReport report = frame_bound_success_report(
+      assignment_and_plane.first.assignment.identity, "candidate computed", 8U);
+  std::optional<WorkerOutputDataReference> output = stage_worker_output(
+      assignment_and_plane.second.worker_output_descriptor(), *spec,
+      assignment_and_plane.first.data_plane.output, &report);
+  ASSERT_TRUE(output.has_value());
+  output->content_digest.bytes.at(0U) ^= std::byte{0x01};
+  assignment_and_plane.second.close_worker_descriptors();
+
+  EXPECT_THROW(
+      assignment_and_plane.second.materialize_report(std::move(report), output),
+      WorkerArtifactDataPlaneError);
 }
 
 TEST(WorkerProtocol, RejectsUnsupportedVersionBeforePayloadAllocation) {
   ScopedSocketPair sockets;
   const std::array<std::byte, 12U> header{
       std::byte{0x50}, std::byte{0x53}, std::byte{0x57}, std::byte{0x31},
-      std::byte{0x00}, std::byte{0x02}, std::byte{0x00}, std::byte{0x03},
+      std::byte{0x00}, std::byte{0x01}, std::byte{0x00}, std::byte{0x03},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
   write_raw(sockets.at(0U), header);
   EXPECT_THROW(read_worker_frame(sockets.at(1U), protocol_deadline()),
@@ -732,8 +865,8 @@ TEST(WorkerProtocol, RejectsOversizedDeclaredPayloadBeforeRead) {
   ScopedSocketPair sockets;
   const std::array<std::byte, 12U> header{
       std::byte{0x50}, std::byte{0x53}, std::byte{0x57}, std::byte{0x31},
-      std::byte{0x00}, std::byte{0x01}, std::byte{0x00}, std::byte{0x03},
-      std::byte{0x04}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01}};
+      std::byte{0x00}, std::byte{0x02}, std::byte{0x00}, std::byte{0x03},
+      std::byte{0x00}, std::byte{0x02}, std::byte{0x00}, std::byte{0x01}};
   write_raw(sockets.at(0U), header);
   EXPECT_THROW(read_worker_frame(sockets.at(1U), protocol_deadline()),
                WorkerProtocolError);
@@ -741,15 +874,24 @@ TEST(WorkerProtocol, RejectsOversizedDeclaredPayloadBeforeRead) {
 
 TEST(WorkerProtocol, RejectsWorkerControlledImageShapeBeyondJobBounds) {
   ScopedSocketPair sockets;
-  const JobSpec spec(GraphArtifactId("graph.protocol"), 7,
-                     OutputSlotId("image.final"), protocol_resources());
+  auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.protocol"),
+                                              7, OutputSlotId("image.final"),
+                                              protocol_resources());
+  auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
   JobAttemptReport sent;
-  sent.identity = protocol_identity(spec);
+  sent.identity = assignment_and_plane.first.assignment.identity;
   sent.outcome = JobAttemptOutcome::Succeeded;
   sent.settled = true;
   sent.failure = JobAttemptFailure::None;
   sent.image = make_aligned_cpu_image_buffer(1, 1, 1, DataType::UINT8, 64U);
-  send_worker_report(sockets.at(0U), sent, spec, protocol_deadline());
+  const std::optional<WorkerOutputDataReference> output = stage_worker_output(
+      assignment_and_plane.second.worker_output_descriptor(), *spec,
+      assignment_and_plane.first.data_plane.output, &sent);
+  ASSERT_TRUE(output.has_value());
+  const PreparedWorkerReport prepared{sent, output};
+  send_worker_report(sockets.at(0U), prepared, *spec,
+                     assignment_and_plane.first.data_plane.output,
+                     protocol_deadline());
   WorkerProtocolFrame frame =
       read_worker_frame(sockets.at(1U), protocol_deadline());
 
@@ -759,9 +901,12 @@ TEST(WorkerProtocol, RejectsWorkerControlledImageShapeBeyondJobBounds) {
       identity.job_id.value().size() + identity.job_spec_digest.bytes.size() +
       4U + identity.attempt_id.value().size() + 4U +
       identity.worker_instance_id.value().size() + sizeof(std::uint64_t) + 3U +
-      4U + sent.message.size() + 1U;
+      4U + sent.message.size() + 1U + 4U + output->reference_id.size() + 4U +
+      output->output_slot_id.value().size();
   overwrite_u32(&frame.payload, dimension_offset, 2U << 20U);
-  EXPECT_THROW(decode_worker_report(frame, spec), WorkerProtocolError);
+  EXPECT_THROW(decode_worker_report(
+                   frame, *spec, assignment_and_plane.first.data_plane.output),
+               WorkerProtocolError);
 }
 
 }  // namespace

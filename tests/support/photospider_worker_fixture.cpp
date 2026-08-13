@@ -38,8 +38,10 @@ constexpr std::chrono::milliseconds kFixtureHeartbeatCadence{25};
 /** @brief Cancel relay gap crossing one slice but fitting three times in 100ms.
  */
 constexpr std::chrono::milliseconds kFixtureCancelFragmentGap{27};
-/** @brief Fixed v1 private worker frame header width. */
+/** @brief Fixed private worker frame header width. */
 constexpr std::size_t kFixtureFrameHeaderBytes = 12U;
+/** @brief One bulk byte beyond the former aggregate control-frame ceiling. */
+constexpr std::size_t kBulkPayloadAboveFormerControlBytes = (64U << 20U) + 1U;
 /** @brief Graph-artifact mode prefix carrying one forbidden inherited fd. */
 constexpr std::string_view kClosedDescriptorPrefix = "fixture.fd.closed.";
 /** @brief Mode proving manager deadlines cross exec without legacy caps. */
@@ -53,9 +55,9 @@ constexpr std::chrono::milliseconds kExpectedLaunchIoTimeout{3500};
 constexpr std::string_view kFilesystemBlockMode = "fixture.fs.block";
 /** @brief Retry mode whose fresh generation blocks on trusted FIFO input. */
 constexpr std::string_view kRetryFilesystemHoldMode = "fixture.retry.hold";
-/** @brief Mode producing one byte above the reusable checkpoint payload cap. */
-constexpr std::string_view kCheckpointBoundaryOverMode =
-    "fixture.checkpoint-boundary-over";  // NOLINT(whitespace/indent_namespace)
+/** @brief Mode producing bytes at the former aggregate control-frame cap. */
+constexpr std::string_view kFormerControlBoundOutputMode =
+    "fixture.former-control-bound-output";  // NOLINT(whitespace/indent_namespace)
 /**
  * @brief Natural signal delay that remains inside the long cancellation grace.
  * @note The gap is deliberately much larger than one supervisor poll slice so
@@ -112,20 +114,17 @@ JobAttemptReport success_report(const JobAssignment& assignment) {
 }
 
 /**
- * @brief Creates a successful candidate one byte above checkpoint transport.
+ * @brief Creates a successful candidate above the former control-frame cap.
  * @param assignment Exact current assignment.
- * @return Settled success candidate that the protocol must type as
- * `Failed/Compute` before any artifact can be retained.
- * @throws std::overflow_error if the source-private cap cannot fit one image
+ * @return Settled success candidate that must use only the artifact data plane.
+ * @throws std::overflow_error if the historical cap cannot fit one image
  * dimension; image allocation failures propagate unchanged.
- * @note The fixture allocates candidate bytes but sends no oversized payload:
- * `send_worker_report()` must replace the candidate with the bounded typed
- * failure before socket transport.
+ * @note The staged payload is one byte above the old 64-MiB aggregate frame
+ * cap, while the Report control frame remains bounded metadata only.
  */
-JobAttemptReport checkpoint_boundary_over_report(
+JobAttemptReport former_control_bound_output_report(
     const JobAssignment& assignment) {
-  const std::size_t payload_bytes =
-      maximum_worker_checkpoint_payload_bytes() + 1U;
+  const std::size_t payload_bytes = kBulkPayloadAboveFormerControlBytes;
   if (payload_bytes >
       static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     throw std::overflow_error(
@@ -185,6 +184,116 @@ void close_fixture_fd(int fd) noexcept {
   }
   while (::close(fd) < 0 && errno == EINTR) {
   }
+}
+
+/**
+ * @brief Owns one fixture-side inherited data-plane descriptor.
+ * @throws Nothing for construction, reset, and destruction.
+ * @note Ownership is cleared before one non-retried close attempt so an
+ * interrupted close cannot target a later numeric-descriptor reuse.
+ */
+class FixtureDataDescriptor final {
+ public:
+  /**
+   * @brief Takes ownership of one exact inherited descriptor.
+   * @param descriptor Nonnegative descriptor or invalid sentinel.
+   * @throws Nothing.
+   */
+  explicit FixtureDataDescriptor(int descriptor) noexcept
+      : descriptor_(descriptor) {}
+
+  /**
+   * @brief Closes any retained descriptor at scope exit.
+   * @throws Nothing; ownership clears before one ignored close result.
+   */
+  ~FixtureDataDescriptor() noexcept { reset(); }
+
+  /**
+   * @brief Prevents duplicate descriptor ownership.
+   * @param other Existing owner that remains unchanged.
+   * @throws Nothing because the operation is deleted.
+   */
+  FixtureDataDescriptor(const FixtureDataDescriptor& other) = delete;
+  /**
+   * @brief Prevents duplicate descriptor assignment.
+   * @param other Existing owner that remains unchanged.
+   * @return No assignment result because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  FixtureDataDescriptor& operator=(const FixtureDataDescriptor& other) = delete;
+
+  /**
+   * @brief Returns the exact retained descriptor without transfer.
+   * @return Nonnegative descriptor or -1.
+   * @throws Nothing.
+   * @note The borrowed descriptor remains valid only until `reset()` or owner
+   * destruction.
+   */
+  int get() const noexcept { return descriptor_; }
+
+  /**
+   * @brief Clears ownership and closes the exact retained descriptor once.
+   * @return Nothing.
+   * @throws Nothing; close results are ignored without retry.
+   */
+  void reset() noexcept {
+    const int owned = std::exchange(descriptor_, -1);
+    if (owned >= 0) {
+      static_cast<void>(::close(owned));
+    }
+  }
+
+ private:
+  /** @brief Sole exact descriptor owned by this fixture scope. */
+  int descriptor_ = -1;
+};
+
+/**
+ * @brief Stages one fixture candidate and returns metadata-only report facts.
+ * @param output_data Non-null exact inherited output-stage descriptor owner.
+ * @param report Complete fixture report whose image, if any, is consumed.
+ * @param spec Exact immutable assignment JobSpec.
+ * @param output_stage Exact manager-assigned private stage metadata.
+ * @return Image-free report plus optional staged-output metadata.
+ * @throws std::invalid_argument for null ownership or invalid report metadata.
+ * @throws WorkerArtifactDataPlaneError and system/allocation/overflow failures
+ * from bounded staging unchanged.
+ * @note The write descriptor is closed before returning, preventing fixture
+ * code from mutating the staged occurrence after control metadata is formed.
+ */
+PreparedWorkerReport stage_fixture_report(
+    FixtureDataDescriptor* output_data, JobAttemptReport report,
+    const JobSpec& spec, const WorkerOutputStageReference& output_stage) {
+  if (output_data == nullptr) {
+    throw std::invalid_argument("fixture output descriptor owner is null");
+  }
+  std::optional<WorkerOutputDataReference> output =
+      stage_worker_output(output_data->get(), spec, output_stage, &report);
+  output_data->reset();
+  return PreparedWorkerReport{std::move(report), std::move(output)};
+}
+
+/**
+ * @brief Stages and sends one fixture report over metadata-only control.
+ * @param fd Connected manager control socket.
+ * @param output_data Non-null exact inherited output-stage owner.
+ * @param report Complete fixture report whose image, if any, is consumed.
+ * @param spec Exact immutable assignment JobSpec.
+ * @param output_stage Exact manager-assigned private stage metadata.
+ * @param io_timeout Positive manager-selected write bound.
+ * @return Nothing after stage closure and complete Report-frame transport.
+ * @throws Staging, encoding, deadline, and channel failures unchanged.
+ * @note Bulk bytes never enter `fd`; only the returned data reference does.
+ */
+void send_fixture_report(int fd, FixtureDataDescriptor* output_data,
+                         JobAttemptReport report, const JobSpec& spec,
+                         const WorkerOutputStageReference& output_stage,
+                         std::chrono::milliseconds io_timeout) {
+  const PreparedWorkerReport prepared =
+      stage_fixture_report(output_data, std::move(report), spec, output_stage);
+  send_worker_report(
+      fd, prepared, spec, output_stage,
+      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
 }
 
 /**
@@ -307,7 +416,7 @@ void relay_fragmented_cancel(int source, int destination) {
       (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(header[10U]))
        << 8U) |
       static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(header[11U]));
-  if (payload_size < 3U || payload_size > kMaximumWorkerFramePayloadBytes) {
+  if (payload_size < 3U || payload_size > kMaximumWorkerControlPayloadBytes) {
     throw std::runtime_error("fixture cancel payload size is invalid");
   }
   std::this_thread::sleep_for(kFixtureCancelFragmentGap);
@@ -350,8 +459,9 @@ void forward_remaining_bytes(int source, int destination) {
 /**
  * @brief Sends one valid report with header and payload crossing poll slices.
  * @param fd Connected manager socket.
- * @param report Complete exact report.
+ * @param report Complete metadata-only exact report.
  * @param spec Immutable JobSpec that bounds the report.
+ * @param output_stage Exact assigned output-stage metadata.
  * @param io_timeout Positive manager-selected write bound.
  * @return Nothing after the captured frame is forwarded in four pieces.
  * @throws std::invalid_argument for an invalid report contract or I/O duration.
@@ -367,8 +477,9 @@ void forward_remaining_bytes(int source, int destination) {
  * stays below the fixture heartbeat timeout. Both capture descriptors are
  * fixture-owned and closed on success or exception; `fd` remains caller-owned.
  */
-void send_fragmented_report(int fd, const JobAttemptReport& report,
+void send_fragmented_report(int fd, const PreparedWorkerReport& report,
                             const JobSpec& spec,
+                            const WorkerOutputStageReference& output_stage,
                             std::chrono::milliseconds io_timeout) {
   int capture[2] = {-1, -1};
   if (::socketpair(AF_UNIX, SOCK_STREAM, 0, capture) != 0) {
@@ -377,7 +488,7 @@ void send_fragmented_report(int fd, const JobAttemptReport& report,
   }
   try {
     send_worker_report(
-        capture[0], report, spec,
+        capture[0], report, spec, output_stage,
         checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
     static_cast<void>(::shutdown(capture[0], SHUT_WR));
     forward_exact_bytes(capture[1], fd, 5U);
@@ -702,10 +813,15 @@ int run_filesystem_block_probe(const std::string& path) noexcept {
  * deliberately.
  */
 int run_fixture(const WorkerProcessLaunchOptions& launch) {
+  FixtureDataDescriptor checkpoint_data(launch.checkpoint_data_fd);
+  FixtureDataDescriptor output_data(launch.output_data_fd);
   PreparedWorkerAssignment prepared = receive_worker_assignment(
       launch.control_fd,
       checked_worker_deadline(std::chrono::steady_clock::now(),
                               launch.startup_timeout));
+  prepared.assignment.checkpoint = materialize_worker_checkpoint(
+      checkpoint_data.get(), prepared.assignment, prepared.data_plane);
+  checkpoint_data.reset();
   const JobAssignment& assignment = prepared.assignment;
   const std::string& mode = assignment.spec->graph_artifact_id().value();
   if (mode == kLaunchDeadlineMode &&
@@ -768,29 +884,29 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     }
   }
   if (mode == "fixture.cooperative") {
-    const JobAttemptReport report = wait_for_cancel(
-        launch.control_fd, assignment, false, launch.io_timeout);
-    send_worker_report(launch.control_fd, report, *assignment.spec,
-                       checked_worker_deadline(std::chrono::steady_clock::now(),
-                                               launch.io_timeout));
+    JobAttemptReport report = wait_for_cancel(launch.control_fd, assignment,
+                                              false, launch.io_timeout);
+    send_fixture_report(launch.control_fd, &output_data, std::move(report),
+                        *assignment.spec, prepared.data_plane.output,
+                        launch.io_timeout);
     return 0;
   }
   if (mode == "fixture.fragmented.cancel") {
-    const JobAttemptReport report = receive_fragmented_cancel(
+    JobAttemptReport report = receive_fragmented_cancel(
         launch.control_fd, assignment, launch.io_timeout);
-    send_worker_report(launch.control_fd, report, *assignment.spec,
-                       checked_worker_deadline(std::chrono::steady_clock::now(),
-                                               launch.io_timeout));
+    send_fixture_report(launch.control_fd, &output_data, std::move(report),
+                        *assignment.spec, prepared.data_plane.output,
+                        launch.io_timeout);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
   if (mode == "fixture.cancel-race.failed-report") {
     static_cast<void>(::shutdown(launch.control_fd, SHUT_RD));
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    const JobAttemptReport report = failed_report(assignment);
-    send_worker_report(launch.control_fd, report, *assignment.spec,
-                       checked_worker_deadline(std::chrono::steady_clock::now(),
-                                               launch.io_timeout));
+    JobAttemptReport report = failed_report(assignment);
+    send_fixture_report(launch.control_fd, &output_data, std::move(report),
+                        *assignment.spec, prepared.data_plane.output,
+                        launch.io_timeout);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
@@ -813,11 +929,11 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     return 36;
   }
   if (mode == "fixture.cancel-race.report-delayed-signal") {
-    const JobAttemptReport report = wait_for_cancel(
-        launch.control_fd, assignment, false, launch.io_timeout);
-    send_worker_report(launch.control_fd, report, *assignment.spec,
-                       checked_worker_deadline(std::chrono::steady_clock::now(),
-                                               launch.io_timeout));
+    JobAttemptReport report = wait_for_cancel(launch.control_fd, assignment,
+                                              false, launch.io_timeout);
+    send_fixture_report(launch.control_fd, &output_data, std::move(report),
+                        *assignment.spec, prepared.data_plane.output,
+                        launch.io_timeout);
     std::this_thread::sleep_for(kDelayedCancelSignalExit);
     static_cast<void>(::kill(::getpid(), SIGKILL));
     return 37;
@@ -838,17 +954,20 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     return 26;
   }
   if (mode == "fixture.report.hang") {
-    const JobAttemptReport report = success_report(assignment);
-    send_worker_report(launch.control_fd, report, *assignment.spec,
-                       checked_worker_deadline(std::chrono::steady_clock::now(),
-                                               launch.io_timeout));
+    JobAttemptReport report = success_report(assignment);
+    send_fixture_report(launch.control_fd, &output_data, std::move(report),
+                        *assignment.spec, prepared.data_plane.output,
+                        launch.io_timeout);
     std::this_thread::sleep_for(std::chrono::seconds(10));
     return 27;
   }
   if (mode == "fixture.fragmented.report") {
-    const JobAttemptReport report = success_report(assignment);
-    send_fragmented_report(launch.control_fd, report, *assignment.spec,
-                           launch.io_timeout);
+    JobAttemptReport report = success_report(assignment);
+    const PreparedWorkerReport prepared_report =
+        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
+                             prepared.data_plane.output);
+    send_fragmented_report(launch.control_fd, prepared_report, *assignment.spec,
+                           prepared.data_plane.output, launch.io_timeout);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
@@ -856,9 +975,25 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     heartbeat_for(launch.control_fd, assignment.identity,
                   std::chrono::milliseconds(300), launch.io_timeout);
   }
-  if (mode == kCheckpointBoundaryOverMode) {
-    const JobAttemptReport report = checkpoint_boundary_over_report(assignment);
-    send_worker_report(launch.control_fd, report, *assignment.spec,
+  if (mode == kFormerControlBoundOutputMode) {
+    JobAttemptReport report = former_control_bound_output_report(assignment);
+    send_fixture_report(launch.control_fd, &output_data, std::move(report),
+                        *assignment.spec, prepared.data_plane.output,
+                        launch.io_timeout);
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
+    return 0;
+  }
+  if (mode == "fixture.data.digest-mismatch") {
+    JobAttemptReport report = success_report(assignment);
+    PreparedWorkerReport prepared_report =
+        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
+                             prepared.data_plane.output);
+    if (!prepared_report.output.has_value()) {
+      return 38;
+    }
+    prepared_report.output->content_digest.bytes.at(0U) ^= std::byte{0x01};
+    send_worker_report(launch.control_fd, prepared_report, *assignment.spec,
+                       prepared.data_plane.output,
                        checked_worker_deadline(std::chrono::steady_clock::now(),
                                                launch.io_timeout));
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
@@ -867,10 +1002,10 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
   if (mode == "fixture.checkpoint" && assignment.checkpoint == nullptr) {
     return 28;
   }
-  const JobAttemptReport report = success_report(assignment);
-  send_worker_report(launch.control_fd, report, *assignment.spec,
-                     checked_worker_deadline(std::chrono::steady_clock::now(),
-                                             launch.io_timeout));
+  JobAttemptReport report = success_report(assignment);
+  send_fixture_report(launch.control_fd, &output_data, std::move(report),
+                      *assignment.spec, prepared.data_plane.output,
+                      launch.io_timeout);
   static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
   return 0;
 }

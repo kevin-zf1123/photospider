@@ -1,6 +1,6 @@
 /**
  * @file worker_protocol.hpp
- * @brief Declares the private Issue #100 manager/worker process protocol.
+ * @brief Declares the metadata-only Issue #105 manager/worker control protocol.
  */
 #pragma once
 
@@ -8,23 +8,28 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_artifact_data_plane.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 
-/** @brief Maximum encoded payload accepted in one private worker frame. */
-inline constexpr std::size_t kMaximumWorkerFramePayloadBytes = 64U << 20U;
+/**
+ * @brief Maximum metadata payload accepted in one private worker control frame.
+ * @note Protocol v2 carries no artifact, image, blob, or Value bytes. The
+ * 128-KiB limit covers the complete worst-case bounded Assignment metadata.
+ */
+inline constexpr std::size_t kMaximumWorkerControlPayloadBytes = 128U << 10U;
 /**
  * @brief Maximum bytes accepted in one private worker text field.
  * @note This single source-private bound covers transported graph paths,
  * configuration text, and diagnostics. The exact boundary is accepted.
  */
 inline constexpr std::size_t kMaximumWorkerTextFieldBytes = 16U << 10U;
-/** @brief Fixed v1 private worker frame header width. */
+/** @brief Fixed v2 private worker control-frame header width. */
 inline constexpr std::size_t kWorkerFrameHeaderBytes = 12U;
 
 /**
@@ -43,18 +48,6 @@ inline constexpr std::size_t kWorkerFrameHeaderBytes = 12U;
  */
 void validate_worker_assignment_graph_transport(
     const ResolvedGraphArtifact& graph);
-
-/**
- * @brief Returns the largest artifact payload safe in every valid Assignment.
- * @return Exact checkpoint payload capacity after reserving the worst-case
- * identity, JobSpec, receipt/descriptor, graph-material, and cadence envelope.
- * @throws Nothing.
- * @note The bound is source-private and does not change an installed ABI. It
- * is intentionally smaller than the complete frame maximum so any retained
- * checkpoint accepted at this boundary remains transportable even when every
- * other supported Assignment field has its maximum encoded length.
- */
-std::size_t maximum_worker_checkpoint_payload_bytes() noexcept;
 
 /**
  * @brief Closed message kinds in the one-assignment worker protocol.
@@ -86,7 +79,7 @@ struct WorkerProtocolFrame final {
 };
 
 /**
- * @brief Reassembles one private worker byte stream across bounded read calls.
+ * @brief Reassembles one private control byte stream across bounded read calls.
  *
  * The decoder retains the exact header and payload offsets after
  * `WorkerProtocolTimeout`, validates the complete header once, allocates only
@@ -142,18 +135,40 @@ class WorkerFrameDecoder final {
 };
 
 /**
- * @brief Complete immutable material assigned to one external worker.
+ * @brief Complete immutable metadata assigned to one external worker.
  * @throws Nothing for default construction; contained values may allocate.
- * @note This value contains no server state root, quota owner, artifact commit
- * capability, credential, native handle, or process-local runtime identity.
+ * @note The manager-side `JobAssignment` may still retain an authorized
+ * checkpoint record so data-plane setup can prepopulate its anonymous file;
+ * the encoder emits only `data_plane.checkpoint` receipt/reference metadata.
+ * A decoded worker-side value leaves `assignment.checkpoint` null until the
+ * separate read descriptor is materialized. No control field contains artifact
+ * bytes, a server root, quota owner, publication capability, credential,
+ * native handle, or process-local runtime identity.
  */
 struct PreparedWorkerAssignment final {
-  /** @brief Exact current Job assignment and optional immutable checkpoint. */
+  /** @brief Exact current Job identity/spec and endpoint-local checkpoint. */
   JobAssignment assignment;
   /** @brief Trusted graph material resolved before process assignment. */
   ResolvedGraphArtifact graph;
+  /** @brief Metadata joining separate checkpoint/output data-plane lanes. */
+  WorkerDataPlaneAssignment data_plane;
   /** @brief Requested worker heartbeat cadence. */
   std::chrono::milliseconds heartbeat_interval{0};
+};
+
+/**
+ * @brief One metadata-only worker report plus optional staged-output reference.
+ * @throws Nothing for default construction; retained values may allocate.
+ * @note `report.image` MUST be empty. A successful worker stages bytes through
+ * its separate output descriptor, then carries only descriptor/digest/size and
+ * the exact assigned reference in `output`. WorkerManager materializes an
+ * independent image only after clean process reaping and data validation.
+ */
+struct PreparedWorkerReport final {
+  /** @brief Exact attempt outcome/settlement/failure facts without bytes. */
+  JobAttemptReport report;
+  /** @brief Candidate stage metadata present only for settled success. */
+  std::optional<WorkerOutputDataReference> output;
 };
 
 /**
@@ -220,8 +235,8 @@ class WorkerChannelError final : public WorkerProtocolError {
  * @brief Writes one checked private worker frame before an absolute deadline.
  * @param fd Connected private Unix socket.
  * @param kind Closed frame kind.
- * @param payload Exact payload, bounded by
- * `kMaximumWorkerFramePayloadBytes`.
+ * @param payload Exact metadata, bounded by
+ * `kMaximumWorkerControlPayloadBytes`.
  * @param deadline Absolute monotonic I/O deadline.
  * @return Nothing after the complete header and payload are written.
  * @throws std::invalid_argument for an invalid descriptor, kind, or oversized
@@ -252,13 +267,14 @@ WorkerProtocolFrame read_worker_frame(
 
 /**
  * @brief Encodes one complete immutable external worker assignment.
- * @param assignment Complete identity/spec/checkpoint/graph/control payload.
+ * @param assignment Complete identity/spec/receipt/graph/data-reference
+ * metadata. Manager-side checkpoint bytes are validated but never encoded.
  * @return Complete private Assignment frame ready for bounded transport.
  * @throws Contract, allocation, digest, field, or aggregate protocol-bound
  * failures. An oversized graph text field raises `std::length_error`.
  * @note This source-private seam lets protocol tests prove the exact aggregate
- * Assignment boundary without blocking on a socket. `send_worker_assignment`
- * is the sole transport wrapper.
+ * Assignment boundary and byte independence without blocking on a socket.
+ * `send_worker_assignment` is the sole transport wrapper.
  */
 WorkerProtocolFrame encode_worker_assignment(
     const PreparedWorkerAssignment& assignment);
@@ -266,7 +282,8 @@ WorkerProtocolFrame encode_worker_assignment(
 /**
  * @brief Sends one complete immutable external worker assignment.
  * @param fd Connected worker socket.
- * @param assignment Complete identity/spec/checkpoint/graph/control payload.
+ * @param assignment Complete bounded metadata; checkpoint bytes remain in the
+ * separate data-plane occurrence.
  * @param deadline Absolute monotonic I/O deadline.
  * @return Nothing after the assignment frame is written.
  * @throws Contract, allocation, protocol-bound, timeout, or channel failures.
@@ -278,7 +295,9 @@ void send_worker_assignment(int fd, const PreparedWorkerAssignment& assignment,
  * @brief Receives and reconstructs one complete immutable worker assignment.
  * @param fd Connected worker socket.
  * @param deadline Absolute monotonic I/O deadline.
- * @return Digest-revalidated assignment, checkpoint, graph, and cadence.
+ * @return Digest-revalidated identity/spec, checkpoint receipt/reference,
+ * graph metadata, output-stage reference, and cadence. Checkpoint bytes remain
+ * absent until separate descriptor materialization.
  * @throws WorkerProtocolError for malformed, oversized, or inconsistent data.
  * @throws WorkerProtocolTimeout/WorkerProtocolEof/WorkerChannelError for I/O
  * failure.
@@ -311,49 +330,50 @@ AttemptIdentity decode_worker_identity(const WorkerProtocolFrame& frame,
                                        WorkerMessageKind expected_kind);
 
 /**
- * @brief Encodes one bounded worker attempt report without performing I/O.
- * @param report Complete worker-local attempt facts.
- * @param spec Immutable JobSpec used for image resource bounds.
- * @return Complete private Report frame ready for bounded transport. An
- * otherwise valid settled success whose image exceeds the reusable-checkpoint,
- * aggregate-frame, or Job resource envelope becomes one bounded
- * `Failed/Compute` report without an image.
- * @throws Contract, image, allocation, or aggregate protocol-bound failures.
- * @note This source-private seam lets protocol tests exercise the exact
- * aggregate Report boundary without changing the installed ABI or owning a
- * socket. The typed fallback preserves exact identity and settlement while
- * replacing untransportable candidate bytes and diagnostic with one fixed
- * bounded worker-owned failure. The reusable-checkpoint bound reserves the
- * complete worst-case future Assignment envelope, so a successful retained
- * artifact cannot later fail solely because identity, JobSpec, graph material,
- * or cadence grew. `send_worker_report()` is the sole transport wrapper.
+ * @brief Encodes one bounded metadata-only worker attempt report.
+ * @param report Complete image-free attempt facts and optional output-stage
+ * descriptor/digest/reference metadata.
+ * @param spec Immutable JobSpec used for exact digest/output joins.
+ * @param output_stage Exact Assignment output reference and byte maximum.
+ * @return Complete private Report control frame ready for bounded transport.
+ * @throws Contract, metadata, allocation, or control-bound failures.
+ * @note Image bytes must already have been staged through the separate data
+ * plane. The encoder rejects rather than serializes an `ImageBuffer` or a
+ * mismatched output reference. `send_worker_report()` is the sole wrapper.
  */
-WorkerProtocolFrame encode_worker_report(const JobAttemptReport& report,
-                                         const JobSpec& spec);
+WorkerProtocolFrame encode_worker_report(
+    const PreparedWorkerReport& report, const JobSpec& spec,
+    const WorkerOutputStageReference& output_stage);
 
 /**
  * @brief Sends one bounded worker attempt report.
  * @param fd Connected worker socket.
- * @param report Complete worker-local attempt facts.
- * @param spec Immutable JobSpec used for image resource bounds.
+ * @param report Complete image-free attempt facts and optional output metadata.
+ * @param spec Immutable JobSpec used for exact joins.
+ * @param output_stage Exact assigned output reference and maximum.
  * @param deadline Absolute monotonic I/O deadline.
  * @return Nothing after one report frame is written.
  * @throws As `encode_worker_report`, plus timeout or channel failures.
  */
-void send_worker_report(int fd, const JobAttemptReport& report,
+void send_worker_report(int fd, const PreparedWorkerReport& report,
                         const JobSpec& spec,
+                        const WorkerOutputStageReference& output_stage,
                         std::chrono::steady_clock::time_point deadline);
 
 /**
- * @brief Decodes one report and rebuilds an independently owned CPU image.
+ * @brief Decodes one metadata-only report without reading artifact bytes.
  * @param frame Valid bounded frame expected to contain Report.
- * @param spec Immutable JobSpec used for output/staging/retention bounds.
- * @return Complete report with tight bytes copied into a new CPU owner.
- * @throws WorkerProtocolError for malformed, oversized, inconsistent, or
- * trailing data.
- * @throws std::bad_alloc when bounded reconstruction exhausts memory.
+ * @param spec Immutable JobSpec used for digest and output-slot joins.
+ * @param output_stage Exact Assignment output reference and maximum.
+ * @return Image-free attempt facts plus optional staged-output metadata.
+ * @throws WorkerProtocolError for malformed, inconsistent, oversized, or
+ * trailing metadata, or for any encoded image-bearing report shape.
+ * @throws std::bad_alloc when bounded metadata reconstruction exhausts memory.
+ * @note WorkerManager separately reads and validates its retained anonymous
+ * output occurrence only after exact clean process reaping.
  */
-JobAttemptReport decode_worker_report(const WorkerProtocolFrame& frame,
-                                      const JobSpec& spec);
+PreparedWorkerReport decode_worker_report(
+    const WorkerProtocolFrame& frame, const JobSpec& spec,
+    const WorkerOutputStageReference& output_stage);
 
 }  // namespace ps::server

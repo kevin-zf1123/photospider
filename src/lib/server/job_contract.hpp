@@ -685,6 +685,19 @@ ArtifactContentDigest hash_artifact_content(const std::byte* bytes,
                                             std::size_t size);
 
 /**
+ * @brief Computes SHA-256 over the exact tight active rows of one CPU image.
+ * @param image Valid nonempty CPU image; source row padding is excluded.
+ * @return Exact digest matching a row-by-row tight artifact payload.
+ * @throws std::invalid_argument for invalid, empty, or non-CPU image state.
+ * @throws std::overflow_error when row or SHA-256 length arithmetic overflows.
+ * @throws std::logic_error only if the internal single-use hash lifecycle is
+ * violated.
+ * @note The borrowed image and its storage remain caller-owned and unchanged.
+ * Hashing performs no full-payload copy and is not a durability operation.
+ */
+ArtifactContentDigest hash_image_artifact_content(const ImageBuffer& image);
+
+/**
  * @brief Validates a complete assignment identity tuple.
  * @param identity Candidate assignment.
  * @return Nothing after validation.

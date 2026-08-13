@@ -107,18 +107,20 @@ JobResourceRequest test_job_resources(std::uint32_t cpu_slots = 2U) {
 }
 
 /**
- * @brief Builds resources that permit one raw-frame-sized test image.
- * @return Valid request larger than the reusable-checkpoint payload cap.
+ * @brief Builds resources that permit one former-frame-sized artifact.
+ * @return Valid request whose host/output/staging/retention bounds are 64 MiB.
  * @throws std::bad_alloc when configured-device storage allocation fails.
- * @note This helper lets the in-process test marker create a legacy-like
- * artifact that bypasses the external worker encoder without bypassing service
- * authorization.
+ * @note This helper proves service authorization is governed by immutable
+ * resource admission rather than a private control-frame transport ceiling.
  */
-JobResourceRequest checkpoint_transport_resources() {
+JobResourceRequest bulk_data_plane_resources() {
+  constexpr std::uint64_t kBulkPayloadAboveFormerControlBytes =
+      (64U << 20U) + 1U;
   JobResourceRequest request = test_job_resources();
-  request.output_bytes = kMaximumWorkerFramePayloadBytes;
-  request.staging_bytes = kMaximumWorkerFramePayloadBytes;
-  request.retention_bytes = kMaximumWorkerFramePayloadBytes;
+  request.host_memory_bytes = kBulkPayloadAboveFormerControlBytes;
+  request.output_bytes = kBulkPayloadAboveFormerControlBytes;
+  request.staging_bytes = kBulkPayloadAboveFormerControlBytes;
+  request.retention_bytes = kBulkPayloadAboveFormerControlBytes;
   return request;
 }
 
@@ -2786,9 +2788,8 @@ TEST(SingleTenantJobService,
 }
 
 TEST(SingleTenantJobService,
-     RejectsLegacyOversizedCheckpointBeforeQuotaOrWorkerPublication) {
-  const std::size_t payload_bytes =
-      maximum_worker_checkpoint_payload_bytes() + 1U;
+     AcceptsCheckpointIndependentOfFormerControlTransportBound) {
+  constexpr std::size_t payload_bytes = (64U << 20U) + 1U;
   ASSERT_LE(payload_bytes,
             static_cast<std::size_t>(std::numeric_limits<int>::max()));
   std::atomic<std::size_t> calls{0U};
@@ -2797,7 +2798,15 @@ TEST(SingleTenantJobService,
           const JobAssignment& assignment,
           const std::function<bool()>& cancellation_requested) {
         EXPECT_FALSE(cancellation_requested());
-        calls.fetch_add(1U, std::memory_order_relaxed);
+        const std::size_t call = calls.fetch_add(1U, std::memory_order_relaxed);
+        if (call == 0U) {
+          EXPECT_EQ(assignment.checkpoint, nullptr);
+        } else {
+          EXPECT_NE(assignment.checkpoint, nullptr);
+          if (assignment.checkpoint != nullptr) {
+            EXPECT_EQ(assignment.checkpoint->payload.size(), payload_bytes);
+          }
+        }
         JobAttemptReport report;
         report.identity = assignment.identity;
         report.outcome = JobAttemptOutcome::Succeeded;
@@ -2808,7 +2817,7 @@ TEST(SingleTenantJobService,
         return report;
       });
   TestJobService service(TenantId("tenant.test"), factory);
-  const JobResourceRequest resources = checkpoint_transport_resources();
+  const JobResourceRequest resources = bulk_data_plane_resources();
   const JobSubmission producer = service.submit(
       JobSpec(GraphArtifactId("graph.test.checkpoint-bound-producer"), 7,
               OutputSlotId("image.final"), resources));
@@ -2826,20 +2835,22 @@ TEST(SingleTenantJobService,
                   wait_for_owned_worker_thread_count_at_most(
                       service, 0U, std::chrono::seconds(2)));
 
-  const std::size_t accepted_before =
-      SingleTenantJobServiceTestAccess::accepted_job_count(service);
   const TenantQuotaSnapshot quota_before = service.quota_snapshot();
   ASSERT_EQ(quota_before.active_attempts, 0U);
   ASSERT_EQ(quota_before.retained_artifacts, 1U);
   ASSERT_EQ(quota_before.retention_bytes, payload_bytes);
-  EXPECT_THROW(service.submit(
-                   JobSpec(GraphArtifactId("graph.test.checkpoint-bound"), 8,
-                           OutputSlotId("image.final"), resources, checkpoint)),
-               std::invalid_argument);
+  const JobSubmission consumer = service.submit(
+      JobSpec(GraphArtifactId("graph.test.checkpoint-data-plane"), 8,
+              OutputSlotId("image.final"), resources, checkpoint));
+  const std::optional<JobSnapshot> consumed =
+      service.wait_for(consumer.job_id, std::chrono::seconds(3));
+  ASSERT_TRUE(consumed.has_value());
+  EXPECT_EQ(consumed->state, JobState::Succeeded) << consumed->message;
+  ASSERT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(
+                      service, 0U, std::chrono::seconds(2)));
 
-  EXPECT_EQ(calls.load(std::memory_order_relaxed), 1U);
-  EXPECT_EQ(SingleTenantJobServiceTestAccess::accepted_job_count(service),
-            accepted_before);
+  EXPECT_EQ(calls.load(std::memory_order_relaxed), 2U);
   EXPECT_EQ(service.find_artifact(checkpoint), artifact);
   const TenantQuotaSnapshot quota_after = service.quota_snapshot();
   EXPECT_EQ(quota_after.active_attempts, 0U);
@@ -2847,8 +2858,10 @@ TEST(SingleTenantJobService,
   EXPECT_EQ(quota_after.host_memory_bytes, 0U);
   EXPECT_EQ(quota_after.output_bytes, 0U);
   EXPECT_EQ(quota_after.staging_bytes, 0U);
-  EXPECT_EQ(quota_after.retained_artifacts, quota_before.retained_artifacts);
-  EXPECT_EQ(quota_after.retention_bytes, quota_before.retention_bytes);
+  EXPECT_EQ(quota_after.retained_artifacts,
+            quota_before.retained_artifacts + 1U);
+  EXPECT_EQ(quota_after.retention_bytes,
+            quota_before.retention_bytes + payload_bytes);
   EXPECT_EQ(quota_after.device_bytes, quota_before.device_bytes);
   EXPECT_EQ(
       SingleTenantJobServiceTestAccess::owned_worker_thread_count(service), 0U);

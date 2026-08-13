@@ -66,6 +66,18 @@ constexpr int kCompletionCallbackInvoked = 76;
 constexpr int kCompletionRecordDeleted = 77;
 /** @brief Probe exit for unexpected allocation-fault test setup failure. */
 constexpr int kCompletionProbeRaised = 78;
+/** @brief Probe exit when the isolated hard file-size limit cannot be set. */
+constexpr int kFileSizeLimitSetupFailed = 79;
+/** @brief Probe exit when the low hard limit does not yield WorkerStartup. */
+constexpr int kFileSizeEnvelopeAccepted = 80;
+/** @brief Probe exit when rejected startup leaves service-owned residue. */
+constexpr int kFileSizeEnvelopeResidue = 81;
+/** @brief Probe exit for an unexpected file-size-envelope probe exception. */
+constexpr int kFileSizeProbeRaised = 82;
+/** @brief One bulk byte beyond the former aggregate worker-frame ceiling. */
+constexpr std::size_t kBulkPayloadAboveFormerControlBytes = (64U << 20U) + 1U;
+/** @brief Isolated hard file-size limit below the normal one-MiB envelope. */
+constexpr rlim_t kLowHardFileSizeLimit = static_cast<rlim_t>(64U << 10U);
 
 /**
  * @brief Process-global descriptor-limit shape exercised by an isolated probe.
@@ -317,17 +329,17 @@ JobResourceRequest supervisor_resources() {
 }
 
 /**
- * @brief Builds resources that isolate the reusable-checkpoint protocol cap.
- * @return Valid request whose image limits reach the raw 64-MiB frame bound.
+ * @brief Builds resources for a candidate at the former aggregate frame cap.
+ * @return Valid request whose image limits are one byte above 64 MiB.
  * @throws Nothing.
- * @note The one-byte-over fixture remains inside these Job resource bounds, so
- * only the smaller future-Assignment closure cap can convert its candidate.
+ * @note The candidate cannot fit the former aggregate control frame once
+ * report metadata is included, but remains valid bulk data-plane content.
  */
-JobResourceRequest checkpoint_transport_resources() {
+JobResourceRequest bulk_data_plane_resources() {
   JobResourceRequest request = supervisor_resources();
-  request.output_bytes = kMaximumWorkerFramePayloadBytes;
-  request.staging_bytes = kMaximumWorkerFramePayloadBytes;
-  request.retention_bytes = kMaximumWorkerFramePayloadBytes;
+  request.output_bytes = kBulkPayloadAboveFormerControlBytes;
+  request.staging_bytes = kBulkPayloadAboveFormerControlBytes;
+  request.retention_bytes = kBulkPayloadAboveFormerControlBytes;
   return request;
 }
 
@@ -348,15 +360,16 @@ TenantQuotaLimits supervisor_quota() {
 }
 
 /**
- * @brief Builds finite quota for one near-frame-boundary process candidate.
- * @return Supervisor quota with output/staging/retention enlarged to 64 MiB.
+ * @brief Builds finite quota for bulk output followed by checkpoint reuse.
+ * @return Output/staging capacity one byte above 64 MiB and retention for two
+ * such resource envelopes.
  * @throws Nothing.
  */
-TenantQuotaLimits checkpoint_transport_quota() {
+TenantQuotaLimits bulk_data_plane_quota() {
   TenantQuotaLimits limits = supervisor_quota();
-  limits.capacity.output_bytes = kMaximumWorkerFramePayloadBytes;
-  limits.capacity.staging_bytes = kMaximumWorkerFramePayloadBytes;
-  limits.capacity.retention_bytes = kMaximumWorkerFramePayloadBytes;
+  limits.capacity.output_bytes = kBulkPayloadAboveFormerControlBytes;
+  limits.capacity.staging_bytes = kBulkPayloadAboveFormerControlBytes;
+  limits.capacity.retention_bytes = 2U * kBulkPayloadAboveFormerControlBytes;
   return limits;
 }
 
@@ -776,6 +789,61 @@ int run_descriptor_closure_probe(DescriptorLimitProbeMode mode) noexcept {
 }
 
 /**
+ * @brief Proves a finite hard file-size limit cannot narrow accepted metadata.
+ * @return Zero only when the attempt fails as `WorkerStartup` before any child
+ * process exists and all active quota/worker/artifact ownership is released;
+ * otherwise one stable nonzero probe code.
+ * @throws Nothing; setup and service exceptions become stable probe exits.
+ * @note The caller runs this function only in an isolated death-test child.
+ * Lowering its hard `RLIMIT_FSIZE` is irreversible within that child and can
+ * therefore never contaminate the parent test process.
+ */
+int run_file_size_envelope_rejection_probe() noexcept {
+  try {
+    rlimit file_size_limit{};
+    if (::getrlimit(RLIMIT_FSIZE, &file_size_limit) != 0 ||
+        (file_size_limit.rlim_max != RLIM_INFINITY &&
+         file_size_limit.rlim_max < kLowHardFileSizeLimit)) {
+      return kFileSizeLimitSetupFailed;
+    }
+    file_size_limit.rlim_cur = kLowHardFileSizeLimit;
+    file_size_limit.rlim_max = kLowHardFileSizeLimit;
+    if (::setrlimit(RLIMIT_FSIZE, &file_size_limit) != 0) {
+      return kFileSizeLimitSetupFailed;
+    }
+
+    ScopedSupervisorRoot root;
+    auto service = make_service(root.path(), supervisor_options());
+    const JobSubmission submitted =
+        service->submit(fixture_spec("fixture.file-size-envelope"));
+    const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+    if (terminal.state != JobState::Failed ||
+        terminal.failure != JobAttemptFailure::WorkerStartup ||
+        !terminal.attempt_settled || terminal.output_receipt.has_value() ||
+        service->find_artifact(terminal.output_artifact_id) != nullptr) {
+      return kFileSizeEnvelopeAccepted;
+    }
+    if (!SingleTenantJobServiceTestAccess::
+            wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s) ||
+        SingleTenantJobServiceTestAccess::live_worker_process_count(*service) !=
+            0U) {
+      return kFileSizeEnvelopeResidue;
+    }
+    const TenantQuotaSnapshot quota = service->quota_snapshot();
+    if (quota.active_attempts != 0U || quota.cpu_slots != 0U ||
+        quota.host_memory_bytes != 0U || quota.output_bytes != 0U ||
+        quota.staging_bytes != 0U || quota.retention_bytes != 0U ||
+        quota.retained_artifacts != 0U || !quota.device_bytes.empty()) {
+      return kFileSizeEnvelopeResidue;
+    }
+    service.reset();
+    return 0;
+  } catch (...) {
+    return kFileSizeProbeRaised;
+  }
+}
+
+/**
  * @brief Polls a predicate within one short deterministic observer bound.
  * @param predicate Nonempty read-only predicate.
  * @param timeout Maximum observer duration.
@@ -1130,6 +1198,20 @@ TEST(WorkerSupervisor, LoweredNoFileLimitStillClosesPreexistingHighDescriptor) {
       ::testing::ExitedWithCode(0), "");
 }
 
+TEST(WorkerSupervisor,
+     LowHardFileSizeLimitFailsAcceptedEnvelopeBeforeForkWithoutResidue) {
+  rlimit file_size_limit{};
+  ASSERT_EQ(::getrlimit(RLIMIT_FSIZE, &file_size_limit), 0);
+  if (file_size_limit.rlim_max != RLIM_INFINITY &&
+      file_size_limit.rlim_max < kLowHardFileSizeLimit) {
+    GTEST_SKIP() << "hard RLIMIT_FSIZE is already below the probe limit";
+  }
+
+  EXPECT_EXIT(
+      { ::_exit(run_file_size_envelope_rejection_probe()); },
+      ::testing::ExitedWithCode(0), "");
+}
+
 TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
   ScopedSupervisorRoot root;
   auto service = make_service(root.path(), supervisor_options());
@@ -1141,6 +1223,7 @@ TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
       {"fixture.signal", JobAttemptFailure::WorkerSignal},
       {"fixture.channel", JobAttemptFailure::WorkerChannel},
       {"fixture.malformed", JobAttemptFailure::WorkerProtocol},
+      {"fixture.data.digest-mismatch", JobAttemptFailure::WorkerProtocol},
       {"fixture.stall", JobAttemptFailure::WorkerHeartbeatTimeout},
       {"fixture.report.hang", JobAttemptFailure::WorkerProtocol}};
   for (const auto& test_case : cases) {
@@ -1152,6 +1235,9 @@ TEST(WorkerSupervisor, CrashAndProtocolFaultsFailOnlyOwningAttempt) {
         << test_case.first << ": " << terminal.message;
     EXPECT_TRUE(terminal.attempt_settled) << test_case.first;
     EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed)
+        << test_case.first;
+    EXPECT_FALSE(terminal.output_receipt.has_value()) << test_case.first;
+    EXPECT_EQ(service->find_artifact(terminal.output_artifact_id), nullptr)
         << test_case.first;
   }
   EXPECT_EQ(wait_terminal(*service, unrelated.job_id).state,
@@ -1573,40 +1659,60 @@ TEST(WorkerSupervisor,
       0U);
 }
 
-TEST(WorkerSupervisor,
-     CheckpointBoundOverageBecomesComputeFailureWithoutOwnershipResidue) {
+TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   ScopedSupervisorRoot root;
   WorkerManagerOptions options = supervisor_options();
   options.heartbeat_timeout = 2s;
   options.attempt_runtime_timeout = 5s;
   options.io_timeout = 2s;
   auto service = make_service(root.path(), std::move(options), nullptr,
-                              checkpoint_transport_quota());
-  const JobSpec spec(GraphArtifactId("fixture.checkpoint-boundary-over"), 0,
-                     OutputSlotId("image.final"),
-                     checkpoint_transport_resources());
+                              bulk_data_plane_quota());
+  const JobSpec spec(GraphArtifactId("fixture.former-control-bound-output"), 0,
+                     OutputSlotId("image.final"), bulk_data_plane_resources());
 
   const JobSubmission submitted = service->submit(spec);
   const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
 
   EXPECT_EQ(terminal.assignment, submitted.assignment);
-  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
-  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_EQ(terminal.state, JobState::Succeeded) << terminal.message;
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Succeeded);
   EXPECT_TRUE(terminal.attempt_settled);
-  EXPECT_EQ(terminal.failure, JobAttemptFailure::Compute);
-  EXPECT_EQ(terminal.message,
-            "worker candidate image exceeds private checkpoint transport "
-            "bounds");
-  EXPECT_FALSE(terminal.output_receipt.has_value());
-  EXPECT_EQ(service->find_artifact(terminal.output_artifact_id), nullptr);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::None);
+  ASSERT_TRUE(terminal.output_receipt.has_value());
+  const std::shared_ptr<const ArtifactRecord> artifact =
+      service->find_artifact(terminal.output_artifact_id);
+  ASSERT_NE(artifact, nullptr);
+  EXPECT_EQ(artifact->payload.size(), kBulkPayloadAboveFormerControlBytes);
+  EXPECT_EQ(artifact->receipt.artifact_id,
+            terminal.output_receipt->artifact_id);
+  EXPECT_EQ(artifact->receipt.output_commit_id,
+            terminal.output_receipt->output_commit_id);
+  EXPECT_EQ(artifact->receipt.content_digest,
+            terminal.output_receipt->content_digest);
+
+  const JobSubmission consumer = service->submit(
+      JobSpec(GraphArtifactId("fixture.checkpoint"), 0,
+              OutputSlotId("image.checkpoint-consumer"),
+              bulk_data_plane_resources(), terminal.output_artifact_id));
+  const JobSnapshot consumed = wait_terminal(*service, consumer.job_id);
+  EXPECT_EQ(consumed.state, JobState::Succeeded) << consumed.message;
+  EXPECT_EQ(consumed.attempt_outcome, JobAttemptOutcome::Succeeded);
+  EXPECT_EQ(consumed.failure, JobAttemptFailure::None);
+  ASSERT_TRUE(consumed.output_receipt.has_value());
+  const std::shared_ptr<const ArtifactRecord> consumer_artifact =
+      service->find_artifact(consumed.output_artifact_id);
+  ASSERT_NE(consumer_artifact, nullptr);
+  EXPECT_EQ(consumer_artifact->payload.size(), sizeof(std::uint32_t));
+
   const TenantQuotaSnapshot quota = service->quota_snapshot();
   EXPECT_EQ(quota.active_attempts, 0U);
   EXPECT_EQ(quota.cpu_slots, 0U);
   EXPECT_EQ(quota.host_memory_bytes, 0U);
   EXPECT_EQ(quota.output_bytes, 0U);
   EXPECT_EQ(quota.staging_bytes, 0U);
-  EXPECT_EQ(quota.retention_bytes, 0U);
-  EXPECT_EQ(quota.retained_artifacts, 0U);
+  EXPECT_EQ(quota.retention_bytes,
+            artifact->payload.size() + consumer_artifact->payload.size());
+  EXPECT_EQ(quota.retained_artifacts, 2U);
   for (const auto& device : quota.device_bytes) {
     EXPECT_EQ(device.second, 0U);
   }
@@ -1832,12 +1938,15 @@ TEST(WorkerSupervisor, ExactDurationBoundsPreserveClosedLaunchPolicy) {
   ASSERT_NE(service, nullptr);
   service.reset();
 
-  WorkerProcessLaunchOptions launch{3, kMaximumWorkerDuration,
+  WorkerProcessLaunchOptions launch{3, 5, 6, kMaximumWorkerDuration,
                                     kMaximumWorkerDuration};
   WorkerProcessLaunchArguments arguments =
       make_worker_process_launch_arguments(launch);
   char executable[] = "photospider-worker";
-  std::array<char*, 4U> argv{executable, arguments.control_fd.data(),
+  std::array<char*, 6U> argv{executable,
+                             arguments.control_fd.data(),
+                             arguments.checkpoint_data_fd.data(),
+                             arguments.output_data_fd.data(),
                              arguments.startup_timeout.data(),
                              arguments.io_timeout.data()};
   const WorkerProcessLaunchOptions parsed = parse_worker_process_launch_options(

@@ -1016,6 +1016,7 @@ if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
         src/lib/server/durable_server_state.cpp
         src/lib/server/single_tenant_job_service.cpp
         src/lib/server/embedded_job_worker.cpp
+        src/lib/server/worker_artifact_data_plane.cpp
         src/lib/server/worker_protocol.cpp
         src/lib/server/worker_manager.cpp)
     target_compile_features(photospider_single_tenant_job_internal PRIVATE

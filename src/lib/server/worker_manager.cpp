@@ -42,6 +42,7 @@
 #include <utility>
 
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_artifact_data_plane.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
@@ -53,6 +54,10 @@ namespace {
 constexpr int kWorkerControlDescriptor = 3;
 /** @brief Fixed close-on-exec child setup-status descriptor. */
 constexpr int kWorkerExecStatusDescriptor = 4;
+/** @brief Fixed read-only checkpoint artifact data-plane descriptor. */
+constexpr int kWorkerCheckpointDataDescriptor = 5;
+/** @brief Fixed write-only output-stage artifact data-plane descriptor. */
+constexpr int kWorkerOutputDataDescriptor = 6;
 /** @brief Supervisor poll cadence for cancel, exit, and deadline checks. */
 constexpr std::chrono::milliseconds kSupervisorPollInterval{20};
 
@@ -338,6 +343,12 @@ struct ChildProcess final {
    * buffered report/EOF drain; revocation clears it before escalation.
    */
   UniqueFd control;
+  /**
+   * @brief Anonymous direction-scoped artifact data-plane occurrences.
+   * @note Child-facing originals are closed in the manager immediately after
+   * fork; the manager read side remains until report hydration or cleanup.
+   */
+  WorkerArtifactDataPlane data_plane;
   /** @brief Whether exact `waitpid` already completed. */
   bool reaped = false;
   /** @brief Exact wait status when `reaped` is true. */
@@ -653,18 +664,18 @@ void configure_descriptor(int fd, bool nonblocking) {
 }
 
 /**
- * @brief Closes every inherited child descriptor except exact fd 0 through 4.
+ * @brief Closes every inherited child descriptor except exact fd 0 through 6.
  * @param plan Immutable platform input prepared before `fork`.
  * @return Zero after complete closure, otherwise the positive setup errno.
  * @throws Nothing.
  * @note Darwin scans the kernel-authoritative process descriptor space with
  * async-signal-safe `close` calls and accepts only `EBADF` for unused slots.
- * Linux requests `[5, UINT_MAX]` in one raw `close_range` syscall. An absent or
+ * Linux requests `[7, UINT_MAX]` in one raw `close_range` syscall. An absent or
  * rejected Linux syscall fails closed instead of falling back to a finite cap.
  */
 int close_child_descriptors(const ChildDescriptorClosurePlan& plan) noexcept {
 #if defined(__APPLE__)
-  for (int fd = kWorkerExecStatusDescriptor + 1;
+  for (int fd = kWorkerOutputDataDescriptor + 1;
        fd < plan.darwin_exclusive_maximum; ++fd) {
     if (::close(fd) == 0 || errno == EBADF) {
       continue;
@@ -677,7 +688,7 @@ int close_child_descriptors(const ChildDescriptorClosurePlan& plan) noexcept {
 #if defined(SYS_close_range)
   const auto result =
       ::syscall(SYS_close_range,
-                static_cast<unsigned int>(kWorkerExecStatusDescriptor + 1),
+                static_cast<unsigned int>(kWorkerOutputDataDescriptor + 1),
                 std::numeric_limits<unsigned int>::max(), 0U);
   if (result == 0) {
     return 0;
@@ -712,7 +723,7 @@ ChildDescriptorClosurePlan prepare_child_descriptor_closure() {
                             "query Darwin worker descriptor ceiling");
   }
   if (result_size != sizeof(maximum_descriptor) ||
-      maximum_descriptor <= kWorkerExecStatusDescriptor) {
+      maximum_descriptor <= kWorkerOutputDataDescriptor) {
     throw std::system_error(EIO, std::generic_category(),
                             "invalid Darwin worker descriptor ceiling");
   }
@@ -743,6 +754,38 @@ rlimit worker_address_space_limit(std::uint64_t requested_bytes) {
                          : static_cast<rlim_t>(requested_bytes);
   if (current.rlim_max != RLIM_INFINITY) {
     requested = std::min(requested, current.rlim_max);
+  }
+  current.rlim_cur = requested;
+  return current;
+}
+
+/**
+ * @brief Builds the attempt-derived POSIX regular-file soft/hard limit.
+ * @param requested_bytes Accepted output-stage byte maximum.
+ * @return Limit whose soft bound exactly matches the accepted envelope.
+ * @throws ManagerFailure with `WorkerStartup` when `RLIMIT_FSIZE` cannot be
+ * queried, represented, or established beneath the inherited hard limit.
+ * @note The check runs before `fork`, so the manager never publishes metadata
+ * for a larger accepted stage while silently installing a smaller file-size
+ * limit. This grants no quota or publication authority.
+ */
+rlimit worker_file_size_limit(std::uint64_t requested_bytes) {
+  rlimit current{};
+  if (::getrlimit(RLIMIT_FSIZE, &current) != 0) {
+    throw ManagerFailure(JobAttemptFailure::WorkerStartup,
+                         std::string("query worker file-size limit failed: ") +
+                             std::strerror(errno));
+  }
+  if (requested_bytes >= static_cast<std::uint64_t>(RLIM_INFINITY)) {
+    throw ManagerFailure(JobAttemptFailure::WorkerStartup,
+                         "accepted worker output stage has no finite "
+                         "RLIMIT_FSIZE representation");
+  }
+  const rlim_t requested = static_cast<rlim_t>(requested_bytes);
+  if (current.rlim_max != RLIM_INFINITY && current.rlim_max < requested) {
+    throw ManagerFailure(
+        JobAttemptFailure::WorkerStartup,
+        "accepted worker output stage exceeds inherited hard RLIMIT_FSIZE");
   }
   current.rlim_cur = requested;
   return current;
@@ -905,6 +948,8 @@ class WorkerManager::Impl final {
     AttemptIdentity identity;
     /** @brief Exact immutable assignment retained through supervision. */
     JobAssignment assignment;
+    /** @brief Pre-thread attempt-local artifact data-plane ownership. */
+    WorkerArtifactDataPlane data_plane;
     /** @brief Sole joinable supervision-thread handle. */
     std::thread supervisor;
     /** @brief Monotonic external cancellation request. */
@@ -951,6 +996,9 @@ class WorkerManager::Impl final {
     validate_job_spec(*assignment.spec);
     auto record = std::make_shared<Record>(
         std::move(assignment), options_.fail_record_construction_for_test);
+    if (!in_process_test_mode_) {
+      record->data_plane = WorkerArtifactDataPlane::create(record->assignment);
+    }
     const std::string key = record->identity.attempt_id.value();
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutting_down_) {
@@ -1233,13 +1281,16 @@ class WorkerManager::Impl final {
    * or a setup diagnostic exhausts memory.
    * @note The fork child performs only async-signal-safe descriptor, limit,
    * status-write, and exec operations using storage prepared before fork.
-   * Darwin closes fd 5 through the kernel `kern.maxfilesperproc` ceiling;
-   * Linux uses raw `close_range(5, UINT_MAX, 0)` and reports any unavailable or
+   * Darwin closes fd 7 through the kernel `kern.maxfilesperproc` ceiling;
+   * Linux uses raw `close_range(7, UINT_MAX, 0)` and reports any unavailable or
    * rejected syscall through close-on-exec fd 4. The parent revalidates
    * waitable `SIGCHLD` policy immediately before `fork` and fail-stops if
-   * process-global exact-reaping authority changed.
+   * process-global exact-reaping authority changed. A finite inherited hard
+   * `RLIMIT_FSIZE` below the accepted output-stage maximum fails as
+   * `WorkerStartup` before `fork`; it is never used to narrow that maximum.
    */
   ChildProcess spawn_process(const std::shared_ptr<Record>& record) {
+    WorkerArtifactDataPlane data_plane = std::move(record->data_plane);
     int sockets[2] = {-1, -1};
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
       throw ManagerFailure(
@@ -1275,13 +1326,19 @@ class WorkerManager::Impl final {
         prepare_child_descriptor_closure();
     const rlimit address_space = worker_address_space_limit(
         record->assignment.spec->resource_request().host_memory_bytes);
+    const rlimit file_size = worker_file_size_limit(static_cast<std::uint64_t>(
+        data_plane.assignment_metadata().output.maximum_payload_bytes));
     const std::string executable = options_.worker_executable.string();
     const WorkerProcessLaunchArguments launch_arguments =
         make_worker_process_launch_arguments(WorkerProcessLaunchOptions{
-            kWorkerControlDescriptor, options_.startup_timeout,
+            kWorkerControlDescriptor, kWorkerCheckpointDataDescriptor,
+            kWorkerOutputDataDescriptor, options_.startup_timeout,
             options_.io_timeout});
     const char* const executable_pointer = executable.c_str();
     const char* const control_pointer = launch_arguments.control_fd.c_str();
+    const char* const checkpoint_pointer =
+        launch_arguments.checkpoint_data_fd.c_str();
+    const char* const output_pointer = launch_arguments.output_data_fd.c_str();
     const char* const startup_pointer =
         launch_arguments.startup_timeout.c_str();
     const char* const io_pointer = launch_arguments.io_timeout.c_str();
@@ -1295,24 +1352,45 @@ class WorkerManager::Impl final {
     }
     if (pid == 0) {
       const int control_copy = ::fcntl(child_socket.get(), F_DUPFD_CLOEXEC,
-                                       kWorkerExecStatusDescriptor + 1);
+                                       kWorkerOutputDataDescriptor + 1);
       if (control_copy < 0) {
         child_setup_failed(status_write.get(), errno);
       }
+      const int checkpoint_copy =
+          ::fcntl(data_plane.worker_checkpoint_descriptor(), F_DUPFD_CLOEXEC,
+                  kWorkerOutputDataDescriptor + 1);
+      if (checkpoint_copy < 0) {
+        child_setup_failed(status_write.get(), errno);
+      }
+      const int output_copy =
+          ::fcntl(data_plane.worker_output_descriptor(), F_DUPFD_CLOEXEC,
+                  kWorkerOutputDataDescriptor + 1);
+      if (output_copy < 0) {
+        child_setup_failed(status_write.get(), errno);
+      }
       const int status_copy = ::fcntl(status_write.get(), F_DUPFD_CLOEXEC,
-                                      kWorkerExecStatusDescriptor + 1);
+                                      kWorkerOutputDataDescriptor + 1);
       if (status_copy < 0) {
         child_setup_failed(status_write.get(), errno);
       }
       if (::dup2(control_copy, kWorkerControlDescriptor) < 0) {
         child_setup_failed(status_copy, errno);
       }
+      if (::dup2(checkpoint_copy, kWorkerCheckpointDataDescriptor) < 0) {
+        child_setup_failed(status_copy, errno);
+      }
+      if (::dup2(output_copy, kWorkerOutputDataDescriptor) < 0) {
+        child_setup_failed(status_copy, errno);
+      }
       if (::dup2(status_copy, kWorkerExecStatusDescriptor) < 0) {
         child_setup_failed(status_copy, errno);
       }
       if (::fcntl(kWorkerControlDescriptor, F_SETFD, 0) < 0 ||
+          ::fcntl(kWorkerCheckpointDataDescriptor, F_SETFD, 0) < 0 ||
+          ::fcntl(kWorkerOutputDataDescriptor, F_SETFD, 0) < 0 ||
           ::fcntl(kWorkerExecStatusDescriptor, F_SETFD, FD_CLOEXEC) < 0 ||
-          ::setrlimit(RLIMIT_AS, &address_space) != 0) {
+          ::setrlimit(RLIMIT_AS, &address_space) != 0 ||
+          ::setrlimit(RLIMIT_FSIZE, &file_size) != 0) {
         child_setup_failed(kWorkerExecStatusDescriptor, errno);
       }
       const int close_error = close_child_descriptors(descriptor_closure);
@@ -1321,18 +1399,23 @@ class WorkerManager::Impl final {
       }
       char* const arguments[] = {const_cast<char*>(executable_pointer),
                                  const_cast<char*>(control_pointer),
+                                 const_cast<char*>(checkpoint_pointer),
+                                 const_cast<char*>(output_pointer),
                                  const_cast<char*>(startup_pointer),
-                                 const_cast<char*>(io_pointer), nullptr};
+                                 const_cast<char*>(io_pointer),
+                                 nullptr};
       ::execv(executable_pointer, arguments);
       child_setup_failed(kWorkerExecStatusDescriptor, errno);
     }
 
     child_socket.reset();
     status_write.reset();
+    data_plane.close_worker_descriptors();
     set_live_pid(record, pid);
     ChildProcess process;
     process.pid = pid;
     process.control = std::move(parent_socket);
+    process.data_plane = std::move(data_plane);
     try {
       const std::optional<int> child_error = read_exec_status(
           status_read.get(),
@@ -1382,6 +1465,7 @@ class WorkerManager::Impl final {
       PreparedWorkerAssignment prepared{
           record->assignment,
           factory_->prepared_external_graph(record->assignment),
+          process.data_plane.assignment_metadata(),
           options_.heartbeat_interval};
       const auto startup_deadline = checked_worker_deadline(
           std::chrono::steady_clock::now(), options_.startup_timeout);
@@ -1512,7 +1596,7 @@ class WorkerManager::Impl final {
     std::optional<std::chrono::steady_clock::time_point> eof_deadline;
     std::optional<std::chrono::steady_clock::time_point>
         post_reap_drain_deadline;
-    std::optional<JobAttemptReport> candidate_report;
+    std::optional<PreparedWorkerReport> candidate_report;
     bool cancel_attempted = false;
     bool cancel_delivery_failed = false;
     bool cancel_channel_failed = false;
@@ -1616,8 +1700,11 @@ class WorkerManager::Impl final {
                       "report"
                     : "worker exited cleanly without one report");
           }
-          return report_completion(record->identity,
-                                   std::move(*candidate_report));
+          JobAttemptReport materialized =
+              process->data_plane.materialize_report(
+                  std::move(candidate_report->report),
+                  candidate_report->output);
+          return report_completion(record->identity, std::move(materialized));
         }
         if (post_reap_drain_deadline.has_value() &&
             now >= *post_reap_drain_deadline) {
@@ -1688,9 +1775,10 @@ class WorkerManager::Impl final {
                 true, std::memory_order_release);
           }
         } else if (frame.kind == WorkerMessageKind::Report) {
-          JobAttemptReport report =
-              decode_worker_report(frame, *record->assignment.spec);
-          if (report.identity != record->identity) {
+          PreparedWorkerReport report = decode_worker_report(
+              frame, *record->assignment.spec,
+              process->data_plane.assignment_metadata().output);
+          if (report.report.identity != record->identity) {
             throw WorkerProtocolError(
                 "worker report identity does not match its exact lease");
           }

@@ -405,6 +405,28 @@ ArtifactContentDigest hash_artifact_content(const std::byte* bytes,
   return digest;
 }
 
+/** @copydoc ps::server::hash_image_artifact_content */
+ArtifactContentDigest hash_image_artifact_content(const ImageBuffer& image) {
+  validate_image_buffer(image);
+  if (image.device != Device::CPU || image.width <= 0 || image.height <= 0 ||
+      image.channels <= 0 || image.data == nullptr) {
+    throw std::invalid_argument(
+        "artifact image hashing requires nonempty CPU data");
+  }
+  const std::size_t row_bytes = image_buffer_row_bytes(image);
+  if (row_bytes > std::numeric_limits<std::size_t>::max() /
+                      static_cast<std::size_t>(image.height)) {
+    throw std::overflow_error("artifact image hash size overflowed");
+  }
+  Sha256 hash;
+  for (int row = 0; row < image.height; ++row) {
+    hash.update(image_buffer_row_data(image, row), row_bytes);
+  }
+  ArtifactContentDigest digest;
+  digest.bytes = hash.finish();
+  return digest;
+}
+
 /** @copydoc ps::server::validate_attempt_identity */
 void validate_attempt_identity(const AttemptIdentity& identity) {
   if (!identity.tenant_id.valid() || !identity.job_id.valid() ||

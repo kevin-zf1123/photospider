@@ -167,13 +167,17 @@ class WorkerManager final {
    * @return Nothing after one unique joinable supervision handle is retained.
    * @throws std::invalid_argument for invalid/shutdown input.
    * @throws std::logic_error for an attempt-identity collision.
-   * @throws std::system_error when supervision-thread creation fails.
+   * @throws std::system_error when anonymous data-plane setup or
+   * supervision-thread creation fails.
+   * @throws std::overflow_error when data-plane size/hash arithmetic cannot be
+   * represented.
    * @throws std::bad_alloc when record/thread storage allocation fails.
-   * @note Record identity retention, registry-key construction, registry
-   * insertion, and thread construction all precede child spawn. Any exception
-   * leaves no live child or unowned transient state: failed insertion retains
-   * no record, while thread failure erases the exact inserted record before
-   * propagating so the caller can roll back admission authority.
+   * @note Record identity retention and anonymous data-plane creation precede
+   * registry insertion and thread construction; all precede child spawn. Any
+   * exception closes/unlinks the attempt-local occurrences and leaves no live
+   * child or unowned transient state: failed insertion retains no record,
+   * while thread failure erases the exact inserted record before propagating
+   * so the caller can roll back admission authority.
    */
   void start(JobAssignment assignment);
 

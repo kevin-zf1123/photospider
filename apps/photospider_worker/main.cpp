@@ -1,6 +1,6 @@
 /**
  * @file main.cpp
- * @brief Runs exactly one private Issue #100 Embedded Host worker assignment.
+ * @brief Runs one metadata-control/data-plane Issue #105 worker assignment.
  */
 #include <sys/socket.h>
 #include <unistd.h>
@@ -15,13 +15,15 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
 
-#include "server/embedded_job_worker.hpp"    // NOLINT(build/include_subdir)
+#include "server/embedded_job_worker.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_artifact_data_plane.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
 
@@ -30,6 +32,68 @@ namespace {
 
 /** @brief Short control-read slice used to revisit heartbeat state. */
 constexpr std::chrono::milliseconds kControlPollInterval{20};
+
+/**
+ * @brief Owns one exact worker-side inherited data-plane descriptor.
+ * @throws Nothing for construction, reset, and destruction.
+ * @note Ownership is cleared before one non-retried close attempt so `EINTR`
+ * cannot target a later numeric-descriptor reuse.
+ */
+class WorkerDataDescriptor final {
+ public:
+  /**
+   * @brief Takes ownership of one inherited descriptor.
+   * @param descriptor Exact nonnegative descriptor or invalid sentinel.
+   * @throws Nothing.
+   */
+  explicit WorkerDataDescriptor(int descriptor) noexcept
+      : descriptor_(descriptor) {}
+
+  /**
+   * @brief Closes any retained descriptor at scope exit.
+   * @throws Nothing; ownership clears before one ignored close result.
+   */
+  ~WorkerDataDescriptor() noexcept { reset(); }
+
+  /**
+   * @brief Prevents duplicate descriptor ownership.
+   * @param other Existing owner that remains unchanged.
+   * @throws Nothing because the operation is deleted.
+   */
+  WorkerDataDescriptor(const WorkerDataDescriptor& other) = delete;
+  /**
+   * @brief Prevents duplicate descriptor assignment.
+   * @param other Existing owner that remains unchanged.
+   * @return No assignment result because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  WorkerDataDescriptor& operator=(const WorkerDataDescriptor& other) = delete;
+
+  /**
+   * @brief Returns the exact descriptor without transfer.
+   * @return Retained descriptor or -1.
+   * @throws Nothing.
+   * @note The borrowed descriptor remains valid only until `reset()` or owner
+   * destruction.
+   */
+  int get() const noexcept { return descriptor_; }
+
+  /**
+   * @brief Clears ownership and performs at most one close attempt.
+   * @return Nothing.
+   * @throws Nothing; close results are ignored without retry.
+   */
+  void reset() noexcept {
+    const int owned = std::exchange(descriptor_, -1);
+    if (owned >= 0) {
+      static_cast<void>(::close(owned));
+    }
+  }
+
+ private:
+  /** @brief Sole exact inherited descriptor owner. */
+  int descriptor_ = -1;
+};
 
 /**
  * @brief Resolver that exposes only one manager-prepared graph occurrence.
@@ -172,7 +236,8 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
  * deadline duration outside the shared worker bound.
  * @throws std::overflow_error if the captured monotonic base cannot represent
  * a validated launch deadline or report image arithmetic overflows.
- * @throws std::length_error when report encoding exceeds a private bound.
+ * @throws WorkerArtifactDataPlaneError for checkpoint/output reference,
+ * descriptor, size, or digest mismatch.
  * @throws std::bad_alloc when assignment, worker, thread, or report state
  * cannot be retained.
  * @throws std::system_error when control-thread creation or mutex locking
@@ -183,6 +248,8 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
  * control thread is joined.
  */
 int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
+  WorkerDataDescriptor checkpoint_data(launch.checkpoint_data_fd);
+  WorkerDataDescriptor output_data(launch.output_data_fd);
   PreparedWorkerAssignment prepared = receive_worker_assignment(
       launch.control_fd,
       checked_worker_deadline(std::chrono::steady_clock::now(),
@@ -193,6 +260,9 @@ int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
           prepared.assignment.identity.job_spec_digest) {
     throw WorkerProtocolError("worker assignment lacks a joined JobSpec");
   }
+  prepared.assignment.checkpoint = materialize_worker_checkpoint(
+      checkpoint_data.get(), prepared.assignment, prepared.data_plane);
+  checkpoint_data.reset();
 
   std::mutex write_mutex;
   send_identity_locked(launch.control_fd, WorkerMessageKind::AssignmentAccepted,
@@ -220,6 +290,17 @@ int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
     control.join();
     throw;
   }
+  std::optional<WorkerOutputDataReference> output_reference;
+  try {
+    output_reference =
+        stage_worker_output(output_data.get(), *prepared.assignment.spec,
+                            prepared.data_plane.output, &report);
+    output_data.reset();
+  } catch (...) {
+    done.store(true, std::memory_order_release);
+    control.join();
+    throw;
+  }
   done.store(true, std::memory_order_release);
   control.join();
   if (control_failed.load(std::memory_order_acquire)) {
@@ -227,7 +308,10 @@ int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   }
   {
     std::lock_guard<std::mutex> lock(write_mutex);
-    send_worker_report(launch.control_fd, report, *prepared.assignment.spec,
+    PreparedWorkerReport prepared_report{std::move(report),
+                                         std::move(output_reference)};
+    send_worker_report(launch.control_fd, prepared_report,
+                       *prepared.assignment.spec, prepared.data_plane.output,
                        checked_worker_deadline(std::chrono::steady_clock::now(),
                                                launch.io_timeout));
   }

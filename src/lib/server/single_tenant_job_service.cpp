@@ -271,25 +271,27 @@ bool artifact_fulfills_job(const DurableJobRecord& job,
  * @param tenant_id Configured tenant accepting the checkpoint.
  * @param artifact_id Exact checkpoint identity declared by the frozen JobSpec.
  * @param artifact Immutable durable record returned by the rooted store.
- * @return True only when tenant, identity, durability, reusable transport size,
- * and content digest all agree.
+ * @param resource_request Immutable admission envelope for the new attempt.
+ * @return True only when tenant, identity, durability, admitted host-memory
+ * size, and content digest all agree.
  * @throws std::overflow_error when content hashing cannot represent its input.
  * @note Durable lookup already validates these facts during recovery. This
  * defensive join keeps submit and retry authorization identical even if a
  * future store implementation changes its in-memory indexing strategy. The
- * transport-size check also fences legacy or test-produced artifacts that fit
- * durable quota but cannot fit every supported external Assignment envelope;
+ * size check binds checkpoint materialization to the accepted attempt envelope
+ * without coupling bulk artifact eligibility to a control-frame limit;
  * rejection occurs before quota reservation or worker-process creation.
  */
 bool checkpoint_is_authorized(const TenantId& tenant_id,
                               const ArtifactId& artifact_id,
-                              const ArtifactRecord& artifact) {
+                              const ArtifactRecord& artifact,
+                              const JobResourceRequest& resource_request) {
   const OutputCommitReceipt& receipt = artifact.receipt;
   return receipt.attempt.tenant_id == tenant_id &&
          receipt.artifact_id == artifact_id &&
          receipt.achieved_durability == ArtifactDurability::CrashDurable &&
          receipt.descriptor.payload_bytes == artifact.payload.size() &&
-         artifact.payload.size() <= maximum_worker_checkpoint_payload_bytes() &&
+         artifact.payload.size() <= resource_request.host_memory_bytes &&
          receipt.content_digest ==
              hash_artifact_content(artifact.payload.data(),
                                    artifact.payload.size());
@@ -533,9 +535,9 @@ JobSubmission SingleTenantJobService::submit(JobSpec spec) {
     checkpoint = durable_state_->find_artifact(
         *immutable_spec->checkpoint_artifact_id());
     if (checkpoint == nullptr ||
-        !checkpoint_is_authorized(tenant_id_,
-                                  *immutable_spec->checkpoint_artifact_id(),
-                                  *checkpoint)) {
+        !checkpoint_is_authorized(
+            tenant_id_, *immutable_spec->checkpoint_artifact_id(), *checkpoint,
+            immutable_spec->resource_request())) {
       throw std::invalid_argument(
           "Job checkpoint does not resolve to this tenant's durable artifact");
     }
@@ -646,9 +648,9 @@ std::optional<JobSubmission> SingleTenantJobService::retry(
     checkpoint =
         durable_state_->find_artifact(*previous.spec->checkpoint_artifact_id());
     if (checkpoint == nullptr ||
-        !checkpoint_is_authorized(tenant_id_,
-                                  *previous.spec->checkpoint_artifact_id(),
-                                  *checkpoint)) {
+        !checkpoint_is_authorized(
+            tenant_id_, *previous.spec->checkpoint_artifact_id(), *checkpoint,
+            previous.spec->resource_request())) {
       throw std::invalid_argument(
           "Job retry checkpoint is no longer a durable tenant artifact");
     }
