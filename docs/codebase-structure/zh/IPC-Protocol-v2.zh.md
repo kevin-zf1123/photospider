@@ -32,8 +32,14 @@ identity、每 attempt 一个全新 process，以及分离的 worker control/dat
 internal CMake target 链接，没有 daemon route 或 installed codec，也不组合进
 `photospiderd`。其 private worker protocol v2 与本 local IPC v2 不同：128-KiB control socket
 只传 attempt/Job/receipt/reference/descriptor/digest metadata，而 checkpoint 与 candidate image
-byte 通过 direction-scoped inherited descriptor 使用 manager-created mode-0600、已 unlink
-occurrence。这是本地可执行分离，不是 authenticated network protocol 或 standalone artifact
+byte 通过 inherited descriptor 使用 manager-created direction-reduced
+`AF_UNIX SOCK_STREAM` lane。Manager endpoint 是 nonblocking；只有在精确 PID 仍受 absolute
+lifecycle deadline 与 TERM/KILL/reap ownership 约束时，worker 才可能阻塞。Checkpoint digest
+在 worker 内校验，output size/hash 在有界 completion handoff 前排空期间校验；worker 发出只含
+metadata 的 Report 后保持存活，直到 manager 在完整关联与 image 重建后返回一次只含 identity
+的 `CompletionReady`。该确认不授予 service 或 artifact authority。Post-reap supervision 绝不
+读取 bulk lane，也不执行 filesystem I/O 或 bulk transfer。这是本地可执行分离，不是 authenticated
+network protocol 或 standalone artifact
 service。其 `TenantId`、`JobId`、`JobAttemptId`、
 `WorkerInstanceId`、`ArtifactId`、quota reservation、checkpoint 与 commit receipt 都是
 独立的源码私有类型；protocol-v2 compute id、`OutputArtifactId`、delivery id、session name

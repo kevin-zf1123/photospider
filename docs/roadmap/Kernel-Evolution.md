@@ -1503,14 +1503,23 @@ private stages remain artifact-authority cleanup.
 
 Issue #105 now provides the local executable evidence for this split at the
 source-private WorkerManager/worker boundary. Private worker protocol v2 has a
-128-KiB metadata-only control bound and no v1/bulk fallback. Manager-created
-mode-0600 unlinked occurrences carry checkpoint and candidate bytes through
-read-only/write-only inherited descriptors; references bind the current
+128-KiB metadata-only control bound and no v1/bulk fallback. After the manager
+record and supervision handle exist, that owner creates direction-reduced
+`AF_UNIX SOCK_STREAM` lanes outside the service mutex. Nonblocking manager
+endpoints carry checkpoint and candidate bytes while the worker endpoints may
+block only under exact PID deadlines and TERM/KILL/reap ownership; references bind the current
 tenant/Job/spec/attempt/worker/lease plus exact checkpoint or output slot but
-grant no authority without the occurrence capability. The worker cannot choose
+grant no authority without the stream capability. The worker cannot choose
 a path, quota, stable ArtifactId, OutputCommitId, or publication result. The
-manager exposes a candidate only after clean reap/writer closure and exact
-owner/mode/link, descriptor, size, resource, and SHA-256 validation; the
+worker validates checkpoint byte count, EOF, and SHA-256 before execution. The
+manager drains and hashes output in bounded chunks before completion handoff,
+then exposes a candidate only after stream EOF, clean reap, and exact reference,
+descriptor, size, resource, and SHA-256 validation. After closing the output
+lane and sending its metadata-only Report, the worker remains alive and
+terminable until the manager completes that join and image reconstruction, then
+returns one identity-only `CompletionReady` with no service/artifact authority.
+Post-reap supervision never reads the bulk lane and performs no filesystem I/O,
+blocking bulk transfer, bulk allocation, or content hash; the
 existing service and durable store still own current-attempt selection, retry,
 quota, manifest-last publication, idempotency, cancellation, and recovery.
 This same-host adapter is not the target authenticated network control plane,
@@ -1764,9 +1773,14 @@ fencing, heartbeat/runtime deadlines, cancellation escalation, exact reaping,
 and ongoing supervision-handle drainage. A report becomes eligible only after
 clean process exit and reap. Its protocol v2 control socket carries only
 bounded attempt/Job/receipt/reference/descriptor/digest metadata; checkpoint
-and output bytes cross separate attempt-local anonymous-file descriptors. A
-candidate becomes visible to the service only after writer closure plus exact
-manager revalidation. Startup, exit, signal, channel, protocol,
+and output bytes cross separate attempt-local direction-reduced stream
+descriptors. The manager transfers them in bounded nonblocking chunks while the
+exact worker remains subject to lifecycle deadlines and drains no bulk data
+after reap. After its metadata-only Report, the worker awaits an identity-only
+`CompletionReady` while still terminable; the manager sends it only after exact
+stream join and image reconstruction. A candidate becomes visible to the
+service only after stream EOF, exact manager revalidation, and clean reap.
+Startup, exit, signal, channel, protocol,
 heartbeat, runtime, and forced-cancellation failures affect only the owning
 attempt. The control plane still orders cancellation against crash-durable
 artifact commit and gates Job success on settlement, retained-quota conversion,

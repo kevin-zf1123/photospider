@@ -4,7 +4,7 @@ This document defines the current source-private Issue #99/#100/#105 Job behavio
 under `src/lib/server/`. ADR 0011 remains the broader target security-domain
 decision and the server roadmap allocates later delivery slices. The current
 module is a real local vertical for one configured tenant with freshly execed
-attempt processes and an attempt-scoped anonymous-file artifact data plane. It
+attempt processes and an attempt-scoped stream artifact data plane. It
 is not a network server, multi-tenant authorization boundary, separate
 WorkerManager/artifact service, remote data plane, or untrusted-plugin sandbox.
 
@@ -73,10 +73,10 @@ specific runtime-state restore.
 Checkpoint authorization is independent of control-frame capacity. The exact
 durable bytes and receipt must join the configured tenant and JobSpec
 `ArtifactId`, and the payload must fit the accepted host-memory envelope.
-Worker-side materialization revalidates anonymous private-file identity, exact
-size, descriptor, and SHA-256 before Graph construction. A mismatch is rejected
-without quota, Job, retry, or artifact authority being inferred from the data
-occurrence.
+Worker-side materialization receives the exact declared byte count followed by
+stream EOF, then revalidates descriptor and SHA-256 before Graph construction.
+A mismatch is rejected without quota, Job, retry, or artifact authority being
+inferred from the stream occurrence.
 
 ## Tenant Quota Authority
 
@@ -113,10 +113,12 @@ CPU slots also cap Embedded Host `maximum_parallelism`. WorkerManager applies
 accepted host memory as the worker's POSIX `RLIMIT_AS` soft bound before
 `exec`; this constrains total virtual address space rather than measured RSS,
 so the executable and its runtime mappings must fit the requested envelope.
-For output staging, WorkerManager prepares an `RLIMIT_FSIZE` soft bound exactly
-equal to the accepted output/staging/retention minimum. A lower finite inherited
-hard limit fails the owning attempt as `WorkerStartup` before `fork`; it never
-silently narrows the data-plane maximum already derived from the JobSpec.
+As an independent worker-filesystem defense, WorkerManager prepares an
+`RLIMIT_FSIZE` soft bound exactly equal to the accepted output/staging/retention
+minimum. A lower finite inherited hard limit fails the owning attempt as
+`WorkerStartup` before `fork`; it never silently narrows the stream data-plane
+maximum already derived from the JobSpec. The limit is not a transport and no
+file-backed fallback exists.
 Configured device values remain admission declarations, not device isolation.
 Neither dimension replaces the worker-local `ResourceLedger`; there is no
 current syscall filter, cgroup/container, GPU-memory enforcement, or hostile-
@@ -235,7 +237,10 @@ descriptor, signal, wait, reap, cancellation, or completion authority.
 `submit()` validates/finalizes JobSpec and checkpoint, reserves the complete
 quota envelope, inserts the in-memory Job, and asks WorkerManager to construct
 and retain its sole manager record and supervision handle while the service
-mutex still blocks assignment progress, then publishes accepted truth. A
+mutex still blocks assignment progress, then publishes accepted truth. Bulk
+data-plane creation, checkpoint transfer, and output transfer occur only after
+the registered supervision thread owns the attempt, outside this service mutex.
+A
 manager-record construction, registry insertion, or supervision-thread start
 failure therefore occurs before child spawn or durable publication and exposes
 neither a Job nor a handle. Supervision-thread construction begins only after
@@ -314,30 +319,30 @@ Exactly 16 KiB is valid; one extra byte synchronously raises a field-specific
 `std::length_error` before factory/service construction and therefore before
 DurableServerState, quota, Job, supervision-thread, channel, or process
 ownership. A failed constructor exposes no partial catalog and cannot become a
-late `WorkerStartup` fact. WorkerManager creates a private socket pair,
-forks/execs one non-installed `photospider-worker`, and registers its exact PID
-before a non-virtual in-memory catalog lookup copies material into exactly one
-immutable assignment. The supervision thread invokes no resolver and performs
-no graph/path filesystem I/O. Before record insertion and supervision-thread
-creation, WorkerManager synchronously creates mode-0600 checkpoint and output
-occurrences, opens direction-scoped descriptors, verifies their exact
-device/inode/owner/mode identity, and unlinks both names. Any setup, registry,
-or thread-construction failure closes those occurrences before admission
-rollback. Each complete mutable pathname is allocated before `mkstemp`, and
-successful creation immediately arms a non-allocating descriptor/name owner;
-therefore even an allocation or setup exception after creation leaves no named
-temporary file. The fork child performs only descriptor setup, `RLIMIT_AS`,
-`RLIMIT_FSIZE`, descriptor closure, and `exec`; the freshly execed worker
-validates Assignment metadata and JobSpec digest, materializes any checkpoint
-through fd 5, creates and seeds a fresh Embedded Host, opens and loads an
-attempt-local Graph, computes within reserved CPU parallelism, writes tight
-candidate rows through fd 6, closes the Graph, destroys Host ownership, and
-returns only typed attempt and staged-output metadata.
+late `WorkerStartup` fact. WorkerManager first registers one immutable manager
+record and supervision handle. Only that supervision owner creates two private
+`AF_UNIX SOCK_STREAM` lanes, reduces the checkpoint lane to
+manager-send/worker-receive and the output lane to worker-send/manager-receive,
+and marks both manager endpoints nonblocking. This setup, all bulk transfer,
+and every failure occur outside the service mutex; a setup failure retires only
+the owning attempt and closes every endpoint without a path, staging file, or
+artifact residue. The supervisor then forks/execs one non-installed
+`photospider-worker` and registers its exact PID before a non-virtual in-memory
+catalog lookup copies material into exactly one immutable assignment. It
+invokes no resolver and performs no graph/path or data-plane filesystem I/O.
+The fork child performs only descriptor setup, `RLIMIT_AS`, `RLIMIT_FSIZE`,
+descriptor closure, and `exec`; the freshly execed worker validates Assignment
+metadata and JobSpec digest, receives and validates any checkpoint through fd
+5, creates and seeds a fresh Embedded Host, opens and loads an attempt-local
+Graph, computes within reserved CPU parallelism, sends tight candidate rows
+through fd 6, closes the Graph, destroys Host ownership, and returns only typed
+attempt and staged-output metadata.
 
 Pre-exec descriptor ownership is exact: fd 0-2 are standard streams, fd 3 is
 the private control socket, and close-on-exec fd 4 carries setup `errno` to the
-parent. Fd 5 is the worker's read-only checkpoint occurrence and fd 6 is its
-write-only output stage; the manager retains only a read view of the latter.
+parent. Fd 5 is the worker's receive-only checkpoint lane and fd 6 is its
+send-only output lane; the manager retains only the opposite direction of each
+stream.
 On Darwin, the parent queries the kernel `kern.maxfilesperproc` ceiling before
 `fork` and the allocation-free child closes every slot in `[7, ceiling)`,
 treating only `EBADF` as an unused slot. The current soft
@@ -407,13 +412,22 @@ runtime envelope. A resource-envelope excess becomes one identity-preserving
 settled `Failed(Compute)` metadata Report with a fixed bounded diagnostic and
 an empty stage; there is no transport-size fallback.
 
-WorkerManager accepts staged output only after one current-identity Report,
-clean zero exit, exact reap, channel EOF, and writer closure. Its retained read
-descriptor must still name a mode-0600 unlinked same-owner regular occurrence,
-and reference, slot, tight descriptor, exact file size, accepted maximum, and
-manager-recomputed SHA-256 must all match before an independent CPU image is
-reconstructed. A mismatch becomes a worker-protocol failure and cannot mint a
-receipt or Job/quota/retry truth. Only the existing service and
+WorkerManager exposes staged output only after one current-identity Report,
+exact stream EOF, clean zero exit, exact reap, and control-channel EOF. While
+the exact child remains lifecycle-owned, the manager drains output in bounded
+nonblocking chunks, enforces the accepted maximum, and incrementally computes
+SHA-256. Reference, slot, tight descriptor, exact stream byte count, resource
+bound, and digest must all join before completion handoff. After closing the
+output lane and sending its metadata-only Report, the worker remains alive and
+terminable until the manager completes that join and independent image
+reconstruction, then replies with one matching identity-only
+`CompletionReady`. The acknowledgement grants no Job, quota, artifact, commit,
+or publication authority. If a prior cancellation-channel failure makes the
+reply impossible, an already completely joined Report may retain its ordinary
+classification. The post-reap drain is control metadata only: it never reads
+the bulk lane and performs no filesystem I/O, blocking data transfer, bulk
+allocation, or content hashing. A mismatch becomes a worker-protocol failure
+and cannot mint a receipt or Job/quota/retry truth. Only the existing service and
 `DurableServerState` may then publish stable ArtifactId/OutputCommitId truth
 through the manifest-last durable transaction.
 
@@ -536,7 +550,7 @@ product process configured to auto-reap `SIGCHLD` children.
   process. Tenant plugin ABI/network security, syscall isolation, and isolated
   hostile-plugin runtime remain absent.
 - The current artifact format is one required tight CPU `ImageBuffer`. The
-  local anonymous-file adapter is an attempt-scoped bulk data plane for that
+  local direction-reduced stream adapter is an attempt-scoped bulk data plane for that
   format, not a general runtime `Value` format, remote transport, object store,
   or standalone artifact service.
 
@@ -591,14 +605,17 @@ bounds, cancel-channel-versus-wait-status attribution,
 deadline-side natural-reap buffered-report drainage, candidate-Report-deadline-
 versus-wait-status attribution, maximum-declared metadata-envelope accounting,
 protocol-v1 rejection, metadata-only control independence from bulk size,
-digest/descriptor/reference fail-closed checks, checkpoint and candidate
-transfer above the former aggregate control bound, all five prepared graph
+digest/descriptor/reference fail-closed checks including true staged-byte joins
+and stale attempts with zero process/quota/receipt/artifact/staging residue,
+checkpoint and candidate transfer above the former aggregate control bound,
+paused checkpoint transfer with responsive service cancellation, bounded
+shutdown while a worker is backpressured on paused output drainage, all five prepared graph
 fields at the exact shared boundary through
 a real process, field-specific one-byte-over catalog rejection before service
 ownership with no durable-root/Job/quota/thread/process residue or
-`WorkerStartup`, resource-over-bound typed failure, deterministic post-
-`mkstemp` exception cleanup without a named path, isolated finite-hard-
-`RLIMIT_FSIZE` pre-fork rejection without process/quota/artifact residue, and
+`WorkerStartup`, resource-over-bound typed failure, data-plane setup rollback
+without a path or stage, isolated finite-hard-`RLIMIT_FSIZE` pre-fork rejection
+without process/quota/artifact residue, and
 retry/restart/new-Job preservation of checkpoint identity, digest, durability,
 and quota truth,
 concurrent shutdown drainage, actual first completion/reconstruction allocation

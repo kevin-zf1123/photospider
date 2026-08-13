@@ -17,9 +17,14 @@ Job service 仍是唯一 durable/quota/artifact/retry authority。Host memory �
 精确 lease fencing 会把 startup、exit、signal、channel、protocol、heartbeat、runtime 与
 forced-cancellation failure 隔离到拥有它的 attempt。
 Private worker protocol v2 把 control frame 限制为 128 KiB 的 attempt/Job/artifact-reference
-metadata。Checkpoint 与 candidate image bytes 改用 manager 创建的 mode-0600、立即 unlink、
-direction-scoped 本地 file descriptor；manager 只有在 clean reap/writer closure，并对 reference、
-owner/mode/link、descriptor、size、resource 与 SHA-256 做精确复核后才接受 candidate。
+metadata。Checkpoint 与 candidate image bytes 改用 manager 创建且方向被裁剪的本地 Unix
+stream descriptor。注册 supervisor 只会在 record/thread ownership 建立后、service mutex 外创建
+它们；manager endpoint 为 nonblocking，而阻塞 transfer 保留在可杀 worker 内。Manager 只有在
+clean-reap completion handoff 前完成 reference、descriptor、stream EOF/size、resource 与
+SHA-256 精确复核后才接受 candidate。worker 关闭 output lane 并发送只含 metadata 的 Report
+后，会保持存活且可被终止，直到 manager 完成该关联并返回一次只含 identity 的
+`CompletionReady`；该确认不授予 Job、quota、artifact、commit 或 publication authority。
+reap 后绝不再读取 bulk lane，也不执行 data-plane filesystem I/O。
 
 该本地切片保留本决策的身份与权威顺序，并提供真实的 quota admission、crash durability、
 process-crash containment 与 bounded cancellation/shutdown。它保留共享的
@@ -266,12 +271,18 @@ tenant-plugin runtime。
 
 Issue #105 以 private protocol v2 取代了上述历史 bulk-control transport。每份完整 Report
 都限制为不超过 128 KiB 的 identity、outcome、diagnostic、image descriptor、reference、size
-与 digest metadata，并且不包含 tight image bytes。Checkpoint 与 candidate bytes 只经
-manager 创建的 mode-0600、立即 unlink、direction-scoped 本地 file descriptor 传输。超过
+与 digest metadata，并且不包含 tight image bytes。Checkpoint 与 candidate bytes 只经 manager
+创建且方向被裁剪的本地 Unix stream 传输。manager endpoint 为 nonblocking，并在 attempt
+绝对 lifecycle deadline 下按有界 slice 推进；阻塞 receive/send 保留在受精确拥有的 worker 内。超过
 accepted output/staging/retention envelope 的 candidate 会变成一个有界、保留 identity 且没有
 image 的 `Failed/Compute` Report；若有限 hard `RLIMIT_FSIZE` 低于 accepted output-stage
 maximum，则所属 attempt 会在 `fork` 前以 `WorkerStartup` 失败，而不是静默缩窄该 envelope。
-不存在 64-MiB compatibility 或 transport-size fallback。在已经尝试 cancellation delivery 后发生
+不存在 64-MiB compatibility 或 transport-size fallback。worker 会关闭 output lane，发送一份只含
+metadata 的 Report，并在同一精确 process lifecycle 下等待匹配的、只含 identity 的
+`CompletionReady`。WorkerManager 只有在 EOF、size/hash/reference/descriptor/resource 校验与独立
+image 重建完成后才发送该确认。若已经失败的 cancellation channel 使回复不可能，一份已经完整
+关联的 Report 可以保留其普通分类，但精确 reap 会终止所有 bulk-lane 访问。在已经尝试
+cancellation delivery 后发生
 socket-system error 时，同样会让错误留在有界 monitor 内：decode 停止，但精确 process
 ownership 与 reap deadline 继续，因此 signal/nonzero wait status 或已经 decode 的 Report
 优先于较弱 channel fact。当 cooperative cancellation deadline 仍然有效时，普通 EOF/post-
@@ -305,9 +316,10 @@ capability metadata。Bulk input、output 与 checkpoint byte 通过 data plane 
 
 当前 #105 可执行证据只在源码私有的同机 WorkerManager/worker boundary 上落实该分离。其 control
 reference 是绑定完整 current attempt/worker/lease 以及精确 checkpoint 或 output slot 的不授权
-join key；继承 descriptor 才提供本地 occurrence access。Worker 不获得 path、artifact root、稳定
-ArtifactId/OutputCommitId mint、quota release 或 publication capability。Anonymous stage 会在
-descriptor closure 时消失，只有既有 `DurableServerState` manifest-last transaction 才能发布
+join key；带方向的继承 stream descriptor 才提供 byte-transfer access。Worker 不获得 path、
+artifact root、稳定 ArtifactId/OutputCommitId mint、quota release 或 publication capability。
+不完整 stream state 会在 descriptor closure 时消失，只有既有 `DurableServerState`
+manifest-last transaction 才能发布
 crash-durable artifact truth。这不是目标 standalone artifact service、remote transport、bearer
 capability、authentication 或 multi-tenant authorization。
 

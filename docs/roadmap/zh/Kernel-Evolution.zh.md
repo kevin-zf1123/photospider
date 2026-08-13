@@ -1212,11 +1212,18 @@ runtime 只获得 invocation buffer。Committed receipt 在 worker/plugin failur
 
 Issue #105 现在为源码私有 WorkerManager/worker boundary 的该分离提供本地可执行证据。Private
 worker protocol v2 使用 128-KiB metadata-only control bound，且没有 v1/bulk fallback。Manager
-创建的 mode-0600、已 unlink occurrence 通过 read-only/write-only 继承 descriptor 传输 checkpoint
-与 candidate byte；reference 绑定 current tenant/Job/spec/attempt/worker/lease 以及精确 checkpoint
-或 output slot，但脱离 occurrence capability 不授予 authority。Worker 不能选择 path、quota、稳定
-ArtifactId、OutputCommitId 或 publication result。Manager 只有在 clean reap/writer closure，并对
-owner/mode/link、descriptor、size、resource 与 SHA-256 做精确复核后才暴露 candidate；既有 service
+record 与 supervision handle 建立后，该 owner 才在 service mutex 外创建 direction-reduced
+`AF_UNIX SOCK_STREAM` lane。Nonblocking manager endpoint 传输 checkpoint 与 candidate byte，worker
+endpoint 只有在精确 PID deadline 与 TERM/KILL/reap ownership 下才可能阻塞；reference 绑定 current
+tenant/Job/spec/attempt/worker/lease 以及精确 checkpoint 或 output slot，但脱离 stream capability
+不授予 authority。Worker 不能选择 path、quota、稳定 ArtifactId、OutputCommitId 或 publication
+result。Worker 会在执行前校验 checkpoint byte count、EOF 与 SHA-256。Manager 会在 completion
+handoff 前以有界 chunk 排空并 hash output，随后只有在 stream EOF、clean reap，并对 reference、
+descriptor、size、resource 与 SHA-256 做精确复核后才暴露 candidate。worker 关闭 output lane 并
+发送只含 metadata 的 Report 后保持存活且可被终止，直到 manager 完成关联与 image 重建，再
+返回一次不授予 service/artifact authority 且只含 identity 的 `CompletionReady`。Post-reap
+supervision 绝不读取 bulk lane，也不执行 filesystem I/O、blocking bulk transfer、bulk allocation
+或 content hash；既有 service
 与 durable store 仍拥有 current-attempt selection、retry、quota、manifest-last publication、
 idempotency、cancellation 与 recovery。这个同机 adapter 不是目标 authenticated network control
 plane、standalone artifact service、remote capability transport 或 multi-tenant authorization boundary。
@@ -1413,8 +1420,12 @@ manifest-last image artifact，支持经过授权的 checkpoint identity 以及 
 `RLIMIT_AS`，并使用带一个 bounded private protocol、精确 assignment/lease/PID fencing、
 heartbeat/runtime deadline、cancellation escalation、精确 reaping 与持续 supervision-handle
 drainage 的同进程 WorkerManager。其 protocol v2 control socket 只传输有界 attempt/Job/receipt/
-reference/descriptor/digest metadata；checkpoint 与 output byte 通过独立的 attempt-local anonymous-
-file descriptor 传输。Candidate 只有在 writer closure 与 manager 精确复核后才对 service 可见。
+reference/descriptor/digest metadata；checkpoint 与 output byte 通过独立的 attempt-local
+direction-reduced stream descriptor 传输。Manager 会在精确 worker 仍受 lifecycle deadline 约束时
+以有界 nonblocking chunk 传输这些 byte，并且不会在 reap 后排空 bulk data。Candidate 只有在
+worker 发出只含 metadata 的 Report 后仍可被终止，并等待只含 identity 的
+`CompletionReady`；manager 只有在精确 stream join 与 image 重建后才发送该确认。Candidate 只有在
+stream EOF、manager 精确复核与 clean reap 后才对 service 可见。
 Report 只有在 clean process exit 与 reap 后才具备资格；
 startup、exit、signal、channel、protocol、heartbeat、runtime 与 forced-cancellation failure 只
 影响拥有它的 attempt。Control plane 仍在 crash-durable artifact commit 与取消之间建立顺序，

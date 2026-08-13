@@ -21,10 +21,18 @@ capacity remains admission-only. The private closed protocol and exact lease
 fencing isolate startup, exit, signal, channel, protocol, heartbeat, runtime,
 and forced-cancellation failures to the owning attempt. Private worker protocol
 v2 limits control frames to 128 KiB of attempt/Job/artifact-reference metadata.
-Checkpoint and candidate image bytes instead use manager-created mode-0600,
-immediately unlinked, direction-scoped local file descriptors; manager
-acceptance waits for clean reap/writer closure and exact reference, owner/mode/
-link, descriptor, size, resource, and SHA-256 revalidation.
+Checkpoint and candidate image bytes instead use manager-created,
+direction-reduced local Unix stream descriptors. The registered supervisor
+creates them only after record/thread ownership and outside the service mutex;
+manager endpoints are nonblocking, while blocking transfer remains in the
+killable worker. Manager acceptance requires exact reference, descriptor,
+stream EOF/size, resource, and SHA-256 revalidation before clean-reap
+completion handoff. After closing the output lane and sending its metadata-only
+Report, the worker remains alive and terminable until the manager completes
+that join and replies with one identity-only `CompletionReady`; the
+acknowledgement grants no Job, quota, artifact, commit, or publication
+authority. Post-reap processing never reads the bulk lane and performs no data-
+plane filesystem I/O.
 
 That local slice preserves this decision's identity and authority ordering and
 provides real quota admission, crash durability, process-crash containment, and
@@ -320,13 +328,21 @@ Issue #105 replaces that historical bulk-control transport with private
 protocol v2. Every complete Report is bounded to 128 KiB of identity, outcome,
 diagnostic, image-descriptor, reference, size, and digest metadata; it contains
 no tight image bytes. Checkpoint and candidate bytes move only through exact
-manager-created, mode-0600, immediately unlinked, direction-scoped local file
-descriptors. A candidate above the accepted output/staging/retention envelope
+manager-created, direction-reduced local Unix streams. Manager endpoints are
+nonblocking and advance in bounded slices under the attempt's absolute
+lifecycle deadlines; blocking receive/send remains in the exactly owned
+worker. A candidate above the accepted output/staging/retention envelope
 becomes one bounded identity-preserving `Failed/Compute` Report with no image,
 while a finite hard `RLIMIT_FSIZE` below the accepted output-stage maximum
 fails the owning attempt as `WorkerStartup` before `fork` instead of silently
 narrowing that envelope. There is no 64-MiB compatibility or transport-size
-fallback. After cancellation delivery has been attempted, a socket-
+fallback. The worker closes its output lane, sends one metadata-only Report,
+and waits under the same exact process lifecycle for a matching identity-only
+`CompletionReady`. WorkerManager sends it only after EOF, size/hash/reference/
+descriptor/resource validation, and independent image reconstruction. If an
+already failed cancellation channel makes the reply impossible, a completely
+joined Report may retain its ordinary classification, but exact reap ends all
+bulk-lane access. After cancellation delivery has been attempted, a socket-
 system error likewise remains inside the bounded monitor: decoding stops, but
 exact process ownership and reap deadlines continue so signal/nonzero wait
 status or an already decoded Report outranks the weaker channel fact. While
@@ -370,10 +386,11 @@ output, and checkpoint bytes move through the data plane.
 The current #105 executable evidence applies this separation only to the
 source-private same-host WorkerManager/worker boundary. Its control reference
 is a non-authorizing join key bound to the complete current attempt/worker/
-lease and exact checkpoint or output slot; inherited descriptors provide the
-local occurrence access. The worker receives no path, artifact root, stable
+lease and exact checkpoint or output slot; directional inherited stream
+descriptors provide byte-transfer access. The worker receives no path,
+artifact root, stable
 ArtifactId/OutputCommitId mint, quota release, or publication capability.
-Anonymous stages disappear on descriptor closure, while only the existing
+Incomplete stream state disappears on descriptor closure, while only the existing
 `DurableServerState` manifest-last transaction can publish crash-durable
 artifact truth. This is not the target standalone artifact service, remote
 transport, bearer capability, authentication, or multi-tenant authorization.

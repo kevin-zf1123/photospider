@@ -1374,10 +1374,18 @@ WorkerManager owns its private bounded protocol, heartbeat/runtime deadlines,
 exact lease/PID fencing, cooperative cancellation, TERM/KILL escalation, and
 exact nonblocking `waitpid` reaping. Issue #105 makes that private protocol v2
 metadata-only under a 128-KiB control bound: checkpoint and candidate bytes use
-separate manager-created mode-0600 unlinked occurrences exposed through
-attempt-scoped direction-specific descriptors. The manager accepts no output
-until clean reap/writer closure and exact reference, slot, owner/mode/link,
-descriptor, size, resource, and SHA-256 validation. The worker receives no
+separate manager-created direction-reduced stream descriptors. Their manager
+endpoints are nonblocking, and a worker endpoint may block only while its exact
+PID remains under lifecycle deadlines and TERM/KILL/reap ownership. Checkpoint
+size/EOF/SHA-256 validation occurs inside that worker. Output is drained and
+hashed in bounded chunks before completion handoff; the manager accepts no
+output until stream EOF, clean reap, and exact reference, slot, descriptor,
+size, resource, and SHA-256 validation. After closing the output lane and
+sending its metadata-only Report, the worker remains alive and terminable until
+the manager completes validation and image reconstruction, then returns one
+identity-only `CompletionReady` that grants no service or artifact authority.
+Post-reap processing never reads the bulk lane and performs no filesystem I/O,
+blocking bulk transfer, bulk allocation, or content hash. The worker receives no
 artifact root, stable output transaction, quota, retry, or publication
 authority. Partial protocol headers and payloads are
 retained across short poll deadlines; cancellation-send failure is drained to

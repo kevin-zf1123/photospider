@@ -38,8 +38,16 @@ has no daemon route or installed codec, and is not composed into
 `photospiderd`. Its private worker protocol v2 is distinct from this local IPC
 v2: a 128-KiB control socket carries only attempt/Job/receipt/reference/
 descriptor/digest metadata, while checkpoint and candidate image bytes use
-manager-created mode-0600 unlinked occurrences through direction-scoped
-inherited descriptors. This is local executable separation, not an
+manager-created direction-reduced `AF_UNIX SOCK_STREAM` lanes through inherited
+descriptors. The manager endpoints are nonblocking; the worker may block only
+while its exact PID remains subject to absolute lifecycle deadlines and
+TERM/KILL/reap ownership. Checkpoint digest verification happens in the worker,
+output size/hash verification happens during bounded pre-handoff drainage, and
+the worker remains alive after its metadata-only Report until the manager
+returns one identity-only `CompletionReady` after the complete join and image
+reconstruction. That acknowledgement grants no service or artifact authority.
+Post-reap supervision never reads the bulk lane and performs no filesystem I/O
+or bulk transfer. This is local executable separation, not an
 authenticated network protocol or standalone artifact service. Its `TenantId`, `JobId`, `JobAttemptId`,
 `WorkerInstanceId`, `ArtifactId`, quota reservation, checkpoint, and commit
 receipt are independent source-private types; protocol-v2 compute ids,

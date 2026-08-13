@@ -1054,9 +1054,15 @@ WorkerManager。每个产品 attempt 都在一个全新、绝不复用的 `photo
 拥有其私有有界协议、heartbeat/runtime deadline、精确 lease/PID fencing、cooperative
 cancellation、TERM/KILL escalation 与精确非阻塞 `waitpid` reaping。Issue #105 使该 private
 protocol v2 在 128-KiB control bound 下只传 metadata：checkpoint 与 candidate byte 使用独立的
-manager-created mode-0600、已 unlink occurrence，并通过 attempt-scoped、direction-specific
-descriptor 暴露。Manager 只有在 clean reap/writer closure，并对 reference、slot、owner/mode/
-link、descriptor、size、resource 与 SHA-256 做精确复核后才接受 output。Worker 不获得 artifact
+manager-created direction-reduced stream descriptor。Manager endpoint 是 nonblocking；worker
+endpoint 只有在其精确 PID 仍受 lifecycle deadline 与 TERM/KILL/reap ownership 约束时才可能
+阻塞。Checkpoint size/EOF/SHA-256 在该 worker 内校验。Output 在 completion handoff 前以有界
+chunk 排空并 hash；Manager 只有在 stream EOF、clean reap，并对 reference、slot、descriptor、
+size、resource 与 SHA-256 做精确复核后才接受 output。worker 关闭 output lane 并发送只含
+metadata 的 Report 后，会保持存活且可被终止，直到 manager 完成校验与 image 重建，再返回
+一次只含 identity、且不授予 service 或 artifact authority 的 `CompletionReady`。Post-reap
+processing 绝不读取 bulk lane，也不执行 filesystem I/O、blocking bulk transfer、bulk allocation
+或 content hash。Worker 不获得 artifact
 root、稳定 output transaction、quota、retry 或 publication authority。短 poll deadline 之间会
 保留部分 protocol header 与 payload；cancellation 发送失败会继续有界排空 worker
 report/EOF/exit truth，而不会直接视为 forced cancellation。产品构造会在打开 durable root 前
