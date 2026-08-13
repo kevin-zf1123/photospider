@@ -1439,6 +1439,44 @@ TEST(WorkerSupervisor, RuntimeTimeoutTerminatesHeartbeatingWorker) {
       0U);
 }
 
+TEST(WorkerSupervisor,
+     OutputProgressCannotRenewAnExpiredAuthenticatedHeartbeatDeadline) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  options.heartbeat_timeout = 150ms;
+  options.attempt_runtime_timeout = 3s;
+  options.post_report_timeout = 2s;
+  options.io_timeout = 2s;
+  auto service = make_service(root.path(), std::move(options));
+
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.output.no-heartbeat"));
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+
+  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+  EXPECT_TRUE(terminal.attempt_settled);
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::WorkerHeartbeatTimeout)
+      << terminal.message;
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerRuntimeTimeout);
+  EXPECT_FALSE(terminal.output_receipt.has_value());
+  EXPECT_EQ(service->find_artifact(terminal.output_artifact_id), nullptr);
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+      0U);
+  const TenantQuotaSnapshot quota = service->quota_snapshot();
+  EXPECT_EQ(quota.active_attempts, 0U);
+  EXPECT_EQ(quota.cpu_slots, 0U);
+  EXPECT_EQ(quota.host_memory_bytes, 0U);
+  EXPECT_EQ(quota.output_bytes, 0U);
+  EXPECT_EQ(quota.staging_bytes, 0U);
+  EXPECT_EQ(quota.retention_bytes, 0U);
+  EXPECT_EQ(quota.retained_artifacts, 0U);
+  EXPECT_TRUE(quota.device_bytes.empty());
+}
+
 TEST(WorkerSupervisor, ReapDeadlineFailStopsWithoutBlockingFallback) {
   ScopedSupervisorRoot root;
   WorkerManagerOptions options = supervisor_options();
@@ -1805,10 +1843,12 @@ TEST(WorkerSupervisor,
 
 TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   ScopedSupervisorRoot root;
+  auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
   WorkerManagerOptions options = supervisor_options();
   options.heartbeat_timeout = 2s;
   options.attempt_runtime_timeout = 5s;
   options.io_timeout = 2s;
+  options.first_external_heartbeat_observed_for_test = heartbeat_observed;
   auto service = make_service(root.path(), std::move(options), nullptr,
                               bulk_data_plane_quota());
   const JobSpec spec(GraphArtifactId("fixture.former-control-bound-output"), 0,
@@ -1822,6 +1862,7 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Succeeded);
   EXPECT_TRUE(terminal.attempt_settled);
   EXPECT_EQ(terminal.failure, JobAttemptFailure::None);
+  EXPECT_TRUE(heartbeat_observed->load(std::memory_order_acquire));
   ASSERT_TRUE(terminal.output_receipt.has_value());
   const std::shared_ptr<const ArtifactRecord> artifact =
       service->find_artifact(terminal.output_artifact_id);

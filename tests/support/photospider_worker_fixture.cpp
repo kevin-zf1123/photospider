@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -42,6 +43,12 @@ constexpr std::chrono::milliseconds kFixtureCancelFragmentGap{27};
 constexpr std::size_t kFixtureFrameHeaderBytes = 12U;
 /** @brief One bulk byte beyond the former aggregate control-frame ceiling. */
 constexpr std::size_t kBulkPayloadAboveFormerControlBytes = (64U << 20U) + 1U;
+/** @brief Exact finite output used to prove bulk bytes are not heartbeats. */
+constexpr std::size_t kHeartbeatlessOutputBytes = 1U << 20U;
+/** @brief Fixed paced-output send slice below the local socket capacity. */
+constexpr std::size_t kHeartbeatlessOutputChunkBytes = 64U << 10U;
+/** @brief Finite inter-slice delay that crosses the heartbeat deadline. */
+constexpr std::chrono::milliseconds kHeartbeatlessOutputChunkGap{30};
 /** @brief Graph-artifact mode prefix carrying one forbidden inherited fd. */
 constexpr std::string_view kClosedDescriptorPrefix = "fixture.fd.closed.";
 /** @brief Mode proving manager deadlines cross exec without legacy caps. */
@@ -138,6 +145,93 @@ JobAttemptReport former_control_bound_output_report(
   report.image = make_aligned_cpu_image_buffer(static_cast<int>(payload_bytes),
                                                1, 1, DataType::UINT8, 64U);
   return report;
+}
+
+/**
+ * @brief Creates one finite success candidate for heartbeat arbitration.
+ * @param assignment Exact current assignment.
+ * @return One tight one-MiB CPU image whose staged transfer lasts 480 ms.
+ * @throws Image allocation failures unchanged.
+ * @note The fixed transfer duration exceeds the integration test's heartbeat
+ * deadline but remains far below its runtime and observer bounds. This is not
+ * a permanent stall fixture.
+ */
+JobAttemptReport heartbeatless_output_report(const JobAssignment& assignment) {
+  JobAttemptReport report;
+  report.identity = assignment.identity;
+  report.outcome = JobAttemptOutcome::Succeeded;
+  report.settled = true;
+  report.failure = JobAttemptFailure::None;
+  report.image = make_aligned_cpu_image_buffer(
+      static_cast<int>(kHeartbeatlessOutputBytes), 1, 1, DataType::UINT8, 64U);
+  return report;
+}
+
+/**
+ * @brief Owns metadata-first fixture output and its retained byte source.
+ * @throws Nothing for value operations; members may allocate beforehand.
+ * @note `prepared.report.image` is empty while `image` retains the exact
+ * worker-side source until the paced data-plane send completes.
+ */
+struct HeartbeatlessPreparedOutput final {
+  /** @brief Metadata-only Report sent before any output bytes. */
+  PreparedWorkerReport prepared;
+  /** @brief Exact worker-owned source retained outside control metadata. */
+  ImageBuffer image;
+};
+
+/**
+ * @brief Prepares exact metadata for one heartbeatless fixture candidate.
+ * @param report Settled successful report with one tight CPU image.
+ * @param output_stage Exact manager-assigned stage reference and bound.
+ * @return Image-free Report metadata plus retained worker source bytes.
+ * @throws std::invalid_argument for a malformed report, image, or stage.
+ * @throws std::overflow_error when tight payload arithmetic overflows.
+ * @throws Hashing and allocation failures unchanged.
+ * @note This fixture-only helper deliberately mirrors the metadata-first
+ * protocol contract so the RED case does not depend on a permanent stall or
+ * control-frame payload bytes.
+ */
+HeartbeatlessPreparedOutput prepare_heartbeatless_output(
+    JobAttemptReport report, const WorkerOutputStageReference& output_stage) {
+  if (!report.image.has_value() ||
+      report.outcome != JobAttemptOutcome::Succeeded || !report.settled ||
+      report.failure != JobAttemptFailure::None ||
+      output_stage.reference_id.empty() ||
+      output_stage.output_slot_id.value().empty()) {
+    throw std::invalid_argument(
+        "heartbeatless fixture output metadata is invalid");
+  }
+  validate_image_buffer(*report.image);
+  ImageBuffer image = *report.image;
+  const std::size_t row_bytes = image_buffer_row_bytes(image);
+  if (row_bytes > std::numeric_limits<std::size_t>::max() /
+                      static_cast<std::size_t>(image.height)) {
+    throw std::overflow_error("heartbeatless fixture output size overflowed");
+  }
+  const std::size_t payload_bytes =
+      row_bytes * static_cast<std::size_t>(image.height);
+  if (payload_bytes != kHeartbeatlessOutputBytes ||
+      payload_bytes > output_stage.maximum_payload_bytes) {
+    throw std::invalid_argument(
+        "heartbeatless fixture output exceeds its assigned stage");
+  }
+  WorkerOutputDataReference reference;
+  reference.reference_id = output_stage.reference_id;
+  reference.output_slot_id = output_stage.output_slot_id;
+  reference.descriptor.width = image.width;
+  reference.descriptor.height = image.height;
+  reference.descriptor.channels = image.channels;
+  reference.descriptor.type = image.type;
+  reference.descriptor.row_bytes = row_bytes;
+  reference.descriptor.payload_bytes = payload_bytes;
+  reference.content_digest = hash_image_artifact_content(image);
+  report.image.reset();
+  HeartbeatlessPreparedOutput output;
+  output.prepared =
+      PreparedWorkerReport{std::move(report), std::move(reference)};
+  output.image = std::move(image);
+  return output;
 }
 
 /**
@@ -249,28 +343,37 @@ class FixtureDataDescriptor final {
 };
 
 /**
- * @brief Stages one fixture candidate and returns metadata-only report facts.
- * @param output_data Non-null exact inherited output-stage descriptor owner.
+ * @brief Fixture-owned metadata-first Report and retained output source.
+ * @throws Nothing for value operations; preparation may allocate beforehand.
+ * @note Fault modes may mutate `report` metadata without changing `output` so
+ * manager-side exact joins are exercised against real streamed bytes.
+ */
+struct PreparedFixtureReportTransfer final {
+  /** @brief Image-free control Report sent before the data-plane source. */
+  PreparedWorkerReport report;
+  /** @brief Original candidate metadata and retained worker byte source. */
+  PreparedWorkerOutputTransfer output;
+};
+
+/**
+ * @brief Prepares one fixture candidate without sending output bytes.
  * @param report Complete fixture report whose image, if any, is consumed.
  * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact manager-assigned private stage metadata.
- * @return Image-free report plus optional staged-output metadata.
- * @throws std::invalid_argument for null ownership or invalid report metadata.
- * @throws WorkerArtifactDataPlaneError and system/allocation/overflow failures
- * from bounded staging unchanged.
- * @note The send descriptor is closed before returning, making EOF the exact
- * candidate-lane commit marker before control metadata is formed.
+ * @return Metadata-first Report plus retained tight worker source.
+ * @throws Validation, hashing, allocation, and overflow failures unchanged.
+ * @note The returned Report contains no image bytes. Its caller sends this
+ * metadata first and retains a killable worker during later bulk transfer.
  */
-PreparedWorkerReport stage_fixture_report(
-    FixtureDataDescriptor* output_data, JobAttemptReport report,
-    const JobSpec& spec, const WorkerOutputStageReference& output_stage) {
-  if (output_data == nullptr) {
-    throw std::invalid_argument("fixture output descriptor owner is null");
-  }
-  std::optional<WorkerOutputDataReference> output =
-      stage_worker_output(output_data->get(), spec, output_stage, &report);
-  output_data->reset();
-  return PreparedWorkerReport{std::move(report), std::move(output)};
+PreparedFixtureReportTransfer prepare_fixture_report(
+    JobAttemptReport report, const JobSpec& spec,
+    const WorkerOutputStageReference& output_stage) {
+  PreparedWorkerOutputTransfer output =
+      prepare_worker_output_transfer(spec, output_stage, &report);
+  PreparedFixtureReportTransfer prepared;
+  prepared.report = PreparedWorkerReport{std::move(report), output.reference};
+  prepared.output = std::move(output);
+  return prepared;
 }
 
 /**
@@ -316,7 +419,8 @@ void await_fixture_completion_ready(
 /**
  * @brief Sends prepared metadata and awaits completion readiness when enabled.
  * @param fd Connected manager control socket.
- * @param prepared Complete image-free report and optional output reference.
+ * @param output_data Non-null exact inherited output-stage descriptor owner.
+ * @param prepared Complete image-free report and retained output source.
  * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact stage metadata expected by the encoder.
  * @param io_timeout Positive shared send/acknowledgement bound.
@@ -327,15 +431,121 @@ void await_fixture_completion_ready(
  * unchanged.
  */
 void send_prepared_fixture_report(
-    int fd, const PreparedWorkerReport& prepared, const JobSpec& spec,
+    int fd, FixtureDataDescriptor* output_data,
+    const PreparedFixtureReportTransfer& prepared, const JobSpec& spec,
     const WorkerOutputStageReference& output_stage,
     std::chrono::milliseconds io_timeout, bool await_completion = true) {
-  const auto deadline =
-      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout);
-  send_worker_report(fd, prepared, spec, output_stage, deadline);
-  if (await_completion) {
-    await_fixture_completion_ready(fd, prepared, deadline);
+  if (output_data == nullptr) {
+    throw std::invalid_argument("fixture output descriptor owner is null");
   }
+  send_worker_report(
+      fd, prepared.report, spec, output_stage,
+      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
+  send_worker_output_transfer(output_data->get(), prepared.output);
+  output_data->reset();
+  if (await_completion) {
+    await_fixture_completion_ready(
+        fd, prepared.report,
+        checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
+  }
+}
+
+/**
+ * @brief Sends one fixture heartbeat for the exact current lease.
+ * @param fd Connected manager socket.
+ * @param identity Exact current attempt identity.
+ * @param io_timeout Positive manager-selected write bound.
+ * @return Nothing after the complete Heartbeat frame is written.
+ * @throws std::invalid_argument for an invalid descriptor, identity, or I/O
+ * duration.
+ * @throws std::overflow_error if the captured base cannot represent the I/O
+ * deadline.
+ * @throws std::bad_alloc when deadline diagnostics or frame encoding exhaust
+ * memory.
+ * @throws WorkerProtocolTimeout or WorkerChannelError when bounded transport
+ * fails.
+ * @note The connected descriptor remains owned by the fixture control flow.
+ */
+void send_heartbeat(int fd, const AttemptIdentity& identity,
+                    std::chrono::milliseconds io_timeout) {
+  send_worker_identity(
+      fd, WorkerMessageKind::Heartbeat, identity,
+      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
+}
+
+/**
+ * @brief Sends one metadata-first candidate with real concurrent heartbeats.
+ * @param fd Connected manager control socket.
+ * @param output_data Non-null exact inherited output-stage descriptor owner.
+ * @param prepared Complete image-free report and retained output source.
+ * @param spec Exact immutable assignment JobSpec.
+ * @param output_stage Exact stage metadata expected by the encoder.
+ * @param io_timeout Positive shared control deadline bound.
+ * @return Nothing after output EOF and exact completion acknowledgement.
+ * @throws Protocol, heartbeat, stream, thread, and validation failures
+ * unchanged after joining the heartbeat thread.
+ * @note Report is sent before the heartbeat thread starts, so every emitted
+ * heartbeat is a genuine control-plane liveness fact. Output starts only after
+ * that thread completes its first bounded Heartbeat send, making the large
+ * transfer assertion deterministic. The main fixture thread stays blocked
+ * only in the killable worker.
+ */
+void send_prepared_fixture_report_with_heartbeats(
+    int fd, FixtureDataDescriptor* output_data,
+    const PreparedFixtureReportTransfer& prepared, const JobSpec& spec,
+    const WorkerOutputStageReference& output_stage,
+    std::chrono::milliseconds io_timeout) {
+  if (output_data == nullptr) {
+    throw std::invalid_argument("fixture output descriptor owner is null");
+  }
+  send_worker_report(
+      fd, prepared.report, spec, output_stage,
+      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
+
+  std::atomic<bool> done{false};
+  std::atomic<int> first_heartbeat_state{0};
+  std::exception_ptr heartbeat_error;
+  std::thread heartbeat([&] {
+    try {
+      send_heartbeat(fd, prepared.report.report.identity, io_timeout);
+      first_heartbeat_state.store(1, std::memory_order_release);
+      while (!done.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(kFixtureHeartbeatCadence);
+        if (!done.load(std::memory_order_acquire)) {
+          send_heartbeat(fd, prepared.report.report.identity, io_timeout);
+        }
+      }
+    } catch (...) {
+      heartbeat_error = std::current_exception();
+      first_heartbeat_state.store(2, std::memory_order_release);
+    }
+  });
+  while (first_heartbeat_state.load(std::memory_order_acquire) == 0) {
+    std::this_thread::yield();
+  }
+  if (first_heartbeat_state.load(std::memory_order_acquire) == 2) {
+    done.store(true, std::memory_order_release);
+    heartbeat.join();
+    std::rethrow_exception(heartbeat_error);
+  }
+  std::exception_ptr output_error;
+  try {
+    send_worker_output_transfer(output_data->get(), prepared.output);
+  } catch (...) {
+    output_error = std::current_exception();
+  }
+  done.store(true, std::memory_order_release);
+  heartbeat.join();
+  if (output_error != nullptr) {
+    std::rethrow_exception(output_error);
+  }
+  if (heartbeat_error != nullptr) {
+    std::rethrow_exception(heartbeat_error);
+  }
+  output_data->reset();
+  await_fixture_completion_ready(
+      fd, prepared.report,
+      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
 }
 
 /**
@@ -358,10 +568,10 @@ void send_fixture_report(int fd, FixtureDataDescriptor* output_data,
                          const WorkerOutputStageReference& output_stage,
                          std::chrono::milliseconds io_timeout,
                          bool await_completion = true) {
-  const PreparedWorkerReport prepared =
-      stage_fixture_report(output_data, std::move(report), spec, output_stage);
-  send_prepared_fixture_report(fd, prepared, spec, output_stage, io_timeout,
-                               await_completion);
+  const PreparedFixtureReportTransfer prepared =
+      prepare_fixture_report(std::move(report), spec, output_stage);
+  send_prepared_fixture_report(fd, output_data, prepared, spec, output_stage,
+                               io_timeout, await_completion);
 }
 
 /**
@@ -437,6 +647,53 @@ void write_exact_fixture_bytes(int fd, const std::byte* source,
       throw std::runtime_error("fixture fragmented-frame write failed");
     }
     offset += static_cast<std::size_t>(written);
+  }
+}
+
+/**
+ * @brief Sends one finite output through fixed delayed stream slices.
+ * @param fd Exact worker-side output descriptor.
+ * @param image Valid tight one-row CPU image retained outside the Report.
+ * @return Nothing after all bytes are sent in fixed slices.
+ * @throws std::invalid_argument for an invalid descriptor or image shape.
+ * @throws std::system_error for a non-retryable stream send failure.
+ * @note Linux uses `MSG_NOSIGNAL`; Darwin inherits `SO_NOSIGPIPE` from the
+ * product lane creator. Each 64-KiB slice is followed by a finite 30-ms gap,
+ * so old manager code cannot claim a permanent-stall failure as RED evidence.
+ */
+void send_heartbeatless_output(int fd, const ImageBuffer& image) {
+  validate_image_buffer(image);
+  if (fd < 0 || image.height != 1 ||
+      image_buffer_row_bytes(image) != kHeartbeatlessOutputBytes) {
+    throw std::invalid_argument(
+        "heartbeatless fixture output source is invalid");
+  }
+  const std::byte* bytes = image_buffer_row_data(image, 0);
+  std::size_t offset = 0U;
+  while (offset != kHeartbeatlessOutputBytes) {
+    const std::size_t slice = std::min(kHeartbeatlessOutputChunkBytes,
+                                       kHeartbeatlessOutputBytes - offset);
+    std::size_t sent_offset = 0U;
+    while (sent_offset != slice) {
+#ifdef MSG_NOSIGNAL
+      constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+      constexpr int kSendFlags = 0;
+#endif
+      const ssize_t sent = ::send(fd, bytes + offset + sent_offset,
+                                  slice - sent_offset, kSendFlags);
+      if (sent < 0 && errno == EINTR) {
+        continue;
+      }
+      if (sent <= 0) {
+        throw std::system_error(errno == 0 ? EPIPE : errno,
+                                std::generic_category(),
+                                "send heartbeatless fixture output");
+      }
+      sent_offset += static_cast<std::size_t>(sent);
+    }
+    offset += slice;
+    std::this_thread::sleep_for(kHeartbeatlessOutputChunkGap);
   }
 }
 
@@ -573,29 +830,6 @@ void send_fragmented_report(int fd, const PreparedWorkerReport& report,
   }
   close_fixture_fd(capture[0]);
   close_fixture_fd(capture[1]);
-}
-
-/**
- * @brief Sends one fixture heartbeat for the exact current lease.
- * @param fd Connected manager socket.
- * @param identity Exact current attempt identity.
- * @param io_timeout Positive manager-selected write bound.
- * @return Nothing after the complete Heartbeat frame is written.
- * @throws std::invalid_argument for an invalid descriptor, identity, or I/O
- * duration.
- * @throws std::overflow_error if the captured base cannot represent the I/O
- * deadline.
- * @throws std::bad_alloc when deadline diagnostics or frame encoding exhaust
- * memory.
- * @throws WorkerProtocolTimeout or WorkerChannelError when bounded transport
- * fails.
- * @note The connected descriptor remains owned by the fixture control flow.
- */
-void send_heartbeat(int fd, const AttemptIdentity& identity,
-                    std::chrono::milliseconds io_timeout) {
-  send_worker_identity(
-      fd, WorkerMessageKind::Heartbeat, identity,
-      checked_worker_deadline(std::chrono::steady_clock::now(), io_timeout));
 }
 
 /**
@@ -1031,13 +1265,16 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
   }
   if (mode == "fixture.fragmented.report") {
     JobAttemptReport report = success_report(assignment);
-    const PreparedWorkerReport prepared_report =
-        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
-                             prepared.data_plane.output);
-    send_fragmented_report(launch.control_fd, prepared_report, *assignment.spec,
-                           prepared.data_plane.output, launch.io_timeout);
+    const PreparedFixtureReportTransfer prepared_report =
+        prepare_fixture_report(std::move(report), *assignment.spec,
+                               prepared.data_plane.output);
+    send_fragmented_report(launch.control_fd, prepared_report.report,
+                           *assignment.spec, prepared.data_plane.output,
+                           launch.io_timeout);
+    send_worker_output_transfer(output_data.get(), prepared_report.output);
+    output_data.reset();
     await_fixture_completion_ready(
-        launch.control_fd, prepared_report,
+        launch.control_fd, prepared_report.report,
         checked_worker_deadline(std::chrono::steady_clock::now(),
                                 launch.io_timeout));
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
@@ -1047,72 +1284,88 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     heartbeat_for(launch.control_fd, assignment.identity,
                   std::chrono::milliseconds(300), launch.io_timeout);
   }
+  if (mode == "fixture.output.no-heartbeat") {
+    HeartbeatlessPreparedOutput output = prepare_heartbeatless_output(
+        heartbeatless_output_report(assignment), prepared.data_plane.output);
+    send_worker_report(launch.control_fd, output.prepared, *assignment.spec,
+                       prepared.data_plane.output,
+                       checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               launch.io_timeout));
+    send_heartbeatless_output(output_data.get(), output.image);
+    output_data.reset();
+    await_fixture_completion_ready(
+        launch.control_fd, output.prepared,
+        checked_worker_deadline(std::chrono::steady_clock::now(),
+                                launch.io_timeout));
+    static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
+    return 0;
+  }
   if (mode == kFormerControlBoundOutputMode) {
     JobAttemptReport report = former_control_bound_output_report(assignment);
-    send_fixture_report(launch.control_fd, &output_data, std::move(report),
-                        *assignment.spec, prepared.data_plane.output,
-                        launch.io_timeout);
+    const PreparedFixtureReportTransfer prepared_report =
+        prepare_fixture_report(std::move(report), *assignment.spec,
+                               prepared.data_plane.output);
+    send_prepared_fixture_report_with_heartbeats(
+        launch.control_fd, &output_data, prepared_report, *assignment.spec,
+        prepared.data_plane.output, launch.io_timeout);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
   if (mode == "fixture.data.digest-mismatch") {
     JobAttemptReport report = success_report(assignment);
-    PreparedWorkerReport prepared_report =
-        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
-                             prepared.data_plane.output);
-    if (!prepared_report.output.has_value()) {
+    PreparedFixtureReportTransfer prepared_report = prepare_fixture_report(
+        std::move(report), *assignment.spec, prepared.data_plane.output);
+    if (!prepared_report.report.output.has_value()) {
       return 38;
     }
-    prepared_report.output->content_digest.bytes.at(0U) ^= std::byte{0x01};
-    send_prepared_fixture_report(launch.control_fd, prepared_report,
-                                 *assignment.spec, prepared.data_plane.output,
-                                 launch.io_timeout);
+    prepared_report.report.output->content_digest.bytes.at(0U) ^=
+        std::byte{0x01};
+    send_prepared_fixture_report(launch.control_fd, &output_data,
+                                 prepared_report, *assignment.spec,
+                                 prepared.data_plane.output, launch.io_timeout);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
   if (mode == "fixture.data.reference-mismatch") {
     JobAttemptReport report = success_report(assignment);
-    PreparedWorkerReport prepared_report =
-        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
-                             prepared.data_plane.output);
-    if (!prepared_report.output.has_value()) {
+    PreparedFixtureReportTransfer prepared_report = prepare_fixture_report(
+        std::move(report), *assignment.spec, prepared.data_plane.output);
+    if (!prepared_report.report.output.has_value()) {
       return 39;
     }
     WorkerOutputStageReference forged_stage = prepared.data_plane.output;
     forged_stage.reference_id.push_back('x');
-    prepared_report.output->reference_id = forged_stage.reference_id;
-    send_prepared_fixture_report(launch.control_fd, prepared_report,
-                                 *assignment.spec, forged_stage,
-                                 launch.io_timeout);
+    prepared_report.report.output->reference_id = forged_stage.reference_id;
+    send_prepared_fixture_report(launch.control_fd, &output_data,
+                                 prepared_report, *assignment.spec,
+                                 forged_stage, launch.io_timeout);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
   if (mode == "fixture.data.descriptor-mismatch") {
     JobAttemptReport report = success_report(assignment);
-    PreparedWorkerReport prepared_report =
-        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
-                             prepared.data_plane.output);
-    if (!prepared_report.output.has_value()) {
+    PreparedFixtureReportTransfer prepared_report = prepare_fixture_report(
+        std::move(report), *assignment.spec, prepared.data_plane.output);
+    if (!prepared_report.report.output.has_value()) {
       return 40;
     }
-    prepared_report.output->descriptor.width = 2;
-    prepared_report.output->descriptor.row_bytes = 8U;
-    prepared_report.output->descriptor.payload_bytes = 8U;
-    send_prepared_fixture_report(launch.control_fd, prepared_report,
-                                 *assignment.spec, prepared.data_plane.output,
-                                 launch.io_timeout);
+    prepared_report.report.output->descriptor.width = 2;
+    prepared_report.report.output->descriptor.row_bytes = 8U;
+    prepared_report.report.output->descriptor.payload_bytes = 8U;
+    send_prepared_fixture_report(launch.control_fd, &output_data,
+                                 prepared_report, *assignment.spec,
+                                 prepared.data_plane.output, launch.io_timeout);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
   if (mode == "fixture.data.stale-attempt") {
     JobAttemptReport report = success_report(assignment);
-    PreparedWorkerReport prepared_report =
-        stage_fixture_report(&output_data, std::move(report), *assignment.spec,
-                             prepared.data_plane.output);
-    ++prepared_report.report.identity.worker_lease_generation.value;
-    send_prepared_fixture_report(launch.control_fd, prepared_report,
-                                 *assignment.spec, prepared.data_plane.output,
-                                 launch.io_timeout);
+    PreparedFixtureReportTransfer prepared_report = prepare_fixture_report(
+        std::move(report), *assignment.spec, prepared.data_plane.output);
+    ++prepared_report.report.report.identity.worker_lease_generation.value;
+    send_prepared_fixture_report(launch.control_fd, &output_data,
+                                 prepared_report, *assignment.spec,
+                                 prepared.data_plane.output, launch.io_timeout);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }

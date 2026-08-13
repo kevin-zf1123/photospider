@@ -160,15 +160,15 @@ struct PreparedWorkerAssignment final {
 };
 
 /**
- * @brief One metadata-only worker report plus optional staged-output reference.
+ * @brief One metadata-first worker report plus optional output reference.
  * @throws Nothing for default construction; retained values may allocate.
- * @note `report.image` MUST be empty. A successful worker stages bytes through
- * its separate output descriptor, then carries only descriptor/digest/size and
- * the exact assigned reference in `output`. WorkerManager nonblockingly drains,
- * incrementally hashes, and joins those bytes before replying with one exact
- * `CompletionReady` acknowledgement. The worker remains alive and killable
- * until that acknowledgement; clean reap performs no data access or filesystem
- * I/O.
+ * @note `report.image` MUST be empty. A successful worker sends this metadata
+ * before streaming bytes through its separate output descriptor. WorkerManager
+ * creates one exact lazy final owner only for the live identity-current worker,
+ * then directly receives and incrementally hashes one fixed slice per deadline
+ * arbitration before replying with exact `CompletionReady`. The worker remains
+ * alive, heartbeating, and killable until that acknowledgement; clean reap
+ * performs no bulk-data or filesystem I/O.
  */
 struct PreparedWorkerReport final {
   /** @brief Exact attempt outcome/settlement/failure facts without bytes. */
@@ -347,9 +347,10 @@ AttemptIdentity decode_worker_identity(const WorkerProtocolFrame& frame,
  * @param output_stage Exact Assignment output reference and byte maximum.
  * @return Complete private Report control frame ready for bounded transport.
  * @throws Contract, metadata, allocation, or control-bound failures.
- * @note Image bytes must already have been sent through the separate data-plane
- * lane. The encoder rejects rather than serializes an `ImageBuffer` or a
- * mismatched output reference. `send_worker_report()` is the sole wrapper.
+ * @note Image bytes must not be serialized here. The worker sends this frame
+ * before its separately retained source bytes, and the encoder rejects an
+ * `ImageBuffer` or mismatched output reference. `send_worker_report()` is the
+ * sole wrapper.
  */
 WorkerProtocolFrame encode_worker_report(
     const PreparedWorkerReport& report, const JobSpec& spec,
@@ -375,13 +376,15 @@ void send_worker_report(int fd, const PreparedWorkerReport& report,
  * @param frame Valid bounded frame expected to contain Report.
  * @param spec Immutable JobSpec used for digest and output-slot joins.
  * @param output_stage Exact Assignment output reference and maximum.
- * @return Image-free attempt facts plus optional staged-output metadata.
+ * @return Image-free attempt facts plus optional exact output metadata.
  * @throws WorkerProtocolError for malformed, inconsistent, oversized, or
  * trailing metadata, or for any encoded image-bearing report shape.
  * @throws std::bad_alloc when bounded metadata reconstruction exhausts memory.
- * @note WorkerManager separately drains the nonblocking output lane under the
- * attempt's absolute lifecycle deadlines, incrementally hashes bounded chunks,
- * and completes the metadata join before clean-reap completion handoff.
+ * @note WorkerManager validates this metadata while the exact PID remains
+ * owned, creates the exact final owner, and separately drains one nonblocking
+ * output slice between absolute lifecycle arbitration points. Only valid
+ * Heartbeat frames renew liveness; output progress never does. The manager
+ * completes the digest/EOF join before clean-reap completion handoff.
  */
 PreparedWorkerReport decode_worker_report(
     const WorkerProtocolFrame& frame, const JobSpec& spec,

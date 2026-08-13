@@ -5,13 +5,14 @@
 #include "server/worker_artifact_data_plane.hpp"
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
@@ -159,8 +160,9 @@ void configure_stream_descriptor(int descriptor, bool nonblocking) {
 }
 
 /**
- * @brief Suppresses process-wide SIGPIPE for one exact sending endpoint.
- * @param descriptor Valid AF_UNIX stream endpoint used for sending.
+ * @brief Installs local SIGPIPE suppression on one exact stream endpoint.
+ * @param descriptor Valid AF_UNIX endpoint, including a direction-reduced
+ * receiver whose reverse-send rejection must remain process-safe.
  * @return Nothing after platform-specific local suppression is installed.
  * @throws std::system_error when Darwin rejects `SO_NOSIGPIPE`.
  * @note Linux uses `MSG_NOSIGNAL` on every send and needs no socket option.
@@ -193,6 +195,8 @@ StreamLane create_stream_lane() {
                   ScopedDescriptor(descriptors[1])};
   configure_stream_descriptor(lane.worker.get(), false);
   configure_stream_descriptor(lane.manager.get(), true);
+  configure_no_sigpipe(lane.worker.get());
+  configure_no_sigpipe(lane.manager.get());
   return lane;
 }
 
@@ -207,7 +211,6 @@ StreamLane create_checkpoint_lane() {
     throw std::system_error(errno, std::generic_category(),
                             "reduce worker checkpoint stream direction");
   }
-  configure_no_sigpipe(lane.manager.get());
   return lane;
 }
 
@@ -222,7 +225,6 @@ StreamLane create_output_lane() {
     throw std::system_error(errno, std::generic_category(),
                             "reduce worker output stream direction");
   }
-  configure_no_sigpipe(lane.worker.get());
   return lane;
 }
 
@@ -422,6 +424,102 @@ void validate_tight_descriptor(const ArtifactImageDescriptor& descriptor) {
       descriptor.payload_bytes != row_bytes * height) {
     throw std::invalid_argument("worker artifact descriptor is inconsistent");
   }
+}
+
+/**
+ * @brief Releases one exact anonymous candidate mapping at final owner death.
+ * @throws Nothing; `munmap` failure cannot be recovered during destruction.
+ * @note `mapped_bytes` is the exact logical candidate length supplied to
+ * `mmap`; the kernel may internally round its virtual mapping to page size.
+ */
+struct AnonymousOutputMappingDeleter final {
+  /** @brief Exact byte length originally passed to `mmap`. */
+  std::size_t mapped_bytes = 0U;
+
+  /**
+   * @brief Releases the retained mapping once.
+   * @param mapping Exact mapping base, or null after an empty move.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void operator()(void* mapping) const noexcept {
+    if (mapping != nullptr && mapped_bytes != 0U) {
+      static_cast<void>(::munmap(mapping, mapped_bytes));
+    }
+  }
+};
+
+/**
+ * @brief Validates one metadata-first candidate before mapping or hydration.
+ * @param assignment Exact manager-derived output stage.
+ * @param report Metadata-only worker outcome facts.
+ * @param output Optional metadata-only candidate reference.
+ * @return Nothing when report shape, stage, descriptor, and size join.
+ * @throws WorkerArtifactDataPlaneError for any mismatch.
+ * @note This check touches no candidate byte and performs no descriptor or
+ * filesystem I/O.
+ */
+void validate_output_report_metadata(
+    const WorkerOutputStageReference& assignment,
+    const JobAttemptReport& report,
+    const std::optional<WorkerOutputDataReference>& output) {
+  const bool successful_shape =
+      report.outcome == JobAttemptOutcome::Succeeded && report.settled &&
+      report.failure == JobAttemptFailure::None;
+  if (report.image.has_value() || successful_shape != output.has_value()) {
+    throw WorkerArtifactDataPlaneError(
+        "worker output metadata does not match its report shape");
+  }
+  if (!output.has_value()) {
+    return;
+  }
+  if (output->reference_id != assignment.reference_id ||
+      output->output_slot_id != assignment.output_slot_id) {
+    throw WorkerArtifactDataPlaneError(
+        "worker output metadata does not join its assigned stage");
+  }
+  try {
+    validate_tight_descriptor(output->descriptor);
+  } catch (const std::exception& error) {
+    throw WorkerArtifactDataPlaneError(
+        std::string("worker output descriptor is invalid: ") + error.what());
+  }
+  if (output->descriptor.payload_bytes > assignment.maximum_payload_bytes) {
+    throw WorkerArtifactDataPlaneError(
+        "worker output-stage size exceeds its assigned stage");
+  }
+}
+
+/**
+ * @brief Creates one lazy pathless exact-length tight CPU mapping.
+ * @param descriptor Valid positive tight output descriptor.
+ * @return `ImageBuffer` whose logical capacity is exactly payload bytes.
+ * @throws WorkerArtifactDataPlaneError when anonymous mapping fails.
+ * @throws std::bad_alloc when the shared owner control block cannot allocate.
+ * @note `mmap` reserves the contiguous virtual range without a bytewise
+ * initialization pass; manager receives later populate it in fixed slices.
+ */
+ImageBuffer make_anonymous_output_image(
+    const ArtifactImageDescriptor& descriptor) {
+  void* mapping =
+      ::mmap(nullptr, descriptor.payload_bytes, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (mapping == MAP_FAILED) {
+    throw WorkerArtifactDataPlaneError(
+        std::string("worker output anonymous mapping failed: ") +
+        std::strerror(errno));
+  }
+  std::shared_ptr<void> owner(
+      mapping, AnonymousOutputMappingDeleter{descriptor.payload_bytes});
+  ImageBuffer image;
+  image.width = descriptor.width;
+  image.height = descriptor.height;
+  image.channels = descriptor.channels;
+  image.type = descriptor.type;
+  image.device = Device::CPU;
+  image.step = descriptor.row_bytes;
+  image.data = std::move(owner);
+  return image;
 }
 
 /**
@@ -661,25 +759,36 @@ void WorkerArtifactDataPlane::close_manager_checkpoint_descriptor() noexcept {
 
 /** @copydoc ps::server::WorkerArtifactDataPlane::receive_output_chunk */
 WorkerDataPlaneIoStatus WorkerArtifactDataPlane::receive_output_chunk(
-    std::vector<std::byte>* payload) {
-  if (payload == nullptr) {
-    throw std::invalid_argument("worker output stream destination is null");
+    std::byte* payload, std::size_t payload_size, std::size_t* offset) {
+  if (offset == nullptr || *offset > payload_size ||
+      (payload_size != 0U && payload == nullptr)) {
+    throw std::invalid_argument("worker output stream destination is invalid");
   }
-  std::array<std::byte, kDataPlaneChunkBytes> chunk{};
+  if (payload_size > assignment_metadata_.output.maximum_payload_bytes) {
+    throw WorkerArtifactDataPlaneError(
+        "worker output destination exceeds its assigned stage");
+  }
+  std::byte excess{};
+  const bool checking_commit = *offset == payload_size;
+  std::byte* destination = checking_commit ? &excess : payload + *offset;
+  const std::size_t requested =
+      checking_commit ? 1U
+                      : std::min(kDataPlaneChunkBytes, payload_size - *offset);
   const ssize_t received =
-      ::recv(manager_output_descriptor_, chunk.data(), chunk.size(), 0);
+      ::recv(manager_output_descriptor_, destination, requested, 0);
   if (received > 0) {
-    const std::size_t size = static_cast<std::size_t>(received);
-    const std::size_t maximum =
-        assignment_metadata_.output.maximum_payload_bytes;
-    if (payload->size() > maximum || size > maximum - payload->size()) {
+    if (checking_commit) {
       throw WorkerArtifactDataPlaneError(
           "worker output stream exceeds its assigned stage");
     }
-    payload->insert(payload->end(), chunk.begin(), chunk.begin() + received);
+    *offset += static_cast<std::size_t>(received);
     return WorkerDataPlaneIoStatus::Progress;
   }
   if (received == 0) {
+    if (*offset != payload_size) {
+      throw WorkerArtifactDataPlaneError(
+          "worker output-stage size exceeds or differs from metadata");
+    }
     return WorkerDataPlaneIoStatus::EndOfStream;
   }
   if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -695,36 +804,47 @@ void WorkerArtifactDataPlane::close_manager_output_descriptor() noexcept {
   close_once(&manager_output_descriptor_);
 }
 
+/** @copydoc ps::server::WorkerArtifactDataPlane::prepare_output_image */
+std::optional<ImageBuffer> WorkerArtifactDataPlane::prepare_output_image(
+    const JobAttemptReport& report,
+    const std::optional<WorkerOutputDataReference>& output) const {
+  validate_output_report_metadata(assignment_metadata_.output, report, output);
+  if (!output.has_value()) {
+    return std::nullopt;
+  }
+  return make_anonymous_output_image(output->descriptor);
+}
+
 /** @copydoc ps::server::WorkerArtifactDataPlane::materialize_report */
 JobAttemptReport WorkerArtifactDataPlane::materialize_report(
     JobAttemptReport report,
     const std::optional<WorkerOutputDataReference>& output,
-    std::vector<std::byte> payload,
+    std::optional<ImageBuffer> image, std::size_t payload_size,
     const ArtifactContentDigest& payload_digest) const {
+  validate_output_report_metadata(assignment_metadata_.output, report, output);
   if (!output.has_value()) {
-    if (!payload.empty()) {
+    if (image.has_value() || payload_size != 0U) {
       throw WorkerArtifactDataPlaneError(
           "image-free worker report sent output-stage bytes");
     }
     return report;
   }
-  if (report.image.has_value() ||
-      report.outcome != JobAttemptOutcome::Succeeded || !report.settled ||
-      report.failure != JobAttemptFailure::None ||
-      output->reference_id != assignment_metadata_.output.reference_id ||
-      output->output_slot_id != assignment_metadata_.output.output_slot_id) {
+  if (!image.has_value()) {
     throw WorkerArtifactDataPlaneError(
-        "worker output metadata does not join its assigned stage");
+        "worker output-stage final owner is missing");
   }
   try {
-    validate_tight_descriptor(output->descriptor);
+    validate_image_buffer(*image);
   } catch (const std::exception& error) {
     throw WorkerArtifactDataPlaneError(
-        std::string("worker output descriptor is invalid: ") + error.what());
+        std::string("worker output final image is invalid: ") + error.what());
   }
-  if (output->descriptor.payload_bytes >
-          assignment_metadata_.output.maximum_payload_bytes ||
-      output->descriptor.payload_bytes != payload.size()) {
+  if (image->width != output->descriptor.width ||
+      image->height != output->descriptor.height ||
+      image->channels != output->descriptor.channels ||
+      image->type != output->descriptor.type || image->device != Device::CPU ||
+      image->step != output->descriptor.row_bytes ||
+      output->descriptor.payload_bytes != payload_size) {
     throw WorkerArtifactDataPlaneError(
         "worker output-stage size exceeds or differs from metadata");
   }
@@ -732,16 +852,7 @@ JobAttemptReport WorkerArtifactDataPlane::materialize_report(
     throw WorkerArtifactDataPlaneError(
         "worker output-stage content digest is inconsistent");
   }
-  auto owner = std::make_shared<std::vector<std::byte>>(std::move(payload));
-  ImageBuffer image;
-  image.width = output->descriptor.width;
-  image.height = output->descriptor.height;
-  image.channels = output->descriptor.channels;
-  image.type = output->descriptor.type;
-  image.device = Device::CPU;
-  image.step = output->descriptor.row_bytes;
-  image.data = std::shared_ptr<void>(owner, owner->data());
-  report.image = std::move(image);
+  report.image = std::move(*image);
   return report;
 }
 
@@ -782,10 +893,10 @@ std::shared_ptr<const ArtifactRecord> materialize_worker_checkpoint(
   return std::make_shared<const ArtifactRecord>(std::move(record));
 }
 
-/** @copydoc ps::server::stage_worker_output */
-std::optional<WorkerOutputDataReference> stage_worker_output(
-    int output_descriptor, const JobSpec& spec,
-    const WorkerOutputStageReference& output_stage, JobAttemptReport* report) {
+/** @copydoc ps::server::prepare_worker_output_transfer */
+PreparedWorkerOutputTransfer prepare_worker_output_transfer(
+    const JobSpec& spec, const WorkerOutputStageReference& output_stage,
+    JobAttemptReport* report) {
   if (report == nullptr) {
     throw std::invalid_argument("worker output report is null");
   }
@@ -800,9 +911,8 @@ std::optional<WorkerOutputDataReference> stage_worker_output(
           output_payload_maximum(spec.resource_request())) {
     throw std::invalid_argument("worker output stage does not join assignment");
   }
-  require_stream_socket(output_descriptor);
   if (!report->image.has_value()) {
-    return std::nullopt;
+    return {};
   }
   if (report->outcome != JobAttemptOutcome::Succeeded || !report->settled ||
       report->failure != JobAttemptFailure::None) {
@@ -829,7 +939,7 @@ std::optional<WorkerOutputDataReference> stage_worker_output(
     report->message =
         "worker candidate image exceeds accepted artifact data-plane bounds";
     report->image.reset();
-    return std::nullopt;
+    return {};
   }
 
   WorkerOutputDataReference output;
@@ -842,12 +952,43 @@ std::optional<WorkerOutputDataReference> stage_worker_output(
   output.descriptor.row_bytes = row_bytes;
   output.descriptor.payload_bytes = payload_bytes;
   output.content_digest = hash_image_artifact_content(image);
+  PreparedWorkerOutputTransfer transfer;
+  transfer.reference = std::move(output);
+  transfer.source = image;
+  report->image.reset();
+  return transfer;
+}
+
+/** @copydoc ps::server::send_worker_output_transfer */
+void send_worker_output_transfer(int output_descriptor,
+                                 const PreparedWorkerOutputTransfer& transfer) {
+  require_stream_socket(output_descriptor);
+  if (transfer.reference.has_value() != transfer.source.has_value()) {
+    throw std::invalid_argument("worker output transfer is incomplete");
+  }
+  if (!transfer.reference.has_value()) {
+    return;
+  }
+  const WorkerOutputDataReference& output = *transfer.reference;
+  const ImageBuffer& image = *transfer.source;
+  validate_image_buffer(image);
+  if (image.device != Device::CPU || image.width != output.descriptor.width ||
+      image.height != output.descriptor.height ||
+      image.channels != output.descriptor.channels ||
+      image.type != output.descriptor.type ||
+      image_buffer_row_bytes(image) != output.descriptor.row_bytes ||
+      output.descriptor.row_bytes >
+          std::numeric_limits<std::size_t>::max() /
+              static_cast<std::size_t>(image.height) ||
+      output.descriptor.row_bytes * static_cast<std::size_t>(image.height) !=
+          output.descriptor.payload_bytes) {
+    throw std::invalid_argument("worker output transfer source is invalid");
+  }
   for (int row = 0; row < image.height; ++row) {
     send_complete_from_worker(output_descriptor,
-                              image_buffer_row_data(image, row), row_bytes);
+                              image_buffer_row_data(image, row),
+                              output.descriptor.row_bytes);
   }
-  report->image.reset();
-  return output;
 }
 
 }  // namespace ps::server

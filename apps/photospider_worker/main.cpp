@@ -294,8 +294,10 @@ void await_completion_ready(int fd, const AttemptIdentity& identity,
  * code 4. Any exception escaping resolver construction or Embedded Host
  * execution propagates unchanged only after `done` is published and the
  * control thread is joined. The worker remains alive and
- * manager-terminable while synchronously awaiting `CompletionReady` under the
- * same absolute report-I/O deadline.
+ * manager-terminable while its control thread emits authenticated heartbeats
+ * during bulk output. It sends metadata first, closes the output lane only
+ * after exact bytes, then synchronously awaits `CompletionReady` under a fresh
+ * absolute acknowledgement deadline.
  */
 int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   WorkerDataDescriptor checkpoint_data(launch.checkpoint_data_fd);
@@ -341,12 +343,21 @@ int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
     control.join();
     throw;
   }
-  std::optional<WorkerOutputDataReference> output_reference;
+  PreparedWorkerOutputTransfer output_transfer;
   try {
-    output_reference =
-        stage_worker_output(output_data.get(), *prepared.assignment.spec,
-                            prepared.data_plane.output, &report);
-    output_data.reset();
+    output_transfer = prepare_worker_output_transfer(
+        *prepared.assignment.spec, prepared.data_plane.output, &report);
+    {
+      std::lock_guard<std::mutex> lock(write_mutex);
+      const PreparedWorkerReport prepared_report{std::move(report),
+                                                 output_transfer.reference};
+      send_worker_report(
+          launch.control_fd, prepared_report, *prepared.assignment.spec,
+          prepared.data_plane.output,
+          checked_worker_deadline(std::chrono::steady_clock::now(),
+                                  launch.io_timeout));
+    }
+    send_worker_output_transfer(output_data.get(), output_transfer);
   } catch (...) {
     done.store(true, std::memory_order_release);
     control.join();
@@ -354,19 +365,12 @@ int run_one_assignment(const WorkerProcessLaunchOptions& launch) {
   }
   done.store(true, std::memory_order_release);
   control.join();
+  output_data.reset();
   if (control_failed.load(std::memory_order_acquire)) {
     return 4;
   }
   const auto completion_deadline = checked_worker_deadline(
       std::chrono::steady_clock::now(), launch.io_timeout);
-  {
-    std::lock_guard<std::mutex> lock(write_mutex);
-    PreparedWorkerReport prepared_report{std::move(report),
-                                         std::move(output_reference)};
-    send_worker_report(launch.control_fd, prepared_report,
-                       *prepared.assignment.spec, prepared.data_plane.output,
-                       completion_deadline);
-  }
   await_completion_ready(launch.control_fd, prepared.assignment.identity,
                          completion_deadline, &control_decoder);
   static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));

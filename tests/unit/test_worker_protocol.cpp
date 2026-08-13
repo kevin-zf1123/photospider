@@ -374,14 +374,48 @@ std::chrono::steady_clock::time_point protocol_deadline() noexcept {
 }
 
 /**
+ * @brief Attempts one stream send without permitting process-wide SIGPIPE.
+ * @param fd Connected direction-reduced AF_UNIX stream endpoint.
+ * @param byte Exact single byte to send.
+ * @return Raw `send` result with `errno` available to the caller.
+ * @throws Nothing.
+ * @note Linux uses `MSG_NOSIGNAL`; Darwin relies on per-endpoint
+ * `SO_NOSIGPIPE` installed by `WorkerArtifactDataPlane::create`. The helper
+ * never changes the process-wide signal disposition.
+ */
+ssize_t send_direction_probe(int fd, const std::byte& byte) noexcept {
+#ifdef MSG_NOSIGNAL
+  constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+  constexpr int kSendFlags = 0;
+#endif
+  return ::send(fd, &byte, sizeof(byte), kSendFlags);
+}
+
+/**
+ * @brief Reports whether one platform error denotes a disabled write half.
+ * @param error Positive errno captured immediately after `send`.
+ * @return True for the closed cross-Darwin/Linux stream error contract.
+ * @throws Nothing.
+ * @note Darwin normally reports `EPIPE`; Linux may additionally expose
+ * `ECONNRESET` or `ENOTCONN` after peer-side stream state transitions.
+ */
+bool is_direction_rejection_error(int error) noexcept {
+  return error == EPIPE || error == ECONNRESET || error == ENOTCONN;
+}
+
+/**
  * @brief Result of one concurrently staged unit-test candidate.
  * @throws Nothing for default construction; retained values may allocate.
  */
 struct CollectedWorkerOutput final {
   /** @brief Metadata emitted by the worker-side staging operation. */
   std::optional<WorkerOutputDataReference> reference;
-  /** @brief Exact bytes drained from the manager-side lane. */
-  std::vector<std::byte> payload;
+  /** @brief Exact final manager image populated directly by bounded receives.
+   */
+  std::optional<ImageBuffer> image;
+  /** @brief Exact bytes written directly into `image`. */
+  std::size_t received_bytes = 0U;
   /** @brief Independently accumulated digest of the drained bytes. */
   ArtifactContentDigest digest;
 };
@@ -405,12 +439,21 @@ CollectedWorkerOutput stage_and_collect_output(
     throw std::invalid_argument("worker output test state is incomplete");
   }
   CollectedWorkerOutput collected;
+  PreparedWorkerOutputTransfer transfer =
+      prepare_worker_output_transfer(spec, output_stage, report);
+  collected.reference = transfer.reference;
+  collected.image =
+      data_plane->prepare_output_image(*report, collected.reference);
+  const std::size_t expected_bytes =
+      collected.reference.has_value()
+          ? collected.reference->descriptor.payload_bytes
+          : 0U;
   ArtifactContentHasher hasher;
   std::exception_ptr sender_failure;
   std::thread sender([&] {
     try {
-      collected.reference = stage_worker_output(
-          data_plane->worker_output_descriptor(), spec, output_stage, report);
+      send_worker_output_transfer(data_plane->worker_output_descriptor(),
+                                  transfer);
       data_plane->close_worker_descriptors();
     } catch (...) {
       sender_failure = std::current_exception();
@@ -421,12 +464,16 @@ CollectedWorkerOutput stage_and_collect_output(
     bool eof = false;
     const auto deadline = protocol_deadline();
     while (!eof) {
-      const std::size_t prior_size = collected.payload.size();
-      const WorkerDataPlaneIoStatus status =
-          data_plane->receive_output_chunk(&collected.payload);
+      const std::size_t prior_size = collected.received_bytes;
+      std::byte* destination =
+          collected.image.has_value()
+              ? static_cast<std::byte*>(collected.image->data.get())
+              : nullptr;
+      const WorkerDataPlaneIoStatus status = data_plane->receive_output_chunk(
+          destination, expected_bytes, &collected.received_bytes);
       if (status == WorkerDataPlaneIoStatus::Progress) {
-        hasher.update(collected.payload.data() + prior_size,
-                      collected.payload.size() - prior_size);
+        hasher.update(destination + prior_size,
+                      collected.received_bytes - prior_size);
       }
       if (status == WorkerDataPlaneIoStatus::EndOfStream) {
         eof = true;
@@ -601,6 +648,68 @@ TEST(WorkerProtocol, RoundTripsCompleteAssignmentAndExactLease) {
             sent.data_plane.output.maximum_payload_bytes);
   EXPECT_EQ(received.graph.yaml_path, sent.graph.yaml_path);
   EXPECT_EQ(received.heartbeat_interval, sent.heartbeat_interval);
+}
+
+TEST(WorkerProtocol,
+     WorkerCheckpointLaneRejectsReverseSendAndPreservesManagerDirection) {
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.checkpoint-direction"), 7,
+      OutputSlotId("image.final"), protocol_resources());
+  auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
+  WorkerArtifactDataPlane& data_plane = assignment_and_plane.second;
+  const std::byte expected{0x5a};
+
+  errno = 0;
+  EXPECT_EQ(
+      send_direction_probe(data_plane.worker_checkpoint_descriptor(), expected),
+      -1);
+  EXPECT_TRUE(is_direction_rejection_error(errno)) << std::strerror(errno);
+
+  const std::vector<std::byte> payload{expected};
+  std::size_t offset = 0U;
+  EXPECT_EQ(data_plane.send_checkpoint_chunk(payload, &offset),
+            WorkerDataPlaneIoStatus::Progress);
+  EXPECT_EQ(offset, payload.size());
+  data_plane.close_manager_checkpoint_descriptor();
+
+  std::byte received{};
+  EXPECT_EQ(::recv(data_plane.worker_checkpoint_descriptor(), &received,
+                   sizeof(received), 0),
+            1);
+  EXPECT_EQ(received, expected);
+  EXPECT_EQ(::recv(data_plane.worker_checkpoint_descriptor(), &received,
+                   sizeof(received), 0),
+            0);
+}
+
+TEST(WorkerProtocol,
+     ManagerOutputLaneRejectsReverseSendAndPreservesWorkerDirectionAndEof) {
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.output-direction"), 7,
+      OutputSlotId("image.final"), protocol_resources());
+  auto assignment_and_plane = prepared_assignment_with_data_plane(spec);
+  WorkerArtifactDataPlane& data_plane = assignment_and_plane.second;
+  const std::byte expected{0xa5};
+
+  errno = 0;
+  EXPECT_EQ(
+      send_direction_probe(data_plane.manager_output_descriptor(), expected),
+      -1);
+  EXPECT_TRUE(is_direction_rejection_error(errno)) << std::strerror(errno);
+
+  ASSERT_EQ(
+      send_direction_probe(data_plane.worker_output_descriptor(), expected), 1);
+  data_plane.close_worker_descriptors();
+  std::byte received{};
+  std::size_t offset = 0U;
+  EXPECT_EQ(
+      data_plane.receive_output_chunk(&received, sizeof(received), &offset),
+      WorkerDataPlaneIoStatus::Progress);
+  EXPECT_EQ(offset, sizeof(received));
+  EXPECT_EQ(received, expected);
+  EXPECT_EQ(
+      data_plane.receive_output_chunk(&received, sizeof(received), &offset),
+      WorkerDataPlaneIoStatus::EndOfStream);
 }
 
 TEST(WorkerProtocol, AssignmentControlPayloadIsIndependentOfCheckpointBytes) {
@@ -816,7 +925,7 @@ TEST(WorkerProtocol, RebuildsTightImageIntoIndependentCpuOwner) {
   const JobAttemptReport received =
       assignment_and_plane.second.materialize_report(
           std::move(received_metadata.report), received_metadata.output,
-          std::move(staged.payload), staged.digest);
+          std::move(staged.image), staged.received_bytes, staged.digest);
 
   ASSERT_TRUE(received.image.has_value());
   EXPECT_NE(received.image->data.get(), source.data.get());
@@ -922,10 +1031,10 @@ TEST(WorkerProtocol, RejectsOutputDigestThatDoesNotMatchStagedBytes) {
   ASSERT_TRUE(output.has_value());
   output->content_digest.bytes.at(0U) ^= std::byte{0x01};
 
-  EXPECT_THROW(
-      assignment_and_plane.second.materialize_report(
-          std::move(report), output, std::move(staged.payload), staged.digest),
-      WorkerArtifactDataPlaneError);
+  EXPECT_THROW(assignment_and_plane.second.materialize_report(
+                   std::move(report), output, std::move(staged.image),
+                   staged.received_bytes, staged.digest),
+               WorkerArtifactDataPlaneError);
 }
 
 TEST(WorkerProtocol, RejectsRealCheckpointReferenceMismatchBeforeLaneRead) {
@@ -996,8 +1105,8 @@ TEST(WorkerProtocol, RejectsRealOutputReferenceMismatchAtExactStageJoin) {
 
   try {
     static_cast<void>(assignment_and_plane.second.materialize_report(
-        std::move(report), staged.reference, std::move(staged.payload),
-        staged.digest));
+        std::move(report), staged.reference, std::move(staged.image),
+        staged.received_bytes, staged.digest));
     FAIL() << "output reference mismatch was accepted";
   } catch (const WorkerArtifactDataPlaneError& error) {
     EXPECT_EQ(std::string(error.what()),
@@ -1021,8 +1130,8 @@ TEST(WorkerProtocol, RejectsRealOutputDescriptorMismatchAfterReferenceJoin) {
 
   try {
     static_cast<void>(assignment_and_plane.second.materialize_report(
-        std::move(report), staged.reference, std::move(staged.payload),
-        staged.digest));
+        std::move(report), staged.reference, std::move(staged.image),
+        staged.received_bytes, staged.digest));
     FAIL() << "output descriptor mismatch was accepted";
   } catch (const WorkerArtifactDataPlaneError& error) {
     EXPECT_NE(

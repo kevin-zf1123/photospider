@@ -132,6 +132,26 @@ enum class WorkerDataPlaneIoStatus : std::uint8_t {
 };
 
 /**
+ * @brief Worker-owned output metadata plus the retained tight byte source.
+ *
+ * Preparation removes image bytes from the control Report while retaining the
+ * exact source owner in this moveable value. The worker sends the Report first,
+ * streams `source` second, closes the output lane, and remains killable until
+ * `CompletionReady`.
+ *
+ * @throws Nothing for default/value operations; preparation may allocate or
+ * hash before construction.
+ * @note `reference` and `source` are either both present or both absent. This
+ * source-private value grants no artifact, commit, quota, or path authority.
+ */
+struct PreparedWorkerOutputTransfer final {
+  /** @brief Metadata carried by the Report before bulk transfer. */
+  std::optional<WorkerOutputDataReference> reference;
+  /** @brief Exact tight CPU source retained only inside the worker. */
+  std::optional<ImageBuffer> source;
+};
+
+/**
  * @brief Owns two direction-reduced stream lanes for one exact worker attempt.
  *
  * Construction creates no pathname or bulk occurrence. One socket lane grants
@@ -273,17 +293,24 @@ class WorkerArtifactDataPlane final {
   void close_manager_checkpoint_descriptor() noexcept;
 
   /**
-   * @brief Receives at most one candidate chunk without blocking the manager.
-   * @param payload Non-null bounded accumulation buffer.
-   * @return Progress, WouldBlock, or EndOfStream after worker closure.
-   * @throws std::invalid_argument for a null output.
-   * @throws WorkerArtifactDataPlaneError when bytes exceed the assigned stage.
+   * @brief Receives at most one candidate chunk directly into final storage.
+   * @param payload Exact-size writable destination; null only at zero size.
+   * @param payload_size Metadata-declared destination size.
+   * @param offset Non-null bytes already received; advanced after progress.
+   * @return Progress, WouldBlock, or EndOfStream only after exact bytes.
+   * @throws std::invalid_argument for null/inconsistent destination state.
+   * @throws WorkerArtifactDataPlaneError for premature EOF, an excess byte, or
+   * a destination larger than the assigned stage.
    * @throws std::system_error for a non-readiness socket failure.
-   * @throws std::bad_alloc when bounded accumulation allocation fails.
    * @note The caller owns absolute deadline, cancellation, polling, and exact
-   * process termination. This method performs one `recv` and never waits.
+   * process termination between calls. This method performs exactly one
+   * nonblocking `recv` of at most 64 KiB and never allocates, copies prior
+   * bytes, loops, or waits. Once `offset == payload_size`, a subsequent call
+   * reads at most one sentinel byte to distinguish exact EOF from excess.
    */
-  WorkerDataPlaneIoStatus receive_output_chunk(std::vector<std::byte>* payload);
+  WorkerDataPlaneIoStatus receive_output_chunk(std::byte* payload,
+                                               std::size_t payload_size,
+                                               std::size_t* offset);
 
   /**
    * @brief Closes the manager output receiver after EOF or revocation.
@@ -293,25 +320,45 @@ class WorkerArtifactDataPlane final {
   void close_manager_output_descriptor() noexcept;
 
   /**
+   * @brief Validates Report metadata and creates its exact final CPU owner.
+   * @param report Metadata-only current attempt report.
+   * @param output Optional candidate metadata decoded from that Report.
+   * @return Empty for an image-free report; otherwise a tight `ImageBuffer`
+   * backed by one lazy anonymous mapping of exactly the declared byte length.
+   * @throws WorkerArtifactDataPlaneError for report/reference/descriptor/size
+   * or accepted-resource mismatch, or anonymous mapping failure.
+   * @throws std::bad_alloc when the shared mapping owner cannot be retained.
+   * @throws std::overflow_error when descriptor arithmetic overflows.
+   * @note Call only after an identity-current Report while its exact worker PID
+   * remains live. This method performs no filesystem or descriptor I/O and
+   * touches no payload byte; later bounded receives write directly into the
+   * final `ImageBuffer` owner without cumulative reallocation or copy.
+   */
+  std::optional<ImageBuffer> prepare_output_image(
+      const JobAttemptReport& report,
+      const std::optional<WorkerOutputDataReference>& output) const;
+
+  /**
    * @brief Revalidates and materializes one completely received candidate.
    * @param report Metadata-only attempt report decoded from the control frame.
    * @param output Optional candidate reference decoded with that report.
-   * @param payload Exact bytes drained from the attempt's output lane.
+   * @param image Exact final owner returned by `prepare_output_image`.
+   * @param payload_size Exact bytes received directly into `image`.
    * @param payload_digest Independently accumulated digest of those bytes.
    * @return Complete report with an independent CPU image only for a valid
    * settled success; other valid report shapes remain image-free.
    * @throws WorkerArtifactDataPlaneError for missing/extra/mismatched output,
    * size/descriptor/resource/digest mismatch, or truncated bytes.
-   * @throws std::bad_alloc when bounded payload/image allocation fails.
    * @throws std::overflow_error when shape or hash arithmetic overflows.
    * @note This method performs no filesystem or descriptor I/O. WorkerManager
-   * calls it after bounded stream EOF and before terminal handoff. It does not
-   * commit an artifact or mutate Job/quota truth.
+   * calls it after exact stream EOF and bounded incremental hashing. It moves
+   * the already-final owner into the Report in O(1); it allocates/copies no
+   * payload and grants no artifact or Job/quota authority.
    */
   JobAttemptReport materialize_report(
       JobAttemptReport report,
       const std::optional<WorkerOutputDataReference>& output,
-      std::vector<std::byte> payload,
+      std::optional<ImageBuffer> image, std::size_t payload_size,
       const ArtifactContentDigest& payload_digest) const;
 
  private:
@@ -362,28 +409,41 @@ std::shared_ptr<const ArtifactRecord> materialize_worker_checkpoint(
     const WorkerDataPlaneAssignment& data_plane);
 
 /**
- * @brief Sends one worker candidate through its private lane and removes bytes
- * from the control report.
- * @param output_descriptor Exact inherited candidate stream fd.
+ * @brief Prepares worker candidate metadata before any output byte is sent.
  * @param spec Immutable current JobSpec and resource envelope.
  * @param output_stage Exact manager-assigned output reference and maximum.
  * @param report Non-null complete worker report; an image is consumed on
  * success and never remains in the returned control metadata.
- * @return Candidate descriptor/digest/reference on staged success, otherwise
- * empty for an image-free report or resource-bound fallback.
+ * @return Optional reference plus retained tight source on staged success;
+ * both fields are empty for an image-free report or resource-bound fallback.
  * @throws std::invalid_argument for null/malformed report, identity/spec/stage
- * mismatch, invalid image, or wrong descriptor access mode.
- * @throws std::system_error for stream send failure.
+ * mismatch, or invalid image.
  * @throws std::overflow_error when image or digest arithmetic overflows.
  * @throws std::bad_alloc when fallback/reference construction exhausts memory.
- * @note Blocking send executes only in the killable worker. An otherwise
+ * @note This function sends no bytes and accesses no descriptor. An otherwise
  * valid settled success above the accepted output/staging/
  * retention maximum becomes a bounded settled `Failed/Compute` report with no
- * image. The function publishes no artifact and returns no stable artifact or
- * commit identity.
+ * image. The caller sends metadata first, retaining `source` inside the exact
+ * killable worker. No artifact or commit identity is minted.
  */
-std::optional<WorkerOutputDataReference> stage_worker_output(
-    int output_descriptor, const JobSpec& spec,
-    const WorkerOutputStageReference& output_stage, JobAttemptReport* report);
+PreparedWorkerOutputTransfer prepare_worker_output_transfer(
+    const JobSpec& spec, const WorkerOutputStageReference& output_stage,
+    JobAttemptReport* report);
+
+/**
+ * @brief Sends one prepared worker candidate after its metadata-only Report.
+ * @param output_descriptor Exact inherited candidate stream fd.
+ * @param transfer Prepared optional reference and retained tight CPU source.
+ * @return Nothing after every tight active row byte is sent.
+ * @throws std::invalid_argument for malformed transfer/source metadata or the
+ * wrong descriptor access mode.
+ * @throws std::system_error for stream send failure.
+ * @throws std::overflow_error when source arithmetic overflows.
+ * @note Blocking send executes only in the exact killable worker. The caller
+ * keeps the heartbeat/control thread active, closes the output descriptor as
+ * the EOF commit marker, then awaits identity-only `CompletionReady`.
+ */
+void send_worker_output_transfer(int output_descriptor,
+                                 const PreparedWorkerOutputTransfer& transfer);
 
 }  // namespace ps::server

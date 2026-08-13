@@ -1526,42 +1526,45 @@ class WorkerManager::Impl final {
   }
 
   /**
-   * @brief Drains a bounded number of ready output chunks without waiting.
+   * @brief Performs one fixed nonblocking receive into final output storage.
    * @param process Non-null child/data-plane owner.
-   * @param payload Non-null attempt-bounded candidate accumulation.
+   * @param image Optional exact final image owner for a successful Report.
+   * @param expected_bytes Metadata-declared payload length, possibly zero.
+   * @param received_bytes Non-null exact direct-receive offset.
    * @param hasher Non-null allocation-free incremental integrity owner.
-   * @param output_eof Non-null monotonic EOF observation.
+   * @param output_eof Non-null monotonic exact-EOF observation.
    * @param output_digest Non-null finalized digest destination.
-   * @return Nothing after readiness exhaustion, EOF, or sixteen chunks.
-   * @throws Data-plane validation, socket, or allocation failures unchanged.
-   * @note Capping one call preserves frequent runtime/cancel/shutdown/deadline
-   * checks even when the worker continuously produces a large candidate.
+   * @return Progress, WouldBlock, or EndOfStream from exactly one receive.
+   * @throws Data-plane validation or socket failures unchanged.
+   * @note The call never loops, waits, allocates, or copies prior bytes. Its
+   * caller returns to cancellation/shutdown/runtime/heartbeat arbitration
+   * before any second bulk operation.
    */
-  void drain_output(ChildProcess* process, std::vector<std::byte>* payload,
-                    ArtifactContentHasher* hasher, bool* output_eof,
-                    std::optional<ArtifactContentDigest>* output_digest) {
-    if (process == nullptr || payload == nullptr || hasher == nullptr ||
-        output_eof == nullptr || output_digest == nullptr) {
+  WorkerDataPlaneIoStatus drain_output_slice(
+      ChildProcess* process, const std::optional<ImageBuffer>& image,
+      std::size_t expected_bytes, std::size_t* received_bytes,
+      ArtifactContentHasher* hasher, bool* output_eof,
+      std::optional<ArtifactContentDigest>* output_digest) {
+    if (process == nullptr || received_bytes == nullptr || hasher == nullptr ||
+        output_eof == nullptr || output_digest == nullptr ||
+        (expected_bytes != 0U && !image.has_value())) {
       throw std::invalid_argument("worker output drain state is incomplete");
     }
-    constexpr std::size_t kMaximumChunksPerSlice = 16U;
-    for (std::size_t chunk = 0U; chunk < kMaximumChunksPerSlice && !*output_eof;
-         ++chunk) {
-      const std::size_t prior_size = payload->size();
-      const WorkerDataPlaneIoStatus status =
-          process->data_plane.receive_output_chunk(payload);
-      if (status == WorkerDataPlaneIoStatus::Progress) {
-        hasher->update(payload->data() + prior_size,
-                       payload->size() - prior_size);
-        continue;
-      }
-      if (status == WorkerDataPlaneIoStatus::EndOfStream) {
-        *output_eof = true;
-        *output_digest = hasher->finish();
-        process->data_plane.close_manager_output_descriptor();
-      }
-      return;
+    std::byte* destination = image.has_value()
+                                 ? static_cast<std::byte*>(image->data.get())
+                                 : nullptr;
+    const std::size_t prior_size = *received_bytes;
+    const WorkerDataPlaneIoStatus status =
+        process->data_plane.receive_output_chunk(destination, expected_bytes,
+                                                 received_bytes);
+    if (status == WorkerDataPlaneIoStatus::Progress) {
+      hasher->update(destination + prior_size, *received_bytes - prior_size);
+    } else if (status == WorkerDataPlaneIoStatus::EndOfStream) {
+      *output_eof = true;
+      *output_digest = hasher->finish();
+      process->data_plane.close_manager_output_descriptor();
     }
+    return status;
   }
 
   /**
@@ -1713,8 +1716,10 @@ class WorkerManager::Impl final {
    * acknowledgement. The manager sends it only after nonblocking EOF, bounded
    * hashing, reference/descriptor/resource joins, and image reconstruction;
    * an already unavailable cancellation channel skips the impossible reply but
-   * does not erase a completely joined worker fact. Once exact reap is
-   * observed, this monitor never reads the bulk lane.
+   * does not erase a completely joined worker fact. Authenticated heartbeats
+   * queued before readiness are accepted without renewing an inactive
+   * heartbeat deadline. Once exact reap is observed, this monitor never reads
+   * the bulk lane and never creates a successful candidate mapping.
    * Every first `Report`, `Failure`, or `ForcedCancellation` construction is
    * locally fail-stop protected after exact reaping and cannot be reclassified
    * by the outer catch boundary.
@@ -1736,7 +1741,9 @@ class WorkerManager::Impl final {
         post_reap_drain_deadline;
     std::optional<PreparedWorkerReport> candidate_report;
     std::optional<JobAttemptReport> materialized_report;
-    std::vector<std::byte> output_payload;
+    std::optional<ImageBuffer> output_image;
+    std::size_t output_expected_bytes = 0U;
+    std::size_t output_received_bytes = 0U;
     ArtifactContentHasher output_hasher;
     std::optional<ArtifactContentDigest> output_digest;
     bool cancel_attempted = false;
@@ -1747,62 +1754,13 @@ class WorkerManager::Impl final {
     WorkerFrameDecoder frame_decoder;
 
     for (;;) {
-      bool output_progress = false;
-      if (!process->reaped && !output_eof) {
-        const bool defer_output =
-            options_.defer_output_drain_for_test != nullptr &&
-            options_.defer_output_drain_for_test->load(
-                std::memory_order_acquire);
-        if (defer_output) {
-          pollfd descriptor{process->data_plane.manager_output_descriptor(),
-                            POLLIN, 0};
-          const int polled = ::poll(&descriptor, 1U, 0);
-          if (polled > 0 && (descriptor.revents & POLLIN) != 0 &&
-              options_.output_transfer_paused_for_test != nullptr) {
-            options_.output_transfer_paused_for_test->store(
-                true, std::memory_order_release);
-          }
-        } else {
-          const std::size_t payload_size_before_drain = output_payload.size();
-          drain_output(process, &output_payload, &output_hasher, &output_eof,
-                       &output_digest);
-          if (output_payload.size() != payload_size_before_drain) {
-            output_progress = true;
-            heartbeat_deadline = checked_worker_deadline(
-                std::chrono::steady_clock::now(), options_.heartbeat_timeout);
-          }
-        }
-      }
-      if (output_eof && candidate_report.has_value() &&
-          !materialized_report.has_value() &&
-          (!process->reaped || !candidate_report->output.has_value())) {
-        materialized_report = process->data_plane.materialize_report(
-            std::move(candidate_report->report), candidate_report->output,
-            std::move(output_payload), *output_digest);
-        if (!process->reaped && !cancel_delivery_failed &&
-            !cancel_channel_failed) {
-          auto acknowledgement_deadline = checked_worker_deadline(
-              std::chrono::steady_clock::now(), options_.io_timeout);
-          acknowledgement_deadline =
-              std::min(acknowledgement_deadline, runtime_deadline);
-          if (report_deadline.has_value()) {
-            acknowledgement_deadline =
-                std::min(acknowledgement_deadline, *report_deadline);
-          }
-          try {
-            send_worker_identity(process->control.get(),
-                                 WorkerMessageKind::CompletionReady,
-                                 record->identity, acknowledgement_deadline);
-          } catch (const WorkerProtocolTimeout&) {
-            throw ManagerFailure(
-                JobAttemptFailure::WorkerProtocol,
-                "worker completion acknowledgement deadline expired");
-          }
-        }
-        candidate_report.reset();
-      }
       observe_exit(record, process);
       const auto now = std::chrono::steady_clock::now();
+      if (process->reaped && candidate_report.has_value() &&
+          !candidate_report->output.has_value() && !output_eof) {
+        output_eof = true;
+        process->data_plane.close_manager_output_descriptor();
+      }
       if (process->reaped && !channel_eof &&
           !post_reap_drain_deadline.has_value()) {
         post_reap_drain_deadline =
@@ -1832,9 +1790,11 @@ class WorkerManager::Impl final {
               process->pid,
               checked_worker_deadline(std::chrono::steady_clock::now(),
                                       options_.terminate_timeout));
-          if (!output_eof) {
-            drain_output(process, &output_payload, &output_hasher, &output_eof,
-                         &output_digest);
+          if (candidate_report.has_value() && !output_eof) {
+            static_cast<void>(
+                drain_output_slice(process, output_image, output_expected_bytes,
+                                   &output_received_bytes, &output_hasher,
+                                   &output_eof, &output_digest));
           }
         }
         const TerminateAndReapResult termination =
@@ -1864,8 +1824,7 @@ class WorkerManager::Impl final {
                                   JobAttemptFailure::WorkerRuntimeTimeout,
                                   "worker exceeded attempt runtime bound");
       }
-      if (!cancel && !candidate_report.has_value() &&
-          !materialized_report.has_value() && !process->reaped &&
+      if (!cancel && !materialized_report.has_value() && !process->reaped &&
           now >= heartbeat_deadline) {
         terminate_and_reap(record, process);
         return failure_completion(record->identity,
@@ -1878,6 +1837,41 @@ class WorkerManager::Impl final {
         return failure_completion(
             record->identity, JobAttemptFailure::WorkerProtocol,
             "worker reported but did not close and exit within its bound");
+      }
+
+      if (output_eof && candidate_report.has_value() &&
+          !materialized_report.has_value() &&
+          (!process->reaped || !candidate_report->output.has_value())) {
+        if (candidate_report->output.has_value() &&
+            !output_digest.has_value()) {
+          throw WorkerArtifactDataPlaneError(
+              "worker output EOF lacks an incremental digest");
+        }
+        const ArtifactContentDigest materialized_digest =
+            output_digest.value_or(ArtifactContentDigest{});
+        materialized_report = process->data_plane.materialize_report(
+            std::move(candidate_report->report), candidate_report->output,
+            std::move(output_image), output_received_bytes,
+            materialized_digest);
+        if (!process->reaped && !cancel_delivery_failed &&
+            !cancel_channel_failed) {
+          auto acknowledgement_deadline =
+              std::min(checked_worker_deadline(std::chrono::steady_clock::now(),
+                                               options_.io_timeout),
+                       runtime_deadline);
+          try {
+            send_worker_identity(process->control.get(),
+                                 WorkerMessageKind::CompletionReady,
+                                 record->identity, acknowledgement_deadline);
+          } catch (const WorkerProtocolTimeout&) {
+            throw ManagerFailure(
+                JobAttemptFailure::WorkerProtocol,
+                "worker completion acknowledgement deadline expired");
+          }
+        }
+        candidate_report.reset();
+        report_deadline = checked_worker_deadline(
+            std::chrono::steady_clock::now(), options_.post_report_timeout);
       }
 
       if (process->reaped) {
@@ -1938,15 +1932,29 @@ class WorkerManager::Impl final {
         continue;
       }
 
-      if (output_progress && !output_eof) {
-        continue;
+      const bool output_pending =
+          !process->reaped && candidate_report.has_value() && !output_eof;
+      const bool defer_output =
+          output_pending && options_.defer_output_drain_for_test != nullptr &&
+          options_.defer_output_drain_for_test->load(std::memory_order_acquire);
+      if (defer_output) {
+        pollfd descriptor{process->data_plane.manager_output_descriptor(),
+                          POLLIN, 0};
+        const int polled = ::poll(&descriptor, 1U, 0);
+        if (polled > 0 && (descriptor.revents & POLLIN) != 0 &&
+            options_.output_transfer_paused_for_test != nullptr) {
+          options_.output_transfer_paused_for_test->store(
+              true, std::memory_order_release);
+        }
       }
-
-      auto read_deadline = checked_worker_deadline(
-          std::chrono::steady_clock::now(), kSupervisorPollInterval);
+      const bool output_slice_ready = output_pending && !defer_output;
+      auto read_deadline =
+          output_slice_ready
+              ? std::chrono::steady_clock::now()
+              : checked_worker_deadline(std::chrono::steady_clock::now(),
+                                        kSupervisorPollInterval);
       if (!process->reaped) {
-        if (!cancel && !candidate_report.has_value() &&
-            !materialized_report.has_value()) {
+        if (!cancel && !materialized_report.has_value()) {
           read_deadline = std::min(read_deadline, heartbeat_deadline);
         }
         read_deadline = std::min(read_deadline, runtime_deadline);
@@ -1968,23 +1976,37 @@ class WorkerManager::Impl final {
         }
         WorkerProtocolFrame frame =
             frame_decoder.read_frame(process->control.get(), read_deadline);
-        if (candidate_report.has_value() || materialized_report.has_value()) {
-          throw WorkerProtocolError(
-              "worker sent an extra frame after its terminal report");
-        }
         if (frame.kind == WorkerMessageKind::Heartbeat) {
           if (decode_worker_identity(frame, WorkerMessageKind::Heartbeat) !=
               record->identity) {
             throw WorkerProtocolError(
                 "worker heartbeat identity does not match its exact lease");
           }
-          heartbeat_deadline = checked_worker_deadline(
-              std::chrono::steady_clock::now(), options_.heartbeat_timeout);
+          const auto heartbeat_accepted_at = std::chrono::steady_clock::now();
+          if (!materialized_report.has_value()) {
+            if (!cancel && heartbeat_accepted_at >= runtime_deadline) {
+              terminate_and_reap(record, process);
+              return failure_completion(
+                  record->identity, JobAttemptFailure::WorkerRuntimeTimeout,
+                  "worker exceeded attempt runtime bound");
+            }
+            if (!cancel && heartbeat_accepted_at >= heartbeat_deadline) {
+              terminate_and_reap(record, process);
+              return failure_completion(
+                  record->identity, JobAttemptFailure::WorkerHeartbeatTimeout,
+                  "worker heartbeat deadline expired");
+            }
+            heartbeat_deadline = checked_worker_deadline(
+                heartbeat_accepted_at, options_.heartbeat_timeout);
+          }
           if (options_.first_external_heartbeat_observed_for_test != nullptr) {
             options_.first_external_heartbeat_observed_for_test->store(
                 true, std::memory_order_release);
           }
         } else if (frame.kind == WorkerMessageKind::Report) {
+          if (candidate_report.has_value() || materialized_report.has_value()) {
+            throw WorkerProtocolError("worker sent an extra terminal report");
+          }
           PreparedWorkerReport report = decode_worker_report(
               frame, *record->assignment.spec,
               process->data_plane.assignment_metadata().output);
@@ -1992,15 +2014,56 @@ class WorkerManager::Impl final {
             throw WorkerProtocolError(
                 "worker report identity does not match its exact lease");
           }
+          const auto report_accepted_at = std::chrono::steady_clock::now();
+          if (!cancel && report_accepted_at >= runtime_deadline) {
+            terminate_and_reap(record, process);
+            return failure_completion(record->identity,
+                                      JobAttemptFailure::WorkerRuntimeTimeout,
+                                      "worker exceeded attempt runtime bound");
+          }
+          if (!cancel && report_accepted_at >= heartbeat_deadline) {
+            terminate_and_reap(record, process);
+            return failure_completion(record->identity,
+                                      JobAttemptFailure::WorkerHeartbeatTimeout,
+                                      "worker heartbeat deadline expired");
+          }
+          observe_exit(record, process);
+          if (!process->reaped || !report.output.has_value()) {
+            output_image = process->data_plane.prepare_output_image(
+                report.report, report.output);
+          }
+          output_expected_bytes = report.output.has_value()
+                                      ? report.output->descriptor.payload_bytes
+                                      : 0U;
+          output_received_bytes = 0U;
+          if (process->reaped && !report.output.has_value()) {
+            output_eof = true;
+            process->data_plane.close_manager_output_descriptor();
+          }
           candidate_report = std::move(report);
-          report_deadline = checked_worker_deadline(
-              std::chrono::steady_clock::now(), options_.post_report_timeout);
         } else {
           throw WorkerProtocolError(
               "worker sent a message invalid for its active state");
         }
       } catch (const WorkerProtocolTimeout&) {
-        // The short poll slice exists only to revisit process/deadline state.
+        if (output_slice_ready) {
+          const WorkerDataPlaneIoStatus status =
+              drain_output_slice(process, output_image, output_expected_bytes,
+                                 &output_received_bytes, &output_hasher,
+                                 &output_eof, &output_digest);
+          if (status == WorkerDataPlaneIoStatus::WouldBlock) {
+            auto wake_deadline = checked_worker_deadline(
+                std::chrono::steady_clock::now(), kSupervisorPollInterval);
+            if (!cancel && !materialized_report.has_value()) {
+              wake_deadline = std::min(wake_deadline, heartbeat_deadline);
+            }
+            wake_deadline = std::min(wake_deadline, runtime_deadline);
+            if (cancel_deadline.has_value()) {
+              wake_deadline = std::min(wake_deadline, *cancel_deadline);
+            }
+            std::this_thread::sleep_until(wake_deadline);
+          }
+        }
       } catch (const WorkerProtocolEof&) {
         channel_eof = true;
         eof_deadline = checked_worker_deadline(std::chrono::steady_clock::now(),
