@@ -1260,6 +1260,36 @@ WorkerProtocolFrame read_worker_frame(
 /** @copydoc ps::server::encode_worker_assignment */
 WorkerProtocolFrame encode_worker_assignment(
     const PreparedWorkerAssignment& assignment) {
+  if (assignment.assignment.spec == nullptr) {
+    throw std::invalid_argument("prepared worker assignment has no JobSpec");
+  }
+  const bool checkpoint_declared =
+      assignment.assignment.spec->checkpoint_artifact_id().has_value();
+  if (checkpoint_declared != (assignment.assignment.checkpoint != nullptr)) {
+    throw std::invalid_argument(
+        "prepared worker checkpoint payload binding is incomplete");
+  }
+  if (assignment.assignment.checkpoint != nullptr) {
+    const ArtifactRecord& checkpoint = *assignment.assignment.checkpoint;
+    if (!assignment.data_plane.checkpoint.has_value()) {
+      throw std::invalid_argument(
+          "prepared worker checkpoint metadata is absent");
+    }
+    const OutputCommitReceipt& metadata =
+        assignment.data_plane.checkpoint->receipt;
+    if (!artifact_receipts_equal(checkpoint.receipt, metadata) ||
+        checkpoint.receipt.descriptor.payload_bytes !=
+            checkpoint.payload.size()) {
+      throw std::invalid_argument(
+          "prepared worker checkpoint metadata or size is inconsistent");
+    }
+  }
+  return encode_worker_assignment_metadata(assignment);
+}
+
+/** @copydoc ps::server::encode_worker_assignment_metadata */
+WorkerProtocolFrame encode_worker_assignment_metadata(
+    const PreparedWorkerAssignment& assignment) {
   validate_attempt_identity(assignment.assignment.identity);
   if (assignment.assignment.spec == nullptr ||
       assignment.heartbeat_interval.count() <= 0 ||
@@ -1276,23 +1306,6 @@ WorkerProtocolFrame encode_worker_assignment(
   validate_worker_data_plane_assignment(assignment.assignment.identity,
                                         *assignment.assignment.spec,
                                         assignment.data_plane);
-  const bool checkpoint_declared =
-      assignment.assignment.spec->checkpoint_artifact_id().has_value();
-  if (checkpoint_declared != (assignment.assignment.checkpoint != nullptr)) {
-    throw std::invalid_argument(
-        "prepared worker checkpoint payload binding is incomplete");
-  }
-  if (assignment.assignment.checkpoint != nullptr) {
-    const ArtifactRecord& checkpoint = *assignment.assignment.checkpoint;
-    const OutputCommitReceipt& metadata =
-        assignment.data_plane.checkpoint->receipt;
-    if (!artifact_receipts_equal(checkpoint.receipt, metadata) ||
-        checkpoint.receipt.descriptor.payload_bytes !=
-            checkpoint.payload.size()) {
-      throw std::invalid_argument(
-          "prepared worker checkpoint metadata or size is inconsistent");
-    }
-  }
   validate_worker_assignment_graph_transport(assignment.graph);
   ByteWriter writer;
   encode_identity(assignment.assignment.identity, &writer);
@@ -1317,11 +1330,10 @@ void send_worker_assignment(int fd, const PreparedWorkerAssignment& assignment,
   write_worker_frame(fd, frame.kind, frame.payload, deadline);
 }
 
-/** @copydoc ps::server::receive_worker_assignment */
-PreparedWorkerAssignment receive_worker_assignment(
-    int fd, std::chrono::steady_clock::time_point deadline) {
-  WorkerProtocolFrame frame = read_worker_frame(fd, deadline);
-  PreparedWorkerAssignment decoded = decode_checked([&] {
+/** @copydoc ps::server::decode_worker_assignment */
+PreparedWorkerAssignment decode_worker_assignment(
+    const WorkerProtocolFrame& frame) {
+  return decode_checked([&] {
     if (frame.kind != WorkerMessageKind::Assignment) {
       throw WorkerProtocolError("worker expected one assignment frame");
     }
@@ -1354,6 +1366,13 @@ PreparedWorkerAssignment receive_worker_assignment(
     reader.finish();
     return prepared;
   });
+}
+
+/** @copydoc ps::server::receive_worker_assignment */
+PreparedWorkerAssignment receive_worker_assignment(
+    int fd, std::chrono::steady_clock::time_point deadline) {
+  const WorkerProtocolFrame frame = read_worker_frame(fd, deadline);
+  PreparedWorkerAssignment decoded = decode_worker_assignment(frame);
   require_worker_protocol_before(deadline);
   return decoded;
 }

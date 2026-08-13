@@ -3652,6 +3652,14 @@ std::optional<std::string> RequestRouter::route_observation_method(
   if (!routed.status.ok) {
     return bounded_error(id, graph_status(routed.status));
   }
+  if (routed.value.session.value != host_session.value) {
+    return bounded_error(
+        id,
+        failure_status(OperationErrorDomain::Graph,
+                       static_cast<std::int32_t>(GraphErrc::InvalidParameter),
+                       graph_error_stable_name(GraphErrc::InvalidParameter),
+                       "execution.trace returned a mismatched Host session"));
+  }
   return encode_routed_value(id, [&] {
     return encode_execution_trace_page(session_id, after_sequence, routed.value,
                                        limit);

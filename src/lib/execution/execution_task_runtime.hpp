@@ -61,6 +61,51 @@ enum class ExecutionTraceAction : std::uint32_t {
 };
 
 /**
+ * @brief Fixed-size observation identity for one task in one compute Run.
+ *
+ * The tuple is copied only from a validated ready submission. It supplies an
+ * exact process-local audit join without retaining a Graph, Run, task plan,
+ * lease, capability, callback, string, or mutable execution state.
+ *
+ * @throws Nothing for aggregate construction, copy, move, comparison, and
+ * scalar access.
+ * @note `graph_revision` and `run_id` are nonzero on task-backed observations;
+ * `run_local_task_id` zero is valid. The value grants no execution,
+ * continuation, cancellation, scheduling, resource, or commit authority.
+ */
+struct ExecutionTaskAuditIdentity final {
+  /** @brief Authoritative nonzero Graph revision captured by the Run. */
+  std::uint64_t graph_revision = 0U;
+
+  /** @brief Nonzero process-lifetime ComputeRun identity. */
+  std::uint64_t run_id = 0U;
+
+  /** @brief Dense task number interpreted only inside `run_id`. */
+  std::uint64_t run_local_task_id = 0U;
+
+  /**
+   * @brief Compares every canonical audit component.
+   * @param other Candidate task audit identity.
+   * @return True only when revision, Run, and Run-local task all match.
+   * @throws Nothing.
+   */
+  bool operator==(const ExecutionTaskAuditIdentity& other) const noexcept {
+    return graph_revision == other.graph_revision && run_id == other.run_id &&
+           run_local_task_id == other.run_local_task_id;
+  }
+
+  /**
+   * @brief Tests whether any canonical audit component differs.
+   * @param other Candidate task audit identity.
+   * @return Negation of `operator==`.
+   * @throws Nothing.
+   */
+  bool operator!=(const ExecutionTaskAuditIdentity& other) const noexcept {
+    return !(*this == other);
+  }
+};
+
+/**
  * @brief Borrowed observation context used by the private execution service.
  *
  * The Graph runtime owns this object through every accepted Run callback. The
@@ -74,16 +119,19 @@ enum class ExecutionTraceAction : std::uint32_t {
 class ExecutionHostContext {
  public:
   /**
-   * @brief Publishes worker and epoch identity on the calling thread.
+   * @brief Publishes worker, epoch, and task audit identity on this thread.
    * @param worker_id Private worker id, or -1 when unavailable.
    * @param epoch Active nonzero Run/route epoch.
+   * @param task_identity Exact submitted task tuple, or absent for a
+   * runtime-wide callback with no task source.
    * @return Nothing.
    * @throws Nothing.
    * @note Every entered callback balances this call with
    * `clear_task_context()` on every exit path.
    */
-  virtual void set_task_context(int worker_id,
-                                std::uint64_t epoch) noexcept = 0;
+  virtual void set_task_context(
+      int worker_id, std::uint64_t epoch,
+      std::optional<ExecutionTaskAuditIdentity> task_identity) noexcept = 0;
 
   /**
    * @brief Clears calling-thread execution attribution.
@@ -98,11 +146,15 @@ class ExecutionHostContext {
    * @param node_id Backend node id, or -1 when unavailable.
    * @param worker_id Private worker id, or -1 when unavailable.
    * @param epoch Active Run/route epoch.
+   * @param task_identity Exact submitted task tuple, or absent for a
+   * runtime-wide event with no task source.
    * @return Nothing.
    * @throws Nothing; observation failure cannot replace task settlement.
    */
-  virtual void log_event(ExecutionTraceAction action, int node_id,
-                         int worker_id, std::uint64_t epoch) noexcept = 0;
+  virtual void log_event(
+      ExecutionTraceAction action, int node_id, int worker_id,
+      std::uint64_t epoch,
+      std::optional<ExecutionTaskAuditIdentity> task_identity) noexcept = 0;
 
  protected:
   /**

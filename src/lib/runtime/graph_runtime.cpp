@@ -124,6 +124,10 @@ thread_local int GraphRuntime::tls_worker_id_ = -1;
 thread_local int GraphRuntime::tls_execution_context_worker_id_ = -1;
 /** @copydoc GraphRuntime::tls_execution_context_epoch_ */
 thread_local uint64_t GraphRuntime::tls_execution_context_epoch_ = 0;
+/** @copydoc GraphRuntime::tls_execution_task_identity_ */
+thread_local std::optional<ExecutionTaskAuditIdentity> GraphRuntime::
+    tls_execution_task_identity_ =  // NOLINT(whitespace/indent_namespace)
+    std::nullopt;                   // NOLINT(whitespace/indent_namespace)
 
 /** @copydoc GraphRuntime::GraphRuntime */
 GraphRuntime::GraphRuntime(const Info& info)
@@ -226,21 +230,26 @@ uint64_t GraphRuntime::this_task_epoch() noexcept {
 }
 
 /** @copydoc GraphRuntime::set_execution_trace_context */
-void GraphRuntime::set_execution_trace_context(int worker_id,
-                                               uint64_t epoch) noexcept {
+void GraphRuntime::set_execution_trace_context(
+    int worker_id, uint64_t epoch,
+    std::optional<ExecutionTaskAuditIdentity> task_identity) noexcept {
   tls_execution_context_worker_id_ = worker_id;
   tls_execution_context_epoch_ = epoch;
+  tls_execution_task_identity_ = task_identity;
 }
 
 /** @copydoc GraphRuntime::clear_execution_trace_context */
 void GraphRuntime::clear_execution_trace_context() noexcept {
   tls_execution_context_worker_id_ = -1;
   tls_execution_context_epoch_ = 0;
+  tls_execution_task_identity_.reset();
 }
 
 /** @copydoc GraphRuntime::set_task_context */
-void GraphRuntime::set_task_context(int worker_id, uint64_t epoch) noexcept {
-  set_execution_trace_context(worker_id, epoch);
+void GraphRuntime::set_task_context(
+    int worker_id, uint64_t epoch,
+    std::optional<ExecutionTaskAuditIdentity> task_identity) noexcept {
+  set_execution_trace_context(worker_id, epoch, task_identity);
 }
 
 /** @copydoc GraphRuntime::clear_task_context */
@@ -248,9 +257,11 @@ void GraphRuntime::clear_task_context() noexcept {
   clear_execution_trace_context();
 }
 
-/** @copydoc GraphRuntime::log_event(ExecutionTraceAction,int,int,uint64_t) */
-void GraphRuntime::log_event(ExecutionTraceAction action, int node_id,
-                             int worker_id, uint64_t epoch) noexcept {
+/** @copydoc GraphRuntime::log_event(ExecutionTraceAction,int,int,uint64_t,
+ * std::optional<ExecutionTaskAuditIdentity>) */
+void GraphRuntime::log_event(
+    ExecutionTraceAction action, int node_id, int worker_id, uint64_t epoch,
+    std::optional<ExecutionTaskAuditIdentity> task_identity) noexcept {
   ExecutionEvent::Action runtime_action = ExecutionEvent::EXECUTE;
   switch (action) {
     case ExecutionTraceAction::AssignInitial:
@@ -279,7 +290,7 @@ void GraphRuntime::log_event(ExecutionTraceAction action, int node_id,
       break;
   }
   try {
-    log_event(runtime_action, node_id, worker_id, epoch);
+    log_event(runtime_action, node_id, worker_id, epoch, task_identity);
   } catch (...) {
     // Execution observations are best effort and cannot replace task failures.
   }
@@ -292,13 +303,14 @@ void GraphRuntime::log_event(ExecutionEvent::Action action, int node_id) {
   if (worker_id < 0) {
     worker_id = tls_execution_context_worker_id_;
   }
-  log_event(action, node_id, worker_id, epoch);
+  log_event(action, node_id, worker_id, epoch, tls_execution_task_identity_);
 }
 
-/** @copydoc GraphRuntime::log_event(ExecutionEvent::Action,int,int,uint64_t)
- */
-void GraphRuntime::log_event(ExecutionEvent::Action action, int node_id,
-                             int worker_id, uint64_t epoch) {
+/** @copydoc GraphRuntime::log_event(ExecutionEvent::Action,int,int,uint64_t,
+ * std::optional<ExecutionTaskAuditIdentity>) */
+void GraphRuntime::log_event(
+    ExecutionEvent::Action action, int node_id, int worker_id, uint64_t epoch,
+    std::optional<ExecutionTaskAuditIdentity> task_identity) {
   std::lock_guard<std::mutex> lock(log_mutex_);
   if (execution_trace_next_sequence_ == kObservationSequenceExhausted) {
     saturating_increment(execution_trace_unsequenced_drops_);
@@ -306,9 +318,10 @@ void GraphRuntime::log_event(ExecutionEvent::Action action, int node_id,
   }
 
   const uint64_t sequence = execution_trace_next_sequence_;
-  ExecutionEvent event{sequence, epoch,
-                       node_id,  worker_id,
-                       action,   std::chrono::high_resolution_clock::now()};
+  ExecutionEvent event{sequence,     epoch,
+                       node_id,      worker_id,
+                       action,       std::chrono::high_resolution_clock::now(),
+                       task_identity};
   execution_trace_next_sequence_ = sequence_successor(sequence);
 
   if (execution_trace_size_ == execution_trace_slots_.size()) {

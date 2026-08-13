@@ -896,12 +896,15 @@ class PHOTOSPIDER_API Host {
    *        terminal empty page.
    * @param limit Maximum events to copy; must be in
    * `kExecutionTraceMinLimit..kExecutionTraceMaxLimit`.
-   * @return Bounded non-destructive execution trace page, or a failure status.
+   * @return Bounded non-destructive execution trace page bound to the exact
+   * requested session, or a failure status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Trace reads never remove events. Invalid limits, future cursors, or
-   *       an exhausted sentinel used before actual exhaustion return
-   *       `GraphErrc::InvalidParameter` without copying a page.
+   * @note Trace reads never remove events. Task-backed entries expose only a
+   * fixed-size Revision/Run/RunLocalTask observation tuple; runtime-wide
+   * entries expose an absent tuple. Invalid limits, future cursors, or an
+   * exhausted sentinel used before actual exhaustion return
+   * `GraphErrc::InvalidParameter` without copying a page.
    */
   virtual Result<ExecutionTracePage> execution_trace(
       const GraphSessionId& session, uint64_t after_sequence,

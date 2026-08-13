@@ -25,6 +25,9 @@ endif()
 option(USE_ASAN "Enable AddressSanitizer" OFF)
 option(USE_TSAN "Enable ThreadSanitizer" OFF)
 option(BUILD_TESTING "Build tests" ON)
+option(PHOTOSPIDER_BUILD_FUZZERS
+    "Build manual Clang libFuzzer codec robustness targets"
+    OFF)
 option(PHOTOSPIDER_ENABLE_OPENCV
     "Enable OpenCV-backed image processing, codecs, and public adapters" ON)
 option(PHOTOSPIDER_ENABLE_YAML
@@ -1039,6 +1042,127 @@ if(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB)
     target_link_libraries(photospider-worker PRIVATE
         photospider_single_tenant_job_internal
         Threads::Threads)
+endif()
+
+# Manual Issue #106 robustness harnesses. These targets deliberately remain
+# outside ALL, CTest, install/export, and CI ownership. The selected private
+# product libraries are instrumented only in an explicit fuzz configuration;
+# default builds retain their ordinary compile and link closure.
+if(PHOTOSPIDER_BUILD_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires a Clang-family compiler with libFuzzer")
+    endif()
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND
+       NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires the Darwin or Linux protocol profile")
+    endif()
+    if(USE_ASAN OR USE_TSAN)
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS cannot be combined with USE_ASAN or USE_TSAN")
+    endif()
+    if(NOT PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB OR
+       NOT PHOTOSPIDER_HAS_ISOLATED_CPU_INVOCATION)
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires worker and isolated CPU protocol products")
+    endif()
+
+    if(CMAKE_CROSSCOMPILING)
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires a native compiler/runtime probe")
+    endif()
+
+    set(PHOTOSPIDER_FUZZ_PROBE_ROOT
+        "${CMAKE_BINARY_DIR}/CMakeFiles/photospider_fuzz_probe")
+    set(PHOTOSPIDER_FUZZ_PROBE_SOURCE
+        "${PHOTOSPIDER_FUZZ_PROBE_ROOT}/probe.cpp")
+    set(PHOTOSPIDER_FUZZ_PROBE_EXECUTABLE
+        "${PHOTOSPIDER_FUZZ_PROBE_ROOT}/probe")
+    file(MAKE_DIRECTORY "${PHOTOSPIDER_FUZZ_PROBE_ROOT}")
+    file(WRITE "${PHOTOSPIDER_FUZZ_PROBE_SOURCE}" [=[
+#include <cstddef>
+#include <cstdint>
+
+extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t*, std::size_t) {
+  return 0;
+}
+]=])
+    unset(PHOTOSPIDER_HAS_WORKING_LIBFUZZER CACHE)
+    try_compile(PHOTOSPIDER_HAS_WORKING_LIBFUZZER
+        "${PHOTOSPIDER_FUZZ_PROBE_ROOT}/build"
+        "${PHOTOSPIDER_FUZZ_PROBE_SOURCE}"
+        COMPILE_DEFINITIONS
+            -fno-omit-frame-pointer
+            -fsanitize=fuzzer-no-link,address,undefined
+        LINK_OPTIONS
+            -fno-omit-frame-pointer
+            -fsanitize=fuzzer,address,undefined
+        COPY_FILE "${PHOTOSPIDER_FUZZ_PROBE_EXECUTABLE}"
+        OUTPUT_VARIABLE PHOTOSPIDER_FUZZ_PROBE_BUILD_OUTPUT
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    if(NOT PHOTOSPIDER_HAS_WORKING_LIBFUZZER)
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires working Clang libFuzzer, AddressSanitizer, and UndefinedBehaviorSanitizer compile/link support")
+    endif()
+    execute_process(
+        COMMAND "${PHOTOSPIDER_FUZZ_PROBE_EXECUTABLE}" -runs=1
+        TIMEOUT 10
+        RESULT_VARIABLE PHOTOSPIDER_FUZZ_PROBE_RUN_RESULT
+        OUTPUT_QUIET
+        ERROR_VARIABLE PHOTOSPIDER_FUZZ_PROBE_RUN_OUTPUT)
+    if(NOT "${PHOTOSPIDER_FUZZ_PROBE_RUN_RESULT}" STREQUAL "0")
+        message(FATAL_ERROR
+            "PHOTOSPIDER_BUILD_FUZZERS requires a runnable Clang libFuzzer/ASan/UBSan runtime")
+    endif()
+
+    function(photospider_instrument_fuzz_codec TARGET_NAME)
+        target_compile_options(${TARGET_NAME} PRIVATE
+            -fno-omit-frame-pointer
+            -fsanitize=fuzzer-no-link,address,undefined)
+        set_target_properties(${TARGET_NAME} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION OFF)
+    endfunction()
+
+    photospider_instrument_fuzz_codec(photospider_execution_internal)
+    photospider_instrument_fuzz_codec(
+        photospider_single_tenant_job_internal)
+
+    add_executable(fuzz_worker_protocol_codec EXCLUDE_FROM_ALL
+        tests/fuzz/fuzz_worker_protocol_codec.cpp)
+    target_compile_features(fuzz_worker_protocol_codec PRIVATE cxx_std_17)
+    target_include_directories(fuzz_worker_protocol_codec PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib")
+    target_link_libraries(fuzz_worker_protocol_codec PRIVATE
+        photospider_single_tenant_job_internal)
+
+    add_executable(fuzz_isolated_cpu_invocation_codec EXCLUDE_FROM_ALL
+        tests/fuzz/fuzz_isolated_cpu_invocation_codec.cpp)
+    target_compile_features(
+        fuzz_isolated_cpu_invocation_codec PRIVATE cxx_std_17)
+    target_include_directories(
+        fuzz_isolated_cpu_invocation_codec PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib")
+    target_link_libraries(fuzz_isolated_cpu_invocation_codec PRIVATE
+        photospider_execution_internal)
+
+    foreach(PHOTOSPIDER_FUZZ_TARGET
+            fuzz_worker_protocol_codec
+            fuzz_isolated_cpu_invocation_codec)
+        target_compile_options(${PHOTOSPIDER_FUZZ_TARGET} PRIVATE
+            -fno-omit-frame-pointer
+            -fsanitize=fuzzer-no-link,address,undefined)
+        target_link_options(${PHOTOSPIDER_FUZZ_TARGET} PRIVATE
+            -fno-omit-frame-pointer
+            -fsanitize=fuzzer,address,undefined)
+        set_target_properties(${PHOTOSPIDER_FUZZ_TARGET} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION OFF
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fuzzers")
+    endforeach()
 endif()
 
 set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS

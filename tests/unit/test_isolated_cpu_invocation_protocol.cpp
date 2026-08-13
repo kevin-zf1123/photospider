@@ -562,5 +562,66 @@ TEST(IsolatedCpuInvocationProtocol,
                IsolatedCpuProtocolError);
 }
 
+/**
+ * @brief Exercises bounded deterministic request/response decode mutations.
+ * @return Nothing; GoogleTest reports noncanonical success or open failure.
+ * @throws Allocation failures from bounded packet copies unchanged.
+ * @note Successful mutations must round-trip byte-for-byte; every strict
+ * prefix and malformed mutation otherwise fails through the closed protocol
+ * exception without acquiring invocation resources.
+ */
+TEST(IsolatedCpuInvocationProtocol,
+     BoundedMutationCorpusIsCanonicalOrFailsWithProtocolError) {
+  const IsolatedCpuInvocationRequest request = test_request();
+  const std::vector<std::byte> request_packet =
+      encode_isolated_cpu_invocation_request(request, {});
+  for (std::size_t retained = 0U; retained < request_packet.size();
+       ++retained) {
+    std::vector<std::byte> truncated(request_packet.begin(),
+                                     request_packet.begin() + retained);
+    EXPECT_THROW(decode_isolated_cpu_invocation_request(truncated, {}),
+                 IsolatedCpuProtocolError)
+        << "request retained bytes=" << retained;
+  }
+  for (std::size_t offset = 0U; offset < request_packet.size(); ++offset) {
+    std::vector<std::byte> mutated = request_packet;
+    mutated[offset] ^= static_cast<std::byte>(
+        static_cast<std::uint8_t>(0x01U << (offset % 8U)));
+    try {
+      const IsolatedCpuInvocationRequest decoded =
+          decode_isolated_cpu_invocation_request(mutated, {});
+      EXPECT_EQ(encode_isolated_cpu_invocation_request(decoded, {}), mutated)
+          << "request mutation offset=" << offset;
+    } catch (const IsolatedCpuProtocolError&) {
+    }
+  }
+
+  const IsolatedCpuInvocationResponse response = test_response(request);
+  const std::vector<std::byte> response_packet =
+      encode_isolated_cpu_invocation_response(request, response, {});
+  for (std::size_t retained = 0U; retained < response_packet.size();
+       ++retained) {
+    std::vector<std::byte> truncated(response_packet.begin(),
+                                     response_packet.begin() + retained);
+    EXPECT_THROW(
+        decode_isolated_cpu_invocation_response(request, truncated, {}),
+        IsolatedCpuProtocolError)
+        << "response retained bytes=" << retained;
+  }
+  for (std::size_t offset = 0U; offset < response_packet.size(); ++offset) {
+    std::vector<std::byte> mutated = response_packet;
+    mutated[offset] ^= static_cast<std::byte>(
+        static_cast<std::uint8_t>(0x80U >> (offset % 8U)));
+    try {
+      const IsolatedCpuInvocationResponse decoded =
+          decode_isolated_cpu_invocation_response(request, mutated, {});
+      EXPECT_EQ(encode_isolated_cpu_invocation_response(request, decoded, {}),
+                mutated)
+          << "response mutation offset=" << offset;
+    } catch (const IsolatedCpuProtocolError&) {
+    }
+  }
+}
+
 }  // namespace
 }  // namespace ps::execution

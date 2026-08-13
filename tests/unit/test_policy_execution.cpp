@@ -73,8 +73,11 @@ ComputeRunSubmission make_submission(
 class TestHostContext final : public ExecutionHostContext {
  public:
   /** @copydoc ExecutionHostContext::set_task_context */
-  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+  void set_task_context(int worker_id, std::uint64_t epoch,
+                        std::optional<ExecutionTaskAuditIdentity>
+                            task_identity) noexcept override {
     (void)epoch;
+    (void)task_identity;
     const int active =
         active_contexts_.fetch_add(1, std::memory_order_acq_rel) + 1;
     int observed = maximum_contexts_.load(std::memory_order_relaxed);
@@ -97,8 +100,8 @@ class TestHostContext final : public ExecutionHostContext {
   }
 
   /** @copydoc ExecutionHostContext::log_event */
-  void log_event(ExecutionTraceAction, int, int,
-                 std::uint64_t) noexcept override {}
+  void log_event(ExecutionTraceAction, int, int, std::uint64_t,
+                 std::optional<ExecutionTaskAuditIdentity>) noexcept override {}
 
   /**
    * @brief Copies all worker ids observed at callback entry.

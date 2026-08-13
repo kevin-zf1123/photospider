@@ -336,6 +336,37 @@ TEST(ExecutionTraceRing, CapacityTwoPagesAreStableNonDestructiveAndExact) {
   EXPECT_EQ(cleared.dropped_count, 3u);
 }
 
+/**
+ * @brief Locks optional fixed-size task audit identity in the runtime ring.
+ * @return Nothing; GoogleTest reports identity loss, invention, or mutation.
+ * @throws Allocation and runtime-construction failures unchanged.
+ * @note Epoch remains an independent diagnostic value and is deliberately
+ * different from the canonical Run scalar in this test. Repeating the same
+ * cursor proves non-destructive page reuse preserves presence and absence.
+ */
+TEST(ExecutionTraceRing, PreservesExactTaskIdentityAndExplicitAbsence) {
+  ScopedRuntimeDirectory directory;
+  GraphRuntime runtime(make_runtime_info(directory));
+  const ExecutionTaskAuditIdentity identity{7U, 11U, 0U};
+  runtime.log_event(GraphRuntime::ExecutionEvent::EXECUTE, 3, 4, 99, identity);
+  runtime.log_event(GraphRuntime::ExecutionEvent::SKIP_STALE_GENERATION, 5, 6,
+                    100, std::nullopt);
+
+  const GraphRuntime::ExecutionEventPage page =
+      runtime.execution_trace_page(0, 2);
+  ASSERT_EQ(page.events.size(), 2U);
+  ASSERT_TRUE(page.events[0].task_identity.has_value());
+  EXPECT_EQ(*page.events[0].task_identity, identity);
+  EXPECT_EQ(page.events[0].epoch, 99U);
+  EXPECT_FALSE(page.events[1].task_identity.has_value());
+
+  const GraphRuntime::ExecutionEventPage repeated =
+      runtime.execution_trace_page(0, 2);
+  ASSERT_EQ(repeated.events.size(), page.events.size());
+  EXPECT_EQ(repeated.events[0].task_identity, page.events[0].task_identity);
+  EXPECT_EQ(repeated.events[1].task_identity, page.events[1].task_identity);
+}
+
 TEST(ExecutionTraceRing, EmptyAndExhaustedCursorsAreDeterministic) {
   ScopedRuntimeDirectory empty_directory;
   GraphRuntime empty_runtime(make_runtime_info(empty_directory));

@@ -5754,7 +5754,17 @@ void ExecutionService::dec_tasks_to_complete() {
 /** @copydoc ExecutionService::log_event */
 void ExecutionService::log_event(ExecutionTraceAction action, int node_id) {
   RunState& run = current_worker_run();
-  run.host->log_event(action, node_id, tls_worker_id_, run.id.value());
+  if (tls_queue_entry_ == nullptr) {
+    throw std::logic_error(
+        "ExecutionService trace requires one active ready submission.");
+  }
+  const ReadyTaskSubmission& submission = tls_queue_entry_->submission;
+  const ComputeRunTaskIdentity identity = submission.identity();
+  const ExecutionTaskAuditIdentity audit_identity{
+      submission.metadata().revision().value(), identity.run_id().value(),
+      identity.local_task_id().value()};
+  run.host->log_event(action, node_id, tls_worker_id_, run.id.value(),
+                      audit_identity);
 }
 
 /** @copydoc ExecutionService::fail_run */
@@ -6148,7 +6158,11 @@ void ExecutionService::worker_loop(
     tls_queue_entry_ = entry.get();
     tls_fence_continuation_gate_.reset();
     tls_worker_id_ = worker_id;
-    run->host->set_task_context(worker_id, run->id.value());
+    const ComputeRunTaskIdentity task_identity = entry->submission.identity();
+    const ExecutionTaskAuditIdentity audit_identity{
+        entry->submission.metadata().revision().value(),
+        task_identity.run_id().value(), task_identity.local_task_id().value()};
+    run->host->set_task_context(worker_id, run->id.value(), audit_identity);
     lifecycle_telemetry_->increment_physical_counter(
         ExecutionLifecyclePhysicalCounter::EnteredCallback);
     try {

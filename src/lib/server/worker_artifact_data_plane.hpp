@@ -66,6 +66,26 @@ struct WorkerDataPlaneAssignment final {
 };
 
 /**
+ * @brief Derives the canonical data-plane metadata for one Job assignment.
+ *
+ * @param assignment Valid manager-owned identity/spec and optional authorized
+ * checkpoint record.
+ * @return Complete deterministic checkpoint/output references and exact output
+ * byte bound.
+ * @throws std::invalid_argument for a missing/mismatched spec, checkpoint,
+ * receipt, descriptor, resource bound, or attempt identity.
+ * @throws std::overflow_error when resource conversion or reference hashing
+ * cannot represent the input.
+ * @throws std::bad_alloc when bounded canonical metadata cannot allocate.
+ * @note This pure helper opens no stream descriptor, copies or hashes no bulk
+ * payload, selects no current attempt, and grants no artifact or publication
+ * authority. `WorkerArtifactDataPlane::create` delegates to it before opening
+ * the two direction-reduced lanes.
+ */
+WorkerDataPlaneAssignment make_worker_data_plane_assignment(
+    const JobAssignment& assignment);
+
+/**
  * @brief Worker-produced metadata describing bytes in its private output stage.
  * @throws Nothing for default construction; retained values may allocate.
  * @note This value is candidate evidence only. It cannot select a published

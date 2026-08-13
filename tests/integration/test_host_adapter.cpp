@@ -2772,19 +2772,31 @@ TEST(EmbeddedHostAdapter,
   auto execution_trace =
       host->execution_trace(session, 0, kExecutionTraceMaxLimit);
   ASSERT_TRUE(execution_trace.status.ok) << execution_trace.status.message;
+  EXPECT_EQ(execution_trace.value.session.value, session.value);
   ASSERT_FALSE(execution_trace.value.events.empty());
   EXPECT_GT(execution_trace.value.events.front().sequence, 0u);
   EXPECT_LT(execution_trace.value.events.back().sequence,
             kObservationSequenceExhausted);
+  EXPECT_TRUE(std::any_of(execution_trace.value.events.begin(),
+                          execution_trace.value.events.end(),
+                          [](const ExecutionTraceEventSnapshot& event) {
+                            return event.task_identity.has_value();
+                          }));
 
   auto repeated_execution_trace =
       host->execution_trace(session, 0, kExecutionTraceMaxLimit);
   ASSERT_TRUE(repeated_execution_trace.status.ok)
       << repeated_execution_trace.status.message;
+  EXPECT_EQ(repeated_execution_trace.value.session.value, session.value);
   ASSERT_EQ(repeated_execution_trace.value.events.size(),
             execution_trace.value.events.size());
   EXPECT_EQ(repeated_execution_trace.value.events.front().sequence,
             execution_trace.value.events.front().sequence);
+  for (std::size_t index = 0U;
+       index < repeated_execution_trace.value.events.size(); ++index) {
+    EXPECT_EQ(repeated_execution_trace.value.events[index].task_identity,
+              execution_trace.value.events[index].task_identity);
+  }
 
   auto future_trace = host->execution_trace(
       session, kObservationSequenceExhausted - 1, kExecutionTraceMaxLimit);

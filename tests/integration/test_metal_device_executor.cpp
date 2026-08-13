@@ -46,7 +46,10 @@ namespace {
 class MetalIntegrationHost final : public ExecutionHostContext {
  public:
   /** @copydoc ExecutionHostContext::set_task_context */
-  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+  void set_task_context(int worker_id, std::uint64_t epoch,
+                        std::optional<ExecutionTaskAuditIdentity>
+                            task_identity) noexcept override {
+    (void)task_identity;
     last_worker_id_.store(worker_id, std::memory_order_relaxed);
     last_epoch_.store(epoch, std::memory_order_relaxed);
     entries_.fetch_add(1, std::memory_order_relaxed);
@@ -58,8 +61,8 @@ class MetalIntegrationHost final : public ExecutionHostContext {
   }
 
   /** @copydoc ExecutionHostContext::log_event */
-  void log_event(ExecutionTraceAction, int, int,
-                 std::uint64_t) noexcept override {}
+  void log_event(ExecutionTraceAction, int, int, std::uint64_t,
+                 std::optional<ExecutionTaskAuditIdentity>) noexcept override {}
 
   /**
    * @brief Returns callback context entries.

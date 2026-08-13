@@ -696,6 +696,61 @@ TEST(WorkerProtocol, RoundTripsCompleteAssignmentAndExactLease) {
   EXPECT_EQ(received.heartbeat_interval, sent.heartbeat_interval);
 }
 
+/**
+ * @brief Locks the pure Assignment semantic decoder and canonical wire oracle.
+ * @return Nothing; GoogleTest reports decode, equality, or rejection failures.
+ * @throws Allocation or fixture-construction failures unchanged.
+ * @note Every strict payload prefix and one trailing-byte mutation exercises
+ * the production semantic decoder without opening a socket or data-plane lane.
+ */
+TEST(WorkerProtocol,
+     PureAssignmentDecoderCanonicalizesAndRejectsBoundedFramingMutations) {
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.pure-assignment"), 7,
+      OutputSlotId("image.final"), protocol_resources());
+  auto prepared = prepared_assignment_with_data_plane(spec);
+  PreparedWorkerAssignment& sent = prepared.first;
+  sent.graph.root_dir = "/trusted/root";
+  sent.graph.yaml_path = "/trusted/root/graph.yaml";
+  sent.graph.config_path = "/trusted/root/config.yaml";
+  sent.graph.cache_root_dir = "/trusted/cache";
+  sent.graph.message = "prepared";
+
+  const WorkerProtocolFrame canonical = encode_worker_assignment(sent);
+  const PreparedWorkerAssignment decoded = decode_worker_assignment(canonical);
+  ASSERT_NE(decoded.assignment.spec, nullptr);
+  EXPECT_EQ(decoded.assignment.identity, sent.assignment.identity);
+  EXPECT_EQ(decoded.assignment.spec->canonical_bytes(),
+            sent.assignment.spec->canonical_bytes());
+  EXPECT_EQ(decoded.data_plane.output.reference_id,
+            sent.data_plane.output.reference_id);
+  EXPECT_EQ(decoded.graph.root_dir, sent.graph.root_dir);
+  EXPECT_EQ(decoded.graph.yaml_path, sent.graph.yaml_path);
+  EXPECT_EQ(decoded.graph.config_path, sent.graph.config_path);
+  EXPECT_EQ(decoded.graph.cache_root_dir, sent.graph.cache_root_dir);
+  EXPECT_EQ(decoded.graph.message, sent.graph.message);
+  EXPECT_EQ(decoded.heartbeat_interval, sent.heartbeat_interval);
+  const WorkerProtocolFrame reencoded =
+      encode_worker_assignment_metadata(decoded);
+  EXPECT_EQ(reencoded.kind, canonical.kind);
+  EXPECT_EQ(reencoded.payload, canonical.payload);
+
+  for (std::size_t retained = 0U; retained < canonical.payload.size();
+       ++retained) {
+    WorkerProtocolFrame truncated = canonical;
+    truncated.payload.resize(retained);
+    EXPECT_THROW(decode_worker_assignment(truncated), WorkerProtocolError)
+        << "retained bytes=" << retained;
+  }
+  WorkerProtocolFrame trailing = canonical;
+  trailing.payload.push_back(std::byte{0});
+  EXPECT_THROW(decode_worker_assignment(trailing), WorkerProtocolError);
+
+  WorkerProtocolFrame wrong_kind = canonical;
+  wrong_kind.kind = WorkerMessageKind::Heartbeat;
+  EXPECT_THROW(decode_worker_assignment(wrong_kind), WorkerProtocolError);
+}
+
 TEST(WorkerProtocol, ExpiredBufferedAssignmentIsNotSemanticallyAccepted) {
   ScopedSocketPair sockets;
   auto spec = std::make_shared<const JobSpec>(

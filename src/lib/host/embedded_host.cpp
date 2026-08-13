@@ -1963,15 +1963,20 @@ HostExecutionTraceAction to_public_execution_action(
 /**
  * @brief Converts one bounded backend execution page into public snapshots.
  *
+ * @param session Exact Graph session resolved for this page.
  * @param backend_page Backend execution events and locked metadata.
- * @return Public execution-trace page preserving sequence metadata.
+ * @return Public session-bound execution-trace page preserving task identity
+ * and sequence metadata.
  * @throws std::bad_alloc if vector allocation fails.
  * @note The conversion is non-destructive and cannot exceed the already
- *       validated backend page bound.
+ *       validated backend page bound. Scalar task identities mint no backend
+ *       Run, task, lease, or commit authority.
  */
 ExecutionTracePage to_public_execution_trace_page(
+    const GraphSessionId& session,
     const GraphRuntime::ExecutionEventPage& backend_page) {
   ExecutionTracePage page;
+  page.session = session;
   page.events.reserve(backend_page.events.size());
   for (const auto& event : backend_page.events) {
     ExecutionTraceEventSnapshot snapshot;
@@ -1984,6 +1989,11 @@ ExecutionTracePage to_public_execution_trace_page(
         std::chrono::duration_cast<std::chrono::microseconds>(
             event.timestamp.time_since_epoch())
             .count());
+    if (event.task_identity.has_value()) {
+      snapshot.task_identity = ExecutionTraceTaskIdentity{
+          event.task_identity->graph_revision, event.task_identity->run_id,
+          event.task_identity->run_local_task_id};
+    }
     page.events.push_back(snapshot);
   }
   page.next_sequence = backend_page.next_sequence;
@@ -3897,7 +3907,7 @@ class EmbeddedHost final : public Host,
                 GraphErrc::NotFound,
                 "execution trace not available for session: " + session.value);
           }
-          return success_result(to_public_execution_trace_page(*page));
+          return success_result(to_public_execution_trace_page(session, *page));
         });
   }
 

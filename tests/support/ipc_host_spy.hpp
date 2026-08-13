@@ -108,11 +108,15 @@ class IpcHostSpy final : public Host {
    *
    * @param host_session Private Host session returned by successful load.
    * @throws std::bad_alloc if the session label cannot be copied.
-   * @note The session is not listed until `load_graph()` succeeds.
+   * @note The session is not listed until `load_graph()` succeeds. The default
+   * empty execution-trace page is bound to the same private session so every
+   * successful Host result satisfies the production page/session invariant.
    */
   explicit IpcHostSpy(
       GraphSessionId host_session = GraphSessionId{"ipc-host-spy-session"})
-      : host_session_(std::move(host_session)) {}
+      : host_session_(std::move(host_session)) {
+    execution_trace_page_.session = host_session_;
+  }
 
   /**
    * @brief Removes all recorded calls without changing configured results.
@@ -466,9 +470,15 @@ class IpcHostSpy final : public Host {
    * @throws std::bad_alloc if copied trace vector storage allocates.
    * @note Repeated calls return copies of the same configured page until a
    *       test replaces it, matching non-destructive observation semantics.
+   *       An empty page session is completed with this spy's stable private
+   *       Host session; an explicit nonempty session is preserved so tests can
+   *       exercise router mismatch rejection.
    */
   void set_execution_trace_page(ExecutionTracePage page) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (page.session.value.empty()) {
+      page.session = host_session_;
+    }
     execution_trace_page_ = std::move(page);
   }
 

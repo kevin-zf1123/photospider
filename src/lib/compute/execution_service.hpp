@@ -1768,11 +1768,14 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   void dec_tasks_to_complete() override;
 
   /**
-   * @brief Publishes one current-worker Run trace.
+   * @brief Publishes one current-worker Run/task trace.
    * @param action Stable trace action.
    * @param node_id Planned Graph node id.
    * @return Nothing.
    * @throws std::logic_error outside a service worker callback.
+   * @note The Host receives the exact revision, Run, and dense Run-local task
+   * identity copied from the active validated QueueEntry. The observation does
+   * not replace the matching lease or registered task plan.
    */
   void log_event(ExecutionTraceAction action, int node_id) override;
 

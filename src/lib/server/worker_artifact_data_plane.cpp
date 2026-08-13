@@ -539,15 +539,10 @@ void validate_artifact_receipt_metadata(const OutputCommitReceipt& receipt) {
   validate_tight_descriptor(receipt.descriptor);
 }
 
-/**
- * @brief Builds one exact bounded Assignment metadata contract.
- * @param assignment Valid manager-owned assignment and optional checkpoint.
- * @return Complete deterministic references and output bound.
- * @throws Validation, allocation, and bounded metadata hashing failures.
- * @note Durable checkpoint payload bytes are not copied or hashed here. The
- * killable worker verifies them while receiving the checkpoint stream.
- */
-WorkerDataPlaneAssignment make_assignment_metadata(
+}  // namespace
+
+/** @copydoc ps::server::make_worker_data_plane_assignment */
+WorkerDataPlaneAssignment make_worker_data_plane_assignment(
     const JobAssignment& assignment) {
   validate_attempt_identity(assignment.identity);
   if (assignment.spec == nullptr) {
@@ -597,8 +592,6 @@ WorkerDataPlaneAssignment make_assignment_metadata(
                                         metadata);
   return metadata;
 }
-
-}  // namespace
 
 /** @copydoc ps::server::validate_worker_data_plane_assignment */
 void validate_worker_data_plane_assignment(
@@ -664,7 +657,8 @@ WorkerArtifactDataPlane::WorkerArtifactDataPlane(
 /** @copydoc ps::server::WorkerArtifactDataPlane::create */
 WorkerArtifactDataPlane WorkerArtifactDataPlane::create(
     const JobAssignment& assignment) {
-  WorkerDataPlaneAssignment metadata = make_assignment_metadata(assignment);
+  WorkerDataPlaneAssignment metadata =
+      make_worker_data_plane_assignment(assignment);
   StreamLane checkpoint = create_checkpoint_lane();
   StreamLane output = create_output_lane();
   return WorkerArtifactDataPlane(

@@ -1810,17 +1810,24 @@ class ExecutionServiceHost final : public ExecutionHostContext {
 
     /** @brief Opaque Run epoch active on that worker. */
     std::uint64_t epoch = 0;
+
+    /** @brief Exact observation-only revision/Run/local-task join. */
+    std::optional<ExecutionTaskAuditIdentity> task_identity;
   };
 
   /**
    * @brief Records one worker-context entry.
    * @param worker_id Fixed private CPU or GPU worker id.
    * @param epoch Active nonzero execution epoch.
+   * @param task_identity Exact task audit tuple active on this callback.
    * @return Nothing.
    * @throws Nothing.
    */
-  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+  void set_task_context(int worker_id, std::uint64_t epoch,
+                        std::optional<ExecutionTaskAuditIdentity>
+                            task_identity) noexcept override {
     (void)epoch;
+    (void)task_identity;
     last_worker_id_.store(worker_id, std::memory_order_relaxed);
     context_entries_.fetch_add(1, std::memory_order_relaxed);
   }
@@ -1840,14 +1847,18 @@ class ExecutionServiceHost final : public ExecutionHostContext {
    * @param node_id Planned node id.
    * @param worker_id Active CPU worker id.
    * @param epoch Active execution epoch.
+   * @param task_identity Exact task audit tuple active on this event.
    * @return Nothing.
    * @throws Nothing.
    */
   void log_event(ExecutionTraceAction action, int node_id, int worker_id,
-                 std::uint64_t epoch) noexcept override {
+                 std::uint64_t epoch,
+                 std::optional<ExecutionTaskAuditIdentity>
+                     task_identity) noexcept override {
     try {
       std::lock_guard<std::mutex> lock(trace_mutex_);
-      trace_events_.push_back(TraceEvent{action, node_id, worker_id, epoch});
+      trace_events_.push_back(
+          TraceEvent{action, node_id, worker_id, epoch, task_identity});
     } catch (...) {
       trace_recording_failed_.store(true, std::memory_order_relaxed);
     }
@@ -8504,12 +8515,26 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   EXPECT_LT(first_traces.front().worker_id, 2);
   EXPECT_EQ(first_traces.front().epoch, first.descriptor().id().value());
   EXPECT_NE(first_traces.front().epoch, second.descriptor().id().value());
+  ASSERT_TRUE(first_traces.front().task_identity.has_value());
+  EXPECT_EQ(first_traces.front().task_identity->graph_revision,
+            first.descriptor().revision().value());
+  EXPECT_EQ(first_traces.front().task_identity->run_id,
+            first.descriptor().id().value());
+  EXPECT_EQ(first_traces.front().task_identity->run_local_task_id, 0U);
   EXPECT_EQ(second_traces.front().action, ExecutionTraceAction::AssignInitial);
   EXPECT_EQ(second_traces.front().node_id, 64);
   EXPECT_GE(second_traces.front().worker_id, 0);
   EXPECT_LT(second_traces.front().worker_id, 2);
   EXPECT_EQ(second_traces.front().epoch, second.descriptor().id().value());
   EXPECT_NE(second_traces.front().epoch, first.descriptor().id().value());
+  ASSERT_TRUE(second_traces.front().task_identity.has_value());
+  EXPECT_EQ(second_traces.front().task_identity->graph_revision,
+            second.descriptor().revision().value());
+  EXPECT_EQ(second_traces.front().task_identity->run_id,
+            second.descriptor().id().value());
+  EXPECT_EQ(second_traces.front().task_identity->run_local_task_id, 0U);
+  EXPECT_NE(first_traces.front().task_identity->run_id,
+            second_traces.front().task_identity->run_id);
 }
 
 /**
@@ -8756,9 +8781,10 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
       std::move(failing_lease), failing_identity, 65, true,
       [&failing_entered, failing_release, failure](
           ComputeRunLease&, const ComputeRunTaskIdentity&,
-          ExecutionTaskRuntime&) {
+          ExecutionTaskRuntime& runtime) {
         failing_entered.set_value();
         failing_release.wait();
+        runtime.log_event(ExecutionTraceAction::RethrowException, 65);
         std::rethrow_exception(failure);
       });
 
@@ -8855,6 +8881,18 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
   }
   EXPECT_EQ(failing_host.context_entries(), failing_host.context_exits());
   EXPECT_EQ(peer_host.context_entries(), peer_host.context_exits());
+  const std::vector<ExecutionServiceHost::TraceEvent> failing_traces =
+      failing_host.trace_events();
+  ASSERT_EQ(failing_traces.size(), 2U);
+  EXPECT_EQ(failing_traces[1].action, ExecutionTraceAction::RethrowException);
+  ASSERT_TRUE(failing_traces[0].task_identity.has_value());
+  ASSERT_TRUE(failing_traces[1].task_identity.has_value());
+  EXPECT_EQ(failing_traces[0].task_identity, failing_traces[1].task_identity);
+  EXPECT_EQ(failing_traces[1].task_identity->graph_revision,
+            failing.descriptor().revision().value());
+  EXPECT_EQ(failing_traces[1].task_identity->run_id,
+            failing.descriptor().id().value());
+  EXPECT_EQ(failing_traces[1].task_identity->run_local_task_id, 0U);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
@@ -9584,6 +9622,7 @@ TEST(ExecutionServiceCancellation,
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(host.context_entries(), 0);
   EXPECT_EQ(host.context_exits(), 0);
+  EXPECT_TRUE(host.trace_events().empty());
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
@@ -9891,6 +9930,14 @@ TEST(ExecutionServiceCancellation,
   EXPECT_EQ(host.context_entries(), 1);
   EXPECT_EQ(host.context_exits(), 1);
   EXPECT_FALSE(host.trace_recording_failed());
+  const std::vector<ExecutionServiceHost::TraceEvent> cancelled_traces =
+      host.trace_events();
+  ASSERT_EQ(cancelled_traces.size(), 1U);
+  EXPECT_EQ(cancelled_traces.front().action,
+            ExecutionTraceAction::AssignInitial);
+  ASSERT_TRUE(cancelled_traces.front().task_identity.has_value());
+  EXPECT_EQ(cancelled_traces.front().task_identity->run_id,
+            run.descriptor().id().value());
   ASSERT_TRUE(run.terminal_outcome().has_value());
   EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
@@ -9904,6 +9951,15 @@ TEST(ExecutionServiceCancellation,
   EXPECT_NO_THROW(
       service.execute_run(host, "cpu", std::move(recovery_ready), 1));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  const std::vector<ExecutionServiceHost::TraceEvent> retry_traces =
+      host.trace_events();
+  ASSERT_EQ(retry_traces.size(), 2U);
+  ASSERT_TRUE(retry_traces.back().task_identity.has_value());
+  EXPECT_EQ(retry_traces.back().task_identity->run_local_task_id, 0U);
+  EXPECT_EQ(retry_traces.back().task_identity->run_id,
+            recovery.descriptor().id().value());
+  EXPECT_NE(retry_traces.front().task_identity->run_id,
+            retry_traces.back().task_identity->run_id);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 

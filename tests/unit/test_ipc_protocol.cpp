@@ -4252,13 +4252,15 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(invocation.first_node.value, 2);
 
   ExecutionTracePage trace_page;
+  trace_page.session = GraphSessionId{"ipc-host-spy-session"};
   trace_page.events = {
       ExecutionTraceEventSnapshot{
           kObservationSequenceExhausted - 2, 31, NodeId{-1}, -1,
-          HostExecutionTraceAction::RethrowException, 9001},
-      ExecutionTraceEventSnapshot{kObservationSequenceExhausted - 1, 32,
-                                  NodeId{9}, 4,
-                                  HostExecutionTraceAction::ExecuteTile, 9002}};
+          HostExecutionTraceAction::RethrowException, 9001,
+          ExecutionTraceTaskIdentity{7U, 31U, 0U}},
+      ExecutionTraceEventSnapshot{
+          kObservationSequenceExhausted - 1, 32, NodeId{9}, 4,
+          HostExecutionTraceAction::ExecuteTile, 9002, std::nullopt}};
   trace_page.next_sequence = kObservationSequenceExhausted;
   trace_page.has_more = false;
   trace_page.dropped_count = kObservationSequenceExhausted;
@@ -4280,9 +4282,13 @@ TEST_F(HostRoutedGraphStateProtocolTest,
                   {"node_id", -1},
                   {"worker_id", -1},
                   {"action", "rethrow_exception"},
-                  {"timestamp_us", 9001}}));
+                  {"timestamp_us", 9001},
+                  {"task_identity", Json{{"graph_revision", 7},
+                                         {"run_id", 31},
+                                         {"run_local_task_id", 0}}}}));
   EXPECT_EQ(result["events"][1]["sequence"], kObservationSequenceExhausted - 1);
   EXPECT_EQ(result["events"][1]["action"], "execute_tile");
+  EXPECT_TRUE(result["events"][1]["task_identity"].is_null());
   EXPECT_EQ(result["next_sequence"], kObservationSequenceExhausted);
   EXPECT_FALSE(result["has_more"].get<bool>());
   EXPECT_EQ(result["dropped_count"], kObservationSequenceExhausted);
@@ -4322,7 +4328,8 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 
   ExecutionTracePage first_trace;
   first_trace.events = {ExecutionTraceEventSnapshot{
-      10, 1, NodeId{3}, 0, HostExecutionTraceAction::Execute, 100}};
+      10, 1, NodeId{3}, 0, HostExecutionTraceAction::Execute, 100,
+      std::nullopt}};
   first_trace.next_sequence = 10;
   first_trace.has_more = true;
   first_trace.dropped_count = 9;
@@ -4339,7 +4346,8 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 
   ExecutionTracePage second_trace;
   second_trace.events = {ExecutionTraceEventSnapshot{
-      11, 2, NodeId{4}, 1, HostExecutionTraceAction::ExecuteTile, 101}};
+      11, 2, NodeId{4}, 1, HostExecutionTraceAction::ExecuteTile, 101,
+      std::nullopt}};
   second_trace.next_sequence = 11;
   second_trace.dropped_count = 0;
   host_.set_execution_trace_page(second_trace);
@@ -4486,8 +4494,10 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(host_.call_count("events.drain"), 1u);
 
   ExecutionTracePage malformed_trace;
+  malformed_trace.session = GraphSessionId{"ipc-host-spy-session"};
   malformed_trace.events = {ExecutionTraceEventSnapshot{
-      4, 1, NodeId{1}, 0, static_cast<HostExecutionTraceAction>(999), 1}};
+      4, 1, NodeId{1}, 0, static_cast<HostExecutionTraceAction>(999), 1,
+      ExecutionTraceTaskIdentity{1U, 1U, 0U}}};
   malformed_trace.next_sequence = 4;
   host_.set_execution_trace_page(malformed_trace);
   host_.reset_invocations();
@@ -4531,6 +4541,19 @@ TEST_F(HostRoutedGraphStateProtocolTest,
       Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("execution.trace"), 1u);
+
+  malformed_trace.next_sequence = 4;
+  malformed_trace.events.front().worker_id = 0;
+  malformed_trace.session = GraphSessionId{"another-private-session"};
+  host_.set_execution_trace_page(malformed_trace);
+  host_.reset_invocations();
+  response = route(
+      "execution.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "graph");
+  EXPECT_EQ(response["error"]["name"], "invalid_parameter");
   EXPECT_EQ(host_.call_count("execution.trace"), 1u);
 }
 
@@ -7270,6 +7293,104 @@ TEST(ClientLifecycle, InterruptBeforeConnectPreventsDescriptorPublication) {
   EXPECT_FALSE(client.connected());
   pollfd descriptor{listener.get(), POLLIN, 0};
   EXPECT_EQ(::poll(&descriptor, 1, 100), 0);
+}
+
+/**
+ * @brief Locks the required execution-trace task identity Client schema.
+ * @return Nothing; GoogleTest reports exact decode or fail-closed violations.
+ * @throws Allocation, socket, thread, or Client setup failures unchanged.
+ * @note One connection serves present and explicit-null identity pages before
+ * malformed shapes, proving a typed response failure neither accepts the
+ * former schema nor retries the request through another route.
+ */
+TEST(ClientExecutionTrace,
+     RequiresExactTaskIdentityAndBindsTheOpaqueSessionToThePage) {
+  ScopedTempDirectory temp("ps-ipc-execution-trace-identity");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const IpcSessionId session_id{std::string(32, 'a')};
+  const Json valid_event{
+      {"sequence", 1},
+      {"epoch", 99},
+      {"node_id", 7},
+      {"worker_id", 2},
+      {"action", "execute"},
+      {"timestamp_us", 1234},
+      {"task_identity",
+       Json{{"graph_revision", 5}, {"run_id", 9}, {"run_local_task_id", 0}}}};
+  const auto page_with_event = [&session_id](Json event) {
+    return Json{{"session_id", session_id.value},
+                {"events", Json::array({std::move(event)})},
+                {"next_sequence", 1},
+                {"has_more", false},
+                {"dropped_count", 0}};
+  };
+
+  std::vector<ScriptedClientReply> replies;
+  replies.push_back({"execution.trace", page_with_event(valid_event)});
+  Json absent = valid_event;
+  absent["task_identity"] = nullptr;
+  replies.push_back({"execution.trace", page_with_event(std::move(absent))});
+  Json missing = valid_event;
+  missing.erase("task_identity");
+  replies.push_back({"execution.trace", page_with_event(std::move(missing))});
+  Json partial = valid_event;
+  partial["task_identity"].erase("run_id");
+  replies.push_back({"execution.trace", page_with_event(std::move(partial))});
+  Json zero_run = valid_event;
+  zero_run["task_identity"]["run_id"] = 0;
+  replies.push_back({"execution.trace", page_with_event(std::move(zero_run))});
+  Json zero_revision = valid_event;
+  zero_revision["task_identity"]["graph_revision"] = 0;
+  replies.push_back(
+      {"execution.trace", page_with_event(std::move(zero_revision))});
+  Json mistyped = valid_event;
+  mistyped["task_identity"]["graph_revision"] = "5";
+  replies.push_back({"execution.trace", page_with_event(std::move(mistyped))});
+  Json extra = valid_event;
+  extra["task_identity"]["future_authority"] = true;
+  replies.push_back({"execution.trace", page_with_event(std::move(extra))});
+  Json mismatched_session = page_with_event(valid_event);
+  mismatched_session["session_id"] = std::string(32, 'b');
+  replies.push_back({"execution.trace", std::move(mismatched_session)});
+
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<ExecutionTracePage> valid =
+      client.execution_trace(session_id, 0, 1);
+  const IpcResult<ExecutionTracePage> explicit_absence =
+      client.execution_trace(session_id, 0, 1);
+  std::vector<IpcResult<ExecutionTracePage>> rejected;
+  rejected.reserve(replies.size() - 2U);
+  for (std::size_t index = 2U; index < replies.size(); ++index) {
+    rejected.push_back(client.execution_trace(session_id, 0, 1));
+  }
+  client.disconnect();
+  peer.join();
+
+  EXPECT_TRUE(served);
+  ASSERT_TRUE(valid.status.ok) << valid.status.message;
+  EXPECT_EQ(valid.value.session.value, session_id.value);
+  ASSERT_EQ(valid.value.events.size(), 1U);
+  ASSERT_TRUE(valid.value.events.front().task_identity.has_value());
+  EXPECT_EQ(valid.value.events.front().task_identity->graph_revision, 5U);
+  EXPECT_EQ(valid.value.events.front().task_identity->run_id, 9U);
+  EXPECT_EQ(valid.value.events.front().task_identity->run_local_task_id, 0U);
+  ASSERT_TRUE(explicit_absence.status.ok) << explicit_absence.status.message;
+  EXPECT_EQ(explicit_absence.value.session.value, session_id.value);
+  ASSERT_EQ(explicit_absence.value.events.size(), 1U);
+  EXPECT_FALSE(explicit_absence.value.events.front().task_identity.has_value());
+  for (const IpcResult<ExecutionTracePage>& result : rejected) {
+    EXPECT_FALSE(result.status.ok);
+    EXPECT_EQ(result.status.domain, OperationErrorDomain::Protocol);
+    EXPECT_EQ(result.status.code, kInvalidRequestCode);
+  }
+  EXPECT_EQ(requests.size(), replies.size());
 }
 
 TEST(ClientLifecycle, RejectsUncorrelatedResponseAndClosesIdempotently) {

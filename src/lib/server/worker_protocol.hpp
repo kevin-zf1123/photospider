@@ -320,6 +320,46 @@ WorkerProtocolFrame encode_worker_assignment(
     const PreparedWorkerAssignment& assignment);
 
 /**
+ * @brief Canonically encodes validated Assignment control metadata only.
+ *
+ * @param assignment Complete identity/spec/data-plane/graph/cadence metadata.
+ * A checkpoint declaration is joined through `data_plane.checkpoint`; the
+ * endpoint-local `assignment.checkpoint` bulk owner may be absent after decode.
+ * @return Complete canonical private Assignment frame.
+ * @throws WorkerProtocolError, contract, allocation, digest, field, or
+ * aggregate protocol-bound failures for invalid metadata.
+ * @note This pure codec opens no descriptor and reads no artifact byte. It does
+ * not authorize sending a manager Assignment: `encode_worker_assignment` and
+ * `send_worker_assignment` additionally require the authorized checkpoint bulk
+ * owner when the JobSpec declares one.
+ */
+WorkerProtocolFrame encode_worker_assignment_metadata(
+    const PreparedWorkerAssignment& assignment);
+
+/**
+ * @brief Decodes one bounded Assignment frame without performing transport I/O.
+ *
+ * The decoder verifies the closed message kind, reconstructs and validates the
+ * exact Attempt/JobSpec digest join, validates checkpoint/output data-plane
+ * descriptors, copies bounded graph-preparation text, rejects a zero heartbeat,
+ * and requires complete payload consumption.
+ *
+ * @param frame Already framed payload no larger than
+ * `kMaximumWorkerControlPayloadBytes`.
+ * @return Complete validated control metadata. Checkpoint artifact bytes remain
+ * absent until the separately authenticated data-plane transfer completes.
+ * @throws WorkerProtocolError for a wrong kind, malformed/truncated payload,
+ * inconsistent identity/spec/descriptor metadata, zero cadence, or trailing
+ * bytes.
+ * @throws std::bad_alloc when bounded decoded storage cannot allocate.
+ * @note This pure semantic seam opens no socket, transfers no artifact bytes,
+ * acquires no lease, and selects no current attempt. Socket receive delegates
+ * to this function and retains deadline acceptance as a transport concern.
+ */
+PreparedWorkerAssignment decode_worker_assignment(
+    const WorkerProtocolFrame& frame);
+
+/**
  * @brief Sends one complete immutable external worker assignment.
  * @param fd Connected worker socket.
  * @param assignment Complete bounded metadata; checkpoint bytes remain in the
@@ -341,8 +381,9 @@ void send_worker_assignment(int fd, const PreparedWorkerAssignment& assignment,
  * @throws WorkerProtocolError for malformed, oversized, or inconsistent data.
  * @throws WorkerProtocolTimeout/WorkerProtocolEof/WorkerChannelError for I/O
  * failure.
- * @note Semantic reconstruction is accepted only while current monotonic time
- * remains strictly before `deadline`; timeout fails the startup channel closed.
+ * @note Semantic reconstruction delegates to `decode_worker_assignment` and is
+ * accepted only while current monotonic time remains strictly before
+ * `deadline`; timeout fails the startup channel closed.
  */
 PreparedWorkerAssignment receive_worker_assignment(
     int fd, std::chrono::steady_clock::time_point deadline);

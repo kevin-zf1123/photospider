@@ -491,9 +491,12 @@ void expect_supervised_child_reaped(
 class SupervisorExecutionHost final : public ExecutionHostContext {
  public:
   /** @copydoc ExecutionHostContext::set_task_context */
-  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+  void set_task_context(int worker_id, std::uint64_t epoch,
+                        std::optional<ExecutionTaskAuditIdentity>
+                            task_identity) noexcept override {
     (void)worker_id;
     (void)epoch;
+    (void)task_identity;
   }
 
   /** @copydoc ExecutionHostContext::clear_task_context */
@@ -501,11 +504,14 @@ class SupervisorExecutionHost final : public ExecutionHostContext {
 
   /** @copydoc ExecutionHostContext::log_event */
   void log_event(ExecutionTraceAction action, int node_id, int worker_id,
-                 std::uint64_t epoch) noexcept override {
+                 std::uint64_t epoch,
+                 std::optional<ExecutionTaskAuditIdentity>
+                     task_identity) noexcept override {
     (void)action;
     (void)node_id;
     (void)worker_id;
     (void)epoch;
+    (void)task_identity;
   }
 };
 
