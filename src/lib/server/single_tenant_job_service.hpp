@@ -389,6 +389,19 @@ struct WorkerManagerOptions final {
    */
   std::shared_ptr<std::atomic<bool>> first_external_heartbeat_observed_for_test;
   /**
+   * @brief Optional latest one-based Heartbeat ordinal accepted while output
+   * remains pending.
+   * @note Null in product construction. One real-process test may dedicate
+   * this counter to one assignment. The manager stores only after validating
+   * the exact current identity, accepting the Heartbeat before its deadline,
+   * accepting a metadata-first Report, and observing that the unreaped
+   * candidate output has not reached EOF. The ordinal exposes no identity,
+   * payload, descriptor, PID, signal, wait, reap, cancellation, completion,
+   * artifact, or quota authority and does not alter any deadline.
+   */
+  std::shared_ptr<std::atomic<std::uint64_t>>
+      latest_output_pending_heartbeat_ordinal_for_test;
+  /**
    * @brief Optional gate pausing manager checkpoint sends in real-process
    * tests.
    * @note Null in product construction. While true, a nonempty checkpoint lane

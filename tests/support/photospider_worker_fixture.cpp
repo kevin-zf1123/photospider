@@ -65,6 +65,9 @@ constexpr std::string_view kRetryFilesystemHoldMode = "fixture.retry.hold";
 /** @brief Mode producing bytes at the former aggregate control-frame cap. */
 constexpr std::string_view kFormerControlBoundOutputMode =
     "fixture.former-control-bound-output";  // NOLINT(whitespace/indent_namespace)
+/** @brief Bulk mode that emits no Heartbeat after its first valid frame. */
+constexpr std::string_view kFormerControlBoundOutputFirstHeartbeatOnlyMode =
+    "fixture.former-control-bound-output.first-heartbeat-only";  // NOLINT(whitespace/indent_namespace)
 /**
  * @brief Natural signal delay that remains inside the long cancellation grace.
  * @note The gap is deliberately much larger than one supervisor poll slice so
@@ -481,20 +484,24 @@ void send_heartbeat(int fd, const AttemptIdentity& identity,
  * @param spec Exact immutable assignment JobSpec.
  * @param output_stage Exact stage metadata expected by the encoder.
  * @param io_timeout Positive shared control deadline bound.
+ * @param continue_heartbeats Whether to emit Heartbeats after the first valid
+ * frame while the main fixture thread remains in bulk transfer.
  * @return Nothing after output EOF and exact completion acknowledgement.
  * @throws Protocol, heartbeat, stream, thread, and validation failures
  * unchanged after joining the heartbeat thread.
  * @note Report is sent before the heartbeat thread starts, so every emitted
  * heartbeat is a genuine control-plane liveness fact. Output starts only after
  * that thread completes its first bounded Heartbeat send, making the large
- * transfer assertion deterministic. The main fixture thread stays blocked
- * only in the killable worker.
+ * transfer assertion deterministic. When `continue_heartbeats` is false, the
+ * thread exits after that first frame so a finite, backpressured bulk transfer
+ * must lose liveness. The main fixture thread stays blocked only in the
+ * killable worker.
  */
 void send_prepared_fixture_report_with_heartbeats(
     int fd, FixtureDataDescriptor* output_data,
     const PreparedFixtureReportTransfer& prepared, const JobSpec& spec,
     const WorkerOutputStageReference& output_stage,
-    std::chrono::milliseconds io_timeout) {
+    std::chrono::milliseconds io_timeout, bool continue_heartbeats) {
   if (output_data == nullptr) {
     throw std::invalid_argument("fixture output descriptor owner is null");
   }
@@ -509,6 +516,9 @@ void send_prepared_fixture_report_with_heartbeats(
     try {
       send_heartbeat(fd, prepared.report.report.identity, io_timeout);
       first_heartbeat_state.store(1, std::memory_order_release);
+      if (!continue_heartbeats) {
+        return;
+      }
       while (!done.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(kFixtureHeartbeatCadence);
         if (!done.load(std::memory_order_acquire)) {
@@ -1300,14 +1310,16 @@ int run_fixture(const WorkerProcessLaunchOptions& launch) {
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }
-  if (mode == kFormerControlBoundOutputMode) {
+  if (mode == kFormerControlBoundOutputMode ||
+      mode == kFormerControlBoundOutputFirstHeartbeatOnlyMode) {
     JobAttemptReport report = former_control_bound_output_report(assignment);
     const PreparedFixtureReportTransfer prepared_report =
         prepare_fixture_report(std::move(report), *assignment.spec,
                                prepared.data_plane.output);
     send_prepared_fixture_report_with_heartbeats(
         launch.control_fd, &output_data, prepared_report, *assignment.spec,
-        prepared.data_plane.output, launch.io_timeout);
+        prepared.data_plane.output, launch.io_timeout,
+        mode == kFormerControlBoundOutputMode);
     static_cast<void>(::shutdown(launch.control_fd, SHUT_WR));
     return 0;
   }

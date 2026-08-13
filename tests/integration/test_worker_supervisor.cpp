@@ -76,6 +76,10 @@ constexpr int kFileSizeEnvelopeResidue = 81;
 constexpr int kFileSizeProbeRaised = 82;
 /** @brief One bulk byte beyond the former aggregate worker-frame ceiling. */
 constexpr std::size_t kBulkPayloadAboveFormerControlBytes = (64U << 20U) + 1U;
+/** @brief Tight liveness bound crossed by the held real bulk transfer. */
+constexpr std::chrono::milliseconds kBulkHeartbeatEvidenceTimeout{2000};
+/** @brief Fixed finite margin beyond one complete Heartbeat timeout. */
+constexpr std::chrono::milliseconds kBulkHeartbeatEvidenceMargin{100};
 /** @brief Isolated hard file-size limit below the normal one-MiB envelope. */
 constexpr rlim_t kLowHardFileSizeLimit = static_cast<rlim_t>(64U << 10U);
 
@@ -1844,19 +1848,48 @@ TEST(WorkerSupervisor,
 TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   ScopedSupervisorRoot root;
   auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
+  auto pending_heartbeat_ordinal =
+      std::make_shared<std::atomic<std::uint64_t>>(0U);
+  auto defer_output = std::make_shared<std::atomic<bool>>(true);
+  auto output_paused = std::make_shared<std::atomic<bool>>(false);
   WorkerManagerOptions options = supervisor_options();
-  options.heartbeat_timeout = 2s;
+  options.heartbeat_timeout = kBulkHeartbeatEvidenceTimeout;
   options.attempt_runtime_timeout = 5s;
   options.io_timeout = 2s;
   options.first_external_heartbeat_observed_for_test = heartbeat_observed;
+  options.latest_output_pending_heartbeat_ordinal_for_test =
+      pending_heartbeat_ordinal;
+  options.defer_output_drain_for_test = defer_output;
+  options.output_transfer_paused_for_test = output_paused;
   auto service = make_service(root.path(), std::move(options), nullptr,
                               bulk_data_plane_quota());
   const JobSpec spec(GraphArtifactId("fixture.former-control-bound-output"), 0,
                      OutputSlotId("image.final"), bulk_data_plane_resources());
 
   const JobSubmission submitted = service->submit(spec);
+  ASSERT_TRUE(wait_until(
+      [&] { return output_paused->load(std::memory_order_acquire); }, 3s));
+  const std::uint64_t heartbeat_ordinal_before_crossing =
+      pending_heartbeat_ordinal->load(std::memory_order_acquire);
+  const auto pending_started = std::chrono::steady_clock::now();
+  std::this_thread::sleep_until(pending_started +
+                                kBulkHeartbeatEvidenceTimeout +
+                                kBulkHeartbeatEvidenceMargin);
+  const auto pending_elapsed =
+      std::chrono::steady_clock::now() - pending_started;
+  const std::optional<JobSnapshot> still_pending =
+      service->query(submitted.job_id);
+  const std::uint64_t heartbeat_ordinal_after_crossing =
+      pending_heartbeat_ordinal->load(std::memory_order_acquire);
+  defer_output->store(false, std::memory_order_release);
   const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
 
+  ASSERT_TRUE(still_pending.has_value());
+  EXPECT_FALSE(is_terminal_job_state(still_pending->state));
+  EXPECT_GE(pending_elapsed, kBulkHeartbeatEvidenceTimeout);
+  EXPECT_GE(heartbeat_ordinal_after_crossing, 2U);
+  EXPECT_GT(heartbeat_ordinal_after_crossing,
+            heartbeat_ordinal_before_crossing);
   EXPECT_EQ(terminal.assignment, submitted.assignment);
   EXPECT_EQ(terminal.state, JobState::Succeeded) << terminal.message;
   EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Succeeded);
@@ -1906,6 +1939,57 @@ TEST(WorkerSupervisor, BulkOutputAndCheckpointUseDataPlaneAndCommit) {
   EXPECT_EQ(
       SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
       0U);
+}
+
+TEST(WorkerSupervisor,
+     BulkOutputWithoutPostReportHeartbeatsTimesOutWithoutResidue) {
+  ScopedSupervisorRoot root;
+  auto heartbeat_observed = std::make_shared<std::atomic<bool>>(false);
+  auto defer_output = std::make_shared<std::atomic<bool>>(true);
+  auto output_paused = std::make_shared<std::atomic<bool>>(false);
+  WorkerManagerOptions options = supervisor_options();
+  options.heartbeat_timeout = kBulkHeartbeatEvidenceTimeout;
+  options.attempt_runtime_timeout = 5s;
+  options.io_timeout = 2s;
+  options.first_external_heartbeat_observed_for_test = heartbeat_observed;
+  options.defer_output_drain_for_test = defer_output;
+  options.output_transfer_paused_for_test = output_paused;
+  auto service = make_service(root.path(), std::move(options), nullptr,
+                              bulk_data_plane_quota());
+  const JobSpec spec(
+      GraphArtifactId(
+          "fixture.former-control-bound-output.first-heartbeat-only"),
+      0, OutputSlotId("image.final"), bulk_data_plane_resources());
+
+  const JobSubmission submitted = service->submit(spec);
+  ASSERT_TRUE(wait_until(
+      [&] { return output_paused->load(std::memory_order_acquire); }, 3s));
+  const JobSnapshot terminal = wait_terminal(*service, submitted.job_id);
+  defer_output->store(false, std::memory_order_release);
+
+  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+  EXPECT_TRUE(terminal.attempt_settled);
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::WorkerHeartbeatTimeout)
+      << terminal.message;
+  EXPECT_NE(terminal.failure, JobAttemptFailure::WorkerRuntimeTimeout);
+  EXPECT_TRUE(heartbeat_observed->load(std::memory_order_acquire));
+  EXPECT_FALSE(terminal.output_receipt.has_value());
+  EXPECT_EQ(service->find_artifact(terminal.output_artifact_id), nullptr);
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(*service, 0U, 2s));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(*service),
+      0U);
+  const TenantQuotaSnapshot quota = service->quota_snapshot();
+  EXPECT_EQ(quota.active_attempts, 0U);
+  EXPECT_EQ(quota.cpu_slots, 0U);
+  EXPECT_EQ(quota.host_memory_bytes, 0U);
+  EXPECT_EQ(quota.output_bytes, 0U);
+  EXPECT_EQ(quota.staging_bytes, 0U);
+  EXPECT_EQ(quota.retention_bytes, 0U);
+  EXPECT_EQ(quota.retained_artifacts, 0U);
+  EXPECT_TRUE(quota.device_bytes.empty());
 }
 
 TEST(WorkerSupervisor, StaleLeaseCannotCancelFreshRetryProcess) {

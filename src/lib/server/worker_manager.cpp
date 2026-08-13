@@ -1709,9 +1709,11 @@ class WorkerManager::Impl final {
    * open and drains the stateful decoder through one bounded post-reap window;
    * only matching delivered TERM/KILL escalation yields
    * `ForcedCancellation`.
-   * A source-private observation flag may record the first exact external
-   * heartbeat for deterministic test rendezvous. It changes no deadline and
-   * grants no process, channel, cancellation, or completion authority.
+   * Source-private observations may record the first exact external heartbeat
+   * and the latest one-based liveness-eligible Heartbeat ordinal accepted
+   * while candidate output remains pending. They change no deadline and grant
+   * no process, channel, payload, cancellation, completion, artifact, or quota
+   * authority.
    * A worker waits for one identity-only `CompletionReady`
    * acknowledgement. The manager sends it only after nonblocking EOF, bounded
    * hashing, reference/descriptor/resource joins, and image reconstruction;
@@ -1751,6 +1753,8 @@ class WorkerManager::Impl final {
     bool cancel_channel_failed = false;
     bool channel_eof = false;
     bool output_eof = false;
+    // Test-only monitor-local order for liveness-eligible Heartbeats.
+    std::uint64_t external_heartbeat_ordinal_for_test = 0U;
     WorkerFrameDecoder frame_decoder;
 
     for (;;) {
@@ -1998,6 +2002,16 @@ class WorkerManager::Impl final {
             }
             heartbeat_deadline = checked_worker_deadline(
                 heartbeat_accepted_at, options_.heartbeat_timeout);
+            if (options_.latest_output_pending_heartbeat_ordinal_for_test !=
+                nullptr) {
+              ++external_heartbeat_ordinal_for_test;
+              if (!process->reaped && candidate_report.has_value() &&
+                  !output_eof) {
+                options_.latest_output_pending_heartbeat_ordinal_for_test
+                    ->store(external_heartbeat_ordinal_for_test,
+                            std::memory_order_release);
+              }
+            }
           }
           if (options_.first_external_heartbeat_observed_for_test != nullptr) {
             options_.first_external_heartbeat_observed_for_test->store(
