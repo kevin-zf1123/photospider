@@ -35,9 +35,13 @@ internal CMake target 链接，没有 daemon route 或 installed codec，也不�
 byte 通过 inherited descriptor 使用 manager-created direction-reduced
 `AF_UNIX SOCK_STREAM` lane。Manager endpoint 是 nonblocking；只有在精确 PID 仍受 absolute
 lifecycle deadline 与 TERM/KILL/reap ownership 约束时，worker 才可能阻塞。Checkpoint digest
-在 worker 内校验，output size/hash 在有界 completion handoff 前排空期间校验；worker 发出只含
-metadata 的 Report 后保持存活，直到 manager 在完整关联与 image 重建后返回一次只含 identity
-的 `CompletionReady`。该确认不授予 service 或 artifact authority。Post-reap supervision 绝不
+在 worker 内校验；output hydration 从 metadata-first descriptor/exact-size/digest 开始。对尚未
+reap 的当前 PID，manager 创建一份精确、惰性的匿名最终 owner，并在绝对 lifecycle 检查之间
+最多把一个 64-KiB slice 直接接收到该 owner；不存在累计 accumulator 扩容或 whole-payload
+copy。只有合法 Heartbeat frame 能续期 liveness，连续或预缓冲 output 绝不能。worker 在 stream
+期间保持真实 heartbeat 活跃，在精确 bytes 后关闭 output lane，并保持存活，直到 manager 在
+EOF、完整关联与 O(1) final-owner transfer 后返回一次只含 identity 的 `CompletionReady`。该确认
+不授予 service 或 artifact authority。Post-reap supervision 绝不
 读取 bulk lane，也不执行 filesystem I/O 或 bulk transfer。这是本地可执行分离，不是 authenticated
 network protocol 或 standalone artifact
 service。其 `TenantId`、`JobId`、`JobAttemptId`、

@@ -42,10 +42,15 @@ manager-created direction-reduced `AF_UNIX SOCK_STREAM` lanes through inherited
 descriptors. The manager endpoints are nonblocking; the worker may block only
 while its exact PID remains subject to absolute lifecycle deadlines and
 TERM/KILL/reap ownership. Checkpoint digest verification happens in the worker,
-output size/hash verification happens during bounded pre-handoff drainage, and
-the worker remains alive after its metadata-only Report until the manager
-returns one identity-only `CompletionReady` after the complete join and image
-reconstruction. That acknowledgement grants no service or artifact authority.
+and output hydration starts from metadata-first descriptor/exact-size/digest.
+For the unreaped current PID, the manager creates one exact lazy anonymous final
+owner and directly receives at most one 64-KiB slice between absolute lifecycle
+checks; it performs no cumulative accumulator growth or whole-payload copy.
+Only valid Heartbeat frames renew liveness, never continuous or prebuffered
+output. The worker keeps genuine heartbeats active during streaming, closes its
+output lane after exact bytes, and remains alive until the manager returns one
+identity-only `CompletionReady` after EOF, complete join, and O(1) final-owner
+transfer. That acknowledgement grants no service or artifact authority.
 Post-reap supervision never reads the bulk lane and performs no filesystem I/O
 or bulk transfer. This is local executable separation, not an
 authenticated network protocol or standalone artifact service. Its `TenantId`, `JobId`, `JobAttemptId`,

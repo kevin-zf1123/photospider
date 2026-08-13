@@ -1217,11 +1217,14 @@ record 与 supervision handle 建立后，该 owner 才在 service mutex 外创�
 endpoint 只有在精确 PID deadline 与 TERM/KILL/reap ownership 下才可能阻塞；reference 绑定 current
 tenant/Job/spec/attempt/worker/lease 以及精确 checkpoint 或 output slot，但脱离 stream capability
 不授予 authority。Worker 不能选择 path、quota、稳定 ArtifactId、OutputCommitId 或 publication
-result。Worker 会在执行前校验 checkpoint byte count、EOF 与 SHA-256。Manager 会在 completion
-handoff 前以有界 chunk 排空并 hash output，随后只有在 stream EOF、clean reap，并对 reference、
-descriptor、size、resource 与 SHA-256 做精确复核后才暴露 candidate。worker 关闭 output lane 并
-发送只含 metadata 的 Report 后保持存活且可被终止，直到 manager 完成关联与 image 重建，再
-返回一次不授予 service/artifact authority 且只含 identity 的 `CompletionReady`。Post-reap
+result。Worker 会在执行前校验 checkpoint byte count、EOF 与 SHA-256。worker 先发送 output
+metadata，并保留 source 与真实 heartbeat。对尚未 reap 的当前 PID，manager 创建一份精确、
+惰性的匿名最终 owner，在绝对 lifecycle 检查之间最多接收一个 64-KiB direct slice，且不发生
+累计扩容或 whole-payload reconstruction copy。只有合法 Heartbeat frame 能续期 liveness，
+output progress 绝不能。只有在 stream EOF、clean reap，并对 reference、descriptor、size、
+resource 与 SHA-256 做精确复核后才暴露 candidate。worker 在精确 bytes 后关闭 output lane，
+并保持可被终止，直到 manager 完成关联与 O(1) owner transfer，再返回一次不授予
+service/artifact authority 且只含 identity 的 `CompletionReady`。Post-reap
 supervision 绝不读取 bulk lane，也不执行 filesystem I/O、blocking bulk transfer、bulk allocation
 或 content hash；既有 service
 与 durable store 仍拥有 current-attempt selection、retry、quota、manifest-last publication、
@@ -1421,9 +1424,10 @@ manifest-last image artifact，支持经过授权的 checkpoint identity 以及 
 heartbeat/runtime deadline、cancellation escalation、精确 reaping 与持续 supervision-handle
 drainage 的同进程 WorkerManager。其 protocol v2 control socket 只传输有界 attempt/Job/receipt/
 reference/descriptor/digest metadata；checkpoint 与 output byte 通过独立的 attempt-local
-direction-reduced stream descriptor 传输。Manager 会在精确 worker 仍受 lifecycle deadline 约束时
-以有界 nonblocking chunk 传输这些 byte，并且不会在 reap 后排空 bulk data。Candidate 只有在
-worker 发出只含 metadata 的 Report 后仍可被终止，并等待只含 identity 的
+direction-reduced stream descriptor 传输。Manager 会在精确 worker 仍受 lifecycle 与 heartbeat
+deadline 约束时，把每个 output slice 直接接收到一个 metadata-sized 最终 owner，并且不会在
+reap 后排空 bulk data。Output 绝不续期 heartbeat。Candidate 只有在 worker 发出只含 metadata
+的 Report 后保持真实 heartbeat、仍可被终止，并等待只含 identity 的
 `CompletionReady`；manager 只有在精确 stream join 与 image 重建后才发送该确认。Candidate 只有在
 stream EOF、manager 精确复核与 clean reap 后才对 service 可见。
 Report 只有在 clean process exit 与 reap 后才具备资格；

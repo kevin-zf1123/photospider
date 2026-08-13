@@ -276,6 +276,10 @@ socket，close-on-exec fd 4 用于向 parent 传递 setup `errno`。Darwin paren
 内核 `kern.maxfilesperproc` 上界。Fd 5 是 worker 的 receive-only checkpoint lane，fd 6 是
 send-only output lane；manager 保留两条 stream 各自相反的 direction。不分配内存的 child 关闭 `[7, 上界)`
 中每个 slot，只把
+worker 对 checkpoint lane 的反向 send 与 manager 对 output lane 的反向 send 会在本地失败，
+且不会因 SIGPIPE 终止：Linux 使用 `MSG_NOSIGNAL`，Darwin 在两个 endpoint 上安装
+`SO_NOSIGPIPE`，可移植的拒绝集合是 `EPIPE`、`ECONNRESET` 或 `ENOTCONN`。两个允许方向都
+保留精确 byte 与 EOF 语义。
 `EBADF` 视为未使用 slot。当前 soft `RLIMIT_NOFILE` 不是安全边界，因为已经打开的高位
 descriptor 会在限制随后降低后继续存在。Linux child 使用 raw
 `close_range(7, UINT_MAX, 0)`；包括旧内核不提供 syscall 在内的任何错误都会通过 fd 4 报告，
@@ -328,11 +332,17 @@ identity、已 settled 的 `Failed(Compute)` metadata Report，携带固定
 有界 diagnostic 与空 stage；不存在 transport-size fallback。
 
 WorkerManager 只有在收到 current-identity Report、精确 stream EOF、clean zero exit、精确 reap
-与 control-channel EOF 后才暴露 staged output。当精确 child 仍受 lifecycle ownership 约束时，
-manager 以有界 nonblocking chunk 排空 output、强制 accepted maximum，并增量计算 SHA-256。
-Reference、slot、tight descriptor、精确 stream byte count、resource bound 与 digest 必须在
-completion handoff 前全部连接。worker 关闭 output lane 并发送只含 metadata 的 Report 后，会
-保持存活且可被终止，直到 manager 完成该关联与独立 image 重建，再返回一次匹配且只含
+与 control-channel EOF 后才暴露 staged output。worker 在 output byte 前发送
+reference/descriptor/exact-size/digest metadata，并保留 source，同时让真实 heartbeat thread
+保持活跃。当精确 child 仍受 lifecycle ownership 约束且尚未 reap 时，manager 会创建一份与最终
+image size 精确一致、惰性、无 path 的匿名 owner，并在每次 monitor 迭代中最多把一个 64-KiB
+nonblocking slice 直接接收到该 owner，同时强制 accepted maximum 并增量计算 SHA-256。每个后续
+slice 都要先经过 cancellation/shutdown/runtime/heartbeat 仲裁。包括连续或预缓冲 byte 在内的
+output progress 都不能续期或复活 heartbeat deadline；只有合法且 current-identity 的 Heartbeat
+frame 可以。不存在累计 accumulator 扩容、whole-payload reconstruction copy 或 post-reap bulk
+access。Reference、slot、tight descriptor、精确 stream byte count、resource bound 与 digest 必须
+在 completion handoff 前全部连接。worker 只在精确 bytes 后关闭 output lane，并保持存活且可被
+终止，直到 manager 完成关联并以 O(1) 移动已经是最终形态的 image owner，再返回一次匹配且只含
 identity 的 `CompletionReady`。该确认不授予 Job、quota、artifact、commit 或 publication
 authority。若先前的 cancellation-channel failure 使回复不可能，已经完整关联的 Report 可以
 保留其普通分类。Post-reap drain 只处理 control metadata：它绝不读取 bulk lane，也不执行

@@ -343,6 +343,11 @@ the private control socket, and close-on-exec fd 4 carries setup `errno` to the
 parent. Fd 5 is the worker's receive-only checkpoint lane and fd 6 is its
 send-only output lane; the manager retains only the opposite direction of each
 stream.
+Reverse worker checkpoint send and reverse manager output send fail locally
+without SIGPIPE termination: Linux uses `MSG_NOSIGNAL`, Darwin installs
+`SO_NOSIGPIPE` on both endpoints, and the portable rejection set is `EPIPE`,
+`ECONNRESET`, or `ENOTCONN`. Both permitted directions retain exact byte and
+EOF semantics.
 On Darwin, the parent queries the kernel `kern.maxfilesperproc` ceiling before
 `fork` and the allocation-free child closes every slot in `[7, ceiling)`,
 treating only `EBADF` as an unused slot. The current soft
@@ -413,14 +418,22 @@ settled `Failed(Compute)` metadata Report with a fixed bounded diagnostic and
 an empty stage; there is no transport-size fallback.
 
 WorkerManager exposes staged output only after one current-identity Report,
-exact stream EOF, clean zero exit, exact reap, and control-channel EOF. While
-the exact child remains lifecycle-owned, the manager drains output in bounded
-nonblocking chunks, enforces the accepted maximum, and incrementally computes
-SHA-256. Reference, slot, tight descriptor, exact stream byte count, resource
-bound, and digest must all join before completion handoff. After closing the
-output lane and sending its metadata-only Report, the worker remains alive and
-terminable until the manager completes that join and independent image
-reconstruction, then replies with one matching identity-only
+exact stream EOF, clean zero exit, exact reap, and control-channel EOF. The
+worker sends reference/descriptor/exact-size/digest metadata before output
+bytes and retains its source while its real heartbeat thread stays active.
+While the exact child remains lifecycle-owned and unreaped, the manager creates
+one lazy pathless anonymous owner of exactly that final image size, drains at
+most one 64-KiB nonblocking slice directly into it per monitor iteration,
+enforces the accepted maximum, and incrementally computes SHA-256. Every later
+slice follows cancellation/shutdown/runtime/heartbeat arbitration. Output
+progress, including continuous or prebuffered bytes, cannot renew or revive the
+heartbeat deadline; only a valid current-identity Heartbeat frame can. There is
+no cumulative accumulator growth, whole-payload reconstruction copy, or
+post-reap bulk access. Reference, slot, tight descriptor, exact stream byte
+count, resource bound, and digest must all join before completion handoff. The
+worker closes the output lane only after exact bytes and remains alive and
+terminable until the manager completes the join and O(1) moves the already-final
+image owner, then replies with one matching identity-only
 `CompletionReady`. The acknowledgement grants no Job, quota, artifact, commit,
 or publication authority. If a prior cancellation-channel failure makes the
 reply impossible, an already completely joined Report may retain its ordinary

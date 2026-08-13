@@ -1056,10 +1056,13 @@ cancellation、TERM/KILL escalation 与精确非阻塞 `waitpid` reaping。Issue
 protocol v2 在 128-KiB control bound 下只传 metadata：checkpoint 与 candidate byte 使用独立的
 manager-created direction-reduced stream descriptor。Manager endpoint 是 nonblocking；worker
 endpoint 只有在其精确 PID 仍受 lifecycle deadline 与 TERM/KILL/reap ownership 约束时才可能
-阻塞。Checkpoint size/EOF/SHA-256 在该 worker 内校验。Output 在 completion handoff 前以有界
-chunk 排空并 hash；Manager 只有在 stream EOF、clean reap，并对 reference、slot、descriptor、
-size、resource 与 SHA-256 做精确复核后才接受 output。worker 关闭 output lane 并发送只含
-metadata 的 Report 后，会保持存活且可被终止，直到 manager 完成校验与 image 重建，再返回
+阻塞。Checkpoint size/EOF/SHA-256 在该 worker 内校验。worker 先发送精确 output metadata，
+并保留 source 与真实 heartbeat。当前 PID 尚未 reap 时，manager 创建一份精确、惰性的匿名最终
+owner，并在每次 lifecycle 仲裁中最多把一个 64-KiB slice 直接接收到该 owner；不存在累计
+reallocation 或 whole-payload reconstruction copy。只有合法 Heartbeat frame 能续期 heartbeat，
+连续或预缓冲 output 绝不能。Manager 只有在 stream EOF、clean reap，并对 reference、slot、
+descriptor、size、resource 与 SHA-256 做精确复核后才接受 output。worker 只在精确 bytes 后
+关闭 output lane，并保持存活且可被终止，直到 manager 完成校验与 O(1) owner transfer，再返回
 一次只含 identity、且不授予 service 或 artifact authority 的 `CompletionReady`。Post-reap
 processing 绝不读取 bulk lane，也不执行 filesystem I/O、blocking bulk transfer、bulk allocation
 或 content hash。Worker 不获得 artifact

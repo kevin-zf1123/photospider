@@ -1512,12 +1512,16 @@ tenant/Job/spec/attempt/worker/lease plus exact checkpoint or output slot but
 grant no authority without the stream capability. The worker cannot choose
 a path, quota, stable ArtifactId, OutputCommitId, or publication result. The
 worker validates checkpoint byte count, EOF, and SHA-256 before execution. The
-manager drains and hashes output in bounded chunks before completion handoff,
-then exposes a candidate only after stream EOF, clean reap, and exact reference,
-descriptor, size, resource, and SHA-256 validation. After closing the output
-lane and sending its metadata-only Report, the worker remains alive and
-terminable until the manager completes that join and image reconstruction, then
-returns one identity-only `CompletionReady` with no service/artifact authority.
+worker sends output metadata first and retains its source with real heartbeats
+active. For the unreaped current PID, the manager creates one exact lazy
+anonymous final owner, receives at most one 64-KiB direct slice between absolute
+lifecycle checks, and performs no cumulative growth or whole-payload
+reconstruction copy. Only a valid Heartbeat frame renews liveness, never output
+progress. The candidate is exposed only after stream EOF, clean reap, and exact
+reference, descriptor, size, resource, and SHA-256 validation. The worker
+closes the output lane after exact bytes and remains terminable until the
+manager completes that join and O(1) owner transfer, then returns one
+identity-only `CompletionReady` with no service/artifact authority.
 Post-reap supervision never reads the bulk lane and performs no filesystem I/O,
 blocking bulk transfer, bulk allocation, or content hash; the
 existing service and durable store still own current-attempt selection, retry,
@@ -1774,9 +1778,10 @@ and ongoing supervision-handle drainage. A report becomes eligible only after
 clean process exit and reap. Its protocol v2 control socket carries only
 bounded attempt/Job/receipt/reference/descriptor/digest metadata; checkpoint
 and output bytes cross separate attempt-local direction-reduced stream
-descriptors. The manager transfers them in bounded nonblocking chunks while the
-exact worker remains subject to lifecycle deadlines and drains no bulk data
-after reap. After its metadata-only Report, the worker awaits an identity-only
+descriptors. The manager receives each output slice directly into one
+metadata-sized final owner while the exact worker remains subject to lifecycle
+and heartbeat deadlines, and drains no bulk data after reap. Output never
+renews heartbeat. After its metadata-only Report, the heartbeating worker awaits an identity-only
 `CompletionReady` while still terminable; the manager sends it only after exact
 stream join and image reconstruction. A candidate becomes visible to the
 service only after stream EOF, exact manager revalidation, and clean reap.

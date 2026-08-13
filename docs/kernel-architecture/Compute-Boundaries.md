@@ -1377,12 +1377,17 @@ metadata-only under a 128-KiB control bound: checkpoint and candidate bytes use
 separate manager-created direction-reduced stream descriptors. Their manager
 endpoints are nonblocking, and a worker endpoint may block only while its exact
 PID remains under lifecycle deadlines and TERM/KILL/reap ownership. Checkpoint
-size/EOF/SHA-256 validation occurs inside that worker. Output is drained and
-hashed in bounded chunks before completion handoff; the manager accepts no
-output until stream EOF, clean reap, and exact reference, slot, descriptor,
-size, resource, and SHA-256 validation. After closing the output lane and
-sending its metadata-only Report, the worker remains alive and terminable until
-the manager completes validation and image reconstruction, then returns one
+size/EOF/SHA-256 validation occurs inside that worker. The worker sends exact
+output metadata first and retains its source with genuine heartbeats active.
+While the current PID is unreaped, the manager creates one exact lazy anonymous
+final owner and receives at most one 64-KiB slice directly into it per lifecycle
+arbitration; it performs no cumulative reallocation or whole-payload
+reconstruction copy. Only a valid Heartbeat frame renews heartbeat, never
+continuous or prebuffered output. The manager accepts no output until stream
+EOF, clean reap, and exact reference, slot, descriptor, size, resource, and
+SHA-256 validation. The worker closes its output lane only after exact bytes and
+remains alive and terminable until the manager completes validation and O(1)
+owner transfer, then returns one
 identity-only `CompletionReady` that grants no service or artifact authority.
 Post-reap processing never reads the bulk lane and performs no filesystem I/O,
 blocking bulk transfer, bulk allocation, or content hash. The worker receives no

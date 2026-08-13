@@ -27,9 +27,13 @@ creates them only after record/thread ownership and outside the service mutex;
 manager endpoints are nonblocking, while blocking transfer remains in the
 killable worker. Manager acceptance requires exact reference, descriptor,
 stream EOF/size, resource, and SHA-256 revalidation before clean-reap
-completion handoff. After closing the output lane and sending its metadata-only
-Report, the worker remains alive and terminable until the manager completes
-that join and replies with one identity-only `CompletionReady`; the
+completion handoff. The worker sends exact metadata-only Report first, keeps
+authenticated heartbeats active while streaming, and closes the output lane
+only after exact bytes. The manager creates one exact lazy anonymous final
+owner for the unreaped current PID, directly receives one at-most-64-KiB slice
+between lifecycle checks, and never treats output progress as heartbeat. The
+worker remains alive and terminable until the manager completes that join and
+replies with one identity-only `CompletionReady`; the
 acknowledgement grants no Job, quota, artifact, commit, or publication
 authority. Post-reap processing never reads the bulk lane and performs no data-
 plane filesystem I/O.
@@ -336,10 +340,14 @@ becomes one bounded identity-preserving `Failed/Compute` Report with no image,
 while a finite hard `RLIMIT_FSIZE` below the accepted output-stage maximum
 fails the owning attempt as `WorkerStartup` before `fork` instead of silently
 narrowing that envelope. There is no 64-MiB compatibility or transport-size
-fallback. The worker closes its output lane, sends one metadata-only Report,
-and waits under the same exact process lifecycle for a matching identity-only
+fallback. The worker sends one metadata-only Report, retains its source and
+real heartbeat loop while streaming, closes its output lane only after exact
+bytes, and waits under the same exact process lifecycle for a matching identity-only
 `CompletionReady`. WorkerManager sends it only after EOF, size/hash/reference/
-descriptor/resource validation, and independent image reconstruction. If an
+descriptor/resource validation, and O(1) transfer of the already-final exact
+anonymous CPU owner. Each manager receive is one at-most-64-KiB direct slice
+followed by absolute runtime/heartbeat/cancel/shutdown arbitration; neither
+continuous nor prebuffered output renews or revives heartbeat. If an
 already failed cancellation channel makes the reply impossible, a completely
 joined Report may retain its ordinary classification, but exact reap ends all
 bulk-lane access. After cancellation delivery has been attempted, a socket-
