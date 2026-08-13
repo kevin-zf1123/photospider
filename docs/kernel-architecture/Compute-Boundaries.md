@@ -1392,9 +1392,17 @@ identity-only `CompletionReady` that grants no service or artifact authority.
 Post-reap processing never reads the bulk lane and performs no filesystem I/O,
 blocking bulk transfer, bulk allocation, or content hash. The worker receives no
 artifact root, stable output transaction, quota, retry, or publication
-authority. Partial protocol headers and payloads are
-retained across short poll deadlines; cancellation-send failure is drained to
-the worker report/EOF/exit deadline rather than treated as forced cancellation.
+authority. Partial or complete protocol headers and payloads are retained
+across short poll deadlines. Poll budget is separate from strict semantic
+lifecycle acceptance: pending bulk permits one due-budget nonblocking control
+probe, but buffered or newly completed Assignment, `AssignmentAccepted`,
+Heartbeat, Report, Cancel, or `CompletionReady` is visible only before its
+applicable absolute deadline. Control writes recheck before and after positive
+send progress; a late possibly delivered frame is treated as a failed write and
+is never retried. A cancellation owner may retain the channel only for bounded
+receive-side report/EOF/exit drainage, so cancellation-send failure is drained
+to the worker report/EOF/exit deadline rather than treated as forced
+cancellation.
 Product construction rejects `SIGCHLD=SIG_IGN` and `SA_NOCLDWAIT` before the
 durable root is opened, and WorkerManager revalidates that waitable policy
 immediately before every `fork`. A later process-global policy mutation, a

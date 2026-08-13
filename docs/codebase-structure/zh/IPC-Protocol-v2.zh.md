@@ -49,6 +49,13 @@ service。其 `TenantId`、`JobId`、`JobAttemptId`、
 独立的源码私有类型；protocol-v2 compute id、`OutputArtifactId`、delivery id、session name
 与 output lease 既不序列化也不授权这些身份。因此下文精确的 60-method inventory 保持不变。
 
+该 private worker codec 会把 poll budget 与 semantic acceptance 视为不同 bound。Pending bulk
+允许一次使用到期 budget 的 nonblocking control probe，而每个完整 control frame 仍只能在严格
+早于适用 absolute lifecycle deadline 时有效。Timeout 会保留 partial 或 complete decoder
+state。Write 会在正向 send progress 前后复查；由于 late send 可能已经交付 byte，owner 必须
+将该 write 视为失败，并且绝不重试 frame。Cancellation owner 只能为有界 receive-side
+report/EOF/exit 排空继续保留 channel。
+
 Public client header 是 `photospider/ipc/protocol.hpp`、`photospider/ipc/client.hpp` 与
 `photospider/ipc/host.hpp`。它们只暴露 typed owned value 和完整 Host factory，不暴露 JSON
 type、socket descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend ownership。

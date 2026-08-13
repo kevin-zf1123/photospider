@@ -359,7 +359,15 @@ process、thread 或 descriptor residue。产品构造不包含该 observation�
 ownership 或 publication。
 
 Manager 与 worker 的短 poll loop 都会为自己的 channel 保留一个 decoder：deadline 到期会保留
-partial header/payload byte 与精确 offset，而 clean EOF 只在 fresh frame boundary 上有效。
+partial 或 complete header/payload byte 与精确 offset，而 clean EOF 只在 fresh frame boundary
+上有效。Socket readiness budget 与 semantic lifecycle acceptance 彼此独立。Output pending
+期间，已经到期的 budget 会在一个 bulk slice 前只执行一次 nonblocking control probe；它不授权
+late frame。只有 monotonic time 严格早于最早适用的 absolute lifecycle deadline 时，frame 才
+对调用方可见；正向 read、完整 decode，以及 Assignment、`AssignmentAccepted`、Heartbeat、
+Report、Cancel 或 `CompletionReady` interpretation 后都会复查。Control write 会在正向 send
+progress 前后检查同一严格边界。Progress 后的 timeout 可能表示 peer 已收到 prefix 或 final byte，
+因此调用方必须将该 write 视为失败，并且绝不重试该 frame。Cancellation owner 只能为有界
+receive-side report/EOF/exit 排空继续保留 channel。
 
 WorkerManager 独占 spawn、private channel、PID、signal delivery、`waitpid` 与 supervision-
 thread reaping。任何 API 都不接受或暴露 PID。每条 cancellation 或 signal 路径都会重新校验

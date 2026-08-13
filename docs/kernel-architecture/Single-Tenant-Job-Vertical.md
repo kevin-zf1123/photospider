@@ -454,8 +454,19 @@ observation is absent from product construction and cannot alter liveness,
 ownership, or publication.
 
 Manager and worker short-poll loops each retain one decoder for their channel:
-deadline expiry preserves partial header/payload bytes and exact offsets, while
-clean EOF remains valid only at a fresh frame boundary.
+deadline expiry preserves partial or complete header/payload bytes and exact
+offsets, while clean EOF remains valid only at a fresh frame boundary. Socket
+readiness budget is distinct from semantic lifecycle acceptance. During
+pending output, a due budget performs exactly one nonblocking control probe
+before one bulk slice; it does not authorize a late frame. A frame becomes
+visible only while monotonic time is strictly before the earliest applicable
+absolute lifecycle deadline, with checks after positive reads, complete decode,
+and Assignment, `AssignmentAccepted`, Heartbeat, Report, Cancel, or
+`CompletionReady` interpretation. Control writes check the same strict boundary
+before and after positive send progress. A timeout after progress may mean that
+the peer received a prefix or final byte, so callers treat the write as failed
+and never retry that frame. A cancellation owner may retain the channel only
+for bounded receive-side report/EOF/exit drainage.
 
 WorkerManager alone owns spawn, the private channel, the PID, signal delivery,
 `waitpid`, and supervision-thread reaping. No API accepts or exposes a PID.

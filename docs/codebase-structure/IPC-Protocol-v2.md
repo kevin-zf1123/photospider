@@ -60,6 +60,15 @@ receipt are independent source-private types; protocol-v2 compute ids,
 serialize nor authorize them. The exact 60-method inventory below is therefore
 unchanged.
 
+That private worker codec treats poll budget and semantic acceptance as
+different bounds. Pending bulk permits one due-budget nonblocking control
+probe, while every complete control frame remains valid only strictly before
+the applicable absolute lifecycle deadline. Timeouts retain partial or
+complete decoder state. Writes recheck before and after positive send progress;
+because a late send may already have delivered bytes, the owner treats the
+write as failed and never retries the frame. A cancellation owner may retain
+the channel only for bounded receive-side report/EOF/exit drainage.
+
 The public client headers are `photospider/ipc/protocol.hpp`,
 `photospider/ipc/client.hpp`, and `photospider/ipc/host.hpp`. They expose typed
 owned values plus the complete Host factory and no JSON type, socket descriptor,

@@ -1231,6 +1231,12 @@ supervision 绝不读取 bulk lane，也不执行 filesystem I/O、blocking bulk
 idempotency、cancellation 与 recovery。这个同机 adapter 不是目标 authenticated network control
 plane、standalone artifact service、remote capability transport 或 multi-tenant authorization boundary。
 
+Private control codec 会区分到期的 nonblocking poll budget 与 absolute lifecycle acceptance
+deadline。到期 budget 可以在一个 bulk slice 前探测一次 control，但 buffered byte 与
+poll/read/decode progress 不能令 late frame 可见。Timeout 会保留 partial 或 complete decoder
+state。Write 会在正向 progress 前后复查；可能已经交付的 late frame 必须被视为 write 失败，
+并且绝不重试。Cancellation owner 只能为有界 receive-side report/EOF/exit 排空继续保留 channel。
+
 凡是加载到 Host 的 DSO 都仍是 operator-trusted native code。当前 operation C++ ABI、
 data-definition pure-C ABI 与 policy pure-C ABI 都不提供 sandbox、timeout、syscall、thread 或
 memory-corruption boundary。当前 operation/policy DSO 候选必须先通过进程不可变的签名内容/role

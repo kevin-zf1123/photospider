@@ -300,6 +300,15 @@ close/exit deadline 不能在有效 cooperative deadline 之前终止或 reap wo
 cooperative deadline 到达时仍然存活的 worker 才会进入 cancellation state machine 所有的
 `SIGTERM`/`SIGKILL` escalation，并且才可能产生 forced cancellation。
 
+Control decoder 会区分 readiness-wait budget 与 semantic lifecycle acceptance。Output
+pending 时可以使用已经到期的 budget，在一个 bulk slice 前做一次 nonblocking control probe；
+但完整 buffered byte 或 poll/read/decode progress 不能授权在 absolute lifecycle deadline 到达或
+之后的 frame。Timeout 会保留 partial 或 complete decoder state。Assignment、
+`AssignmentAccepted`、Heartbeat、Report、Cancel 与 `CompletionReady` 只能在 monotonic time
+严格早于其适用 bound 时被接受。Control write 会在每次正向 send 前后复查；late result 可能已经
+交付 prefix 或 final byte，因此 owner 必须将该 write 视为失败，并且绝不重试该 lifecycle
+frame。Cancellation owner 只能为有界 receive-side report/EOF/exit 排空继续保留 channel。
+
 Exec bootstrap 还会在 control descriptor 之外携带必填的精确 startup 与 worker-write
 deadline。worker 不使用本地默认值或更短 cap，而是直接采用 manager value，因此即使第一帧
 assignment 尚不可用，两端也执行同一 configured lifecycle policy。

@@ -366,6 +366,18 @@ authoritative wait-status fact; only a worker still alive at the cooperative
 deadline enters the cancellation state machine's owned `SIGTERM`/`SIGKILL`
 escalation and may produce forced cancellation.
 
+The control decoder separates a readiness-wait budget from semantic lifecycle
+acceptance. Pending output may use a due budget for one nonblocking control
+probe before one bulk slice, but complete buffered bytes or poll/read/decode
+progress cannot authorize a frame at or after its absolute lifecycle deadline.
+Timeout preserves partial or complete decoder state. Assignment,
+`AssignmentAccepted`, Heartbeat, Report, Cancel, and `CompletionReady` are
+accepted only while monotonic time is strictly before their applicable bound.
+Control writes recheck before and after every positive send; a late result may
+have delivered a prefix or final byte, so the owner treats the write as failed
+and never retries that lifecycle frame. A cancellation owner may retain the
+channel only for bounded receive-side report/EOF/exit drainage.
+
 The exec bootstrap also carries required exact startup and worker-write
 deadlines alongside the control descriptor. The worker uses the manager values
 without local defaults or shorter caps, so both sides enforce one configured

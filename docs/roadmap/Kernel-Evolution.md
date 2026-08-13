@@ -1530,6 +1530,14 @@ This same-host adapter is not the target authenticated network control plane,
 standalone artifact service, remote capability transport, or multi-tenant
 authorization boundary.
 
+The private control codec distinguishes a due nonblocking poll budget from the
+absolute lifecycle acceptance deadline. The due budget may probe control once
+before a bulk slice, but buffered bytes and poll/read/decode progress cannot
+make a late frame visible. Timeout preserves partial or complete decoder state.
+Writes recheck before and after positive progress; a possibly delivered late
+frame is treated as a failed write and is never retried. A cancellation owner
+may retain the channel only for bounded receive-side report/EOF/exit drainage.
+
 Every DSO loaded into a Host remains operator-trusted native code. The current
 operation C++ ABI, data-definition pure-C ABI, and policy pure-C ABI provide no
 sandbox, timeout, syscall, thread, or memory-corruption boundary. Current

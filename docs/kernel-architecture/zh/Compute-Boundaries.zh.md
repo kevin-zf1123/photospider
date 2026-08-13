@@ -1067,10 +1067,16 @@ descriptor、size、resource 与 SHA-256 做精确复核后才接受 output。wo
 processing 绝不读取 bulk lane，也不执行 filesystem I/O、blocking bulk transfer、bulk allocation
 或 content hash。Worker 不获得 artifact
 root、稳定 output transaction、quota、retry 或 publication authority。短 poll deadline 之间会
-保留部分 protocol header 与 payload；cancellation 发送失败会继续有界排空 worker
-report/EOF/exit truth，而不会直接视为 forced cancellation。产品构造会在打开 durable root 前
-拒绝 `SIGCHLD=SIG_IGN` 与 `SA_NOCLDWAIT`，WorkerManager 还会在每次 `fork` 前立即重新校验
-该可等待策略。之后若 process-global 策略被修改、出现竞争 reaper，或精确 `waitpid` 返回任何
+保留 partial 或 complete protocol header 与 payload。Poll budget 与严格 semantic lifecycle
+acceptance 相互独立：pending bulk 允许一次使用到期 budget 的 nonblocking control probe，但
+buffered 或刚完成的 Assignment、`AssignmentAccepted`、Heartbeat、Report、Cancel 或
+`CompletionReady` 只能在其适用 absolute deadline 前可见。Control write 会在正向 send progress
+前后复查；late 且可能已经交付的 frame 必须被视为 write 失败，并且绝不重试。Cancellation
+owner 只能为有界 receive-side report/EOF/exit 排空继续保留 channel，因此发送失败会继续
+有界排空 worker report/EOF/exit truth，而不会直接视为 forced cancellation。产品构造会在打开
+durable root 前拒绝 `SIGCHLD=SIG_IGN` 与 `SA_NOCLDWAIT`，WorkerManager 还会在每次
+`fork` 前立即重新校验该可等待策略。之后若 process-global 策略被修改、出现竞争 reaper，
+或精确 `waitpid` 返回任何
 非 `EINTR` 错误（包括 `ECHILD`），authority 都会在执行 completion callback、标记 completed
 record 或删除 record 前 fail-stop。即使已经精确 reap，manager 仍会保留 record，直到构造出
 一个 typed terminal fact 且控制面 callback 返回为止。实际首次外部/进程内 `Report`、
