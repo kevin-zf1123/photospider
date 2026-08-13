@@ -3168,8 +3168,11 @@ The maintained entry points are:
   discovery fixture.
 - `ci/scripts/runtime_capability_test.sh` for exact Make/Ninja target parsing,
   complete legacy and policy/execution profiles, partial/mixed/absent
-  fail-closed behavior, required-target validation, and mutually exclusive CLI
-  configuration.
+  fail-closed behavior, required-target validation, mutually exclusive CLI
+  configuration, and the exact optional `test_plugin_trust_bundle` gate. Its
+  trust cases preserve pre-trust/legacy no-op behavior, reject missing or
+  malformed inventory and incomplete/nonregular material, and prove that a
+  complete capable build replaces inherited trust values with canonical paths.
 - `ci/scripts/integration_plan.sh` for allow-empty exact-label configuration
   preflight without authoritative matrix output.
 - `ci/scripts/build_integrity.sh` for the default producer profile, including

@@ -2570,7 +2570,9 @@ NUL 分隔的 Git 输出与父 shell 可见的临时文件。因此 `git diff` �
   占位到构建后发现 fixture。
 - `ci/scripts/runtime_capability_test.sh`：覆盖精确 Make/Ninja target 解析、完整旧 profile 与
   policy/execution profile、不完整/混合/缺失清单的 fail-closed 行为、required-target 校验和
-  互斥 CLI 配置。
+  互斥 CLI 配置，以及精确的可选 `test_plugin_trust_bundle` gate。其 trust case 保持
+  pre-trust/legacy no-op 行为，拒绝缺失或 malformed inventory 与不完整/非 regular material，
+  并证明具备完整 capability 的 build 会用 canonical path 覆盖 inherited trust value。
 - `ci/scripts/integration_plan.sh`：执行允许空集合的精确 label 配置期预检，不输出权威 matrix。
 - `ci/scripts/build_integrity.sh`：构建 default producer profile，包括运行时契约检测、架构中性
   required-target/full build、严格构建后带标签 CTest inventory 校验和权威 matrix job output。
