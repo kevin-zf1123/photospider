@@ -378,6 +378,19 @@ Report writes; no worker-local default or cap can shorten the manager policy.
 Bootstrap descriptors and startup remain outside control payloads because they
 are process capabilities/policy needed before the first frame is available.
 
+The parent also applies that configured startup duration to fd 4 as one
+absolute exec-bootstrap deadline. Its nonblocking reader retains partial
+native-`int` state across `EINTR`/`EAGAIN`; partial-record EOF remains a
+truncated setup failure. Poll/read readiness is not acceptance: after reading
+one complete child `errno` or clean close-on-exec EOF, WorkerManager takes a
+fresh monotonic observation and exposes the result only while
+`now < deadline`. Equality or later is the typed `WorkerStartup` deadline,
+before child-error or exec-success classification, and the existing exact PID
+owner performs TERM-to-KILL-to-`waitpid` cleanup. The separate Assignment
+startup window created afterward cannot revive a late exec result. Maintained
+real-process tests cross the boundary deterministically for both complete
+results and require zero process, thread, quota, receipt, and artifact residue.
+
 The source-private duration domain is closed before durable ownership. Each of
 the nine `WorkerManagerOptions` fields is positive and at most the inclusive
 `4,294,967,295 ms` shared maximum. `heartbeat_interval` has the narrower

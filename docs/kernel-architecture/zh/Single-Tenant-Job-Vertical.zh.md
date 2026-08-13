@@ -301,6 +301,16 @@ materialization，并把精确 I/O duration 用于 acceptance、heartbeat 与 Re
 本地默认值或 cap 无法缩短 manager policy。Bootstrap descriptor 与 startup 不进入 control
 payload，因为它们是在第一帧可用前就需要的 process capability/policy。
 
+parent 也会把该 configured startup duration 作为同一个 absolute exec-bootstrap deadline 应用
+于 fd 4。其 nonblocking reader 会跨 `EINTR`/`EAGAIN` 保留 partial native-`int` state；
+partial-record EOF 仍是 truncated setup failure。Poll/read ready 不等于接受：读取一份完整 child
+`errno` 或干净 close-on-exec EOF 后，WorkerManager 必须取得 fresh monotonic observation，且仅
+在 `now < deadline` 时暴露结果。等值或更晚是 typed `WorkerStartup` deadline，并且优先于
+child-error 或 exec-success 分类；既有精确 PID owner 会执行 TERM→KILL→`waitpid` 清理。之后
+另行创建的 Assignment startup window 不能复活迟到的 exec 结果。长期真实进程测试会对两种
+完整结果确定性地跨越该边界，并要求 process、thread、quota、receipt 与 artifact residue 全部
+归零。
+
 源码私有 duration 域会在取得 durable ownership 前封闭。九个 `WorkerManagerOptions` 字段都
 为正，且不大于包含式共享上限 `4,294,967,295 ms`。`heartbeat_interval` 采用更窄的包含式
 上限 `4,294,967,294 ms`，并且必须保持严格小于 `heartbeat_timeout`；这也保留了 protocol 的

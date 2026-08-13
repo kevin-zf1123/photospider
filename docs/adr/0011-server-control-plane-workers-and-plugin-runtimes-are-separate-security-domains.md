@@ -382,6 +382,14 @@ The exec bootstrap also carries required exact startup and worker-write
 deadlines alongside the control descriptor. The worker uses the manager values
 without local defaults or shorter caps, so both sides enforce one configured
 lifecycle policy even before the first assignment frame is available.
+The parent applies that startup policy to close-on-exec status fd 4 as one
+absolute exec-bootstrap deadline across poll, partial native-`int` reads, and
+`EINTR`/`EAGAIN`. After a complete child `errno` or clean EOF, a fresh
+monotonic observation must still satisfy `now < deadline` before either result
+is visible. Equality or later remains `WorkerStartup` deadline and triggers
+the existing exact TERM-to-KILL-to-`waitpid` cleanup; it cannot become child-
+error classification or be revived as exec success by the later Assignment
+startup window. Partial-record EOF remains a truncated setup failure.
 All nine manager durations use one inclusive `4,294,967,295 ms` closed domain;
 heartbeat interval stops at `4,294,967,294 ms` so it can remain strictly below
 heartbeat timeout. Product construction rejects every field-specific excess

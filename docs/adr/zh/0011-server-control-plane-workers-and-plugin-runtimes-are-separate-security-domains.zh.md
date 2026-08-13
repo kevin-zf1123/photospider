@@ -312,6 +312,13 @@ frame。Cancellation owner 只能为有界 receive-side report/EOF/exit 排空�
 Exec bootstrap 还会在 control descriptor 之外携带必填的精确 startup 与 worker-write
 deadline。worker 不使用本地默认值或更短 cap，而是直接采用 manager value，因此即使第一帧
 assignment 尚不可用，两端也执行同一 configured lifecycle policy。
+parent 会把该 startup policy 作为同一个 absolute exec-bootstrap deadline 应用于
+close-on-exec status fd 4，并让它贯穿 poll、partial native-`int` read 与
+`EINTR`/`EAGAIN`。读取完整 child `errno` 或干净 EOF 后，必须用 fresh monotonic
+observation 再次满足 `now < deadline`，才能暴露任一结果。等值或更晚仍是
+`WorkerStartup` deadline，并触发既有精确 TERM→KILL→`waitpid` 清理；它不能变成 child-
+error 分类，也不能被后续 Assignment startup window 复活为 exec success。Partial-record
+EOF 仍是 truncated setup failure。
 全部九个 manager duration 使用同一个包含式 `4,294,967,295 ms` 封闭域；heartbeat interval
 止于 `4,294,967,294 ms`，从而能够保持严格小于 heartbeat timeout。产品构造会在取得 durable-
 root ownership 前拒绝每个字段的超界值。随后 manager 与 worker 使用精确可表示的 monotonic
