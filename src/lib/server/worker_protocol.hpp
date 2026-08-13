@@ -85,7 +85,8 @@ struct WorkerProtocolFrame final {
  * @brief Reassembles one private control byte stream across bounded read calls.
  *
  * The decoder retains the exact header and payload offsets after
- * `WorkerProtocolTimeout`, validates the complete header once, allocates only
+ * `WorkerProtocolTimeout`, including when a complete frame misses its semantic
+ * acceptance deadline. It validates the complete header once, allocates only
  * the advertised bounded payload, and resets only after returning a complete
  * frame. One instance belongs to one socket byte stream and must not be shared
  * concurrently.
@@ -115,9 +116,34 @@ class WorkerFrameDecoder final {
    * @throws WorkerProtocolEof for EOF at a fresh frame boundary.
    * @throws WorkerProtocolError for malformed or truncated input.
    * @throws WorkerChannelError for an invalid descriptor or socket failure.
+   * @note Equality with `deadline` is already late. This overload uses the
+   * same absolute value for readiness waiting and semantic acceptance.
    */
   WorkerProtocolFrame read_frame(
       int fd, std::chrono::steady_clock::time_point deadline);
+
+  /**
+   * @brief Advances one frame with separate readiness and acceptance bounds.
+   * @param fd Connected private Unix socket owned by this decoder's stream.
+   * @param poll_deadline Absolute monotonic bound for waiting on socket
+   * readiness. A due value permits one nonblocking readiness probe.
+   * @param acceptance_deadline Absolute monotonic lifecycle bound; a complete
+   * frame is returned only while current time is strictly before this value.
+   * @return Closed kind and exact bounded payload after full reassembly.
+   * @throws WorkerProtocolTimeout when readiness is unavailable within the
+   * poll budget or semantic acceptance reaches its deadline. All retained
+   * partial or complete bytes remain available to a later call.
+   * @throws WorkerProtocolEof for EOF at a fresh frame boundary.
+   * @throws WorkerProtocolError for malformed or truncated input.
+   * @throws WorkerChannelError for an invalid descriptor or socket failure.
+   * @note This split permits WorkerManager's zero-budget control probe to
+   * observe a ready control frame before the independent lifecycle deadline;
+   * an unavailable or partial probe times out without losing decoder state so
+   * one bounded bulk slice can run.
+   */
+  WorkerProtocolFrame read_frame(
+      int fd, std::chrono::steady_clock::time_point poll_deadline,
+      std::chrono::steady_clock::time_point acceptance_deadline);
 
  private:
   /** @brief Returns to a fresh frame boundary after successful delivery. */
@@ -250,6 +276,10 @@ class WorkerChannelError final : public WorkerProtocolError {
  * @throws WorkerProtocolTimeout on deadline expiry.
  * @throws WorkerChannelError on socket failure or closure.
  * @note Writes suppress `SIGPIPE`; an unavailable peer becomes an exception.
+ * A timeout after positive write progress can mean the peer received a frame
+ * prefix or even the final byte. Callers must treat the write as failed and
+ * never retry that frame. A cancellation owner may retain the channel only for
+ * its existing bounded receive-side report/EOF/exit drainage.
  */
 void write_worker_frame(int fd, WorkerMessageKind kind,
                         const std::vector<std::byte>& payload,
@@ -266,7 +296,8 @@ void write_worker_frame(int fd, WorkerMessageKind kind,
  * @throws WorkerChannelError for a socket-system failure.
  * @note Callers that intentionally retry short read deadlines on one stream
  * must retain `WorkerFrameDecoder`; this convenience function cannot preserve
- * a partial frame after it throws `WorkerProtocolTimeout`.
+ * a partial or complete frame after it throws `WorkerProtocolTimeout` and is
+ * therefore reserved for lifecycle paths that fail closed on timeout.
  */
 WorkerProtocolFrame read_worker_frame(
     int fd, std::chrono::steady_clock::time_point deadline);
@@ -310,6 +341,8 @@ void send_worker_assignment(int fd, const PreparedWorkerAssignment& assignment,
  * @throws WorkerProtocolError for malformed, oversized, or inconsistent data.
  * @throws WorkerProtocolTimeout/WorkerProtocolEof/WorkerChannelError for I/O
  * failure.
+ * @note Semantic reconstruction is accepted only while current monotonic time
+ * remains strictly before `deadline`; timeout fails the startup channel closed.
  */
 PreparedWorkerAssignment receive_worker_assignment(
     int fd, std::chrono::steady_clock::time_point deadline);

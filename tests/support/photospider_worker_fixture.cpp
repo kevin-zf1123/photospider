@@ -404,6 +404,10 @@ void await_fixture_completion_ready(
             "fixture completion acknowledgement identity does not match "
             "report");
       }
+      if (std::chrono::steady_clock::now() >= deadline) {
+        throw WorkerProtocolTimeout(
+            "fixture completion acknowledgement deadline expired");
+      }
       return;
     }
     if (frame.kind == WorkerMessageKind::Cancel) {
@@ -411,6 +415,10 @@ void await_fixture_completion_ready(
           prepared.report.identity) {
         throw WorkerProtocolError(
             "fixture late cancel identity does not match report");
+      }
+      if (std::chrono::steady_clock::now() >= deadline) {
+        throw WorkerProtocolTimeout(
+            "fixture late cancel acceptance deadline expired");
       }
       continue;
     }
@@ -859,9 +867,11 @@ void send_fragmented_report(int fd, const PreparedWorkerReport& report,
  * or poll deadline.
  * @throws std::bad_alloc when deadline diagnostics, frame processing, or report
  * construction exhausts memory.
- * @note One decoder retains partial Cancel bytes across heartbeat poll slices;
- * read-slice timeouts are contained and retried. The descriptor is borrowed and
- * remains open for the caller's report path.
+ * @note One decoder retains partial or complete Cancel bytes across heartbeat
+ * poll slices; read-slice timeouts are contained and retried. A Cancel changes
+ * fixture behavior only while the slice deadline remains active after identity
+ * decoding. The descriptor is borrowed and remains open for the caller's
+ * report path.
  */
 JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
                                  bool ignore_cancel,
@@ -877,14 +887,20 @@ JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
                                                kFixtureHeartbeatCadence);
     }
     try {
-      const WorkerProtocolFrame frame = frame_decoder.read_frame(
-          fd, std::min(next_heartbeat,
-                       checked_worker_deadline(std::chrono::steady_clock::now(),
-                                               kFixtureHeartbeatCadence)));
+      const auto read_deadline =
+          std::min(next_heartbeat,
+                   checked_worker_deadline(std::chrono::steady_clock::now(),
+                                           kFixtureHeartbeatCadence));
+      const WorkerProtocolFrame frame =
+          frame_decoder.read_frame(fd, read_deadline);
       if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
           assignment.identity) {
         throw WorkerProtocolError(
             "fixture cancel identity does not match assignment");
+      }
+      if (std::chrono::steady_clock::now() >= read_deadline) {
+        throw WorkerProtocolTimeout(
+            "fixture cancel acceptance deadline expired");
       }
       if (!ignore_cancel) {
         return cancelled_report(assignment);
@@ -928,13 +944,18 @@ void wait_for_cancel_then_channel_close(int fd, const JobAssignment& assignment,
                                                kFixtureHeartbeatCadence);
     }
     try {
-      const WorkerProtocolFrame frame = frame_decoder.read_frame(
-          fd, checked_worker_deadline(std::chrono::steady_clock::now(),
-                                      kFixtureHeartbeatCadence));
+      const auto read_deadline = checked_worker_deadline(
+          std::chrono::steady_clock::now(), kFixtureHeartbeatCadence);
+      const WorkerProtocolFrame frame =
+          frame_decoder.read_frame(fd, read_deadline);
       if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
           assignment.identity) {
         throw WorkerProtocolError(
             "fixture cancel identity does not match assignment");
+      }
+      if (std::chrono::steady_clock::now() >= read_deadline) {
+        throw WorkerProtocolTimeout(
+            "fixture cancel acceptance deadline expired");
       }
       cancel_observed = true;
     } catch (const WorkerProtocolTimeout&) {

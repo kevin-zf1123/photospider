@@ -21,8 +21,63 @@
 #include <utility>
 #include <vector>
 
+#include "server/worker_protocol_test_access.hpp"  // NOLINT(build/include_subdir)
+
 namespace ps::server {
 namespace {
+
+/**
+ * @brief Borrowed deterministic hooks active only on the current test thread.
+ * @note Product threads retain the null default and therefore use the real
+ * monotonic clock without observation callbacks.
+ */
+// NOLINTBEGIN(whitespace/indent_namespace)
+thread_local const WorkerProtocolDeadlineTestHooks*
+    g_worker_protocol_deadline_test_hooks = nullptr;
+// NOLINTEND
+
+/**
+ * @brief Returns the production clock or one current-thread test replacement.
+ * @return Monotonic time used by protocol deadline calculations.
+ * @throws Nothing.
+ */
+std::chrono::steady_clock::time_point worker_protocol_now() noexcept {
+  const WorkerProtocolDeadlineTestHooks* hooks =
+      g_worker_protocol_deadline_test_hooks;
+  if (hooks != nullptr && hooks->now != nullptr) {
+    return hooks->now(hooks->context);
+  }
+  return std::chrono::steady_clock::now();
+}
+
+/**
+ * @brief Notifies one current-thread deterministic test observation point.
+ * @param point Exact protocol boundary reached by the implementation.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void observe_worker_protocol_deadline_test_point(
+    WorkerProtocolDeadlineTestPoint point) noexcept {
+  const WorkerProtocolDeadlineTestHooks* hooks =
+      g_worker_protocol_deadline_test_hooks;
+  if (hooks != nullptr && hooks->observe != nullptr) {
+    hooks->observe(hooks->context, point);
+  }
+}
+
+/**
+ * @brief Enforces one strict absolute protocol acceptance boundary.
+ * @param deadline Absolute monotonic deadline whose equality is already late.
+ * @return Nothing while current time is strictly before `deadline`.
+ * @throws WorkerProtocolTimeout when current time is equal to or later than
+ * `deadline`.
+ */
+void require_worker_protocol_before(
+    std::chrono::steady_clock::time_point deadline) {
+  if (worker_protocol_now() >= deadline) {
+    throw WorkerProtocolTimeout("worker protocol I/O deadline expired");
+  }
+}
 
 /** @brief Fixed big-endian frame magic spelling ASCII `PSW1`. */
 constexpr std::uint32_t kWorkerProtocolMagic = 0x50535731U;
@@ -394,7 +449,7 @@ WorkerMessageKind parse_message_kind(std::uint16_t value) {
  * @throws Nothing.
  */
 int poll_timeout_ms(std::chrono::steady_clock::time_point deadline) noexcept {
-  const auto now = std::chrono::steady_clock::now();
+  const auto now = worker_protocol_now();
   if (deadline <= now) {
     return 0;
   }
@@ -446,12 +501,17 @@ void wait_ready(int fd, std::int16_t events,
  * @param size Number of bytes to send.
  * @param deadline Absolute monotonic deadline.
  * @throws WorkerProtocolTimeout or WorkerChannelError on I/O failure.
+ * @note A positive send is irrevocable. If its post-send deadline check fails,
+ * callers must treat the write as failed and must not retry the frame. An
+ * existing cancellation FSM may retain the channel only for bounded
+ * receive-side report/EOF/exit drainage.
  */
 void write_all(int fd, const std::byte* bytes, std::size_t size,
                std::chrono::steady_clock::time_point deadline) {
   std::size_t offset = 0U;
   while (offset != size) {
     wait_ready(fd, POLLOUT, deadline);
+    require_worker_protocol_before(deadline);
 #ifdef MSG_NOSIGNAL
     constexpr int kSendFlags = MSG_NOSIGNAL;
 #else
@@ -461,10 +521,14 @@ void write_all(int fd, const std::byte* bytes, std::size_t size,
         ::send(fd, bytes + offset, size - offset, kSendFlags);
     if (written > 0) {
       offset += static_cast<std::size_t>(written);
+      observe_worker_protocol_deadline_test_point(
+          WorkerProtocolDeadlineTestPoint::WriteProgressAfterSend);
+      require_worker_protocol_before(deadline);
       continue;
     }
     if (written < 0 &&
         (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+      require_worker_protocol_before(deadline);
       continue;
     }
     const int error = written == 0 ? EPIPE : errno;
@@ -479,7 +543,9 @@ void write_all(int fd, const std::byte* bytes, std::size_t size,
  * @param bytes Non-null output when `size` is nonzero.
  * @param size Number of bytes to receive.
  * @param offset Non-null retained offset at or below `size`.
- * @param deadline Absolute monotonic deadline.
+ * @param poll_deadline Absolute monotonic readiness-wait budget. A due value
+ * still permits one nonblocking probe and one read when readiness is present.
+ * @param acceptance_deadline Absolute monotonic frame acceptance deadline.
  * @param clean_eof_allowed Whether zero bytes at initial offset means clean
  * frame-boundary EOF.
  * @throws std::invalid_argument for inconsistent buffer/offset state.
@@ -489,16 +555,18 @@ void write_all(int fd, const std::byte* bytes, std::size_t size,
  */
 void read_incremental(int fd, std::byte* bytes, std::size_t size,
                       std::size_t* offset,
-                      std::chrono::steady_clock::time_point deadline,
+                      std::chrono::steady_clock::time_point poll_deadline,
+                      std::chrono::steady_clock::time_point acceptance_deadline,
                       bool clean_eof_allowed) {
   if (offset == nullptr || *offset > size || (size != 0U && bytes == nullptr)) {
     throw std::invalid_argument("worker incremental read state is invalid");
   }
   while (*offset != size) {
-    wait_ready(fd, POLLIN, deadline);
+    wait_ready(fd, POLLIN, poll_deadline);
     const ssize_t received = ::recv(fd, bytes + *offset, size - *offset, 0);
     if (received > 0) {
       *offset += static_cast<std::size_t>(received);
+      require_worker_protocol_before(acceptance_deadline);
       continue;
     }
     if (received == 0) {
@@ -508,6 +576,7 @@ void read_incremental(int fd, std::byte* bytes, std::size_t size,
       throw WorkerProtocolError("worker protocol frame is truncated by EOF");
     }
     if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+      require_worker_protocol_before(acceptance_deadline);
       continue;
     }
     throw WorkerChannelError(std::string("worker protocol read failed: ") +
@@ -1072,6 +1141,23 @@ void validate_worker_assignment_graph_text_field(std::string_view field_name,
 
 }  // namespace
 
+/** @copydoc
+ * ps::server::ScopedWorkerProtocolDeadlineTestHooks::ScopedWorkerProtocolDeadlineTestHooks
+ */
+ScopedWorkerProtocolDeadlineTestHooks::ScopedWorkerProtocolDeadlineTestHooks(
+    const WorkerProtocolDeadlineTestHooks* hooks) noexcept
+    : previous_(g_worker_protocol_deadline_test_hooks) {
+  g_worker_protocol_deadline_test_hooks = hooks;
+}
+
+/** @copydoc
+ * ps::server::ScopedWorkerProtocolDeadlineTestHooks::~ScopedWorkerProtocolDeadlineTestHooks
+ */
+ScopedWorkerProtocolDeadlineTestHooks::
+    ~ScopedWorkerProtocolDeadlineTestHooks() noexcept {
+  g_worker_protocol_deadline_test_hooks = previous_;
+}
+
 /** @copydoc ps::server::validate_worker_assignment_graph_transport */
 void validate_worker_assignment_graph_transport(
     const ResolvedGraphArtifact& graph) {
@@ -1103,17 +1189,27 @@ void write_worker_frame(int fd, WorkerMessageKind kind,
   }
   write_all(fd, header_bytes.data(), header_bytes.size(), deadline);
   write_all(fd, payload.data(), payload.size(), deadline);
+  require_worker_protocol_before(deadline);
 }
 
 /** @copydoc ps::server::WorkerFrameDecoder::read_frame */
 WorkerProtocolFrame WorkerFrameDecoder::read_frame(
     int fd, std::chrono::steady_clock::time_point deadline) {
+  return read_frame(fd, deadline, deadline);
+}
+
+/** @copydoc ps::server::WorkerFrameDecoder::read_frame */
+WorkerProtocolFrame WorkerFrameDecoder::read_frame(
+    int fd, std::chrono::steady_clock::time_point poll_deadline,
+    std::chrono::steady_clock::time_point acceptance_deadline) {
   if (fd < 0) {
     throw WorkerChannelError("worker frame input descriptor is invalid");
   }
+  const auto effective_poll_deadline =
+      std::min(poll_deadline, acceptance_deadline);
   if (!header_decoded_) {
     read_incremental(fd, header_.data(), header_.size(), &header_offset_,
-                     deadline, true);
+                     effective_poll_deadline, acceptance_deadline, true);
     const std::vector<std::byte> header(header_.begin(), header_.end());
     ByteReader header_reader(header);
     if (header_reader.get_u32() != kWorkerProtocolMagic) {
@@ -1134,7 +1230,10 @@ WorkerProtocolFrame WorkerFrameDecoder::read_frame(
   }
 
   read_incremental(fd, payload_.data(), payload_.size(), &payload_offset_,
-                   deadline, false);
+                   effective_poll_deadline, acceptance_deadline, false);
+  observe_worker_protocol_deadline_test_point(
+      WorkerProtocolDeadlineTestPoint::FrameReadyBeforeAcceptance);
+  require_worker_protocol_before(acceptance_deadline);
   WorkerProtocolFrame frame;
   frame.kind = kind_;
   frame.payload = std::move(payload_);
@@ -1222,7 +1321,7 @@ void send_worker_assignment(int fd, const PreparedWorkerAssignment& assignment,
 PreparedWorkerAssignment receive_worker_assignment(
     int fd, std::chrono::steady_clock::time_point deadline) {
   WorkerProtocolFrame frame = read_worker_frame(fd, deadline);
-  return decode_checked([&] {
+  PreparedWorkerAssignment decoded = decode_checked([&] {
     if (frame.kind != WorkerMessageKind::Assignment) {
       throw WorkerProtocolError("worker expected one assignment frame");
     }
@@ -1255,6 +1354,8 @@ PreparedWorkerAssignment receive_worker_assignment(
     reader.finish();
     return prepared;
   });
+  require_worker_protocol_before(deadline);
+  return decoded;
 }
 
 /** @copydoc ps::server::send_worker_identity */

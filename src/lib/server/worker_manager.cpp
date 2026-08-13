@@ -1585,6 +1585,8 @@ class WorkerManager::Impl final {
    * spawn, standard exceptions from the ordinary protocol/monitor path are
    * converted to typed failure only after exact reaping; test-only observation
    * or cleanup exceptions still propagate to the thread-scope classifier.
+   * Assignment acceptance becomes authoritative only after exact identity
+   * decoding while still strictly before the captured startup deadline.
    */
   WorkerManagerCompletion run_external_process(
       const std::shared_ptr<Record>& record) {
@@ -1616,6 +1618,10 @@ class WorkerManager::Impl final {
           record->identity) {
         throw WorkerProtocolError(
             "worker acceptance identity does not match its exact lease");
+      }
+      if (std::chrono::steady_clock::now() >= startup_deadline) {
+        throw WorkerProtocolTimeout(
+            "worker assignment acceptance deadline expired");
       }
       accepted = true;
       return monitor_process(record, &process);
@@ -1714,6 +1720,11 @@ class WorkerManager::Impl final {
    * while candidate output remains pending. They change no deadline and grant
    * no process, channel, payload, cancellation, completion, artifact, or quota
    * authority.
+   * Socket-read poll budgets and semantic lifecycle acceptance deadlines are
+   * separate: pending bulk uses a due poll budget for one nonblocking control
+   * probe, while a ready frame remains acceptable only before the earliest
+   * runtime/heartbeat/cancel/report/post-reap lifecycle deadline. A probe
+   * timeout retains decoder state and yields exactly one bounded bulk slice.
    * A worker waits for one identity-only `CompletionReady`
    * acknowledgement. The manager sends it only after nonblocking EOF, bounded
    * hashing, reference/descriptor/resource joins, and image reconstruction;
@@ -1952,34 +1963,38 @@ class WorkerManager::Impl final {
         }
       }
       const bool output_slice_ready = output_pending && !defer_output;
-      auto read_deadline =
+      auto poll_deadline =
           output_slice_ready
-              ? std::chrono::steady_clock::now()
-              : checked_worker_deadline(std::chrono::steady_clock::now(),
-                                        kSupervisorPollInterval);
+              ? now
+              : checked_worker_deadline(now, kSupervisorPollInterval);
+      auto acceptance_deadline = std::chrono::steady_clock::time_point::max();
       if (!process->reaped) {
         if (!cancel && !materialized_report.has_value()) {
-          read_deadline = std::min(read_deadline, heartbeat_deadline);
+          acceptance_deadline =
+              std::min(acceptance_deadline, heartbeat_deadline);
         }
-        read_deadline = std::min(read_deadline, runtime_deadline);
+        acceptance_deadline = std::min(acceptance_deadline, runtime_deadline);
         if (cancel_deadline.has_value()) {
-          read_deadline = std::min(read_deadline, *cancel_deadline);
+          acceptance_deadline = std::min(acceptance_deadline, *cancel_deadline);
         }
       }
       if (!process->reaped && effective_report_deadline.has_value()) {
-        read_deadline = std::min(read_deadline, *effective_report_deadline);
+        acceptance_deadline =
+            std::min(acceptance_deadline, *effective_report_deadline);
       }
       if (post_reap_drain_deadline.has_value()) {
-        read_deadline = std::min(read_deadline, *post_reap_drain_deadline);
+        acceptance_deadline =
+            std::min(acceptance_deadline, *post_reap_drain_deadline);
       }
+      poll_deadline = std::min(poll_deadline, acceptance_deadline);
       try {
         if (cancel_attempted &&
             options_.inject_cancel_channel_failure_for_test) {
           throw WorkerChannelError(
               "injected accepted-cancel worker channel failure");
         }
-        WorkerProtocolFrame frame =
-            frame_decoder.read_frame(process->control.get(), read_deadline);
+        WorkerProtocolFrame frame = frame_decoder.read_frame(
+            process->control.get(), poll_deadline, acceptance_deadline);
         if (frame.kind == WorkerMessageKind::Heartbeat) {
           if (decode_worker_identity(frame, WorkerMessageKind::Heartbeat) !=
               record->identity) {
@@ -1987,6 +2002,10 @@ class WorkerManager::Impl final {
                 "worker heartbeat identity does not match its exact lease");
           }
           const auto heartbeat_accepted_at = std::chrono::steady_clock::now();
+          if (heartbeat_accepted_at >= acceptance_deadline) {
+            throw WorkerProtocolTimeout(
+                "worker heartbeat acceptance deadline expired");
+          }
           if (!materialized_report.has_value()) {
             if (!cancel && heartbeat_accepted_at >= runtime_deadline) {
               terminate_and_reap(record, process);
@@ -2029,6 +2048,10 @@ class WorkerManager::Impl final {
                 "worker report identity does not match its exact lease");
           }
           const auto report_accepted_at = std::chrono::steady_clock::now();
+          if (report_accepted_at >= acceptance_deadline) {
+            throw WorkerProtocolTimeout(
+                "worker report acceptance deadline expired");
+          }
           if (!cancel && report_accepted_at >= runtime_deadline) {
             terminate_and_reap(record, process);
             return failure_completion(record->identity,
@@ -2060,6 +2083,9 @@ class WorkerManager::Impl final {
               "worker sent a message invalid for its active state");
         }
       } catch (const WorkerProtocolTimeout&) {
+        if (std::chrono::steady_clock::now() >= acceptance_deadline) {
+          continue;
+        }
         if (output_slice_ready) {
           const WorkerDataPlaneIoStatus status =
               drain_output_slice(process, output_image, output_expected_bytes,

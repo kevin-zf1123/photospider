@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -24,6 +25,7 @@
 
 #include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
+#include "server/worker_protocol_test_access.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::server {
 namespace {
@@ -374,6 +376,50 @@ std::chrono::steady_clock::time_point protocol_deadline() noexcept {
 }
 
 /**
+ * @brief Deterministic monotonic time advanced at one protocol boundary.
+ * @throws Nothing for aggregate initialization and value operations.
+ */
+struct ProtocolDeadlineHookState final {
+  /** @brief Current synthetic monotonic tick count. */
+  std::atomic<std::chrono::steady_clock::rep> now_ticks{0};
+  /** @brief Exact synthetic deadline installed by the test. */
+  std::chrono::steady_clock::time_point deadline;
+  /** @brief Boundary that advances `now_ticks` exactly to `deadline`. */
+  WorkerProtocolDeadlineTestPoint crossing_point =
+      WorkerProtocolDeadlineTestPoint::FrameReadyBeforeAcceptance;
+};
+
+/**
+ * @brief Returns one test's atomically controlled monotonic time.
+ * @param context Non-null `ProtocolDeadlineHookState`.
+ * @return Synthetic time point retained by the state.
+ * @throws Nothing.
+ */
+std::chrono::steady_clock::time_point protocol_test_now(
+    void* context) noexcept {
+  const auto* state = static_cast<const ProtocolDeadlineHookState*>(context);
+  return std::chrono::steady_clock::time_point{
+      std::chrono::steady_clock::duration{
+          state->now_ticks.load(std::memory_order_acquire)}};
+}
+
+/**
+ * @brief Advances synthetic time exactly when the selected boundary is seen.
+ * @param context Non-null `ProtocolDeadlineHookState`.
+ * @param point Exact implementation boundary reached by the protocol.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void cross_protocol_test_deadline(
+    void* context, WorkerProtocolDeadlineTestPoint point) noexcept {
+  auto* state = static_cast<ProtocolDeadlineHookState*>(context);
+  if (point == state->crossing_point) {
+    state->now_ticks.store(state->deadline.time_since_epoch().count(),
+                           std::memory_order_release);
+  }
+}
+
+/**
  * @brief Attempts one stream send without permitting process-wide SIGPIPE.
  * @param fd Connected direction-reduced AF_UNIX stream endpoint.
  * @param byte Exact single byte to send.
@@ -650,6 +696,22 @@ TEST(WorkerProtocol, RoundTripsCompleteAssignmentAndExactLease) {
   EXPECT_EQ(received.heartbeat_interval, sent.heartbeat_interval);
 }
 
+TEST(WorkerProtocol, ExpiredBufferedAssignmentIsNotSemanticallyAccepted) {
+  ScopedSocketPair sockets;
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.expired-assignment"), 7,
+      OutputSlotId("image.final"), protocol_resources());
+  auto prepared = prepared_assignment_with_data_plane(spec);
+  prepared.first.graph.ok = true;
+  prepared.first.graph.yaml_path = "/trusted/expired-assignment.yaml";
+
+  send_worker_assignment(sockets.at(0U), prepared.first, protocol_deadline());
+
+  EXPECT_THROW(receive_worker_assignment(sockets.at(1U),
+                                         std::chrono::steady_clock::now()),
+               WorkerProtocolTimeout);
+}
+
 TEST(WorkerProtocol,
      WorkerCheckpointLaneRejectsReverseSendAndPreservesManagerDirection) {
   auto spec = std::make_shared<const JobSpec>(
@@ -871,6 +933,151 @@ TEST(WorkerProtocol, StatefulDecoderPreservesHeaderAndPayloadAcrossTimeouts) {
   const std::vector<std::byte> expected(frame_bytes.begin() + 12,
                                         frame_bytes.end());
   EXPECT_EQ(frame.payload, expected);
+}
+
+TEST(WorkerProtocol, ExpiredBufferedFrameTimesOutAndRemainsAvailableForRetry) {
+  ScopedSocketPair sockets;
+  const std::vector<std::byte> expected{std::byte{0x10}, std::byte{0x20},
+                                        std::byte{0x30}};
+  write_worker_frame(sockets.at(0U), WorkerMessageKind::Heartbeat, expected,
+                     protocol_deadline());
+  WorkerFrameDecoder decoder;
+  bool timed_out = false;
+
+  try {
+    static_cast<void>(
+        decoder.read_frame(sockets.at(1U), std::chrono::steady_clock::now()));
+  } catch (const WorkerProtocolTimeout&) {
+    timed_out = true;
+  }
+
+  ASSERT_TRUE(timed_out);
+  const WorkerProtocolFrame frame =
+      decoder.read_frame(sockets.at(1U), protocol_deadline());
+  EXPECT_EQ(frame.kind, WorkerMessageKind::Heartbeat);
+  EXPECT_EQ(frame.payload, expected);
+}
+
+TEST(WorkerProtocol,
+     CompleteDecodeCrossingDeadlineTimesOutAndRemainsAvailableForRetry) {
+  ScopedSocketPair sockets;
+  const std::vector<std::byte> expected{std::byte{0x41}, std::byte{0x42},
+                                        std::byte{0x43}};
+  write_worker_frame(sockets.at(0U), WorkerMessageKind::Report, expected,
+                     protocol_deadline());
+  WorkerFrameDecoder decoder;
+  ProtocolDeadlineHookState state;
+  const auto synthetic_now = std::chrono::steady_clock::now();
+  state.now_ticks.store(synthetic_now.time_since_epoch().count(),
+                        std::memory_order_release);
+  state.deadline = synthetic_now + std::chrono::seconds(1);
+  state.crossing_point =
+      WorkerProtocolDeadlineTestPoint::FrameReadyBeforeAcceptance;
+  const WorkerProtocolDeadlineTestHooks hooks{&state, protocol_test_now,
+                                              cross_protocol_test_deadline};
+  bool timed_out = false;
+
+  {
+    const ScopedWorkerProtocolDeadlineTestHooks scoped_hooks(&hooks);
+    try {
+      static_cast<void>(decoder.read_frame(sockets.at(1U), state.deadline));
+    } catch (const WorkerProtocolTimeout&) {
+      timed_out = true;
+    }
+  }
+
+  ASSERT_TRUE(timed_out);
+  const WorkerProtocolFrame frame =
+      decoder.read_frame(sockets.at(1U), protocol_deadline());
+  EXPECT_EQ(frame.kind, WorkerMessageKind::Report);
+  EXPECT_EQ(frame.payload, expected);
+}
+
+TEST(WorkerProtocol,
+     ZeroBudgetProbeAcceptsReadyFrameBeforeIndependentLifecycleDeadline) {
+  ScopedSocketPair sockets;
+  const std::vector<std::byte> expected{std::byte{0x7a}};
+  write_worker_frame(sockets.at(0U), WorkerMessageKind::Heartbeat, expected,
+                     protocol_deadline());
+  WorkerFrameDecoder decoder;
+  const auto poll_deadline = std::chrono::steady_clock::now();
+
+  const WorkerProtocolFrame frame =
+      decoder.read_frame(sockets.at(1U), poll_deadline, protocol_deadline());
+
+  EXPECT_EQ(frame.kind, WorkerMessageKind::Heartbeat);
+  EXPECT_EQ(frame.payload, expected);
+}
+
+TEST(WorkerProtocol, ZeroBudgetProbeRetainsPartialFrameForNextBulkSlice) {
+  ScopedSocketPair sockets;
+  const std::array<std::byte, 18U> frame_bytes{
+      std::byte{0x50}, std::byte{0x53}, std::byte{0x57}, std::byte{0x31},
+      std::byte{0x00}, std::byte{0x02}, std::byte{0x00}, std::byte{0x03},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x06},
+      std::byte{0x10}, std::byte{0x20}, std::byte{0x30}, std::byte{0x40},
+      std::byte{0x50}, std::byte{0x60}};
+  WorkerFrameDecoder decoder;
+  write_raw_range(sockets.at(0U), frame_bytes.data(), 5U);
+
+  EXPECT_THROW(
+      decoder.read_frame(sockets.at(1U), std::chrono::steady_clock::now(),
+                         protocol_deadline()),
+      WorkerProtocolTimeout);
+
+  write_raw_range(sockets.at(0U), frame_bytes.data() + 5U,
+                  frame_bytes.size() - 5U);
+  const WorkerProtocolFrame frame =
+      decoder.read_frame(sockets.at(1U), protocol_deadline());
+  EXPECT_EQ(frame.kind, WorkerMessageKind::Heartbeat);
+  const std::vector<std::byte> expected(frame_bytes.begin() + 12,
+                                        frame_bytes.end());
+  EXPECT_EQ(frame.payload, expected);
+}
+
+TEST(WorkerProtocol, ExpiredWritableFrameDoesNotSendAnyBytes) {
+  ScopedSocketPair sockets;
+  const std::vector<std::byte> payload{std::byte{0x31}};
+
+  EXPECT_THROW(write_worker_frame(sockets.at(0U), WorkerMessageKind::Heartbeat,
+                                  payload, std::chrono::steady_clock::now()),
+               WorkerProtocolTimeout);
+
+  std::byte received{};
+  errno = 0;
+  EXPECT_EQ(::recv(sockets.at(1U), &received, sizeof(received), MSG_DONTWAIT),
+            -1);
+  EXPECT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK);
+}
+
+TEST(WorkerProtocol, FinalSendCrossingDeadlineFailsClosedWithoutRetry) {
+  ScopedSocketPair sockets;
+  ProtocolDeadlineHookState state;
+  const auto synthetic_now = std::chrono::steady_clock::now();
+  state.now_ticks.store(synthetic_now.time_since_epoch().count(),
+                        std::memory_order_release);
+  state.deadline = synthetic_now + std::chrono::seconds(1);
+  state.crossing_point =
+      WorkerProtocolDeadlineTestPoint::WriteProgressAfterSend;
+  const WorkerProtocolDeadlineTestHooks hooks{&state, protocol_test_now,
+                                              cross_protocol_test_deadline};
+  bool timed_out = false;
+
+  {
+    const ScopedWorkerProtocolDeadlineTestHooks scoped_hooks(&hooks);
+    try {
+      write_worker_frame(sockets.at(0U), WorkerMessageKind::Heartbeat, {},
+                         state.deadline);
+    } catch (const WorkerProtocolTimeout&) {
+      timed_out = true;
+    }
+  }
+
+  EXPECT_TRUE(timed_out);
+  const WorkerProtocolFrame delivered =
+      read_worker_frame(sockets.at(1U), protocol_deadline());
+  EXPECT_EQ(delivered.kind, WorkerMessageKind::Heartbeat);
+  EXPECT_TRUE(delivered.payload.empty());
 }
 
 TEST(WorkerProtocol, RoundTripsCompletionReadyAcknowledgementIdentity) {
