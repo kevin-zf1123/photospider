@@ -4,7 +4,46 @@
  */
 #pragma once
 
+#include <chrono>
+#include <cstdint>
+#include <memory>
+
 namespace ps::server {
+
+/**
+ * @brief Closed observation point for strict exec-status acceptance tests.
+ * @throws Nothing for value operations.
+ * @note The point exposes no descriptor, PID, signal, wait, reap, Job, quota,
+ * artifact, or completion authority.
+ */
+enum class WorkerManagerExecStatusDeadlineTestPoint : std::uint8_t {
+  /** @brief A complete errno or clean EOF was read but is not yet visible. */
+  ResultReadyBeforeAcceptance = 0U,
+};
+
+/**
+ * @brief Borrowed callbacks for one manager's deterministic exec-status clock.
+ * @throws Nothing for aggregate initialization and value operations.
+ * @note `context` retains test-owned state through every supervisor thread.
+ * Both callbacks must be `noexcept` and must not perform process, descriptor,
+ * protocol, Job, quota, artifact, or completion operations. Product options
+ * leave this source-private hook absent.
+ */
+struct WorkerManagerExecStatusDeadlineTestHooks final {
+  /** @brief Signature of the exec-status-only monotonic clock replacement. */
+  using NowFunction =
+      std::chrono::steady_clock::time_point (*)(void* context) noexcept;
+  /** @brief Signature of one exact result-acceptance observation. */
+  using ObserveFunction = void (*)(
+      void* context, WorkerManagerExecStatusDeadlineTestPoint point) noexcept;
+
+  /** @brief Shared type-erased owner passed unchanged to both callbacks. */
+  std::shared_ptr<void> context;
+  /** @brief Optional exec-status-only monotonic clock replacement. */
+  NowFunction now = nullptr;
+  /** @brief Optional exact-boundary observer. */
+  ObserveFunction observe = nullptr;
+};
 
 /**
  * @brief Source-private access to exact descriptor-reset behavior.

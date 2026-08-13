@@ -34,6 +34,7 @@
 
 #include "server/single_tenant_job_service.hpp"  // NOLINT(build/include_subdir)
 #include "server/single_tenant_job_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#include "server/worker_manager_test_access.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_process_launch.hpp"  // NOLINT(build/include_subdir)
 #include "server/worker_protocol.hpp"        // NOLINT(build/include_subdir)
 
@@ -398,6 +399,82 @@ WorkerManagerOptions supervisor_options() {
 }
 
 /**
+ * @brief Deterministic monotonic state for one exec-status acceptance test.
+ * @throws Nothing for value construction and atomic operations.
+ */
+struct ExecStatusDeadlineHookState final {
+  /** @brief Current synthetic monotonic clock ticks. */
+  std::atomic<std::chrono::steady_clock::duration::rep> now_ticks{0};
+  /** @brief Exact strict deadline reached at the observed result boundary. */
+  std::chrono::steady_clock::time_point deadline;
+  /** @brief Number of complete errno or clean EOF observations. */
+  std::atomic<std::size_t> observations{0U};
+};
+
+/**
+ * @brief Retains one synthetic clock state with its immutable hook contract.
+ * @throws Nothing for value construction and ownership moves.
+ */
+struct ExecStatusDeadlineHooks final {
+  /** @brief Mutable state retained for terminal assertions. */
+  std::shared_ptr<ExecStatusDeadlineHookState> state;
+  /** @brief Immutable callback contract installed in manager options. */
+  std::shared_ptr<const WorkerManagerExecStatusDeadlineTestHooks> callbacks;
+};
+
+/**
+ * @brief Returns one test's synthetic exec-status-only monotonic time.
+ * @param context Non-null `ExecStatusDeadlineHookState` owner.
+ * @return Exact atomically retained synthetic time.
+ * @throws Nothing.
+ */
+std::chrono::steady_clock::time_point exec_status_test_now(
+    void* context) noexcept {
+  const auto* state = static_cast<const ExecStatusDeadlineHookState*>(context);
+  return std::chrono::steady_clock::time_point{
+      std::chrono::steady_clock::duration{
+          state->now_ticks.load(std::memory_order_acquire)}};
+}
+
+/**
+ * @brief Advances synthetic time to equality after one terminal pipe result.
+ * @param context Non-null `ExecStatusDeadlineHookState` owner.
+ * @param point Exact non-authorizing exec-status observation point.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Equality is deliberately late under the strict `now < deadline`
+ * contract. The callback performs no descriptor or process operation.
+ */
+void cross_exec_status_test_deadline(
+    void* context, WorkerManagerExecStatusDeadlineTestPoint point) noexcept {
+  auto* state = static_cast<ExecStatusDeadlineHookState*>(context);
+  if (point ==
+      WorkerManagerExecStatusDeadlineTestPoint::ResultReadyBeforeAcceptance) {
+    state->observations.fetch_add(1U, std::memory_order_acq_rel);
+    state->now_ticks.store(state->deadline.time_since_epoch().count(),
+                           std::memory_order_release);
+  }
+}
+
+/**
+ * @brief Builds one retained exec-status hook and its deterministic state.
+ * @param startup_timeout Positive manager startup duration.
+ * @return Shared state and immutable callbacks suitable for manager options.
+ * @throws Duration validation, deadline arithmetic, or allocation failures.
+ */
+ExecStatusDeadlineHooks exec_status_deadline_hooks(
+    std::chrono::milliseconds startup_timeout) {
+  auto state = std::make_shared<ExecStatusDeadlineHookState>();
+  state->deadline = checked_worker_deadline(
+      std::chrono::steady_clock::time_point{}, startup_timeout);
+  auto hooks = std::make_shared<WorkerManagerExecStatusDeadlineTestHooks>();
+  hooks->context = state;
+  hooks->now = exec_status_test_now;
+  hooks->observe = cross_exec_status_test_deadline;
+  return {std::move(state), std::move(hooks)};
+}
+
+/**
  * @brief Describes one independently bounded WorkerManager duration field.
  * @throws Nothing for value construction.
  * @note The pointer-to-member keeps the rejection matrix tied directly to the
@@ -699,6 +776,43 @@ JobSnapshot wait_terminal(SingleTenantJobService& service,
     throw std::runtime_error("supervisor Job did not become terminal");
   }
   return *snapshot;
+}
+
+/**
+ * @brief Verifies one strict exec-status deadline terminal and full cleanup.
+ * @param service Live service after one deterministic deadline crossing.
+ * @param submitted Exact accepted Job receipt.
+ * @param hook_state Non-null retained synthetic-clock observation state.
+ * @return Nothing after terminal, process, thread, quota, and artifact checks.
+ * @throws Test assertion failures and observer wait failures through
+ * GoogleTest.
+ */
+void expect_exec_status_deadline_failure_without_residue(
+    SingleTenantJobService& service, const JobSubmission& submitted,
+    const std::shared_ptr<ExecStatusDeadlineHookState>& hook_state) {
+  const JobSnapshot terminal = wait_terminal(service, submitted.job_id);
+
+  EXPECT_EQ(hook_state->observations.load(std::memory_order_acquire), 1U);
+  EXPECT_EQ(terminal.state, JobState::Failed) << terminal.message;
+  EXPECT_TRUE(terminal.attempt_settled);
+  EXPECT_EQ(terminal.attempt_outcome, JobAttemptOutcome::Failed);
+  EXPECT_EQ(terminal.failure, JobAttemptFailure::WorkerStartup);
+  EXPECT_EQ(terminal.message, "worker exec-status deadline expired");
+  EXPECT_FALSE(terminal.output_receipt.has_value());
+  EXPECT_EQ(service.find_artifact(terminal.output_artifact_id), nullptr);
+  EXPECT_TRUE(SingleTenantJobServiceTestAccess::
+                  wait_for_owned_worker_thread_count_at_most(service, 0U, 2s));
+  EXPECT_EQ(
+      SingleTenantJobServiceTestAccess::live_worker_process_count(service), 0U);
+  const TenantQuotaSnapshot quota = service.quota_snapshot();
+  EXPECT_EQ(quota.active_attempts, 0U);
+  EXPECT_EQ(quota.cpu_slots, 0U);
+  EXPECT_EQ(quota.host_memory_bytes, 0U);
+  EXPECT_EQ(quota.output_bytes, 0U);
+  EXPECT_EQ(quota.staging_bytes, 0U);
+  EXPECT_EQ(quota.retention_bytes, 0U);
+  EXPECT_EQ(quota.retained_artifacts, 0U);
+  EXPECT_TRUE(quota.device_bytes.empty());
 }
 
 /**
@@ -1013,6 +1127,40 @@ TEST(WorkerSupervisor,
 
   EXPECT_EQ(terminal.state, JobState::Succeeded) << terminal.message;
   EXPECT_EQ(terminal.failure, JobAttemptFailure::None);
+}
+
+TEST(WorkerSupervisor, ExecStatusCleanEofCrossingDeadlineFailsClosedAndReaps) {
+  ScopedSupervisorRoot root;
+  WorkerManagerOptions options = supervisor_options();
+  auto hooks = exec_status_deadline_hooks(options.startup_timeout);
+  options.exec_status_deadline_hooks_for_test = hooks.callbacks;
+  auto service = make_service(root.path(), std::move(options));
+
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.exec-status.clean-eof"));
+
+  expect_exec_status_deadline_failure_without_residue(*service, submitted,
+                                                      hooks.state);
+}
+
+TEST(WorkerSupervisor, ExecStatusErrnoCrossingDeadlineReportsDeadlineAndReaps) {
+  ScopedSupervisorRoot root;
+  const std::filesystem::path transient_executable =
+      root.path() / "exec-status-errno-fixture";
+  std::filesystem::create_symlink(PS_TEST_WORKER_FIXTURE_PATH,
+                                  transient_executable);
+  WorkerManagerOptions options = supervisor_options();
+  options.worker_executable = transient_executable;
+  auto hooks = exec_status_deadline_hooks(options.startup_timeout);
+  options.exec_status_deadline_hooks_for_test = hooks.callbacks;
+  auto service = make_service(root.path(), std::move(options));
+  ASSERT_TRUE(std::filesystem::remove(transient_executable));
+
+  const JobSubmission submitted =
+      service->submit(fixture_spec("fixture.exec-status.errno"));
+
+  expect_exec_status_deadline_failure_without_residue(*service, submitted,
+                                                      hooks.state);
 }
 
 TEST(WorkerSupervisor,

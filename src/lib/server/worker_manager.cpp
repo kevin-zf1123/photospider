@@ -794,23 +794,83 @@ rlimit worker_file_size_limit(std::uint64_t requested_bytes) {
 }
 
 /**
+ * @brief Returns the real clock or one manager's exec-status test replacement.
+ * @param hooks Optional source-private callbacks retained by manager options.
+ * @return Monotonic time used only by the exec-status bootstrap deadline.
+ * @throws Nothing.
+ * @note Product configuration leaves `hooks` null. A test callback receives no
+ * descriptor, PID, process-lifecycle, Job, quota, artifact, or completion
+ * authority.
+ */
+std::chrono::steady_clock::time_point worker_exec_status_now(
+    const std::shared_ptr<const WorkerManagerExecStatusDeadlineTestHooks>&
+        hooks) noexcept {
+  if (hooks != nullptr && hooks->now != nullptr) {
+    return hooks->now(hooks->context.get());
+  }
+  return std::chrono::steady_clock::now();
+}
+
+/**
+ * @brief Notifies one deterministic exec-status acceptance observation.
+ * @param hooks Optional source-private callbacks retained by manager options.
+ * @param point Exact non-authorizing implementation boundary reached.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void observe_worker_exec_status_deadline_test_point(
+    const std::shared_ptr<const WorkerManagerExecStatusDeadlineTestHooks>&
+        hooks,
+    WorkerManagerExecStatusDeadlineTestPoint point) noexcept {
+  if (hooks != nullptr && hooks->observe != nullptr) {
+    hooks->observe(hooks->context.get(), point);
+  }
+}
+
+/**
+ * @brief Rejects an exec-status result at or beyond its absolute deadline.
+ * @param deadline Exact parent-side exec-bootstrap acceptance deadline.
+ * @param test_hooks Optional deterministic source-private clock replacement.
+ * @return The checked monotonic observation strictly before `deadline`.
+ * @throws ManagerFailure with `WorkerStartup` when the deadline is reached.
+ * @note The check runs both before a blocking wait and after a complete errno
+ * or clean close-on-exec EOF has been read, so scheduler delay cannot revive a
+ * late exec result or replace the deadline fact with a child errno.
+ */
+std::chrono::steady_clock::time_point
+require_worker_exec_status_before_deadline(
+    std::chrono::steady_clock::time_point deadline,
+    const std::shared_ptr<const WorkerManagerExecStatusDeadlineTestHooks>&
+        test_hooks) {
+  const auto now = worker_exec_status_now(test_hooks);
+  if (now >= deadline) {
+    throw ManagerFailure(JobAttemptFailure::WorkerStartup,
+                         "worker exec-status deadline expired");
+  }
+  return now;
+}
+
+/**
  * @brief Reads the close-on-exec setup pipe to distinguish exec from failure.
  * @param fd Nonblocking parent read descriptor.
  * @param deadline Absolute startup deadline.
+ * @param test_hooks Optional deterministic source-private clock/observer.
  * @return Empty after successful exec EOF, otherwise child setup errno.
  * @throws ManagerFailure on timeout, truncation, or pipe-system failure.
+ * @note A complete errno and clean close-on-exec EOF are accepted only after a
+ * fresh strict deadline check. The test observer runs immediately before that
+ * check; product configuration uses the real monotonic clock and no observer.
  */
 std::optional<int> read_exec_status(
-    int fd, std::chrono::steady_clock::time_point deadline) {
+    int fd, std::chrono::steady_clock::time_point deadline,
+    const std::shared_ptr<const WorkerManagerExecStatusDeadlineTestHooks>&
+        test_hooks) {
   int child_error = 0;
   auto* bytes = reinterpret_cast<unsigned char*>(&child_error);
   std::size_t offset = 0U;
   for (;;) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) {
-      throw ManagerFailure(JobAttemptFailure::WorkerStartup,
-                           "worker exec-status deadline expired");
-    }
+    const auto now =
+        require_worker_exec_status_before_deadline(deadline, test_hooks);
     auto remaining =
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
     if (remaining.count() <= 0) {
@@ -837,12 +897,20 @@ std::optional<int> read_exec_status(
     if (received > 0) {
       offset += static_cast<std::size_t>(received);
       if (offset == sizeof(child_error)) {
+        observe_worker_exec_status_deadline_test_point(
+            test_hooks, WorkerManagerExecStatusDeadlineTestPoint::
+                            ResultReadyBeforeAcceptance);
+        require_worker_exec_status_before_deadline(deadline, test_hooks);
         return child_error;
       }
       continue;
     }
     if (received == 0) {
       if (offset == 0U) {
+        observe_worker_exec_status_deadline_test_point(
+            test_hooks, WorkerManagerExecStatusDeadlineTestPoint::
+                            ResultReadyBeforeAcceptance);
+        require_worker_exec_status_before_deadline(deadline, test_hooks);
         return std::nullopt;
       }
       throw ManagerFailure(JobAttemptFailure::WorkerStartup,
@@ -1416,10 +1484,13 @@ class WorkerManager::Impl final {
     process.control = std::move(parent_socket);
     process.data_plane = std::move(data_plane);
     try {
-      const std::optional<int> child_error = read_exec_status(
-          status_read.get(),
-          checked_worker_deadline(std::chrono::steady_clock::now(),
-                                  options_.startup_timeout));
+      const auto exec_status_started =
+          worker_exec_status_now(options_.exec_status_deadline_hooks_for_test);
+      const std::optional<int> child_error =
+          read_exec_status(status_read.get(),
+                           checked_worker_deadline(exec_status_started,
+                                                   options_.startup_timeout),
+                           options_.exec_status_deadline_hooks_for_test);
       status_read.reset();
       if (child_error.has_value()) {
         static_cast<void>(terminate_and_reap(record, &process));

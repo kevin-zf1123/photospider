@@ -30,6 +30,7 @@ namespace ps::server {
 class SingleTenantJobServiceTestAccess;
 class WorkerManager;
 struct WorkerManagerCompletion;
+struct WorkerManagerExecStatusDeadlineTestHooks;
 
 /**
  * @brief Reports whether a Job state is terminal.
@@ -345,6 +346,16 @@ struct WorkerManagerOptions final {
   std::chrono::milliseconds kill_reap_timeout{2000};
   /** @brief Bounded per-frame read/write deadline duration. */
   std::chrono::milliseconds io_timeout{2000};
+  /**
+   * @brief Optional deterministic exec-status acceptance clock and observer.
+   * @note Null in product construction. Maintained tests may replace only the
+   * parent-side exec-status monotonic clock and observe a complete errno or
+   * clean EOF immediately before acceptance. The shared hook retains its
+   * opaque state across the supervision thread but exposes no descriptor, PID,
+   * signal, wait, reap, Job, quota, artifact, or completion authority.
+   */
+  std::shared_ptr<const WorkerManagerExecStatusDeadlineTestHooks>
+      exec_status_deadline_hooks_for_test;
   /**
    * @brief Optional source-private gate suppressing `waitpid` observations.
    * @note Null in product construction. Tests may hold this flag true to
