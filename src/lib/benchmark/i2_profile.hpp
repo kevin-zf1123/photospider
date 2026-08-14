@@ -184,7 +184,11 @@ struct I2ObservedVisibleOutput final {
   bool value_valid_at_capture = false;
   /** @brief Sole typed canonical digest result. */
   std::optional<ContentDigestResult> content_digest;
-  /** @brief Sole closed Host/conditional-Metal acquisition evidence. */
+  /**
+   * @brief Sole closed Host/conditional-Metal acquisition evidence.
+   * @note Stored only after the Host return passes a fresh capture-deadline
+   * sample; a late local result is destroyed without publication.
+   */
   std::optional<I2ValueAcquisitionEvidence> acquisition;
   /** @brief Exact Value revision copied before releasing payload ownership. */
   ValueRevisionId value_revision;
@@ -260,6 +264,18 @@ class I2EpisodeObservationCollector final {
   I2EpisodeObservationCollector();
 
   /**
+   * @brief Allocates an empty store with an injected harness capture clock.
+   * @param capture_clock Sole monotonic source for payload-work acceptance.
+   * @throws std::invalid_argument when `capture_clock` is empty.
+   * @throws std::bad_alloc when shared implementation or callback ownership
+   * cannot be allocated.
+   * @note Product callback coordinates still use the process steady clock. The
+   * injected callback controls only serialized harness pre/post checks and adds
+   * no Run, payload, device, scheduler, or product authority.
+   */
+  explicit I2EpisodeObservationCollector(I1MonotonicClock capture_clock);
+
+  /**
    * @brief Releases this collector's shared observation-store ownership.
    * @throws Nothing.
    * @note Existing edit sinks may retain the store after this object is
@@ -313,12 +329,16 @@ class I2EpisodeObservationCollector final {
    * @return Number of completely published visible slots encountered.
    * @throws Digest, Value, Host, Metal, allocation, and synchronization
    * failures unchanged.
-   * @throws std::runtime_error before starting another payload operation when
-   * the capture deadline has expired or is tied with the current sample.
+   * @throws Any exception from an injected harness capture clock unchanged.
+   * @throws std::runtime_error before starting another payload operation, or
+   * after a Host call returns but before its evidence is committed, when a
+   * fresh sample is tied with or later than the capture deadline.
    * @note Each successfully frozen slot is traversed/acquired at most once;
    * its Value is released before successful return, all frozen facts remain
    * sticky, and later calls perform no payload work for that slot. A partially
-   * frozen slot keeps only completed facts until explicit unfrozen release.
+   * frozen slot keeps only completed facts until explicit unfrozen release. A
+   * late Host result remains local, leaves `acquisition` empty and the Value
+   * owned by the Pending slot, and cannot become frozen evidence.
    */
   std::size_t freeze_visible_outputs(
       I2Host& host, std::chrono::steady_clock::time_point capture_deadline);
@@ -353,6 +373,8 @@ class I2EpisodeObservationCollector final {
 
   /** @brief Shared store retained by every request-scoped sink. */
   std::shared_ptr<Impl> impl_;
+  /** @brief Sole monotonic source for serialized payload acceptance checks. */
+  I1MonotonicClock capture_clock_;
 };
 
 /**

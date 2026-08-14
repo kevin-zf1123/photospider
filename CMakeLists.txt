@@ -892,8 +892,8 @@ if(PHOTOSPIDER_ENABLE_YAML)
 endif()
 
 # These nine translation units own the Issue #72, Issue #75, Issue #76,
-# Issue #82, and Issue #93 deterministic observation/failure seams. The
-# installable archive always receives their production objects; focused tests
+# Issue #82, Issue #93, and Issue #125 deterministic observation/failure seams.
+# The installable archive always receives their production objects; focused tests
 # receive a non-installed variant while reusing every common object. Keeping
 # the split at translation-unit granularity avoids compiling a second copy of
 # the complete embedded product.
@@ -1263,6 +1263,7 @@ set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
     PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
     PHOTOSPIDER_INTERNAL_HOST_ASYNC_ADMISSION_TESTING
+    PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
@@ -1289,8 +1290,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 endif()
 
 # Fail configuration if a future refactor accidentally restores an Issue #72,
-# Issue #75, Issue #76, Issue #82, or Issue #93 test definition on any
-# production product target.
+# Issue #75, Issue #76, Issue #82, Issue #93, or Issue #125 test definition on
+# any production product target.
 function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
     get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
         ${TARGET_NAME} COMPILE_DEFINITIONS)
@@ -2590,6 +2591,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             tests/integration/test_i2_product_path.cpp
             photospider_internal_test_product)
         target_compile_definitions(test_i2_product_path PRIVATE
+            PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING
             PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         add_ps_test(test_b1_product_path
             tests/integration/test_b1_product_path.cpp

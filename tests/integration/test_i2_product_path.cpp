@@ -18,16 +18,247 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "benchmark/i2_profile.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
+
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+namespace ps {
+
+/**
+ * @brief Test-side mirror of source-private I2 acquisition checkpoints.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class EmbeddedI2AcquisitionTestEvent {
+  /** @brief The second direct Host ReadLease has been closed. */
+  SecondHostAccessCompleted,
+  /** @brief The Host-only `io_after` snapshot has been copied. */
+  HostOnlyIoSnapshotCompleted,
+};
+
+/**
+ * @brief Test-side mirror of the borrowed source-private acquisition hook.
+ * @throws Nothing for aggregate construction.
+ */
+struct EmbeddedI2AcquisitionTestHook {
+  /** @brief Borrowed test context passed to every callback. */
+  void* context = nullptr;
+  /** @brief Non-throwing injected monotonic-clock callback. */
+  std::chrono::steady_clock::time_point (*now)(void* context) noexcept =
+      nullptr;
+  /** @brief Non-throwing completed-checkpoint callback. */
+  void (*notify)(void* context,
+                 EmbeddedI2AcquisitionTestEvent event) noexcept = nullptr;
+  /** @brief Whether the product call must take its Metal-unavailable branch. */
+  bool force_metal_unavailable = false;
+};
+
+/**
+ * @brief Installs or clears the source-private I2 acquisition test hook.
+ * @param hook Borrowed hook that outlives all synchronous callbacks, or null.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void set_embedded_i2_acquisition_test_hook(
+    const EmbeddedI2AcquisitionTestHook* hook) noexcept;
+
+}  // namespace ps
+#endif
 
 namespace ps::benchmark {
 namespace {
 
 using std::chrono_literals::operator""ms;
 using std::chrono_literals::operator""s;
+
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+/**
+ * @brief Owns deterministic clock and checkpoint facts for one I2 acquisition.
+ * @throws Nothing for value construction and scalar mutation.
+ */
+struct I2AcquisitionDeadlineState final {
+  /** @brief Current injected monotonic point. */
+  std::chrono::steady_clock::time_point now;
+  /** @brief Exclusive absolute capture deadline. */
+  std::chrono::steady_clock::time_point deadline;
+  /** @brief Checkpoint that advances `now` exactly to the deadline, if any. */
+  std::optional<EmbeddedI2AcquisitionTestEvent> cross_at;
+  /** @brief Exact monotonic sample count. */
+  std::size_t clock_samples = 0U;
+  /** @brief Completed second-Host-access checkpoint count. */
+  std::size_t second_host_completions = 0U;
+  /** @brief Completed Host-only I/O snapshot checkpoint count. */
+  std::size_t host_only_snapshot_completions = 0U;
+};
+
+/**
+ * @brief Returns one deterministic I2 acquisition time sample.
+ * @param context Borrowed `I2AcquisitionDeadlineState`.
+ * @return Current injected monotonic point.
+ * @throws Nothing.
+ */
+std::chrono::steady_clock::time_point sample_i2_acquisition_clock(
+    void* context) noexcept {
+  auto* const state = static_cast<I2AcquisitionDeadlineState*>(context);
+  ++state->clock_samples;
+  return state->now;
+}
+
+/**
+ * @brief Records a completed product checkpoint and performs an exact crossing.
+ * @param context Borrowed `I2AcquisitionDeadlineState`.
+ * @param event Exact product checkpoint that has completed.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void observe_i2_acquisition_checkpoint(
+    void* context, EmbeddedI2AcquisitionTestEvent event) noexcept {
+  auto* const state = static_cast<I2AcquisitionDeadlineState*>(context);
+  if (event == EmbeddedI2AcquisitionTestEvent::SecondHostAccessCompleted) {
+    ++state->second_host_completions;
+  } else {
+    ++state->host_only_snapshot_completions;
+  }
+  if (state->cross_at == event) {
+    state->now = state->deadline;
+  }
+}
+
+/**
+ * @brief Publishes and later clears one borrowed I2 acquisition test hook.
+ * @throws Nothing.
+ * @note The guard forces the real EmbeddedHost down its Metal-unavailable path.
+ */
+class ScopedI2AcquisitionTestHook final {
+ public:
+  /**
+   * @brief Installs callbacks borrowing the supplied deterministic state.
+   * @param state State that outlives this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedI2AcquisitionTestHook(
+      I2AcquisitionDeadlineState& state) noexcept
+      : hook_{&state, sample_i2_acquisition_clock,
+              observe_i2_acquisition_checkpoint, true} {
+    set_embedded_i2_acquisition_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Removes the hook before borrowed state can be destroyed.
+   * @throws Nothing.
+   * @note Synchronous callback ownership has already returned to the test.
+   */
+  ~ScopedI2AcquisitionTestHook() noexcept {
+    set_embedded_i2_acquisition_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Prevents duplicate hook-publication ownership.
+   * @param other Guard whose publication would otherwise be duplicated.
+   * @throws Nothing because this operation is deleted.
+   */
+  ScopedI2AcquisitionTestHook(const ScopedI2AcquisitionTestHook& other) =
+      delete;
+
+  /**
+   * @brief Prevents duplicate hook-publication assignment.
+   * @param other Guard whose publication would otherwise be duplicated.
+   * @return No value because this operation is deleted.
+   * @throws Nothing because this operation is deleted.
+   */
+  ScopedI2AcquisitionTestHook& operator=(
+      const ScopedI2AcquisitionTestHook& other) = delete;
+
+ private:
+  /** @brief Owned hook value containing a borrowed test-state pointer. */
+  EmbeddedI2AcquisitionTestHook hook_;
+};
+
+/**
+ * @brief Builds one small Ready Host RGBA FP32 image for direct acquisition.
+ * @return Valid 1x1 HWC Value with one exact 16-byte Host allocation.
+ * @throws Value validation or allocation failures unchanged.
+ */
+Value make_i2_acquisition_test_value() {
+  constexpr std::size_t kChannels = 4U;
+  constexpr std::size_t kElementBytes = sizeof(float);
+  DenseTensorDescriptor descriptor;
+  descriptor.shape = {1U, 1U, kChannels};
+  descriptor.element_semantics = ElementSemantics::FloatingPoint;
+  descriptor.storage_encoding = StorageEncoding{32U};
+  return Value::from_cpu_dense_tensor(
+      std::move(descriptor), ImageFacet{1U, 0U, 2U},
+      StridedLayout{{static_cast<std::ptrdiff_t>(kChannels * kElementBytes),
+                     static_cast<std::ptrdiff_t>(kChannels * kElementBytes),
+                     static_cast<std::ptrdiff_t>(kElementBytes)},
+                    0U},
+      std::vector<std::byte>(kChannels * kElementBytes));
+}
+
+/**
+ * @brief Requires one exact Host-only deadline tie to return no evidence.
+ * @param cross_at Completed product checkpoint that advances the clock to `D`.
+ * @return Nothing.
+ * @throws Product, Value, allocation, and synchronization failures reach
+ * GoogleTest.
+ * @note The caller Value remains valid and every resource reservation remains
+ * at its pre-call baseline. No wall-clock duration or scheduler timing is used.
+ */
+void expect_host_only_deadline_tie_rejected(
+    EmbeddedI2AcquisitionTestEvent cross_at) {
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  I2Host* const i2_host = as_i2_host(*host);
+  ASSERT_NE(i2_host, nullptr);
+  const auto deadline = std::chrono::steady_clock::time_point(
+      std::chrono::nanoseconds(9000000000));
+  I2AcquisitionDeadlineState clock_state{deadline - std::chrono::nanoseconds(1),
+                                         deadline, cross_at};
+  ScopedI2AcquisitionTestHook hook(clock_state);
+  Value value = make_i2_acquisition_test_value();
+  const I1ExecutionSnapshot before = i2_host->i2_execution_snapshot(0U, 4096U);
+
+  std::optional<I2ValueAcquisitionEvidence> late_evidence;
+  bool deadline_rejected = false;
+  try {
+    late_evidence = i2_host->acquire_i2_value(
+        value,
+        I2ValueLineage{1U, kI1TargetNodeId, ComputeIntent::RealTimeUpdate, 1U,
+                       1U},
+        deadline);
+  } catch (const std::runtime_error&) {
+    deadline_rejected = true;
+  }
+
+  EXPECT_TRUE(deadline_rejected);
+  EXPECT_FALSE(late_evidence.has_value());
+  EXPECT_TRUE(value.valid());
+  EXPECT_EQ(clock_state.now, deadline);
+  EXPECT_EQ(
+      clock_state.clock_samples,
+      cross_at == EmbeddedI2AcquisitionTestEvent::SecondHostAccessCompleted
+          ? 3U
+          : 4U);
+  EXPECT_EQ(clock_state.second_host_completions, 1U);
+  EXPECT_EQ(
+      clock_state.host_only_snapshot_completions,
+      cross_at == EmbeddedI2AcquisitionTestEvent::SecondHostAccessCompleted
+          ? 0U
+          : 1U);
+  const I1ExecutionSnapshot after = i2_host->i2_execution_snapshot(0U, 4096U);
+  EXPECT_EQ(after.host_resources.reserved, before.host_resources.reserved);
+  ASSERT_EQ(after.device_resources.size(), before.device_resources.size());
+  for (std::size_t index = 0U; index < before.device_resources.size();
+       ++index) {
+    EXPECT_EQ(after.device_resources[index].device,
+              before.device_resources[index].device);
+    EXPECT_EQ(after.device_resources[index].reserved,
+              before.device_resources[index].reserved);
+  }
+}
+#endif
 
 /**
  * @brief Owns one isolated filesystem root for real I2 product tests.
@@ -553,6 +784,94 @@ TEST(I2ProductPath, PreviewTriggersFinalAndAcquisitionsReuseExactBindings) {
   const VoidResult closed = host->close_graph(session);
   EXPECT_TRUE(closed.status.ok) << closed.status.message;
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+/**
+ * @brief Proves Host-only evidence completes when every fresh sample is `< D`.
+ * @throws Product, Value, allocation, and synchronization failures reach
+ * GoogleTest.
+ * @note The forced Metal-unavailable branch still executes both direct Host
+ * reads and the final I/O snapshot. The injected clock remains exactly `D-1ns`.
+ */
+TEST(I2ProductPath, HostOnlyEvidenceStrictlyBeforeDeadlineIsComplete) {
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  I2Host* const i2_host = as_i2_host(*host);
+  ASSERT_NE(i2_host, nullptr);
+  const auto deadline = std::chrono::steady_clock::time_point(
+      std::chrono::nanoseconds(8000000000));
+  I2AcquisitionDeadlineState clock_state{deadline - std::chrono::nanoseconds(1),
+                                         deadline, std::nullopt};
+  ScopedI2AcquisitionTestHook hook(clock_state);
+  Value value = make_i2_acquisition_test_value();
+  const I1ExecutionSnapshot before = i2_host->i2_execution_snapshot(0U, 4096U);
+
+  const I2ValueAcquisitionEvidence evidence = i2_host->acquire_i2_value(
+      value,
+      I2ValueLineage{1U, kI1TargetNodeId, ComputeIntent::RealTimeUpdate, 1U,
+                     1U},
+      deadline);
+
+  ASSERT_TRUE(evidence.host_first.plan.has_value());
+  ASSERT_TRUE(evidence.host_second.plan.has_value());
+  EXPECT_EQ(evidence.host_first.plan->kind(), AccessPlanKind::Direct);
+  EXPECT_EQ(evidence.host_second.plan->kind(), AccessPlanKind::Direct);
+  EXPECT_EQ(evidence.host_first.plan->transfer_bytes(), 0U);
+  EXPECT_EQ(evidence.host_second.plan->transfer_bytes(), 0U);
+  EXPECT_EQ(evidence.host_first.revision, evidence.host_second.revision);
+  EXPECT_EQ(evidence.host_first.binding, evidence.host_second.binding);
+  EXPECT_EQ(evidence.host_first.allocation, evidence.host_second.allocation);
+  EXPECT_EQ(evidence.io_before.active_tasks, evidence.io_after.active_tasks);
+  EXPECT_EQ(evidence.io_before.active_planned_bytes,
+            evidence.io_after.active_planned_bytes);
+  EXPECT_FALSE(evidence.metal.available);
+  EXPECT_EQ(evidence.metal.unavailable_reason,
+            "not-applicable: process Metal executor unavailable");
+  EXPECT_FALSE(evidence.metal.first.has_value());
+  EXPECT_FALSE(evidence.metal.second.has_value());
+  EXPECT_TRUE(value.valid());
+  EXPECT_EQ(clock_state.now, deadline - std::chrono::nanoseconds(1));
+  EXPECT_EQ(clock_state.clock_samples, 4U);
+  EXPECT_EQ(clock_state.second_host_completions, 1U);
+  EXPECT_EQ(clock_state.host_only_snapshot_completions, 1U);
+  const I1ExecutionSnapshot after = i2_host->i2_execution_snapshot(0U, 4096U);
+  EXPECT_EQ(after.host_resources.reserved, before.host_resources.reserved);
+  ASSERT_EQ(after.device_resources.size(), before.device_resources.size());
+  for (std::size_t index = 0U; index < before.device_resources.size();
+       ++index) {
+    EXPECT_EQ(after.device_resources[index].device,
+              before.device_resources[index].device);
+    EXPECT_EQ(after.device_resources[index].reserved,
+              before.device_resources[index].reserved);
+  }
+}
+
+/**
+ * @brief Proves Host-only evidence is rejected when its final snapshot ties D.
+ * @throws Product, Value, allocation, and synchronization failures reach
+ * GoogleTest.
+ * @note A source-private checkpoint advances an injected monotonic clock from
+ * `D-1ns` to `D` only after the second Host ReadLease and Host-only `io_after`
+ * snapshot complete. No wall-clock duration or scheduler timing is asserted.
+ */
+TEST(I2ProductPath, HostOnlyFinalSnapshotDeadlineTieDoesNotReturnEvidence) {
+  expect_host_only_deadline_tie_rejected(
+      EmbeddedI2AcquisitionTestEvent::HostOnlyIoSnapshotCompleted);
+}
+
+/**
+ * @brief Proves second Host access evidence is rejected when its fresh sample
+ * ties D.
+ * @throws Product, Value, allocation, and synchronization failures reach
+ * GoogleTest.
+ * @note The crossing occurs only after the second real ReadLease closes, before
+ * Metal availability or the Host-only I/O snapshot is observed.
+ */
+TEST(I2ProductPath, HostOnlySecondAccessDeadlineTieDoesNotReturnEvidence) {
+  expect_host_only_deadline_tie_rejected(
+      EmbeddedI2AcquisitionTestEvent::SecondHostAccessCompleted);
+}
+#endif
 
 /**
  * @brief Proves equal-time newer acceptance cancels an older blocked preview

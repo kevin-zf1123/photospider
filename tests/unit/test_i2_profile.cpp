@@ -243,7 +243,12 @@ class RecordingI2Host final : public I2Host {
     return result;
   }
 
-  /** @copydoc I2Host::acquire_i2_value */
+  /**
+   * @copydoc I2Host::acquire_i2_value
+   * @note When both completion controls are populated, the fake advances the
+   * borrowed harness clock immediately before returning otherwise complete
+   * synthetic evidence. It transfers no Value or clock ownership.
+   */
   I2ValueAcquisitionEvidence acquire_i2_value(
       Value value, const I2ValueLineage& lineage,
       std::chrono::steady_clock::time_point capture_deadline) override {
@@ -260,6 +265,10 @@ class RecordingI2Host final : public I2Host {
     I2ValueAcquisitionEvidence evidence;
     evidence.host_first = access;
     evidence.host_second = access;
+    if (acquisition_completion_clock != nullptr &&
+        acquisition_completion_time.has_value()) {
+      *acquisition_completion_clock = *acquisition_completion_time;
+    }
     return evidence;
   }
 
@@ -283,6 +292,12 @@ class RecordingI2Host final : public I2Host {
   std::optional<std::chrono::steady_clock::time_point> last_capture_deadline;
   /** @brief Whether the next and later Value acquisitions fail. */
   bool fail_acquisition = false;
+  /** @brief Borrowed fake clock advanced immediately before a successful
+   * return. */
+  std::chrono::steady_clock::time_point* acquisition_completion_clock = nullptr;
+  /** @brief Exact completion point assigned to the borrowed fake clock. */
+  std::optional<std::chrono::steady_clock::time_point>
+      acquisition_completion_time;
 };
 
 /**
@@ -609,6 +624,66 @@ TEST(I2EpisodeObservationCollector,
   EXPECT_FALSE(snapshot.visible_outputs.front().output.valid());
   EXPECT_FALSE(snapshot.visible_outputs.front().content_digest.has_value());
   EXPECT_FALSE(snapshot.visible_outputs.front().acquisition.has_value());
+}
+
+/**
+ * @brief Proves a Host result that returns at D cannot freeze acquisition
+ * facts.
+ * @throws Value, digest, Host, or collector failures reach GoogleTest.
+ * @note The injected collector clock begins at `D-1ns`; the fake Host advances
+ * it exactly to `D` immediately before returning complete evidence. The late
+ * Value remains Pending until explicit unfrozen release, with no timing sleep.
+ */
+TEST(I2EpisodeObservationCollector,
+     HostReturnAtCaptureDeadlineDoesNotFreezeEvidenceOrValue) {
+  const auto deadline = std::chrono::steady_clock::time_point(
+      std::chrono::nanoseconds(10000000000));
+  auto clock_now = deadline - std::chrono::nanoseconds(1);
+  std::size_t clock_samples = 0U;
+  I2EpisodeObservationCollector collector([&] {
+    ++clock_samples;
+    return clock_now;
+  });
+  RecordingI2Host host;
+  host.acquisition_completion_clock = &clock_now;
+  host.acquisition_completion_time = deadline;
+  std::shared_ptr<compute::ComputeRunObservationSink> sink =
+      collector.make_edit_sink(11U);
+  const compute::AcceptedBoundaryCoordinate accepted(
+      std::chrono::steady_clock::time_point(
+          std::chrono::nanoseconds(6000000000)),
+      12U);
+  compute::ComputeRun preview(make_i2_test_submission(
+      ComputeIntent::RealTimeUpdate, compute::ComputeRunQuality::Interactive,
+      checked_i1_time_add(accepted.admission_time(), kI2PreviewDeadlineBudget),
+      accepted));
+  compute::ComputeRunLease preview_lease = preview.acquire_lease();
+  sink->on_current_visible(preview_lease.descriptor(),
+                           make_i2_freeze_test_value(),
+                           sink->reserve_causal_coordinate());
+
+  EXPECT_THROW(collector.freeze_visible_outputs(host, deadline),
+               std::runtime_error);
+  EXPECT_EQ(host.acquisition_call_count, 1U);
+  EXPECT_EQ(host.last_capture_deadline, deadline);
+  EXPECT_EQ(clock_now, deadline);
+  EXPECT_EQ(clock_samples, 3U);
+  const I2EpisodeObservationSnapshot late = collector.snapshot();
+  ASSERT_EQ(late.visible_outputs.size(), 1U);
+  EXPECT_TRUE(late.visible_outputs.front().value_valid_at_capture);
+  EXPECT_TRUE(late.visible_outputs.front().output.valid());
+  EXPECT_TRUE(late.visible_outputs.front().content_digest.has_value());
+  EXPECT_FALSE(late.visible_outputs.front().acquisition.has_value());
+
+  collector.release_unfrozen_visible_outputs();
+  EXPECT_EQ(collector.freeze_visible_outputs(host, deadline), 1U);
+  EXPECT_EQ(host.acquisition_call_count, 1U);
+  const I2EpisodeObservationSnapshot released = collector.snapshot();
+  ASSERT_EQ(released.visible_outputs.size(), 1U);
+  EXPECT_TRUE(released.visible_outputs.front().value_valid_at_capture);
+  EXPECT_FALSE(released.visible_outputs.front().output.valid());
+  EXPECT_TRUE(released.visible_outputs.front().content_digest.has_value());
+  EXPECT_FALSE(released.visible_outputs.front().acquisition.has_value());
 }
 
 /**

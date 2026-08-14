@@ -402,7 +402,20 @@ class I2EpisodeObservationCollector::Impl final {
 
 /** @copydoc I2EpisodeObservationCollector::I2EpisodeObservationCollector */
 I2EpisodeObservationCollector::I2EpisodeObservationCollector()
-    : impl_(std::make_shared<Impl>()) {}
+    : I2EpisodeObservationCollector([] {
+        return std::chrono::steady_clock::now();
+      }) {}  // NOLINT(whitespace/indent_namespace)
+
+/** @copydoc I2EpisodeObservationCollector::I2EpisodeObservationCollector */
+I2EpisodeObservationCollector::I2EpisodeObservationCollector(
+    I1MonotonicClock capture_clock)
+    : impl_(std::make_shared<Impl>()),
+      capture_clock_(std::move(capture_clock)) {
+  if (!capture_clock_) {
+    throw std::invalid_argument(
+        "I2 observation collector capture clock must not be empty.");
+  }
+}
 
 /** @copydoc I2EpisodeObservationCollector::~I2EpisodeObservationCollector */
 I2EpisodeObservationCollector::~I2EpisodeObservationCollector() noexcept =
@@ -452,7 +465,7 @@ std::size_t I2EpisodeObservationCollector::freeze_visible_outputs(
     if (freeze_state != I2VisibleOutputFreezeState::Pending) {
       continue;
     }
-    if (std::chrono::steady_clock::now() >= capture_deadline) {
+    if (capture_clock_() >= capture_deadline) {
       throw std::runtime_error(
           "I2 visible-output capture deadline expired before payload work.");
     }
@@ -468,18 +481,24 @@ std::size_t I2EpisodeObservationCollector::freeze_visible_outputs(
       visible.content_digest = compute_content_digest(visible.output);
     }
     if (!visible.acquisition.has_value() && visible.output.valid()) {
-      if (std::chrono::steady_clock::now() >= capture_deadline) {
+      if (capture_clock_() >= capture_deadline) {
         throw std::runtime_error(
             "I2 visible-output capture deadline expired before Host "
             "acquisition.");
       }
-      visible.acquisition = host.acquire_i2_value(
+      I2ValueAcquisitionEvidence acquisition = host.acquire_i2_value(
           visible.output,
           I2ValueLineage{visible.child.graph_instance_id,
                          visible.child.target_node_id,
                          visible.child.request_intent, visible.child.generation,
                          visible.child.run_id},
           capture_deadline);
+      if (capture_clock_() >= capture_deadline) {
+        throw std::runtime_error(
+            "I2 visible-output capture deadline expired after Host "
+            "acquisition.");
+      }
+      visible.acquisition.emplace(std::move(acquisition));
     }
     if (visible.content_digest.has_value() && visible.acquisition.has_value()) {
       visible.output = Value{};

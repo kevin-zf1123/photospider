@@ -197,18 +197,23 @@ class I2Host {
    * visible; it may be historical when a newer generation is already current.
    * @param lineage Exact visible child descriptor lineage.
    * @param capture_deadline Exclusive absolute episode capture deadline. Every
-   * direct traversal and conditional Metal wait uses this same value.
+   * direct traversal, conditional Metal wait, and final evidence acceptance
+   * uses this same value without a relative refresh.
    * @return Closed direct/transfer/reuse/resource/no-I/O evidence.
    * @throws Validation, ReadyFence, native executor, resource, allocation, and
    * synchronization failures unchanged.
    * @throws std::runtime_error when the deadline is expired or tied before a
-   * new access, or when one in-flight Metal transfer reaches it.
+   * new access, after either direct Host access or the final Host-only
+   * snapshot, when one in-flight Metal transfer reaches it, or after Metal
+   * evidence cleanup.
    * @note This verification-only method executes no Graph work, readback,
    * filesystem, codec, cache, output-store, or document persistence. After
    * copying second-reuse facts it removes only the exact acquired Metal
-   * revision/binding/producer. Historical acquisition validates a live managed
-   * lineage without changing currentness, so row cleanup changes no ordinary
-   * residency lookup, publication, replacement, or capacity policy.
+   * revision/binding/producer. Evidence returns only after a final fresh sample
+   * is strictly earlier than the immutable deadline; a late local record is
+   * destroyed. Historical acquisition validates a live managed lineage without
+   * changing currentness, so row cleanup changes no ordinary residency lookup,
+   * publication, replacement, or capacity policy.
    */
   virtual I2ValueAcquisitionEvidence acquire_i2_value(
       Value value, const I2ValueLineage& lineage,

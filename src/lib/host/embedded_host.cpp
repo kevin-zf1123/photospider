@@ -233,7 +233,119 @@ void notify_embedded_operation_test_hook(EmbeddedOperationTestEvent event,
 }
 #endif
 
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+/**
+ * @brief Source-private checkpoints in one explicit I2 Value acquisition.
+ * @throws Nothing for value construction and comparison.
+ * @note Production builds do not compile this private test contract.
+ */
+enum class EmbeddedI2AcquisitionTestEvent {
+  /** @brief The second direct Host ReadLease has been closed. */
+  SecondHostAccessCompleted,
+  /** @brief The Host-only `io_after` snapshot has been copied. */
+  HostOnlyIoSnapshotCompleted,
+};
+
+/**
+ * @brief Injects a deterministic clock and Host-only path into I2 acquisition.
+ * @throws Nothing for aggregate construction.
+ * @note The hook borrows `context`; serialized tests keep the context and hook
+ * alive until all synchronous callbacks finish and the hook is removed.
+ */
+struct EmbeddedI2AcquisitionTestHook {
+  /** @brief Borrowed test context passed to every callback. */
+  void* context = nullptr;
+
+  /**
+   * @brief Samples the test-owned monotonic clock.
+   * @param context Borrowed context supplied by the installing test.
+   * @return Time in the same steady-clock domain as the capture deadline.
+   * @throws Nothing; throwing terminates the process.
+   */
+  std::chrono::steady_clock::time_point (*now)(void* context) noexcept =
+      nullptr;
+
+  /**
+   * @brief Publishes one completed acquisition checkpoint.
+   * @param context Borrowed context supplied by the installing test.
+   * @param event Exact checkpoint that has just completed.
+   * @return Nothing.
+   * @throws Nothing; throwing terminates the process.
+   */
+  void (*notify)(void* context,
+                 EmbeddedI2AcquisitionTestEvent event) noexcept = nullptr;
+
+  /** @brief Whether this call must ignore any process Metal executor. */
+  bool force_metal_unavailable = false;
+};
+
+/** @brief Borrowed I2-acquisition hook pointer published atomically. */
+using EmbeddedI2AcquisitionHookPtr = const EmbeddedI2AcquisitionTestHook*;
+
+/**
+ * @brief Process-local hook used only by serialized product-path tests.
+ * @throws Nothing for atomic initialization and pointer publication.
+ * @note Publication transfers no callback or context ownership.
+ */
+std::atomic<EmbeddedI2AcquisitionHookPtr> g_embedded_i2_acquisition_test_hook{
+    nullptr};  // NOLINT(whitespace/indent_namespace)
+#endif
+
 namespace {
+
+/**
+ * @brief Samples the sole monotonic clock for I2 acquisition acceptance.
+ * @return Current point in the capture deadline's steady-clock domain.
+ * @throws Nothing.
+ * @note Production always samples `steady_clock::now`; only the non-installed
+ * test product may replace the sample through a borrowed serialized hook.
+ */
+std::chrono::steady_clock::time_point sample_i2_acquisition_time() noexcept {
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+  const EmbeddedI2AcquisitionTestHook* hook =
+      g_embedded_i2_acquisition_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->now != nullptr) {
+    return hook->now(hook->context);
+  }
+#endif
+  return std::chrono::steady_clock::now();
+}
+
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+/**
+ * @brief Reports one completed source-private I2 acquisition checkpoint.
+ * @param event Exact completed phase.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Production builds contain neither hook lookup nor callback authority.
+ */
+void notify_i2_acquisition_test_hook(
+    EmbeddedI2AcquisitionTestEvent event) noexcept {
+  const EmbeddedI2AcquisitionTestHook* hook =
+      g_embedded_i2_acquisition_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->notify != nullptr) {
+    hook->notify(hook->context, event);
+  }
+}
+#endif
+
+/**
+ * @brief Applies the source-private forced-unavailable Metal test choice.
+ * @param process_available Whether the real process executor exists.
+ * @return False only when the process lacks Metal or the test forces N/A.
+ * @throws Nothing.
+ * @note Production returns `process_available` unchanged.
+ */
+bool i2_metal_available_for_acquisition(bool process_available) noexcept {
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+  const EmbeddedI2AcquisitionTestHook* hook =
+      g_embedded_i2_acquisition_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->force_metal_unavailable) {
+    return false;
+  }
+#endif
+  return process_available;
+}
 
 /**
  * @brief Owns the backend objects used by one embedded Host adapter.
@@ -3005,10 +3117,6 @@ class EmbeddedHost final : public Host,
       throw std::invalid_argument(
           "I2 acquisition requires complete realtime child lineage.");
     }
-    if (std::chrono::steady_clock::now() >= capture_deadline) {
-      throw std::runtime_error(
-          "I2 capture deadline expired before direct Host acquisition.");
-    }
     const ReadyFenceSnapshot ready = value.ready_fence().poll();
     if (!ready.ready()) {
       throw ReadyFenceAccessError(ready);
@@ -3025,19 +3133,44 @@ class EmbeddedHost final : public Host,
     benchmark::I2ValueAcquisitionEvidence evidence;
     evidence.io_before =
         state_->execution_service->compute_io_executor().snapshot();
-    evidence.host_first = observe_i2_host_access(value);
-    if (std::chrono::steady_clock::now() >= capture_deadline) {
+    if (sample_i2_acquisition_time() >= capture_deadline) {
       throw std::runtime_error(
-          "I2 capture deadline expired before second Host acquisition.");
+          "I2 capture deadline expired before direct Host acquisition.");
     }
-    evidence.host_second = observe_i2_host_access(value);
+    benchmark::I2ValueAccessEvidence host_first = observe_i2_host_access(value);
+    if (sample_i2_acquisition_time() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 capture deadline expired after first Host acquisition.");
+    }
+    benchmark::I2ValueAccessEvidence host_second =
+        observe_i2_host_access(value);
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+    notify_i2_acquisition_test_hook(
+        EmbeddedI2AcquisitionTestEvent::SecondHostAccessCompleted);
+#endif
+    if (sample_i2_acquisition_time() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 capture deadline expired after second Host acquisition.");
+    }
+    evidence.host_first = std::move(host_first);
+    evidence.host_second = std::move(host_second);
 
-    if (!state_->execution_service->has_device_executor(Device::GPU_METAL)) {
+    if (!i2_metal_available_for_acquisition(
+            state_->execution_service->has_device_executor(
+                Device::GPU_METAL))) {
       evidence.metal.available = false;
       evidence.metal.unavailable_reason =
           "not-applicable: process Metal executor unavailable";
       evidence.io_after =
           state_->execution_service->compute_io_executor().snapshot();
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+      notify_i2_acquisition_test_hook(
+          EmbeddedI2AcquisitionTestEvent::HostOnlyIoSnapshotCompleted);
+#endif
+      if (sample_i2_acquisition_time() >= capture_deadline) {
+        throw std::runtime_error(
+            "I2 capture deadline expired after Host-only evidence snapshot.");
+      }
       return evidence;
     }
 
@@ -3126,6 +3259,10 @@ class EmbeddedHost final : public Host,
     if (!resident_release.release()) {
       throw std::logic_error(
           "I2 Metal resident changed before exact row cleanup.");
+    }
+    if (sample_i2_acquisition_time() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 capture deadline expired after Metal evidence cleanup.");
     }
     return evidence;
   }
@@ -4624,6 +4761,21 @@ void set_embedded_host_lifecycle_test_hook(
 void set_embedded_host_operation_test_hook(
     const EmbeddedOperationTestHook* hook) noexcept {
   g_embedded_operation_test_hook.store(hook, std::memory_order_release);
+}
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_I2_ACQUISITION_TESTING)
+/**
+ * @brief Installs or clears the deterministic I2-acquisition test hook.
+ * @param hook Hook that outlives every affected synchronous callback, or null.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Tests serialize installation and remove the hook before destroying its
+ * context. Production builds contain neither this symbol nor its checkpoints.
+ */
+void set_embedded_i2_acquisition_test_hook(
+    const EmbeddedI2AcquisitionTestHook* hook) noexcept {
+  g_embedded_i2_acquisition_test_hook.store(hook, std::memory_order_release);
 }
 #endif
 
