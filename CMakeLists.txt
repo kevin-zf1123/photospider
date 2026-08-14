@@ -2663,7 +2663,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             ${OpenCV_LIBS})
         add_executable(i2_progressive_benchmark EXCLUDE_FROM_ALL
             tests/verification/i2_progressive_benchmark.cpp
-            tests/verification/i2_evidence_json.cpp)
+            tests/verification/i2_evidence_json.cpp
+            tests/verification/i2_evidence_workflow.cpp)
         set_target_properties(i2_progressive_benchmark PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
             BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
@@ -2750,7 +2751,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_i1_profile tests/unit/test_i1_profile.cpp)
     add_ps_test(test_i2_evidence tests/unit/test_i2_evidence.cpp)
     target_sources(test_i2_evidence PRIVATE
-        tests/verification/i2_evidence_json.cpp)
+        tests/verification/i2_evidence_json.cpp
+        tests/verification/i2_evidence_workflow.cpp)
     target_link_libraries(test_i2_evidence PRIVATE
         nlohmann_json::nlohmann_json)
     add_ps_test(test_i2_profile tests/unit/test_i2_profile.cpp)

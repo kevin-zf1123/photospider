@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <future>
@@ -195,9 +196,13 @@ class I2Host {
    * @param value Exact Ready preview or final immutable Value captured while
    * visible; it may be historical when a newer generation is already current.
    * @param lineage Exact visible child descriptor lineage.
+   * @param capture_deadline Exclusive absolute episode capture deadline. Every
+   * direct traversal and conditional Metal wait uses this same value.
    * @return Closed direct/transfer/reuse/resource/no-I/O evidence.
    * @throws Validation, ReadyFence, native executor, resource, allocation, and
    * synchronization failures unchanged.
+   * @throws std::runtime_error when the deadline is expired or tied before a
+   * new access, or when one in-flight Metal transfer reaches it.
    * @note This verification-only method executes no Graph work, readback,
    * filesystem, codec, cache, output-store, or document persistence. After
    * copying second-reuse facts it removes only the exact acquired Metal
@@ -206,7 +211,8 @@ class I2Host {
    * residency lookup, publication, replacement, or capacity policy.
    */
   virtual I2ValueAcquisitionEvidence acquire_i2_value(
-      Value value, const I2ValueLineage& lineage) = 0;
+      Value value, const I2ValueLineage& lineage,
+      std::chrono::steady_clock::time_point capture_deadline) = 0;
 
   /**
    * @brief Copies authoritative process execution/resource evidence.

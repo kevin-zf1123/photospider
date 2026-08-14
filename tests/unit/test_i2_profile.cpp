@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "benchmark/i2_profile.hpp"
+#include "compute/i2_metal_acquisition_deadline.hpp"
 
 namespace ps::benchmark {
 namespace {
@@ -244,8 +245,10 @@ class RecordingI2Host final : public I2Host {
 
   /** @copydoc I2Host::acquire_i2_value */
   I2ValueAcquisitionEvidence acquire_i2_value(
-      Value value, const I2ValueLineage& lineage) override {
+      Value value, const I2ValueLineage& lineage,
+      std::chrono::steady_clock::time_point capture_deadline) override {
     static_cast<void>(lineage);
+    last_capture_deadline = capture_deadline;
     ++acquisition_call_count;
     if (fail_acquisition) {
       throw std::runtime_error("synthetic I2 acquisition failure");
@@ -276,6 +279,8 @@ class RecordingI2Host final : public I2Host {
   std::vector<CapturedI2Admission> admissions;
   /** @brief Exact explicit Value-acquisition invocation count. */
   std::size_t acquisition_call_count = 0U;
+  /** @brief Last absolute capture deadline received by the fake Host. */
+  std::optional<std::chrono::steady_clock::time_point> last_capture_deadline;
   /** @brief Whether the next and later Value acquisitions fail. */
   bool fail_acquisition = false;
 };
@@ -473,8 +478,11 @@ TEST(I2EpisodeObservationCollector,
   sink->on_current_visible(preview_lease.descriptor(),
                            make_i2_freeze_test_value(), coordinate);
 
-  ASSERT_EQ(collector.freeze_visible_outputs(host), 1U);
+  const auto capture_deadline = checked_i1_time_add(
+      std::chrono::steady_clock::now(), std::chrono::seconds(1));
+  ASSERT_EQ(collector.freeze_visible_outputs(host, capture_deadline), 1U);
   ASSERT_EQ(host.acquisition_call_count, 1U);
+  EXPECT_EQ(host.last_capture_deadline, capture_deadline);
   const I2EpisodeObservationSnapshot frozen = collector.snapshot();
   ASSERT_EQ(frozen.visible_outputs.size(), 1U);
   const I2ObservedVisibleOutput& baseline = frozen.visible_outputs.front();
@@ -485,10 +493,10 @@ TEST(I2EpisodeObservationCollector,
   ASSERT_TRUE(baseline.content_digest.has_value());
   ASSERT_TRUE(baseline.acquisition.has_value());
 
-  ASSERT_EQ(collector.freeze_visible_outputs(host), 1U);
+  ASSERT_EQ(collector.freeze_visible_outputs(host, capture_deadline), 1U);
   collector.release_unfrozen_visible_outputs();
   collector.release_unfrozen_visible_outputs();
-  ASSERT_EQ(collector.freeze_visible_outputs(host), 1U);
+  ASSERT_EQ(collector.freeze_visible_outputs(host, capture_deadline), 1U);
   EXPECT_EQ(host.acquisition_call_count, 1U);
   const I2EpisodeObservationSnapshot repeated = collector.snapshot();
   ASSERT_EQ(repeated.visible_outputs.size(), 1U);
@@ -535,11 +543,16 @@ TEST(I2EpisodeObservationCollector,
                                    partial_sink->reserve_causal_coordinate());
   RecordingI2Host failing_host;
   failing_host.fail_acquisition = true;
-  EXPECT_THROW(partial_collector.freeze_visible_outputs(failing_host),
-               std::runtime_error);
+  const auto capture_deadline = checked_i1_time_add(
+      std::chrono::steady_clock::now(), std::chrono::seconds(1));
+  EXPECT_THROW(
+      partial_collector.freeze_visible_outputs(failing_host, capture_deadline),
+      std::runtime_error);
   EXPECT_EQ(failing_host.acquisition_call_count, 1U);
   partial_collector.release_unfrozen_visible_outputs();
-  EXPECT_EQ(partial_collector.freeze_visible_outputs(failing_host), 1U);
+  EXPECT_EQ(
+      partial_collector.freeze_visible_outputs(failing_host, capture_deadline),
+      1U);
   EXPECT_EQ(failing_host.acquisition_call_count, 1U);
   const I2EpisodeObservationSnapshot partial = partial_collector.snapshot();
   ASSERT_EQ(partial.visible_outputs.size(), 1U);
@@ -561,6 +574,73 @@ TEST(I2EpisodeObservationCollector,
   EXPECT_FALSE(unfrozen.visible_outputs.front().output.valid());
   EXPECT_FALSE(unfrozen.visible_outputs.front().content_digest.has_value());
   EXPECT_FALSE(unfrozen.visible_outputs.front().acquisition.has_value());
+}
+
+/**
+ * @brief Proves the exclusive capture deadline rejects new payload work.
+ * @throws Value and collector construction failures reach GoogleTest.
+ * @note The Host must not be entered when the same absolute deadline is
+ * already expired; the caller can then release the still-unfrozen Value.
+ */
+TEST(I2EpisodeObservationCollector,
+     ExpiredCaptureDeadlineRejectsBeforeHostAcquisition) {
+  I2EpisodeObservationCollector collector;
+  RecordingI2Host host;
+  std::shared_ptr<compute::ComputeRunObservationSink> sink =
+      collector.make_edit_sink(11U);
+  const auto accepted_time = std::chrono::steady_clock::now();
+  const compute::AcceptedBoundaryCoordinate accepted(accepted_time, 11U);
+  compute::ComputeRun preview(make_i2_test_submission(
+      ComputeIntent::RealTimeUpdate, compute::ComputeRunQuality::Interactive,
+      checked_i1_time_add(accepted_time, kI2PreviewDeadlineBudget), accepted));
+  compute::ComputeRunLease preview_lease = preview.acquire_lease();
+  sink->on_current_visible(preview_lease.descriptor(),
+                           make_i2_freeze_test_value(),
+                           sink->reserve_causal_coordinate());
+
+  EXPECT_THROW(collector.freeze_visible_outputs(
+                   host, std::chrono::steady_clock::time_point::min()),
+               std::runtime_error);
+  EXPECT_EQ(host.acquisition_call_count, 0U);
+  EXPECT_FALSE(host.last_capture_deadline.has_value());
+  collector.release_unfrozen_visible_outputs();
+  const I2EpisodeObservationSnapshot snapshot = collector.snapshot();
+  ASSERT_EQ(snapshot.visible_outputs.size(), 1U);
+  EXPECT_FALSE(snapshot.visible_outputs.front().output.valid());
+  EXPECT_FALSE(snapshot.visible_outputs.front().content_digest.has_value());
+  EXPECT_FALSE(snapshot.visible_outputs.front().acquisition.has_value());
+}
+
+/**
+ * @brief Proves capture timeout cannot alter the later fixed-grid schedule.
+ * @throws Checked I2 grid arithmetic or fence allocation failures reach
+ * GoogleTest.
+ * @note The exclusive tie is rejected before fence observation; subsequent
+ * origin and terminal calculations remain the original `G + slot * 1.5s`.
+ */
+TEST(I2Profile, CaptureTimeoutPreservesLaterOriginAndTerminalBoundary) {
+  const auto grid_origin = std::chrono::steady_clock::time_point(
+      std::chrono::nanoseconds(123456789));
+  constexpr std::size_t kTimedOutSlot = 17U;
+  const auto episode_end = checked_i1_time_add(
+      i2_episode_origin(grid_origin, kTimedOutSlot), kI2EpisodeStride);
+  const auto capture_deadline =
+      checked_i1_time_subtract(episode_end, std::chrono::milliseconds(100));
+  const auto next_origin = i2_episode_origin(grid_origin, kTimedOutSlot + 1U);
+  const auto terminal_boundary = i2_terminal_boundary(grid_origin);
+  PendingReadyFence pending = make_pending_ready_fence();
+
+  const auto terminal = compute::wait_for_i2_metal_completion_until(
+      pending.fence, capture_deadline,
+      [capture_deadline] { return capture_deadline; },
+      [](std::chrono::steady_clock::time_point) {
+        ADD_FAILURE() << "expired I2 Metal wait attempted to sleep";
+      });
+
+  EXPECT_FALSE(terminal.has_value());
+  EXPECT_EQ(i2_episode_origin(grid_origin, kTimedOutSlot + 1U), next_origin);
+  EXPECT_EQ(next_origin, episode_end);
+  EXPECT_EQ(i2_terminal_boundary(grid_origin), terminal_boundary);
 }
 
 /**

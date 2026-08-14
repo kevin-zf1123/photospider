@@ -2,19 +2,26 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "benchmark/i2_evidence.hpp"
 #include "photospider/data/value.hpp"
 #include "verification/i2_evidence_json.hpp"
+#include "verification/i2_evidence_workflow.hpp"
 
 namespace ps::benchmark {
 namespace {
@@ -586,6 +593,539 @@ std::vector<I2EpisodeInnerRow> make_passing_i2_aggregate_rows() {
     row.latencies.final = 20ms;
   }
   return rows;
+}
+
+/** @brief Whether the injected I2 async worker reached its ownership gate. */
+std::atomic_bool i2_gate_worker_arrived{false};
+
+/** @brief Whether the injected I2 evaluator consumed its closed input. */
+std::atomic_bool i2_gate_evaluator_entered{false};
+
+/** @brief Whether a controllably delayed evaluator may finish consumption. */
+std::atomic_bool i2_gate_evaluator_released{false};
+
+/** @brief Whether the launcher observed premature evaluator entry. */
+std::atomic_bool i2_gate_launcher_saw_evaluator{false};
+
+/** @brief Borrowed slot-order sink used only by the serializer seam. */
+std::vector<std::size_t>* i2_serialized_slots = nullptr;
+
+/**
+ * @brief Records that one worker reached the recoverable launch gate.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void observe_i2_worker_at_launch_gate() noexcept {
+  i2_gate_worker_arrived.store(true, std::memory_order_release);
+}
+
+/**
+ * @brief Records evaluator entry and delegates to the real I2 evaluator.
+ * @param input Complete closed Value-free evidence.
+ * @return Evaluated row for the same slot.
+ * @throws Evaluation failures unchanged.
+ */
+I2EpisodeInnerRow observe_then_evaluate_i2(I2EpisodeEvidenceInput input) {
+  i2_gate_evaluator_entered.store(true, std::memory_order_release);
+  return evaluate_i2_episode(std::move(input));
+}
+
+/**
+ * @brief Holds Value-free evaluation until the test completes baseline work.
+ * @param input Complete closed Value-free evidence.
+ * @return Evaluated row after explicit release.
+ * @throws Evaluation failures unchanged.
+ * @note The bounded test process owns the release flag; the workflow still
+ * owns the sole future and input-consumption decision.
+ */
+I2EpisodeInnerRow block_then_evaluate_i2(I2EpisodeEvidenceInput input) {
+  i2_gate_evaluator_entered.store(true, std::memory_order_release);
+  while (!i2_gate_evaluator_released.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  return evaluate_i2_episode(std::move(input));
+}
+
+/**
+ * @brief Launches a worker and waits until it is blocked before returning.
+ * @param task Sole recoverable I2 evaluation task.
+ * @return Valid future owning that task.
+ * @throws std::system_error or std::bad_alloc from `std::async` unchanged.
+ * @note The launcher records whether evaluation began before future
+ * installation was allowed, making ownership order deterministic.
+ */
+std::future<I2EpisodeInnerRow> launch_i2_worker_before_return(
+    I2EpisodeEvaluationTask task) {
+  std::future<I2EpisodeInnerRow> future =
+      std::async(std::launch::async, std::move(task));
+  while (!i2_gate_worker_arrived.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  i2_gate_launcher_saw_evaluator.store(
+      i2_gate_evaluator_entered.load(std::memory_order_acquire),
+      std::memory_order_release);
+  return future;
+}
+
+/**
+ * @brief Rejects one evaluator launch with a stable system error.
+ * @param task Unretained task whose input must remain recoverable.
+ * @return Never returns a future.
+ * @throws std::system_error unconditionally.
+ */
+std::future<I2EpisodeInnerRow> throw_i2_system_error_launcher(
+    I2EpisodeEvaluationTask task) {
+  static_cast<void>(task);
+  throw std::system_error(
+      std::make_error_code(std::errc::resource_unavailable_try_again),
+      "injected I2 async launcher failure");
+}
+
+/**
+ * @brief Serializes one row while recording exact explicit-drain order.
+ * @param row Complete un-compacted I2 row.
+ * @return Full production JSON text.
+ * @throws std::logic_error when the test-owned order sink is absent.
+ * @throws JSON or allocation failures unchanged.
+ */
+std::string observe_i2_serializer(const I2EpisodeInnerRow& row) {
+  if (i2_serialized_slots == nullptr) {
+    throw std::logic_error("I2 serializer observation sink is absent");
+  }
+  i2_serialized_slots->push_back(row.evidence.slot);
+  return i2_inner_row_json(row).dump();
+}
+
+/**
+ * @brief Records one row and rejects the second slot before stream mutation.
+ * @param row Complete un-compacted I2 row.
+ * @return Production JSON text for every slot except one.
+ * @throws std::runtime_error unconditionally for slot one.
+ * @throws std::logic_error when the observation sink is absent.
+ */
+std::string observe_then_fail_i2_serializer(const I2EpisodeInnerRow& row) {
+  if (i2_serialized_slots == nullptr) {
+    throw std::logic_error("I2 serializer observation sink is absent");
+  }
+  i2_serialized_slots->push_back(row.evidence.slot);
+  if (row.evidence.slot == 1U) {
+    throw std::runtime_error("injected I2 serializer failure");
+  }
+  return i2_inner_row_json(row).dump();
+}
+
+/**
+ * @brief Creates fixed-width I2 admissions with one attempted failure.
+ * @param episode_origin Exact failed episode origin.
+ * @return Twelve records whose first is accepted, second fails, and suffix is
+ * untouched.
+ * @throws Checked-time, future-state, or diagnostic allocation failures
+ * unchanged.
+ */
+std::array<I2EditAdmissionResult, kI1EditCount>
+make_i2_failed_finalization_admissions(
+    std::chrono::steady_clock::time_point episode_origin) {
+  std::array<I2EditAdmissionResult, kI1EditCount> admissions;
+  for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
+    admissions[edit_index].edit_index = edit_index;
+    admissions[edit_index].nominal_time = checked_i1_time_add(
+        episode_origin, kI1EditStride * static_cast<std::int64_t>(edit_index));
+  }
+  I2EditAdmissionResult& accepted = admissions.front();
+  accepted.admission_attempted = true;
+  accepted.admission_sample = episode_origin;
+  accepted.admission_window_valid = true;
+  accepted.reserved_event_sequence = 1U;
+  accepted.preview_deadline =
+      checked_i1_time_add(episode_origin, kI2PreviewDeadlineBudget);
+  accepted.final_deadline =
+      checked_i1_time_add(episode_origin, kI2FinalDeadlineBudget);
+  accepted.host_return = I1HostReturnEvidence{
+      checked_i1_time_add(episode_origin, 100us), OperationStatus{}, true};
+  accepted.accepted_coordinate =
+      compute::AcceptedBoundaryCoordinate(episode_origin, 1U);
+  std::promise<OperationStatus> accepted_settlement;
+  accepted.settlement = accepted_settlement.get_future();
+  accepted_settlement.set_value(OperationStatus{});
+
+  I2EditAdmissionResult& failed = admissions[1U];
+  failed.admission_attempted = true;
+  failed.admission_sample = failed.nominal_time;
+  failed.admission_window_valid = true;
+  failed.reserved_event_sequence = 2U;
+  failed.preview_deadline =
+      checked_i1_time_add(failed.admission_sample, kI2PreviewDeadlineBudget);
+  failed.final_deadline =
+      checked_i1_time_add(failed.admission_sample, kI2FinalDeadlineBudget);
+  failed.host_return = I1HostReturnEvidence{
+      checked_i1_time_add(failed.admission_sample, 100us),
+      OperationStatus{false, OperationErrorDomain::Graph,
+                      static_cast<std::int32_t>(GraphErrc::ComputeError),
+                      graph_error_stable_name(GraphErrc::ComputeError),
+                      "injected I2 failed admission"},
+      false};
+  return admissions;
+}
+
+/**
+ * @brief Deterministic failed-admission finalization port.
+ * @throws Nothing after its fixed final sample is constructed.
+ * @note The port records only ordering and outer-write ownership; it has no
+ * Host, Graph, stream, Value, or residency authority.
+ */
+class RecordingI2FailedAdmissionPort final
+    : public I2FailedAdmissionFinalizationPort {
+ public:
+  /**
+   * @brief Binds one post-close sample inside the current episode guard.
+   * @param final_sample Fixed monotonic sample returned after snapshot.
+   * @throws Nothing.
+   */
+  explicit RecordingI2FailedAdmissionPort(
+      std::chrono::steady_clock::time_point final_sample) noexcept
+      : final_sample_(final_sample) {}
+
+  /** @copydoc I2FailedAdmissionFinalizationPort::close_graph */
+  OperationStatus close_graph() override {
+    ++close_calls;
+    return {};
+  }
+
+  /** @copydoc
+   * I2FailedAdmissionFinalizationPort::capture_closed_execution_snapshot */
+  I1ExecutionSnapshot capture_closed_execution_snapshot() override {
+    ++snapshot_calls;
+    return {};
+  }
+
+  /** @copydoc I2FailedAdmissionFinalizationPort::monotonic_now */
+  std::chrono::steady_clock::time_point monotonic_now() override {
+    ++monotonic_calls;
+    return final_sample_;
+  }
+
+  /** @copydoc I2FailedAdmissionFinalizationPort::persist_outer_failure */
+  void persist_outer_failure(std::string_view diagnostic) override {
+    ++outer_calls;
+    persisted_diagnostic.assign(diagnostic.data(), diagnostic.size());
+  }
+
+  /** @copydoc I2FailedAdmissionFinalizationPort::observe_stage */
+  void observe_stage(
+      I2FailedAdmissionFinalizationStage stage) noexcept override {
+    if (stage_count >= stages.size()) {
+      stage_overflow = true;
+      return;
+    }
+    stages[stage_count++] = stage;
+  }
+
+  /** @brief Exact Graph-close invocation count. */
+  std::size_t close_calls = 0U;
+  /** @brief Exact closed-snapshot invocation count. */
+  std::size_t snapshot_calls = 0U;
+  /** @brief Exact monotonic-sample invocation count. */
+  std::size_t monotonic_calls = 0U;
+  /** @brief Exact outer-persistence invocation count. */
+  std::size_t outer_calls = 0U;
+  /** @brief Whether stage storage exceeded its fixed six entries. */
+  bool stage_overflow = false;
+  /** @brief Number of monotonically recorded finalization stages. */
+  std::size_t stage_count = 0U;
+  /** @brief Fixed no-allocation stage sequence. */
+  std::array<I2FailedAdmissionFinalizationStage, 6U> stages{};
+  /** @brief Last complete outer diagnostic. */
+  std::string persisted_diagnostic;
+
+ private:
+  /** @brief Fixed final snapshot sample owned by the fake. */
+  std::chrono::steady_clock::time_point final_sample_;
+};
+
+/**
+ * @brief Proves the I2 worker cannot consume input before future installation.
+ * @throws Workflow and evaluation failures reach GoogleTest.
+ */
+TEST(I2EvidenceWorkflow,
+     AsyncWorkerWaitsForFutureInstallationBeforeEvaluation) {
+  i2_gate_worker_arrived.store(false, std::memory_order_relaxed);
+  i2_gate_evaluator_entered.store(false, std::memory_order_relaxed);
+  i2_gate_launcher_saw_evaluator.store(false, std::memory_order_relaxed);
+  std::vector<I2EpisodeInnerRow> rows;
+  rows.reserve(kI2GridSlotCount);
+  std::optional<std::future<I2EpisodeInnerRow>> pending;
+
+  start_i2_episode_evaluation(
+      make_valid_i2_input(0U), &pending, &rows, &launch_i2_worker_before_return,
+      &observe_then_evaluate_i2, &observe_i2_worker_at_launch_gate);
+
+  EXPECT_TRUE(i2_gate_worker_arrived.load(std::memory_order_acquire));
+  EXPECT_FALSE(i2_gate_launcher_saw_evaluator.load(std::memory_order_acquire));
+  EXPECT_TRUE(pending.has_value());
+  collect_i2_episode_evaluation_until(
+      checked_i1_time_add(std::chrono::steady_clock::now(), 1s), &pending,
+      &rows);
+  EXPECT_TRUE(i2_gate_evaluator_entered.load(std::memory_order_acquire));
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().evidence.slot, 0U);
+}
+
+/**
+ * @brief Proves baseline work may overlap exactly one delayed evaluator.
+ * @throws Workflow and evaluation failures reach GoogleTest.
+ * @note An already-expired handoff fails without consuming the future or
+ * shifting the next origin; explicit release then permits ordered collection.
+ */
+TEST(I2EvidenceWorkflow,
+     DelayedEvaluatorOverlapsBaselineButCannotMoveFixedHandoff) {
+  i2_gate_worker_arrived.store(false, std::memory_order_relaxed);
+  i2_gate_evaluator_entered.store(false, std::memory_order_relaxed);
+  i2_gate_evaluator_released.store(false, std::memory_order_relaxed);
+  i2_gate_launcher_saw_evaluator.store(false, std::memory_order_relaxed);
+  std::vector<I2EpisodeInnerRow> rows;
+  rows.reserve(kI2GridSlotCount);
+  std::optional<std::future<I2EpisodeInnerRow>> pending;
+  const auto grid_origin =
+      std::chrono::steady_clock::time_point(std::chrono::nanoseconds(123));
+  const auto next_origin = i2_episode_origin(grid_origin, 1U);
+
+  start_i2_episode_evaluation(
+      make_valid_i2_input(0U), &pending, &rows, &launch_i2_worker_before_return,
+      &block_then_evaluate_i2, &observe_i2_worker_at_launch_gate);
+  while (!i2_gate_evaluator_entered.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  if (!pending.has_value()) {
+    i2_gate_evaluator_released.store(true, std::memory_order_release);
+    FAIL() << "I2 delayed evaluator future was not installed";
+    return;
+  }
+  EXPECT_EQ(pending->wait_for(std::chrono::nanoseconds::zero()),
+            std::future_status::timeout);
+
+  std::size_t baseline_preparation_count = 0U;
+  ++baseline_preparation_count;
+  EXPECT_EQ(baseline_preparation_count, 1U);
+  EXPECT_THROW(
+      collect_i2_episode_evaluation_until(
+          std::chrono::steady_clock::time_point::min(), &pending, &rows),
+      std::runtime_error);
+  EXPECT_TRUE(pending.has_value());
+  EXPECT_TRUE(rows.empty());
+  EXPECT_EQ(i2_episode_origin(grid_origin, 1U), next_origin);
+
+  i2_gate_evaluator_released.store(true, std::memory_order_release);
+  collect_i2_episode_evaluation_until(
+      checked_i1_time_add(std::chrono::steady_clock::now(), 1s), &pending,
+      &rows);
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().evidence.slot, 0U);
+  EXPECT_EQ(i2_episode_origin(grid_origin, 1U), next_origin);
+}
+
+/**
+ * @brief Proves launch failure evaluates one recoverable row then propagates.
+ * @throws Nothing when the expected injected system error is observed.
+ */
+TEST(I2EvidenceWorkflow,
+     AsyncLaunchFailureRecoversCurrentRowBeforePropagation) {
+  std::vector<I2EpisodeInnerRow> rows;
+  rows.reserve(kI2GridSlotCount);
+  std::optional<std::future<I2EpisodeInnerRow>> pending;
+
+  EXPECT_THROW(start_i2_episode_evaluation(
+                   make_valid_i2_input(0U), &pending, &rows,
+                   &throw_i2_system_error_launcher, &evaluate_i2_episode),
+               std::system_error);
+  EXPECT_FALSE(pending.has_value());
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().evidence.slot, 0U);
+}
+
+/**
+ * @brief Proves evaluation never enters the serializer before explicit drain.
+ * @throws Workflow, JSON, or stream failures reach GoogleTest.
+ * @note Repeated drain is cursor-idempotent and preserves physical slot order.
+ */
+TEST(I2EvidenceWorkflow,
+     SerializationBeginsOnlyAtExplicitOrderedTerminalDrain) {
+  std::vector<I2EpisodeInnerRow> rows;
+  rows.reserve(kI2GridSlotCount);
+  std::optional<std::future<I2EpisodeInnerRow>> pending;
+  std::vector<std::size_t> serialized_slots;
+  i2_serialized_slots = &serialized_slots;
+
+  start_i2_episode_evaluation(make_valid_i2_input(0U), &pending, &rows);
+  collect_i2_episode_evaluation_until(
+      checked_i1_time_add(std::chrono::steady_clock::now(), 1s), &pending,
+      &rows);
+  start_i2_episode_evaluation(make_valid_i2_input(1U), &pending, &rows);
+  collect_i2_episode_evaluation_until(
+      checked_i1_time_add(std::chrono::steady_clock::now(), 1s), &pending,
+      &rows);
+  EXPECT_TRUE(serialized_slots.empty());
+  ASSERT_EQ(rows.size(), 2U);
+  EXPECT_GE(rows.capacity(), kI2GridSlotCount);
+
+  std::ostringstream output;
+  std::size_t written = 0U;
+  flush_i2_episode_rows(&output, rows, &written, &observe_i2_serializer);
+  flush_i2_episode_rows(&output, rows, &written, &observe_i2_serializer);
+  i2_serialized_slots = nullptr;
+
+  EXPECT_EQ(written, 2U);
+  EXPECT_EQ(serialized_slots, (std::vector<std::size_t>{0U, 1U}));
+  EXPECT_FALSE(rows.front().evidence.observations.visible_outputs.empty());
+}
+
+/**
+ * @brief Proves a serializer failure preserves cursor and raw row ownership.
+ * @throws Workflow, JSON, or injected serializer failures are checked by
+ * GoogleTest.
+ * @note A later explicit drain resumes at the first uncommitted row and does
+ * not duplicate the already flushed prefix.
+ */
+TEST(I2EvidenceWorkflow,
+     SerializerFailurePreservesDurableCursorAndCompleteRows) {
+  std::vector<I2EpisodeInnerRow> rows;
+  rows.reserve(kI2GridSlotCount);
+  std::optional<std::future<I2EpisodeInnerRow>> pending;
+  for (std::size_t slot = 0U; slot < 2U; ++slot) {
+    start_i2_episode_evaluation(make_valid_i2_input(slot), &pending, &rows);
+    collect_i2_episode_evaluation_until(
+        checked_i1_time_add(std::chrono::steady_clock::now(), 1s), &pending,
+        &rows);
+  }
+  std::vector<std::size_t> serialized_slots;
+  i2_serialized_slots = &serialized_slots;
+  std::ostringstream output;
+  std::size_t written = 0U;
+
+  EXPECT_THROW(flush_i2_episode_rows(&output, rows, &written,
+                                     &observe_then_fail_i2_serializer),
+               std::runtime_error);
+  EXPECT_EQ(written, 1U);
+  ASSERT_EQ(serialized_slots, (std::vector<std::size_t>{0U, 1U}));
+  EXPECT_FALSE(rows[1U].evidence.observations.visible_outputs.empty());
+
+  serialized_slots.clear();
+  flush_i2_episode_rows(&output, rows, &written, &observe_i2_serializer);
+  i2_serialized_slots = nullptr;
+  EXPECT_EQ(written, 2U);
+  EXPECT_EQ(serialized_slots, (std::vector<std::size_t>{1U}));
+}
+
+/**
+ * @brief Proves generic abort joins one row and flushes it exactly once.
+ * @throws Nothing when the original primary diagnostic remains authoritative.
+ */
+TEST(I2EvidenceWorkflow, GenericAbortDrainsOnlyCompleteOrderedRows) {
+  std::vector<I2EpisodeInnerRow> rows;
+  rows.reserve(kI2GridSlotCount);
+  std::optional<std::future<I2EpisodeInnerRow>> pending;
+  I2OuterPersistenceOwnershipGate ownership_gate;
+  std::ostringstream output;
+  std::size_t written = 0U;
+  start_i2_episode_evaluation(make_valid_i2_input(0U), &pending, &rows);
+
+  try {
+    rethrow_i2_runner_failure_after_generic_drain(
+        std::make_exception_ptr(std::runtime_error("primary I2 abort")),
+        ownership_gate, &pending, &rows, &output, &written);
+    FAIL() << "expected primary I2 abort";
+  } catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::string(error.what()), "primary I2 abort");
+  }
+
+  EXPECT_FALSE(pending.has_value());
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(written, 1U);
+  std::size_t generic_outer_calls = 0U;
+  try_i2_generic_outer_failure_persistence(
+      ownership_gate, [&generic_outer_calls] { ++generic_outer_calls; });
+  EXPECT_EQ(generic_outer_calls, 1U);
+}
+
+/**
+ * @brief Proves failed admission uniquely owns Invalid-row then outer output.
+ * @throws Setup and finalization failures are checked by GoogleTest.
+ */
+TEST(I2EvidenceWorkflow,
+     FailedAdmissionFlushesInvalidRowAndSuppressesGenericPersistence) {
+  I2EpisodeEvidenceInput input;
+  input.replicate_ordinal = 1U;
+  input.slot = 0U;
+  input.grid_origin = std::chrono::steady_clock::now();
+  input.episode_origin = i2_episode_origin(input.grid_origin, input.slot);
+  input.terminal_boundary = i2_terminal_boundary(input.grid_origin);
+  auto admissions =
+      make_i2_failed_finalization_admissions(input.episode_origin);
+  I2EpisodeObservationCollector observations;
+  RecordingI2FailedAdmissionPort port(
+      checked_i1_time_add(input.episode_origin, 100ms));
+  I2OuterPersistenceOwnershipGate ownership_gate;
+  ASSERT_TRUE(
+      claim_i2_failed_admission_if_needed(admissions[1U], ownership_gate));
+  std::vector<I2EpisodeInnerRow> rows;
+  rows.reserve(kI2GridSlotCount);
+  std::ostringstream output;
+  std::size_t written = 0U;
+
+  std::exception_ptr terminal_failure;
+  try {
+    finalize_i2_failed_admission("injected I2 admission failure",
+                                 std::move(input), std::move(admissions),
+                                 ownership_gate, &observations, &port, &output,
+                                 &rows, &written);
+  } catch (...) {
+    terminal_failure = std::current_exception();
+  }
+  ASSERT_NE(terminal_failure, nullptr);
+  EXPECT_TRUE(ownership_gate.failed_admission_finalizer_owns_persistence());
+  EXPECT_EQ(port.close_calls, 1U);
+  EXPECT_EQ(port.snapshot_calls, 1U);
+  EXPECT_EQ(port.monotonic_calls, 1U);
+  EXPECT_EQ(port.outer_calls, 1U);
+  EXPECT_FALSE(port.stage_overflow);
+  EXPECT_EQ(port.stage_count, port.stages.size());
+  EXPECT_EQ(port.stages[0U],
+            I2FailedAdmissionFinalizationStage::GraphCloseCompleted);
+  EXPECT_EQ(port.stages[1U],
+            I2FailedAdmissionFinalizationStage::HistoryCutCaptured);
+  EXPECT_EQ(port.stages[2U],
+            I2FailedAdmissionFinalizationStage::UnfrozenOutputsReleased);
+  EXPECT_EQ(
+      port.stages[3U],
+      I2FailedAdmissionFinalizationStage::ClosedExecutionSnapshotCaptured);
+  EXPECT_EQ(port.stages[4U],
+            I2FailedAdmissionFinalizationStage::InnerRowFlushed);
+  EXPECT_EQ(port.stages[5U],
+            I2FailedAdmissionFinalizationStage::OuterFailurePersistenceStarted);
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(written, 1U);
+  EXPECT_EQ(rows.front().latency_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(rows.front().waste_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(rows.front().memory_verdict, I1Verdict::Invalid);
+  EXPECT_EQ(rows.front().output_verdict, I1Verdict::Invalid);
+  EXPECT_TRUE(rows.front().evidence.edits.front().admission_attempted);
+  EXPECT_TRUE(
+      rows.front().evidence.edits.front().settlement_status.has_value());
+  EXPECT_TRUE(rows.front().evidence.edits[1U].admission_attempted);
+  EXPECT_FALSE(rows.front().evidence.edits[1U].accepted_coordinate.has_value());
+  EXPECT_FALSE(rows.front().evidence.edits[2U].admission_attempted);
+
+  std::optional<std::future<I2EpisodeInnerRow>> pending;
+  try {
+    rethrow_i2_runner_failure_after_generic_drain(
+        terminal_failure, ownership_gate, &pending, &rows, &output, &written);
+  } catch (...) {
+  }
+  std::size_t generic_outer_calls = 0U;
+  try_i2_generic_outer_failure_persistence(
+      ownership_gate, [&generic_outer_calls] { ++generic_outer_calls; });
+  EXPECT_EQ(generic_outer_calls, 0U);
+  EXPECT_EQ(written, 1U);
+  EXPECT_EQ(port.outer_calls, 1U);
 }
 
 /**

@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "compute/i2_metal_acquisition_deadline.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
 #include "compute/execution_service_test_probe.hpp"
@@ -5571,7 +5572,8 @@ ExecutionService::device_executor_diagnostics(Device device) const {
 /** @copydoc ExecutionService::acquire_metal_resident_value */
 DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
     Value source, std::uint32_t width, std::uint32_t height,
-    const execution::DeviceCompletionSeed& completion_seed) {
+    const execution::DeviceCompletionSeed& completion_seed,
+    std::chrono::steady_clock::time_point capture_deadline) {
   if (!source.valid() || width == 0U || height == 0U) {
     throw std::invalid_argument(
         "Metal residency acquisition requires a valid Value and positive "
@@ -5580,6 +5582,10 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
   if (!pool_->device_executors.contains(Device::GPU_METAL)) {
     throw std::invalid_argument(
         "Metal residency acquisition requires a registered executor.");
+  }
+  if (std::chrono::steady_clock::now() >= capture_deadline) {
+    throw std::runtime_error(
+        "I2 Metal acquisition deadline expired before residency lookup.");
   }
   const ReadyFenceSnapshot source_state = source.ready_fence().poll();
   if (!source_state.ready()) {
@@ -5596,6 +5602,10 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
   std::optional<Value> resident = residency->find_published_value_acquisition(
       completion_seed, source, metal_device, MemoryDomain::DeviceLocal);
   if (resident.has_value()) {
+    if (std::chrono::steady_clock::now() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 Metal acquisition deadline expired before resident reuse.");
+    }
     const ReadyFenceSnapshot resident_state = resident->ready_fence().poll();
     if (!resident_state.ready()) {
       throw ReadyFenceAccessError(resident_state);
@@ -5611,6 +5621,10 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
           "ExecutionService cannot acquire Metal residency during shutdown.");
     }
   }
+  if (std::chrono::steady_clock::now() >= capture_deadline) {
+    throw std::runtime_error(
+        "I2 Metal acquisition deadline expired before native submission.");
+  }
   HostToMetalValueInvocation invocation(source, width, height, completion_seed,
                                         pool_->ledger);
   pool_->device_executors.execute(Device::GPU_METAL, invocation);
@@ -5620,21 +5634,19 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
         "Metal executor completed without a published resident Value.");
   }
 
-  const std::chrono::steady_clock::time_point completion_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  ReadyFenceSnapshot terminal = pending.ready_fence().poll();
-  while (!terminal.terminal() &&
-         std::chrono::steady_clock::now() < completion_deadline) {
-    std::this_thread::sleep_for(std::chrono::microseconds(50));
-    terminal = pending.ready_fence().poll();
-  }
-  if (!terminal.terminal()) {
+  const std::optional<ReadyFenceSnapshot> terminal =
+      wait_for_i2_metal_completion_until(pending.ready_fence(),
+                                         capture_deadline);
+  if (!terminal.has_value()) {
+    const execution::DeviceCompletionIdentity identity(completion_seed, source,
+                                                       pending);
+    (void)contain_i2_timed_out_transfer(*residency, identity, pending);
     throw std::runtime_error(
-        "Metal residency acquisition timed out waiting for native "
-        "completion.");
+        "I2 Metal residency acquisition reached the absolute capture "
+        "deadline.");
   }
-  if (!terminal.ready()) {
-    throw ReadyFenceAccessError(terminal);
+  if (!terminal->ready()) {
+    throw ReadyFenceAccessError(*terminal);
   }
   resident = residency->find_published_value_acquisition(
       completion_seed, source, metal_device, MemoryDomain::DeviceLocal);

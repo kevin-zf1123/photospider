@@ -26,6 +26,7 @@
 #include "benchmark/i2_evidence.hpp"
 #include "photospider/host/host.hpp"
 #include "verification/i2_evidence_json.hpp"
+#include "verification/i2_evidence_workflow.hpp"
 
 #ifndef PHOTOSPIDER_I2_PROJECT_SOURCE_DIR
 #error "PHOTOSPIDER_I2_PROJECT_SOURCE_DIR must name the project checkout"
@@ -418,93 +419,91 @@ bool row_is_invalid(const I2EpisodeInnerRow& row) noexcept {
 }
 
 /**
- * @brief Writes one evaluated row as a complete ordered NDJSON record.
- * @param output Open episode stream.
- * @param row Complete row whose payload Values have already been released.
- * @return Nothing after one newline-delimited record is accepted by stream.
- * @throws JSON/std allocation failures or std::runtime_error on stream error.
+ * @brief Adapts runner-owned Graph/snapshot/file authorities to finalization.
+ * @throws Nothing for construction and destruction; virtual operations retain
+ * their underlying Host/JSON/I/O exception behavior.
+ * @note Ordering is owned exclusively by `finalize_i2_failed_admission()` and
+ * every borrowed owner outlives its non-returning invocation.
  */
-void append_episode_row(std::ostream& output, const I2EpisodeInnerRow& row) {
-  output << i2_inner_row_json(row).dump() << '\n';
-  if (!output) {
-    throw std::runtime_error("failed to append I2 episodes.ndjson");
-  }
-}
+class I2RunnerFailedAdmissionPort final
+    : public I2FailedAdmissionFinalizationPort {
+ public:
+  /**
+   * @brief Binds the concrete failed-episode authorities.
+   * @param graph_close Exact-once loaded Graph close guard.
+   * @param i2_host Source-private closed-snapshot capability.
+   * @param lifecycle_cursor Baseline cursor preceding episode transitions.
+   * @param output_directory Prepared disposable artifact root.
+   * @throws Nothing because all inputs are borrowed references or scalars.
+   */
+  I2RunnerFailedAdmissionPort(
+      ScopedGraphClose& graph_close, I2Host& i2_host,
+      std::uint64_t lifecycle_cursor,
+      const std::filesystem::path& output_directory) noexcept
+      : graph_close_(graph_close),
+        i2_host_(i2_host),
+        lifecycle_cursor_(lifecycle_cursor),
+        output_directory_(output_directory) {}
 
-/**
- * @brief Captures an all-Invalid source-faithful row after failed admission.
- * @param options Invocation controls.
- * @param grid_origin Immutable replicate origin.
- * @param terminal_boundary Immutable stride-111 boundary.
- * @param slot Failed episode slot.
- * @param episode_origin Failed episode origin.
- * @param baseline Pre-episode authoritative snapshot.
- * @param admissions Partially attempted fixed-width admissions.
- * @param observations Shared episode observation collector.
- * @param i2_host Private snapshot capability.
- * @param graph_close Exact Graph-close authority used to revoke publication.
- * @return Evaluated all-Invalid row after close/drain/cut/snapshot.
- * @throws Close, future, snapshot, allocation, and evaluation failures.
- * @note No suffix edit or later slot is submitted and no payload is traversed.
- */
-I2EpisodeInnerRow close_failed_admission_row(
-    const I2RunnerOptions& options,
-    std::chrono::steady_clock::time_point grid_origin,
-    std::chrono::steady_clock::time_point terminal_boundary, std::size_t slot,
-    std::chrono::steady_clock::time_point episode_origin,
-    I1ExecutionSnapshot baseline,
-    std::array<I2EditAdmissionResult, kI1EditCount>* admissions,
-    I2EpisodeObservationCollector* observations, I2Host& i2_host,
-    ScopedGraphClose* graph_close) {
-  require_success("failed-admission Graph close",
-                  graph_close->close_now().status);
-  std::array<std::optional<OperationStatus>, kI1EditCount> settlements;
-  for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-    std::future<OperationStatus>& future = (*admissions)[edit_index].settlement;
-    if (future.valid()) {
-      settlements[edit_index] = future.get();
-    }
+  /** @copydoc I2FailedAdmissionFinalizationPort::close_graph */
+  OperationStatus close_graph() override {
+    return graph_close_.close_now().status;
   }
-  observations->release_unfrozen_visible_outputs();
-  I2EpisodeEvidenceInput input;
-  input.replicate_ordinal = options.replicate_ordinal;
-  input.slot = slot;
-  input.grid_origin = grid_origin;
-  input.episode_origin = episode_origin;
-  input.terminal_boundary = terminal_boundary;
-  input.observation_cut = observations->capture_history_cut();
-  input.baseline = std::move(baseline);
-  input.final_snapshot = i2_host.i2_execution_snapshot(
-      input.baseline.lifecycle.snapshot_cut, 4096U);
-  input.final_snapshot_sample = std::chrono::steady_clock::now();
-  input.observations = observations->snapshot();
-  input.expected_preview_digest = i2_frozen_preview_content_digest();
-  input.expected_final_digest = i1_frozen_final_content_digest();
-  for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-    input.edits[edit_index] = capture_i2_edit_evidence(
-        (*admissions)[edit_index], std::move(settlements[edit_index]));
+
+  /** @copydoc
+   * I2FailedAdmissionFinalizationPort::capture_closed_execution_snapshot */
+  I1ExecutionSnapshot capture_closed_execution_snapshot() override {
+    return i2_host_.i2_execution_snapshot(lifecycle_cursor_, 4096U);
   }
-  return evaluate_i2_episode(std::move(input));
-}
+
+  /** @copydoc I2FailedAdmissionFinalizationPort::monotonic_now */
+  std::chrono::steady_clock::time_point monotonic_now() override {
+    return std::chrono::steady_clock::now();
+  }
+
+  /** @copydoc I2FailedAdmissionFinalizationPort::persist_outer_failure */
+  void persist_outer_failure(std::string_view diagnostic) override {
+    write_failure_artifact(output_directory_, diagnostic);
+  }
+
+ private:
+  /** @brief Borrowed exact-once Graph close authority. */
+  ScopedGraphClose& graph_close_;
+  /** @brief Borrowed source-private closed-snapshot authority. */
+  I2Host& i2_host_;
+  /** @brief Cursor immediately preceding the failed episode. */
+  std::uint64_t lifecycle_cursor_ = 0U;
+  /** @brief Borrowed prepared disposable artifact root. */
+  const std::filesystem::path& output_directory_;
+};
 
 /**
  * @brief Executes one exact continuous-grid I2 replicate and writes evidence.
  * @param options Validated runner options.
  * @param output_directory Fresh explicit result root.
+ * @param ownership_gate Main-owned no-throw persistence authority.
  * @return Evaluated replicate summary after normal Graph close.
  * @throws std::runtime_error for setup, cadence, admission, settlement, I/O,
  * or Invalid evidence; lower-level allocation/system failures propagate.
  * @note No nominal edit or episode time is shifted or backfilled. Edits
  * `0..10` are admitted without waiting. Visible payload capture occurs only
- * after edit eleven admission and stops before the final safety interval.
- * Every normal row is cut, evaluated, serialized, and compacted before the
- * next baseline; missing guard capacity therefore aborts instead of changing
- * the next origin. A failed admission closes the Graph, drains accepted work,
- * writes one source-faithful Invalid row, and forbids later submission.
+ * after edit eleven admission and every Host/Metal traversal receives the same
+ * exclusive capture deadline. Once payloads, settlements, and snapshots are
+ * closed, one Value-free evaluator may overlap the next baseline; its result
+ * is required before the next immutable pre-admission handoff. JSON, NDJSON,
+ * progress logs, replicate aggregation, summary persistence, and compaction
+ * occur only at the fixed terminal boundary on success. Exactly one evaluator
+ * plus 111 pre-reserved complete rows bounds worker, queue, and memory state.
+ * A failed admission first claims persistence ownership, closes the Graph,
+ * drains accepted work, flushes one source-faithful all-Invalid row with every
+ * earlier row, persists one outer failure artifact, and forbids suffix edits
+ * and later slots. Generic abort drains only complete ordered rows and cannot
+ * retry a claimed failed-admission artifact.
  */
 I2ReplicateSummary run_exact_replicate(
     const I2RunnerOptions& options,
-    const std::filesystem::path& output_directory) {
+    const std::filesystem::path& output_directory,
+    I2OuterPersistenceOwnershipGate& ownership_gate) {
   const std::filesystem::path graph_path = output_directory / "i2-graph.yaml";
   write_text_file(graph_path, i1_frozen_graph_yaml());
 
@@ -557,150 +556,209 @@ I2ReplicateSummary run_exact_replicate(
   }
   std::vector<I2EpisodeInnerRow> rows;
   rows.reserve(kI2GridSlotCount);
-
-  for (std::size_t slot = 0U; slot < kI2GridSlotCount; ++slot) {
-    const auto episode_origin = i2_episode_origin(grid_origin, slot);
-    const auto episode_end =
-        checked_i1_time_add(episode_origin, kI2EpisodeStride);
-    if (slot != 0U) {
-      prepare_episode_baseline(*host, *i2_host, loaded.value);
-    }
-    if (std::chrono::steady_clock::now() > episode_origin) {
-      throw std::runtime_error(
-          "baseline preparation missed fixed I2 origin at slot " +
-          std::to_string(slot));
-    }
-    const I1ExecutionSnapshot baseline =
-        i2_host->i2_execution_snapshot(0U, 4096U);
-    if (std::chrono::steady_clock::now() > episode_origin) {
-      throw std::runtime_error(
-          "baseline snapshot missed fixed I2 origin at slot " +
-          std::to_string(slot));
-    }
-
-    I2EpisodeObservationCollector observations;
-    I2AcceptedBoundaryCollector admissions(
-        *i2_host, [] { return std::chrono::steady_clock::now(); },
-        [](std::chrono::steady_clock::time_point target) {
-          std::this_thread::sleep_until(target);
-        });
-    std::array<I2EditAdmissionResult, kI1EditCount> admission_results;
-    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-      admission_results[edit_index].edit_index = edit_index;
-      admission_results[edit_index].nominal_time = checked_i1_time_add(
-          episode_origin,
-          kI1EditStride * static_cast<std::int64_t>(edit_index));
-    }
-
-    std::optional<std::size_t> failed_edit;
-    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-      const auto nominal = admission_results[edit_index].nominal_time;
-      std::this_thread::sleep_until(nominal);
-      if (std::chrono::steady_clock::now() <=
-          checked_i1_time_add(nominal, kI1AdmissionLateness)) {
-        require_success("I2 edit mutation",
-                        host->set_node_yaml(loaded.value, NodeId{1},
-                                            i1_edit_node_one_yaml(edit_index))
-                            .status);
+  std::size_t written_rows = 0U;
+  std::optional<std::future<I2EpisodeInnerRow>> pending_evaluation;
+  try {
+    for (std::size_t slot = 0U; slot < kI2GridSlotCount; ++slot) {
+      const auto episode_origin = i2_episode_origin(grid_origin, slot);
+      const auto episode_end =
+          checked_i1_time_add(episode_origin, kI2EpisodeStride);
+      if (slot != 0U) {
+        prepare_episode_baseline(*host, *i2_host, loaded.value);
       }
-      admission_results[edit_index] = admissions.admit_edit(
-          episode_origin, edit_index,
-          make_i2_host_compute_request(loaded.value, edit_index),
-          observations.make_edit_sink(edit_index));
-      const I2EditAdmissionResult& admission = admission_results[edit_index];
-      if (!admission.admission_window_valid ||
-          !admission.accepted_coordinate.has_value() ||
-          !admission.settlement.valid()) {
-        failed_edit = edit_index;
-        break;
-      }
-    }
-
-    if (failed_edit.has_value()) {
-      I2EpisodeInnerRow invalid_row = close_failed_admission_row(
-          options, grid_origin, terminal_boundary, slot, episode_origin,
-          baseline, &admission_results, &observations, *i2_host, &graph_close);
-      append_episode_row(episode_output, invalid_row);
-      episode_output.flush();
-      if (!episode_output) {
+      if (std::chrono::steady_clock::now() > episode_origin) {
         throw std::runtime_error(
-            "failed to flush source-faithful I2 invalid row");
+            "baseline preparation missed fixed I2 origin at slot " +
+            std::to_string(slot));
       }
-      throw std::runtime_error(
-          "I2 admission invalid/failed without backfill at slot " +
-          std::to_string(slot) + ", edit " + std::to_string(*failed_edit));
-    }
+      const I1ExecutionSnapshot baseline =
+          i2_host->i2_execution_snapshot(0U, 4096U);
+      if (std::chrono::steady_clock::now() > episode_origin) {
+        throw std::runtime_error(
+            "baseline snapshot missed fixed I2 origin at slot " +
+            std::to_string(slot));
+      }
 
-    const auto capture_deadline =
-        checked_i1_time_subtract(episode_end, kI2CaptureSafetyMargin);
-    bool all_ready = false;
-    while (std::chrono::steady_clock::now() < episode_end) {
-      if (std::chrono::steady_clock::now() < capture_deadline) {
-        observations.freeze_visible_outputs(*i2_host);
-        if (std::chrono::steady_clock::now() >= episode_end) {
+      if (pending_evaluation.has_value()) {
+        const auto handoff_deadline =
+            checked_i1_time_subtract(episode_origin, kI1AdmissionLateness);
+        if (std::chrono::steady_clock::now() >= handoff_deadline) {
           throw std::runtime_error(
-              "I2 payload capture crossed the immutable episode guard");
+              "prior I2 evaluation reached the immutable pre-admission "
+              "handoff before slot " +
+              std::to_string(slot));
+        }
+        collect_i2_episode_evaluation_until(handoff_deadline,
+                                            &pending_evaluation, &rows);
+        if (std::chrono::steady_clock::now() >= handoff_deadline) {
+          throw std::runtime_error(
+              "prior I2 evaluation crossed the immutable pre-admission "
+              "handoff before slot " +
+              std::to_string(slot));
+        }
+        if (row_is_invalid(rows.back())) {
+          throw std::runtime_error(
+              "I2 row became Invalid; later fixed slots were not submitted");
         }
       }
-      all_ready =
-          every_settlement_ready(&admission_results) &&
-          observations.published_host_settlement_count() == kI1EditCount;
-      if (all_ready) {
+
+      I2EpisodeObservationCollector observations;
+      I2AcceptedBoundaryCollector admissions(
+          *i2_host, [] { return std::chrono::steady_clock::now(); },
+          [](std::chrono::steady_clock::time_point target) {
+            std::this_thread::sleep_until(target);
+          });
+      std::array<I2EditAdmissionResult, kI1EditCount> admission_results;
+      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
+           ++edit_index) {
+        admission_results[edit_index].edit_index = edit_index;
+        admission_results[edit_index].nominal_time = checked_i1_time_add(
+            episode_origin,
+            kI1EditStride * static_cast<std::int64_t>(edit_index));
+      }
+
+      std::optional<std::size_t> failed_edit;
+      std::string failed_diagnostic;
+      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
+           ++edit_index) {
+        const auto nominal = admission_results[edit_index].nominal_time;
+        std::this_thread::sleep_until(nominal);
+        if (std::chrono::steady_clock::now() <=
+            checked_i1_time_add(nominal, kI1AdmissionLateness)) {
+          require_success("I2 edit mutation",
+                          host->set_node_yaml(loaded.value, NodeId{1},
+                                              i1_edit_node_one_yaml(edit_index))
+                              .status);
+        }
+        admission_results[edit_index] = admissions.admit_edit(
+            episode_origin, edit_index,
+            make_i2_host_compute_request(loaded.value, edit_index),
+            observations.make_edit_sink(edit_index));
+        const I2EditAdmissionResult& admission = admission_results[edit_index];
+        const bool missing_acceptance =
+            claim_i2_failed_admission_if_needed(admission, ownership_gate);
+        const bool failed = !admission.admission_window_valid ||
+                            missing_acceptance || !admission.settlement.valid();
+        if (!failed) {
+          continue;
+        }
+        if (!missing_acceptance) {
+          ownership_gate.claim_failed_admission_finalizer();
+        }
+        failed_edit = edit_index;
+        failed_diagnostic =
+            "I2 admission invalid/failed without backfill at slot " +
+            std::to_string(slot) + ", edit " + std::to_string(edit_index);
+        if (admission.host_return.has_value()) {
+          failed_diagnostic += "; Host status " +
+                               admission.host_return->status.name + ": " +
+                               admission.host_return->status.message;
+        } else {
+          failed_diagnostic +=
+              "; no Host call was legal at the sampled admission boundary";
+        }
         break;
       }
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
-    }
-    if (!all_ready) {
-      throw std::runtime_error(
-          "I2 work or Host settlement missed the terminal guard at slot " +
-          std::to_string(slot));
-    }
-    if (std::chrono::steady_clock::now() < capture_deadline) {
-      observations.freeze_visible_outputs(*i2_host);
-    }
-    if (std::chrono::steady_clock::now() >= episode_end) {
-      throw std::runtime_error(
-          "I2 evidence capture exhausted the terminal guard at slot " +
-          std::to_string(slot));
+
+      I2EpisodeEvidenceInput input;
+      input.replicate_ordinal = options.replicate_ordinal;
+      input.slot = slot;
+      input.grid_origin = grid_origin;
+      input.episode_origin = episode_origin;
+      input.terminal_boundary = terminal_boundary;
+      input.baseline = baseline;
+      input.expected_preview_digest = i2_frozen_preview_content_digest();
+      input.expected_final_digest = i1_frozen_final_content_digest();
+
+      if (failed_edit.has_value()) {
+        I2RunnerFailedAdmissionPort failed_port(graph_close, *i2_host,
+                                                baseline.lifecycle.snapshot_cut,
+                                                output_directory);
+        finalize_i2_failed_admission(
+            std::move(failed_diagnostic), std::move(input),
+            std::move(admission_results), ownership_gate, &observations,
+            &failed_port, &episode_output, &rows, &written_rows);
+      }
+
+      const auto capture_deadline =
+          checked_i1_time_subtract(episode_end, kI2CaptureSafetyMargin);
+      bool all_ready = false;
+      while (std::chrono::steady_clock::now() < episode_end) {
+        if (std::chrono::steady_clock::now() < capture_deadline) {
+          observations.freeze_visible_outputs(*i2_host, capture_deadline);
+          if (std::chrono::steady_clock::now() >= episode_end) {
+            throw std::runtime_error(
+                "I2 payload capture crossed the immutable episode guard");
+          }
+        }
+        all_ready =
+            every_settlement_ready(&admission_results) &&
+            observations.published_host_settlement_count() == kI1EditCount;
+        if (all_ready) {
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+      }
+      if (!all_ready) {
+        throw std::runtime_error(
+            "I2 work or Host settlement missed the terminal guard at slot " +
+            std::to_string(slot));
+      }
+      if (std::chrono::steady_clock::now() < capture_deadline) {
+        observations.freeze_visible_outputs(*i2_host, capture_deadline);
+      }
+      if (std::chrono::steady_clock::now() >= episode_end) {
+        throw std::runtime_error(
+            "I2 evidence capture exhausted the terminal guard at slot " +
+            std::to_string(slot));
+      }
+
+      input.observation_cut = observations.capture_history_cut();
+      std::array<std::optional<OperationStatus>, kI1EditCount> settlements;
+      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
+           ++edit_index) {
+        settlements[edit_index] =
+            admission_results[edit_index].settlement.get();
+      }
+      observations.release_unfrozen_visible_outputs();
+      input.final_snapshot = i2_host->i2_execution_snapshot(
+          baseline.lifecycle.snapshot_cut, 4096U);
+      input.final_snapshot_sample = std::chrono::steady_clock::now();
+      input.observations = observations.snapshot();
+      for (std::size_t edit_index = 0U; edit_index < kI1EditCount;
+           ++edit_index) {
+        input.edits[edit_index] = capture_i2_edit_evidence(
+            admission_results[edit_index], std::move(settlements[edit_index]));
+      }
+
+      start_i2_episode_evaluation(std::move(input), &pending_evaluation, &rows);
+      if (slot + 1U == kI2GridSlotCount) {
+        if (std::chrono::steady_clock::now() >= terminal_boundary) {
+          throw std::runtime_error(
+              "final I2 evaluation started after the terminal boundary");
+        }
+        collect_i2_episode_evaluation_until(terminal_boundary,
+                                            &pending_evaluation, &rows);
+        if (std::chrono::steady_clock::now() > terminal_boundary) {
+          throw std::runtime_error(
+              "final I2 evaluation crossed the terminal boundary");
+        }
+        if (row_is_invalid(rows.back())) {
+          throw std::runtime_error(
+              "final I2 row became Invalid at the terminal boundary");
+        }
+        std::this_thread::sleep_until(terminal_boundary);
+      }
     }
 
-    I2EpisodeEvidenceInput input;
-    input.replicate_ordinal = options.replicate_ordinal;
-    input.slot = slot;
-    input.grid_origin = grid_origin;
-    input.episode_origin = episode_origin;
-    input.terminal_boundary = terminal_boundary;
-    input.observation_cut = observations.capture_history_cut();
-    input.baseline = baseline;
-    input.expected_preview_digest = i2_frozen_preview_content_digest();
-    input.expected_final_digest = i1_frozen_final_content_digest();
-    std::array<std::optional<OperationStatus>, kI1EditCount> settlements;
-    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-      settlements[edit_index] = admission_results[edit_index].settlement.get();
-    }
-    observations.release_unfrozen_visible_outputs();
-    input.final_snapshot =
-        i2_host->i2_execution_snapshot(baseline.lifecycle.snapshot_cut, 4096U);
-    input.final_snapshot_sample = std::chrono::steady_clock::now();
-    input.observations = observations.snapshot();
-    for (std::size_t edit_index = 0U; edit_index < kI1EditCount; ++edit_index) {
-      input.edits[edit_index] = capture_i2_edit_evidence(
-          admission_results[edit_index], std::move(settlements[edit_index]));
-    }
-    I2EpisodeInnerRow row = evaluate_i2_episode(std::move(input));
-    append_episode_row(episode_output, row);
-    if (row_is_invalid(row)) {
-      episode_output.flush();
-      throw std::runtime_error(
-          "I2 row became Invalid; later fixed slots were not submitted");
-    }
-    std::cerr << "I2 slot " << slot + 1U << '/' << kI2GridSlotCount << " ("
-              << i2_phase_text(classify_i2_slot(slot).first) << ") evaluated\n";
-    compact_row_for_summary(&row);
-    rows.push_back(std::move(row));
+    flush_i2_episode_rows(&episode_output, rows, &written_rows);
+  } catch (...) {
+    const std::exception_ptr primary_failure = std::current_exception();
+    rethrow_i2_runner_failure_after_generic_drain(
+        primary_failure, ownership_gate, &pending_evaluation, &rows,
+        &episode_output, &written_rows);
   }
 
-  std::this_thread::sleep_until(terminal_boundary);
   episode_output.close();
   if (!episode_output) {
     throw std::runtime_error("failed to close episodes.ndjson");
@@ -708,6 +766,15 @@ I2ReplicateSummary run_exact_replicate(
   const I2ReplicateSummary summary = evaluate_i2_replicate(rows);
   write_text_file(output_directory / "summary.json",
                   i2_replicate_summary_json(summary).dump(2) + "\n");
+  for (const I2EpisodeInnerRow& row : rows) {
+    std::cerr << "I2 slot " << row.evidence.slot + 1U << '/' << kI2GridSlotCount
+              << " ("
+              << i2_phase_text(classify_i2_slot(row.evidence.slot).first)
+              << ") evaluated\n";
+  }
+  for (I2EpisodeInnerRow& row : rows) {
+    compact_row_for_summary(&row);
+  }
   require_success("close_graph", graph_close.close_now().status);
   return summary;
 }
@@ -722,11 +789,13 @@ I2ReplicateSummary run_exact_replicate(
  * @return Zero only when all four axes pass, two for a complete failing
  * replicate, and one for parsing/setup/Invalid evidence.
  * @throws Nothing; exceptions are converted to stderr and additive failure
- * JSON only after a safe output directory has been prepared.
+ * JSON only after a safe output directory has been prepared and only while
+ * the failed-admission ownership gate permits generic persistence.
  * @note This executable is EXCLUDE_FROM_ALL and absent from CTest/default CI.
  */
 int main(int argc, char** argv) {
   std::optional<std::filesystem::path> output_directory;
+  ps::benchmark::I2OuterPersistenceOwnershipGate ownership_gate;
   try {
     const ps::benchmark::I2RunnerOptions options =
         ps::benchmark::parse_options(argc, argv);
@@ -737,7 +806,8 @@ int main(int argc, char** argv) {
     output_directory =
         ps::benchmark::prepare_output_directory(options.output_directory);
     const ps::benchmark::I2ReplicateSummary summary =
-        ps::benchmark::run_exact_replicate(options, *output_directory);
+        ps::benchmark::run_exact_replicate(options, *output_directory,
+                                           ownership_gate);
     const bool passed =
         summary.latency_verdict == ps::benchmark::I1Verdict::Pass &&
         summary.waste_verdict == ps::benchmark::I1Verdict::Pass &&
@@ -747,10 +817,11 @@ int main(int argc, char** argv) {
   } catch (const std::exception& error) {
     std::cerr << "i2_progressive_benchmark: " << error.what() << '\n';
     if (output_directory.has_value()) {
-      try {
-        ps::benchmark::write_failure_artifact(*output_directory, error.what());
-      } catch (...) {
-      }
+      ps::benchmark::try_i2_generic_outer_failure_persistence(
+          ownership_gate, [&] {
+            ps::benchmark::write_failure_artifact(*output_directory,
+                                                  error.what());
+          });
     }
     return 1;
   } catch (...) {
@@ -758,10 +829,11 @@ int main(int argc, char** argv) {
         "runner raised a non-standard exception";
     std::cerr << "i2_progressive_benchmark: " << kDiagnostic << '\n';
     if (output_directory.has_value()) {
-      try {
-        ps::benchmark::write_failure_artifact(*output_directory, kDiagnostic);
-      } catch (...) {
-      }
+      ps::benchmark::try_i2_generic_outer_failure_persistence(
+          ownership_gate, [&] {
+            ps::benchmark::write_failure_artifact(*output_directory,
+                                                  kDiagnostic);
+          });
     }
     return 1;
   }

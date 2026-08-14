@@ -308,14 +308,20 @@ class I2EpisodeObservationCollector final {
   /**
    * @brief Freezes digest and closed access evidence for visible Values.
    * @param host Real embedded I2 capability used only for explicit access.
+   * @param capture_deadline Exclusive absolute episode capture deadline shared
+   * unchanged with Host and any Metal transfer wait.
    * @return Number of completely published visible slots encountered.
    * @throws Digest, Value, Host, Metal, allocation, and synchronization
    * failures unchanged.
+   * @throws std::runtime_error before starting another payload operation when
+   * the capture deadline has expired or is tied with the current sample.
    * @note Each successfully frozen slot is traversed/acquired at most once;
    * its Value is released before successful return, all frozen facts remain
-   * sticky, and later calls perform no payload work for that slot.
+   * sticky, and later calls perform no payload work for that slot. A partially
+   * frozen slot keeps only completed facts until explicit unfrozen release.
    */
-  std::size_t freeze_visible_outputs(I2Host& host);
+  std::size_t freeze_visible_outputs(
+      I2Host& host, std::chrono::steady_clock::time_point capture_deadline);
 
   /**
    * @brief Releases every visible Value not successfully frozen.

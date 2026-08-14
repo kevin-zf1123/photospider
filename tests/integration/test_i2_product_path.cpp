@@ -464,7 +464,10 @@ TEST(I2ProductPath, PreviewTriggersFinalAndAcquisitionsReuseExactBindings) {
   ASSERT_TRUE(wait_for_i2_settlement(observations, 5s));
   const I1ExecutionSnapshot before_acquisitions =
       i2_host->i2_execution_snapshot(0U, 4096U);
-  ASSERT_EQ(observations.freeze_visible_outputs(*i2_host), 2U);
+  const auto capture_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  ASSERT_EQ(observations.freeze_visible_outputs(*i2_host, capture_deadline),
+            2U);
   const I1ExecutionSnapshot after_acquisitions = i2_host->i2_execution_snapshot(
       before_acquisitions.lifecycle.snapshot_cut, 4096U);
   ASSERT_EQ(before_acquisitions.device_resources.size(),

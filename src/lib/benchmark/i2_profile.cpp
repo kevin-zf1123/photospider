@@ -437,7 +437,7 @@ I2EpisodeObservationSnapshot I2EpisodeObservationCollector::snapshot() const {
 
 /** @copydoc I2EpisodeObservationCollector::freeze_visible_outputs */
 std::size_t I2EpisodeObservationCollector::freeze_visible_outputs(
-    I2Host& host) {
+    I2Host& host, std::chrono::steady_clock::time_point capture_deadline) {
   std::size_t published_count = 0U;
   for (std::size_t index = 0U; index < impl_->visible_outputs_.size();
        ++index) {
@@ -452,6 +452,10 @@ std::size_t I2EpisodeObservationCollector::freeze_visible_outputs(
     if (freeze_state != I2VisibleOutputFreezeState::Pending) {
       continue;
     }
+    if (std::chrono::steady_clock::now() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 visible-output capture deadline expired before payload work.");
+    }
     I2ObservedVisibleOutput& visible = slot.value;
     visible.value_valid_at_capture = visible.output.valid();
     if (visible.output.valid() && !visible.value_revision.valid()) {
@@ -464,12 +468,18 @@ std::size_t I2EpisodeObservationCollector::freeze_visible_outputs(
       visible.content_digest = compute_content_digest(visible.output);
     }
     if (!visible.acquisition.has_value() && visible.output.valid()) {
+      if (std::chrono::steady_clock::now() >= capture_deadline) {
+        throw std::runtime_error(
+            "I2 visible-output capture deadline expired before Host "
+            "acquisition.");
+      }
       visible.acquisition = host.acquire_i2_value(
           visible.output,
           I2ValueLineage{visible.child.graph_instance_id,
                          visible.child.target_node_id,
                          visible.child.request_intent, visible.child.generation,
-                         visible.child.run_id});
+                         visible.child.run_id},
+          capture_deadline);
     }
     if (visible.content_digest.has_value() && visible.acquisition.has_value()) {
       visible.output = Value{};

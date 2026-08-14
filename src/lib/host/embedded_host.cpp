@@ -2993,7 +2993,8 @@ class EmbeddedHost final : public Host,
 
   /** @copydoc benchmark::I2Host::acquire_i2_value */
   benchmark::I2ValueAcquisitionEvidence acquire_i2_value(
-      Value value, const benchmark::I2ValueLineage& lineage) override {
+      Value value, const benchmark::I2ValueLineage& lineage,
+      std::chrono::steady_clock::time_point capture_deadline) override {
     if (!value.valid()) {
       throw std::invalid_argument(
           "I2 acquisition requires a valid visible Value.");
@@ -3003,6 +3004,10 @@ class EmbeddedHost final : public Host,
         lineage.supersession_generation == 0U || lineage.run_id == 0U) {
       throw std::invalid_argument(
           "I2 acquisition requires complete realtime child lineage.");
+    }
+    if (std::chrono::steady_clock::now() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 capture deadline expired before direct Host acquisition.");
     }
     const ReadyFenceSnapshot ready = value.ready_fence().poll();
     if (!ready.ready()) {
@@ -3021,6 +3026,10 @@ class EmbeddedHost final : public Host,
     evidence.io_before =
         state_->execution_service->compute_io_executor().snapshot();
     evidence.host_first = observe_i2_host_access(value);
+    if (std::chrono::steady_clock::now() >= capture_deadline) {
+      throw std::runtime_error(
+          "I2 capture deadline expired before second Host acquisition.");
+    }
     evidence.host_second = observe_i2_host_access(value);
 
     if (!state_->execution_service->has_device_executor(Device::GPU_METAL)) {
@@ -3057,7 +3066,7 @@ class EmbeddedHost final : public Host,
     }
     compute::DeviceResidentValueAcquisition first =
         state_->execution_service->acquire_metal_resident_value(
-            value, width, height, completion_seed);
+            value, width, height, completion_seed, capture_deadline);
     const StorageBinding first_binding = first.value.storage_binding();
     const ProducerIdentity first_producer = first.value.producer_identity();
     I2MetalResidentReleaseGuard resident_release(*state_->execution_service,
@@ -3087,7 +3096,7 @@ class EmbeddedHost final : public Host,
 
     compute::DeviceResidentValueAcquisition second =
         state_->execution_service->acquire_metal_resident_value(
-            value, width, height, completion_seed);
+            value, width, height, completion_seed, capture_deadline);
     const StorageBinding second_binding = second.value.storage_binding();
     const AccessPlan second_plan = second.value.plan_access(
         AccessTarget{metal_device, MemoryDomain::DeviceLocal, false, false});

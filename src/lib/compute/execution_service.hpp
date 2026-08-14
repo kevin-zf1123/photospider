@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -1267,19 +1268,26 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param height Positive logical image height.
    * @param completion_seed Exact Graph/request/Run lineage and explicit
    * published-Value acquisition semantics attached to a real native transfer.
+   * @param capture_deadline Exclusive absolute I2 capture deadline. Lookup,
+   * native admission, completion observation, and timeout containment all use
+   * this unchanged value.
    * @return Ready resident Value plus whether executor submission occurred.
    * @throws std::invalid_argument for missing Metal, invalid source geometry,
    * or malformed lineage.
    * @throws ReadyFenceAccessError when native completion settles
    * unsuccessfully.
-   * @throws std::runtime_error when service shutdown starts or a bounded native
-   * completion wait expires.
+   * @throws std::runtime_error when service shutdown starts or the absolute
+   * capture deadline expires or ties the current monotonic sample.
    * @throws Native executor, resource, allocation, and synchronization failures
    * unchanged.
    * @note The method first uses the process-owned ResidencyManager's atomic
    * published-acquisition lookup. A genuine absence enters exactly one
    * registered Metal executor invocation using the service ResourceLedger; an
    * exact hit performs no executor submission, allocation, or transfer.
+   * A timed-out miss removes its exact pending manager admission; a completion
+   * that won the Ready race has only its exact resident released. A completion
+   * that already consumed a rejected/stale admission remains the sole fence
+   * and ledger owner until safe terminal settlement.
    * Historical source generation is allowed only while its managed lineage is
    * live and the calling seed plus source/resident revision, binding, producer,
    * Ready fence, and saved first-publication identity all match exactly. This
@@ -1288,7 +1296,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   DeviceResidentValueAcquisition acquire_metal_resident_value(
       Value source, std::uint32_t width, std::uint32_t height,
-      const execution::DeviceCompletionSeed& completion_seed);
+      const execution::DeviceCompletionSeed& completion_seed,
+      std::chrono::steady_clock::time_point capture_deadline);
 
   /**
    * @brief Releases one exact process-resident Metal Value after I2 capture.
