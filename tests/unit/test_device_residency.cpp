@@ -283,6 +283,119 @@ TEST(I2MetalAcquisitionDeadline, ExactDeadlineTieFailsClosed) {
 }
 
 /**
+ * @brief Rejects Ready completed at D between the precheck and fence poll.
+ * @return Nothing; GoogleTest reports post-poll deadline-gate drift.
+ * @throws ReadyFence construction failures unchanged.
+ * @note The source-private hook publishes the real terminal and advances the
+ * injected clock without wall-clock sleep or scheduling probability.
+ */
+TEST(I2MetalAcquisitionDeadline,
+     ReadyCompletedBetweenPrecheckAndPollAtDeadlineTieFailsClosed) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  const auto deadline =
+      std::chrono::steady_clock::time_point{} + std::chrono::microseconds(100);
+  auto now = deadline - std::chrono::microseconds(1);
+  std::size_t hook_calls = 0U;
+  std::size_t clock_calls = 0U;
+  const auto terminal =
+      compute::detail::wait_for_i2_metal_completion_until_with_pre_poll_hook(
+          pending.fence, deadline,
+          [&pending, &now, &hook_calls, deadline] {
+            ++hook_calls;
+            now = deadline;
+            EXPECT_TRUE(pending.completer.complete_ready());
+          },
+          [&now, &clock_calls] {
+            ++clock_calls;
+            return now;
+          },
+          [](std::chrono::steady_clock::time_point) {
+            ADD_FAILURE() << "terminal fence must not sleep";
+          });
+
+  EXPECT_FALSE(terminal.has_value());
+  EXPECT_EQ(hook_calls, 1U);
+  EXPECT_EQ(clock_calls, 2U);
+  EXPECT_EQ(pending.fence.poll().state(), ReadyFenceState::Ready);
+}
+
+/**
+ * @brief Rejects Failed completed after D between the precheck and poll.
+ * @return Nothing; GoogleTest reports post-poll deadline-gate drift.
+ * @throws ReadyFence construction or failure-publication errors unchanged.
+ * @note The source-private hook publishes the real terminal and advances the
+ * injected clock without wall-clock sleep or scheduling probability.
+ */
+TEST(I2MetalAcquisitionDeadline,
+     FailedCompletedBetweenPrecheckAndPollAfterDeadlineFailsClosed) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  const auto deadline =
+      std::chrono::steady_clock::time_point{} + std::chrono::microseconds(100);
+  auto now = deadline - std::chrono::microseconds(1);
+  std::size_t hook_calls = 0U;
+  std::size_t clock_calls = 0U;
+  const auto terminal =
+      compute::detail::wait_for_i2_metal_completion_until_with_pre_poll_hook(
+          pending.fence, deadline,
+          [&pending, &now, &hook_calls, deadline] {
+            ++hook_calls;
+            now = deadline + std::chrono::microseconds(1);
+            EXPECT_TRUE(pending.completer.complete_failed(ReadyFenceFailure(
+                ReadyFenceFailureDomain::Execution, 91,
+                "deterministic failed completion crossing the I2 deadline")));
+          },
+          [&now, &clock_calls] {
+            ++clock_calls;
+            return now;
+          },
+          [](std::chrono::steady_clock::time_point) {
+            ADD_FAILURE() << "terminal fence must not sleep";
+          });
+
+  EXPECT_FALSE(terminal.has_value());
+  EXPECT_EQ(hook_calls, 1U);
+  EXPECT_EQ(clock_calls, 2U);
+  EXPECT_EQ(pending.fence.poll().state(), ReadyFenceState::Failed);
+}
+
+/**
+ * @brief Rejects cancellation completed after D between precheck and poll.
+ * @return Nothing; GoogleTest reports post-poll deadline-gate drift.
+ * @throws ReadyFence construction failures unchanged.
+ * @note The source-private hook publishes the real terminal and advances the
+ * injected clock without wall-clock sleep or scheduling probability.
+ */
+TEST(I2MetalAcquisitionDeadline,
+     ProducerCancelledBetweenPrecheckAndPollAfterDeadlineFailsClosed) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  const auto deadline =
+      std::chrono::steady_clock::time_point{} + std::chrono::microseconds(100);
+  auto now = deadline - std::chrono::microseconds(1);
+  std::size_t hook_calls = 0U;
+  std::size_t clock_calls = 0U;
+  const auto terminal =
+      compute::detail::wait_for_i2_metal_completion_until_with_pre_poll_hook(
+          pending.fence, deadline,
+          [&pending, &now, &hook_calls, deadline] {
+            ++hook_calls;
+            now = deadline + std::chrono::microseconds(1);
+            EXPECT_TRUE(pending.completer.cancel());
+          },
+          [&now, &clock_calls] {
+            ++clock_calls;
+            return now;
+          },
+          [](std::chrono::steady_clock::time_point) {
+            ADD_FAILURE() << "terminal fence must not sleep";
+          });
+
+  EXPECT_FALSE(terminal.has_value());
+  EXPECT_EQ(hook_calls, 1U);
+  EXPECT_EQ(clock_calls, 2U);
+  EXPECT_EQ(pending.fence.poll().state(), ReadyFenceState::ProducerCancelled);
+}
+
+/**
  * @brief Proves timeout discard denies late publication and releases ownership.
  * @return Nothing; GoogleTest reports admission, fence, resident, or ledger
  * drift.

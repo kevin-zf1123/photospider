@@ -38,51 +38,93 @@ enum class I2TimedOutTransferContainment : std::uint8_t {
   CompletionOwnerSettling,
 };
 
+namespace detail {
+
+/**
+ * @brief Waits for one Metal fence with a deterministic pre-poll test hook.
+ * @tparam BeforePoll Nullary verification hook invoked only after an open
+ * deadline precheck and immediately before polling.
+ * @tparam Clock Nullary callable returning `steady_clock::time_point`.
+ * @tparam SleepUntil Callable accepting one `steady_clock::time_point`.
+ * @param fence Exact pending or terminal fence to observe.
+ * @param capture_deadline Exclusive absolute I2 capture deadline.
+ * @param before_poll Source-private interleave hook.
+ * @param clock Monotonic source sampled immediately before and after each
+ * fence observation.
+ * @param sleep_until Bounded sleeper used only between polls.
+ * @return Terminal snapshot whose fresh post-poll sample is strictly before
+ * the deadline, otherwise `std::nullopt` even for an exact terminal tie.
+ * @throws std::logic_error for an invalid fence.
+ * @throws BeforePoll, Clock, or sleeper failures unchanged.
+ * @note The function owns no producer, Value, transfer, residency, ledger, or
+ * native cancellation authority. It checks the exclusive deadline before
+ * every fence observation, rejects every terminal when the immediate
+ * post-poll sample reaches the deadline, and never sleeps past it. Production
+ * delegates with a no-op hook; only deterministic source-private tests use the
+ * hook to place a real terminal transition in the precheck-to-poll interleave.
+ */
+template <typename BeforePoll, typename Clock, typename SleepUntil>
+std::optional<ReadyFenceSnapshot>
+wait_for_i2_metal_completion_until_with_pre_poll_hook(
+    const ReadyFence& fence,
+    std::chrono::steady_clock::time_point capture_deadline,
+    BeforePoll&& before_poll, Clock&& clock, SleepUntil&& sleep_until) {
+  while (true) {
+    const std::chrono::steady_clock::time_point pre_poll_at = clock();
+    if (pre_poll_at >= capture_deadline) {
+      return std::nullopt;
+    }
+    before_poll();
+    const ReadyFenceSnapshot observed = fence.poll();
+    const std::chrono::steady_clock::time_point post_poll_at = clock();
+    if (post_poll_at >= capture_deadline) {
+      return std::nullopt;
+    }
+    if (observed.terminal()) {
+      return observed;
+    }
+    const auto remaining = capture_deadline - post_poll_at;
+    const std::chrono::steady_clock::time_point wake_at =
+        remaining <= kI2MetalCompletionPollInterval
+            ? capture_deadline
+            : post_poll_at + kI2MetalCompletionPollInterval;
+    sleep_until(wake_at);
+  }
+}
+
+}  // namespace detail
+
 /**
  * @brief Waits for one Metal fence only while an absolute deadline is open.
  * @tparam Clock Nullary callable returning `steady_clock::time_point`.
  * @tparam SleepUntil Callable accepting one `steady_clock::time_point`.
  * @param fence Exact pending or terminal fence to observe.
  * @param capture_deadline Exclusive absolute I2 capture deadline.
- * @param clock Monotonic observation source.
+ * @param clock Monotonic source sampled immediately before and after each
+ * fence observation.
  * @param sleep_until Bounded sleeper used only between polls.
- * @return Terminal snapshot observed strictly before the deadline, otherwise
- * `std::nullopt` even when Ready exists at an exact deadline tie.
+ * @return Terminal snapshot whose fresh post-poll sample is strictly before
+ * the deadline, otherwise `std::nullopt` even for an exact terminal tie.
  * @throws std::logic_error for an invalid fence.
  * @throws Clock or sleeper failures unchanged.
- * @note The function owns no producer, Value, transfer, residency, ledger, or
- * native cancellation authority. It checks the exclusive deadline before
- * every fence observation and never sleeps past it.
+ * @note This production form delegates with a no-op pre-poll hook and grants
+ * no producer, Value, transfer, residency, ledger, or cancellation authority.
  */
 template <typename Clock, typename SleepUntil>
 std::optional<ReadyFenceSnapshot> wait_for_i2_metal_completion_until(
     const ReadyFence& fence,
     std::chrono::steady_clock::time_point capture_deadline, Clock&& clock,
     SleepUntil&& sleep_until) {
-  while (true) {
-    const std::chrono::steady_clock::time_point observed_at = clock();
-    if (observed_at >= capture_deadline) {
-      return std::nullopt;
-    }
-    const ReadyFenceSnapshot observed = fence.poll();
-    if (observed.terminal()) {
-      return observed;
-    }
-    const auto remaining = capture_deadline - observed_at;
-    const std::chrono::steady_clock::time_point wake_at =
-        remaining <= kI2MetalCompletionPollInterval
-            ? capture_deadline
-            : observed_at + kI2MetalCompletionPollInterval;
-    sleep_until(wake_at);
-  }
+  return detail::wait_for_i2_metal_completion_until_with_pre_poll_hook(
+      fence, capture_deadline, [] {}, clock, sleep_until);
 }
 
 /**
  * @brief Uses the process monotonic clock to wait within one I2 deadline.
  * @param fence Exact pending or terminal fence to observe.
  * @param capture_deadline Exclusive absolute I2 capture deadline.
- * @return Terminal snapshot observed strictly before the deadline, otherwise
- * `std::nullopt`.
+ * @return Terminal snapshot accepted only when its fresh post-poll sample is
+ * strictly before the deadline, otherwise `std::nullopt`.
  * @throws std::logic_error for an invalid fence.
  * @throws std::system_error from the platform sleeper unchanged.
  * @note This overload delegates to the deterministic injected-clock form and
