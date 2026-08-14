@@ -667,7 +667,7 @@ class M1ObservationPublicationHook {
   virtual void after_coordinate_sample() noexcept {}
 
   /**
-   * @brief Runs after one bounded coordinate-gate contention attempt.
+   * @brief Runs after one failed coordinate-gate acquisition.
    * @return Nothing.
    * @throws Nothing.
    * @note The default is a no-op so production-free test seams add no state.
@@ -686,8 +686,10 @@ class M1ObservationPublicationHook {
  * @brief Fixed-capacity source-private observer shared by one M1 replicate.
  *
  * Construction allocates every event slot. Per-request sinks share one
- * sequence and publish only scalar records without locks, blocking,
- * allocation, compute re-entry, or product authority.
+ * sequence and publish only scalar records without mutexes, allocation,
+ * compute re-entry, or product authority. Coordinate reservation may retry its
+ * exception-free serialized gate while another callback assigns one paired
+ * time/sequence coordinate.
  *
  * @throws std::invalid_argument when capacity is zero.
  * @throws std::bad_alloc when shared state or fixed slots cannot allocate.

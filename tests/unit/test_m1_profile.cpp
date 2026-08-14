@@ -142,6 +142,86 @@ class PausingCoordinateSampleHook final : public M1ObservationPublicationHook {
 };
 
 /**
+ * @brief Holds one coordinate owner through the historical contention limit.
+ *
+ * @throws Nothing for construction, destruction, or hook dispatch.
+ * @note One contender releases the owner only on its 4096th failed gate
+ * observation. The old implementation then misclassified ordinary contention
+ * as sticky numeric sequence exhaustion before attempting the now-free gate.
+ */
+class CoordinateContentionLimitHook final
+    : public M1ObservationPublicationHook {
+ public:
+  /** @brief Historical attempt count that exposed false exhaustion. */
+  static constexpr std::uint64_t kHistoricalAttemptLimit = 4096U;
+
+  /** @copydoc M1ObservationPublicationHook::after_coordinate_sample */
+  void after_coordinate_sample() noexcept override {
+    if (sampled_.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
+    while (!released_.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    sample_finished_.store(true, std::memory_order_release);
+  }
+
+  /** @copydoc M1ObservationPublicationHook::after_coordinate_contention */
+  void after_coordinate_contention() noexcept override {
+    const std::uint64_t count =
+        contention_count_.fetch_add(1U, std::memory_order_acq_rel) + 1U;
+    if (count != kHistoricalAttemptLimit) {
+      return;
+    }
+    released_.store(true, std::memory_order_release);
+    while (!sample_finished_.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  }
+
+  /** @copydoc M1ObservationPublicationHook::after_slot_claim */
+  void after_slot_claim() noexcept override {}
+
+  /**
+   * @brief Tests whether the first reservation owns the paused sample gate.
+   * @return True after its first steady-clock sample.
+   * @throws Nothing.
+   */
+  bool sampled() const noexcept {
+    return sampled_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns the exact number of observed failed gate acquisitions.
+   * @return Monotonic contention callback count.
+   * @throws Nothing.
+   */
+  std::uint64_t contention_count() const noexcept {
+    return contention_count_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Releases the first sampler during defensive test cleanup.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void release() noexcept { released_.store(true, std::memory_order_release); }
+
+ private:
+  /** @brief True after the first reservation samples steady time. */
+  std::atomic<bool> sampled_{false};
+
+  /** @brief True when the first reservation may clear the sampling gate. */
+  std::atomic<bool> released_{false};
+
+  /** @brief True after the first reservation is ready to clear the gate. */
+  std::atomic<bool> sample_finished_{false};
+
+  /** @brief Number of contending atomic-flag observations. */
+  std::atomic<std::uint64_t> contention_count_{0U};
+};
+
+/**
  * @brief Builds one complete passing inner-fairness input.
  * @return Exact 30-window evidence with every independent guard passing.
  * @throws std::bad_alloc when vector storage allocates.
@@ -3543,6 +3623,52 @@ TEST(M1Profile, CoordinateReservationSerializesSampleAndSequence) {
   sink->abort_causal_coordinate(coordinates[0U]);
   sink->abort_causal_coordinate(coordinates[1U]);
   EXPECT_TRUE(collector.snapshot().stable_publication_cut);
+}
+
+/**
+ * @brief Proves scheduling contention cannot masquerade as numeric sequence
+ * exhaustion at the historical 4096-attempt boundary.
+ *
+ * @throws GoogleTest assertion control, thread, and observer allocation
+ * failures.
+ * @note A single contender is sufficient: the hook releases the first owner on
+ * the last old retry, making the false exhaustion deterministic without a
+ * probabilistic high-thread-count race.
+ */
+TEST(M1Profile, CoordinateContentionCannotExhaustNumericSequence) {
+  const auto hook = std::make_shared<CoordinateContentionLimitHook>();
+  M1FairnessObservationCollector collector(2U, 1U, hook);
+  const auto sink = collector.make_sink(M1ObservedRequestTag::Interactive);
+  std::array<compute::ComputeRunObservationCoordinate, 2U> coordinates;
+
+  std::thread first(
+      [&] { coordinates[0U] = sink->reserve_causal_coordinate(); });
+  for (std::size_t attempt = 0U; attempt < 1000000U && !hook->sampled();
+       ++attempt) {
+    std::this_thread::yield();
+  }
+  if (!hook->sampled()) {
+    hook->release();
+    first.join();
+    FAIL() << "first coordinate did not reach the contention-limit hook";
+    return;
+  }
+
+  std::thread second(
+      [&] { coordinates[1U] = sink->reserve_causal_coordinate(); });
+  first.join();
+  second.join();
+
+  EXPECT_GE(hook->contention_count(),
+            CoordinateContentionLimitHook::kHistoricalAttemptLimit);
+  EXPECT_EQ(coordinates[0U].causal_sequence, 1U);
+  EXPECT_EQ(coordinates[1U].causal_sequence, 2U);
+  EXPECT_LE(coordinates[0U].observed_at, coordinates[1U].observed_at);
+  sink->abort_causal_coordinate(coordinates[0U]);
+  sink->abort_causal_coordinate(coordinates[1U]);
+  const M1FairnessObservationSnapshot snapshot = collector.snapshot();
+  EXPECT_FALSE(snapshot.sequence_exhausted);
+  EXPECT_TRUE(snapshot.stable_publication_cut);
 }
 
 /**

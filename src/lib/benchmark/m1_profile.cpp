@@ -14,6 +14,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -29,9 +30,6 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
 
 /** @brief Fixed maximum CAS attempts at one observer callback boundary. */
 constexpr std::size_t kM1AtomicAttemptLimit = 64U;
-
-/** @brief Fixed maximum attempts to enter the coordinate sampling gate. */
-constexpr std::size_t kM1CoordinateGateAttemptLimit = 4096U;
 
 /**
  * @brief Appends one fail-closed structural diagnostic.
@@ -179,8 +177,9 @@ bool M1EventCoordinate::operator<(
  *
  * @throws std::invalid_argument when constructed with zero capacity.
  * @throws std::bad_alloc when slot or shared sink ownership allocates.
- * @note Callback methods remain bounded, nonblocking, allocation-free, and
- * observation-only; exhaustion is sticky evidence rather than product flow.
+ * @note Callback methods remain allocation-free and observation-only.
+ * Coordinate reservation serializes its constant-work time/sequence pair and
+ * may retry under contention; only true numeric exhaustion is sticky evidence.
  */
 class M1FairnessObservationCollector::Impl final
     : public std::enable_shared_from_this<Impl> {
@@ -412,9 +411,11 @@ class M1FairnessObservationCollector::Impl final
   };
 
   /**
-   * @brief Reserves one shared nonzero observer coordinate without blocking.
+   * @brief Reserves one serialized shared nonzero observer coordinate.
    * @return Steady sample and unique sequence, or zero after exhaustion.
    * @throws Nothing.
+   * @note Contention retries until the exception-free constant-work gate owner
+   * releases it. Gate competition never claims numeric sequence exhaustion.
    */
   compute::ComputeRunObservationCoordinate
   reserve_causal_coordinate() noexcept {
@@ -423,39 +424,33 @@ class M1FairnessObservationCollector::Impl final
       return compute::ComputeRunObservationCoordinate{
           std::chrono::steady_clock::now(), 0U};
     }
-    for (std::size_t attempt = 0U; attempt < kM1CoordinateGateAttemptLimit;
-         ++attempt) {
-      if (coordinate_reservation_gate_.test_and_set(
-              std::memory_order_acquire)) {
-        if (publication_hook_ != nullptr) {
-          publication_hook_->after_coordinate_contention();
-        }
-        continue;
-      }
-      const auto observed_at = std::chrono::steady_clock::now();
+    while (
+        coordinate_reservation_gate_.test_and_set(std::memory_order_acquire)) {
       if (publication_hook_ != nullptr) {
-        publication_hook_->after_coordinate_sample();
+        publication_hook_->after_coordinate_contention();
       }
-      const std::uint64_t current =
-          next_sequence_.load(std::memory_order_relaxed);
-      if (current == 0U) {
-        sequence_exhausted_.store(true, std::memory_order_release);
-        coordinate_reservation_gate_.clear(std::memory_order_release);
-        return compute::ComputeRunObservationCoordinate{observed_at, 0U};
-      }
-      const std::uint64_t next =
-          current == std::numeric_limits<std::uint64_t>::max() ? 0U
-                                                               : current + 1U;
-      next_sequence_.store(next, std::memory_order_relaxed);
-      if (next == 0U) {
-        sequence_exhausted_.store(true, std::memory_order_release);
-      }
-      coordinate_reservation_gate_.clear(std::memory_order_release);
-      return compute::ComputeRunObservationCoordinate{observed_at, current};
+      std::this_thread::yield();
     }
-    sequence_exhausted_.store(true, std::memory_order_release);
-    return compute::ComputeRunObservationCoordinate{
-        std::chrono::steady_clock::now(), 0U};
+    const auto observed_at = std::chrono::steady_clock::now();
+    if (publication_hook_ != nullptr) {
+      publication_hook_->after_coordinate_sample();
+    }
+    const std::uint64_t current =
+        next_sequence_.load(std::memory_order_relaxed);
+    if (current == 0U) {
+      sequence_exhausted_.store(true, std::memory_order_release);
+      coordinate_reservation_gate_.clear(std::memory_order_release);
+      return compute::ComputeRunObservationCoordinate{observed_at, 0U};
+    }
+    const std::uint64_t next =
+        current == std::numeric_limits<std::uint64_t>::max() ? 0U
+                                                             : current + 1U;
+    next_sequence_.store(next, std::memory_order_relaxed);
+    if (next == 0U) {
+      sequence_exhausted_.store(true, std::memory_order_release);
+    }
+    coordinate_reservation_gate_.clear(std::memory_order_release);
+    return compute::ComputeRunObservationCoordinate{observed_at, current};
   }
 
   /**
@@ -616,7 +611,11 @@ class M1FairnessObservationCollector::Impl final
   /** @brief Sticky reservation-frontier exhaustion/contention evidence. */
   std::atomic<bool> reservation_frontier_exhausted_{false};
 
-  /** @brief Bounded lock-free gate pairing sequence order with sample order. */
+  /**
+   * @brief Exception-free serialized gate pairing sequence and sample order.
+   * @note Contenders retry until the current constant-work owner releases it;
+   * contention never mutates `sequence_exhausted_`.
+   */
   std::atomic_flag coordinate_reservation_gate_ = ATOMIC_FLAG_INIT;
 
   /** @brief Next shared nonzero observer-local causal sequence. */

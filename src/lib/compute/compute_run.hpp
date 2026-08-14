@@ -446,10 +446,12 @@ struct ComputeRunServiceStartObservation final {
  * exception terminates because callbacks run on product correctness
  * boundaries.
  * @note Callbacks may run while the coordinator, Run, execution-service, or
- * lifecycle-registry fence is held. Implementations must remain bounded,
- * nonblocking, and must not re-enter compute services. The interface is
- * source-private and is absent from installed Host, operation, policy, CLI,
- * and IPC contracts.
+ * lifecycle-registry fence is held. Callback bodies remain bounded and
+ * nonblocking after coordinate reservation. A source-private coordinate
+ * allocator may yield while retrying only an exception-free constant-work
+ * atomic serialization owner; it must not sleep, allocate, acquire a product
+ * mutex, or re-enter compute services. The interface is source-private and is
+ * absent from installed Host, operation, policy, CLI, and IPC contracts.
  */
 class ComputeRunObservationSink {
  public:
@@ -466,8 +468,10 @@ class ComputeRunObservationSink {
    * sample.
    * @throws Nothing; implementations must contain sequence exhaustion.
    * @note Callers invoke this immediately before the transition represented by
-   * the later callback. Reservation is bounded, nonblocking, allocation-free,
-   * and does not itself publish an event.
+   * the later callback. Reservation is allocation-free and does not itself
+   * publish an event. An implementation may yield while retrying an
+   * exception-free constant-work atomic serialization owner so that ordinary
+   * contention cannot be misclassified as numeric sequence exhaustion.
    */
   virtual ComputeRunObservationCoordinate
   reserve_causal_coordinate() noexcept = 0;
