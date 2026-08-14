@@ -41,6 +41,42 @@ enum class I2TimedOutTransferContainment : std::uint8_t {
 namespace detail {
 
 /**
+ * @brief Polls one already-published Metal resident with a deterministic hook.
+ * @tparam BeforePoll Nullary verification hook invoked after the open-deadline
+ * precheck and immediately before the single fence observation.
+ * @tparam Clock Nullary callable returning `steady_clock::time_point`.
+ * @param fence Exact Ready resident fence borrowed from process residency.
+ * @param capture_deadline Exclusive absolute I2 capture deadline.
+ * @param before_poll Source-private precheck-to-poll interleave hook.
+ * @param clock Monotonic source sampled around the fence observation.
+ * @return The observed snapshot only when its fresh post-poll sample is
+ * strictly before the deadline; otherwise `std::nullopt` at a tie or later.
+ * @throws std::logic_error for an invalid fence.
+ * @throws BeforePoll or Clock failures unchanged.
+ * @note The helper performs exactly one poll and owns no Value, resident,
+ * executor submission, transfer, release, ledger, or native authority. A
+ * timeout therefore leaves the existing resident untouched for its row-scoped
+ * owner. Production delegates with a no-op hook; deterministic tests place
+ * deadline crossing exactly between the precheck and poll.
+ */
+template <typename BeforePoll, typename Clock>
+std::optional<ReadyFenceSnapshot>
+poll_i2_metal_resident_reuse_with_pre_poll_hook(
+    const ReadyFence& fence,
+    std::chrono::steady_clock::time_point capture_deadline,
+    BeforePoll&& before_poll, Clock&& clock) {
+  if (clock() >= capture_deadline) {
+    return std::nullopt;
+  }
+  before_poll();
+  const ReadyFenceSnapshot observed = fence.poll();
+  if (clock() >= capture_deadline) {
+    return std::nullopt;
+  }
+  return observed;
+}
+
+/**
  * @brief Waits for one Metal fence with a deterministic pre-poll test hook.
  * @tparam BeforePoll Nullary verification hook invoked only after an open
  * deadline precheck and immediately before polling.
@@ -93,6 +129,44 @@ wait_for_i2_metal_completion_until_with_pre_poll_hook(
 }
 
 }  // namespace detail
+
+/**
+ * @brief Polls one resident fence under an injected monotonic clock.
+ * @tparam Clock Nullary callable returning `steady_clock::time_point`.
+ * @param fence Exact already-published resident fence.
+ * @param capture_deadline Exclusive absolute I2 capture deadline.
+ * @param clock Monotonic source sampled around the single fence observation.
+ * @return Snapshot accepted only when its fresh post-poll sample is strictly
+ * before the deadline, otherwise `std::nullopt`.
+ * @throws std::logic_error for an invalid fence.
+ * @throws Clock failures unchanged.
+ * @note This overload delegates with a no-op test hook and grants no resident
+ * release, transfer, executor, or ownership authority.
+ */
+template <typename Clock>
+std::optional<ReadyFenceSnapshot> poll_i2_metal_resident_reuse(
+    const ReadyFence& fence,
+    std::chrono::steady_clock::time_point capture_deadline, Clock&& clock) {
+  return detail::poll_i2_metal_resident_reuse_with_pre_poll_hook(
+      fence, capture_deadline, [] {}, clock);
+}
+
+/**
+ * @brief Polls one resident fence with the process monotonic clock.
+ * @param fence Exact already-published resident fence.
+ * @param capture_deadline Exclusive absolute I2 capture deadline.
+ * @return Snapshot accepted only when its fresh post-poll sample is strictly
+ * before the deadline, otherwise `std::nullopt`.
+ * @throws std::logic_error for an invalid fence.
+ * @note The helper performs no wait, retry, transfer, release, or budget
+ * refresh; equality with the unchanged deadline is late.
+ */
+inline std::optional<ReadyFenceSnapshot> poll_i2_metal_resident_reuse(
+    const ReadyFence& fence,
+    std::chrono::steady_clock::time_point capture_deadline) {
+  return poll_i2_metal_resident_reuse(
+      fence, capture_deadline, [] { return std::chrono::steady_clock::now(); });
+}
 
 /**
  * @brief Waits for one Metal fence only while an absolute deadline is open.

@@ -1284,7 +1284,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @note The method first uses the process-owned ResidencyManager's atomic
    * published-acquisition lookup. A genuine absence enters exactly one
    * registered Metal executor invocation using the service ResourceLedger; an
-   * exact hit performs no executor submission, allocation, or transfer.
+   * exact hit performs one fence poll bracketed by fresh samples from the same
+   * process monotonic clock, and returns only when the post-poll sample remains
+   * strictly before the unchanged capture deadline. A late resident hit
+   * performs no executor submission, timeout containment, allocation,
+   * transfer, or resident release.
    * Admission or upload preparation that reaches the deadline unwinds before
    * native commit and leaves no pending Value, manager admission, resident, or
    * ledger lease. A timed-out committed miss removes its exact pending manager

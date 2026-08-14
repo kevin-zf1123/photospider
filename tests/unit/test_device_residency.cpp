@@ -1023,9 +1023,12 @@ TEST(DeviceResidency, ExactReleaseRejectsWrongIdentityAndRemovesOnlyMatch) {
  * @throws Fake publication, ledger, identity, and manager exceptions.
  * @note Generation one is published before generation two becomes current.
  * Its immutable Ready source then admits one verification transfer. Exact
- * lookup reuses the resident twice, while wrong seed/source identities and
- * post-retirement lookup fail closed without broad resident removal. Exact
- * release finally returns the sole device lease after local Values unwind.
+ * lookup reuses the resident twice. A deterministic precheck-to-poll deadline
+ * crossing rejects late reuse without releasing that resident, while a fresh
+ * strict-before sample preserves its exact Direct identity. Wrong seed/source
+ * identities and post-retirement lookup fail closed without broad removal;
+ * exact release finally returns the sole device lease after local Values
+ * unwind.
  */
 TEST(DeviceResidency,
      PublishedHistoricalValueAcquisitionSurvivesNewerCurrentGeneration) {
@@ -1084,6 +1087,49 @@ TEST(DeviceResidency,
     EXPECT_EQ(second->storage_binding(), binding);
     EXPECT_EQ(first->producer_identity(), producer);
     EXPECT_EQ(second->producer_identity(), producer);
+
+    const auto reuse_deadline = std::chrono::steady_clock::time_point{} +
+                                std::chrono::microseconds(100);
+    auto reuse_now = reuse_deadline - std::chrono::microseconds(1);
+    std::size_t reuse_clock_calls = 0U;
+    const std::optional<ReadyFenceSnapshot> late_reuse =
+        compute::detail::poll_i2_metal_resident_reuse_with_pre_poll_hook(
+            second->ready_fence(), reuse_deadline,
+            [&reuse_now, reuse_deadline] { reuse_now = reuse_deadline; },
+            [&reuse_now, &reuse_clock_calls] {
+              ++reuse_clock_calls;
+              return reuse_now;
+            });
+    EXPECT_FALSE(late_reuse.has_value());
+    EXPECT_EQ(reuse_clock_calls, 2U);
+
+    const std::optional<Value> retained_after_timeout =
+        manager.find_published_value_acquisition(seed, historical.source, metal,
+                                                 MemoryDomain::DeviceLocal);
+    ASSERT_TRUE(retained_after_timeout.has_value());
+    EXPECT_EQ(retained_after_timeout->revision_id(), revision);
+    EXPECT_EQ(retained_after_timeout->storage_binding(), binding);
+    EXPECT_EQ(retained_after_timeout->producer_identity(), producer);
+
+    reuse_now = reuse_deadline - std::chrono::microseconds(2);
+    reuse_clock_calls = 0U;
+    const std::optional<ReadyFenceSnapshot> strict_before_reuse =
+        compute::detail::poll_i2_metal_resident_reuse_with_pre_poll_hook(
+            retained_after_timeout->ready_fence(), reuse_deadline,
+            [&reuse_now, reuse_deadline] {
+              reuse_now = reuse_deadline - std::chrono::microseconds(1);
+            },
+            [&reuse_now, &reuse_clock_calls] {
+              ++reuse_clock_calls;
+              return reuse_now;
+            });
+    ASSERT_TRUE(strict_before_reuse.has_value());
+    EXPECT_TRUE(strict_before_reuse->ready());
+    EXPECT_EQ(reuse_clock_calls, 2U);
+    const AccessPlan reuse_plan = retained_after_timeout->plan_access(
+        AccessTarget{metal, MemoryDomain::DeviceLocal, false, false});
+    EXPECT_EQ(reuse_plan.kind(), AccessPlanKind::Direct);
+    EXPECT_EQ(reuse_plan.transfer_bytes(), 0U);
 
     const std::array<DeviceCompletionSeed, 5U> wrong_seeds{
         wrong_run.seed(),

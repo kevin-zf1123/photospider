@@ -5614,13 +5614,14 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
   std::optional<Value> resident = residency->find_published_value_acquisition(
       completion_seed, source, metal_device, MemoryDomain::DeviceLocal);
   if (resident.has_value()) {
-    if (std::chrono::steady_clock::now() >= capture_deadline) {
+    const std::optional<ReadyFenceSnapshot> resident_state =
+        poll_i2_metal_resident_reuse(resident->ready_fence(), capture_deadline);
+    if (!resident_state.has_value()) {
       throw std::runtime_error(
           "I2 Metal acquisition deadline expired before resident reuse.");
     }
-    const ReadyFenceSnapshot resident_state = resident->ready_fence().poll();
-    if (!resident_state.ready()) {
-      throw ReadyFenceAccessError(resident_state);
+    if (!resident_state->ready()) {
+      throw ReadyFenceAccessError(*resident_state);
     }
     return DeviceResidentValueAcquisition{std::move(*resident), false};
   }
