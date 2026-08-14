@@ -1138,6 +1138,16 @@ overlap 与稀疏 I/O sampling 不能制造 fairness 或 memory authority。既�
 不能建立画像 conformance。长期手工/release protocol 与测试归属边界记录在
 [测试与验证](../../development/zh/Testing-and-Validation.zh.md#执行画像-slo-手工release-protocol)。
 
+Issue #125 现在会让 I2 的固定 111-slot cadence 脱离可延后 evidence finalization。恰有一个可恢复
+且不含 Value 的 evaluator 只能与下一次 baseline preparation 重叠，并且必须在固定 pre-admission
+handoff 前收集；最多存在一个 future 与 111 条预留 row。JSON/NDJSON、progress log、replicate
+evaluation、summary persistence 与 compaction 会移动到 terminal boundary 或 abort drain。Failed
+admission 只拥有一条 close/release/全 Invalid/inner-before-outer terminal path，不允许 suffix 或
+后续 slot backfill。同一切片还会用 episode 中原样传递的排他 absolute capture deadline，取代
+Metal acquisition 的 relative 五秒等待，并对 exact pending/Ready race 做 containment。已经 commit
+的 native command 仍由其唯一 callback 终结；runner 不会因此获得 cancellation、device 或 public
+API authority。
+
 ## 服务器与插件隔离
 
 [ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)

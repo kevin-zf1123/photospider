@@ -554,7 +554,39 @@ digest 分别等于 `i2_frozen_preview_content_digest()` 与
 同步，也属于 Invalid；expected oracle 完整时，candidate-only mismatch 属于 Fail。在 replicate
 层面，memory 与 output 消费全部 111 行。Latency 与 waste 只消费 measured slot `11..110`
 的 sample、service 与完整 verdict；cold 和 warmup 只传播 Invalid，因此其 Pass 或 Fail value
-不能污染 100 行 steady-state aggregate。手工
+不能污染 100 行 steady-state aggregate。
+
+Issue #125 在不改变该 grid 或任何 verdict threshold 的前提下，闭合了 I2 capture 与手工 runner
+finalization boundary。每个 episode 都会在其不可变 1.5 秒终点之前 100 ms 派生一个排他的
+absolute capture deadline。Collector 会把同一个 time point 原样贯穿 `I2Host`、embedded Host
+与 `ExecutionService`；在新 digest、direct Host acquisition、residency lookup/reuse 或 Metal
+submission 之前，`now >= deadline` 都会失败。Metal miss 只能在该 deadline 内等待，不能重新
+建立 relative timeout。到期时，caller 会先尝试移除精确的 `DeviceCompletionIdentity` admission。
+若 native completion 已经抢先完成 Ready publication，则只释放它的精确 resident。若 completion
+已经消费 rejected/stale admission，则唯一 native callback 继续负责 terminal fence publication
+及其保留的 resource lease。该 containment 不声称能够同步取消已经 commit 的 native command，
+late callback 也不能重新获得已丢弃的 residency publication authority。
+
+Payload capture、全部 accepted settlement、Value release、history cut 与最终 execution snapshot
+完成后，会封闭一个完整且不含 Value 的 input。随后恰有一个可恢复的 `std::launch::async`
+evaluator 可以与下一次 baseline preparation 重叠。在一个有效的唯一 future 安装完成前，它不能
+消费 input；launch 失败时，会在 caller 线程同步评估仍可恢复的 input，并继续传播 launch error。
+Runner 会在下一个固定 pre-admission handoff 前收集该 future，绝不移动或回填 origin。它最多
+保留一个 evaluator，以及预留存储中的 111 条完整 row。成功路径中的 JSON 构造、NDJSON write
+与 flush、progress log、replicate evaluation、summary persistence 和 row compaction 只会在固定
+terminal boundary 发生。Abort 会在存在时 join 唯一 evaluator，并严格按 slot 顺序只 flush 完整
+row；cursor 只有在 encode、write、flush 与 stream check 全部成功后才前进，raw row 在
+serialization 之前绝不 compact。
+
+Failed 或 invalid admission 会在构造 diagnostic 前 claim 一个单调且不分配内存的 persistence
+gate。它的唯一 finalizer 会关闭 Graph、捕获 history cut、消费每个有效的 accepted
+settlement、不经 digest/acquisition traversal 地释放 unfrozen Value、捕获 closed state、评估一条
+source-faithful 且 fixed-width 的全 Invalid row、flush 全部早期 row 与当前 row，最后才尝试写入
+additive outer failure artifact。未触及的 suffix edit 保持显式，后续 slot 不得提交。Claim 后会
+抑制 generic inner/outer failure handling，因此两个 artifact 都不会通过 compatibility fallback
+重试。
+
+手工
 `i2_progressive_benchmark` target 为 `EXCLUDE_FROM_ALL`，不属于 CTest，并且只向调用者选择的
 目录写入 `execution-profile-i2-inner-row-v1` evidence。该 inner record 不是 ADR 0010
 canonical 15-field outer row、bundle 或 reference comparison。因此，仅构建它或通过

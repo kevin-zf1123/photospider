@@ -2062,6 +2062,30 @@ caller-selected empty output directory. The inner schema is not the canonical
 the deterministic tests establish a machine SLO result. The exact 111-slot run
 remains an explicit manual/release action; no such run is claimed here.
 
+Issue #125's long-lived regressions test the runner mechanisms without replaying
+the 111-slot machine workload. `test_i2_evidence` injects evaluator launch and
+completion gates plus a serializer seam. It requires future installation before
+input consumption, exactly one delayed evaluator while baseline work proceeds,
+failure at an already-expired fixed handoff without future loss or origin
+shift, synchronous launch recovery, terminal-only ordered serialization,
+cursor preservation after serializer failure, complete-row generic abort drain,
+and failed-admission all-Invalid inner-before-outer persistence with generic
+retry suppression. The workflow accepts only the next slot, requires storage
+reserved for all 111 rows, and owns at most one future.
+
+`test_i2_profile` rejects an expired or exact-tie capture deadline before Host
+acquisition and proves a timeout cannot change any later 1.5-second origin or
+the stride-111 terminal. `test_device_residency` uses real `ReadyFence` and
+`ResidencyManager` state to cover Ready strictly before the deadline, exclusive
+tie rejection, exact pending-admission discard, rejected late publication and
+single fence failure, the sole-owner settling interval after a rejected
+completion consumes admission, and exact release when Ready publication wins
+the timeout race. `test_i2_product_path` retains the conditional real-product
+check that a deadline-bounded first Metal upload is followed by Direct zero-transfer reuse
+of the same revision, binding, allocation, and producer, then exact row-scoped
+release. These tests create no native-cancellation claim and do not register
+the manual runner or result orchestration with CTest/CI.
+
 Required logical values call `compute_content_digest(Value)` and require
 `Available`, a present `ContentDigest`, and
 `CanonicalDigestAlgorithm::Sha256CanonicalV1`. Logical digest, raw little-endian

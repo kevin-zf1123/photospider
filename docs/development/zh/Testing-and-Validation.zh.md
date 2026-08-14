@@ -1656,6 +1656,24 @@ output directory 写入闭合的 `execution-profile-i2-inner-row-v1` raw record 
 通过 deterministic test 都不能建立机器 SLO 结果。精确 111-slot run 仍是显式的手工/release
 动作；本文不声明已经执行该运行。
 
+Issue #125 的长期回归会测试 runner mechanism，但不会 replay 111-slot machine workload。
+`test_i2_evidence` 会注入 evaluator launch/completion gate 与 serializer seam。它要求先安装
+future 再消费 input；baseline work 进行时恰有一个 delayed evaluator；已经过期的固定 handoff
+必须失败，但不得丢失 future 或移动 origin；同时覆盖同步 launch recovery、只在 terminal 发生的
+有序 serialization、serializer 失败后的 cursor 保留、只 drain 完整 row 的 generic abort，以及
+failed-admission 全 Invalid 且 inner-before-outer 的 persistence 与 generic retry 抑制。Workflow
+只接受下一个 slot，要求为全部 111 条 row 预留存储，并且最多拥有一个 future。
+
+`test_i2_profile` 会在 Host acquisition 前拒绝已经过期或 exact-tie 的 capture deadline，并证明
+timeout 不能改变任何后续 1.5 秒 origin 或 stride-111 terminal。`test_device_residency` 使用真实
+`ReadyFence` 与 `ResidencyManager` 状态，覆盖 deadline 前严格 Ready、排他 tie rejection、精确
+pending-admission discard、拒绝 late publication 与单次 fence failure、rejected completion 消费
+admission 后的 sole-owner settling interval，以及 Ready publication 抢先赢得 timeout race 时的精确
+release。`test_i2_product_path` 保留条件式真实产品检查：受
+deadline 约束的首次 Metal upload 后，必须以同一个 revision、binding、allocation 与 producer
+执行 Direct、zero-transfer reuse，随后进行精确 row-scoped release。这些测试不会创建 native-
+cancellation claim，也不会把 manual runner 或 result orchestration 注册进 CTest/CI。
+
 必需 logical value 调用 `compute_content_digest(Value)`，并且要求 `Available`、
 存在 `ContentDigest`，以及 `CanonicalDigestAlgorithm::Sha256CanonicalV1`。Logical
 digest、raw little-endian payload SHA-256、canonical manifest SHA-256、semantic-

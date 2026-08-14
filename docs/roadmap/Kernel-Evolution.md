@@ -1415,6 +1415,19 @@ profile conformance. The maintained manual/release protocol and test-ownership
 boundary are documented in
 [Testing and Validation](../development/Testing-and-Validation.md#execution-profile-slo-manualrelease-protocol).
 
+Issue #125 now keeps I2's fixed 111-slot cadence free of deferrable evidence
+finalization. One recoverable Value-free evaluator may overlap only next-
+baseline preparation and must be collected before the fixed pre-admission
+handoff; at most one future and 111 pre-reserved rows exist. JSON/NDJSON,
+progress logs, replicate evaluation, summary persistence, and compaction move
+to the terminal boundary or an abort drain. Failed admission owns a single
+close/release/all-Invalid/inner-before-outer terminal path with no suffix or
+later-slot backfill. The same slice replaces the Metal acquisition's relative
+five-second wait with the episode's unchanged exclusive absolute capture
+deadline and exact pending/Ready race containment. A committed native command
+still terminates under its sole callback; the runner gains no cancellation,
+device, or public API authority.
+
 ## Server and Plugin Isolation
 
 [ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)

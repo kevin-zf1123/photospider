@@ -695,7 +695,49 @@ candidate-only mismatch with intact expected oracles is Fail. At replicate
 level, memory and output consume all 111 rows. Latency and waste consume samples,
 service, and complete verdicts only from measured slots `11..110`; cold and
 warmup propagate Invalid only, so their Pass or Fail values cannot pollute the
-100-row steady-state aggregate. The manual
+100-row steady-state aggregate.
+
+Issue #125 closes the I2 capture and manual-runner finalization boundary without
+changing that grid or any verdict threshold. Each episode derives one exclusive
+absolute capture deadline 100 ms before its immutable 1.5-second end. The
+collector passes that same time point unchanged through `I2Host` and embedded
+Host into `ExecutionService`; `now >= deadline` loses before a new digest,
+direct Host acquisition, residency lookup/reuse, or Metal submission. A Metal
+miss waits only inside that deadline, never under a new relative timeout. On
+expiry, the caller first tries to remove the exact `DeviceCompletionIdentity`
+admission. If native completion already won Ready publication, only its exact
+resident is released. If completion already consumed a rejected/stale
+admission, the sole native callback remains responsible for terminal fence
+publication and its retained resource leases. This containment does not claim
+synchronous cancellation of a committed native command, and a late callback
+cannot regain discarded residency-publication authority.
+
+After payload capture, all accepted settlements, Value release, history cut,
+and the final execution snapshot close one complete Value-free input. Exactly
+one recoverable `std::launch::async` evaluator may then overlap preparation of
+the next baseline. Its input cannot be consumed until a valid sole future is
+installed; launch failure evaluates the still-recoverable input synchronously
+and propagates the launch error. The runner collects that future before the
+next fixed pre-admission handoff and never shifts or backfills an origin. It
+retains at most one evaluator and 111 complete rows in pre-reserved storage.
+JSON construction, NDJSON writes and flushes, progress logging, replicate
+evaluation, summary persistence, and row compaction occur only at the fixed
+terminal boundary on success. An abort joins the sole evaluator when present
+and flushes only complete rows in exact slot order; a cursor advances only
+after encode, write, flush, and stream checking succeed, and raw rows are never
+compacted before serialization.
+
+A failed or invalid admission claims a monotonic no-allocation persistence gate
+before diagnostic construction. Its sole finalizer closes the Graph, captures
+the history cut, consumes every valid accepted settlement, releases unfrozen
+Values without digest/acquisition traversal, captures closed state, evaluates
+one source-faithful all-Invalid fixed-width row, flushes every earlier row plus
+that row, and only then attempts the additive outer failure artifact. Untouched
+suffix edits remain explicit and no later slot is submitted. Generic inner or
+outer failure handling is suppressed after the claim, so neither artifact is
+retried through a compatibility fallback.
+
+The manual
 `i2_progressive_benchmark` target is `EXCLUDE_FROM_ALL`, is absent from CTest,
 and writes `execution-profile-i2-inner-row-v1` evidence only to a caller-selected
 directory. That inner record is not the canonical ADR 0010 15-field outer row,
