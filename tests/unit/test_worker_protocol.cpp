@@ -16,8 +16,10 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -662,6 +664,341 @@ void overwrite_u32(std::vector<std::byte>* bytes, std::size_t offset,
   }
 }
 
+/**
+ * @brief One already-encoded canonical worker payload field.
+ * @throws Nothing for aggregate initialization and value operations.
+ * @note Offsets are derived by `AssignmentWireLayout` parsing rather than
+ * maintained as protocol constants.
+ */
+struct EncodedWorkerField final {
+  /** @brief First byte in the containing payload. */
+  std::size_t offset = 0U;
+  /** @brief Exact fixed or decoded field width. */
+  std::size_t width = 0U;
+};
+
+/**
+ * @brief Length prefix and bytes of one canonical worker string field.
+ * @throws Nothing for aggregate initialization and value operations.
+ */
+struct EncodedWorkerString final {
+  /** @brief Four-byte big-endian length prefix. */
+  EncodedWorkerField length;
+  /** @brief Exact bytes selected by that prefix. */
+  EncodedWorkerField value;
+};
+
+/**
+ * @brief Walks one product-encoded worker payload without interpreting it.
+ *
+ * The cursor consumes fixed-width integers and length-prefixed strings in
+ * canonical field order. It exposes exact slices only to deterministic tests;
+ * production decoding and validation remain owned by `worker_protocol.cpp`.
+ *
+ * @throws Nothing for construction; member operations throw on malformed test
+ * fixture bytes.
+ * @note The cursor borrows one immutable payload and performs no socket,
+ * descriptor, artifact, process, or authority operation.
+ */
+class CanonicalWorkerPayloadCursor final {
+ public:
+  /**
+   * @brief Borrows one canonical product payload.
+   * @param payload Exact immutable bytes retained by the calling test.
+   * @throws Nothing.
+   */
+  explicit CanonicalWorkerPayloadCursor(
+      const std::vector<std::byte>& payload) noexcept
+      : payload_(payload) {}
+
+  /**
+   * @brief Consumes one exact encoded field.
+   * @param width Required byte width, including zero for an empty string.
+   * @return Slice describing the consumed field.
+   * @throws std::out_of_range when the canonical fixture is truncated.
+   */
+  EncodedWorkerField take(std::size_t width) {
+    if (width > payload_.size() - offset_) {
+      throw std::out_of_range("canonical worker fixture is truncated");
+    }
+    const EncodedWorkerField field{offset_, width};
+    offset_ += width;
+    return field;
+  }
+
+  /**
+   * @brief Reads one consumed field as an unsigned big-endian integer.
+   * @param field Existing one- through eight-byte slice from this payload.
+   * @return Exact integer value.
+   * @throws std::invalid_argument for an unsupported width.
+   * @throws std::out_of_range when the slice is not inside this payload.
+   */
+  std::uint64_t unsigned_value(const EncodedWorkerField& field) const {
+    if (field.width == 0U || field.width > sizeof(std::uint64_t) ||
+        field.offset > payload_.size() ||
+        field.width > payload_.size() - field.offset) {
+      throw std::invalid_argument("canonical worker integer field is invalid");
+    }
+    std::uint64_t value = 0U;
+    for (std::size_t index = 0U; index < field.width; ++index) {
+      value = (value << 8U) |
+              std::to_integer<std::uint8_t>(payload_[field.offset + index]);
+    }
+    return value;
+  }
+
+  /**
+   * @brief Consumes one canonical length-prefixed string.
+   * @return Four-byte length field and the exact following value bytes.
+   * @throws std::out_of_range for truncated fixture bytes.
+   * @throws std::invalid_argument when the prefix cannot be interpreted.
+   */
+  EncodedWorkerString take_string() {
+    const EncodedWorkerField length = take(sizeof(std::uint32_t));
+    const std::size_t value_width =
+        static_cast<std::size_t>(unsigned_value(length));
+    return EncodedWorkerString{length, take(value_width)};
+  }
+
+  /**
+   * @brief Consumes and returns one closed boolean byte.
+   * @return Canonical zero or one value.
+   * @throws std::logic_error when the product encoder emitted another value.
+   * @throws std::out_of_range for truncated fixture bytes.
+   */
+  bool take_bool() {
+    const std::uint64_t value = unsigned_value(take(1U));
+    if (value > 1U) {
+      throw std::logic_error("canonical worker boolean is invalid");
+    }
+    return value != 0U;
+  }
+
+  /**
+   * @brief Requires complete semantic consumption of the canonical payload.
+   * @return Nothing when no encoded field remains.
+   * @throws std::logic_error when the test layout omitted a product field.
+   */
+  void finish() const {
+    if (offset_ != payload_.size()) {
+      throw std::logic_error("canonical worker layout has trailing bytes");
+    }
+  }
+
+ private:
+  /** @brief Borrowed immutable canonical payload. */
+  const std::vector<std::byte>& payload_;
+  /** @brief First byte not yet consumed by semantic traversal. */
+  std::size_t offset_ = 0U;
+};
+
+/**
+ * @brief Wire slices retained while one AttemptIdentity is consumed.
+ * @throws Nothing for aggregate initialization and value operations.
+ */
+struct EncodedAttemptIdentityFields final {
+  /** @brief Fixed-width JobSpec digest inside the identity tuple. */
+  EncodedWorkerField job_spec_digest;
+  /** @brief Fixed-width worker lease generation. */
+  EncodedWorkerField worker_lease_generation;
+};
+
+/**
+ * @brief Consumes one canonical AttemptIdentity in production field order.
+ * @param cursor Non-null cursor positioned at an identity boundary.
+ * @return Slices needed by identity and digest mutation regressions.
+ * @throws std::invalid_argument when `cursor` is null.
+ * @throws Fixture traversal failures unchanged.
+ */
+EncodedAttemptIdentityFields take_attempt_identity_fields(
+    CanonicalWorkerPayloadCursor* cursor) {
+  if (cursor == nullptr) {
+    throw std::invalid_argument("canonical identity cursor is null");
+  }
+  static_cast<void>(cursor->take_string());
+  static_cast<void>(cursor->take_string());
+  const EncodedWorkerField digest = cursor->take(JobSpecDigest{}.bytes.size());
+  static_cast<void>(cursor->take_string());
+  static_cast<void>(cursor->take_string());
+  const EncodedWorkerField lease = cursor->take(sizeof(std::uint64_t));
+  return EncodedAttemptIdentityFields{digest, lease};
+}
+
+/**
+ * @brief Semantic slices in one canonical Assignment payload.
+ * @throws Nothing for aggregate initialization and value operations.
+ * @note Optional receipt fields exist only when both JobSpec and data-plane
+ * metadata declare a checkpoint.
+ */
+struct AssignmentWireLayout final {
+  /** @brief Assignment AttemptIdentity JobSpec digest bytes. */
+  EncodedWorkerField attempt_job_spec_digest;
+  /** @brief Assignment AttemptIdentity worker lease generation. */
+  EncodedWorkerField attempt_worker_lease_generation;
+  /** @brief Closed JobSpec execution-profile enum. */
+  EncodedWorkerField execution_profile;
+  /** @brief Configured-device count preceding the device sequence. */
+  EncodedWorkerField device_count;
+  /** @brief Output-stage reference bytes used by the data-plane join. */
+  EncodedWorkerString output_reference;
+  /** @brief Checkpoint receipt ArtifactId bytes when present. */
+  std::optional<EncodedWorkerString> checkpoint_receipt_artifact_id;
+  /** @brief Checkpoint receipt descriptor width when present. */
+  std::optional<EncodedWorkerField> checkpoint_descriptor_width;
+  /** @brief Checkpoint receipt durability enum when present. */
+  std::optional<EncodedWorkerField> checkpoint_receipt_durability;
+  /** @brief Length prefix for the first transported graph text field. */
+  EncodedWorkerField graph_root_length;
+  /** @brief Final nonzero heartbeat cadence. */
+  EncodedWorkerField heartbeat;
+
+  /**
+   * @brief Derives every retained slice by walking a canonical Assignment.
+   *
+   * @param payload Product encoder output for one Assignment frame.
+   * @return Complete semantic layout after exact payload consumption.
+   * @throws std::logic_error for inconsistent canonical checkpoint flags or
+   * omitted/trailing fields.
+   * @throws Fixture traversal and allocation failures unchanged.
+   * @note No offset is maintained independently of the product field order.
+   */
+  static AssignmentWireLayout parse(const std::vector<std::byte>& payload) {
+    CanonicalWorkerPayloadCursor cursor(payload);
+    AssignmentWireLayout layout;
+    const EncodedAttemptIdentityFields identity =
+        take_attempt_identity_fields(&cursor);
+    layout.attempt_job_spec_digest = identity.job_spec_digest;
+    layout.attempt_worker_lease_generation = identity.worker_lease_generation;
+
+    static_cast<void>(cursor.take_string());
+    static_cast<void>(cursor.take(sizeof(std::uint32_t)));
+    static_cast<void>(cursor.take_string());
+    layout.execution_profile = cursor.take(1U);
+    static_cast<void>(cursor.take(1U));
+    static_cast<void>(cursor.take(sizeof(std::uint32_t)));
+    for (std::size_t index = 0U; index < 4U; ++index) {
+      static_cast<void>(cursor.take(sizeof(std::uint64_t)));
+    }
+    layout.device_count = cursor.take(sizeof(std::uint32_t));
+    const std::size_t device_count =
+        static_cast<std::size_t>(cursor.unsigned_value(layout.device_count));
+    for (std::size_t index = 0U; index < device_count; ++index) {
+      static_cast<void>(cursor.take_string());
+      static_cast<void>(cursor.take(sizeof(std::uint64_t)));
+    }
+    const bool spec_has_checkpoint = cursor.take_bool();
+    if (spec_has_checkpoint) {
+      static_cast<void>(cursor.take_string());
+    }
+
+    const bool data_plane_has_checkpoint = cursor.take_bool();
+    if (spec_has_checkpoint != data_plane_has_checkpoint) {
+      throw std::logic_error(
+          "canonical Assignment checkpoint flags are inconsistent");
+    }
+    if (data_plane_has_checkpoint) {
+      static_cast<void>(cursor.take_string());
+      static_cast<void>(take_attempt_identity_fields(&cursor));
+      static_cast<void>(cursor.take_string());
+      layout.checkpoint_receipt_artifact_id = cursor.take_string();
+      static_cast<void>(cursor.take_string());
+      layout.checkpoint_descriptor_width = cursor.take(sizeof(std::uint32_t));
+      static_cast<void>(cursor.take(sizeof(std::uint32_t)));
+      static_cast<void>(cursor.take(sizeof(std::uint32_t)));
+      static_cast<void>(cursor.take(1U));
+      static_cast<void>(cursor.take(sizeof(std::uint64_t)));
+      static_cast<void>(cursor.take(sizeof(std::uint64_t)));
+      static_cast<void>(cursor.take(ArtifactContentDigest{}.bytes.size()));
+      layout.checkpoint_receipt_durability = cursor.take(1U);
+    }
+    layout.output_reference = cursor.take_string();
+    static_cast<void>(cursor.take_string());
+    static_cast<void>(cursor.take(sizeof(std::uint64_t)));
+
+    static_cast<void>(cursor.take_bool());
+    layout.graph_root_length = cursor.take_string().length;
+    for (std::size_t index = 0U; index < 4U; ++index) {
+      static_cast<void>(cursor.take_string());
+    }
+    layout.heartbeat = cursor.take(sizeof(std::uint32_t));
+    cursor.finish();
+    return layout;
+  }
+};
+
+/**
+ * @brief Overwrites one semantic integer field in big-endian order.
+ * @param payload Non-null canonical payload copy.
+ * @param field Exact one- through eight-byte slice derived from its layout.
+ * @param value Replacement value representable by `field.width` bytes.
+ * @return Nothing after only the selected bytes are replaced.
+ * @throws std::invalid_argument for null, empty, oversized, or out-of-range
+ * field metadata, or a replacement that does not fit.
+ */
+void overwrite_worker_integer(std::vector<std::byte>* payload,
+                              const EncodedWorkerField& field,
+                              std::uint64_t value) {
+  if (payload == nullptr || field.width == 0U ||
+      field.width > sizeof(std::uint64_t) || field.offset > payload->size() ||
+      field.width > payload->size() - field.offset ||
+      (field.width < sizeof(std::uint64_t) &&
+       value >= (std::uint64_t{1U} << (field.width * 8U)))) {
+    throw std::invalid_argument("worker semantic integer mutation is invalid");
+  }
+  for (std::size_t index = 0U; index < field.width; ++index) {
+    const std::size_t shift = (field.width - index - 1U) * 8U;
+    (*payload)[field.offset + index] =
+        static_cast<std::byte>(static_cast<std::uint8_t>(value >> shift));
+  }
+}
+
+/**
+ * @brief Replaces the first byte of one nonempty semantic field.
+ * @param payload Non-null canonical payload copy.
+ * @param field Nonempty in-range slice derived from its semantic layout.
+ * @param value Exact replacement byte.
+ * @return Nothing after one byte is replaced without changing framing.
+ * @throws std::invalid_argument for null, empty, or out-of-range metadata.
+ * @note Tests use valid opaque replacement characters or one digest bit so
+ * earlier length and syntax validation remains satisfied.
+ */
+void replace_first_worker_field_byte(std::vector<std::byte>* payload,
+                                     const EncodedWorkerField& field,
+                                     std::byte value) {
+  if (payload == nullptr || field.width == 0U ||
+      field.offset > payload->size() ||
+      field.width > payload->size() - field.offset) {
+    throw std::invalid_argument("worker semantic byte mutation is invalid");
+  }
+  (*payload)[field.offset] = value;
+}
+
+/**
+ * @brief Requires one direct Assignment semantic rejection and diagnostic.
+ * @param frame Structurally mutated canonical Assignment frame.
+ * @param expected_diagnostic Required semantic rejection substring.
+ * @param mutation_name Human-readable matrix row used by GoogleTest tracing.
+ * @return Nothing after observing `WorkerProtocolError` with the expected
+ * semantic diagnostic.
+ * @throws Test-framework or allocation failures unchanged.
+ */
+void expect_assignment_rejection(const WorkerProtocolFrame& frame,
+                                 std::string_view expected_diagnostic,
+                                 std::string_view mutation_name) {
+  SCOPED_TRACE(std::string(mutation_name));
+  try {
+    static_cast<void>(decode_worker_assignment(frame));
+    FAIL() << "semantic Assignment mutation was accepted";
+  } catch (const WorkerProtocolError& error) {
+    EXPECT_NE(std::string_view(error.what()).find(expected_diagnostic),
+              std::string_view::npos)
+        << error.what();
+  } catch (const std::exception& error) {
+    FAIL() << "semantic Assignment mutation raised wrong exception: "
+           << error.what();
+  }
+}
+
 TEST(WorkerProtocol, RoundTripsCompleteAssignmentAndExactLease) {
   ScopedSocketPair sockets;
   auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.protocol"),
@@ -749,6 +1086,136 @@ TEST(WorkerProtocol,
   WorkerProtocolFrame wrong_kind = canonical;
   wrong_kind.kind = WorkerMessageKind::Heartbeat;
   EXPECT_THROW(decode_worker_assignment(wrong_kind), WorkerProtocolError);
+}
+
+/**
+ * @brief Locks the structured Assignment semantic rejection matrix.
+ * @return Nothing; GoogleTest reports any accepted mutation, wrong exception,
+ * or diagnostic that proves a different earlier field rejected the payload.
+ * @throws Fixture construction, hashing, or allocation failures unchanged.
+ * @note Every row starts from product-canonical bytes, changes one field at a
+ * semantic cursor-derived offset without changing aggregate framing, and then
+ * calls the production pure decoder directly. The checkpoint rows ensure the
+ * receipt and tight-descriptor branches are actually present.
+ */
+TEST(WorkerProtocol, PureAssignmentDecoderRejectsStructuredFieldMutations) {
+  auto spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.semantic-assignment"), 7,
+      OutputSlotId("image.final"), protocol_resources());
+  auto assignment = prepared_assignment_with_data_plane(spec);
+  assignment.first.graph.root_dir = "/trusted/semantic-root";
+  assignment.first.graph.yaml_path = "/trusted/semantic-root/graph.yaml";
+  assignment.first.graph.message = "semantic mutation matrix";
+  const WorkerProtocolFrame canonical =
+      encode_worker_assignment(assignment.first);
+  const AssignmentWireLayout layout =
+      AssignmentWireLayout::parse(canonical.payload);
+
+  WorkerProtocolFrame invalid_profile = canonical;
+  overwrite_worker_integer(&invalid_profile.payload, layout.execution_profile,
+                           0xffU);
+  expect_assignment_rejection(invalid_profile,
+                              "worker JobSpec profile is invalid",
+                              "closed JobSpec execution-profile enum");
+
+  WorkerProtocolFrame excessive_device_count = canonical;
+  overwrite_worker_integer(
+      &excessive_device_count.payload, layout.device_count,
+      static_cast<std::uint64_t>(kMaximumConfiguredDevicesPerJob + 1U));
+  expect_assignment_rejection(
+      excessive_device_count, "worker JobSpec device count exceeds its bound",
+      "configured-device count bound before sequence allocation");
+
+  WorkerProtocolFrame oversized_graph_length = canonical;
+  overwrite_worker_integer(
+      &oversized_graph_length.payload, layout.graph_root_length,
+      static_cast<std::uint64_t>(kMaximumWorkerTextFieldBytes + 1U));
+  expect_assignment_rejection(oversized_graph_length,
+                              "worker protocol string exceeds its bound",
+                              "transported graph string length prefix");
+
+  WorkerProtocolFrame incomplete_attempt = canonical;
+  overwrite_worker_integer(&incomplete_attempt.payload,
+                           layout.attempt_worker_lease_generation, 0U);
+  expect_assignment_rejection(incomplete_attempt,
+                              "attempt identity tuple is incomplete",
+                              "AttemptIdentity lease generation");
+
+  WorkerProtocolFrame mismatched_job_spec_digest = canonical;
+  const std::byte changed_digest =
+      mismatched_job_spec_digest
+          .payload[layout.attempt_job_spec_digest.offset] ^
+      std::byte{0x01};
+  replace_first_worker_field_byte(&mismatched_job_spec_digest.payload,
+                                  layout.attempt_job_spec_digest,
+                                  changed_digest);
+  expect_assignment_rejection(
+      mismatched_job_spec_digest,
+      "worker assignment JobSpec digest does not join identity",
+      "AttemptIdentity to canonical JobSpec digest join");
+
+  WorkerProtocolFrame mismatched_output_reference = canonical;
+  replace_first_worker_field_byte(&mismatched_output_reference.payload,
+                                  layout.output_reference.value,
+                                  std::byte{'x'});
+  expect_assignment_rejection(
+      mismatched_output_reference,
+      "worker output-stage metadata is inconsistent",
+      "data-plane output reference join after complete JobSpec decode");
+
+  WorkerProtocolFrame zero_heartbeat = canonical;
+  overwrite_worker_integer(&zero_heartbeat.payload, layout.heartbeat, 0U);
+  expect_assignment_rejection(zero_heartbeat,
+                              "worker heartbeat cadence is zero",
+                              "final heartbeat cadence");
+
+  const ArtifactId checkpoint_id("artifact.protocol.semantic-checkpoint");
+  auto checkpoint_spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.protocol.semantic-checkpoint"), 7,
+      OutputSlotId("image.final"), protocol_resources(), checkpoint_id);
+  auto checkpoint_assignment = prepared_assignment_with_data_plane(
+      checkpoint_spec,
+      std::make_shared<const ArtifactRecord>(
+          maximum_assignment_checkpoint(*checkpoint_spec, 32U)));
+  checkpoint_assignment.first.graph.root_dir = "/trusted/checkpoint-root";
+  checkpoint_assignment.first.graph.yaml_path =
+      "/trusted/checkpoint-root/graph.yaml";
+  const WorkerProtocolFrame checkpoint_canonical =
+      encode_worker_assignment(checkpoint_assignment.first);
+  const PreparedWorkerAssignment checkpoint_decoded =
+      decode_worker_assignment(checkpoint_canonical);
+  ASSERT_TRUE(checkpoint_decoded.data_plane.checkpoint.has_value());
+  EXPECT_EQ(encode_worker_assignment_metadata(checkpoint_decoded).payload,
+            checkpoint_canonical.payload);
+  const AssignmentWireLayout checkpoint_layout =
+      AssignmentWireLayout::parse(checkpoint_canonical.payload);
+  ASSERT_TRUE(checkpoint_layout.checkpoint_receipt_artifact_id.has_value());
+  ASSERT_TRUE(checkpoint_layout.checkpoint_descriptor_width.has_value());
+  ASSERT_TRUE(checkpoint_layout.checkpoint_receipt_durability.has_value());
+
+  WorkerProtocolFrame mismatched_receipt = checkpoint_canonical;
+  replace_first_worker_field_byte(
+      &mismatched_receipt.payload,
+      checkpoint_layout.checkpoint_receipt_artifact_id->value, std::byte{'z'});
+  expect_assignment_rejection(
+      mismatched_receipt,
+      "worker checkpoint data-plane metadata is inconsistent",
+      "checkpoint receipt ArtifactId join");
+
+  WorkerProtocolFrame inconsistent_checkpoint_descriptor = checkpoint_canonical;
+  overwrite_worker_integer(&inconsistent_checkpoint_descriptor.payload,
+                           *checkpoint_layout.checkpoint_descriptor_width, 31U);
+  expect_assignment_rejection(inconsistent_checkpoint_descriptor,
+                              "worker artifact descriptor is inconsistent",
+                              "checkpoint receipt tight descriptor width");
+
+  WorkerProtocolFrame invalid_receipt_durability = checkpoint_canonical;
+  overwrite_worker_integer(&invalid_receipt_durability.payload,
+                           *checkpoint_layout.checkpoint_receipt_durability,
+                           0xffU);
+  expect_assignment_rejection(invalid_receipt_durability,
+                              "worker artifact durability is invalid",
+                              "checkpoint receipt durability enum");
 }
 
 TEST(WorkerProtocol, ExpiredBufferedAssignmentIsNotSemanticallyAccepted) {

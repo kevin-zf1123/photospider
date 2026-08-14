@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,17 +27,26 @@ namespace {
 /**
  * @brief Complete canonical metadata retained by the worker codec harness.
  * @throws Nothing after member construction; factories may allocate or throw.
- * @note The assignment declares no checkpoint, so it owns no artifact bytes.
+ * @note Only `report_assignment` is retained after construction. Every frame
+ * is metadata-only; the checkpoint seed's one-byte local fixture is consumed
+ * solely by pure metadata derivation, then discarded before canonical
+ * encoding; it is never transferred or opened.
  */
 struct WorkerCodecSeedCorpus final {
-  /** @brief Valid no-checkpoint Assignment used for retained codec joins. */
-  PreparedWorkerAssignment assignment;
+  /** @brief Valid no-checkpoint Assignment retained for Report joins. */
+  PreparedWorkerAssignment report_assignment;
 
-  /** @brief Canonical encoded Assignment metadata frame. */
-  WorkerProtocolFrame assignment_frame;
+  /** @brief Canonical Assignment without checkpoint metadata. */
+  WorkerProtocolFrame assignment_without_checkpoint_frame;
 
-  /** @brief Canonical metadata-only failed Report frame. */
-  WorkerProtocolFrame report_frame;
+  /** @brief Canonical Assignment with checkpoint receipt and descriptor. */
+  WorkerProtocolFrame assignment_with_checkpoint_frame;
+
+  /** @brief Canonical failed Report without output metadata. */
+  WorkerProtocolFrame failed_report_frame;
+
+  /** @brief Canonical successful Report with tight output metadata. */
+  WorkerProtocolFrame successful_report_frame;
 };
 
 /**
@@ -72,40 +82,150 @@ AttemptIdentity make_seed_identity(const JobSpec& spec) {
 }
 
 /**
- * @brief Builds canonical Assignment and Report seeds without I/O authority.
+ * @brief Builds one complete canonical Assignment seed value.
+ * @param spec Non-null immutable JobSpec retained by the Assignment.
+ * @param checkpoint Optional local checkpoint fixture used only to derive and
+ * validate metadata through the production pure helper and encoder.
+ * @return Complete valid Assignment ready for canonical encoding.
+ * @throws std::invalid_argument for a null JobSpec.
+ * @throws Worker protocol, Job contract, hashing, or allocation failures
+ * unchanged.
+ * @note The helper opens no descriptor, performs no artifact I/O, launches no
+ * process, acquires no lease, and selects no current attempt.
+ */
+PreparedWorkerAssignment make_seed_assignment(
+    std::shared_ptr<const JobSpec> spec,
+    std::shared_ptr<const ArtifactRecord> checkpoint = nullptr) {
+  if (spec == nullptr) {
+    throw std::invalid_argument("worker fuzz seed JobSpec is null");
+  }
+  PreparedWorkerAssignment assignment;
+  assignment.assignment.identity = make_seed_identity(*spec);
+  assignment.assignment.spec = std::move(spec);
+  assignment.assignment.checkpoint = std::move(checkpoint);
+  assignment.data_plane =
+      make_worker_data_plane_assignment(assignment.assignment);
+  assignment.graph.ok = true;
+  assignment.graph.root_dir = "/fuzz/root";
+  assignment.graph.yaml_path = "/fuzz/root/graph.yaml";
+  assignment.graph.config_path = "/fuzz/root/config.yaml";
+  assignment.graph.cache_root_dir = "/fuzz/cache";
+  assignment.graph.message = "canonical fuzz seed";
+  assignment.heartbeat_interval = std::chrono::milliseconds(100);
+  return assignment;
+}
+
+/**
+ * @brief Builds one bounded checkpoint fixture for canonical metadata only.
+ * @param spec JobSpec that declares the exact checkpoint ArtifactId.
+ * @param identity Complete assignment identity whose tenant owns the receipt.
+ * @return One-byte digest-consistent crash-durable artifact record.
+ * @throws std::invalid_argument when the JobSpec declares no checkpoint.
+ * @throws Contract, hashing, or allocation failures unchanged.
+ * @note The returned byte never enters a fuzz frame or data-plane operation;
+ * it lets the pure product helper derive receipt-size metadata, after which
+ * the caller discards the local fixture before canonical metadata encoding.
+ */
+ArtifactRecord make_seed_checkpoint(const JobSpec& spec,
+                                    const AttemptIdentity& identity) {
+  if (!spec.checkpoint_artifact_id().has_value()) {
+    throw std::invalid_argument(
+        "worker fuzz checkpoint seed has no declared ArtifactId");
+  }
+  ArtifactRecord checkpoint;
+  checkpoint.payload.push_back(std::byte{0x5a});
+  checkpoint.receipt.attempt = identity;
+  checkpoint.receipt.output_slot_id = OutputSlotId("checkpoint.input");
+  checkpoint.receipt.artifact_id = *spec.checkpoint_artifact_id();
+  checkpoint.receipt.output_commit_id =
+      OutputCommitId("commit.fuzz.checkpoint");
+  checkpoint.receipt.descriptor.width = 1;
+  checkpoint.receipt.descriptor.height = 1;
+  checkpoint.receipt.descriptor.channels = 1;
+  checkpoint.receipt.descriptor.type = DataType::UINT8;
+  checkpoint.receipt.descriptor.row_bytes = 1U;
+  checkpoint.receipt.descriptor.payload_bytes = 1U;
+  checkpoint.receipt.content_digest = hash_artifact_content(
+      checkpoint.payload.data(), checkpoint.payload.size());
+  checkpoint.receipt.achieved_durability = ArtifactDurability::CrashDurable;
+  return checkpoint;
+}
+
+/**
+ * @brief Builds one canonical successful Report output reference.
+ * @param assignment Valid retained no-checkpoint Assignment and output stage.
+ * @return Exact stage join, one-pixel tight descriptor, and content digest.
+ * @throws Contract or hashing failures unchanged.
+ * @note The fixed byte is hashed on the stack only; no artifact is opened,
+ * transferred, published, or retained by the seed corpus.
+ */
+WorkerOutputDataReference make_successful_seed_output(
+    const PreparedWorkerAssignment& assignment) {
+  const std::byte output_byte{0xa5};
+  WorkerOutputDataReference output;
+  output.reference_id = assignment.data_plane.output.reference_id;
+  output.output_slot_id = assignment.data_plane.output.output_slot_id;
+  output.descriptor.width = 1;
+  output.descriptor.height = 1;
+  output.descriptor.channels = 1;
+  output.descriptor.type = DataType::UINT8;
+  output.descriptor.row_bytes = 1U;
+  output.descriptor.payload_bytes = 1U;
+  output.content_digest = hash_artifact_content(&output_byte, 1U);
+  return output;
+}
+
+/**
+ * @brief Builds four canonical Assignment and Report metadata seed shapes.
  * @return Complete immutable seed corpus for both worker semantic codecs.
  * @throws Worker protocol, Job contract, hashing, or allocation failures
  * unchanged when the maintained seed ceases to satisfy product contracts.
- * @note Data-plane metadata is derived through the production pure helper;
- * no `WorkerArtifactDataPlane` is constructed.
+ * @note Data-plane metadata is derived through the production pure helper and
+ * frames use production encoders. No `WorkerArtifactDataPlane`, descriptor,
+ * process, lease, current-attempt selection, or publication authority exists.
  */
 WorkerCodecSeedCorpus make_seed_corpus() {
   WorkerCodecSeedCorpus corpus;
-  auto spec = std::make_shared<const JobSpec>(GraphArtifactId("graph.fuzz"), 1,
-                                              OutputSlotId("image.final"),
-                                              make_seed_resources());
-  corpus.assignment.assignment.identity = make_seed_identity(*spec);
-  corpus.assignment.assignment.spec = std::move(spec);
-  corpus.assignment.data_plane =
-      make_worker_data_plane_assignment(corpus.assignment.assignment);
-  corpus.assignment.graph.ok = true;
-  corpus.assignment.graph.root_dir = "/fuzz/root";
-  corpus.assignment.graph.yaml_path = "/fuzz/root/graph.yaml";
-  corpus.assignment.graph.config_path = "/fuzz/root/config.yaml";
-  corpus.assignment.graph.cache_root_dir = "/fuzz/cache";
-  corpus.assignment.graph.message = "canonical fuzz seed";
-  corpus.assignment.heartbeat_interval = std::chrono::milliseconds(100);
-  corpus.assignment_frame = encode_worker_assignment(corpus.assignment);
+  auto report_spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.fuzz"), 1, OutputSlotId("image.final"),
+      make_seed_resources());
+  corpus.report_assignment = make_seed_assignment(std::move(report_spec));
+  corpus.assignment_without_checkpoint_frame =
+      encode_worker_assignment_metadata(corpus.report_assignment);
 
-  PreparedWorkerReport report;
-  report.report.identity = corpus.assignment.assignment.identity;
-  report.report.outcome = JobAttemptOutcome::Failed;
-  report.report.settled = true;
-  report.report.failure = JobAttemptFailure::Compute;
-  report.report.message = "canonical fuzz seed failure";
-  corpus.report_frame =
-      encode_worker_report(report, *corpus.assignment.assignment.spec,
-                           corpus.assignment.data_plane.output);
+  auto checkpoint_spec = std::make_shared<const JobSpec>(
+      GraphArtifactId("graph.fuzz.checkpoint"), 1, OutputSlotId("image.final"),
+      make_seed_resources(), ArtifactId("artifact.fuzz.checkpoint"));
+  auto checkpoint = std::make_shared<const ArtifactRecord>(make_seed_checkpoint(
+      *checkpoint_spec, make_seed_identity(*checkpoint_spec)));
+  PreparedWorkerAssignment checkpoint_assignment =
+      make_seed_assignment(std::move(checkpoint_spec), std::move(checkpoint));
+  checkpoint_assignment.assignment.checkpoint.reset();
+  corpus.assignment_with_checkpoint_frame =
+      encode_worker_assignment_metadata(checkpoint_assignment);
+
+  PreparedWorkerReport failed_report;
+  failed_report.report.identity = corpus.report_assignment.assignment.identity;
+  failed_report.report.outcome = JobAttemptOutcome::Failed;
+  failed_report.report.settled = true;
+  failed_report.report.failure = JobAttemptFailure::Compute;
+  failed_report.report.message = "canonical fuzz seed failure";
+  corpus.failed_report_frame = encode_worker_report(
+      failed_report, *corpus.report_assignment.assignment.spec,
+      corpus.report_assignment.data_plane.output);
+
+  PreparedWorkerReport successful_report;
+  successful_report.report.identity =
+      corpus.report_assignment.assignment.identity;
+  successful_report.report.outcome = JobAttemptOutcome::Succeeded;
+  successful_report.report.settled = true;
+  successful_report.report.failure = JobAttemptFailure::None;
+  successful_report.report.message = "canonical fuzz seed success";
+  successful_report.output =
+      make_successful_seed_output(corpus.report_assignment);
+  corpus.successful_report_frame = encode_worker_report(
+      successful_report, *corpus.report_assignment.assignment.spec,
+      corpus.report_assignment.data_plane.output);
   return corpus;
 }
 
@@ -201,11 +321,30 @@ void exercise_assignment(const WorkerProtocolFrame& frame) {
 void exercise_report(const WorkerProtocolFrame& frame,
                      const WorkerCodecSeedCorpus& corpus) {
   const PreparedWorkerReport decoded =
-      decode_worker_report(frame, *corpus.assignment.assignment.spec,
-                           corpus.assignment.data_plane.output);
+      decode_worker_report(frame, *corpus.report_assignment.assignment.spec,
+                           corpus.report_assignment.data_plane.output);
   require_canonical_frame(
-      frame, encode_worker_report(decoded, *corpus.assignment.assignment.spec,
-                                  corpus.assignment.data_plane.output));
+      frame,
+      encode_worker_report(decoded, *corpus.report_assignment.assignment.spec,
+                           corpus.report_assignment.data_plane.output));
+}
+
+/**
+ * @brief Chooses the frame kind supplied to one product semantic decoder.
+ * @param assignment_decoder True for Assignment, false for Report.
+ * @param wrong_kind Whether to deliberately select the other valid frame kind.
+ * @return Correct Assignment/Report kind or the closed wrong-kind counterpart.
+ * @throws Nothing.
+ * @note A closed wrong kind reaches the decoder's semantic kind rejection
+ * without relying on an invalid enum representation or frame transport.
+ */
+WorkerMessageKind select_seed_kind(bool assignment_decoder,
+                                   bool wrong_kind) noexcept {
+  if (assignment_decoder) {
+    return wrong_kind ? WorkerMessageKind::Report
+                      : WorkerMessageKind::Assignment;
+  }
+  return wrong_kind ? WorkerMessageKind::Assignment : WorkerMessageKind::Report;
 }
 
 }  // namespace
@@ -213,8 +352,11 @@ void exercise_report(const WorkerProtocolFrame& frame,
 
 /**
  * @brief Runs one bounded worker metadata codec fuzz iteration.
- * @param data Arbitrary libFuzzer bytes; the first byte selects raw Assignment,
- * canonical Assignment mutation, raw Report, or canonical Report mutation.
+ * @param data Arbitrary libFuzzer bytes. In the first byte, bits 0-1 select raw
+ * Assignment, canonical Assignment mutation, raw Report, or canonical Report
+ * mutation; bit 2 selects checkpoint Assignment or successful-output Report
+ * instead of their alternate canonical shape; bit 3 selects a closed wrong
+ * frame kind. Remaining bytes are raw or XOR mutation material.
  * @param size Exact input size.
  * @return Zero after a successful canonical decode or closed protocol reject.
  * @throws Unexpected allocation, contract, or codec exceptions unchanged so
@@ -230,8 +372,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
   using ps::server::kMaximumWorkerControlPayloadBytes;
   using ps::server::mutate_payload;
   using ps::server::seed_corpus;
+  using ps::server::select_seed_kind;
   using ps::server::WorkerCodecSeedCorpus;
-  using ps::server::WorkerMessageKind;
   using ps::server::WorkerProtocolError;
   using ps::server::WorkerProtocolFrame;
   if (size == 0U || data == nullptr ||
@@ -239,29 +381,40 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     return 0;
   }
   const WorkerCodecSeedCorpus& corpus = seed_corpus();
-  const std::uint8_t mode = data[0] & 0x03U;
+  /** @brief Low selector bits choosing raw or seeded decoder operation. */
+  constexpr std::uint8_t kOperationMask = 0x03U;
+  /** @brief Selects checkpoint Assignment or successful Report seed shape. */
+  constexpr std::uint8_t kAlternateShapeBit = 0x04U;
+  /** @brief Selects one valid but semantically wrong frame kind. */
+  constexpr std::uint8_t kWrongKindBit = 0x08U;
+  const std::uint8_t mode = data[0] & kOperationMask;
+  const bool alternate_shape = (data[0] & kAlternateShapeBit) != 0U;
+  const bool assignment_decoder = mode < 2U;
+  const bool wrong_kind = (data[0] & kWrongKindBit) != 0U;
+  const auto kind = select_seed_kind(assignment_decoder, wrong_kind);
   const std::uint8_t* payload_data = data + 1U;
   const std::size_t payload_size = size - 1U;
   try {
     if (mode == 0U) {
       exercise_assignment(
-          WorkerProtocolFrame{WorkerMessageKind::Assignment,
-                              copy_payload(payload_data, payload_size)});
+          WorkerProtocolFrame{kind, copy_payload(payload_data, payload_size)});
     } else if (mode == 1U) {
-      exercise_assignment(
-          WorkerProtocolFrame{WorkerMessageKind::Assignment,
-                              mutate_payload(corpus.assignment_frame.payload,
-                                             payload_data, payload_size)});
+      const WorkerProtocolFrame& seed =
+          alternate_shape ? corpus.assignment_with_checkpoint_frame
+                          : corpus.assignment_without_checkpoint_frame;
+      exercise_assignment(WorkerProtocolFrame{
+          kind, mutate_payload(seed.payload, payload_data, payload_size)});
     } else if (mode == 2U) {
       exercise_report(
-          WorkerProtocolFrame{WorkerMessageKind::Report,
-                              copy_payload(payload_data, payload_size)},
+          WorkerProtocolFrame{kind, copy_payload(payload_data, payload_size)},
           corpus);
     } else {
+      const WorkerProtocolFrame& seed = alternate_shape
+                                            ? corpus.successful_report_frame
+                                            : corpus.failed_report_frame;
       exercise_report(
-          WorkerProtocolFrame{WorkerMessageKind::Report,
-                              mutate_payload(corpus.report_frame.payload,
-                                             payload_data, payload_size)},
+          WorkerProtocolFrame{
+              kind, mutate_payload(seed.payload, payload_data, payload_size)},
           corpus);
     }
   } catch (const WorkerProtocolError&) {
