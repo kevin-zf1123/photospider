@@ -560,7 +560,11 @@ Issue #125 在不改变该 grid 或任何 verdict threshold 的前提下，闭�
 finalization boundary。每个 episode 都会在其不可变 1.5 秒终点之前 100 ms 派生一个排他的
 absolute capture deadline。Collector 会把同一个 time point 原样贯穿 `I2Host`、embedded Host
 与 `ExecutionService`；在新 digest、direct Host acquisition、residency lookup/reuse 或 Metal
-submission 之前，`now >= deadline` 都会失败。Miss 时，source-private invocation 会把同一个
+submission 之前，`now >= deadline` 都会失败。每次 Host ReadLease 关闭后都会 fresh sample，
+第二条 record 在该 sample 严格早于 deadline 前保持为局部值。Host-only 最终 I/O snapshot 完成后，
+或 conditional Metal evidence 与精确 resident cleanup 完成后，Host 会再次采样。Collector 同样把
+完整 Host return 保持为局部，直到紧接调用后的 sample 通过；tie 或更晚的 sample 不提交
+acquisition、不释放 Pending Value，也不建立替代 deadline。Miss 时，source-private invocation 会把同一个
 absolute point 贯穿 serialized executor admission、upload planning/allocation/encoding、不超过
 64 KiB 的 host-copy chunk，以及 native command-buffer commit 前立即执行的最后一次语义检查。
 Exact tie 会 fail closed。Commit 前到期时不执行 native commit，RAII retirement 也不会留下

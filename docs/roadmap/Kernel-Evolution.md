@@ -1436,8 +1436,12 @@ post-poll sample remains strictly before the deadline, while an exact or later
 sample follows the same containment. The resident-hit path brackets its single
 reuse poll with the same samples; a late Direct candidate produces no evidence
 or new executor work and leaves the pre-existing row-owned resident untouched
-for exact cleanup. The runner gains no cancellation, device, or public API
-authority.
+for exact cleanup. Direct Host reads and the complete Host snapshot are likewise
+accepted only after fresh samples strictly before the unchanged deadline. The
+collector holds a Host return locally until its own post-call sample passes, so
+a tie or later Host-only result freezes no evidence and leaves the Pending Value
+for explicit unfrozen release. The runner gains no cancellation, device, or
+public API authority.
 
 ## Server and Plugin Isolation
 

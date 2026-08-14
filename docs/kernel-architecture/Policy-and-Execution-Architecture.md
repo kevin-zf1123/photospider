@@ -702,7 +702,13 @@ changing that grid or any verdict threshold. Each episode derives one exclusive
 absolute capture deadline 100 ms before its immutable 1.5-second end. The
 collector passes that same time point unchanged through `I2Host` and embedded
 Host into `ExecutionService`; `now >= deadline` loses before a new digest,
-direct Host acquisition, residency lookup/reuse, or Metal submission. On a
+direct Host acquisition, residency lookup/reuse, or Metal submission. Each Host
+ReadLease closes before a fresh sample, and the second record remains local until
+that sample is strictly earlier. The Host samples again after the final Host-only
+I/O snapshot or after conditional Metal evidence and exact resident cleanup. The
+collector likewise holds the complete Host return locally until an immediate
+post-call sample passes; a tie or later sample commits no acquisition, releases
+no Pending Value, and creates no replacement deadline. On a
 miss, the source-private invocation carries that same absolute point through
 serialized executor admission, upload planning/allocation/encoding, host-copy
 chunks no larger than 64 KiB, and the last semantic check immediately before

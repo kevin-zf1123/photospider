@@ -1984,6 +1984,14 @@ final row snapshot. A wrong identity releases nothing; no broad clear,
 capacity-pressure substitute, or ordinary residency-policy change is
 permitted. Once local acquisition Values unwind, every configured device's
 complete memory-and-scratch `reserved` vector must equal its pre-row baseline.
+The same exclusive absolute capture deadline governs the Host-only shape. A
+fresh sample after each direct Host ReadLease and after the final I/O snapshot
+must remain strictly earlier than that unchanged point. Conditional Metal also
+takes a final sample after evidence snapshots and exact resident cleanup. The
+collector holds the complete Host return locally until its own immediate
+post-call sample passes, so a tie or later return stores no acquisition, does not
+freeze or release the Pending Value, and remains eligible only for explicit
+unfrozen cleanup. No layer refreshes the deadline or retains a late authority.
 
 I2 uses the ADR 0010 target state machine, not an invented current API: one
 replicate-grid origin fixes a continuous 111-slot cold/warmup/measured grid,
@@ -2074,8 +2082,11 @@ retry suppression. The workflow accepts only the next slot, requires storage
 reserved for all 111 rows, and owns at most one future.
 
 `test_i2_profile` rejects an expired or exact-tie capture deadline before Host
-acquisition and proves a timeout cannot change any later 1.5-second origin or
-the stride-111 terminal. `test_device_residency` uses real `ReadyFence` and
+acquisition, injects a deterministic collector clock that reaches the deadline
+exactly as a synthetic Host returns complete evidence, and proves that the late
+local result is not stored while the Value remains Pending until explicit
+unfrozen release. It also proves a timeout cannot change any later 1.5-second
+origin or the stride-111 terminal. `test_device_residency` uses real `ReadyFence` and
 `ResidencyManager` state to cover Ready strictly before the deadline, exclusive
 pre-poll tie rejection, deterministic post-poll deadline crossing for Ready,
 Failed, and ProducerCancelled without wall-clock sleep, exact pending-admission
@@ -2092,11 +2103,17 @@ upload-preparation, bounded-copy, and final pre-commit monotonic ties. They
 require no callback entry after admission timeout, no native commit, no
 published destination/resident, exact pending-admission retirement, zero live
 native allocations, and a zero device-ledger reservation after unwind.
-`test_i2_product_path` retains the conditional real-product check that a
+`test_i2_product_path` uses a source-private hook to force the real EmbeddedHost
+through Metal N/A. One case keeps every sample at `D-1ns` and requires complete
+two-read Host-only evidence; another advances the same injected clock exactly
+after the Host-only final I/O snapshot and requires the tie to return no
+evidence, retain the caller Value, and leave Host/device reservations unchanged.
+It also retains the conditional real-product check that a
 deadline-bounded first Metal upload is followed by Direct zero-transfer reuse
 of the same revision, binding, allocation, and producer, then exact row-scoped
 release. These tests create no native-cancellation claim and do not register the
-manual runner or result orchestration with CTest/CI.
+manual runner or result orchestration with CTest/CI. The hook and its compile
+definition exist only in the non-installed internal test product.
 
 Required logical values call `compute_content_digest(Value)` and require
 `Available`, a present `ContentDigest`, and

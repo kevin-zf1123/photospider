@@ -459,7 +459,12 @@ transfer，第二次必须复用同一个
 device-local residency，且 transfer 与 allocation 都为零。禁止 Metal-to-Host
 transfer、filesystem/codec I/O，以及上述两个条件式首次 access 之外的任何 transfer。
 没有 Metal 时，只有 device-specific 组件属于预定义 `not-applicable`；Host reuse
-与 no-I/O 门禁仍然适用。同一个排他 capture deadline 会以 fresh monotonic sample 包围 resident
+与 no-I/O 门禁仍然适用。每次 direct Host ReadLease 关闭后都会立即取得 fresh monotonic sample；
+只有该 sample 严格早于未改变的排他 capture deadline 时，才接受其 evidence。第二次 access 在该
+门禁通过前保持为局部值。Host-only 最终 I/O snapshot 完成后，Host 会在返回 N/A evidence 前再次
+采样，而 collector 会把返回值保持在局部，直到它自身紧接调用后的 sample 通过。因此 tie 或更晚的
+sample 不会冻结 acquisition，Value 会保持 Pending 直到显式 unfrozen release。同一个排他 capture
+deadline 会以 fresh monotonic sample 包围 resident
 lookup 的单次 fence poll。只有 post-poll sample 严格早于 deadline 时才接受第二次 reuse；sample
 等于或晚于 deadline 时不产生 evidence 或新 native work，也不释放既有 row-owned resident。当
 coordinator-managed lineage 仍存活时，已经 Ready 的
@@ -468,7 +473,8 @@ immutable Value 可以在较新 generation 成为 current 后被获取。该 ver
 fence identity；普通 current Run submission 仍按精确 generation 拒绝 stale completion。
 复制第二次 access 及其 diagnostic、resource 与 no-I/O fact 后，
 Host 必须在最终 row snapshot 前，通过精确的 `revision + 完整 StorageBinding + producer`
-identity，只移除该 row 的 resident。错误 identity 不产生任何效果。该 verification-only
+identity，只移除该 row 的 resident，然后在返回闭合 acquisition 前取得一次最终 fresh sample。
+错误 identity 不产生任何效果。该 verification-only
 release 既不 broad clear cache，也不改变普通 lookup、publication、replacement、capacity 或
 eviction 语义。Acquisition-local Value 析构后，完整 memory-and-scratch device `reserved`
 vector 等于 row 前 baseline。第十二次 edit（`edit_index=11`）的 final logical digest

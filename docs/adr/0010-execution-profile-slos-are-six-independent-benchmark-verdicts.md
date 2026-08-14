@@ -533,7 +533,14 @@ the second must reuse the same device-local residency with zero transfer or
 allocation. Metal-to-Host transfer, filesystem/codec I/O, and any transfer
 beyond those two conditional first accesses are forbidden. Without Metal only
 the device-specific component is predefined `not-applicable`; the Host reuse
-and no-I/O gates still apply. The same exclusive capture deadline brackets the
+and no-I/O gates still apply. Each direct Host ReadLease closes before a fresh
+monotonic sample; its evidence is accepted only when that sample is strictly
+earlier than the unchanged exclusive capture deadline. The second access stays
+local until that gate passes. After the Host-only final I/O snapshot, the Host
+samples again before returning N/A evidence, and the collector keeps the return
+local until its own immediate post-call sample passes. A tie or later sample
+therefore freezes no acquisition and leaves the Value Pending until explicit
+unfrozen release. The same exclusive capture deadline brackets the
 resident lookup's single fence poll with fresh monotonic samples. The second
 reuse is accepted only when the post-poll sample is strictly earlier; a tie or
 later sample produces no evidence or new native work and does not release the
@@ -546,7 +553,8 @@ ordinary current Run submissions retain exact stale-generation rejection.
 After the second access and its diagnostic,
 resource, and no-I/O facts have been copied, the Host removes only that row's
 resident by exact `revision + complete StorageBinding + producer` identity
-before the final row snapshot. A wrong identity is a no-op. This
+before the final row snapshot, then takes one final fresh sample before returning
+the closed acquisition. A wrong identity is a no-op. This
 verification-only release neither clears the cache broadly nor changes normal
 lookup, publication, replacement, capacity, or eviction semantics. After
 acquisition-local Values unwind, the complete memory-and-scratch device

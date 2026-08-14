@@ -1597,6 +1597,12 @@ fence 检查。Host 会在最终 row snapshot 前，按精确 revision、完整 
 只释放该 row 的 resident。错误 identity 不释放任何内容；不得使用 broad clear、capacity-
 pressure substitute，也不得改变普通 residency policy。Local acquisition Value 析构后，每个
 已配置 device 的完整 memory-and-scratch `reserved` vector 必须等于 row 前 baseline。
+同一个排他 absolute capture deadline 也约束 Host-only shape。每次 direct Host ReadLease 后以及
+最终 I/O snapshot 后取得的 fresh sample 都必须严格早于该未改变的 point。Conditional Metal 还会在
+evidence snapshot 与精确 resident cleanup 后取得最终 sample。Collector 会把完整 Host return 保持
+为局部值，直到它自身紧接调用后的 sample 通过；因此 tie 或更晚的返回不存储 acquisition、不冻结
+或释放 Pending Value，只能继续由显式 unfrozen cleanup 处理。任何层都不刷新 deadline 或保留
+迟到 authority。
 
 I2 使用 ADR 0010 的目标 state machine，而不是虚构当前 API：唯一 replicate-grid
 origin 固定连续的 111-slot cold/warmup/measured grid，measured 从 stride 11 开始，
@@ -1664,8 +1670,10 @@ future 再消费 input；baseline work 进行时恰有一个 delayed evaluator�
 failed-admission 全 Invalid 且 inner-before-outer 的 persistence 与 generic retry 抑制。Workflow
 只接受下一个 slot，要求为全部 111 条 row 预留存储，并且最多拥有一个 future。
 
-`test_i2_profile` 会在 Host acquisition 前拒绝已经过期或 exact-tie 的 capture deadline，并证明
-timeout 不能改变任何后续 1.5 秒 origin 或 stride-111 terminal。`test_device_residency` 使用真实
+`test_i2_profile` 会在 Host acquisition 前拒绝已经过期或 exact-tie 的 capture deadline，注入一个
+确定性 collector clock，使其在 synthetic Host 返回完整 evidence 的精确时刻到达 deadline，并证明
+迟到的局部结果不会存储，而 Value 会保持 Pending 直到显式 unfrozen release。它还证明 timeout
+不能改变任何后续 1.5 秒 origin 或 stride-111 terminal。`test_device_residency` 使用真实
 `ReadyFence` 与 `ResidencyManager` 状态，覆盖 deadline 前严格 Ready、排他的 pre-poll tie
 rejection、无需 wall-clock sleep 的 Ready、Failed 与 ProducerCancelled 确定性 post-poll deadline
 crossing、精确 pending-admission discard、拒绝 late publication 与单次 fence failure、rejected
@@ -1677,10 +1685,14 @@ revision/binding/producer resident，并单独接受 zero-transfer 的 strict-be
 callback 跨越另一个 invocation 的 absolute deadline，并注入精确的 upload-preparation、
 bounded-copy 与最终 pre-commit monotonic tie。测试要求 admission timeout 后不进入 callback、
 不执行 native commit、不发布 destination/resident、精确清除 pending admission、live native
-allocation 为零，且 unwind 后的 device-ledger reservation 为零。`test_i2_product_path` 保留条件式真实产品检查：受 deadline
-约束的首次 Metal upload 后，必须以同一个 revision、binding、allocation 与 producer 执行 Direct、
+allocation 为零，且 unwind 后的 device-ledger reservation 为零。`test_i2_product_path` 使用
+source-private hook 强制真实 EmbeddedHost 走 Metal N/A。一项 case 把所有 sample 保持在 `D-1ns`，
+并要求完整的两次读取 Host-only evidence；另一项会在 Host-only 最终 I/O snapshot 后精确推进同一个
+injected clock，并要求 tie 不返回 evidence、保留 caller Value，且 Host/device reservation 不变。
+它还保留条件式真实产品检查：受 deadline 约束的首次 Metal upload 后，必须以同一个 revision、binding、allocation 与 producer 执行 Direct、
 zero-transfer reuse，随后进行精确 row-scoped release。这些测试不会创建 native-cancellation claim，
-也不会把 manual runner 或 result orchestration 注册进 CTest/CI。
+也不会把 manual runner 或 result orchestration 注册进 CTest/CI。该 hook 及其 compile definition 只
+存在于 non-installed internal test product。
 
 必需 logical value 调用 `compute_content_digest(Value)`，并且要求 `Available`、
 存在 `ContentDigest`，以及 `CanonicalDigestAlgorithm::Sha256CanonicalV1`。Logical

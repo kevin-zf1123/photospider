@@ -1153,7 +1153,10 @@ containment，并由其唯一 callback 终结。每次 fence poll 前后都有 m
 post-poll sample 仍严格早于 deadline 时，才接受 Ready、Failed 或 ProducerCancelled；sample 与
 deadline 相等或更晚时进入同一 containment。resident-hit 路径会用同一组 sample 包围单次 reuse
 poll；迟到的 Direct candidate 不产生 evidence 或新 executor work，并且保留既有 row-owned
-resident 供精确 cleanup。Runner 不会因此获得 cancellation、device 或 public API authority。
+resident 供精确 cleanup。Direct Host read 与完整 Host snapshot 同样只有在 fresh sample 严格早于
+未改变的 deadline 后才可接受。Collector 会把 Host return 保持为局部，直到它自身的 post-call
+sample 通过；tie 或更晚的 Host-only 结果不会冻结 evidence，Pending Value 会留给显式 unfrozen
+release。Runner 不会因此获得 cancellation、device 或 public API authority。
 
 ## 服务器与插件隔离
 
