@@ -1553,6 +1553,18 @@ TEST(WorkerSupervisor, ReassemblesReportAcrossMultiplePollSlices) {
   EXPECT_EQ(terminal.failure, JobAttemptFailure::None);
 }
 
+/**
+ * @brief Reassembles one fragmented Cancel across multiple receiver slices.
+ * @return Nothing; GoogleTest reports lifecycle or identity drift.
+ * @throws Fixture, service, protocol, process, and allocation failures.
+ * @note The relay emits one exact Cancel header and payload in fragments whose
+ * gaps cross receiver poll slices. The contract requires the complete frame to
+ * remain decoder-owned through semantic identity interpretation and fresh
+ * strict-before acceptance; successful acceptance must still publish
+ * Cancelled/Cancelled/CancellationObserved. This end-to-end wall-clock case is
+ * paired with a deterministic protocol test for the post-interpretation
+ * deadline interleave.
+ */
 TEST(WorkerSupervisor, ReassemblesCancelAcrossMultiplePollSlices) {
   ScopedSupervisorRoot root;
   WorkerManagerOptions options = supervisor_options();

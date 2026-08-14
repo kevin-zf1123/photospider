@@ -181,10 +181,12 @@ void send_identity_locked(int fd, WorkerMessageKind kind,
  * @param frame_decoder Non-null decoder retained through completion readiness.
  * @return Nothing when `done` becomes true or control fails.
  * @throws Nothing; all failures set `control_failed` and request cancellation.
- * @note One decoder retains partial or complete Cancel header/payload bytes
- * across short poll deadlines while heartbeat and completion observation stay
- * responsive. A Cancel mutates state only while the short absolute acceptance
- * deadline remains active after exact identity decoding.
+ * @note One decoder retains partial or complete Cancel header/payload bytes,
+ * including a complete transport frame whose semantic commit misses one short
+ * poll deadline. Heartbeat and completion observation therefore stay
+ * responsive without losing the exact Cancel. Cancellation mutates state only
+ * after identity decoding and `accept_frame()` linearizes strictly before the
+ * unchanged slice deadline.
  * The outer catch contains deadline validation/overflow/allocation, protocol,
  * channel, and mutex failures, so none cross this `noexcept` thread boundary.
  * All pointer arguments remain owned by `run_one_assignment()` until join.
@@ -216,17 +218,14 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
             std::min(next_heartbeat,
                      checked_worker_deadline(std::chrono::steady_clock::now(),
                                              kControlPollInterval));
-        WorkerProtocolFrame frame =
-            frame_decoder->read_frame(fd, read_deadline);
+        const WorkerProtocolFrame& frame =
+            frame_decoder->inspect_frame(fd, read_deadline);
         if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
             identity) {
           throw WorkerProtocolError(
               "worker cancel identity does not match its exact lease");
         }
-        if (std::chrono::steady_clock::now() >= read_deadline) {
-          throw WorkerProtocolTimeout(
-              "worker cancel acceptance deadline expired");
-        }
+        static_cast<void>(frame_decoder->accept_frame(read_deadline));
         cancellation_requested->store(true, std::memory_order_release);
       } catch (const WorkerProtocolTimeout&) {
         // The short slice exists only to revisit done/heartbeat state.
@@ -248,8 +247,10 @@ void run_control_loop(int fd, const AttemptIdentity& identity,
  * @throws Worker protocol timeout, EOF, channel, malformed-kind, or identity
  * failures unchanged.
  * @note A late exact Cancel may race the stopped heartbeat/control loop. It is
- * consumed without rewriting the already settled Report; all other kinds fail
- * closed. The worker stays signalable throughout this bounded wait.
+ * semantically accepted and consumed without rewriting the already settled
+ * Report; all other kinds fail closed. A complete frame remains decoder-owned
+ * until identity interpretation and strict deadline commit succeed. The worker
+ * stays signalable throughout this bounded wait.
  */
 void await_completion_ready(int fd, const AttemptIdentity& identity,
                             std::chrono::steady_clock::time_point deadline,
@@ -258,7 +259,7 @@ void await_completion_ready(int fd, const AttemptIdentity& identity,
     throw std::invalid_argument("worker completion decoder is null");
   }
   for (;;) {
-    const WorkerProtocolFrame frame = decoder->read_frame(fd, deadline);
+    const WorkerProtocolFrame& frame = decoder->inspect_frame(fd, deadline);
     if (frame.kind == WorkerMessageKind::CompletionReady) {
       if (decode_worker_identity(frame, WorkerMessageKind::CompletionReady) !=
           identity) {
@@ -266,10 +267,7 @@ void await_completion_ready(int fd, const AttemptIdentity& identity,
             "worker completion acknowledgement identity does not match its "
             "lease");
       }
-      if (std::chrono::steady_clock::now() >= deadline) {
-        throw WorkerProtocolTimeout(
-            "worker completion acknowledgement deadline expired");
-      }
+      static_cast<void>(decoder->accept_frame(deadline));
       return;
     }
     if (frame.kind == WorkerMessageKind::Cancel) {
@@ -278,10 +276,7 @@ void await_completion_ready(int fd, const AttemptIdentity& identity,
         throw WorkerProtocolError(
             "late worker cancel identity does not match its lease");
       }
-      if (std::chrono::steady_clock::now() >= deadline) {
-        throw WorkerProtocolTimeout(
-            "late worker cancel acceptance deadline expired");
-      }
+      static_cast<void>(decoder->accept_frame(deadline));
       continue;
     }
     throw WorkerProtocolError(

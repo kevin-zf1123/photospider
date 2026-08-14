@@ -1682,18 +1682,16 @@ class WorkerManager::Impl final {
       if (checkpoint_completion.has_value()) {
         return std::move(*checkpoint_completion);
       }
-      const WorkerProtocolFrame acceptance =
-          read_worker_frame(process.control.get(), startup_deadline);
+      WorkerFrameDecoder acceptance_decoder;
+      const WorkerProtocolFrame& acceptance = acceptance_decoder.inspect_frame(
+          process.control.get(), startup_deadline);
       if (decode_worker_identity(acceptance,
                                  WorkerMessageKind::AssignmentAccepted) !=
           record->identity) {
         throw WorkerProtocolError(
             "worker acceptance identity does not match its exact lease");
       }
-      if (std::chrono::steady_clock::now() >= startup_deadline) {
-        throw WorkerProtocolTimeout(
-            "worker assignment acceptance deadline expired");
-      }
+      static_cast<void>(acceptance_decoder.accept_frame(startup_deadline));
       accepted = true;
       return monitor_process(record, &process);
     } catch (const ManagerFailure&) {
@@ -1775,13 +1773,16 @@ class WorkerManager::Impl final {
    * one of the validated lifecycle deadlines.
    * @throws std::bad_alloc when bounded frame/report reconstruction exhausts
    * memory.
-   * @note Short read slices share one stateful frame decoder. Cancellation-send
-   * failure starts the same cooperative deadline and keeps draining worker
-   * report/EOF/exit truth. Every ordinary EOF or candidate-Report deadline is
-   * subordinated through one shared arbitration to the still-active
-   * cooperative deadline, so it cannot terminate/reap first and exact wait
-   * status can still outrank channel or protocol loss. If the deadline-side
-   * exact observation reaps a
+   * @note Short read slices share one stateful frame decoder. Partial bytes and
+   * a complete transport frame remain decoder-owned across readiness or
+   * semantic-acceptance timeout; identity/report interpretation commits the
+   * frame only at a fresh strict-before sample, before any lifecycle mutation.
+   * Cancellation-send failure starts the same cooperative deadline and keeps
+   * draining worker report/EOF/exit truth. Every ordinary EOF or
+   * candidate-Report deadline is subordinated through one shared arbitration
+   * to the still-active cooperative deadline, so it cannot terminate/reap
+   * first and exact wait status can still outrank channel or protocol loss. If
+   * the deadline-side exact observation reaps a
    * natural exit before channel revocation, the monitor keeps that descriptor
    * open and drains the stateful decoder through one bounded post-reap window;
    * only matching delivered TERM/KILL escalation yields
@@ -2064,7 +2065,7 @@ class WorkerManager::Impl final {
           throw WorkerChannelError(
               "injected accepted-cancel worker channel failure");
         }
-        WorkerProtocolFrame frame = frame_decoder.read_frame(
+        const WorkerProtocolFrame& frame = frame_decoder.inspect_frame(
             process->control.get(), poll_deadline, acceptance_deadline);
         if (frame.kind == WorkerMessageKind::Heartbeat) {
           if (decode_worker_identity(frame, WorkerMessageKind::Heartbeat) !=
@@ -2072,11 +2073,8 @@ class WorkerManager::Impl final {
             throw WorkerProtocolError(
                 "worker heartbeat identity does not match its exact lease");
           }
-          const auto heartbeat_accepted_at = std::chrono::steady_clock::now();
-          if (heartbeat_accepted_at >= acceptance_deadline) {
-            throw WorkerProtocolTimeout(
-                "worker heartbeat acceptance deadline expired");
-          }
+          const auto heartbeat_accepted_at =
+              frame_decoder.accept_frame(acceptance_deadline).accepted_at;
           if (!materialized_report.has_value()) {
             if (!cancel && heartbeat_accepted_at >= runtime_deadline) {
               terminate_and_reap(record, process);
@@ -2118,11 +2116,8 @@ class WorkerManager::Impl final {
             throw WorkerProtocolError(
                 "worker report identity does not match its exact lease");
           }
-          const auto report_accepted_at = std::chrono::steady_clock::now();
-          if (report_accepted_at >= acceptance_deadline) {
-            throw WorkerProtocolTimeout(
-                "worker report acceptance deadline expired");
-          }
+          const auto report_accepted_at =
+              frame_decoder.accept_frame(acceptance_deadline).accepted_at;
           if (!cancel && report_accepted_at >= runtime_deadline) {
             terminate_and_reap(record, process);
             return failure_completion(record->identity,

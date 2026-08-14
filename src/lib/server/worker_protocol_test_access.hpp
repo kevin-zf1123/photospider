@@ -21,6 +21,8 @@ enum class WorkerProtocolDeadlineTestPoint : std::uint8_t {
   FrameReadyBeforeAcceptance = 0U,
   /** @brief One positive `send` has updated exact write progress. */
   WriteProgressAfterSend = 1U,
+  /** @brief Semantic interpretation finished before frame acceptance commit. */
+  FrameSemanticReadyBeforeAcceptance = 2U,
 };
 
 /**

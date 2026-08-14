@@ -1202,6 +1202,52 @@ WorkerProtocolFrame WorkerFrameDecoder::read_frame(
 WorkerProtocolFrame WorkerFrameDecoder::read_frame(
     int fd, std::chrono::steady_clock::time_point poll_deadline,
     std::chrono::steady_clock::time_point acceptance_deadline) {
+  static_cast<void>(inspect_frame(fd, poll_deadline, acceptance_deadline));
+  return accept_frame(acceptance_deadline).frame;
+}
+
+/** @copydoc ps::server::WorkerFrameDecoder::inspect_frame */
+const WorkerProtocolFrame& WorkerFrameDecoder::inspect_frame(
+    int fd, std::chrono::steady_clock::time_point deadline) {
+  return inspect_frame(fd, deadline, deadline);
+}
+
+/** @copydoc ps::server::WorkerFrameDecoder::inspect_frame */
+const WorkerProtocolFrame& WorkerFrameDecoder::inspect_frame(
+    int fd, std::chrono::steady_clock::time_point poll_deadline,
+    std::chrono::steady_clock::time_point acceptance_deadline) {
+  if (!retained_frame_.has_value()) {
+    retained_frame_ = advance_frame(fd, poll_deadline, acceptance_deadline);
+  } else {
+    require_worker_protocol_before(acceptance_deadline);
+  }
+  return *retained_frame_;
+}
+
+/** @copydoc ps::server::WorkerFrameDecoder::accept_frame */
+AcceptedWorkerProtocolFrame WorkerFrameDecoder::accept_frame(
+    std::chrono::steady_clock::time_point acceptance_deadline) {
+  if (!retained_frame_.has_value()) {
+    throw std::logic_error(
+        "worker protocol semantic acceptance has no complete frame");
+  }
+  observe_worker_protocol_deadline_test_point(
+      WorkerProtocolDeadlineTestPoint::FrameSemanticReadyBeforeAcceptance);
+  const std::chrono::steady_clock::time_point accepted_at =
+      worker_protocol_now();
+  if (accepted_at >= acceptance_deadline) {
+    throw WorkerProtocolTimeout("worker protocol I/O deadline expired");
+  }
+  AcceptedWorkerProtocolFrame accepted{std::move(*retained_frame_),
+                                       accepted_at};
+  retained_frame_.reset();
+  return accepted;
+}
+
+/** @copydoc ps::server::WorkerFrameDecoder::advance_frame */
+WorkerProtocolFrame WorkerFrameDecoder::advance_frame(
+    int fd, std::chrono::steady_clock::time_point poll_deadline,
+    std::chrono::steady_clock::time_point acceptance_deadline) {
   if (fd < 0) {
     throw WorkerChannelError("worker frame input descriptor is invalid");
   }
@@ -1371,9 +1417,10 @@ PreparedWorkerAssignment decode_worker_assignment(
 /** @copydoc ps::server::receive_worker_assignment */
 PreparedWorkerAssignment receive_worker_assignment(
     int fd, std::chrono::steady_clock::time_point deadline) {
-  const WorkerProtocolFrame frame = read_worker_frame(fd, deadline);
+  WorkerFrameDecoder decoder;
+  const WorkerProtocolFrame& frame = decoder.inspect_frame(fd, deadline);
   PreparedWorkerAssignment decoded = decode_worker_assignment(frame);
-  require_worker_protocol_before(deadline);
+  static_cast<void>(decoder.accept_frame(deadline));
   return decoded;
 }
 

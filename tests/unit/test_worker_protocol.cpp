@@ -1515,6 +1515,56 @@ TEST(WorkerProtocol,
   EXPECT_EQ(frame.payload, expected);
 }
 
+/**
+ * @brief Proves a complete identity frame survives semantic deadline crossing.
+ * @return Nothing; GoogleTest reports retained-frame or identity drift.
+ * @throws Socket, protocol, identity, and deterministic-hook failures.
+ * @note The hook advances the synthetic clock only after exact identity
+ * interpretation and immediately before semantic acceptance. The peer then
+ * closes its write direction, so a lost frame deterministically becomes EOF
+ * rather than relying on scheduler timing or wall-clock sleeps.
+ */
+TEST(WorkerProtocol,
+     SemanticDeadlineCrossingRetainsCompleteIdentityFrameForRetry) {
+  ScopedSocketPair sockets;
+  const JobSpec spec(GraphArtifactId("graph.semantic-retry"), 7,
+                     OutputSlotId("image.final"), protocol_resources());
+  const AttemptIdentity identity = protocol_identity(spec);
+  send_worker_identity(sockets.at(0U), WorkerMessageKind::Cancel, identity,
+                       protocol_deadline());
+  ASSERT_EQ(::shutdown(sockets.at(0U), SHUT_WR), 0);
+  WorkerFrameDecoder decoder;
+  ProtocolDeadlineHookState state;
+  const auto synthetic_now = std::chrono::steady_clock::now();
+  state.now_ticks.store(synthetic_now.time_since_epoch().count(),
+                        std::memory_order_release);
+  state.deadline = synthetic_now + std::chrono::seconds(1);
+  state.crossing_point =
+      WorkerProtocolDeadlineTestPoint::FrameSemanticReadyBeforeAcceptance;
+  const WorkerProtocolDeadlineTestHooks hooks{&state, protocol_test_now,
+                                              cross_protocol_test_deadline};
+
+  {
+    const ScopedWorkerProtocolDeadlineTestHooks scoped_hooks(&hooks);
+    const WorkerProtocolFrame& inspected =
+        decoder.inspect_frame(sockets.at(1U), state.deadline);
+    EXPECT_EQ(decode_worker_identity(inspected, WorkerMessageKind::Cancel),
+              identity);
+    EXPECT_THROW(static_cast<void>(decoder.accept_frame(state.deadline)),
+                 WorkerProtocolTimeout);
+  }
+
+  const WorkerProtocolFrame& retry =
+      decoder.inspect_frame(sockets.at(1U), protocol_deadline());
+  EXPECT_EQ(decode_worker_identity(retry, WorkerMessageKind::Cancel), identity);
+  const AcceptedWorkerProtocolFrame accepted =
+      decoder.accept_frame(protocol_deadline());
+  EXPECT_EQ(decode_worker_identity(accepted.frame, WorkerMessageKind::Cancel),
+            identity);
+  EXPECT_THROW(decoder.inspect_frame(sockets.at(1U), protocol_deadline()),
+               WorkerProtocolEof);
+}
+
 TEST(WorkerProtocol,
      ZeroBudgetProbeAcceptsReadyFrameBeforeIndependentLifecycleDeadline) {
   ScopedSocketPair sockets;

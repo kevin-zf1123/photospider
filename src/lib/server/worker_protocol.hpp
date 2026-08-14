@@ -82,19 +82,39 @@ struct WorkerProtocolFrame final {
 };
 
 /**
+ * @brief One frame committed at its semantic acceptance linearization point.
+ * @note `accepted_at` is the decoder's single fresh monotonic sample taken
+ * after caller interpretation and before retained-frame ownership is cleared.
+ * The bounded payload allocation occurs during transport decode before this
+ * record is constructed. The record grants no lifecycle authority beyond the
+ * successfully accepted frame.
+ */
+struct AcceptedWorkerProtocolFrame final {
+  /** @brief Exact semantically interpreted frame moved from decoder ownership.
+   */
+  WorkerProtocolFrame frame;
+  /** @brief Fresh strict-before semantic acceptance time. */
+  std::chrono::steady_clock::time_point accepted_at;
+};
+
+/**
  * @brief Reassembles one private control byte stream across bounded read calls.
  *
  * The decoder retains the exact header and payload offsets after
  * `WorkerProtocolTimeout`, including when a complete frame misses its semantic
  * acceptance deadline. It validates the complete header once, allocates only
- * the advertised bounded payload, and resets only after returning a complete
- * frame. One instance belongs to one socket byte stream and must not be shared
- * concurrently.
+ * the advertised bounded payload, and can retain one complete transport frame
+ * across a later semantic-acceptance timeout. `inspect_frame()` plus
+ * `accept_frame()` lets a caller validate identity/report meaning before the
+ * complete frame is consumed. One instance belongs to one socket byte stream
+ * and must not be shared concurrently.
  *
  * @throws Nothing for construction and destruction.
- * @note After any exception other than `WorkerProtocolTimeout`, the channel is
- * faulted and this decoder must be discarded with it. Clean EOF is recognized
- * only when no byte of the next header has been consumed.
+ * @note After any transport/decode exception other than
+ * `WorkerProtocolTimeout`, the channel is faulted and this decoder must be
+ * discarded with it. Caller-misuse `std::logic_error` from `accept_frame()`
+ * performs no channel I/O and does not itself fault the stream. Clean EOF is
+ * recognized only when no byte of the next header has been consumed.
  */
 class WorkerFrameDecoder final {
  public:
@@ -145,9 +165,71 @@ class WorkerFrameDecoder final {
       int fd, std::chrono::steady_clock::time_point poll_deadline,
       std::chrono::steady_clock::time_point acceptance_deadline);
 
+  /**
+   * @brief Reassembles and retains one frame for semantic interpretation.
+   * @param fd Connected private Unix socket owned by this decoder's stream.
+   * @param deadline Absolute monotonic transport and acceptance deadline.
+   * @return Borrowed complete frame retained until `accept_frame()` succeeds.
+   * @throws Worker protocol timeout, EOF, malformed-input, channel, or
+   * allocation failures unchanged.
+   * @note A prior complete frame whose semantic acceptance timed out is
+   * returned again under this fresh deadline without reading another byte.
+   * The borrowed reference becomes invalid after successful acceptance, the
+   * next decoder mutation, or decoder destruction. Interpretation must not
+   * mutate external lifecycle state before `accept_frame()` succeeds.
+   */
+  const WorkerProtocolFrame& inspect_frame(
+      int fd, std::chrono::steady_clock::time_point deadline);
+
+  /**
+   * @brief Reassembles and retains a frame under split protocol deadlines.
+   * @param fd Connected private Unix socket owned by this decoder's stream.
+   * @param poll_deadline Absolute readiness-wait budget.
+   * @param acceptance_deadline Absolute semantic lifecycle deadline.
+   * @return Borrowed complete frame retained until `accept_frame()` succeeds.
+   * @throws Worker protocol timeout, EOF, malformed-input, channel, or
+   * allocation failures unchanged.
+   * @note A due poll deadline still permits the same nonblocking probe as
+   * `read_frame()`. A retained complete frame performs no new channel I/O.
+   */
+  const WorkerProtocolFrame& inspect_frame(
+      int fd, std::chrono::steady_clock::time_point poll_deadline,
+      std::chrono::steady_clock::time_point acceptance_deadline);
+
+  /**
+   * @brief Commits one semantically interpreted complete frame before D.
+   * @param acceptance_deadline Unchanged exclusive lifecycle deadline.
+   * @return Accepted frame and its exact semantic linearization sample.
+   * @throws std::logic_error when no complete inspected frame is retained.
+   * @throws WorkerProtocolTimeout at a deadline tie or later; the complete
+   * frame remains retained for a later bounded semantic retry.
+   * @note The fresh monotonic sample linearizes semantic acceptance after the
+   * caller has decoded and validated the borrowed frame. Failure consumes no
+   * bytes, resets no state, and grants no Job, cancellation, liveness, report,
+   * artifact, or completion authority.
+   */
+  AcceptedWorkerProtocolFrame accept_frame(
+      std::chrono::steady_clock::time_point acceptance_deadline);
+
  private:
+  /**
+   * @brief Advances incremental transport into one complete owned frame.
+   * @param fd Connected private Unix socket.
+   * @param poll_deadline Absolute readiness-wait budget.
+   * @param acceptance_deadline Absolute frame-transport deadline.
+   * @return Complete transport-accepted frame after partial state resets.
+   * @throws Worker protocol failures unchanged.
+   * @note This method does not perform caller-specific semantic acceptance.
+   */
+  WorkerProtocolFrame advance_frame(
+      int fd, std::chrono::steady_clock::time_point poll_deadline,
+      std::chrono::steady_clock::time_point acceptance_deadline);
+
   /** @brief Returns to a fresh frame boundary after successful delivery. */
   void reset() noexcept;
+
+  /** @brief Complete frame retained through semantic acceptance timeout. */
+  std::optional<WorkerProtocolFrame> retained_frame_;
 
   /** @brief Fixed header bytes retained across timeout slices. */
   std::array<std::byte, kWorkerFrameHeaderBytes> header_{};

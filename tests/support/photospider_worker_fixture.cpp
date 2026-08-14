@@ -388,15 +388,17 @@ PreparedFixtureReportTransfer prepare_fixture_report(
  * @throws Protocol timeout, EOF, channel, identity, or allocation failures
  * unchanged.
  * @note Fixtures remain alive and manager-terminable until the manager proves
- * any output join and finishes metadata reconstruction. The acknowledgement
- * grants no durable publication or Job authority.
+ * any output join and finishes metadata reconstruction. Complete control
+ * frames remain decoder-owned until identity interpretation and semantic
+ * deadline acceptance succeed. The acknowledgement grants no durable
+ * publication or Job authority.
  */
 void await_fixture_completion_ready(
     int fd, const PreparedWorkerReport& prepared,
     std::chrono::steady_clock::time_point deadline) {
   WorkerFrameDecoder decoder;
   for (;;) {
-    const WorkerProtocolFrame frame = decoder.read_frame(fd, deadline);
+    const WorkerProtocolFrame& frame = decoder.inspect_frame(fd, deadline);
     if (frame.kind == WorkerMessageKind::CompletionReady) {
       if (decode_worker_identity(frame, WorkerMessageKind::CompletionReady) !=
           prepared.report.identity) {
@@ -404,10 +406,7 @@ void await_fixture_completion_ready(
             "fixture completion acknowledgement identity does not match "
             "report");
       }
-      if (std::chrono::steady_clock::now() >= deadline) {
-        throw WorkerProtocolTimeout(
-            "fixture completion acknowledgement deadline expired");
-      }
+      static_cast<void>(decoder.accept_frame(deadline));
       return;
     }
     if (frame.kind == WorkerMessageKind::Cancel) {
@@ -416,10 +415,7 @@ void await_fixture_completion_ready(
         throw WorkerProtocolError(
             "fixture late cancel identity does not match report");
       }
-      if (std::chrono::steady_clock::now() >= deadline) {
-        throw WorkerProtocolTimeout(
-            "fixture late cancel acceptance deadline expired");
-      }
+      static_cast<void>(decoder.accept_frame(deadline));
       continue;
     }
     throw WorkerProtocolError(
@@ -867,11 +863,11 @@ void send_fragmented_report(int fd, const PreparedWorkerReport& report,
  * or poll deadline.
  * @throws std::bad_alloc when deadline diagnostics, frame processing, or report
  * construction exhausts memory.
- * @note One decoder retains partial or complete Cancel bytes across heartbeat
- * poll slices; read-slice timeouts are contained and retried. A Cancel changes
- * fixture behavior only while the slice deadline remains active after identity
- * decoding. The descriptor is borrowed and remains open for the caller's
- * report path.
+ * @note One decoder retains partial bytes and a complete transport Cancel
+ * across heartbeat poll slices; read or semantic-slice timeouts are contained
+ * and retried. A Cancel changes fixture behavior only after identity decoding
+ * and a fresh strict-before acceptance commit. The descriptor is borrowed and
+ * remains open for the caller's report path.
  */
 JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
                                  bool ignore_cancel,
@@ -891,17 +887,14 @@ JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
           std::min(next_heartbeat,
                    checked_worker_deadline(std::chrono::steady_clock::now(),
                                            kFixtureHeartbeatCadence));
-      const WorkerProtocolFrame frame =
-          frame_decoder.read_frame(fd, read_deadline);
+      const WorkerProtocolFrame& frame =
+          frame_decoder.inspect_frame(fd, read_deadline);
       if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
           assignment.identity) {
         throw WorkerProtocolError(
             "fixture cancel identity does not match assignment");
       }
-      if (std::chrono::steady_clock::now() >= read_deadline) {
-        throw WorkerProtocolTimeout(
-            "fixture cancel acceptance deadline expired");
-      }
+      static_cast<void>(frame_decoder.accept_frame(read_deadline));
       if (!ignore_cancel) {
         return cancelled_report(assignment);
       }
@@ -925,8 +918,9 @@ JobAttemptReport wait_for_cancel(int fd, const JobAssignment& assignment,
  * or poll deadline.
  * @throws std::bad_alloc when deadline diagnostics or frame processing exhausts
  * memory.
- * @note Heartbeats continue only until cancellation is observed. The final
- * return lets the fixture process reach normal `exit(0)` after channel
+ * @note Heartbeats continue only until cancellation is semantically accepted.
+ * A complete Cancel remains decoder-owned across a missed slice deadline. The
+ * final return lets the fixture process reach normal `exit(0)` after channel
  * revocation, which the manager test seam can retain as a zombie. Read-slice
  * timeouts and the expected post-cancel EOF are contained; `fd` is borrowed.
  */
@@ -946,17 +940,14 @@ void wait_for_cancel_then_channel_close(int fd, const JobAssignment& assignment,
     try {
       const auto read_deadline = checked_worker_deadline(
           std::chrono::steady_clock::now(), kFixtureHeartbeatCadence);
-      const WorkerProtocolFrame frame =
-          frame_decoder.read_frame(fd, read_deadline);
+      const WorkerProtocolFrame& frame =
+          frame_decoder.inspect_frame(fd, read_deadline);
       if (decode_worker_identity(frame, WorkerMessageKind::Cancel) !=
           assignment.identity) {
         throw WorkerProtocolError(
             "fixture cancel identity does not match assignment");
       }
-      if (std::chrono::steady_clock::now() >= read_deadline) {
-        throw WorkerProtocolTimeout(
-            "fixture cancel acceptance deadline expired");
-      }
+      static_cast<void>(frame_decoder.accept_frame(read_deadline));
       cancel_observed = true;
     } catch (const WorkerProtocolTimeout&) {
     } catch (const WorkerProtocolEof&) {
