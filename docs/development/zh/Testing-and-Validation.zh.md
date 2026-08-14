@@ -2447,8 +2447,14 @@ Issue #106 维护两个调用真实产品 decoder 的本地 parser robustness ha
 `PHOTOSPIDER_BUILD_FUZZERS` 默认是 `OFF`；启用后，configuration 要求 Darwin 或 Linux、
 Clang-family compiler，并要求 libFuzzer、AddressSanitizer 与 UndefinedBehaviorSanitizer 通过真实
 compile/link 加有界 native-run probe。缺失或初始化不兼容的 runtime 因而会在 configuration 阶段
-失败。与全局 `USE_ASAN` 或 `USE_TSAN` mode 冲突时会默认拒绝。两个 executable 都是
-`EXCLUDE_FROM_ALL`，且没有 `add_test()`、install、export、package 或 CI ownership。
+失败。与全局 `USE_ASAN` 或 `USE_TSAN` mode 冲突时会默认拒绝。包含 decoder 的生产 private
+static library 使用 `fuzzer-no-link,address,undefined` 编译，并只把 `address,undefined` 暴露为
+传递到最终链接的要求。这样每个使用其被插桩 object 的普通 consumer（包括
+`photospider-worker`）都会闭合 runtime，但不会取得 libFuzzer main；两个手工 executable 则拥有
+完整的 `fuzzer,address,undefined` 链接。Configuration-time target-property check 会拒绝未来任何
+compile/link ownership 错配。两个 executable 都是 `EXCLUDE_FROM_ALL`，且没有 `add_test()`、
+install、export、package 或 CI ownership；被插桩的 private library 同样不会被 install 或
+export。
 
 必须显式构建并运行有界本地 campaign：
 

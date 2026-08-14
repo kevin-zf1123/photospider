@@ -2995,8 +2995,16 @@ requires Darwin or Linux, a Clang-family compiler, and an actual successful
 compile/link plus bounded native-run probe for libFuzzer, AddressSanitizer, and
 UndefinedBehaviorSanitizer. A missing or initialization-incompatible runtime
 therefore fails during configuration. Conflicting global `USE_ASAN` or
-`USE_TSAN` modes fail closed. Both executables are `EXCLUDE_FROM_ALL` and have
-no `add_test()`, install, export, package, or CI ownership.
+`USE_TSAN` modes fail closed. The production private static libraries containing
+the decoders compile with `fuzzer-no-link,address,undefined` and expose only
+`address,undefined` as a transitive final-link requirement. This closes every
+ordinary consumer of their instrumented objects, including
+`photospider-worker`, without giving it libFuzzer main; the two manual
+executables own the complete `fuzzer,address,undefined` link. Configure-time
+target-property checks reject any future compile/link ownership mismatch. Both
+executables are `EXCLUDE_FROM_ALL` and have no `add_test()`, install, export,
+package, or CI ownership; the instrumented private libraries are likewise not
+installed or exported.
 
 Build and run a bounded local campaign explicitly:
 

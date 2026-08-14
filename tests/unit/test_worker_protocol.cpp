@@ -730,8 +730,8 @@ class CanonicalWorkerPayloadCursor final {
    * @brief Reads one consumed field as an unsigned big-endian integer.
    * @param field Existing one- through eight-byte slice from this payload.
    * @return Exact integer value.
-   * @throws std::invalid_argument for an unsupported width.
-   * @throws std::out_of_range when the slice is not inside this payload.
+   * @throws std::invalid_argument when the width is zero, exceeds
+   * `sizeof(std::uint64_t)`, or the slice is not inside this payload.
    */
   std::uint64_t unsigned_value(const EncodedWorkerField& field) const {
     if (field.width == 0U || field.width > sizeof(std::uint64_t) ||
@@ -750,8 +750,8 @@ class CanonicalWorkerPayloadCursor final {
   /**
    * @brief Consumes one canonical length-prefixed string.
    * @return Four-byte length field and the exact following value bytes.
-   * @throws std::out_of_range for truncated fixture bytes.
-   * @throws std::invalid_argument when the prefix cannot be interpreted.
+   * @throws std::out_of_range when the length prefix or value bytes are
+   * truncated.
    */
   EncodedWorkerString take_string() {
     const EncodedWorkerField length = take(sizeof(std::uint32_t));
