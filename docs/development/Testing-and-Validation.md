@@ -2077,15 +2077,17 @@ reserved for all 111 rows, and owns at most one future.
 acquisition and proves a timeout cannot change any later 1.5-second origin or
 the stride-111 terminal. `test_device_residency` uses real `ReadyFence` and
 `ResidencyManager` state to cover Ready strictly before the deadline, exclusive
-tie rejection, exact pending-admission discard, rejected late publication and
-single fence failure, the sole-owner settling interval after a rejected
-completion consumes admission, and exact release when Ready publication wins
-the timeout race. Conditional `test_metal_device_executor` regressions hold one
-real serialized callback through another invocation's absolute deadline and
-inject exact upload-preparation, bounded-copy, and final pre-commit monotonic
-ties. They require no callback entry after admission timeout, no native commit,
-no published destination/resident, exact pending-admission retirement, zero
-live native allocations, and a zero device-ledger reservation after unwind.
+pre-poll tie rejection, deterministic post-poll deadline crossing for Ready,
+Failed, and ProducerCancelled without wall-clock sleep, exact pending-admission
+discard, rejected late publication and single fence failure, the sole-owner
+settling interval after a rejected completion consumes admission, and exact
+release when Ready publication wins the timeout race. Conditional
+`test_metal_device_executor` regressions hold one real serialized callback
+through another invocation's absolute deadline and inject exact
+upload-preparation, bounded-copy, and final pre-commit monotonic ties. They
+require no callback entry after admission timeout, no native commit, no
+published destination/resident, exact pending-admission retirement, zero live
+native allocations, and a zero device-ledger reservation after unwind.
 `test_i2_product_path` retains the conditional real-product check that a
 deadline-bounded first Metal upload is followed by Direct zero-transfer reuse
 of the same revision, binding, allocation, and producer, then exact row-scoped

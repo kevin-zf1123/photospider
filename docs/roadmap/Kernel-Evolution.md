@@ -1430,7 +1430,10 @@ deadline. That point now also bounds serialized Metal executor admission,
 immediately before native commit. Pre-commit expiry leaves no native command
 submission, resident, pending transfer/fence owner, or ledger lease; an earlier
 committed command retains exact pending/Ready race containment and still
-terminates under its sole callback. The runner gains no cancellation, device,
+terminates under its sole callback. Every fence poll is bracketed by monotonic
+samples; Ready, Failed, or ProducerCancelled is accepted only when the fresh
+post-poll sample remains strictly before the deadline, while an exact or later
+sample follows the same containment. The runner gains no cancellation, device,
 or public API authority.
 
 ## Server and Plugin Isolation

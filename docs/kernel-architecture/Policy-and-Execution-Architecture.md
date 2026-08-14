@@ -710,7 +710,11 @@ native command-buffer commit. An exact tie fails closed. Pre-commit expiry
 performs no native commit and RAII retirement leaves no published Value,
 transfer admission, resident, live pending-fence owner, or ledger lease. A
 committed Metal miss waits only inside that original deadline, never under a new
-relative timeout. On later expiry, the caller first tries to remove the exact
+relative timeout. The wait samples the same monotonic clock immediately before
+and after every `ReadyFence::poll()`. A returned Ready, Failed, or
+ProducerCancelled snapshot is accepted only when the fresh post-poll sample is
+strictly earlier than the deadline; an exact or later sample follows timeout
+containment. On later expiry, the caller first tries to remove the exact
 `DeviceCompletionIdentity` admission. If native completion already won Ready
 publication, only its exact resident is released. If completion already
 consumed a rejected/stale admission, the sole native callback remains

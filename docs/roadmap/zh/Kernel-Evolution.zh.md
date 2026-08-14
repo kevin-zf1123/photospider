@@ -1149,8 +1149,10 @@ Metal acquisition 的 relative 五秒等待。同一个 point 现在还约束 se
 admission、最大 64 KiB 的 upload-copy chunk、setup/encoding，以及 native commit 前立即执行的
 最后一次语义检查。Commit 前到期不会留下 native command submission、resident、pending
 transfer/fence owner 或 ledger lease；此前已经 commit 的 command 仍执行 exact pending/Ready race
-containment，并由其唯一 callback 终结。Runner 不会因此获得 cancellation、device 或 public API
-authority。
+containment，并由其唯一 callback 终结。每次 fence poll 前后都有 monotonic sample；只有 fresh
+post-poll sample 仍严格早于 deadline 时，才接受 Ready、Failed 或 ProducerCancelled；sample 与
+deadline 相等或更晚时进入同一 containment。Runner 不会因此获得 cancellation、device 或 public
+API authority。
 
 ## 服务器与插件隔离
 
