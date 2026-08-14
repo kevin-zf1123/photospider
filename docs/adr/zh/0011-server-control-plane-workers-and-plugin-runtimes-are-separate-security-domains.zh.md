@@ -303,9 +303,13 @@ cooperative deadline 到达时仍然存活的 worker 才会进入 cancellation s
 Control decoder 会区分 readiness-wait budget 与 semantic lifecycle acceptance。Output
 pending 时可以使用已经到期的 budget，在一个 bulk slice 前做一次 nonblocking control probe；
 但完整 buffered byte 或 poll/read/decode progress 不能授权在 absolute lifecycle deadline 到达或
-之后的 frame。Timeout 会保留 partial 或 complete decoder state。Assignment、
-`AssignmentAccepted`、Heartbeat、Report、Cancel 与 `CompletionReady` 只能在 monotonic time
-严格早于其适用 bound 时被接受。Control write 会在每次正向 send 前后复查；late result 可能已经
+之后的 frame。Timeout 会保留 partial byte，也会让 transport-complete frame 在 caller-specific
+identity/report 解释期间继续保留。只有相对于同一 semantic deadline 的 fresh monotonic sample
+严格更早时，才会 move 并 reset 该 frame；同一个 sample 也是精确 lifecycle acceptance time。
+因此 tie 或更晚的 sample 不授予 cancellation、liveness、report 或 completion authority，并让
+完整 frame 可供下一个有界 slice 使用。Assignment、`AssignmentAccepted`、Heartbeat、Report、
+Cancel 与 `CompletionReady` 只能在 monotonic time 严格早于其适用 bound 时被接受。Control write
+会在每次正向 send 前后复查；late result 可能已经
 交付 prefix 或 final byte，因此 owner 必须将该 write 视为失败，并且绝不重试该 lifecycle
 frame。Cancellation owner 只能为有界 receive-side report/EOF/exit 排空继续保留 channel。
 

@@ -2081,7 +2081,11 @@ pre-poll tie rejection, deterministic post-poll deadline crossing for Ready,
 Failed, and ProducerCancelled without wall-clock sleep, exact pending-admission
 discard, rejected late publication and single fence failure, the sole-owner
 settling interval after a rejected completion consumes admission, and exact
-release when Ready publication wins the timeout race. Conditional
+release when Ready publication wins the timeout race. The same suite places a
+deadline tie between the second resident-reuse precheck and its single poll,
+requires two monotonic samples, proves that late rejection preserves the exact
+revision/binding/producer resident, and separately accepts strict-before Direct
+reuse with zero transfer. Conditional
 `test_metal_device_executor` regressions hold one real serialized callback
 through another invocation's absolute deadline and inject exact
 upload-preparation, bounded-copy, and final pre-commit monotonic ties. They

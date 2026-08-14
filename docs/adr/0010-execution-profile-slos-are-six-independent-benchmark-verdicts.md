@@ -533,7 +533,11 @@ the second must reuse the same device-local residency with zero transfer or
 allocation. Metal-to-Host transfer, filesystem/codec I/O, and any transfer
 beyond those two conditional first accesses are forbidden. Without Metal only
 the device-specific component is predefined `not-applicable`; the Host reuse
-and no-I/O gates still apply. An already-Ready immutable Value may be acquired
+and no-I/O gates still apply. The same exclusive capture deadline brackets the
+resident lookup's single fence poll with fresh monotonic samples. The second
+reuse is accepted only when the post-poll sample is strictly earlier; a tie or
+later sample produces no evidence or new native work and does not release the
+pre-existing row-owned resident. An already-Ready immutable Value may be acquired
 after a newer generation becomes current while its coordinator-managed lineage
 remains live. This
 verification acquisition does not mutate currentness, but still requires exact

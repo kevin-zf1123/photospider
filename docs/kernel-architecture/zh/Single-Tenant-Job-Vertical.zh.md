@@ -369,15 +369,19 @@ process、thread 或 descriptor residue。产品构造不包含该 observation�
 ownership 或 publication。
 
 Manager 与 worker 的短 poll loop 都会为自己的 channel 保留一个 decoder：deadline 到期会保留
-partial 或 complete header/payload byte 与精确 offset，而 clean EOF 只在 fresh frame boundary
-上有效。Socket readiness budget 与 semantic lifecycle acceptance 彼此独立。Output pending
-期间，已经到期的 budget 会在一个 bulk slice 前只执行一次 nonblocking control probe；它不授权
-late frame。只有 monotonic time 严格早于最早适用的 absolute lifecycle deadline 时，frame 才
-对调用方可见；正向 read、完整 decode，以及 Assignment、`AssignmentAccepted`、Heartbeat、
-Report、Cancel 或 `CompletionReady` interpretation 后都会复查。Control write 会在正向 send
-progress 前后检查同一严格边界。Progress 后的 timeout 可能表示 peer 已收到 prefix 或 final byte，
-因此调用方必须将该 write 视为失败，并且绝不重试该 frame。Cancellation owner 只能为有界
-receive-side report/EOF/exit 排空继续保留 channel。
+partial header/payload byte 与精确 offset，而 clean EOF 只在 fresh frame boundary 上有效。一个
+transport-complete frame 会继续由 decoder 持有，直到 caller 解释其 Assignment、
+`AssignmentAccepted`、Heartbeat、Report、Cancel 或 `CompletionReady` 语义，随后 decoder 再取得
+一次 fresh monotonic sample。只有 sample 严格早于最早适用的 absolute lifecycle deadline 时，
+才会 move/reset 该 frame 并返回其精确 acceptance time；sample 等于或晚于 deadline 时会保留完整
+frame，供下一次有界 semantic retry 使用，并且不授予任何 lifecycle mutation。Socket readiness
+budget 与该 semantic lifecycle acceptance 彼此独立。Output pending 期间，已经到期的 budget 会在
+一个 bulk slice 前只执行一次 nonblocking control probe；它不授权 late frame。Control write 会在
+正向 send progress 前后检查同一严格边界。Progress 后的 timeout 可能表示 peer 已收到 prefix 或
+final byte，因此调用方必须将该 write 视为失败，并且绝不重试该 frame。Cancellation owner 只能为
+有界 receive-side report/EOF/exit 排空继续保留 channel。`test_worker_protocol` 会在 Cancel identity
+interpretation 后、semantic commit 前精确推进确定性时钟，随后 half-close peer，以证明 retry 返回
+保留的 frame 而非 EOF；真实进程 fragmented-Cancel supervisor test 仍会跨越多个 poll slice。
 
 WorkerManager 独占 spawn、private channel、PID、signal delivery、`waitpid` 与 supervision-
 thread reaping。任何 API 都不接受或暴露 PID。每条 cancellation 或 signal 路径都会重新校验

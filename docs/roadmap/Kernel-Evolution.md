@@ -1433,8 +1433,11 @@ committed command retains exact pending/Ready race containment and still
 terminates under its sole callback. Every fence poll is bracketed by monotonic
 samples; Ready, Failed, or ProducerCancelled is accepted only when the fresh
 post-poll sample remains strictly before the deadline, while an exact or later
-sample follows the same containment. The runner gains no cancellation, device,
-or public API authority.
+sample follows the same containment. The resident-hit path brackets its single
+reuse poll with the same samples; a late Direct candidate produces no evidence
+or new executor work and leaves the pre-existing row-owned resident untouched
+for exact cleanup. The runner gains no cancellation, device, or public API
+authority.
 
 ## Server and Plugin Isolation
 
@@ -1554,10 +1557,15 @@ authorization boundary.
 The private control codec distinguishes a due nonblocking poll budget from the
 absolute lifecycle acceptance deadline. The due budget may probe control once
 before a bulk slice, but buffered bytes and poll/read/decode progress cannot
-make a late frame visible. Timeout preserves partial or complete decoder state.
-Writes recheck before and after positive progress; a possibly delivered late
-frame is treated as a failed write and is never retried. A cancellation owner
-may retain the channel only for bounded receive-side report/EOF/exit drainage.
+make a late frame visible. Timeout preserves partial bytes and a
+transport-complete frame through identity/report interpretation. The frame is
+moved and reset only after one fresh sample is strictly before the unchanged
+semantic deadline; that sample becomes the exact lifecycle acceptance time.
+A tie or later sample leaves the frame available to the next bounded slice and
+grants no cancellation, liveness, report, or completion authority. Writes
+recheck before and after positive progress; a possibly delivered late frame is
+treated as a failed write and is never retried. A cancellation owner may retain
+the channel only for bounded receive-side report/EOF/exit drainage.
 
 Every DSO loaded into a Host remains operator-trusted native code. The current
 operation C++ ABI, data-definition pure-C ABI, and policy pure-C ABI provide no

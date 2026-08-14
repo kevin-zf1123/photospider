@@ -51,10 +51,12 @@ service。其 `TenantId`、`JobId`、`JobAttemptId`、
 
 该 private worker codec 会把 poll budget 与 semantic acceptance 视为不同 bound。Pending bulk
 允许一次使用到期 budget 的 nonblocking control probe，而每个完整 control frame 仍只能在严格
-早于适用 absolute lifecycle deadline 时有效。Timeout 会保留 partial 或 complete decoder
-state。Write 会在正向 send progress 前后复查；由于 late send 可能已经交付 byte，owner 必须
-将该 write 视为失败，并且绝不重试 frame。Cancellation owner 只能为有界 receive-side
-report/EOF/exit 排空继续保留 channel。
+早于适用 absolute lifecycle deadline 时有效。Timeout 会保留 partial byte 或 transport-complete
+frame。Decoder 会暴露该完整 frame 供 semantic interpretation，取得 fresh strict-before sample，
+随后才 move/reset frame 并返回精确 acceptance time。sample 等于或晚于 deadline 时会保留 frame
+供有界 semantic retry 使用，并且不授予 lifecycle mutation。Write 会在正向 send progress 前后
+复查；由于 late send 可能已经交付 byte，owner 必须将该 write 视为失败，并且绝不重试 frame。
+Cancellation owner 只能为有界 receive-side report/EOF/exit 排空继续保留 channel。
 
 Public client header 是 `photospider/ipc/protocol.hpp`、`photospider/ipc/client.hpp` 与
 `photospider/ipc/host.hpp`。它们只暴露 typed owned value 和完整 Host factory，不暴露 JSON

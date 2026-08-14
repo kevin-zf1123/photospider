@@ -370,9 +370,15 @@ The control decoder separates a readiness-wait budget from semantic lifecycle
 acceptance. Pending output may use a due budget for one nonblocking control
 probe before one bulk slice, but complete buffered bytes or poll/read/decode
 progress cannot authorize a frame at or after its absolute lifecycle deadline.
-Timeout preserves partial or complete decoder state. Assignment,
-`AssignmentAccepted`, Heartbeat, Report, Cancel, and `CompletionReady` are
-accepted only while monotonic time is strictly before their applicable bound.
+Timeout preserves partial bytes and also preserves a transport-complete frame
+through caller-specific identity/report interpretation. Only a fresh monotonic
+sample strictly before the unchanged semantic deadline moves and resets that
+frame; the same sample is the exact lifecycle acceptance time. A tie or later
+sample therefore grants no cancellation, liveness, report, or completion
+authority and leaves the complete frame available to the next bounded slice.
+Assignment, `AssignmentAccepted`, Heartbeat, Report, Cancel, and
+`CompletionReady` are accepted only while monotonic time is strictly before
+their applicable bound.
 Control writes recheck before and after every positive send; a late result may
 have delivered a prefix or final byte, so the owner treats the write as failed
 and never retries that lifecycle frame. A cancellation owner may retain the

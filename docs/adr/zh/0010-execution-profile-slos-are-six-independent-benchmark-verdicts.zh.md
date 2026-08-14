@@ -459,7 +459,10 @@ transfer，第二次必须复用同一个
 device-local residency，且 transfer 与 allocation 都为零。禁止 Metal-to-Host
 transfer、filesystem/codec I/O，以及上述两个条件式首次 access 之外的任何 transfer。
 没有 Metal 时，只有 device-specific 组件属于预定义 `not-applicable`；Host reuse
-与 no-I/O 门禁仍然适用。当 coordinator-managed lineage 仍存活时，已经 Ready 的
+与 no-I/O 门禁仍然适用。同一个排他 capture deadline 会以 fresh monotonic sample 包围 resident
+lookup 的单次 fence poll。只有 post-poll sample 严格早于 deadline 时才接受第二次 reuse；sample
+等于或晚于 deadline 时不产生 evidence 或新 native work，也不释放既有 row-owned resident。当
+coordinator-managed lineage 仍存活时，已经 Ready 的
 immutable Value 可以在较新 generation 成为 current 后被获取。该 verification acquisition
 不修改 currentness，但仍要求精确 seed、revision、source/destination binding、producer 与
 fence identity；普通 current Run submission 仍按精确 generation 拒绝 stale completion。

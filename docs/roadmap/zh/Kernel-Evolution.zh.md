@@ -1151,8 +1151,9 @@ admission、最大 64 KiB 的 upload-copy chunk、setup/encoding，以及 native
 transfer/fence owner 或 ledger lease；此前已经 commit 的 command 仍执行 exact pending/Ready race
 containment，并由其唯一 callback 终结。每次 fence poll 前后都有 monotonic sample；只有 fresh
 post-poll sample 仍严格早于 deadline 时，才接受 Ready、Failed 或 ProducerCancelled；sample 与
-deadline 相等或更晚时进入同一 containment。Runner 不会因此获得 cancellation、device 或 public
-API authority。
+deadline 相等或更晚时进入同一 containment。resident-hit 路径会用同一组 sample 包围单次 reuse
+poll；迟到的 Direct candidate 不产生 evidence 或新 executor work，并且保留既有 row-owned
+resident 供精确 cleanup。Runner 不会因此获得 cancellation、device 或 public API authority。
 
 ## 服务器与插件隔离
 
@@ -1249,9 +1250,13 @@ plane、standalone artifact service、remote capability transport 或 multi-tena
 
 Private control codec 会区分到期的 nonblocking poll budget 与 absolute lifecycle acceptance
 deadline。到期 budget 可以在一个 bulk slice 前探测一次 control，但 buffered byte 与
-poll/read/decode progress 不能令 late frame 可见。Timeout 会保留 partial 或 complete decoder
-state。Write 会在正向 progress 前后复查；可能已经交付的 late frame 必须被视为 write 失败，
-并且绝不重试。Cancellation owner 只能为有界 receive-side report/EOF/exit 排空继续保留 channel。
+poll/read/decode progress 不能令 late frame 可见。Timeout 会保留 partial byte，也会让
+transport-complete frame 在 identity/report 解释期间继续保留。只有相对于同一 semantic deadline
+的一个 fresh sample 严格更早时才 move 并 reset frame；该 sample 成为精确 lifecycle acceptance
+time。tie 或更晚的 sample 会让 frame 可供下一个有界 slice 使用，且不授予 cancellation、
+liveness、report 或 completion authority。Write 会在正向 progress 前后复查；可能已经交付的
+late frame 必须被视为 write 失败，并且绝不重试。Cancellation owner 只能为有界 receive-side
+report/EOF/exit 排空继续保留 channel。
 
 凡是加载到 Host 的 DSO 都仍是 operator-trusted native code。当前 operation C++ ABI、
 data-definition pure-C ABI 与 policy pure-C ABI 都不提供 sandbox、timeout、syscall、thread 或

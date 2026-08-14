@@ -1670,7 +1670,10 @@ timeout 不能改变任何后续 1.5 秒 origin 或 stride-111 terminal。`test_
 rejection、无需 wall-clock sleep 的 Ready、Failed 与 ProducerCancelled 确定性 post-poll deadline
 crossing、精确 pending-admission discard、拒绝 late publication 与单次 fence failure、rejected
 completion 消费 admission 后的 sole-owner settling interval，以及 Ready publication 抢先赢得
-timeout race 时的精确 release。条件式 `test_metal_device_executor` 回归会让一个真实 serialized
+timeout race 时的精确 release。同一 suite 会把 deadline tie 精确放在第二次 resident-reuse
+precheck 与单次 poll 之间，要求两次 monotonic sample，证明 late rejection 保留精确
+revision/binding/producer resident，并单独接受 zero-transfer 的 strict-before Direct reuse。条件式
+`test_metal_device_executor` 回归会让一个真实 serialized
 callback 跨越另一个 invocation 的 absolute deadline，并注入精确的 upload-preparation、
 bounded-copy 与最终 pre-commit monotonic tie。测试要求 admission timeout 后不进入 callback、
 不执行 native commit、不发布 destination/resident、精确清除 pending admission、live native

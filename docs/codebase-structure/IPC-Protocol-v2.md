@@ -63,11 +63,15 @@ unchanged.
 That private worker codec treats poll budget and semantic acceptance as
 different bounds. Pending bulk permits one due-budget nonblocking control
 probe, while every complete control frame remains valid only strictly before
-the applicable absolute lifecycle deadline. Timeouts retain partial or
-complete decoder state. Writes recheck before and after positive send progress;
-because a late send may already have delivered bytes, the owner treats the
-write as failed and never retries the frame. A cancellation owner may retain
-the channel only for bounded receive-side report/EOF/exit drainage.
+the applicable absolute lifecycle deadline. Timeouts retain partial bytes or a
+transport-complete frame. The decoder exposes that complete frame for semantic
+interpretation, takes a fresh strict-before sample, and only then moves/resets
+it while returning the exact acceptance time. A tie or later sample keeps the
+frame for a bounded semantic retry and grants no lifecycle mutation. Writes
+recheck before and after positive send progress; because a late send may already
+have delivered bytes, the owner treats the write as failed and never retries
+the frame. A cancellation owner may retain the channel only for bounded
+receive-side report/EOF/exit drainage.
 
 The public client headers are `photospider/ipc/protocol.hpp`,
 `photospider/ipc/client.hpp`, and `photospider/ipc/host.hpp`. They expose typed
