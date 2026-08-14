@@ -157,9 +157,14 @@ class MetalExecutionContext {
    * prior output publication in the same operation callback.
    * @throws std::overflow_error for byte arithmetic or identity exhaustion.
    * @throws std::runtime_error for native allocation/encoder failures.
+   * @throws std::runtime_error when an invocation's exclusive absolute deadline
+   * is observed during preparation, bounded copy, or immediately before native
+   * commit.
    * @throws std::bad_alloc for retained publication/completion ownership.
    * @note The method performs only explicitly requested source access and
-   * never waits for Metal. Rank-three publication retains the source
+   * never waits for Metal. Host bytes are copied in bounded chunks with the
+   * invocation's unchanged deadline checked between chunks. Rank-three
+   * publication retains the source
    * descriptor, ImageFacet, layout, exact storage envelope, and logical
    * revision; only the private native R32Float row is flattened. The pending
    * device-local destination settles from the command-buffer callback.

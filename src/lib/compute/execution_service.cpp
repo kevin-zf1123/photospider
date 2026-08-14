@@ -314,17 +314,20 @@ class HostToMetalValueInvocation final
    * @param width Positive logical image width.
    * @param height Positive logical image height.
    * @param seed Exact current request/Run lineage.
+   * @param capture_deadline Exclusive absolute I2 capture deadline.
    * @param resource_ledger Process ResourceLedger borrowed through entry.
    * @throws Nothing beyond Value copying.
    */
-  HostToMetalValueInvocation(Value source, std::uint32_t width,
-                             std::uint32_t height,
-                             execution::DeviceCompletionSeed seed,
-                             ResourceLedger& resource_ledger) noexcept
+  HostToMetalValueInvocation(
+      Value source, std::uint32_t width, std::uint32_t height,
+      execution::DeviceCompletionSeed seed,
+      std::chrono::steady_clock::time_point capture_deadline,
+      ResourceLedger& resource_ledger) noexcept
       : source_(std::move(source)),
         width_(width),
         height_(height),
         seed_(std::move(seed)),
+        capture_deadline_(capture_deadline),
         resource_ledger_(resource_ledger) {}
 
   /** @copydoc execution::DeviceExecutorInvocation::run */
@@ -350,6 +353,12 @@ class HostToMetalValueInvocation final
     return seed_;
   }
 
+  /** @copydoc execution::DeviceExecutorInvocation::execution_deadline */
+  std::optional<std::chrono::steady_clock::time_point> execution_deadline()
+      const noexcept override {
+    return capture_deadline_;
+  }
+
   /**
    * @brief Takes the pending device Value published by `run()`.
    * @return Published Value, or invalid sentinel before/after the sole take.
@@ -370,6 +379,9 @@ class HostToMetalValueInvocation final
   std::uint32_t height_ = 0U;
   /** @brief Exact native-completion request and Run lineage. */
   execution::DeviceCompletionSeed seed_;
+  /** @brief Unchanged exclusive absolute deadline for every Metal checkpoint.
+   */
+  std::chrono::steady_clock::time_point capture_deadline_;
   /** @brief Process resource authority borrowed through this invocation. */
   ResourceLedger& resource_ledger_;
   /** @brief Pending device Value taken after synchronous executor return. */
@@ -5626,7 +5638,7 @@ DeviceResidentValueAcquisition ExecutionService::acquire_metal_resident_value(
         "I2 Metal acquisition deadline expired before native submission.");
   }
   HostToMetalValueInvocation invocation(source, width, height, completion_seed,
-                                        pool_->ledger);
+                                        capture_deadline, pool_->ledger);
   pool_->device_executors.execute(Device::GPU_METAL, invocation);
   Value pending = invocation.take_published_value();
   if (!pending.valid()) {

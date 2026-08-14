@@ -1269,8 +1269,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param completion_seed Exact Graph/request/Run lineage and explicit
    * published-Value acquisition semantics attached to a real native transfer.
    * @param capture_deadline Exclusive absolute I2 capture deadline. Lookup,
-   * native admission, completion observation, and timeout containment all use
-   * this unchanged value.
+   * serialized executor admission, interruptible upload preparation/copy, the
+   * final native pre-commit check, completion observation, and timeout
+   * containment all use this unchanged value.
    * @return Ready resident Value plus whether executor submission occurred.
    * @throws std::invalid_argument for missing Metal, invalid source geometry,
    * or malformed lineage.
@@ -1284,8 +1285,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * published-acquisition lookup. A genuine absence enters exactly one
    * registered Metal executor invocation using the service ResourceLedger; an
    * exact hit performs no executor submission, allocation, or transfer.
-   * A timed-out miss removes its exact pending manager admission; a completion
-   * that won the Ready race has only its exact resident released. A completion
+   * Admission or upload preparation that reaches the deadline unwinds before
+   * native commit and leaves no pending Value, manager admission, resident, or
+   * ledger lease. A timed-out committed miss removes its exact pending manager
+   * admission; a completion that won the Ready race has only its exact resident
+   * released. A completion
    * that already consumed a rejected/stale admission remains the sole fence
    * and ledger owner until safe terminal settlement.
    * Historical source generation is allowed only while its managed lineage is

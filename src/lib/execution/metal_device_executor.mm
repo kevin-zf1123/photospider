@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,30 @@
 
 namespace ps::execution {
 namespace {
+
+/** @brief Maximum bytes copied before rechecking an upload deadline. */
+constexpr std::size_t kDeadlineCheckedUploadCopyChunkBytes = 64U * 1024U;
+
+/**
+ * @brief Enforces one invocation's exclusive absolute executor deadline.
+ * @param invocation Borrowed invocation that owns the deadline and clock.
+ * @param checkpoint Semantic executor boundary being observed.
+ * @param diagnostic Stable stage-specific timeout diagnostic.
+ * @return Nothing when no deadline exists or time remains strictly before it.
+ * @throws std::runtime_error when the observation equals or exceeds the same
+ * absolute deadline.
+ * @note The helper never creates a relative fallback. Exact ties fail closed.
+ */
+void throw_if_execution_deadline_expired(
+    const DeviceExecutorInvocation& invocation,
+    DeviceExecutorDeadlineCheckpoint checkpoint, const char* diagnostic) {
+  const std::optional<std::chrono::steady_clock::time_point> deadline =
+      invocation.execution_deadline();
+  if (deadline.has_value() &&
+      invocation.observe_execution_time(checkpoint) >= *deadline) {
+    throw std::runtime_error(diagnostic);
+  }
+}
 
 /**
  * @brief Converts a required UTF-8 view to an Objective-C string.
@@ -557,9 +582,12 @@ class MetalDeviceExecutor final : public DeviceExecutor {
   /** @copydoc DeviceExecutor::execute_impl */
   void execute_impl(DeviceExecutorInvocation& invocation) override {
     @autoreleasepool {
-      InvocationAdmission admission(*this);
+      InvocationAdmission admission(*this, invocation);
+      throw_if_execution_deadline_expired(
+          invocation, DeviceExecutorDeadlineCheckpoint::UploadPreparation,
+          "Metal execution deadline expired before invocation setup.");
       InvocationContext context(*this, invocation.completion_seed(),
-                                invocation.resource_ledger());
+                                invocation.resource_ledger(), invocation);
       ScopedMetalExecutionContext scope(context);
       invocation.run();
     }
@@ -588,27 +616,36 @@ class MetalDeviceExecutor final : public DeviceExecutor {
    *
    * @throws std::overflow_error before waiting when either monotonic counter
    * is exhausted.
+   * @throws std::runtime_error when an invocation deadline is observed at or
+   * before serialized callback entry.
    * @throws std::system_error when initial acquisition of `state_mutex_`
    * fails.
-   * @note C++17 non-timed predicate waiting does not propagate synchronization
-   * exceptions. The predicate is non-throwing; failure to re-lock and satisfy
-   * the wait postcondition terminates the process. One admission is
-   * thread-affine and cannot outlive its executor.
+   * @note Unconstrained calls use C++17 non-timed predicate waiting.
+   * Constrained calls use the invocation's unchanged absolute steady-clock
+   * deadline and recheck the exclusive boundary after wake. Predicates are
+   * non-throwing; failure to re-lock and satisfy a wait postcondition
+   * terminates the process. One admission is thread-affine and cannot outlive
+   * its executor.
    */
   class InvocationAdmission final {
    public:
     /**
      * @brief Submits and waits for one exclusive callback entry.
      * @param executor Live executor whose admission monitor is entered.
+     * @param invocation Borrowed invocation supplying any absolute deadline.
      * @throws std::overflow_error before waiting when a diagnostic counter is
      * exhausted.
+     * @throws std::runtime_error when the exclusive invocation deadline is
+     * observed before serialized callback entry.
      * @throws std::system_error when initial acquisition of `state_mutex_`
      * fails.
-     * @note The C++17 non-timed wait itself propagates no synchronization
-     * exception. Its predicate is non-throwing; a failed re-lock that cannot
-     * satisfy the wait postcondition terminates the process.
+     * @note Deadline-constrained waiting uses `wait_until` with the exact
+     * absolute point, never a duration or refreshed budget. The predicate is
+     * non-throwing; a failed re-lock that cannot satisfy the wait postcondition
+     * terminates the process.
      */
-    explicit InvocationAdmission(MetalDeviceExecutor& executor)
+    InvocationAdmission(MetalDeviceExecutor& executor,
+                        const DeviceExecutorInvocation& invocation)
         : executor_(executor) {
       std::unique_lock<std::mutex> lock(executor_.state_mutex_);
       if (executor_.submission_count_ ==
@@ -619,8 +656,26 @@ class MetalDeviceExecutor final : public DeviceExecutor {
             "Metal executor invocation counters exhausted.");
       }
       ++executor_.submission_count_;
-      executor_.callback_available_.wait(
-          lock, [this]() noexcept { return !executor_.callback_active_; });
+      const auto callback_available = [this]() noexcept {
+        return !executor_.callback_active_;
+      };
+      const std::optional<std::chrono::steady_clock::time_point> deadline =
+          invocation.execution_deadline();
+      if (!deadline.has_value()) {
+        executor_.callback_available_.wait(lock, callback_available);
+      } else {
+        throw_if_execution_deadline_expired(
+            invocation, DeviceExecutorDeadlineCheckpoint::Admission,
+            "Metal execution deadline expired before executor admission.");
+        if (!executor_.callback_available_.wait_until(lock, *deadline,
+                                                      callback_available)) {
+          throw std::runtime_error(
+              "Metal execution deadline expired during executor admission.");
+        }
+        throw_if_execution_deadline_expired(
+            invocation, DeviceExecutorDeadlineCheckpoint::Admission,
+            "Metal execution deadline expired at executor admission.");
+      }
       executor_.callback_active_ = true;
       ++executor_.invocation_count_;
       active_ = true;
@@ -686,19 +741,27 @@ class MetalDeviceExecutor final : public DeviceExecutor {
      * borrowed.
      * @param completion_seed Optional exact ComputeRun/task lineage.
      * @param resource_ledger Service device-account authority.
+     * @param invocation Borrowed invocation supplying deadline observations.
      * @throws std::bad_alloc when the retention array cannot be created.
+     * @throws std::runtime_error when allocation reaches the exclusive
+     * invocation deadline.
      */
     InvocationContext(MetalDeviceExecutor& executor,
                       std::optional<DeviceCompletionSeed> completion_seed,
-                      ResourceLedger& resource_ledger)
+                      ResourceLedger& resource_ledger,
+                      const DeviceExecutorInvocation& invocation)
         : executor_(executor),
           completion_seed_(std::move(completion_seed)),
           resource_ledger_(resource_ledger),
+          invocation_(invocation),
           resources_([[NSMutableArray alloc] init]),
           scratch_resources_([[NSMutableArray alloc] init]) {
       if (resources_ == nil || scratch_resources_ == nil) {
         throw std::bad_alloc{};
       }
+      check_deadline(
+          DeviceExecutorDeadlineCheckpoint::UploadPreparation,
+          "Metal execution deadline expired during invocation setup.");
     }
 
     /**
@@ -1007,6 +1070,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
     /** @copydoc MetalExecutionContext::publish_float32_host_to_texture */
     void publish_float32_host_to_texture(Value source, std::uint32_t width,
                                          std::uint32_t height) override {
+      check_deadline(
+          DeviceExecutorDeadlineCheckpoint::UploadPreparation,
+          "Metal execution deadline expired before upload preparation.");
       if (!source.valid()) {
         throw std::invalid_argument(
             "Metal upload requires a valid source Value.");
@@ -1087,6 +1153,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
         throw std::invalid_argument(
             "Metal upload requires an explicit Transfer access plan.");
       }
+      check_deadline(
+          DeviceExecutorDeadlineCheckpoint::UploadPreparation,
+          "Metal execution deadline expired during upload validation.");
 
       const DenseTensorView source_view(source);
       MTLTextureDescriptor* texture_descriptor =
@@ -1110,6 +1179,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       planned_auxiliary_scratch_lengths_.clear();
       next_auxiliary_scratch_ = 0U;
       device_reservation_.emplace(std::move(*reservation));
+      check_deadline(
+          DeviceExecutorDeadlineCheckpoint::UploadPreparation,
+          "Metal execution deadline expired after upload resource admission.");
 
       id<MTLBuffer> staging_buffer =
           [executor_.device_ newBufferWithLength:geometry.storage_size
@@ -1120,15 +1192,32 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       }
       record_actual_resource(staging_buffer, true);
       retain_resource(staging_buffer, true);
+      check_deadline(
+          DeviceExecutorDeadlineCheckpoint::UploadPreparation,
+          "Metal execution deadline expired after staging allocation.");
       auto* staging_bytes = static_cast<std::byte*>(staging_buffer.contents);
       const std::size_t source_row_stride =
           static_cast<std::size_t>(source_layout.byte_strides[0]);
       for (std::size_t row = 0U; row < static_cast<std::size_t>(height);
            ++row) {
-        std::memcpy(staging_bytes + row * geometry.bytes_per_row,
-                    source_view.data() + row * source_row_stride,
-                    geometry.bytes_per_row);
+        for (std::size_t offset = 0U; offset < geometry.bytes_per_row;) {
+          check_deadline(
+              DeviceExecutorDeadlineCheckpoint::UploadCopy,
+              "Metal execution deadline expired during chunked upload copy.");
+          const std::size_t remaining = geometry.bytes_per_row - offset;
+          const std::size_t chunk =
+              remaining < kDeadlineCheckedUploadCopyChunkBytes
+                  ? remaining
+                  : kDeadlineCheckedUploadCopyChunkBytes;
+          std::memcpy(staging_bytes + row * geometry.bytes_per_row + offset,
+                      source_view.data() + row * source_row_stride + offset,
+                      chunk);
+          offset += chunk;
+        }
       }
+      check_deadline(
+          DeviceExecutorDeadlineCheckpoint::UploadCopy,
+          "Metal execution deadline expired after chunked upload copy.");
 
       id<MTLTexture> texture =
           [executor_.device_ newTextureWithDescriptor:texture_descriptor];
@@ -1139,6 +1228,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       record_actual_resource(texture, false);
       retain_resource(texture, false);
       persistent_texture_ = texture;
+      check_deadline(
+          DeviceExecutorDeadlineCheckpoint::UploadPreparation,
+          "Metal execution deadline expired after upload texture allocation.");
 
       id<MTLCommandBuffer> command_buffer =
           [executor_.command_queue_ commandBuffer];
@@ -1161,6 +1253,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
              destinationLevel:0
             destinationOrigin:MTLOriginMake(0, 0, 0)];
       [blit endEncoding];
+      check_deadline(
+          DeviceExecutorDeadlineCheckpoint::UploadPreparation,
+          "Metal execution deadline expired after upload command encoding.");
 
       const StridedLayout destination_layout =
           rank_three_hwc
@@ -1197,6 +1292,10 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       }];
       ScopedTransferAdmission admission(executor_.residency_manager_, identity);
       published_value_ = std::move(published_destination);
+      check_deadline(
+          DeviceExecutorDeadlineCheckpoint::NativeCommit,
+          "Metal execution deadline expired before native command-buffer "
+          "commit.");
       [command_buffer commit];
       admission.release();
     }
@@ -1209,6 +1308,19 @@ class MetalDeviceExecutor final : public DeviceExecutor {
     }
 
    private:
+    /**
+     * @brief Enforces the invocation's unchanged exclusive absolute deadline.
+     * @param checkpoint Current upload/admission semantic boundary.
+     * @param diagnostic Stable failure text for the current boundary.
+     * @return Nothing while time remains strictly before the deadline.
+     * @throws std::runtime_error on an exact tie or later observation.
+     * @note Unconstrained invocations create no fallback timeout.
+     */
+    void check_deadline(DeviceExecutorDeadlineCheckpoint checkpoint,
+                        const char* diagnostic) const {
+      throw_if_execution_deadline_expired(invocation_, checkpoint, diagnostic);
+    }
+
     /**
      * @brief Returns the complete device identity for this native executor.
      * @return Process-local Metal device zero identity.
@@ -1422,6 +1534,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
 
     /** @brief Sole service-owned authority borrowed for allocation planning. */
     ResourceLedger& resource_ledger_;
+
+    /** @brief Stack invocation owning any absolute deadline and clock seam. */
+    const DeviceExecutorInvocation& invocation_;
 
     /** @brief Live atomic plan returned on unwind until actual commit. */
     std::optional<ResourceLedger::DeviceReservation> device_reservation_;

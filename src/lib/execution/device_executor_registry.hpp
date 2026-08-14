@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -18,6 +19,26 @@
  */
 
 namespace ps::execution {
+
+/**
+ * @brief Source-private checkpoints governed by one executor invocation
+ * deadline.
+ *
+ * @throws Nothing for value construction, copying, and comparison.
+ * @note The checkpoints identify semantic observations rather than independent
+ * timeout budgets. An invocation that supplies a deadline MUST use the same
+ * absolute steady-clock point at every checkpoint.
+ */
+enum class DeviceExecutorDeadlineCheckpoint : std::uint32_t {
+  /** @brief Serialized executor callback admission. */
+  Admission = 0U,
+  /** @brief Native upload validation, planning, allocation, or encoding. */
+  UploadPreparation = 1U,
+  /** @brief One bounded host-memory upload-copy chunk. */
+  UploadCopy = 2U,
+  /** @brief Last semantic observation immediately before native commit. */
+  NativeCommit = 3U,
+};
 
 /**
  * @brief Copied observational diagnostics for one registered executor.
@@ -39,7 +60,9 @@ struct DeviceExecutorDiagnostics final {
    * before a call waits for serialized callback entry. It includes calls whose
    * callback later throws, never decreases, and never wraps. Same-executor
    * callback re-entry is rejected before this counter advances. A saturated
-   * executor rejects the next submission explicitly.
+   * executor rejects the next submission explicitly. A deadline rejection
+   * after reaching concrete admission advances only this counter and never
+   * `invocation_count`.
    */
   std::uint64_t submission_count = 0U;
 
@@ -104,6 +127,35 @@ class DeviceExecutorInvocation {
   virtual std::optional<DeviceCompletionSeed> completion_seed() const {
     return std::nullopt;
   }
+
+  /**
+   * @brief Returns the exclusive absolute execution deadline when constrained.
+   * @return One steady-clock point shared by every executor checkpoint, or
+   * nullopt for ordinary invocations without a deadline.
+   * @throws Nothing.
+   * @note The default preserves unconstrained operation invocations. Concrete
+   * callers MUST NOT construct a relative fallback or refresh this point.
+   */
+  virtual std::optional<std::chrono::steady_clock::time_point>
+  execution_deadline() const noexcept {
+    return std::nullopt;
+  }
+
+  /**
+   * @brief Samples monotonic time at one deadline checkpoint.
+   * @param checkpoint Semantic executor boundary being observed.
+   * @return Current steady-clock time.
+   * @throws Nothing.
+   * @note Production invocations use the default clock. Source-private tests
+   * may override the observation to make an exact tie deterministic; the
+   * returned value never changes the absolute deadline supplied by
+   * `execution_deadline()`.
+   */
+  virtual std::chrono::steady_clock::time_point observe_execution_time(
+      DeviceExecutorDeadlineCheckpoint checkpoint) const noexcept {
+    (void)checkpoint;
+    return std::chrono::steady_clock::now();
+  }
 };
 
 /**
@@ -140,12 +192,17 @@ class DeviceExecutor {
    * the current thread.
    * @throws std::overflow_error before callback entry when a monotonic
    * diagnostic counter is exhausted.
+   * @throws std::runtime_error when an invocation-supplied exclusive absolute
+   * deadline is observed at serialized admission or a concrete native
+   * checkpoint.
    * @throws Provider, synchronization, or native executor failures unchanged.
    * @note Calls through a different executor object remain permitted. The
    * thread-local identity guard is restored after normal return or any
    * exception. Implementations invoke `run()` exactly once and create no
    * second ready/completion queue. Submission diagnostics advance before
-   * waiting for serialized callback admission.
+   * waiting for serialized callback admission. Implementations use the same
+   * invocation-supplied absolute point throughout and never create a relative
+   * fallback.
    */
   void execute(DeviceExecutorInvocation& invocation);
 
