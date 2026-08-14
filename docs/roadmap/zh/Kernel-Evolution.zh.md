@@ -1069,8 +1069,9 @@ reservation state。`M1Host` 还有一个 source-private、幂等的 terminal ev
 控制面。Observer boundary 保留 reservation entry/completion 与 slot claim/连续 publication
 frontier，并从
 commit 前 coordinate reservation 跨越到 callback completion 或显式 abort，因此相等 event
-count 不能隐藏 reserve、commit 或 claim 后暂停的 work。有界 lock-free coordinate allocator
-会把 timestamp sampling 与 sequence assignment 线性化，task zero 仍是合法的 zero-based
+count 不能隐藏 reserve、commit 或 claim 后暂停的 work。Exception-free 的 serialized coordinate
+allocator 会把 timestamp sampling 与 sequence assignment 线性化；竞争只会重试，不会声称
+数值耗尽，task zero 仍是合法的 zero-based
 semantic identity。Lifecycle snapshot 保留 request cursor 与 capture ordinal，并作为精确 lossless page/event
 chain 与 identity-aware Graph/candidate/bundle/Run/generation 状态机 replay。每个 event 与
 page cut 都精确校验全部九个 registry-derived counter。六个 physical counter 独立采样，只
@@ -1144,9 +1145,12 @@ handoff 前收集；最多存在一个 future 与 111 条预留 row。JSON/NDJSO
 evaluation、summary persistence 与 compaction 会移动到 terminal boundary 或 abort drain。Failed
 admission 只拥有一条 close/release/全 Invalid/inner-before-outer terminal path，不允许 suffix 或
 后续 slot backfill。同一切片还会用 episode 中原样传递的排他 absolute capture deadline，取代
-Metal acquisition 的 relative 五秒等待，并对 exact pending/Ready race 做 containment。已经 commit
-的 native command 仍由其唯一 callback 终结；runner 不会因此获得 cancellation、device 或 public
-API authority。
+Metal acquisition 的 relative 五秒等待。同一个 point 现在还约束 serialized Metal executor
+admission、最大 64 KiB 的 upload-copy chunk、setup/encoding，以及 native commit 前立即执行的
+最后一次语义检查。Commit 前到期不会留下 native command submission、resident、pending
+transfer/fence owner 或 ledger lease；此前已经 commit 的 command 仍执行 exact pending/Ready race
+containment，并由其唯一 callback 终结。Runner 不会因此获得 cancellation、device 或 public API
+authority。
 
 ## 服务器与插件隔离
 

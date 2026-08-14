@@ -1324,9 +1324,10 @@ legal only after every Graph and Host operation closes, to capture
 boundaries retain reservation entry/completion and slot claim/contiguous-
 publication frontiers from pre-commit coordinate reservation through callback
 completion or explicit abort, so equal event counts cannot conceal work paused
-after reserve, commit, or claim. The bounded lock-free coordinate allocator
-linearizes timestamp sampling with sequence assignment, and task zero remains a
-legal zero-based semantic identity. Lifecycle snapshots retain request cursors and capture
+after reserve, commit, or claim. The exception-free serialized coordinate
+allocator linearizes timestamp sampling with sequence assignment; contention
+retries without claiming numeric exhaustion, and task zero remains a legal
+zero-based semantic identity. Lifecycle snapshots retain request cursors and capture
 ordinals and are replayed as an exact lossless page/event chain plus an
 identity-aware Graph/candidate/bundle/Run/generation state machine. Every event
 and page cut exact-checks all nine registry-derived counters. The six physical
@@ -1424,9 +1425,13 @@ to the terminal boundary or an abort drain. Failed admission owns a single
 close/release/all-Invalid/inner-before-outer terminal path with no suffix or
 later-slot backfill. The same slice replaces the Metal acquisition's relative
 five-second wait with the episode's unchanged exclusive absolute capture
-deadline and exact pending/Ready race containment. A committed native command
-still terminates under its sole callback; the runner gains no cancellation,
-device, or public API authority.
+deadline. That point now also bounds serialized Metal executor admission,
+64-KiB-maximum upload-copy chunks, setup/encoding, and the final semantic check
+immediately before native commit. Pre-commit expiry leaves no native command
+submission, resident, pending transfer/fence owner, or ledger lease; an earlier
+committed command retains exact pending/Ready race containment and still
+terminates under its sole callback. The runner gains no cancellation, device,
+or public API authority.
 
 ## Server and Plugin Isolation
 

@@ -560,12 +560,17 @@ Issue #125 在不改变该 grid 或任何 verdict threshold 的前提下，闭�
 finalization boundary。每个 episode 都会在其不可变 1.5 秒终点之前 100 ms 派生一个排他的
 absolute capture deadline。Collector 会把同一个 time point 原样贯穿 `I2Host`、embedded Host
 与 `ExecutionService`；在新 digest、direct Host acquisition、residency lookup/reuse 或 Metal
-submission 之前，`now >= deadline` 都会失败。Metal miss 只能在该 deadline 内等待，不能重新
-建立 relative timeout。到期时，caller 会先尝试移除精确的 `DeviceCompletionIdentity` admission。
-若 native completion 已经抢先完成 Ready publication，则只释放它的精确 resident。若 completion
-已经消费 rejected/stale admission，则唯一 native callback 继续负责 terminal fence publication
-及其保留的 resource lease。该 containment 不声称能够同步取消已经 commit 的 native command，
-late callback 也不能重新获得已丢弃的 residency publication authority。
+submission 之前，`now >= deadline` 都会失败。Miss 时，source-private invocation 会把同一个
+absolute point 贯穿 serialized executor admission、upload planning/allocation/encoding、不超过
+64 KiB 的 host-copy chunk，以及 native command-buffer commit 前立即执行的最后一次语义检查。
+Exact tie 会 fail closed。Commit 前到期时不执行 native commit，RAII retirement 也不会留下
+published Value、transfer admission、resident、live pending-fence owner 或 ledger lease。已经 commit
+的 Metal miss 只能在原 deadline 内等待，不能重新建立 relative timeout。之后到期时，caller 会先
+尝试移除精确的 `DeviceCompletionIdentity` admission。若 native completion 已经抢先完成 Ready
+publication，则只释放它的精确 resident。若 completion 已经消费 rejected/stale admission，则唯一
+native callback 继续负责 terminal fence publication 及其保留的 resource lease。该 containment
+不声称能够同步取消已经 commit 的 native command，late callback 也不能重新获得已丢弃的
+residency publication authority。
 
 Payload capture、全部 accepted settlement、Value release、history cut 与最终 execution snapshot
 完成后，会封闭一个完整且不含 Value 的 input。随后恰有一个可恢复的 `std::launch::async`

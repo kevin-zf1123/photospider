@@ -1669,10 +1669,14 @@ timeout 不能改变任何后续 1.5 秒 origin 或 stride-111 terminal。`test_
 `ReadyFence` 与 `ResidencyManager` 状态，覆盖 deadline 前严格 Ready、排他 tie rejection、精确
 pending-admission discard、拒绝 late publication 与单次 fence failure、rejected completion 消费
 admission 后的 sole-owner settling interval，以及 Ready publication 抢先赢得 timeout race 时的精确
-release。`test_i2_product_path` 保留条件式真实产品检查：受
-deadline 约束的首次 Metal upload 后，必须以同一个 revision、binding、allocation 与 producer
-执行 Direct、zero-transfer reuse，随后进行精确 row-scoped release。这些测试不会创建 native-
-cancellation claim，也不会把 manual runner 或 result orchestration 注册进 CTest/CI。
+release。条件式 `test_metal_device_executor` 回归会让一个真实 serialized callback 跨越另一个
+invocation 的 absolute deadline，并注入精确的 upload-preparation、bounded-copy 与最终
+pre-commit monotonic tie。测试要求 admission timeout 后不进入 callback、不执行 native commit、
+不发布 destination/resident、精确清除 pending admission、live native allocation 为零，且 unwind
+后的 device-ledger reservation 为零。`test_i2_product_path` 保留条件式真实产品检查：受 deadline
+约束的首次 Metal upload 后，必须以同一个 revision、binding、allocation 与 producer 执行 Direct、
+zero-transfer reuse，随后进行精确 row-scoped release。这些测试不会创建 native-cancellation claim，
+也不会把 manual runner 或 result orchestration 注册进 CTest/CI。
 
 必需 logical value 调用 `compute_content_digest(Value)`，并且要求 `Available`、
 存在 `ContentDigest`，以及 `CanonicalDigestAlgorithm::Sha256CanonicalV1`。Logical
@@ -2335,8 +2339,9 @@ operation provider 时的 `test_m1_product_path` 注册确定性 M1 合同；聚
 fence。Unit suite 覆盖
 精确 C/W/B/U arithmetic、1/7/40 origin grid、固定 warmup offer、carryover/current-hold
 evidence、独立 producer-local cycle、全部五个轴、未知 enum 的 fail-closed 行为、合法的
-zero-based task zero、有限 lock-free callback publication、并发 reservation 下的 sequence/
-time monotonicity、每个 product callback 都保持 mirror-before-authority 的同坐标 fanout、
+zero-based task zero、allocation-free callback publication、并发 reservation 下的 sequence/time
+monotonicity、确定性越过历史 4096 次 gate attempt 而不产生伪 `sequence_exhausted`、真实
+`UINT64_MAX` fail-closed exhaustion、每个 product callback 都保持 mirror-before-authority 的同坐标 fanout、
 不变的 base-only-I1/full-B1 environment delegation、canonical golden digest、functional
 key、exact-one/DAG resolution 与不完整 live authority。它们还会拒绝 substituted
 isolated-I1 source、遗漏的 isolated-B1 outcome、

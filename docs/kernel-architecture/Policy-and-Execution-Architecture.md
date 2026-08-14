@@ -702,15 +702,22 @@ changing that grid or any verdict threshold. Each episode derives one exclusive
 absolute capture deadline 100 ms before its immutable 1.5-second end. The
 collector passes that same time point unchanged through `I2Host` and embedded
 Host into `ExecutionService`; `now >= deadline` loses before a new digest,
-direct Host acquisition, residency lookup/reuse, or Metal submission. A Metal
-miss waits only inside that deadline, never under a new relative timeout. On
-expiry, the caller first tries to remove the exact `DeviceCompletionIdentity`
-admission. If native completion already won Ready publication, only its exact
-resident is released. If completion already consumed a rejected/stale
-admission, the sole native callback remains responsible for terminal fence
-publication and its retained resource leases. This containment does not claim
-synchronous cancellation of a committed native command, and a late callback
-cannot regain discarded residency-publication authority.
+direct Host acquisition, residency lookup/reuse, or Metal submission. On a
+miss, the source-private invocation carries that same absolute point through
+serialized executor admission, upload planning/allocation/encoding, host-copy
+chunks no larger than 64 KiB, and the last semantic check immediately before
+native command-buffer commit. An exact tie fails closed. Pre-commit expiry
+performs no native commit and RAII retirement leaves no published Value,
+transfer admission, resident, live pending-fence owner, or ledger lease. A
+committed Metal miss waits only inside that original deadline, never under a new
+relative timeout. On later expiry, the caller first tries to remove the exact
+`DeviceCompletionIdentity` admission. If native completion already won Ready
+publication, only its exact resident is released. If completion already
+consumed a rejected/stale admission, the sole native callback remains
+responsible for terminal fence publication and its retained resource leases.
+This containment does not claim synchronous cancellation of a committed native
+command, and a late callback cannot regain discarded residency-publication
+authority.
 
 After payload capture, all accepted settlements, Value release, history cut,
 and the final execution snapshot close one complete Value-free input. Exactly

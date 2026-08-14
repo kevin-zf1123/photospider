@@ -873,7 +873,7 @@ probe adds remaining child-grant capacity for both classes. The observation is
 published only after the selected operation gate, route, ready removal,
 counters, and execution grant commit. The M1 collector retains both capacity-
 aware class facts and the committed-grant bit in its existing preallocated,
-allocation-free, nonblocking, lock-free callback store. The scheduler's
+allocation-free callback store. The scheduler's
 three-to-one `consecutive_interactive_` accounting continues to use scheduler-
 selectable Throughput competition, not these narrower evidence facts. Nominal
 intervals remain useful only for Graph-demand diagnostics and cannot reset or
@@ -890,8 +890,11 @@ precede publication of the source-history record carrying the same coordinate;
 coordinate reservation and explicit abort remain authority-only. Overflow,
 sequence exhaustion, or tag/QoS disagreement is sticky fail-closed evidence.
 Coordinate allocation samples steady time and assigns the next sequence in one
-bounded lock-free atomic section, so increasing causal sequence guarantees
-nondecreasing `observed_at` under concurrency. Local task identity is zero-based:
+exception-free serialized atomic section, so increasing causal sequence
+guarantees nondecreasing `observed_at` under concurrency. A contender retries
+until the constant-work owner releases that gate; contention never becomes
+`sequence_exhausted`, which is reserved for the true nonzero `uint64_t` numeric
+boundary. Local task identity is zero-based:
 task zero is valid for start and terminal events, while only non-task event kinds
 use zero as their scalar sentinel. The source-private `M1Host` adds no compute
 route: it joins Host/device ledger, Compute I/O, class-partitioned ready,

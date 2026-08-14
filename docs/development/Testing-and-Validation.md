@@ -2080,11 +2080,17 @@ the stride-111 terminal. `test_device_residency` uses real `ReadyFence` and
 tie rejection, exact pending-admission discard, rejected late publication and
 single fence failure, the sole-owner settling interval after a rejected
 completion consumes admission, and exact release when Ready publication wins
-the timeout race. `test_i2_product_path` retains the conditional real-product
-check that a deadline-bounded first Metal upload is followed by Direct zero-transfer reuse
+the timeout race. Conditional `test_metal_device_executor` regressions hold one
+real serialized callback through another invocation's absolute deadline and
+inject exact upload-preparation, bounded-copy, and final pre-commit monotonic
+ties. They require no callback entry after admission timeout, no native commit,
+no published destination/resident, exact pending-admission retirement, zero
+live native allocations, and a zero device-ledger reservation after unwind.
+`test_i2_product_path` retains the conditional real-product check that a
+deadline-bounded first Metal upload is followed by Direct zero-transfer reuse
 of the same revision, binding, allocation, and producer, then exact row-scoped
-release. These tests create no native-cancellation claim and do not register
-the manual runner or result orchestration with CTest/CI.
+release. These tests create no native-cancellation claim and do not register the
+manual runner or result orchestration with CTest/CI.
 
 Required logical values call `compute_content_digest(Value)` and require
 `Available`, a present `ContentDigest`, and
@@ -2850,9 +2856,11 @@ enabled, `test_m1_product_path`; focused `test_compute_run` cases also prove the
 service-start coordinate reservation/commit/callback-or-abort fence. The unit suites
 check exact C/W/B/U arithmetic, the 1/7/40 origin grid, fixed warmup offers,
 carryover/current-hold evidence, independent producer-local cycles, all five
-axes, unknown-enum fail-closed behavior, legal zero-based task zero, finite
-lock-free callback publication, sequence/time monotonicity under concurrent
-reservation, mirror-before-authority same-coordinate fanout for every product
+axes, unknown-enum fail-closed behavior, legal zero-based task zero,
+allocation-free callback publication, sequence/time monotonicity under
+concurrent reservation, deterministic contention beyond the historical 4096
+gate attempts without false `sequence_exhausted`, true `UINT64_MAX` fail-closed
+exhaustion, mirror-before-authority same-coordinate fanout for every product
 callback, unchanged base-only-I1/full-B1 environment delegation, canonical
 golden digests, functional keys, exact-one/DAG resolution, and incomplete live
 authority. They also reject substituted isolated-I1 sources,

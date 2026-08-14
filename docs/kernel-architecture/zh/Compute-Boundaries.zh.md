@@ -680,7 +680,7 @@ grant，它只会得到当前 worker cycle 的 grant-block mark；policy/fairnes
 物理 start commit 前，独立的 evidence-startable probe 会为两类额外检查剩余 child-grant
 capacity。只有所选 operation gate、route、ready removal、counter 与 execution grant 全部
 commit 后，才会发布这条 observation。M1 collector 在既有预分配、allocation-free、
-nonblocking、lock-free callback store 中保留两类 capacity-aware fact 与 committed-grant bit。
+callback store 中保留两类 capacity-aware fact 与 committed-grant bit。
 Scheduler 的三比一 `consecutive_interactive_` 计账继续使用 scheduler-selectable Throughput
 competition，而不是这些更窄的 evidence fact。Nominal interval 只保留为 Graph-demand
 diagnostic，不能重置或豁免任一规则。
@@ -692,9 +692,11 @@ accepted-row sequence 合并。每个 fanout product callback 都先发布到复
 最后才进入 M1 sequence authority。Authority callback 的返回是 reservation-completion edge，
 因此 stable M1 cut 不可能早于携带同一 coordinate 的 source-history record 发布；coordinate
 reservation 与显式 abort 仍只进入 authority。Overflow、sequence exhaustion 或 tag/QoS
-不一致都是 sticky fail-closed evidence。Coordinate allocation 会在同一个有界 lock-free
-atomic section 中采样 steady time 并分配下一个 sequence，因此并发下递增 causal sequence
-保证 `observed_at` 非递减。Local task identity 从零开始：start 与 terminal event 允许 task
+不一致都是 sticky fail-closed evidence。Coordinate allocation 会在同一个 exception-free 的
+serialized atomic section 中采样 steady time 并分配下一个 sequence，因此并发下递增 causal
+sequence 保证 `observed_at` 非递减。Contender 会重试到 constant-work owner 释放该 gate；竞争
+绝不会变成 `sequence_exhausted`，后者只保留给非零 `uint64_t` 的真实数值边界。Local task
+identity 从零开始：start 与 terminal event 允许 task
 zero，只有 non-task event kind 才把零用作 scalar sentinel。Source-private 的 `M1Host` 不增加
 compute route：它从同一个 service 组合 Host/device ledger、Compute I/O、按 class 分区的
 ready、lifecycle 与不可变 Throughput capacity/reserved snapshot。它唯一的 mutation 是幂等
