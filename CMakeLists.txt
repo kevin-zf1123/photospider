@@ -1073,6 +1073,15 @@ if(PHOTOSPIDER_BUILD_FUZZERS)
             "PHOTOSPIDER_BUILD_FUZZERS requires a native compiler/runtime probe")
     endif()
 
+    set(PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS
+        -fno-omit-frame-pointer
+        -fsanitize=fuzzer-no-link,address,undefined)
+    set(PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTIONS
+        -fsanitize=address,undefined)
+    set(PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS
+        -fno-omit-frame-pointer
+        -fsanitize=fuzzer,address,undefined)
+
     set(PHOTOSPIDER_FUZZ_PROBE_ROOT
         "${CMAKE_BINARY_DIR}/CMakeFiles/photospider_fuzz_probe")
     set(PHOTOSPIDER_FUZZ_PROBE_SOURCE
@@ -1093,11 +1102,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t*, std::size_t) {
         "${PHOTOSPIDER_FUZZ_PROBE_ROOT}/build"
         "${PHOTOSPIDER_FUZZ_PROBE_SOURCE}"
         COMPILE_DEFINITIONS
-            -fno-omit-frame-pointer
-            -fsanitize=fuzzer-no-link,address,undefined
+            ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS}
         LINK_OPTIONS
-            -fno-omit-frame-pointer
-            -fsanitize=fuzzer,address,undefined
+            ${PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS}
         COPY_FILE "${PHOTOSPIDER_FUZZ_PROBE_EXECUTABLE}"
         OUTPUT_VARIABLE PHOTOSPIDER_FUZZ_PROBE_BUILD_OUTPUT
         CXX_STANDARD 17
@@ -1120,15 +1127,92 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t*, std::size_t) {
 
     function(photospider_instrument_fuzz_codec TARGET_NAME)
         target_compile_options(${TARGET_NAME} PRIVATE
-            -fno-omit-frame-pointer
-            -fsanitize=fuzzer-no-link,address,undefined)
+            ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS})
+        # A static archive cannot link its own sanitizer runtime. Publish only
+        # the ASan/UBSan link closure required by every final consumer of its
+        # instrumented objects; libFuzzer main remains executable-owned.
+        target_link_options(${TARGET_NAME} INTERFACE
+            ${PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTIONS})
         set_target_properties(${TARGET_NAME} PROPERTIES
             INTERPROCEDURAL_OPTIMIZATION OFF)
     endfunction()
 
-    photospider_instrument_fuzz_codec(photospider_execution_internal)
-    photospider_instrument_fuzz_codec(
+    function(photospider_assert_fuzz_codec_contract TARGET_NAME)
+        get_target_property(PHOTOSPIDER_FUZZ_CODEC_TYPE
+            ${TARGET_NAME} TYPE)
+        if(NOT PHOTOSPIDER_FUZZ_CODEC_TYPE STREQUAL "STATIC_LIBRARY")
+            message(FATAL_ERROR
+                "Instrumented fuzz codec ${TARGET_NAME} must remain a static library")
+        endif()
+        get_target_property(PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS_ACTUAL
+            ${TARGET_NAME} COMPILE_OPTIONS)
+        foreach(PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS)
+            if(NOT "${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION}" IN_LIST
+                    PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS_ACTUAL)
+                message(FATAL_ERROR
+                    "Instrumented fuzz codec ${TARGET_NAME} is missing compile option ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION}")
+            endif()
+        endforeach()
+        get_target_property(PHOTOSPIDER_FUZZ_CODEC_LINK_OPTIONS_ACTUAL
+            ${TARGET_NAME} INTERFACE_LINK_OPTIONS)
+        foreach(PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTIONS)
+            if(NOT "${PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTION}" IN_LIST
+                    PHOTOSPIDER_FUZZ_CODEC_LINK_OPTIONS_ACTUAL)
+                message(FATAL_ERROR
+                    "Instrumented fuzz codec ${TARGET_NAME} is missing runtime link closure ${PHOTOSPIDER_FUZZ_RUNTIME_LINK_OPTION}")
+            endif()
+        endforeach()
+        foreach(PHOTOSPIDER_FUZZ_CODEC_LINK_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_CODEC_LINK_OPTIONS_ACTUAL)
+            if(PHOTOSPIDER_FUZZ_CODEC_LINK_OPTION MATCHES "fuzzer")
+                message(FATAL_ERROR
+                    "Instrumented fuzz codec ${TARGET_NAME} leaks libFuzzer through its link interface")
+            endif()
+        endforeach()
+    endfunction()
+
+    function(photospider_assert_fuzz_executable_contract TARGET_NAME)
+        get_target_property(PHOTOSPIDER_FUZZ_EXECUTABLE_TYPE
+            ${TARGET_NAME} TYPE)
+        get_target_property(PHOTOSPIDER_FUZZ_EXECUTABLE_EXCLUDED
+            ${TARGET_NAME} EXCLUDE_FROM_ALL)
+        if(NOT PHOTOSPIDER_FUZZ_EXECUTABLE_TYPE STREQUAL "EXECUTABLE" OR
+           NOT PHOTOSPIDER_FUZZ_EXECUTABLE_EXCLUDED)
+            message(FATAL_ERROR
+                "Manual fuzz target ${TARGET_NAME} must remain an EXCLUDE_FROM_ALL executable")
+        endif()
+        get_target_property(PHOTOSPIDER_FUZZ_EXECUTABLE_COMPILE_OPTIONS_ACTUAL
+            ${TARGET_NAME} COMPILE_OPTIONS)
+        foreach(PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS)
+            if(NOT "${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION}" IN_LIST
+                    PHOTOSPIDER_FUZZ_EXECUTABLE_COMPILE_OPTIONS_ACTUAL)
+                message(FATAL_ERROR
+                    "Manual fuzz target ${TARGET_NAME} is missing compile option ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTION}")
+            endif()
+        endforeach()
+        get_target_property(PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS_ACTUAL
+            ${TARGET_NAME} LINK_OPTIONS)
+        foreach(PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTION
+                IN LISTS PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS)
+            if(NOT "${PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTION}" IN_LIST
+                    PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS_ACTUAL)
+                message(FATAL_ERROR
+                    "Manual fuzz target ${TARGET_NAME} is missing link option ${PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTION}")
+            endif()
+        endforeach()
+    endfunction()
+
+    set(PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGETS
+        photospider_execution_internal
         photospider_single_tenant_job_internal)
+    foreach(PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGET
+            IN LISTS PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGETS)
+        photospider_instrument_fuzz_codec(
+            ${PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGET})
+    endforeach()
 
     add_executable(fuzz_worker_protocol_codec EXCLUDE_FROM_ALL
         tests/fuzz/fuzz_worker_protocol_codec.cpp)
@@ -1150,18 +1234,26 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t*, std::size_t) {
     target_link_libraries(fuzz_isolated_cpu_invocation_codec PRIVATE
         photospider_execution_internal)
 
-    foreach(PHOTOSPIDER_FUZZ_TARGET
-            fuzz_worker_protocol_codec
-            fuzz_isolated_cpu_invocation_codec)
+    set(PHOTOSPIDER_FUZZ_TARGETS
+        fuzz_worker_protocol_codec
+        fuzz_isolated_cpu_invocation_codec)
+    foreach(PHOTOSPIDER_FUZZ_TARGET IN LISTS PHOTOSPIDER_FUZZ_TARGETS)
         target_compile_options(${PHOTOSPIDER_FUZZ_TARGET} PRIVATE
-            -fno-omit-frame-pointer
-            -fsanitize=fuzzer-no-link,address,undefined)
+            ${PHOTOSPIDER_FUZZ_CODEC_COMPILE_OPTIONS})
         target_link_options(${PHOTOSPIDER_FUZZ_TARGET} PRIVATE
-            -fno-omit-frame-pointer
-            -fsanitize=fuzzer,address,undefined)
+            ${PHOTOSPIDER_FUZZ_EXECUTABLE_LINK_OPTIONS})
         set_target_properties(${PHOTOSPIDER_FUZZ_TARGET} PROPERTIES
             INTERPROCEDURAL_OPTIMIZATION OFF
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fuzzers")
+    endforeach()
+    foreach(PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGET
+            IN LISTS PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGETS)
+        photospider_assert_fuzz_codec_contract(
+            ${PHOTOSPIDER_INSTRUMENTED_FUZZ_CODEC_TARGET})
+    endforeach()
+    foreach(PHOTOSPIDER_FUZZ_TARGET IN LISTS PHOTOSPIDER_FUZZ_TARGETS)
+        photospider_assert_fuzz_executable_contract(
+            ${PHOTOSPIDER_FUZZ_TARGET})
     endforeach()
 endif()
 
